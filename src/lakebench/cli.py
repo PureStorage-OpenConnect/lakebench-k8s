@@ -2736,9 +2736,9 @@ def info(
     dims = cfg.get_scale_dimensions()
     guidance = _compute_guidance(scale)
 
-    # Derive recipe name: {schema}-{mode}
+    # Derive workload profile: {schema}-{mode}
     effective_mode = _resolve_datagen_mode(cfg)
-    recipe_name = f"{workload.schema_type.value}-{effective_mode}"
+    workload_profile = f"{workload.schema_type.value}-{effective_mode}"
 
     # Per-job executor counts with auto/override labels
     override_map = {
@@ -2772,7 +2772,7 @@ def info(
     lines = [
         ("Deployment", cfg.name),
         ("Namespace", cfg.get_namespace()),
-        ("Recipe", recipe_name),
+        ("Workload", workload_profile),
         ("Schema", workload.schema_type.value),
         ("Scale", f"{scale} (~{dims.approx_bronze_gb:.0f} GB bronze)"),
         ("Customers", f"{dims.customers:,}"),
