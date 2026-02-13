@@ -1,0 +1,62 @@
+# Lakebench example configuration
+#
+# Only `name` and S3 credentials are required. Everything else has defaults.
+# Use `recipe:` for quick setup, or set architecture fields individually.
+#
+# Recipes: hive-iceberg-trino (default), hive-iceberg-spark,
+#          hive-iceberg-none, hive-delta-trino, hive-delta-none,
+#          polaris-iceberg-trino, polaris-iceberg-spark, polaris-iceberg-none
+name: my-lakehouse
+
+# Optional: set a recipe to auto-configure catalog + table format + query engine
+# recipe: hive-iceberg-trino
+
+images:
+  datagen: lakebench/datagen:latest
+  # spark: apache/spark:3.5.4-python3    # default
+  # postgres: postgres:17                 # default
+  pull_policy: IfNotPresent
+
+platform:
+  kubernetes:
+    namespace: ""                         # empty = use deployment name
+    create_namespace: true
+
+  storage:
+    s3:
+      endpoint: http://your-s3-endpoint:80
+      region: us-east-1
+      path_style: true
+      access_key: YOUR_ACCESS_KEY
+      secret_key: YOUR_SECRET_KEY
+      buckets:
+        bronze: lakebench-bronze
+        silver: lakebench-silver
+        gold: lakebench-gold
+    scratch:
+      enabled: false
+      storage_class: px-csi-scratch
+      size: 100Gi
+
+  compute:
+    postgres:
+      storage: 10Gi
+      storage_class: ""
+
+architecture:
+  # These are set automatically when using `recipe:`. Set them individually
+  # to override or when not using a recipe.
+  # catalog:
+  #   type: hive                          # hive | polaris
+  # table_format:
+  #   type: iceberg                       # iceberg | delta
+  # query_engine:
+  #   type: trino                         # trino | spark-thrift | none
+
+  pipeline:
+    pattern: medallion                    # medallion | streaming | batch
+
+  workload:
+    datagen:
+      scale: 1                            # 1 unit ~ 10 GB bronze
+      file_size: 512mb

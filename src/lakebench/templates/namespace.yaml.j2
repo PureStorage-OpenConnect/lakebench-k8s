@@ -1,0 +1,10 @@
+---
+# Namespace for Lakebench deployment
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/managed-by: lakebench

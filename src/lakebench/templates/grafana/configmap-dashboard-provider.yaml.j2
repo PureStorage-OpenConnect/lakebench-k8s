@@ -1,0 +1,22 @@
+{# Grafana dashboard provisioner configuration #}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-grafana-dashboard-provider
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: grafana
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'lakebench'
+        orgId: 1
+        folder: 'Lakebench'
+        folderUid: 'lakebench'
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards

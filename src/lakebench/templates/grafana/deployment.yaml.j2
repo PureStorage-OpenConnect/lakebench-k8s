@@ -1,0 +1,89 @@
+{# Grafana ServiceAccount #}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lakebench-grafana
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: grafana
+---
+{# Grafana Deployment with pre-provisioned dashboards #}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakebench-grafana
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: grafana
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lakebench-grafana
+  template:
+    metadata:
+      labels:
+        app: lakebench-grafana
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/component: grafana
+    spec:
+      serviceAccountName: lakebench-grafana
+      securityContext:
+        fsGroup: 472
+        runAsNonRoot: true
+        runAsUser: 472
+      containers:
+        - name: grafana
+          image: {{ grafana_image }}
+          imagePullPolicy: {{ pull_policy }}
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          env:
+            - name: GF_SECURITY_ADMIN_USER
+              value: "admin"
+            - name: GF_SECURITY_ADMIN_PASSWORD
+              value: "lakebench"
+            - name: GF_USERS_ALLOW_SIGN_UP
+              value: "false"
+            - name: GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH
+              value: "/var/lib/grafana/dashboards/pipeline-overview.json"
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: datasources
+              mountPath: /etc/grafana/provisioning/datasources
+            - name: dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards
+            - name: dashboards
+              mountPath: /var/lib/grafana/dashboards
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: datasources
+          configMap:
+            name: lakebench-grafana-datasources
+        - name: dashboard-provider
+          configMap:
+            name: lakebench-grafana-dashboard-provider
+        - name: dashboards
+          configMap:
+            name: lakebench-grafana-dashboards

@@ -1,0 +1,66 @@
+---
+# DuckDB Query Engine Deployment
+# Single-pod deployment using sleep infinity pattern.
+# Queries are executed via kubectl exec into the DuckDB CLI.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakebench-duckdb
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: duckdb
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: duckdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/component: duckdb
+    spec:
+      containers:
+        - name: duckdb
+          image: {{ duckdb_image }}
+          imagePullPolicy: {{ image_pull_policy }}
+          command: ["sh", "-c", "pip install --quiet duckdb && sleep infinity"]
+          env:
+            - name: AWS_REGION
+              value: "{{ s3_region }}"
+            - name: AWS_DEFAULT_REGION
+              value: "{{ s3_region }}"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
+            - name: S3_ENDPOINT
+              value: "{{ s3_endpoint }}"
+            - name: S3_PATH_STYLE
+              value: "{{ s3_path_style | lower }}"
+          resources:
+            requests:
+              cpu: "{{ duckdb_cores }}"
+              memory: "{{ duckdb_memory_k8s }}"
+            limits:
+              cpu: "{{ duckdb_cores }}"
+              memory: "{{ duckdb_memory_k8s }}"
+          readinessProbe:
+            exec:
+              command: ["python", "-c", "import duckdb; print('ok')"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import duckdb; print('ok')"]
+            initialDelaySeconds: 45
+            periodSeconds: 60

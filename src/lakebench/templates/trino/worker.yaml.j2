@@ -1,0 +1,112 @@
+---
+# Trino Worker StatefulSet
+# Uses PVCs for spill-to-disk and data caching.
+# See docs/storage-architecture.md for rationale.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lakebench-trino-worker
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: trino-worker
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  replicas: {{ trino_worker_replicas | default(2) }}
+  serviceName: lakebench-trino-worker
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app: lakebench-trino
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: lakebench-trino
+        component: worker
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/instance: {{ name }}
+        app.kubernetes.io/component: trino-worker
+    spec:
+      # Init container to wait for coordinator
+      initContainers:
+        - name: wait-for-coordinator
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lakebench-trino 8080; do echo waiting for coordinator; sleep 2; done']
+      containers:
+        - name: trino
+          image: {{ trino_image | default('trinodb/trino:479') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trino/config.properties
+              subPath: config.properties.worker
+            - name: config
+              mountPath: /etc/trino/node.properties
+              subPath: node.properties
+            - name: config
+              mountPath: /etc/trino/jvm.config
+              subPath: jvm.config.worker
+            - name: config
+              mountPath: /etc/trino/log.properties
+              subPath: log.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/lakehouse.properties
+              subPath: lakehouse.properties
+            - name: data
+              mountPath: /data/trino
+          resources:
+            requests:
+              cpu: "{{ trino_worker_cpu | default('4') }}"
+              memory: "{{ trino_worker_memory | default('16Gi') }}"
+            limits:
+              cpu: "{{ trino_worker_cpu | default('4') }}"
+              memory: "{{ trino_worker_memory | default('16Gi') }}"
+          readinessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: lakebench-trino-config
+        - name: catalog
+          configMap:
+            name: lakebench-trino-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: lakebench
+          app.kubernetes.io/component: trino-worker
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {% if trino_worker_storage_class %}
+        storageClassName: {{ trino_worker_storage_class }}
+        {% endif %}
+        resources:
+          requests:
+            storage: {{ trino_worker_storage | default('50Gi') }}

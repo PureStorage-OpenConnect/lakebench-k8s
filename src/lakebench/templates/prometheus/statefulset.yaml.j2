@@ -1,0 +1,81 @@
+{# Prometheus StatefulSet - persistent storage for metrics #}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+spec:
+  serviceName: lakebench-prometheus
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lakebench-prometheus
+  template:
+    metadata:
+      labels:
+        app: lakebench-prometheus
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/component: prometheus
+    spec:
+      serviceAccountName: lakebench-prometheus
+      securityContext:
+        fsGroup: 65534
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: prometheus
+          image: {{ prometheus_image }}
+          imagePullPolicy: {{ pull_policy }}
+          args:
+            - "--config.file=/etc/prometheus/prometheus.yml"
+            - "--storage.tsdb.path=/prometheus"
+            - "--storage.tsdb.retention.time={{ prometheus_retention }}"
+            - "--web.enable-lifecycle"
+            - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+            - "--web.console.templates=/usr/share/prometheus/consoles"
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 2Gi
+      volumes:
+        - name: config
+          configMap:
+            name: lakebench-prometheus-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {% if prometheus_storage_class %}
+        storageClassName: {{ prometheus_storage_class }}
+        {% endif %}
+        resources:
+          requests:
+            storage: {{ prometheus_storage }}

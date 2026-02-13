@@ -1,0 +1,89 @@
+---
+# Apache Polaris REST Catalog Deployment
+# Polaris 1.3.0+ with relational-jdbc persistence (PostgreSQL)
+# FlashBlade S3: stsUnavailable=true, pathStyleAccess=true
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakebench-polaris
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: polaris
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: polaris
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: polaris
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/instance: {{ name }}
+    spec:
+      containers:
+        - name: polaris
+          image: apache/polaris:{{ polaris_version | default('1.3.0-incubating') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          ports:
+            - containerPort: 8181
+              name: rest
+            - containerPort: 8182
+              name: metrics
+          env:
+            # Persistence -- relational-jdbc backed by shared PostgreSQL
+            - name: POLARIS_PERSISTENCE_TYPE
+              value: "relational-jdbc"
+            - name: QUARKUS_DATASOURCE_DB_KIND
+              value: "postgresql"
+            - name: QUARKUS_DATASOURCE_USERNAME
+              value: "polaris"
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              value: "lakebench-polaris-2024"
+            - name: QUARKUS_DATASOURCE_JDBC_URL
+              value: "jdbc:postgresql://lakebench-postgres.{{ namespace }}.svc.cluster.local:5432/polaris"
+            # S3 credentials for server-side file I/O
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
+            - name: AWS_REGION
+              value: "{{ s3_region }}"
+          volumeMounts:
+            - name: polaris-config
+              mountPath: /deployments/config
+              readOnly: true
+          resources:
+            requests:
+              cpu: "{{ polaris_cpu }}"
+              memory: "{{ polaris_memory }}"
+            limits:
+              cpu: "{{ polaris_cpu }}"
+              memory: "{{ polaris_memory }}"
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: 8182
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: 8182
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+      volumes:
+        - name: polaris-config
+          configMap:
+            name: lakebench-polaris-config

@@ -1,0 +1,114 @@
+---
+# PostgreSQL StatefulSet for Hive Metastore backend
+# Based on Addendum B.1
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: lakebench-postgres
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: postgres
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  selector:
+    matchLabels:
+      app: lakebench-postgres
+  serviceName: lakebench-postgres
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: lakebench-postgres
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/instance: {{ name }}
+        app.kubernetes.io/component: postgres
+    spec:
+      serviceAccountName: lakebench-postgres
+      {% if not openshift_mode %}
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+      {% endif %}
+      containers:
+        - name: postgres
+          image: {{ postgres_image | default('postgres:17') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-postgres-secret
+                  key: username
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-postgres-secret
+                  key: password
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-postgres-secret
+                  key: database
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # Use MD5 auth for Hive compatibility (Hive JDBC driver doesn't support SCRAM-SHA-256)
+            - name: POSTGRES_HOST_AUTH_METHOD
+              value: md5
+            - name: POSTGRES_INITDB_ARGS
+              value: "--auth-host=md5"
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          # CRITICAL: Use pg_isready for liveness/readiness (Addendum E.1)
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - hive
+                - -d
+                - hive
+                - -h
+                - 127.0.0.1
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - hive
+                - -d
+                - hive
+                - -h
+                - 127.0.0.1
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {% if storage_class %}
+        storageClassName: {{ storage_class }}
+        {% endif %}
+        resources:
+          requests:
+            storage: {{ postgres_storage | default('10Gi') }}

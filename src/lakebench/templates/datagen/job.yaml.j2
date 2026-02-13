@@ -1,0 +1,89 @@
+---
+# Lakebench Data Generation Job
+# Uses Kubernetes Indexed Job for parallel data generation
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lakebench-datagen
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: datagen
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  parallelism: {{ datagen_parallelism | default(4) }}
+  completions: {{ datagen_parallelism | default(4) }}
+  completionMode: Indexed
+  backoffLimit: 60
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: lakebench-datagen
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/instance: {{ name }}
+        app.kubernetes.io/component: datagen
+    spec:
+      serviceAccountName: lakebench-spark-runner
+      restartPolicy: OnFailure
+      containers:
+        - name: datagen
+          image: {{ datagen_image | default('lakebench/datagen:latest') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          args:
+            - "--target-tb"
+            - "{{ datagen_target_tb }}"
+            - "--mode"
+            - "{{ datagen_mode | default('batch') }}"
+            - "--file-size-mb"
+            - "{{ datagen_file_size_mb | default(512) }}"
+            - "--payload-kb"
+            - "{{ datagen_payload_kb | default(0) }}"
+            - "--bucket"
+            - "{{ bucket_bronze }}"
+            - "--prefix"
+            - "{{ datagen_path_prefix | default('customer/interactions/') }}"
+            - "--seed"
+            - "{{ datagen_seed | default(42) }}"
+            - "--dirty-ratio"
+            - "{{ datagen_dirty_ratio | default(0.08) }}"
+            - "--total-nodes"
+            - "{{ datagen_parallelism | default(4) }}"
+            - "--workers"
+            - "4"
+            {% if datagen_timestamp_start %}
+            - "--timestamp-start"
+            - "{{ datagen_timestamp_start }}"
+            {% endif %}
+            {% if datagen_timestamp_end %}
+            - "--timestamp-end"
+            - "{{ datagen_timestamp_end }}"
+            {% endif %}
+            {% if datagen_resume %}- "--resume"{% endif %}
+          env:
+            # JOB_COMPLETION_INDEX is automatically set by Kubernetes (0, 1, 2, ...)
+            # Used as default --node-id in generate.py
+            - name: S3_ENDPOINT
+              value: "{{ s3_endpoint }}"
+            - name: S3_REGION
+              value: "{{ s3_region }}"
+            - name: S3_PATH_STYLE
+              value: "{{ 'true' if s3_path_style else 'false' }}"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
+          resources:
+            requests:
+              cpu: "{{ datagen_cpu | default('2') }}"
+              memory: "{{ datagen_memory | default('4Gi') }}"
+            limits:
+              cpu: "{{ datagen_cpu | default('2') }}"
+              memory: "{{ datagen_memory | default('4Gi') }}"

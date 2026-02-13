@@ -1,0 +1,19 @@
+---
+# Hive Metastore Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakebench-hive-metastore
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: hive
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  ports:
+    - port: 9083
+      targetPort: 9083
+      name: thrift
+  selector:
+    app: lakebench-hive-metastore

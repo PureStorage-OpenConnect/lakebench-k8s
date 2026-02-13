@@ -1,0 +1,21 @@
+{# Grafana datasource provisioning - Prometheus #}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-grafana-datasources
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: grafana
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://lakebench-prometheus.{{ namespace }}.svc.cluster.local:9090
+        isDefault: true
+        editable: false
+        jsonData:
+          timeInterval: "15s"

@@ -1,0 +1,70 @@
+name: Build Binary
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # Needed to create GitHub Releases
+
+jobs:
+  build-binary:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - os: linux-amd64
+            runner: ubuntu-latest
+          - os: macos-amd64
+            runner: macos-latest
+          - os: macos-arm64
+            runner: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[build]" && pip install -e .
+
+      - name: Build binary
+        run: pyinstaller lakebench.spec
+
+      - name: Smoke test
+        run: |
+          ./dist/lakebench version
+          ./dist/lakebench --help
+          ./dist/lakebench init --name smoketest -o /tmp/smoke.yaml
+          test -f /tmp/smoke.yaml
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lakebench-${{ matrix.os }}
+          path: dist/lakebench
+
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-binary
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename binaries
+        run: |
+          for dir in artifacts/lakebench-*; do
+            os=$(basename "$dir" | sed 's/lakebench-//')
+            mv "$dir/lakebench" "lakebench-${os}"
+          done
+          ls -la lakebench-*
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: lakebench-*
+          generate_release_notes: true

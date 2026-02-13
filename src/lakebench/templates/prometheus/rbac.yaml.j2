@@ -1,0 +1,43 @@
+{# Prometheus RBAC - ServiceAccount, ClusterRole, ClusterRoleBinding #}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: lakebench-prometheus
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: lakebench-prometheus-{{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "endpoints", "services", "nodes", "nodes/proxy"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: lakebench-prometheus-{{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: lakebench-prometheus-{{ namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: lakebench-prometheus
+    namespace: {{ namespace }}

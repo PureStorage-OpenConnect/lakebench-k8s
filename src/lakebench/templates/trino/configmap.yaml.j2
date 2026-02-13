@@ -1,0 +1,80 @@
+---
+# Trino Configuration
+# Based on Addendum B.3
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-trino-config
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: trino
+    app.kubernetes.io/managed-by: lakebench
+data:
+  config.properties.coordinator: |
+    coordinator=true
+    node-scheduler.include-coordinator=false
+    http-server.http.port=8080
+    discovery.uri=http://lakebench-trino:8080
+
+  config.properties.worker: |
+    coordinator=false
+    http-server.http.port=8080
+    discovery.uri=http://lakebench-trino:8080
+    {% if trino_worker_spill_enabled | default(true) %}
+    spill-enabled=true
+    spiller-spill-path=/data/trino/spill
+    max-spill-per-node={{ trino_worker_spill_max | default('40Gi') | replace('Gi', 'GB') }}
+    spill-compression-enabled=true
+    {% endif %}
+
+  node.properties: |
+    node.environment=lakebench
+    node.data-dir=/data/trino
+
+  jvm.config.coordinator: |
+    -server
+    -Xmx{{ trino_coordinator_memory | default('8Gi') | replace('Gi', 'G') | replace('Mi', 'M') }}
+    -XX:+UseG1GC
+    -XX:G1HeapRegionSize=32M
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:+ExitOnOutOfMemoryError
+    -Djdk.attach.allowAttachSelf=true
+
+  jvm.config.worker: |
+    -server
+    -Xmx{{ trino_worker_memory | default('16Gi') | replace('Gi', 'G') | replace('Mi', 'M') }}
+    -XX:+UseG1GC
+    -XX:G1HeapRegionSize=32M
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:+ExitOnOutOfMemoryError
+    -Djdk.attach.allowAttachSelf=true
+
+  log.properties: |
+    io.trino=INFO
+
+  # Iceberg catalog configuration
+  lakehouse.properties: |
+    connector.name=iceberg
+    {% if catalog_type == "polaris" %}
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port | default(8181) }}/api/catalog
+    iceberg.rest-catalog.warehouse={{ trino_catalog_name | default('lakehouse') }}
+    iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.credential=lakebench:{{ polaris_client_secret | default('lakebench-polaris-secret-2024') }}
+    iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
+    {% else %}
+    iceberg.catalog.type=hive_metastore
+    hive.metastore.uri=thrift://lakebench-hive-metastore:9083
+    {% endif %}
+    fs.native-s3.enabled=true
+    s3.endpoint={{ s3_endpoint }}
+    s3.path-style-access={{ s3_path_style | default(true) | lower }}
+    s3.region={{ s3_region | default('us-east-1') }}
+    s3.aws-access-key=${ENV:AWS_ACCESS_KEY_ID}
+    s3.aws-secret-key=${ENV:AWS_SECRET_ACCESS_KEY}
+    iceberg.file-format=PARQUET
+    iceberg.compression-codec=SNAPPY

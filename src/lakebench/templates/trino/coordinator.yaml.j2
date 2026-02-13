@@ -1,0 +1,103 @@
+---
+# Trino Coordinator Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakebench-trino-coordinator
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: trino-coordinator
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lakebench-trino
+      component: coordinator
+  template:
+    metadata:
+      labels:
+        app: lakebench-trino
+        component: coordinator
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/instance: {{ name }}
+        app.kubernetes.io/component: trino-coordinator
+    spec:
+      # Init container to wait for catalog service
+      initContainers:
+        {% if catalog_type == "polaris" %}
+        - name: wait-for-polaris
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port | default(8181) }}; do echo waiting for polaris; sleep 2; done']
+        {% else %}
+        - name: wait-for-hive
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lakebench-hive-metastore 9083; do echo waiting for hive; sleep 2; done']
+        {% endif %}
+      containers:
+        - name: trino
+          image: {{ trino_image | default('trinodb/trino:479') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trino/config.properties
+              subPath: config.properties.coordinator
+            - name: config
+              mountPath: /etc/trino/node.properties
+              subPath: node.properties
+            - name: config
+              mountPath: /etc/trino/jvm.config
+              subPath: jvm.config.coordinator
+            - name: config
+              mountPath: /etc/trino/log.properties
+              subPath: log.properties
+            - name: catalog
+              mountPath: /etc/trino/catalog/lakehouse.properties
+              subPath: lakehouse.properties
+            - name: data
+              mountPath: /data/trino
+          resources:
+            requests:
+              cpu: "{{ trino_coordinator_cpu | default('2') }}"
+              memory: "{{ trino_coordinator_memory | default('8Gi') }}"
+            limits:
+              cpu: "{{ trino_coordinator_cpu | default('2') }}"
+              memory: "{{ trino_coordinator_memory | default('8Gi') }}"
+          # Readiness: HTTP endpoint responding
+          readinessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/info
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: config
+          configMap:
+            name: lakebench-trino-config
+        - name: catalog
+          configMap:
+            name: lakebench-trino-config
+        - name: data
+          emptyDir: {}

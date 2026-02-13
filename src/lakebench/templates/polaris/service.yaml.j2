@@ -1,0 +1,24 @@
+---
+# Apache Polaris Service
+# REST API on port 8181, metrics/health on port 8182
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakebench-polaris
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: polaris
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ polaris_port | default(8181) }}
+      targetPort: 8181
+      name: rest
+    - port: 8182
+      targetPort: 8182
+      name: metrics
+  selector:
+    app.kubernetes.io/component: polaris

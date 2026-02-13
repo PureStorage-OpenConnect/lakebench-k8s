@@ -1,0 +1,79 @@
+---
+# Hive Metastore configuration
+# Based on Addendum B.2
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-hive-config
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: hive
+    app.kubernetes.io/managed-by: lakebench
+data:
+  hive-site.xml: |
+    <?xml version="1.0"?>
+    <configuration>
+      <!-- Database connection -->
+      <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://lakebench-postgres:5432/hive</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>{{ postgres_password | default('lakebench-hive-2024') }}</value>
+      </property>
+
+      <!-- Connection pool (proven defaults) -->
+      <property>
+        <name>javax.jdo.option.ConnectionPool.maxPoolSize</name>
+        <value>20</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionPool.maxActive</name>
+        <value>15</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionPool.maxIdle</name>
+        <value>5</value>
+      </property>
+      <property>
+        <name>javax.jdo.option.ConnectionPool.minIdle</name>
+        <value>2</value>
+      </property>
+
+      <!-- Metastore server settings -->
+      <property>
+        <name>hive.metastore.server.min.threads</name>
+        <value>{{ hive_thrift_min_threads | default(10) }}</value>
+      </property>
+      <property>
+        <name>hive.metastore.server.max.threads</name>
+        <value>{{ hive_thrift_max_threads | default(50) }}</value>
+      </property>
+      <property>
+        <name>hive.metastore.client.socket.timeout</name>
+        <value>{{ hive_client_timeout | default('300s') }}</value>
+      </property>
+
+      <!-- Warehouse location (local - Iceberg tables use their own S3 paths) -->
+      <property>
+        <name>hive.metastore.warehouse.dir</name>
+        <value>/tmp/warehouse</value>
+      </property>
+
+      <!-- Disable filesystem operations that require warehouse access -->
+      <property>
+        <name>hive.metastore.try.direct.sql</name>
+        <value>true</value>
+      </property>
+    </configuration>

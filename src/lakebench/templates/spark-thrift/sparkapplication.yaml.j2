@@ -1,0 +1,166 @@
+---
+# Spark Thrift Server Deployment
+# Runs HiveThriftServer2 in client mode via spark-submit.
+# The Spark Operator SparkApplication CRD does not support client mode,
+# and HiveThriftServer2 does not support cluster mode, so a standard
+# Kubernetes Deployment is used instead.
+#
+# An init container downloads Iceberg + Hadoop AWS jars into a shared
+# volume (/extra-jars) so they are on the classpath when the Thrift
+# Server starts accepting sessions.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lakebench-spark-thrift
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: spark-thrift-server
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: spark-thrift-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lakebench
+        app.kubernetes.io/component: spark-thrift-server
+    spec:
+      serviceAccountName: lakebench-spark-runner
+      initContainers:
+{% if catalog_type == "hive" %}
+        - name: wait-for-hive
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lakebench-hive-metastore 9083; do echo waiting for hive; sleep 2; done']
+{% elif catalog_type == "polaris" %}
+        - name: wait-for-polaris
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port | default(8181) }}; do echo waiting for polaris; sleep 2; done']
+{% endif %}
+        - name: download-jars
+          image: {{ spark_image }}
+          imagePullPolicy: {{ image_pull_policy }}
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              mkdir -p /tmp/.ivy2
+              /opt/spark/bin/spark-submit \
+                --packages "{{ spark_thrift_packages }}" \
+                --conf spark.jars.ivy=/tmp/.ivy2 \
+                --class org.apache.spark.deploy.DummyNonExistent \
+                local:///dev/null 2>&1 || true
+              cp /tmp/.ivy2/jars/*.jar /extra-jars/ 2>/dev/null || true
+              ls -la /extra-jars/
+          volumeMounts:
+            - name: extra-jars
+              mountPath: /extra-jars
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: spark-thrift
+          image: {{ spark_image }}
+          imagePullPolicy: {{ image_pull_policy }}
+          ports:
+            - containerPort: 10000
+              name: thrift
+              protocol: TCP
+            - containerPort: 4040
+              name: spark-ui
+              protocol: TCP
+          env:
+            - name: SPARK_HOME
+              value: /opt/spark
+            - name: SPARK_USER_NAME
+              value: spark
+            - name: AWS_REGION
+              value: "{{ s3_region }}"
+            - name: AWS_DEFAULT_REGION
+              value: "{{ s3_region }}"
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
+          command:
+            - /bin/bash
+            - -c
+            - |
+              # Copy downloaded jars into Spark's jars directory for classpath
+              cp /extra-jars/*.jar /opt/spark/jars/ 2>/dev/null || true
+              mkdir -p /tmp/spark-local /tmp/spark-warehouse /tmp/.ivy2
+              /opt/spark/bin/spark-submit \
+                --class org.apache.spark.sql.hive.thriftserver.HiveThriftServer2 \
+                --deploy-mode client \
+                --conf spark.jars.ivy=/tmp/.ivy2 \
+                --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}=org.apache.iceberg.spark.SparkCatalog \
+{% if catalog_type == "hive" %}
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.type=hive \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.uri=thrift://lakebench-hive-metastore.{{ namespace }}.svc.cluster.local:9083 \
+{% elif catalog_type == "polaris" %}
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.type=rest \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.uri=http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port }}/api/catalog \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.credential=lakebench:{{ polaris_client_secret }} \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.warehouse={{ spark_thrift_catalog_name }} \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.scope=PRINCIPAL_ROLE:ALL \
+{% endif %}
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.io-impl=org.apache.iceberg.aws.s3.S3FileIO \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.s3.endpoint={{ s3_endpoint }} \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.s3.path-style-access={{ s3_path_style | lower }} \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.client.region={{ s3_region }} \
+                --conf spark.hadoop.fs.s3a.endpoint={{ s3_endpoint }} \
+                --conf spark.hadoop.fs.s3a.access.key={{ s3_access_key }} \
+                --conf spark.hadoop.fs.s3a.secret.key={{ s3_secret_key }} \
+                --conf spark.hadoop.fs.s3a.path.style.access={{ s3_path_style | lower }} \
+                --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+                --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
+                --conf spark.sql.defaultCatalog={{ spark_thrift_catalog_name }} \
+                --conf spark.hive.server2.thrift.port=10000 \
+                --conf spark.driver.memory={{ spark_thrift_memory }} \
+                --conf spark.driver.cores={{ spark_thrift_cores }} \
+                --conf spark.local.dir=/tmp/spark-local \
+                --conf spark.sql.warehouse.dir=/tmp/spark-warehouse \
+{% if observability_enabled | default(false) %}
+                --conf spark.ui.prometheus.enabled=true \
+                --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet \
+                --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus \
+{% endif %}
+                local:///opt/spark/jars/spark-hive-thriftserver_2.12-*.jar
+          volumeMounts:
+            - name: extra-jars
+              mountPath: /extra-jars
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: "{{ spark_thrift_cores }}"
+              memory: "{{ spark_thrift_memory_k8s }}"
+            limits:
+              cpu: "{{ spark_thrift_cores }}"
+              memory: "{{ spark_thrift_memory_k8s }}"
+          readinessProbe:
+            tcpSocket:
+              port: 10000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 10000
+            initialDelaySeconds: 60
+            periodSeconds: 20
+      volumes:
+        - name: extra-jars
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

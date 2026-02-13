@@ -1,0 +1,153 @@
+---
+# Polaris Bootstrap Job
+# 1. Bootstraps realm + root principal (admin-tool, direct DB access)
+# 2. Creates catalog with FlashBlade S3 storage (curl, REST API)
+#
+# This Job is idempotent -- running it again is safe.
+# FlashBlade config: stsUnavailable=true, pathStyleAccess=true
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lakebench-polaris-bootstrap
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: polaris-bootstrap
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: polaris-bootstrap
+    spec:
+      restartPolicy: Never
+      initContainers:
+        # Step 1: Bootstrap realm + root principal (direct DB access)
+        - name: bootstrap-realm
+          image: apache/polaris-admin-tool:{{ polaris_version | default('1.3.0-incubating') }}
+          imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
+          env:
+            - name: POLARIS_PERSISTENCE_TYPE
+              value: "relational-jdbc"
+            - name: QUARKUS_DATASOURCE_DB_KIND
+              value: "postgresql"
+            - name: QUARKUS_DATASOURCE_USERNAME
+              value: "polaris"
+            - name: QUARKUS_DATASOURCE_PASSWORD
+              value: "lakebench-polaris-2024"
+            - name: QUARKUS_DATASOURCE_JDBC_URL
+              value: "jdbc:postgresql://lakebench-postgres.{{ namespace }}.svc.cluster.local:5432/polaris"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              OUTPUT=$(java -jar /deployments/polaris-admin-tool.jar bootstrap \
+                -r POLARIS \
+                -c "POLARIS,lakebench,{{ polaris_client_secret | default('lakebench-polaris-secret-2024') }}" 2>&1)
+              RC=$?
+              echo "$OUTPUT"
+              if [ $RC -ne 0 ]; then
+                if echo "$OUTPUT" | grep -q "already been bootstrapped"; then
+                  echo "Realm already bootstrapped (OK)"
+                  exit 0
+                fi
+                exit $RC
+              fi
+      containers:
+        # Step 2: Create catalog + assign privileges via REST API
+        - name: setup-catalog
+          image: curlimages/curl:latest
+          env:
+            - name: POLARIS_URI
+              value: "http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port | default(8181) }}"
+            - name: CLIENT_ID
+              value: "lakebench"
+            - name: CLIENT_SECRET
+              value: "{{ polaris_client_secret | default('lakebench-polaris-secret-2024') }}"
+            - name: S3_ENDPOINT
+              value: "{{ s3_endpoint }}"
+            - name: S3_REGION
+              value: "{{ s3_region }}"
+            - name: BUCKET_BRONZE
+              value: "{{ bucket_bronze }}"
+            - name: BUCKET_SILVER
+              value: "{{ bucket_silver }}"
+            - name: BUCKET_GOLD
+              value: "{{ bucket_gold }}"
+            - name: CATALOG_NAME
+              value: "{{ trino_catalog_name | default('lakehouse') }}"
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "Waiting for Polaris to be ready..."
+              for i in $(seq 1 30); do
+                if curl -sf "$POLARIS_URI/q/health/ready" >/dev/null 2>&1; then
+                  echo "Polaris is ready"
+                  break
+                fi
+                echo "  attempt $i/30..."
+                sleep 5
+              done
+
+              echo "Obtaining OAuth2 token..."
+              TOKEN=$(curl -sf -X POST "$POLARIS_URI/api/catalog/v1/oauth/tokens" \
+                -d "grant_type=client_credentials&client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&scope=PRINCIPAL_ROLE:ALL" \
+                | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+
+              if [ -z "$TOKEN" ]; then
+                echo "ERROR: Failed to obtain OAuth2 token"
+                exit 1
+              fi
+              echo "Token obtained successfully"
+
+              echo "Creating catalog '$CATALOG_NAME'..."
+              HTTP_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST "$POLARIS_URI/api/management/v1/catalogs" \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Content-Type: application/json" \
+                -d '{
+                  "catalog": {
+                    "name": "'"$CATALOG_NAME"'",
+                    "type": "INTERNAL",
+                    "storageConfigInfo": {
+                      "storageType": "S3",
+                      "allowedLocations": ["s3://'"$BUCKET_BRONZE"'/", "s3://'"$BUCKET_SILVER"'/", "s3://'"$BUCKET_GOLD"'/"],
+                      "endpoint": "'"$S3_ENDPOINT"'",
+                      "pathStyleAccess": true,
+                      "stsUnavailable": true,
+                      "region": "'"$S3_REGION"'"
+                    },
+                    "properties": {
+                      "default-base-location": "s3://'"$BUCKET_SILVER"'/warehouse/"
+                    }
+                  }
+                }' 2>/dev/null || echo "000")
+
+              if [ "$HTTP_CODE" = "201" ]; then
+                echo "Catalog '$CATALOG_NAME' created"
+              elif [ "$HTTP_CODE" = "409" ]; then
+                echo "Catalog '$CATALOG_NAME' already exists (OK)"
+              else
+                echo "WARNING: Catalog creation returned HTTP $HTTP_CODE"
+              fi
+
+              # Create namespaces in the catalog
+              for NS in default bronze silver gold; do
+                NS_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
+                  "$POLARIS_URI/api/catalog/v1/$CATALOG_NAME/namespaces" \
+                  -H "Authorization: Bearer $TOKEN" \
+                  -H "Content-Type: application/json" \
+                  -d '{"namespace": ["'"$NS"'"]}' 2>/dev/null || echo "000")
+                if [ "$NS_CODE" = "200" ]; then
+                  echo "Namespace '$NS' created in catalog '$CATALOG_NAME'"
+                elif [ "$NS_CODE" = "409" ]; then
+                  echo "Namespace '$NS' already exists (OK)"
+                else
+                  echo "WARNING: Namespace '$NS' creation returned HTTP $NS_CODE"
+                fi
+              done
+
+              echo "Polaris bootstrap complete"

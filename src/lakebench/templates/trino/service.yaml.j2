@@ -1,0 +1,47 @@
+---
+# Trino Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakebench-trino
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: trino
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  type: ClusterIP
+  selector:
+    app: lakebench-trino
+    component: coordinator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+---
+# Headless Service for Trino Worker StatefulSet
+# Required by StatefulSet.spec.serviceName for stable pod DNS.
+# See docs/storage-architecture.md for rationale.
+apiVersion: v1
+kind: Service
+metadata:
+  name: lakebench-trino-worker
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: trino-worker
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: lakebench-trino
+    component: worker
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

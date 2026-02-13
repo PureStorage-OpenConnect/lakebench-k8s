@@ -1,0 +1,308 @@
+---
+# Lakebench Datagen Code ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-datagen-code
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: datagen
+    app.kubernetes.io/managed-by: lakebench
+data:
+  requirements.txt: |
+    pyarrow>=14.0.0
+    boto3>=1.34.0
+    faker>=22.0.0
+    numpy>=1.26.0
+
+  customer360.py: |
+    """Customer360 schema definition for data generation."""
+    import pyarrow as pa
+
+    CHANNELS = ["web", "mobile", "store", "call_center", "social_media"]
+    EVENT_TYPES = ["purchase", "browse", "support", "login", "abandoned_cart"]
+    DEVICE_TYPES = ["desktop", "mobile", "tablet", "smart_tv", "kiosk"]
+    BROWSERS = ["Chrome", "Firefox", "Safari", "Edge", "Opera", "Chrome Mobile", "Safari Mobile", "Samsung Internet"]
+    OPERATING_SYSTEMS = ["Windows 11", "Windows 10", "macOS Sonoma", "macOS Ventura", "Ubuntu 22.04", "iOS 17", "Android 14", "ChromeOS"]
+    PRODUCT_CATEGORIES = ["Electronics", "Clothing", "Home & Garden", "Sports", "Books", "Food & Grocery", "Health & Beauty", "Automotive", "Toys & Games", "Office Supplies"]
+    CURRENCIES = ["USD", "EUR", "GBP", "CAD", "AUD", "JPY"]
+
+    CUSTOMER360_SCHEMA = pa.schema([
+        pa.field("interaction_id", pa.string(), nullable=False),
+        pa.field("customer_id", pa.string(), nullable=False),
+        pa.field("session_id", pa.string(), nullable=False),
+        pa.field("event_timestamp", pa.timestamp("us"), nullable=False),
+        pa.field("channel", pa.string(), nullable=False),
+        pa.field("event_type", pa.string(), nullable=False),
+        pa.field("product_id", pa.string(), nullable=True),
+        pa.field("product_category", pa.string(), nullable=True),
+        pa.field("transaction_amount", pa.decimal128(12, 2), nullable=True),
+        pa.field("currency", pa.string(), nullable=True),
+        pa.field("device_type", pa.string(), nullable=True),
+        pa.field("browser", pa.string(), nullable=True),
+        pa.field("operating_system", pa.string(), nullable=True),
+        pa.field("ip_address", pa.string(), nullable=True),
+        pa.field("email_raw", pa.string(), nullable=True),
+        pa.field("phone_raw", pa.string(), nullable=True),
+        pa.field("city_raw", pa.string(), nullable=True),
+        pa.field("state_raw", pa.string(), nullable=True),
+        pa.field("zip_code", pa.string(), nullable=True),
+        pa.field("interaction_payload", pa.binary(), nullable=True),
+    ])
+
+    DEFAULT_QUALITY_DISTRIBUTION = {"clean": 0.70, "duplicate_suspected": 0.05, "incomplete": 0.10, "format_inconsistent": 0.10, "outlier": 0.05}
+
+    DIRTY_EMAIL_PATTERNS = [
+        lambda fake, rng: fake.email(),
+        lambda fake, rng: fake.user_name() + "gmail.com",
+        lambda fake, rng: fake.user_name() + "@" + fake.domain_word(),
+        lambda fake, rng: fake.user_name() + "@@" + fake.free_email_domain(),
+        lambda fake, rng: fake.email().upper(),
+        lambda fake, rng: " " + fake.email() + " ",
+    ]
+
+    DIRTY_PHONE_PATTERNS = [
+        lambda fake, rng: fake.phone_number(),
+        lambda fake, rng: "".join(c for c in fake.phone_number() if c.isdigit()),
+        lambda fake, rng: f"({rng.integers(100, 999)}) {rng.integers(100, 999)}-{rng.integers(1000, 9999)}",
+        lambda fake, rng: f"+1-{rng.integers(100, 999)}-{rng.integers(100, 999)}-{rng.integers(1000, 9999)}",
+        lambda fake, rng: str(rng.integers(1000000000, 9999999999)),
+        lambda fake, rng: "",
+    ]
+
+    CITY_MISSPELLINGS = {
+        "New York": ["New Yrok", "Newyork", "new york", "NEW YORK", "N.Y."],
+        "Los Angeles": ["Los Angelas", "LA", "Los angeles", "L.A."],
+        "Chicago": ["Chicgao", "chicago", "CHICAGO"],
+        "Houston": ["Huston", "houston", "HOUSTON"],
+        "Phoenix": ["Pheonix", "phoenix", "PHOENIX"],
+        "Philadelphia": ["Philidelphia", "Philly", "philadelphia"],
+        "San Antonio": ["San antonio", "SanAntonio", "SANANTONIO"],
+        "San Diego": ["San diego", "Sandiego", "SANDIEGO"],
+        "Dallas": ["dallas", "DALLAS", "Dalas"],
+        "San Jose": ["San jose", "Sanjose", "SANJOSE"],
+    }
+
+    STATE_VARIATIONS = {
+        "California": ["CA", "Calif.", "california", "CALIFORNIA", "Cal"],
+        "Texas": ["TX", "Tex.", "texas", "TEXAS"],
+        "Florida": ["FL", "Fla.", "florida", "FLORIDA"],
+        "New York": ["NY", "N.Y.", "new york", "NEW YORK"],
+        "Pennsylvania": ["PA", "Penn.", "pennsylvania", "PENNSYLVANIA"],
+        "Illinois": ["IL", "Ill.", "illinois", "ILLINOIS"],
+        "Ohio": ["OH", "ohio", "OHIO"],
+        "Georgia": ["GA", "Ga.", "georgia", "GEORGIA"],
+        "North Carolina": ["NC", "N.C.", "north carolina", "NORTH CAROLINA"],
+        "Michigan": ["MI", "Mich.", "michigan", "MICHIGAN"],
+    }
+
+  generate.py: |
+    #!/usr/bin/env python3
+    """Lakebench data generator - simplified version."""
+    from __future__ import annotations
+    import io, json, logging, os, sys, time, uuid
+    from dataclasses import dataclass
+    from datetime import datetime, timedelta
+    from decimal import Decimal
+    from typing import Any
+    import boto3, numpy as np, pyarrow as pa, pyarrow.parquet as pq
+    from botocore.config import Config as BotoConfig
+    from faker import Faker
+    from customer360 import (BROWSERS, CHANNELS, CITY_MISSPELLINGS, CURRENCIES, CUSTOMER360_SCHEMA,
+        DEFAULT_QUALITY_DISTRIBUTION, DEVICE_TYPES, DIRTY_EMAIL_PATTERNS, DIRTY_PHONE_PATTERNS,
+        EVENT_TYPES, OPERATING_SYSTEMS, PRODUCT_CATEGORIES, STATE_VARIATIONS)
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    logger = logging.getLogger(__name__)
+
+    @dataclass
+    class GeneratorConfig:
+        node_id: int
+        total_nodes: int
+        target_size_bytes: int
+        file_size_bytes: int
+        s3_endpoint: str
+        s3_bucket: str
+        s3_path_prefix: str
+        s3_path_style: bool
+        s3_region: str
+        access_key: str
+        secret_key: str
+        seed: int
+        dirty_data_ratio: float
+        payload_size: int
+        customer_count: int
+        checkpoint_file: str
+        resume: bool
+
+        @classmethod
+        def from_env(cls) -> "GeneratorConfig":
+            return cls(
+                node_id=int(os.environ.get("JOB_COMPLETION_INDEX", "0")),
+                total_nodes=int(os.environ.get("TOTAL_NODES", "1")),
+                target_size_bytes=int(os.environ.get("TARGET_SIZE_BYTES", str(1024**3))),
+                file_size_bytes=int(os.environ.get("FILE_SIZE_BYTES", str(64 * 1024**2))),
+                s3_endpoint=os.environ.get("S3_ENDPOINT", ""),
+                s3_bucket=os.environ.get("S3_BUCKET", ""),
+                s3_path_prefix=os.environ.get("S3_PATH_PREFIX", "customer/interactions/"),
+                s3_path_style=os.environ.get("S3_PATH_STYLE", "true").lower() == "true",
+                s3_region=os.environ.get("S3_REGION", "us-east-1"),
+                access_key=os.environ.get("AWS_ACCESS_KEY_ID", ""),
+                secret_key=os.environ.get("AWS_SECRET_ACCESS_KEY", ""),
+                seed=int(os.environ.get("SEED", "42")),
+                dirty_data_ratio=float(os.environ.get("DIRTY_DATA_RATIO", "0.08")),
+                payload_size=int(os.environ.get("PAYLOAD_SIZE", "0")),
+                customer_count=int(os.environ.get("CUSTOMER_COUNT", "1000000")),
+                checkpoint_file=os.environ.get("CHECKPOINT_FILE", "/tmp/checkpoint.json"),
+                resume=os.environ.get("RESUME", "false").lower() == "true",
+            )
+
+        def validate(self) -> list[str]:
+            errors = []
+            if not self.s3_endpoint: errors.append("S3_ENDPOINT is required")
+            if not self.s3_bucket: errors.append("S3_BUCKET is required")
+            if not self.access_key: errors.append("AWS_ACCESS_KEY_ID is required")
+            if not self.secret_key: errors.append("AWS_SECRET_ACCESS_KEY is required")
+            return errors
+
+    class Customer360Generator:
+        BYTES_PER_ROW = 2100
+
+        def __init__(self, config: GeneratorConfig):
+            self.config = config
+            self.fake = Faker()
+            Faker.seed(config.seed)
+            customer_rng = np.random.default_rng(seed=config.seed)
+            self.customer_ids = [str(uuid.UUID(int=customer_rng.integers(0, 2**128))) for _ in range(min(config.customer_count, 100000))]
+            rows_per_file = max(1000, config.file_size_bytes // self.BYTES_PER_ROW)
+            self.rows_per_file = rows_per_file
+            rows_needed = config.target_size_bytes // self.BYTES_PER_ROW
+            self.total_files = max(1, rows_needed // rows_per_file)
+            logger.info(f"Generator: {self.total_files} files, {rows_per_file} rows/file, targeting {config.target_size_bytes / (1024**3):.2f} GB")
+
+        def calculate_my_files(self) -> list[int]:
+            return [f for f in range(self.total_files) if f % self.config.total_nodes == self.config.node_id]
+
+        def generate_file_data(self, file_id: int) -> pa.Table:
+            config = self.config
+            rows = self.rows_per_file
+            rng = np.random.default_rng(seed=config.seed + file_id)
+            row_id_start = file_id * rows
+            base_time = datetime.now() - timedelta(days=365)
+            timestamps = [base_time + timedelta(seconds=rng.integers(0, 365 * 24 * 3600)) for _ in range(rows)]
+            customer_indices = rng.integers(0, len(self.customer_ids), rows)
+            is_dirty = rng.random(rows) < config.dirty_data_ratio
+
+            data = {
+                "interaction_id": [str(uuid.UUID(int=row_id_start + i)) for i in range(rows)],
+                "customer_id": [self.customer_ids[idx] for idx in customer_indices],
+                "session_id": [str(uuid.UUID(int=rng.integers(0, 2**128))) for _ in range(rows)],
+                "event_timestamp": timestamps,
+                "channel": rng.choice(CHANNELS, rows).tolist(),
+                "event_type": rng.choice(EVENT_TYPES, rows).tolist(),
+                "product_id": [f"PROD-{rng.integers(10000, 99999)}" for _ in range(rows)],
+                "product_category": rng.choice(PRODUCT_CATEGORIES, rows).tolist(),
+                "transaction_amount": [Decimal(str(round(rng.uniform(1, 5000), 2))) if rng.random() > 0.3 else None for _ in range(rows)],
+                "currency": rng.choice(CURRENCIES, rows).tolist(),
+                "device_type": rng.choice(DEVICE_TYPES, rows).tolist(),
+                "browser": rng.choice(BROWSERS, rows).tolist(),
+                "operating_system": rng.choice(OPERATING_SYSTEMS, rows).tolist(),
+                "ip_address": [f"{rng.integers(1, 255)}.{rng.integers(0, 255)}.{rng.integers(0, 255)}.{rng.integers(1, 255)}" for _ in range(rows)],
+                "email_raw": self._gen_emails(rows, rng, is_dirty),
+                "phone_raw": self._gen_phones(rows, rng, is_dirty),
+                "city_raw": self._gen_cities(rows, rng, is_dirty),
+                "state_raw": self._gen_states(rows, rng, is_dirty),
+                "zip_code": [f"{rng.integers(10000, 99999)}" for _ in range(rows)],
+                "interaction_payload": [None] * rows,
+            }
+            return pa.Table.from_pydict(data, schema=CUSTOMER360_SCHEMA)
+
+        def _gen_emails(self, rows, rng, is_dirty):
+            return [DIRTY_EMAIL_PATTERNS[rng.integers(1, len(DIRTY_EMAIL_PATTERNS)) if is_dirty[i] else 0](self.fake, rng) if rng.random() > 0.05 else None for i in range(rows)]
+
+        def _gen_phones(self, rows, rng, is_dirty):
+            return [DIRTY_PHONE_PATTERNS[rng.integers(1, len(DIRTY_PHONE_PATTERNS)) if is_dirty[i] else 0](self.fake, rng) if rng.random() > 0.05 else None for i in range(rows)]
+
+        def _gen_cities(self, rows, rng, is_dirty):
+            cities = list(CITY_MISSPELLINGS.keys())
+            return [rng.choice(CITY_MISSPELLINGS[rng.choice(cities)]) if is_dirty[i] else rng.choice(cities) if rng.random() > 0.03 else None for i in range(rows)]
+
+        def _gen_states(self, rows, rng, is_dirty):
+            states = list(STATE_VARIATIONS.keys())
+            return [rng.choice(STATE_VARIATIONS[rng.choice(states)]) if is_dirty[i] else rng.choice(states) if rng.random() > 0.03 else None for i in range(rows)]
+
+    class S3Writer:
+        def __init__(self, config: GeneratorConfig):
+            self.config = config
+            boto_config = BotoConfig(signature_version="s3v4", s3={"addressing_style": "path" if config.s3_path_style else "virtual"}, retries={"max_attempts": 3})
+            self.client = boto3.client("s3", endpoint_url=config.s3_endpoint, aws_access_key_id=config.access_key, aws_secret_access_key=config.secret_key, region_name=config.s3_region, config=boto_config)
+
+        def write_table(self, table: pa.Table, file_id: int) -> dict:
+            key = f"{self.config.s3_path_prefix}part-{file_id:05d}.parquet"
+            buffer = io.BytesIO()
+            pq.write_table(table, buffer, compression="snappy", use_dictionary=True, write_statistics=True)
+            buffer.seek(0)
+            size = buffer.getbuffer().nbytes
+            start = time.time()
+            try:
+                self.client.put_object(Bucket=self.config.s3_bucket, Key=key, Body=buffer, ContentType="application/octet-stream")
+                elapsed = time.time() - start
+                return {"success": True, "path": f"s3://{self.config.s3_bucket}/{key}", "size_bytes": size, "elapsed_seconds": elapsed, "throughput_mbps": (size / (1024**2)) / elapsed if elapsed > 0 else 0}
+            except Exception as e:
+                return {"success": False, "path": f"s3://{self.config.s3_bucket}/{key}", "error": str(e)}
+
+        def ensure_bucket_exists(self) -> bool:
+            try:
+                self.client.head_bucket(Bucket=self.config.s3_bucket)
+                return True
+            except Exception:
+                try:
+                    self.client.create_bucket(Bucket=self.config.s3_bucket)
+                    return True
+                except:
+                    return False
+
+    def run_generation(config: GeneratorConfig) -> dict:
+        generator = Customer360Generator(config)
+        writer = S3Writer(config)
+        if not writer.ensure_bucket_exists():
+            return {"success": False, "error": "Failed to access S3 bucket"}
+        my_files = generator.calculate_my_files()
+        logger.info(f"Node {config.node_id}/{config.total_nodes}: {len(my_files)} files assigned")
+        total_bytes, total_rows, failed = 0, 0, []
+        start = time.time()
+        for i, file_id in enumerate(my_files):
+            logger.info(f"Generating file {file_id} ({i + 1}/{len(my_files)})")
+            table = generator.generate_file_data(file_id)
+            result = writer.write_table(table, file_id)
+            if result["success"]:
+                total_bytes += result["size_bytes"]
+                total_rows += len(table)
+                logger.info(f"  Wrote {result['size_bytes'] / (1024**2):.2f} MB @ {result['throughput_mbps']:.1f} MB/s")
+            else:
+                logger.error(f"  Failed: {result.get('error')}")
+                failed.append(file_id)
+        elapsed = time.time() - start
+        return {"success": len(failed) == 0, "node_id": config.node_id, "files_written": len(my_files) - len(failed), "files_failed": len(failed), "total_bytes": total_bytes, "total_rows": total_rows, "elapsed_seconds": elapsed, "throughput_mbps": (total_bytes / (1024**2)) / elapsed if elapsed > 0 else 0}
+
+    def main() -> int:
+        logger.info("Lakebench Data Generator starting...")
+        config = GeneratorConfig.from_env()
+        errors = config.validate()
+        if errors:
+            for e in errors: logger.error(f"Config error: {e}")
+            return 1
+        logger.info(f"Node: {config.node_id}/{config.total_nodes}, Target: {config.target_size_bytes / (1024**3):.2f} GB")
+        logger.info(f"S3: {config.s3_endpoint}, Bucket: {config.s3_bucket}")
+        result = run_generation(config)
+        if result["success"]:
+            logger.info(f"SUCCESS: {result['files_written']} files, {result['total_bytes'] / (1024**3):.2f} GB, {result['throughput_mbps']:.1f} MB/s")
+            return 0
+        else:
+            logger.error(f"FAILED: {result.get('error', 'Unknown error')}")
+            return 1
+
+    if __name__ == "__main__":
+        sys.exit(main())

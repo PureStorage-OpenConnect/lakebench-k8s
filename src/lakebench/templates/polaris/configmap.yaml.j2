@@ -1,0 +1,27 @@
+---
+# Polaris server configuration (application.properties)
+# Mounted at /deployments/config/application.properties
+# SmallRye Config picks this up automatically for Quarkus apps
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-polaris-config
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: polaris
+    app.kubernetes.io/managed-by: lakebench
+data:
+  application.properties: |
+    # FlashBlade S3: stsUnavailable=true on the catalog handles STS skip.
+    # DO NOT set SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true -- it drops
+    # endpoint + pathStyleAccess config from the StorageAccessConfig, causing
+    # server-side S3FileIO to default to s3.amazonaws.com (see BUG-P10).
+    #
+    # Server-side S3 credentials (for FileIO metadata validation).
+    # These are used by the AwsCredentialsStorageIntegration when
+    # stsUnavailable=true skips STS AssumeRole but the SDK still needs
+    # credentials from the default credential chain (AWS_ACCESS_KEY_ID env var).
+    polaris.storage.aws.access-key={{ s3_access_key }}
+    polaris.storage.aws.secret-key={{ s3_secret_key }}

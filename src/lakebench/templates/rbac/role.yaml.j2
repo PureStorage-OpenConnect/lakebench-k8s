@@ -1,0 +1,34 @@
+---
+# Role granting pod management permissions for Spark
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: lakebench-spark-runner
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/instance: {{ name }}
+    app.kubernetes.io/component: spark
+    app.kubernetes.io/managed-by: lakebench
+rules:
+  # Pod management for executor lifecycle
+  # NOTE: deletecollection required for Spark 3.5.x driver cleanup
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  # Service creation for driver
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+  # ConfigMap access for job scripts
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+  # Pod logs for debugging
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
+  # PersistentVolumeClaims for scratch storage
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]

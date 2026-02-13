@@ -1,0 +1,46 @@
+{# PodMonitor for Spark driver and executor metrics #}
+{# Requires Prometheus Operator CRDs to be installed #}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: lakebench-spark-driver
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: spark-metrics
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      spark-role: driver
+  namespaceSelector:
+    matchNames:
+      - {{ namespace }}
+  podMetricsEndpoints:
+    - targetPort: 4040
+      interval: 15s
+      path: /metrics/prometheus
+      scheme: http
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: lakebench-spark-executor
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: spark-metrics
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      spark-role: executor
+  namespaceSelector:
+    matchNames:
+      - {{ namespace }}
+  podMetricsEndpoints:
+    - targetPort: 4040
+      interval: 15s
+      path: /metrics/executors/prometheus
+      scheme: http
