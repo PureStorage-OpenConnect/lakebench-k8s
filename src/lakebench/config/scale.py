@@ -76,7 +76,7 @@ class DatagenGuidance:
 
     Proven defaults:
     - batch mode: 1 generator, 1 uploader, 4 CPU / 4Gi per pod
-    - continuous mode: 8 generators, 2 uploaders, 8 CPU / 32Gi per pod
+    - continuous mode: 8 generators, 2 uploaders, 8 CPU / 24Gi per pod
     """
 
     parallelism: int
@@ -280,9 +280,11 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
     """
     spark = compute_guidance(scale)
 
-    # Datagen: fixed CPU per pod by mode:
+    # Datagen: CPU and memory are hard-locked per mode (MVP sizing):
     #   batch:      4 CPU, 4Gi per pod, 1 generator, 1 uploader
-    #   continuous:  8 CPU, 32Gi per pod, 8 generators, 2 uploaders
+    #   continuous: 8 CPU, 24Gi per pod, 8 generators, 2 uploaders
+    # Observed peak at scale 100: ~18.4Gi with spikes above 20Gi.
+    # 24Gi provides ~30% headroom above steady-state peak.
     # Scaling is done by parallelism (number of pods), not per-pod resources.
 
     if scale <= 5:
@@ -318,7 +320,7 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
             datagen = DatagenGuidance(
                 parallelism=max(4, scale // 5),
                 cpu="8",
-                memory="32Gi",
+                memory="24Gi",
                 mode="continuous",
                 generators=8,
                 uploaders=2,
@@ -335,7 +337,7 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
         datagen = DatagenGuidance(
             parallelism=max(8, scale // 10),
             cpu="8",
-            memory="32Gi",
+            memory="24Gi",
             mode="continuous",
             generators=8,
             uploaders=2,
@@ -352,7 +354,7 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
         datagen = DatagenGuidance(
             parallelism=max(16, scale // 30),
             cpu="8",
-            memory="32Gi",
+            memory="24Gi",
             mode="continuous",
             generators=8,
             uploaders=2,

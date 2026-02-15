@@ -178,7 +178,7 @@ def deployed_e2e_infrastructure(test_config: Path, namespace: str, check_cluster
         print("DEPLOYING INFRASTRUCTURE")
         print(f"{'=' * 60}")
 
-        result = run_lakebench("deploy", str(test_config), timeout=DEPLOY_TIMEOUT)
+        result = run_lakebench("deploy", str(test_config), "--yes", timeout=DEPLOY_TIMEOUT)
         if result.returncode != 0:
             pytest.fail(f"Deploy failed:\n{result.stdout}\n{result.stderr}")
 
@@ -215,6 +215,7 @@ def generated_data(test_config: Path, deployed_e2e_infrastructure: str):
         result = run_lakebench(
             "generate",
             str(test_config),
+            "--yes",
             "--wait",
             "--timeout",
             str(GENERATE_TIMEOUT),
@@ -261,8 +262,6 @@ class TestBatchPipeline:
         result = run_lakebench(
             "run",
             str(test_config),
-            "--mode",
-            "batch",
             "--timeout",
             str(PIPELINE_TIMEOUT),
             timeout=PIPELINE_TIMEOUT + 60,
@@ -289,8 +288,6 @@ class TestBatchPipeline:
         result = run_lakebench(
             "benchmark",
             str(test_config),
-            "--timeout",
-            str(BENCHMARK_TIMEOUT),
             timeout=BENCHMARK_TIMEOUT + 60,
         )
 
@@ -312,7 +309,7 @@ class TestBatchPipeline:
         print("GENERATING REPORT")
         print(f"{'=' * 60}")
 
-        result = run_lakebench("report", str(test_config))
+        result = run_lakebench("report")
 
         print(f"Exit code: {result.returncode}")
 
@@ -327,7 +324,7 @@ class TestBatchPipeline:
 
     def test_06_results_display(self, test_config: Path, generated_data: str):
         """Display pipeline results."""
-        result = run_lakebench("results", str(test_config))
+        result = run_lakebench("results")
 
         # Results should display (even if no data, shouldn't crash)
         assert result.returncode in (0, 1)
@@ -373,8 +370,7 @@ class TestContinuousPipeline:
         result = run_lakebench(
             "run",
             str(test_config),
-            "--mode",
-            "continuous",
+            "--continuous",
             "--timeout",
             "300",  # 5 min test run
             timeout=360,
@@ -487,7 +483,9 @@ class TestFullWorkflow:
         # Step 1: Deploy
         if not SKIP_DEPLOY:
             print("\n[1/5] Deploying infrastructure...")
-            result = run_lakebench("deploy", str(test_config), timeout=DEPLOY_TIMEOUT, check=True)
+            result = run_lakebench(
+                "deploy", str(test_config), "--yes", timeout=DEPLOY_TIMEOUT, check=True
+            )
             assert result.returncode == 0, "Deploy failed"
 
             # Wait for readiness
@@ -499,6 +497,7 @@ class TestFullWorkflow:
             result = run_lakebench(
                 "generate",
                 str(test_config),
+                "--yes",
                 "--wait",
                 "--timeout",
                 str(GENERATE_TIMEOUT),
@@ -511,8 +510,6 @@ class TestFullWorkflow:
         result = run_lakebench(
             "run",
             str(test_config),
-            "--mode",
-            "batch",
             "--timeout",
             str(PIPELINE_TIMEOUT),
             timeout=PIPELINE_TIMEOUT + 60,
@@ -524,8 +521,6 @@ class TestFullWorkflow:
         result = run_lakebench(
             "benchmark",
             str(test_config),
-            "--timeout",
-            str(BENCHMARK_TIMEOUT),
             timeout=BENCHMARK_TIMEOUT + 60,
         )
         # Benchmark exit 0 or 1 is acceptable (some queries may fail)
@@ -533,7 +528,7 @@ class TestFullWorkflow:
 
         # Step 5: Report
         print("\n[5/5] Generating report...")
-        result = run_lakebench("report", str(test_config))
+        result = run_lakebench("report")
         assert result.returncode == 0, "Report failed"
 
         print(f"\n{'=' * 60}")
@@ -636,6 +631,7 @@ class TestScaleMatrix:
             result = run_lakebench(
                 "deploy",
                 str(config_path),
+                "--yes",
                 timeout=DEPLOY_TIMEOUT * timeout_mult,
             )
             assert result.returncode == 0, f"Deploy failed at scale {scale}"
@@ -645,6 +641,7 @@ class TestScaleMatrix:
             result = run_lakebench(
                 "generate",
                 str(config_path),
+                "--yes",
                 "--wait",
                 "--timeout",
                 str(GENERATE_TIMEOUT * timeout_mult),
@@ -670,8 +667,6 @@ class TestScaleMatrix:
             result = run_lakebench(
                 "benchmark",
                 str(config_path),
-                "--timeout",
-                str(BENCHMARK_TIMEOUT * timeout_mult),
                 timeout=BENCHMARK_TIMEOUT * timeout_mult + 60,
             )
             assert result.returncode in (0, 1), f"Benchmark crashed at scale {scale}"
@@ -731,6 +726,7 @@ class TestScaleMatrix:
                 result = run_lakebench(
                     "deploy",
                     str(config_path),
+                    "--yes",
                     timeout=DEPLOY_TIMEOUT * timeout_mult,
                 )
                 assert result.returncode == 0
@@ -803,6 +799,7 @@ class TestStressScales:
             result = run_lakebench(
                 "deploy",
                 str(config_path),
+                "--yes",
                 timeout=DEPLOY_TIMEOUT * timeout_mult,
             )
             assert result.returncode == 0, f"Deploy failed at stress scale {scale}"
@@ -811,6 +808,7 @@ class TestStressScales:
             result = run_lakebench(
                 "generate",
                 str(config_path),
+                "--yes",
                 "--wait",
                 "--timeout",
                 str(GENERATE_TIMEOUT * timeout_mult),
@@ -834,14 +832,12 @@ class TestStressScales:
             result = run_lakebench(
                 "benchmark",
                 str(config_path),
-                "--timeout",
-                str(BENCHMARK_TIMEOUT * timeout_mult),
                 timeout=BENCHMARK_TIMEOUT * timeout_mult + 120,
             )
             assert result.returncode in (0, 1), f"Benchmark crashed at stress scale {scale}"
 
             # Report
-            result = run_lakebench("report", str(config_path))
+            result = run_lakebench("report")
             assert result.returncode == 0, f"Report failed at stress scale {scale}"
 
             print(f"\nStress scale {scale} completed successfully")

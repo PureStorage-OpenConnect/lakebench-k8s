@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import random
+import statistics
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -406,8 +407,7 @@ class BenchmarkRunner:
                     times.append(result.elapsed_seconds)
                     last_result = result
 
-                times.sort()
-                median_time = times[len(times) // 2]
+                median_time = statistics.median(times)
                 assert last_result is not None
                 results.append(
                     QueryResult(

@@ -4,6 +4,56 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.2] - 2026-02-14
+
+### Changed
+- Spark Operator `install` default changed from `true` to `false`. The operator
+  requires cluster-admin and platform-specific patches -- explicit opt-in is safer.
+- `run --timeout` now auto-scales from the data scale factor (`max(3600, scale * 60)`)
+  when not explicitly set.
+- `status` command is config-aware: only shows components matching the configured
+  catalog, query engine, and observability settings. Includes Trino workers and
+  datagen job progress.
+- Spark job monitor fires progress callback on every poll while RUNNING (not just
+  on state transitions). CLI only prints executor count when it changes.
+- `validate` summary distinguishes warnings from passes/failures and shows a
+  warning count.
+
+### Added
+- Spark Operator namespace watching detection: `validate` and `run` now check
+  whether `spark.jobNamespaces` includes the target namespace. When `install: true`,
+  the namespace is added automatically via `helm upgrade --reuse-values` and the
+  operator controller is restarted to pick up the change. When `install: false`,
+  the exact fix command is shown.
+- `generate --yes/-y` flag to skip confirmation prompt.
+- Confirmation prompt before `generate` submits the datagen job.
+- OOM and crash-loop detection in datagen progress: `generate --wait` exits
+  immediately with actionable guidance when pods are OOMKilled.
+- Pending pod count shown during `generate --wait`.
+- Bucket name overlap warning in `validate` (bronze/silver/gold sharing names).
+- Active datagen guard in `clean`: warns and prompts before deleting S3 data
+  while generation is running.
+- S3 `empty_bucket()` progress callback; `clean` command shows deletion progress.
+- `S3Client._check_client()` raises `S3AuthError` early when boto init failed.
+- ANSI escape code stripping for `logs` command output.
+- Helm failure recovery commands in observability deployer error messages.
+- Workflow hint in CLI help epilog: `init -> validate -> deploy -> generate -> run -> report -> destroy`.
+- Minimum viable config block in generated YAML (3 required fields).
+
+### Fixed
+- `generate` showed "Target: 0.00 GB" (wrong dict key `target_size_bytes`
+  instead of `target_tb`).
+- `validate` Stackable error listed all 4 operators even when only 1 CRD was
+  missing. Now lists only missing operators plus prerequisites.
+- JSON query output (`--format json`) now produces proper `{"key": "value"}`
+  dicts instead of raw tab-delimited arrays.
+- CSV query output strips surrounding quotes from fields.
+- ConfigMap deploy failure in `spark/job.py` now returns `False` (hard failure)
+  instead of raising an unhandled exception.
+- 11 bare `except: pass` patterns replaced with `logger.debug()` or
+  `logger.warning()` across cli.py, engine.py, k8s/client.py, s3/client.py,
+  hive.py, and metrics/collector.py.
+
 ## [1.0.1] - 2026-02-13
 
 ### Fixed

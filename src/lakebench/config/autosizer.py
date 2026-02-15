@@ -163,14 +163,16 @@ def resolve_auto_sizing(
         changes.append(f"trino.worker.memory={guidance.trino.worker_memory}")
 
     # -- Datagen --
-    # CPU and memory per pod are fixed by mode:
+    # CPU and memory per pod are hard-locked by mode (MVP sizing):
     #   batch:      4 CPU, 4Gi
-    #   continuous:  8 CPU, 32Gi
+    #   continuous: 8 CPU, 24Gi
+    # These are always overridden regardless of user config to prevent
+    # OOMKill from mode/memory mismatches.
     # Scaling is via parallelism (number of pods).
     datagen = config.architecture.workload.datagen
 
     if effective_mode == "continuous":
-        mode_cpu, mode_memory = "8", "32Gi"
+        mode_cpu, mode_memory = "8", "24Gi"
         mode_generators, mode_uploaders = 8, 2
     else:
         mode_cpu, mode_memory = "4", "4Gi"
@@ -178,13 +180,19 @@ def resolve_auto_sizing(
 
     if _set_if_default(datagen, "parallelism", guidance.datagen.parallelism):
         changes.append(f"datagen.parallelism={guidance.datagen.parallelism}")
-    if _set_if_default(datagen, "cpu", mode_cpu):
-        changes.append(f"datagen.cpu={mode_cpu}")
-    if _set_if_default(datagen, "memory", mode_memory):
-        changes.append(f"datagen.memory={mode_memory}")
-    if _set_if_default(datagen, "generators", mode_generators):
+
+    # Hard-lock CPU and memory -- always set to mode-correct values
+    if datagen.cpu != mode_cpu:
+        datagen.cpu = mode_cpu
+        changes.append(f"datagen.cpu={mode_cpu} (locked by {effective_mode} mode)")
+    if datagen.memory != mode_memory:
+        datagen.memory = mode_memory
+        changes.append(f"datagen.memory={mode_memory} (locked by {effective_mode} mode)")
+    if datagen.generators == 0 or datagen.generators != mode_generators:
+        datagen.generators = mode_generators
         changes.append(f"datagen.generators={mode_generators}")
-    if _set_if_default(datagen, "uploaders", mode_uploaders):
+    if datagen.uploaders == 0 or datagen.uploaders != mode_uploaders:
+        datagen.uploaders = mode_uploaders
         changes.append(f"datagen.uploaders={mode_uploaders}")
 
     # -- Cluster capacity: cap to fit --

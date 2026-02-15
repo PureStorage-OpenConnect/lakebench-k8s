@@ -340,7 +340,8 @@ class SparkJobManager:
         try:
             cap = k8s.get_cluster_capacity()
             self._cluster_cpu_m: int | None = cap.total_cpu_millicores if cap else None
-        except Exception:
+        except Exception as e:
+            logger.warning("Could not get cluster capacity for streaming budget: %s", e)
             self._cluster_cpu_m = None
 
     def submit_job(
@@ -1048,13 +1049,16 @@ class SparkJobManager:
         }
 
         # Apply ConfigMap
-        success = self.k8s.apply_manifest(configmap)
-        if success:
-            logger.info(f"Deployed spark-scripts ConfigMap with {len(data)} scripts")
-        else:
-            logger.error("Failed to deploy spark-scripts ConfigMap")
-
-        return success
+        try:
+            success = self.k8s.apply_manifest(configmap)
+            if success:
+                logger.info("Deployed spark-scripts ConfigMap with %d scripts", len(data))
+            else:
+                logger.error("Failed to deploy spark-scripts ConfigMap (apply returned False)")
+            return success
+        except Exception as e:
+            logger.error("Failed to deploy spark-scripts ConfigMap: %s", e)
+            return False
 
     # Alias for backward compatibility
     def deploy_scripts(self) -> bool:
