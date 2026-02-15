@@ -1,7 +1,7 @@
 # Building Custom Datagen Images
 
 The Lakebench data generator runs as a container image deployed to Kubernetes.
-The default image (`lakebench/datagen:latest`) produces the Customer360 schema
+The default image (`docker.io/sillidata/lb-datagen:v2`) produces the Customer360 schema
 described in [datagen-schema.md](datagen-schema.md). You can build a custom
 image to add columns, change statistical distributions, use a different data
 domain, or adjust dependencies.

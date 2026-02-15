@@ -29,7 +29,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: datagen
-          image: {{ datagen_image | default('lakebench/datagen:latest') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:v2') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--target-tb"

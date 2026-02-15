@@ -171,17 +171,39 @@ def generate_example_config_yaml() -> str:
     return """# Lakebench Configuration
 # ========================
 # This file defines your lakehouse deployment configuration.
-# Only the fields you MUST set are uncommented. Everything else shows
-# available options with their defaults -- uncomment and modify as needed.
+#
+# LEGEND:
+#   Uncommented fields  = REQUIRED or explicitly set values
+#   # field: value      = Available option with its DEFAULT value.
+#                         When commented out, this default is still ACTIVE.
+#   ## Section Header   = Section label (not a config field)
+#
+# Key behavior: commenting out an optional section does NOT disable it --
+# Pydantic fills in defaults. To truly disable something, set its 'enabled'
+# or 'install' field to false explicitly.
 #
 # Full reference: docs/configuration.md
 # Recipe guide:   docs/recipes.md
+#
+# MINIMUM VIABLE CONFIG (3 fields):
+#   name: my-lakehouse
+#   platform.storage.s3.endpoint: http://your-s3:80
+#   platform.storage.s3.access_key / secret_key: your-credentials
+# Everything else has sensible defaults.
 
 # REQUIRED: Unique name for this deployment (also used as K8s namespace)
 name: my-lakehouse
 
 # Optional description
 # description: "My Lakebench lakehouse deployment"
+
+# Recipe shorthand -- sets catalog + table_format + query_engine in one line.
+# Valid recipes: default, hive-iceberg-trino, hive-iceberg-spark,
+#   hive-iceberg-duckdb, hive-iceberg-none, hive-delta-trino, hive-delta-none,
+#   polaris-iceberg-trino, polaris-iceberg-spark, polaris-iceberg-duckdb,
+#   polaris-iceberg-none
+# See docs/recipes.md for details.
+# recipe: hive-iceberg-trino
 
 # Config schema version (always 1)
 # version: 1
@@ -190,8 +212,9 @@ name: my-lakehouse
 # IMAGES
 # ============================================================================
 # Container images for all components. Override for private registries.
+# See docs/datagen-custom-images.md for building custom datagen images.
 # images:
-#   datagen: lakebench/datagen:latest
+#   datagen: docker.io/sillidata/lb-datagen:v2    # Customizable (see docs/datagen-custom-images.md)
 #   spark: apache/spark:3.5.4-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
@@ -234,17 +257,31 @@ platform:
       #   gold: lakebench-gold
       # create_buckets: true
 
-    ## Scratch storage for Spark shuffle PVCs (Portworx / local-path)
+    ## Scratch storage for Spark shuffle PVCs
+    ## When enabled, Spark shuffle data uses PVCs instead of emptyDir.
+    ## Any StorageClass that provides RWO volumes works (Portworx, local-path, EBS, etc.).
     # scratch:
     #   enabled: false
-    #   storage_class: px-csi-scratch  # repl=1 recommended for shuffle data
+    #   storage_class: px-csi-scratch    # Name of the StorageClass to use
     #   size: 100Gi
-    #   create_storage_class: true
+    #   create_storage_class: true       # If true, lakebench creates this StorageClass
+    #                                    # on deploy (requires cluster-admin). Set false
+    #                                    # if the SC already exists or is managed externally.
+    #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Examples:
+    #                                    #   pxd.portworx.com (Portworx)
+    #                                    #   rancher.io/local-path (local-path)
+    #                                    #   ebs.csi.aws.com (AWS EBS)
+    #   parameters:                      # Provider-specific StorageClass parameters
+    #     repl: "1"
+    #     io_profile: auto
+    #     priority_io: high
 
   # compute:
   #   spark:
   #     operator:
-  #       install: true              # Auto-install Spark Operator if missing
+  #       install: false             # Set true to auto-install Spark Operator.
+  #                                  # Default is false -- install the operator
+  #                                  # manually or set true for auto-install.
   #       namespace: spark-operator
   #       version: "2.4.0"           # v2.x uses webhook for volume injection
   #
@@ -310,7 +347,7 @@ architecture:
   #     properties: {}               # Additional Iceberg table properties
 
   # query_engine:
-  #   type: trino                    # trino | spark-thrift | none
+  #   type: trino                    # trino | spark-thrift | duckdb | none
   #   trino:
   #     coordinator:
   #       cpu: "2"
@@ -328,6 +365,11 @@ architecture:
   #   # spark_thrift:
   #   #   cores: 2
   #   #   memory: 4g
+  #   ## DuckDB (lightweight in-process engine)
+  #   # duckdb:
+  #   #   cores: 2
+  #   #   memory: 4g
+  #   #   catalog_name: lakehouse
 
   # pipeline:
   #   pattern: medallion             # medallion | streaming | batch
@@ -369,13 +411,15 @@ architecture:
   workload:
     # schema: customer360            # customer360 | iot | financial
     datagen:
+      # Image: configured via images.datagen (see docs/datagen-custom-images.md)
       scale: 10                    # 1 unit ~ 10 GB bronze (10 = ~100 GB)
       # mode: auto                   # auto | batch | continuous
       # parallelism: 4
       # file_size: 512mb
       # dirty_data_ratio: 0.08
-      # cpu: "2"                     # CPU per datagen pod
-      # memory: 4Gi                  # Memory per datagen pod
+      ## CPU and memory are hard-locked per mode (cannot be overridden):
+      ##   batch:      4 CPU, 4Gi   (scale <= 10)
+      ##   continuous: 8 CPU, 24Gi  (scale > 10)
       # generators: 0                # Per-pod generator processes (0 = auto)
       # uploaders: 0                 # Per-pod uploader threads (0 = auto)
       # timestamp_start: "2024-01-01"
@@ -395,12 +439,18 @@ architecture:
     #     incomplete: 0.03
     #     format_inconsistent: 0.03
 
-  ## Benchmark configuration (Trino query benchmark)
+  ## Benchmark configuration
+  ## Runs analytical SQL queries against silver/gold tables via the configured
+  ## query engine (Trino, Spark Thrift, or DuckDB). See docs/benchmarking.md.
   # benchmark:
-  #   mode: power                    # power | standard | extended
-  #   streams: 4                     # Concurrent query streams (throughput mode)
-  #   cache: hot                     # hot | cold
-  #   iterations: 1                  # Iterations per query (>1 uses median)
+  #   mode: power                    # power: single sequential stream (per-query latency)
+  #                                  # throughput: N concurrent streams (aggregate QpH)
+  #                                  # composite: geometric mean of power + throughput
+  #   streams: 4                     # Concurrent streams (throughput/composite only;
+  #                                  # ignored in power mode)
+  #   cache: hot                     # hot: caches stay populated between queries
+  #                                  # cold: metadata cache flushed before each run
+  #   iterations: 1                  # Runs per query. 1 = raw timing, 3+ = median
 
   ## Table name overrides (namespace.table format)
   # tables:
@@ -411,36 +461,16 @@ architecture:
 # ============================================================================
 # LAYER 3: OBSERVABILITY
 # ============================================================================
+# Flat schema -- use top-level keys directly under observability:
 # observability:
-#   metrics:
-#     local:
-#       output_dir: ./lakebench-output/runs
-#     ## Prometheus metrics
-#     prometheus:
-#       enabled: false
-#       push_gateway: ""             # e.g. http://prometheus-pushgw:9091
-#       deploy: false                # Auto-deploy Prometheus into namespace
-#       retention: 7d
-#       storage: 10Gi
-#       storage_class: ""
-#     ## Metrics collection toggles
-#     collect:
-#       spark_metrics: true
-#       trino_metrics: true
-#       s3_metrics: true
-#       kubernetes_metrics: true
-#
-#   ## Grafana dashboards
-#   dashboards:
-#     grafana:
-#       enabled: false
-#       deploy: false                # Auto-deploy Grafana into namespace
-#       dashboards:
-#         - spark-jobs
-#         - trino-queries
-#         - storage-throughput
-#         - cluster-resources
-#
+#   enabled: false                   # Deploy kube-prometheus-stack (Prometheus + Grafana)
+#   prometheus_stack_enabled: true   # Prometheus collection
+#   s3_metrics_enabled: true         # S3 operation metrics
+#   spark_metrics_enabled: true      # Spark job metrics
+#   dashboards_enabled: true         # Grafana dashboards
+#   retention: 7d                    # Prometheus data retention
+#   storage: 10Gi                    # Prometheus PVC size
+#   storage_class: ""                # PVC storage class (empty = default)
 #   reports:
 #     enabled: true
 #     output_dir: ./lakebench-output/runs

@@ -1,7 +1,7 @@
 ---
-# Portworx StorageClass for Spark scratch/shuffle (repl=1)
+# StorageClass for Spark scratch/shuffle PVCs.
 # Cluster-scoped resource -- requires cluster-admin to create.
-# See docs/storage-architecture.md for rationale.
+# Provisioner and parameters are configurable via scratch config.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -9,11 +9,11 @@ metadata:
   labels:
     app.kubernetes.io/name: lakebench
     app.kubernetes.io/managed-by: lakebench
-provisioner: pxd.portworx.com
+provisioner: {{ scratch_provisioner }}
 parameters:
-  repl: "1"
-  io_profile: "auto"
-  priority_io: "high"
+{% for key, value in scratch_parameters.items() %}
+  {{ key }}: "{{ value }}"
+{% endfor %}
 reclaimPolicy: Delete
 volumeBindingMode: Immediate
 allowVolumeExpansion: true

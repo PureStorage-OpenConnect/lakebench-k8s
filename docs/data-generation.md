@@ -95,16 +95,19 @@ allocation:
 - **batch** (scale <= 10, or explicit): 1 generator process, 1 uploader thread
   per pod. Low resource profile (4 CPU, 4Gi memory). Best for small datasets.
 - **continuous** (scale > 10, or explicit): 8 generator processes, 2 uploader
-  threads per pod. High resource profile (8 CPU, 32Gi memory). Best for large
+  threads per pod. Higher resource profile (8 CPU, 24Gi memory). Best for large
   datasets where sustained throughput matters.
 - **auto** (default): Selects batch or continuous based on scale factor.
 
 ### Resource Allocation by Mode
 
+CPU and memory are hard-locked per mode and cannot be overridden in the config.
+The autosizer always sets them to the mode-correct values.
+
 | Mode | CPU/pod | Memory/pod | Generators/pod | Uploaders/pod | Trigger |
 |------|--------:|-----------:|:--------------:|:-------------:|---------|
 | batch | 4 | 4Gi | 1 | 1 | scale <= 10 (auto) |
-| continuous | 8 | 32Gi | 8 | 2 | scale > 10 (auto) |
+| continuous | 8 | 24Gi | 8 | 2 | scale > 10 (auto) |
 
 The number of datagen pods (parallelism) also scales with the scale factor:
 
@@ -200,7 +203,7 @@ images:
   pull_policy: Always
 ```
 
-The default image (`lakebench/datagen:latest`) is built from the `datagen/`
+The default image (`docker.io/sillidata/lb-datagen:v2`) is built from the `datagen/`
 directory in this repository. To build and push a custom image:
 
 ```bash
