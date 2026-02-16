@@ -25,6 +25,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the namespace is added automatically via `helm upgrade --reuse-values` and the
   operator controller is restarted to pick up the change. When `install: false`,
   the exact fix command is shown.
+- Prerequisite detection in `validate`: checks kubectl and helm on PATH, checks
+  Stackable CRDs for Hive recipes (with install commands), checks Spark Operator
+  with full manual `helm install` command when `install: false`.
+- `deploy` now blocks with exit 1 when Stackable operators are missing for Hive
+  recipes (was a non-blocking warning). Suggests Polaris as an alternative.
 - `generate --yes/-y` flag to skip confirmation prompt.
 - Confirmation prompt before `generate` submits the datagen job.
 - OOM and crash-loop detection in datagen progress: `generate --wait` exits

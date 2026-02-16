@@ -104,3 +104,71 @@ class TestRecommendCommand:
         assert guidance.spark.recommended_memory.endswith("g")
         assert guidance.trino.worker_memory.endswith("Gi")
         assert guidance.datagen.memory.endswith("Gi")
+
+
+class TestPreflightCheck:
+    """Tests for _preflight_check deploy guard."""
+
+    def test_preflight_blocks_on_missing_stackable(self, monkeypatch):
+        """Preflight exits 1 when Stackable CRDs are missing for Hive catalog."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _preflight_check
+
+        # Build a config with catalog=hive and valid S3
+        cfg = MagicMock()
+        cfg.architecture.catalog.type.value = "hive"
+        cfg.platform.storage.s3.endpoint = "http://s3:80"
+        cfg.platform.storage.s3.access_key = "key"
+        cfg.platform.storage.s3.secret_key = "secret"
+
+        # Mock K8s CRD listing to return no Stackable CRDs
+        mock_crd_list = MagicMock()
+        mock_crd_list.items = []
+
+        with (
+            patch("kubernetes.client.ApiextensionsV1Api") as mock_api,
+            pytest.raises(ClickExit),
+        ):
+            mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
+            _preflight_check(cfg)
+
+    def test_preflight_passes_when_stackable_present(self, monkeypatch):
+        """Preflight does not exit when Stackable CRDs are present."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _preflight_check
+
+        cfg = MagicMock()
+        cfg.architecture.catalog.type.value = "hive"
+        cfg.platform.storage.s3.endpoint = "http://s3:80"
+        cfg.platform.storage.s3.access_key = "key"
+        cfg.platform.storage.s3.secret_key = "secret"
+
+        # Mock CRDs to include the required Stackable CRDs
+        crd1 = MagicMock()
+        crd1.metadata.name = "hiveclusters.hive.stackable.tech"
+        crd2 = MagicMock()
+        crd2.metadata.name = "secretclasses.secrets.stackable.tech"
+        mock_crd_list = MagicMock()
+        mock_crd_list.items = [crd1, crd2]
+
+        with patch("kubernetes.client.ApiextensionsV1Api") as mock_api:
+            mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
+            # Should not raise
+            _preflight_check(cfg)
+
+    def test_preflight_skips_stackable_for_polaris(self, monkeypatch):
+        """Preflight skips Stackable check when catalog is Polaris."""
+        from unittest.mock import MagicMock
+
+        from lakebench.cli import _preflight_check
+
+        cfg = MagicMock()
+        cfg.architecture.catalog.type.value = "polaris"
+        cfg.platform.storage.s3.endpoint = "http://s3:80"
+        cfg.platform.storage.s3.access_key = "key"
+        cfg.platform.storage.s3.secret_key = "secret"
+
+        # Should not raise (Stackable check skipped entirely)
+        _preflight_check(cfg)

@@ -49,6 +49,13 @@ The deployment engine follows this fixed sequence:
 7. **Spark RBAC** -- Creates the ServiceAccount, Role, and RoleBinding for Spark
    job submission. On OpenShift, also binds the `anyuid` SCC to the service
    account.
+
+> Before running Spark jobs, Lakebench checks that the Spark Operator is
+> watching the target namespace. If `spark.operator.install: true`, it
+> auto-adds the namespace and restarts the operator. If `install: false`
+> (the default), it reports the fix command. Run `lakebench validate`
+> to check this before deploying.
+
 8. **Prometheus** -- Deploys Prometheus for metrics collection. Only deployed when
    `observability.metrics.prometheus.enabled` is true or the `--include-observability`
    flag is used.

@@ -46,7 +46,11 @@ architecture:
 |---|---|---|---|
 | `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `7200` | Timeout in seconds when waiting |
+| `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--resume` | | `false` | Resume from checkpoint if a previous generation was interrupted |
+
+Without `--yes`, the command prompts for confirmation before submitting
+the datagen job. Use `--yes` for scripts and CI/CD pipelines.
 
 ### Examples
 
