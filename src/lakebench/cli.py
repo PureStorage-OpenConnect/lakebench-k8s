@@ -164,11 +164,11 @@ def _preflight_check(cfg) -> None:
             api_ext = k8s_client.ApiextensionsV1Api()
             crds = api_ext.list_custom_resource_definition()
             crd_names = {crd.metadata.name for crd in crds.items}
-            required = {
+            required_crds = {
                 "hiveclusters.hive.stackable.tech": "hive-operator",
                 "secretclasses.secrets.stackable.tech": "secret-operator",
             }
-            _missing_stackable = [op for crd, op in required.items() if crd not in crd_names]
+            _missing_stackable = [op for crd, op in required_crds.items() if crd not in crd_names]
         except Exception:
             logger.debug("Preflight CRD check skipped (K8s not reachable)", exc_info=True)
 
@@ -735,11 +735,11 @@ def validate(
             api_ext = k8s_client.ApiextensionsV1Api()
             crds = api_ext.list_custom_resource_definition()
             crd_names = {crd.metadata.name for crd in crds.items}
-            required = {
+            required_crds = {
                 "hiveclusters.hive.stackable.tech": "hive-operator",
                 "secretclasses.secrets.stackable.tech": "secret-operator",
             }
-            missing = [op for crd, op in required.items() if crd not in crd_names]
+            missing = [op for crd, op in required_crds.items() if crd not in crd_names]
             if missing:
                 print_error(f"Missing Stackable operators: {', '.join(missing)}")
                 print_info("Install with:")
@@ -3652,7 +3652,10 @@ def query(
                     for r in parsed[1:]
                 ]
             else:
-                data = parsed
+                data = [
+                    {str(i): v.strip().strip('"') for i, v in enumerate(r)}
+                    for r in parsed
+                ]
             console.print(json.dumps({"rows": data, "count": len(data)}, indent=2))
         elif output_format == "csv":
             import csv
