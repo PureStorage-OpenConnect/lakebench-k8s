@@ -734,8 +734,8 @@ def build_pipeline_benchmark(
                     if _mem_str.rstrip("gG").replace(".", "").isdigit()
                     else 0.0
                 )
-        except Exception:
-            pass  # best-effort; don't break metrics collection
+        except Exception as e:
+            logger.warning("Could not parse resource metrics for stage: %s", e)
 
         stage = StageMetrics(
             stage_name=_STREAMING_MAP.get(sj.job_type, sj.job_type),
@@ -1101,8 +1101,8 @@ class MetricsCollector:
                 metrics.output_rows = int(float(value))
             elif key_lower in ("elapsed_seconds",):
                 metrics.elapsed_seconds = float(value)
-        except (ValueError, TypeError):
-            pass
+        except (ValueError, TypeError) as e:
+            logger.debug("Could not parse metric value %s=%s: %s", key_lower, value, e)
 
     def record_streaming(self, metrics: StreamingJobMetrics) -> None:
         """Record metrics for a streaming job.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -12,6 +13,8 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from lakebench.config import LakebenchConfig
 from lakebench.k8s import K8sClient
+
+logger = logging.getLogger(__name__)
 
 
 class DeploymentStatus(Enum):
@@ -144,8 +147,8 @@ class DeploymentEngine:
         if not dry_run and self.k8s is not None:
             try:
                 cluster_cap = self.k8s.get_cluster_capacity()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         resolve_auto_sizing(config, cluster_cap)
 
         self.context = self._build_context()
@@ -273,6 +276,8 @@ class DeploymentEngine:
             or None,
             # Scratch StorageClass
             "scratch_storage_class": cfg.platform.storage.scratch.storage_class,
+            "scratch_provisioner": cfg.platform.storage.scratch.provisioner,
+            "scratch_parameters": cfg.platform.storage.scratch.parameters,
             # Spark
             "spark_driver_cores": cfg.platform.compute.spark.driver.cores,
             "spark_driver_memory": cfg.platform.compute.spark.driver.memory,
@@ -478,10 +483,15 @@ class DeploymentEngine:
 
         scratch_cfg = self.config.platform.storage.scratch
         if not scratch_cfg.enabled or not scratch_cfg.create_storage_class:
+            reasons = []
+            if not scratch_cfg.enabled:
+                reasons.append("scratch.enabled=false")
+            if not scratch_cfg.create_storage_class:
+                reasons.append("scratch.create_storage_class=false")
             return DeploymentResult(
                 component="scratch-sc",
                 status=DeploymentStatus.SKIPPED,
-                message="Scratch StorageClass creation disabled",
+                message=f"Scratch StorageClass creation disabled ({', '.join(reasons)})",
                 elapsed_seconds=0,
             )
 
@@ -508,7 +518,7 @@ class DeploymentEngine:
                     elapsed_seconds=time.time() - start,
                 )
             except Exception:
-                pass  # SC doesn't exist, create it
+                logger.debug("StorageClass '%s' not found, will create", scratch_cfg.storage_class)
 
             import yaml
 
@@ -524,10 +534,11 @@ class DeploymentEngine:
             )
         except Exception as e:
             # Non-fatal -- cluster-admin may be needed
+            logger.warning("Scratch StorageClass creation failed: %s", e)
             return DeploymentResult(
                 component="scratch-sc",
-                status=DeploymentStatus.SUCCESS,
-                message=f"StorageClass creation skipped (may need cluster-admin): {e}",
+                status=DeploymentStatus.SKIPPED,
+                message=f"Scratch StorageClass creation failed (may need cluster-admin): {e}",
                 elapsed_seconds=time.time() - start,
             )
 
@@ -718,8 +729,10 @@ class DeploymentEngine:
                                 ["trino", "--execute", maintenance_sql],
                                 namespace,
                             )
-                        except Exception:
-                            pass  # Table may not exist yet
+                        except Exception as e:
+                            logger.warning(
+                                "Iceberg maintenance failed (table may not exist): %s", e
+                            )
                 # Now drop the tables
                 for table in tables_to_drop:
                     self.k8s.exec_in_pod(
@@ -766,27 +779,47 @@ class DeploymentEngine:
                     region=s3_cfg.region,
                     path_style=s3_cfg.path_style,
                 )
-                buckets = [
-                    s3_cfg.buckets.bronze,
-                    s3_cfg.buckets.silver,
-                    s3_cfg.buckets.gold,
-                ]
-                total_deleted = 0
-                for bucket in buckets:
-                    deleted = s3.empty_bucket(bucket)
-                    total_deleted += deleted
-                results.append(
-                    DeploymentResult(
-                        component="s3-buckets",
-                        status=DeploymentStatus.SUCCESS,
-                        message=f"Cleaned {len(buckets)} S3 buckets ({total_deleted} objects)",
+                if s3._init_error:
+                    bucket_names = (
+                        f"{s3_cfg.buckets.bronze}, {s3_cfg.buckets.silver}, {s3_cfg.buckets.gold}"
                     )
-                )
-                report(
-                    "s3-buckets",
-                    DeploymentStatus.SUCCESS,
-                    f"S3 buckets cleaned ({total_deleted} objects)",
-                )
+                    results.append(
+                        DeploymentResult(
+                            component="s3-buckets",
+                            status=DeploymentStatus.FAILED,
+                            message=(
+                                f"S3 client init failed: {s3._init_error}. "
+                                f"Clean buckets manually: {bucket_names}"
+                            ),
+                        )
+                    )
+                    report(
+                        "s3-buckets",
+                        DeploymentStatus.FAILED,
+                        f"S3 init failed: {s3._init_error}",
+                    )
+                else:
+                    buckets = [
+                        s3_cfg.buckets.bronze,
+                        s3_cfg.buckets.silver,
+                        s3_cfg.buckets.gold,
+                    ]
+                    total_deleted = 0
+                    for bucket in buckets:
+                        deleted = s3.empty_bucket(bucket)
+                        total_deleted += deleted
+                    results.append(
+                        DeploymentResult(
+                            component="s3-buckets",
+                            status=DeploymentStatus.SUCCESS,
+                            message=f"Cleaned {len(buckets)} S3 buckets ({total_deleted} objects)",
+                        )
+                    )
+                    report(
+                        "s3-buckets",
+                        DeploymentStatus.SUCCESS,
+                        f"S3 buckets cleaned ({total_deleted} objects)",
+                    )
             except Exception as e:
                 results.append(
                     DeploymentResult(
@@ -798,230 +831,286 @@ class DeploymentEngine:
                 report("s3-buckets", DeploymentStatus.FAILED, f"S3 cleanup failed: {e}")
 
         # Step 5: Remove observability stack (kube-prometheus-stack)
-        report("observability", DeploymentStatus.IN_PROGRESS, "Removing observability stack...")
-        try:
-            from .observability import ObservabilityDeployer
+        if self.config.observability.enabled:
+            report("observability", DeploymentStatus.IN_PROGRESS, "Removing observability stack...")
+            try:
+                from .observability import ObservabilityDeployer
 
-            obs_deployer = ObservabilityDeployer(self)
-            obs_result = obs_deployer.destroy()
-            results.append(obs_result)
-            report("observability", obs_result.status, obs_result.message)
-        except Exception as e:
+                obs_deployer = ObservabilityDeployer(self)
+                obs_result = obs_deployer.destroy()
+                results.append(obs_result)
+                report("observability", obs_result.status, obs_result.message)
+            except Exception as e:
+                results.append(
+                    DeploymentResult(
+                        component="observability",
+                        status=DeploymentStatus.SUCCESS,
+                        message=f"Observability cleanup skipped: {e}",
+                    )
+                )
+        else:
             results.append(
                 DeploymentResult(
                     component="observability",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"Observability cleanup skipped: {e}",
+                    status=DeploymentStatus.SKIPPED,
+                    message="Observability not configured",
                 )
             )
 
-        # Step 6: Remove Trino
-        report("trino", DeploymentStatus.IN_PROGRESS, "Removing Trino...")
-        try:
-            apps_v1 = k8s_client.AppsV1Api()
-            core_v1 = k8s_client.CoreV1Api()
-            # Coordinator is a Deployment
+        # Step 6: Remove query engine (only the configured one)
+        engine_type = self.config.architecture.query_engine.type.value
+        catalog_type = self.config.architecture.catalog.type.value
+
+        # Trino
+        if engine_type == "trino":
+            report("trino", DeploymentStatus.IN_PROGRESS, "Removing Trino...")
             try:
-                apps_v1.delete_namespaced_deployment("lakebench-trino-coordinator", namespace)
-            except ApiException as e:
-                if e.status != 404:
-                    raise
-            # Worker is a StatefulSet (with PVCs)
-            try:
-                apps_v1.delete_namespaced_stateful_set("lakebench-trino-worker", namespace)
-            except ApiException as e:
-                if e.status != 404:
-                    raise
-            # Clean up worker PVCs
-            try:
-                pvcs = core_v1.list_namespaced_persistent_volume_claim(
-                    namespace,
-                    label_selector="app.kubernetes.io/component=trino-worker",
-                )
-                for pvc in pvcs.items:
-                    core_v1.delete_namespaced_persistent_volume_claim(pvc.metadata.name, namespace)
-            except ApiException:
-                pass
-            # Services: coordinator ClusterIP + worker headless
-            for name in [
-                "lakebench-trino",
-                "lakebench-trino-coordinator",
-                "lakebench-trino-worker",
-            ]:
+                apps_v1 = k8s_client.AppsV1Api()
+                core_v1 = k8s_client.CoreV1Api()
                 try:
-                    core_v1.delete_namespaced_service(name, namespace)
+                    apps_v1.delete_namespaced_deployment("lakebench-trino-coordinator", namespace)
                 except ApiException as e:
                     if e.status != 404:
                         raise
-            try:
-                core_v1.delete_namespaced_config_map("lakebench-trino-config", namespace)
-            except ApiException:
-                pass
+                try:
+                    apps_v1.delete_namespaced_stateful_set("lakebench-trino-worker", namespace)
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                try:
+                    pvcs = core_v1.list_namespaced_persistent_volume_claim(
+                        namespace,
+                        label_selector="app.kubernetes.io/component=trino-worker",
+                    )
+                    for pvc in pvcs.items:
+                        core_v1.delete_namespaced_persistent_volume_claim(
+                            pvc.metadata.name, namespace
+                        )
+                except ApiException:
+                    pass
+                for svc_name in [
+                    "lakebench-trino",
+                    "lakebench-trino-coordinator",
+                    "lakebench-trino-worker",
+                ]:
+                    try:
+                        core_v1.delete_namespaced_service(svc_name, namespace)
+                    except ApiException as e:
+                        if e.status != 404:
+                            raise
+                try:
+                    core_v1.delete_namespaced_config_map("lakebench-trino-config", namespace)
+                except ApiException:
+                    pass
+                results.append(
+                    DeploymentResult(
+                        component="trino",
+                        status=DeploymentStatus.SUCCESS,
+                        message="Trino removed",
+                    )
+                )
+                report("trino", DeploymentStatus.SUCCESS, "Trino removed")
+            except Exception as e:
+                results.append(
+                    DeploymentResult(
+                        component="trino",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
+                )
+        else:
             results.append(
                 DeploymentResult(
                     component="trino",
-                    status=DeploymentStatus.SUCCESS,
-                    message="Trino removed",
-                )
-            )
-            report("trino", DeploymentStatus.SUCCESS, "Trino removed")
-        except Exception as e:
-            results.append(
-                DeploymentResult(
-                    component="trino",
-                    status=DeploymentStatus.FAILED,
-                    message=str(e),
+                    status=DeploymentStatus.SKIPPED,
+                    message="Trino not configured",
                 )
             )
 
-        # Step 6b: Remove Spark Thrift Server Deployment + Service
-        report("spark-thrift", DeploymentStatus.IN_PROGRESS, "Removing Spark Thrift Server...")
-        try:
-            core_v1 = k8s_client.CoreV1Api()
-            apps_v1 = k8s_client.AppsV1Api()
+        # Spark Thrift Server
+        if engine_type == "spark-thrift":
+            report("spark-thrift", DeploymentStatus.IN_PROGRESS, "Removing Spark Thrift Server...")
             try:
-                apps_v1.delete_namespaced_deployment("lakebench-spark-thrift", namespace)
-            except ApiException as e:
-                if e.status != 404:
-                    raise
-            try:
-                core_v1.delete_namespaced_service("lakebench-spark-thrift", namespace)
-            except ApiException as e:
-                if e.status != 404:
-                    raise
+                core_v1 = k8s_client.CoreV1Api()
+                apps_v1 = k8s_client.AppsV1Api()
+                try:
+                    apps_v1.delete_namespaced_deployment("lakebench-spark-thrift", namespace)
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                try:
+                    core_v1.delete_namespaced_service("lakebench-spark-thrift", namespace)
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                results.append(
+                    DeploymentResult(
+                        component="spark-thrift",
+                        status=DeploymentStatus.SUCCESS,
+                        message="Spark Thrift Server removed",
+                    )
+                )
+                report("spark-thrift", DeploymentStatus.SUCCESS, "Spark Thrift Server removed")
+            except Exception as e:
+                results.append(
+                    DeploymentResult(
+                        component="spark-thrift",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
+                )
+        else:
             results.append(
                 DeploymentResult(
                     component="spark-thrift",
-                    status=DeploymentStatus.SUCCESS,
-                    message="Spark Thrift Server removed",
-                )
-            )
-            report("spark-thrift", DeploymentStatus.SUCCESS, "Spark Thrift Server removed")
-        except Exception as e:
-            results.append(
-                DeploymentResult(
-                    component="spark-thrift",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"Spark Thrift cleanup skipped: {e}",
+                    status=DeploymentStatus.SKIPPED,
+                    message="Spark Thrift not configured",
                 )
             )
 
-        # Step 6c: Remove DuckDB Deployment + Service
-        report("duckdb", DeploymentStatus.IN_PROGRESS, "Removing DuckDB...")
-        try:
-            core_v1 = k8s_client.CoreV1Api()
-            apps_v1 = k8s_client.AppsV1Api()
+        # DuckDB
+        if engine_type == "duckdb":
+            report("duckdb", DeploymentStatus.IN_PROGRESS, "Removing DuckDB...")
             try:
-                apps_v1.delete_namespaced_deployment("lakebench-duckdb", namespace)
-            except ApiException as e:
-                if e.status != 404:
-                    raise
-            try:
-                core_v1.delete_namespaced_service("lakebench-duckdb", namespace)
-            except ApiException as e:
-                if e.status != 404:
-                    raise
+                core_v1 = k8s_client.CoreV1Api()
+                apps_v1 = k8s_client.AppsV1Api()
+                try:
+                    apps_v1.delete_namespaced_deployment("lakebench-duckdb", namespace)
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                try:
+                    core_v1.delete_namespaced_service("lakebench-duckdb", namespace)
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                results.append(
+                    DeploymentResult(
+                        component="duckdb",
+                        status=DeploymentStatus.SUCCESS,
+                        message="DuckDB removed",
+                    )
+                )
+                report("duckdb", DeploymentStatus.SUCCESS, "DuckDB removed")
+            except Exception as e:
+                results.append(
+                    DeploymentResult(
+                        component="duckdb",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
+                )
+        else:
             results.append(
                 DeploymentResult(
                     component="duckdb",
-                    status=DeploymentStatus.SUCCESS,
-                    message="DuckDB removed",
-                )
-            )
-            report("duckdb", DeploymentStatus.SUCCESS, "DuckDB removed")
-        except Exception as e:
-            results.append(
-                DeploymentResult(
-                    component="duckdb",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"DuckDB cleanup skipped: {e}",
+                    status=DeploymentStatus.SKIPPED,
+                    message="DuckDB not configured",
                 )
             )
 
-        # Step 7: Remove Hive Metastore (Stackable HiveCluster)
-        report("hive", DeploymentStatus.IN_PROGRESS, "Removing Hive Metastore...")
-        try:
-            custom_api = k8s_client.CustomObjectsApi()
-            apps_v1 = k8s_client.AppsV1Api()
-            core_v1 = k8s_client.CoreV1Api()
+        # Step 7: Remove catalog (only the configured one)
+        # Hive Metastore
+        if catalog_type == "hive":
+            report("hive", DeploymentStatus.IN_PROGRESS, "Removing Hive Metastore...")
             try:
-                custom_api.delete_namespaced_custom_object(
-                    group="hive.stackable.tech",
-                    version="v1alpha1",
-                    namespace=namespace,
-                    plural="hiveclusters",
-                    name="lakebench-hive",
+                custom_api = k8s_client.CustomObjectsApi()
+                apps_v1 = k8s_client.AppsV1Api()
+                core_v1 = k8s_client.CoreV1Api()
+                try:
+                    custom_api.delete_namespaced_custom_object(
+                        group="hive.stackable.tech",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="hiveclusters",
+                        name="lakebench-hive",
+                    )
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                try:
+                    apps_v1.delete_namespaced_deployment("lakebench-hive-metastore", namespace)
+                except ApiException:
+                    pass
+                try:
+                    core_v1.delete_namespaced_service("lakebench-hive-metastore", namespace)
+                except ApiException:
+                    pass
+                results.append(
+                    DeploymentResult(
+                        component="hive",
+                        status=DeploymentStatus.SUCCESS,
+                        message="Hive Metastore removed",
+                    )
                 )
-            except ApiException as e:
-                if e.status != 404:
-                    raise
-            # Also clean up any legacy raw Hive deployment
-            try:
-                apps_v1.delete_namespaced_deployment("lakebench-hive-metastore", namespace)
-            except ApiException:
-                pass
-            try:
-                core_v1.delete_namespaced_service("lakebench-hive-metastore", namespace)
-            except ApiException:
-                pass
+                report("hive", DeploymentStatus.SUCCESS, "Hive Metastore removed")
+            except Exception as e:
+                results.append(
+                    DeploymentResult(
+                        component="hive",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
+                )
+        else:
             results.append(
                 DeploymentResult(
                     component="hive",
-                    status=DeploymentStatus.SUCCESS,
-                    message="Hive Metastore removed",
-                )
-            )
-            report("hive", DeploymentStatus.SUCCESS, "Hive Metastore removed")
-        except Exception as e:
-            results.append(
-                DeploymentResult(
-                    component="hive",
-                    status=DeploymentStatus.FAILED,
-                    message=str(e),
+                    status=DeploymentStatus.SKIPPED,
+                    message="Hive not configured",
                 )
             )
 
-        # Step 6b: Remove Polaris (if deployed)
-        report("polaris", DeploymentStatus.IN_PROGRESS, "Removing Polaris...")
-        try:
-            apps_v1 = k8s_client.AppsV1Api()
-            core_v1 = k8s_client.CoreV1Api()
-            batch_v1 = k8s_client.BatchV1Api()
+        # Polaris
+        if catalog_type == "polaris":
+            report("polaris", DeploymentStatus.IN_PROGRESS, "Removing Polaris...")
             try:
-                apps_v1.delete_namespaced_deployment("lakebench-polaris", namespace)
-            except ApiException as e:
-                if e.status != 404:
-                    raise
-            try:
-                core_v1.delete_namespaced_service("lakebench-polaris", namespace)
-            except ApiException:
-                pass
-            try:
-                batch_v1.delete_namespaced_job(
-                    "lakebench-polaris-bootstrap",
-                    namespace,
-                    propagation_policy="Background",
+                apps_v1 = k8s_client.AppsV1Api()
+                core_v1 = k8s_client.CoreV1Api()
+                batch_v1 = k8s_client.BatchV1Api()
+                try:
+                    apps_v1.delete_namespaced_deployment("lakebench-polaris", namespace)
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                try:
+                    core_v1.delete_namespaced_service("lakebench-polaris", namespace)
+                except ApiException:
+                    pass
+                try:
+                    batch_v1.delete_namespaced_job(
+                        "lakebench-polaris-bootstrap",
+                        namespace,
+                        propagation_policy="Background",
+                    )
+                except ApiException:
+                    pass
+                try:
+                    core_v1.delete_namespaced_config_map("lakebench-polaris-config", namespace)
+                except ApiException:
+                    pass
+                results.append(
+                    DeploymentResult(
+                        component="polaris",
+                        status=DeploymentStatus.SUCCESS,
+                        message="Polaris removed",
+                    )
                 )
-            except ApiException:
-                pass
-            try:
-                core_v1.delete_namespaced_config_map("lakebench-polaris-config", namespace)
-            except ApiException:
-                pass
+                report("polaris", DeploymentStatus.SUCCESS, "Polaris removed")
+            except Exception as e:
+                results.append(
+                    DeploymentResult(
+                        component="polaris",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
+                )
+        else:
             results.append(
                 DeploymentResult(
                     component="polaris",
-                    status=DeploymentStatus.SUCCESS,
-                    message="Polaris removed",
-                )
-            )
-            report("polaris", DeploymentStatus.SUCCESS, "Polaris removed")
-        except Exception as e:
-            results.append(
-                DeploymentResult(
-                    component="polaris",
-                    status=DeploymentStatus.FAILED,
-                    message=str(e),
+                    status=DeploymentStatus.SKIPPED,
+                    message="Polaris not configured",
                 )
             )
 

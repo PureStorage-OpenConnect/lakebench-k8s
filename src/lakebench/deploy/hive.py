@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,8 @@ import yaml
 from lakebench.k8s import WaitResult, WaitStatus
 
 from .engine import DeploymentResult, DeploymentStatus
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -51,23 +54,38 @@ class HiveDeployer:
         self.renderer = engine.renderer
         self.context = engine.context
 
-    def _is_stackable_available(self) -> bool:
-        """Check if Stackable Hive operator CRD is available.
+    # Required CRDs for a working Stackable Hive deployment
+    _REQUIRED_CRDS: dict[str, str] = {
+        "hiveclusters.hive.stackable.tech": "hive-operator",
+        "secretclasses.secrets.stackable.tech": "secret-operator",
+    }
+
+    def _check_stackable_crds(self) -> dict[str, bool]:
+        """Check which required Stackable CRDs are present.
 
         Returns:
-            True if HiveCluster CRD exists
+            Dict mapping CRD name to availability boolean.
         """
+        result = dict.fromkeys(self._REQUIRED_CRDS, False)
         try:
             from kubernetes import client as k8s_client
 
             api_ext = k8s_client.ApiextensionsV1Api()
             crds = api_ext.list_custom_resource_definition()
             for crd in crds.items:
-                if crd.metadata.name == "hiveclusters.hive.stackable.tech":
-                    return True
-            return False
-        except Exception:
-            return False
+                if crd.metadata.name in result:
+                    result[crd.metadata.name] = True
+        except Exception as e:
+            logger.warning("Could not list CRDs to check Stackable availability: %s", e)
+        return result
+
+    def _is_stackable_available(self) -> bool:
+        """Check if all required Stackable CRDs are available.
+
+        Returns:
+            True if HiveCluster and SecretClass CRDs both exist
+        """
+        return all(self._check_stackable_crds().values())
 
     def deploy(self) -> DeploymentResult:
         """Deploy Hive Metastore.
@@ -102,13 +120,33 @@ class HiveDeployer:
         if use_stackable:
             return self._deploy_stackable(namespace, start)
         else:
-            # Stackable is required - don't fall back to broken legacy
+            # Stackable is required -- report which CRDs are missing
+            crd_status = self._check_stackable_crds()
+            missing = [
+                self._REQUIRED_CRDS[crd] for crd, available in crd_status.items() if not available
+            ]
+            # Only list operators that are actually missing (plus prerequisites)
+            operators_needed = set(missing)
+            if operators_needed:
+                operators_needed.update(["commons-operator", "listener-operator"])
+            install_order = [
+                "commons-operator",
+                "listener-operator",
+                "secret-operator",
+                "hive-operator",
+            ]
+            install_cmds = "\n  ".join(
+                f"helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
+                "--version 25.7.0 --namespace stackable --create-namespace"
+                for op in install_order
+                if op in operators_needed
+            )
             return DeploymentResult(
                 component="hive",
                 status=DeploymentStatus.FAILED,
                 message=(
-                    "Stackable Hive operator not found. "
-                    "Install with: helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator --version 25.7.0 --namespace stackable"
+                    f"Stackable platform not fully installed (missing: {', '.join(missing)}). "
+                    f"Install all required operators:\n  {install_cmds}"
                 ),
                 elapsed_seconds=time.time() - start,
             )
