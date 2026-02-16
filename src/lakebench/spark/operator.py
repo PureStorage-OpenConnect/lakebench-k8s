@@ -288,21 +288,25 @@ class SparkOperatorManager:
         new_list = watched + [namespace]
         ns_set = ",".join(new_list)
 
-        result = subprocess.run(
-            [
-                "helm",
-                "upgrade",
-                self.HELM_RELEASE_NAME,
-                self.HELM_CHART_NAME,
-                "-n",
-                self.namespace,
-                "--reuse-values",
-                "--set",
-                f"spark.jobNamespaces={{{ns_set}}}",
-            ],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "helm",
+                    "upgrade",
+                    self.HELM_RELEASE_NAME,
+                    self.HELM_CHART_NAME,
+                    "-n",
+                    self.namespace,
+                    "--reuse-values",
+                    "--set",
+                    f"spark.jobNamespaces={{{ns_set}}}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            logger.error("helm not found on PATH -- cannot add namespace")
+            return False
 
         if result.returncode != 0:
             logger.error(
@@ -536,7 +540,7 @@ class SparkOperatorManager:
             # Wait for operator to be ready
             return self._wait_for_ready(timeout=120)
 
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error(f"Failed to install Spark Operator: {e}")
             return False
 

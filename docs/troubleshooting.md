@@ -74,6 +74,51 @@ kubectl get deployment -A | grep spark-operator
 
 ---
 
+## SparkApplication stuck with no status
+
+**Symptom:** After `lakebench run`, the SparkApplication CR exists in the
+namespace but never transitions to `SUBMITTED` or `RUNNING`. The `STATUS`
+column is blank. No driver pods are created. The job eventually times out.
+
+**Cause:** The Spark Operator is not watching the target namespace. The
+operator's `spark.jobNamespaces` Helm value controls which namespaces it
+monitors. If your deployment namespace is not in that list, the operator
+ignores SparkApplications created there.
+
+**Diagnosis:**
+
+```bash
+# Check what namespaces the operator is watching
+helm get values spark-operator -n spark-operator --all -o json | \
+  python3 -c "import sys,json; print(json.load(sys.stdin).get('spark',{}).get('jobNamespaces','all'))"
+
+# Check operator controller logs for RBAC errors
+kubectl logs -n spark-operator -l app.kubernetes.io/component=controller --tail=20
+```
+
+**Fix:** `lakebench validate` detects this automatically. If
+`spark.operator.install: true`, the deploy/run commands auto-add the
+namespace and restart the operator. If `install: false` (the default),
+validate prints the exact fix command:
+
+```bash
+helm upgrade spark-operator spark-operator/spark-operator \
+  -n spark-operator --reuse-values \
+  --set 'spark.jobNamespaces={default,your-namespace}'
+```
+
+After updating, restart the operator controller (it reads jobNamespaces at
+startup only):
+
+```bash
+kubectl rollout restart deployment/spark-operator-controller -n spark-operator
+```
+
+On OpenShift, you may also need to re-patch the deployment to remove
+`fsGroup` and `seccompProfile` after any `helm upgrade`.
+
+---
+
 ## OpenShift SCC permission denied
 
 **Symptom:** Spark pods fail with `CreateContainerError` or permission denied
