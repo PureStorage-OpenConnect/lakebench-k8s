@@ -22,6 +22,17 @@ You need admin-level access to the target namespace (or permission to create
 one). On OpenShift, Lakebench automatically handles Security Context
 Constraints for the Spark service account.
 
+Minimum cluster size depends on the scale factor. As a rough guide:
+
+| Scale | Minimum CPU | Minimum RAM | Bronze data |
+|------:|------------:|------------:|------------:|
+| 1 | 8 cores | 32 GB | ~10 GB |
+| 10 | 16 cores | 64 GB | ~100 GB |
+| 100 | 64 cores | 256 GB | ~1 TB |
+
+Run `lakebench recommend` after install to check your cluster's maximum
+supported scale.
+
 ### CLI tools on PATH
 
 | Tool | Minimum version | Used for |
@@ -61,9 +72,16 @@ helm install spark-operator spark-operator/spark-operator \
   --set webhook.enable=true
 ```
 
-### Catalog operator (Hive)
+### Catalog operator (depends on your recipe)
 
-For the default Hive catalog, install the **Stackable Hive Operator**:
+Which catalog operators you need depends on your recipe choice:
+
+| Recipe prefix | Catalog | Operators required |
+|---|---|---|
+| `hive-*` | Hive Metastore | Stackable commons, secret, listener, and hive operators |
+| `polaris-*` | Apache Polaris | **None** -- Lakebench deploys Polaris directly |
+
+For **Hive** recipes (the default), install the Stackable operators:
 
 ```bash
 helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \
@@ -76,8 +94,7 @@ helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
   --version 25.7.0 --namespace stackable
 ```
 
-If you prefer Apache Polaris as the catalog, no operator is needed --
-Lakebench deploys Polaris directly. See the
+For **Polaris** recipes, skip the Stackable install entirely. See the
 [Polaris Quick Start](quickstart-polaris.md) for details.
 
 ---
@@ -191,10 +208,13 @@ and S3 reachability. Fix any errors before continuing.
 lakebench deploy lakebench.yaml
 ```
 
+You will be asked to confirm before deploying. Add `--yes` to skip the prompt.
+
 Lakebench creates (in order): the Kubernetes namespace, S3 secrets, scratch
-StorageClass, PostgreSQL (metadata backend), Hive Metastore, Trino, and the
-Spark RBAC service account. Wait for the command to finish -- it reports the
-status of each component as it deploys.
+StorageClass, PostgreSQL (metadata backend), Hive Metastore or Polaris
+(depending on your catalog choice), the query engine, and the Spark RBAC
+service account. Wait for the command to finish -- it reports the status of
+each component as it deploys.
 
 Check that everything is healthy:
 
@@ -207,6 +227,8 @@ lakebench status lakebench.yaml
 ```bash
 lakebench generate lakebench.yaml --wait
 ```
+
+You will be asked to confirm before generating. Add `--yes` to skip the prompt.
 
 This launches Kubernetes Jobs that write synthetic Customer360 Parquet files
 into the bronze S3 bucket. The `--wait` flag blocks until generation is
@@ -288,6 +310,8 @@ lakebench benchmark lakebench.yaml
 lakebench destroy lakebench.yaml --force
 lakebench deploy lakebench.yaml
 ```
+
+For more detailed diagnosis, see the [Troubleshooting Guide](troubleshooting.md).
 
 ---
 

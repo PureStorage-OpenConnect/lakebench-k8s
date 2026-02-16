@@ -11,6 +11,11 @@ lakebench [COMMAND] [OPTIONS] [CONFIG_FILE]
 Most commands accept an optional config file argument. If omitted, the CLI
 looks for `./lakebench.yaml` in the current directory.
 
+Several commands prompt for confirmation before running. Use `--yes` (deploy,
+generate) or `--force` (destroy, clean) to skip the prompt. The `--force`
+naming is used for destructive operations to make scripted teardowns more
+deliberate.
+
 ## Commands
 
 ### init
@@ -93,7 +98,8 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
-may take hours.
+may take hours. Without `--yes`, the command prompts for confirmation before
+submitting jobs.
 
 ### run
 
@@ -106,7 +112,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
-| `--timeout` | `-t` | `3600` | Timeout per job in seconds |
+| `--timeout` | `-t` | auto | Timeout per job in seconds (`max(3600, scale * 60)` when omitted) |
 | `--skip-benchmark` | | `false` | Skip the Trino query benchmark after pipeline |
 | `--continuous` | | `false` | Run streaming pipeline instead of batch |
 | `--duration` | | config value | Streaming run duration in seconds |

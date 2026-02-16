@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import time
 from datetime import datetime
@@ -155,6 +156,7 @@ def _preflight_check(cfg) -> None:
 
     # 3. Check Stackable CRDs if catalog=hive
     if cfg.architecture.catalog.type.value == "hive":
+        _missing_stackable: list[str] = []
         try:
             # Check CRDs directly without instantiating a full deployer
             from kubernetes import client as k8s_client
@@ -166,23 +168,29 @@ def _preflight_check(cfg) -> None:
                 "hiveclusters.hive.stackable.tech": "hive-operator",
                 "secretclasses.secrets.stackable.tech": "secret-operator",
             }
-            missing = [op for crd, op in required.items() if crd not in crd_names]
-            if missing:
-                print_warning(f"Missing Stackable operators: {', '.join(missing)}")
-                print_info("Deploy will fail at Hive step. Install operators first:")
-                for op in [
-                    "commons-operator",
-                    "listener-operator",
-                    "secret-operator",
-                    "hive-operator",
-                ]:
-                    console.print(
-                        f"  helm install {op} "
-                        f"oci://oci.stackable.tech/sdp-charts/{op} "
-                        f"--version 25.7.0 --namespace stackable --create-namespace"
-                    )
+            _missing_stackable = [op for crd, op in required.items() if crd not in crd_names]
         except Exception:
             logger.debug("Preflight CRD check skipped (K8s not reachable)", exc_info=True)
+
+        if _missing_stackable:
+            print_error(f"Missing Stackable operators: {', '.join(_missing_stackable)}")
+            print_info("Install operators first:")
+            for op in [
+                "commons-operator",
+                "listener-operator",
+                "secret-operator",
+                "hive-operator",
+            ]:
+                console.print(
+                    f"  helm install {op} "
+                    f"oci://oci.stackable.tech/sdp-charts/{op} "
+                    f"--version 25.7.0 --namespace stackable --create-namespace"
+                )
+            print_info(
+                "Or switch to a Polaris recipe (no operators needed):\n"
+                "  Set recipe: polaris-iceberg-trino in your config"
+            )
+            raise typer.Exit(1)
 
 
 def _build_component_list(cfg) -> str:
@@ -494,6 +502,16 @@ def validate(
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
 
+    # 1b. Check required CLI tools
+    console.print("\n[bold]CLI Tools[/bold]")
+    for tool in ["kubectl", "helm"]:
+        if shutil.which(tool):
+            print_success(f"{tool} found on PATH")
+            checks_passed += 1
+        else:
+            print_error(f"{tool} not found on PATH")
+            checks_failed += 1
+
     if not cfg.platform.storage.s3.endpoint:
         print_warning("S3 endpoint not configured")
         checks_failed += 1
@@ -708,6 +726,45 @@ def validate(
     except Exception as e:
         print_warning(f"Could not validate storage classes: {e}")
 
+    # 5b. Catalog Prerequisites (Hive needs Stackable operators)
+    if cfg.architecture.catalog.type.value == "hive":
+        console.print("\n[bold]Catalog Prerequisites[/bold]")
+        try:
+            from kubernetes import client as k8s_client
+
+            api_ext = k8s_client.ApiextensionsV1Api()
+            crds = api_ext.list_custom_resource_definition()
+            crd_names = {crd.metadata.name for crd in crds.items}
+            required = {
+                "hiveclusters.hive.stackable.tech": "hive-operator",
+                "secretclasses.secrets.stackable.tech": "secret-operator",
+            }
+            missing = [op for crd, op in required.items() if crd not in crd_names]
+            if missing:
+                print_error(f"Missing Stackable operators: {', '.join(missing)}")
+                print_info("Install with:")
+                for op in [
+                    "commons-operator",
+                    "listener-operator",
+                    "secret-operator",
+                    "hive-operator",
+                ]:
+                    console.print(
+                        f"  helm install {op} "
+                        f"oci://oci.stackable.tech/sdp-charts/{op} "
+                        f"--version 25.7.0 --namespace stackable --create-namespace"
+                    )
+                checks_failed += 1
+            else:
+                print_success("Stackable operators installed (Hive catalog)")
+                checks_passed += 1
+        except Exception:
+            print_warning("Could not verify Stackable operators (K8s not reachable)")
+    elif cfg.architecture.catalog.type.value == "polaris":
+        console.print("\n[bold]Catalog Prerequisites[/bold]")
+        print_success("Polaris catalog (no external operators needed)")
+        checks_passed += 1
+
     # 6. Spark Operator Status
     console.print("\n[bold]Spark Operator[/bold]")
     try:
@@ -763,8 +820,19 @@ def validate(
                 checks_passed += 1  # Non-blocking if install=True
                 checks_warned += 1
             else:
-                print_error("Spark Operator not installed and install=False")
-                print_info("Set platform.compute.spark.operator.install: true or install manually")
+                ns = cfg.get_namespace()
+                print_error("Spark Operator not installed")
+                print_info(
+                    "Option 1: Set platform.compute.spark.operator.install: true (auto-install)"
+                )
+                print_info("Option 2: Install manually:")
+                console.print(
+                    f"  helm repo add spark-operator https://kubeflow.github.io/spark-operator\n"
+                    f"  helm install spark-operator spark-operator/spark-operator \\\n"
+                    f"    --namespace spark-operator --create-namespace \\\n"
+                    f"    --set 'spark.jobNamespaces={{{ns}}}' \\\n"
+                    f"    --set webhook.enable=true"
+                )
                 checks_failed += 1
     except Exception as e:
         print_warning(f"Could not check Spark Operator status: {e}")
