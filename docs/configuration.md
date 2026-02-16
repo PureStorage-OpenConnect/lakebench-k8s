@@ -38,7 +38,7 @@ When you omit optional sections, these defaults apply:
 | `datagen.scale` | 10 | ~100 GB bronze data |
 | `catalog.type` | hive | Stackable Hive Metastore |
 | `query_engine.type` | trino | Trino coordinator + 2 workers |
-| `spark.operator.install` | true | Auto-installs Spark Operator |
+| `spark.operator.install` | false | Must opt in to auto-install Spark Operator |
 | `observability.enabled` | false | No Prometheus/Grafana |
 | `scratch.enabled` | false | emptyDir for shuffle |
 
@@ -340,7 +340,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `platform.compute.spark.operator.install` | bool | `true` | Install the Kubeflow Spark Operator via Helm. |
+| `platform.compute.spark.operator.install` | bool | `false` | Install the Kubeflow Spark Operator via Helm. Requires cluster-admin. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | Namespace for the Spark Operator. |
 | `platform.compute.spark.operator.version` | string | `2.4.0` | Spark Operator chart version. v2.x required. |
 | `platform.compute.spark.driver.cores` | int | `4` | Spark driver CPU cores. |

@@ -88,6 +88,7 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 |---|---|---|---|
 | `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `7200` | Timeout in seconds when waiting |
+| `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--resume` | | `false` | Resume from checkpoint if previous run was interrupted |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
