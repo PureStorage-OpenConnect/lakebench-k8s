@@ -27,7 +27,7 @@ Constraints for the Spark service account.
 | Tool | Minimum version | Used for |
 |------|----------------|----------|
 | `kubectl` | 1.26+ | All Kubernetes operations |
-| `helm` | 3.12+ | Installing the Spark operator |
+| `helm` | 3.12+ | Spark Operator install, namespace detection, and Stackable operators (Hive catalog) |
 
 If you are on OpenShift, `oc` works as a drop-in replacement for `kubectl`.
 
@@ -45,9 +45,10 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator 2.4.0+** must be installed cluster-wide. If it
-is not present, `lakebench deploy` can install it automatically (set
-`platform.compute.spark.operator.install: true` in your config).
+The **Kubeflow Spark Operator 2.4.0+** must be installed cluster-wide.
+Lakebench assumes the operator is pre-installed (the default is
+`platform.compute.spark.operator.install: false`). Set it to `true` if you
+want `lakebench deploy` to install it automatically via Helm.
 
 Install manually with Helm if you prefer:
 
