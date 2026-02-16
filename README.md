@@ -25,30 +25,45 @@ Pre-built binaries (no Python required) are available on
 
 - Python 3.10+
 - `kubectl` and `helm` on PATH
-- Kubernetes cluster (1.26+)
+- Kubernetes cluster (1.26+, minimum 8 CPU / 32 GB RAM for scale 1)
 - S3-compatible object storage (FlashBlade, MinIO, AWS S3, etc.)
+- [Kubeflow Spark Operator 2.4.0+](https://github.com/kubeflow/spark-operator) (or set `spark.operator.install: true` in config to auto-install)
+- [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) if using a Hive recipe (the default). Not needed for Polaris recipes.
+
+See [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
+for detailed install instructions.
 
 ## Quick Start
+
+A **recipe** selects the catalog + table format + query engine combination
+(e.g. `hive-iceberg-trino`). The **scale factor** controls data volume:
+1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB.
 
 ```bash
 # 1. Generate config (interactive prompts for S3 details)
 lakebench init --interactive
 
-# 2. Deploy infrastructure
+# 2. Validate config and cluster connectivity
+lakebench validate lakebench.yaml
+
+# 3. Deploy infrastructure
 lakebench deploy lakebench.yaml
 
-# 3. Generate test data
+# 4. Generate test data
 lakebench generate lakebench.yaml --wait
 
-# 4. Run the pipeline + benchmark
+# 5. Run the pipeline + benchmark
 lakebench run lakebench.yaml
 
-# 5. View results
+# 6. View results
 lakebench report
 
-# 6. Tear down
+# 7. Tear down
 lakebench destroy lakebench.yaml
 ```
+
+> Deploy and generate will prompt for confirmation. Add `--yes` to skip
+> (e.g. `lakebench deploy lakebench.yaml --yes`).
 
 ## Commands
 
@@ -120,8 +135,10 @@ Full documentation is in the [docs/](https://github.com/PureStorage-OpenConnect/
 - [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md) -- supported component combinations
 - [Supported Components](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/supported-components.md) -- versions, images, and recipe matrix
 - [Deployment](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/deployment.md) -- deploy lifecycle and status checks
+- [Data Generation](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/data-generation.md) -- scale factors, parallelism, and monitoring
 - [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and streaming modes
 - [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- query suite and scoring
+- [Polaris Quick Start](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/quickstart-polaris.md) -- use Apache Polaris instead of Hive
 - [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design and component layers
 - [Troubleshooting](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/troubleshooting.md) -- common errors and fixes
 

@@ -32,6 +32,7 @@
 - [PostgreSQL](component-postgres.md) -- Metadata store, storage classes, deployment order
 - [Observability](component-observability.md) -- Prometheus, Grafana, local metrics, HTML reports
 - [Polaris Reference](polaris-reference.md) -- Polaris REST catalog deployment and gotchas
+- [Supported Components](supported-components.md) -- Versions, images, and recipe matrix
 
 ## Architecture & Reference
 

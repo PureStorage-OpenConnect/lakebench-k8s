@@ -1154,3 +1154,35 @@ class TestSparkOperatorNamespaceWatching:
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
         status = mgr.ensure_namespace_watched(can_heal=True)
         assert status.watching_namespace is True
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_install_handles_helm_not_found(self, mock_run):
+        """install() returns False when helm binary is not on PATH."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        def _side_effect(cmd, **kwargs):
+            if cmd[0] == "helm":
+                raise FileNotFoundError("helm not found")
+            # kubectl calls (e.g. _is_openshift) succeed
+            return MagicMock(returncode=1, stdout="", stderr="")
+
+        mock_run.side_effect = _side_effect
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        assert mgr.install() is False
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_add_namespace_handles_helm_not_found(self, mock_run):
+        """_add_namespace_to_watch returns False when helm is not on PATH."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        # First call: _get_watched_namespaces returns a list
+        # Second call: helm upgrade raises FileNotFoundError
+        mock_run.side_effect = [
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["default"]}}',
+            ),
+            FileNotFoundError("helm not found"),
+        ]
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        assert mgr._add_namespace_to_watch("lakebench-test") is False

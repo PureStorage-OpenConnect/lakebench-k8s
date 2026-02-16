@@ -84,7 +84,7 @@ QpH score is `(number_of_queries / total_seconds) * 3600`.
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--stage` | `-s` | (all) | Run a specific stage only: `bronze-verify`, `silver-build`, or `gold-finalize` |
-| `--timeout` | `-t` | `3600` | Timeout per job in seconds |
+| `--timeout` | `-t` | auto | Timeout per job in seconds. Defaults to `max(3600, scale * 60)` when omitted. |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline stages |
 | `--continuous` | | `false` | Run in continuous streaming mode instead of batch |
 | `--duration` | | config value | Streaming run duration in seconds (continuous mode only) |

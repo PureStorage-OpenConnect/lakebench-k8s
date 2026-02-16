@@ -27,7 +27,7 @@ platform:
   compute:
     spark:
       operator:
-        install: true               # Set false if already installed
+        install: false              # Set true to auto-install (requires cluster-admin)
         namespace: "spark-operator"  # Where the operator runs
         version: "2.4.0"            # Must be v2.x
 ```
@@ -55,7 +55,7 @@ platform:
   compute:
     spark:
       operator:
-        install: true                # Auto-install Spark Operator via Helm
+        install: false               # Set true to auto-install via Helm (requires cluster-admin)
         namespace: "spark-operator"  # Operator namespace
         version: "2.4.0"            # Operator chart version (v2.x required)
 ```
