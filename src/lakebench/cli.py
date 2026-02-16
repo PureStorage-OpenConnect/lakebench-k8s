@@ -3652,10 +3652,7 @@ def query(
                     for r in parsed[1:]
                 ]
             else:
-                data = [
-                    {str(i): v.strip().strip('"') for i, v in enumerate(r)}
-                    for r in parsed
-                ]
+                data = [{str(i): v.strip().strip('"') for i, v in enumerate(r)} for r in parsed]
             console.print(json.dumps({"rows": data, "count": len(data)}, indent=2))
         elif output_format == "csv":
             import csv
