@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from dataclasses import dataclass
 from typing import Any
 
 from kubernetes import client, config
 from kubernetes.client.rest import ApiException
+
+logger = logging.getLogger(__name__)
 
 
 class K8sError(Exception):
@@ -102,8 +105,8 @@ class K8sClient:
             contexts, active = config.list_kube_config_contexts()
             if active and "namespace" in active.get("context", {}):
                 return active["context"]["namespace"]
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not read namespace from kubeconfig: %s", e)
 
         return "default"
 
@@ -123,8 +126,8 @@ class K8sClient:
                     user=ctx.get("user", ""),
                     namespace=ctx.get("namespace"),
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not list kubeconfig contexts: %s", e)
         return None
 
     def test_connectivity(self) -> tuple[bool, str]:
@@ -642,8 +645,8 @@ class K8sClient:
             for crd in crds.items:
                 if crd.spec.group == group and crd.spec.names.kind == kind:
                     return crd.spec.names.plural
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not look up CRD plural for %s/%s: %s", group, kind, e)
 
         # Fallback: simple pluralization
         kind_lower = kind.lower()
@@ -668,8 +671,8 @@ class K8sClient:
             for crd in crds.items:
                 if crd.spec.group == group and crd.spec.names.kind == kind:
                     return crd.spec.scope == "Cluster"
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Could not check CRD scope for %s/%s: %s", group, kind, e)
 
         # Default to namespaced
         return False

@@ -64,10 +64,10 @@ class TestFullComputeGuidance:
         assert g.datagen.memory == "4Gi"
 
     def test_datagen_fixed_cpu_continuous(self):
-        """Continuous mode: fixed 8 CPU, 32Gi per pod."""
+        """Continuous mode: fixed 8 CPU, 24Gi per pod (MVP sizing)."""
         g = full_compute_guidance(100)
         assert g.datagen.cpu == "8"
-        assert g.datagen.memory == "32Gi"
+        assert g.datagen.memory == "24Gi"
 
 
 # ---------------------------------------------------------------------------
@@ -185,9 +185,9 @@ class TestAutoSizingScaleOnly:
         assert config.architecture.query_engine.trino.worker.replicas == 4
         assert config.architecture.query_engine.trino.worker.memory == "32Gi"
         assert config.architecture.workload.datagen.parallelism >= 8
-        # Continuous mode: fixed 8 CPU, 32Gi, 8 generators
+        # Continuous mode: fixed 8 CPU, 24Gi, 8 generators (MVP sizing)
         assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "32Gi"
+        assert config.architecture.workload.datagen.memory == "24Gi"
         assert config.architecture.workload.datagen.generators == 8
         assert config.architecture.workload.datagen.uploaders == 2
 
@@ -202,9 +202,9 @@ class TestAutoSizingScaleOnly:
         assert config.platform.compute.spark.executor.instances >= 16
         assert config.platform.compute.spark.executor.memory == "48g"
         assert config.architecture.query_engine.trino.worker.replicas >= 8
-        # Continuous mode
+        # Continuous mode (MVP sizing)
         assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "32Gi"
+        assert config.architecture.workload.datagen.memory == "24Gi"
         assert config.architecture.workload.datagen.generators == 8
 
     def test_memory_overhead_derived(self):
@@ -287,6 +287,36 @@ class TestAutoSizingUserOverride:
         assert config.architecture.workload.datagen.cpu == "4"
         assert config.architecture.workload.datagen.memory == "4Gi"
         assert config.architecture.workload.datagen.generators == 1
+
+    def test_datagen_memory_hardlocked_continuous(self):
+        """User-set memory is overridden to mode-correct value (continuous)."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "workload": {"datagen": {"scale": 100, "memory": "8Gi"}},
+            },
+        )
+        resolve_auto_sizing(config)
+
+        # Even though user set 8Gi, continuous mode hard-locks to 24Gi
+        assert config.architecture.workload.datagen.memory == "24Gi"
+        assert config.architecture.workload.datagen.cpu == "8"
+
+    def test_datagen_memory_hardlocked_batch(self):
+        """User-set memory is overridden to mode-correct value (batch)."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "workload": {
+                    "datagen": {"scale": 5, "mode": "batch", "memory": "16Gi"},
+                },
+            },
+        )
+        resolve_auto_sizing(config)
+
+        # Even though user set 16Gi, batch mode hard-locks to 4Gi
+        assert config.architecture.workload.datagen.memory == "4Gi"
+        assert config.architecture.workload.datagen.cpu == "4"
 
 
 # ---------------------------------------------------------------------------

@@ -14,6 +14,41 @@ lakebench deploy my-config.yaml
 lakebench run my-config.yaml
 ```
 
+## Minimum Viable Config
+
+The smallest working config requires only a name, an S3 endpoint, and S3
+credentials. Everything else has working defaults (Hive + Iceberg + Trino,
+scale 1, Spark operator auto-installed).
+
+```yaml
+name: my-lakehouse
+platform:
+  storage:
+    s3:
+      endpoint: http://your-s3-endpoint:80
+      access_key: YOUR_KEY
+      secret_key: YOUR_SECRET
+```
+
+When you omit optional sections, these defaults apply:
+
+| Section | Default | Effect |
+|---------|---------|--------|
+| `recipe` | (none) | hive + iceberg + trino |
+| `datagen.scale` | 10 | ~100 GB bronze data |
+| `catalog.type` | hive | Stackable Hive Metastore |
+| `query_engine.type` | trino | Trino coordinator + 2 workers |
+| `spark.operator.install` | true | Auto-installs Spark Operator |
+| `observability.enabled` | false | No Prometheus/Grafana |
+| `scratch.enabled` | false | emptyDir for shuffle |
+
+**What to tune first as you scale up:**
+
+1. `datagen.scale` -- controls data volume
+2. `compute.spark.executor` -- match instances/memory to your cluster
+3. `query_engine.trino.worker` -- match replicas/memory to your cluster
+4. `scratch` / `postgres` storage classes -- match to your storage provider
+
 ## Annotated Example
 
 Below is a complete configuration with every section annotated. Only `name`
@@ -41,7 +76,7 @@ version: 1
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: lakebench/datagen:latest
+  datagen: docker.io/sillidata/lb-datagen:v2
   spark: apache/spark:3.5.4-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
@@ -254,7 +289,7 @@ registries or custom builds.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `images.datagen` | string | `lakebench/datagen:latest` | Data generator image. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:v2` | Data generator image. |
 | `images.spark` | string | `apache/spark:3.5.4-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
@@ -297,7 +332,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.storage.scratch.enabled` | bool | `false` | Enable scratch StorageClass for Spark PVCs. |
 | `platform.storage.scratch.storage_class` | string | `px-csi-scratch` | StorageClass name for scratch volumes. |
 | `platform.storage.scratch.size` | string | `100Gi` | Default scratch PVC size. |
-| `platform.storage.scratch.create_storage_class` | bool | `true` | Create the StorageClass if it does not exist. |
+| `platform.storage.scratch.create_storage_class` | bool | `true` | Create the StorageClass if it does not exist (requires cluster-admin). Set to `false` if the SC already exists or is managed externally. |
+| `platform.storage.scratch.provisioner` | string | `pxd.portworx.com` | CSI provisioner for the StorageClass. Use `rancher.io/local-path`, `ebs.csi.aws.com`, etc. for non-Portworx providers. |
+| `platform.storage.scratch.parameters` | dict | `{"repl": "1", ...}` | Provider-specific StorageClass parameters. |
 
 ### Platform -- Spark Compute
 
@@ -399,8 +436,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.workload.datagen.parallelism` | int | `4` | Number of parallel datagen pods. |
 | `architecture.workload.datagen.file_size` | string | `512mb` | Target Parquet file size. |
 | `architecture.workload.datagen.dirty_data_ratio` | float | `0.08` | Fraction of intentionally dirty records (0.0--1.0). |
-| `architecture.workload.datagen.cpu` | string | `2` | CPU per datagen pod. |
-| `architecture.workload.datagen.memory` | string | `4Gi` | Memory per datagen pod. |
+| `architecture.workload.datagen.cpu` | string | `2` | CPU per datagen pod. **Hard-locked by mode** (batch=4, continuous=8). |
+| `architecture.workload.datagen.memory` | string | `4Gi` | Memory per datagen pod. **Hard-locked by mode** (batch=4Gi, continuous=24Gi). |
 | `architecture.workload.datagen.generators` | int | `0` | Generator processes per pod. 0 = auto (1 batch, 8 continuous). |
 | `architecture.workload.datagen.uploaders` | int | `0` | Uploader threads per pod. 0 = auto (1 batch, 2 continuous). |
 | `architecture.workload.datagen.checkpoint.enabled` | bool | `true` | Enable datagen checkpoint for resume. |

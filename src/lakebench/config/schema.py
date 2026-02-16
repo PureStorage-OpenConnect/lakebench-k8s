@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # =============================================================================
 # Enums
@@ -98,10 +98,13 @@ class DatagenMode(str, Enum):
     - batch: single generator thread per pod, low resource profile (4 CPU / 4Gi).
       Best for small datasets (< 100 GB).
     - continuous: multi-process pipeline with multiple generator workers and
-      dedicated uploader threads, high resource profile (8 CPU / 32Gi).
+      dedicated uploader threads, higher resource profile (8 CPU / 24Gi).
       Best for large datasets (>= 100 GB) where sustained throughput matters.
     - auto: automatically selects batch or continuous based on scale factor.
       scale <= 10 (~100 GB) -> batch, scale > 10 -> continuous.
+
+    CPU and memory are hard-locked per mode and cannot be overridden by the
+    user.  The autosizer always sets them to the mode-correct values.
     """
 
     BATCH = "batch"
@@ -125,7 +128,7 @@ class ReportFormat(str, Enum):
 class ImagesConfig(BaseModel):
     """Container image configuration for all Lakebench components."""
 
-    datagen: str = "lakebench/datagen:latest"
+    datagen: str = "docker.io/sillidata/lb-datagen:v2"
     spark: str = "apache/spark:3.5.4-python3"
     postgres: str = "postgres:17"
     hive: str = "apache/hive:3.1.3"
@@ -196,6 +199,10 @@ class ScratchStorageConfig(BaseModel):
     storage_class: str = "px-csi-scratch"
     size: str = "100Gi"
     create_storage_class: bool = True
+    provisioner: str = "pxd.portworx.com"
+    parameters: dict[str, str] = Field(
+        default_factory=lambda: {"repl": "1", "io_profile": "auto", "priority_io": "high"}
+    )
 
 
 class StorageConfig(BaseModel):
@@ -224,7 +231,7 @@ class SparkExecutorConfig(BaseModel):
 class SparkOperatorConfig(BaseModel):
     """Spark operator installation configuration."""
 
-    install: bool = True
+    install: bool = False
     namespace: str = "spark-operator"
     version: str = "2.4.0"  # v2.x properly injects volumes via webhook
 
@@ -872,10 +879,12 @@ class ReportsConfig(BaseModel):
 class ObservabilityConfig(BaseModel):
     """Layer 3: Observability configuration.
 
-    Flat model replacing the previous deeply-nested metrics/dashboards hierarchy.
-    The ``enabled`` flag controls the kube-prometheus-stack deployment.
-    Sub-flags control individual collection features.
+    Flat model -- use top-level keys (enabled, prometheus_stack_enabled, etc.).
+    Deeply nested YAML (metrics.prometheus.enabled) is rejected to prevent
+    silent data loss (see BUG-029).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     prometheus_stack_enabled: bool = True

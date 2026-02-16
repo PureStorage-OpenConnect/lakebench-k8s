@@ -305,6 +305,11 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.cpu == "8"
         assert config.architecture.workload.datagen.memory == "16Gi"
 
+    def test_datagen_image_default(self):
+        """BUG-010: Default datagen image is docker.io/sillidata/lb-datagen:v2."""
+        config = LakebenchConfig(name="test")
+        assert config.images.datagen == "docker.io/sillidata/lb-datagen:v2"
+
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""
         from lakebench.config.schema import DatagenMode
@@ -371,6 +376,35 @@ class TestScratchStorageConfig:
         assert scratch.storage_class == "my-sc"
         assert scratch.size == "200Gi"
         assert scratch.create_storage_class is False
+
+    def test_scratch_provisioner_default(self):
+        """BUG-001: Default scratch provisioner is Portworx."""
+        config = LakebenchConfig(name="test")
+        scratch = config.platform.storage.scratch
+        assert scratch.provisioner == "pxd.portworx.com"
+        assert scratch.parameters == {
+            "repl": "1",
+            "io_profile": "auto",
+            "priority_io": "high",
+        }
+
+    def test_scratch_provisioner_override(self):
+        """BUG-001: Scratch provisioner and parameters can be overridden."""
+        config = LakebenchConfig(
+            name="test",
+            platform={
+                "storage": {
+                    "scratch": {
+                        "enabled": True,
+                        "provisioner": "ebs.csi.aws.com",
+                        "parameters": {"type": "gp3", "iopsPerGB": "50"},
+                    }
+                }
+            },
+        )
+        scratch = config.platform.storage.scratch
+        assert scratch.provisioner == "ebs.csi.aws.com"
+        assert scratch.parameters == {"type": "gp3", "iopsPerGB": "50"}
 
 
 class TestTrinoWorkerStorageConfig:
@@ -442,6 +476,51 @@ class TestGenerateConfig:
         assert "spark:" in yaml_content
         # Check for proven defaults in comments
         assert "spark.hadoop.fs.s3a" in yaml_content
+
+
+class TestGeneratedYamlDrift:
+    """BUG-008: Verify generated config YAML stays in sync with schema."""
+
+    def test_duckdb_mentioned(self):
+        """Generated YAML should mention duckdb as a query engine option."""
+        yaml_content = generate_example_config_yaml()
+        assert "duckdb" in yaml_content
+
+    def test_recipe_field_present(self):
+        """Generated YAML should include a recipe field with valid names."""
+        yaml_content = generate_example_config_yaml()
+        assert "recipe:" in yaml_content
+        # At least one known recipe name should appear
+        assert "hive-iceberg-trino" in yaml_content
+
+    def test_datagen_image_matches_schema(self):
+        """Generated YAML datagen image should match schema default."""
+        yaml_content = generate_example_config_yaml()
+        default_image = LakebenchConfig(name="t").images.datagen
+        assert default_image in yaml_content
+
+    def test_scratch_provisioner_present(self):
+        """Generated YAML should document scratch provisioner field."""
+        yaml_content = generate_example_config_yaml()
+        assert "provisioner:" in yaml_content
+
+    def test_legend_present(self):
+        """Generated YAML should start with a usage legend."""
+        yaml_content = generate_example_config_yaml()
+        assert "LEGEND" in yaml_content
+
+    def test_spark_operator_note(self):
+        """Generated YAML should document that spark operator defaults to false."""
+        yaml_content = generate_example_config_yaml()
+        assert "default is false" in yaml_content.lower()
+
+    def test_benchmark_section_engine_agnostic(self):
+        """Benchmark section should not be Trino-specific."""
+        yaml_content = generate_example_config_yaml()
+        # Should NOT say "Trino query benchmark" (was the old header)
+        assert "Trino query benchmark" not in yaml_content
+        # Should have a generic benchmark header
+        assert "benchmark" in yaml_content.lower()
 
 
 class TestPerJobExecutorOverrides:

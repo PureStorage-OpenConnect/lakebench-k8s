@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -10,6 +12,8 @@ from urllib.parse import urlparse
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError
+
+logger = logging.getLogger(__name__)
 
 
 class S3Error(Exception):
@@ -130,6 +134,15 @@ class S3Client:
             path_style=info.path_style,
         )
 
+    def _check_client(self) -> None:
+        """Verify that the boto client initialized successfully.
+
+        Raises:
+            S3AuthError: If client init failed (bad endpoint, credentials, etc.)
+        """
+        if self._init_error:
+            raise S3AuthError(f"S3 client initialization failed: {self._init_error}")
+
     def test_endpoint_reachable(self) -> tuple[bool, str]:
         """Test if S3 endpoint is reachable.
 
@@ -199,6 +212,7 @@ class S3Client:
         Returns:
             True if bucket exists, False otherwise
         """
+        self._check_client()
         try:
             self._client.head_bucket(Bucket=bucket_name)
             return True
@@ -245,6 +259,7 @@ class S3Client:
         Returns:
             List of bucket names
         """
+        self._check_client()
         try:
             response = self._client.list_buckets()
             return [b["Name"] for b in response.get("Buckets", [])]
@@ -280,8 +295,8 @@ class S3Client:
             if response.get("IsTruncated", False):
                 object_count = None  # Unknown, too many
                 size_bytes = None
-        except ClientError:
-            pass  # Can't get details, but bucket exists
+        except ClientError as e:
+            logger.warning("Could not get bucket details for %s: %s", bucket_name, e)
 
         return BucketInfo(
             name=bucket_name,
@@ -331,7 +346,12 @@ class S3Client:
                 f"Failed to get bucket size for {bucket_name}: {e}"
             )
 
-    def empty_bucket(self, bucket_name: str, max_wait: int = 300) -> int:
+    def empty_bucket(
+        self,
+        bucket_name: str,
+        max_wait: int = 300,
+        progress_callback: Callable[[str, int], None] | None = None,
+    ) -> int:
         """Delete all objects and abort incomplete multipart uploads in a bucket.
 
         Cleanup pattern: delete, abort multipart uploads, then
@@ -340,6 +360,7 @@ class S3Client:
         Args:
             bucket_name: Name of the bucket to empty
             max_wait: Maximum seconds to wait for bucket to be fully empty
+            progress_callback: Optional callback(bucket_name, running_deleted_count)
 
         Returns:
             Number of objects deleted
@@ -381,6 +402,9 @@ class S3Client:
                         batch_deleted += 1
 
                 deleted_count += batch_deleted
+
+                if progress_callback and batch_deleted > 0:
+                    progress_callback(bucket_name, deleted_count)
 
                 # 3. Verify empty -- recount objects and uploads
                 obj_count = 0

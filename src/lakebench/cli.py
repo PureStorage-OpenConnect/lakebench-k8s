@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -30,14 +32,27 @@ from lakebench.s3 import test_s3_connectivity
 # Default config file name for auto-discovery
 DEFAULT_CONFIG = "lakebench.yaml"
 
+logger = logging.getLogger(__name__)
+
 # Global journal instance (lazy-initialized)
 _journal: Journal | None = None
+
+# ANSI escape code stripper for log output
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text."""
+    return _ANSI_RE.sub("", text)
+
 
 app = typer.Typer(
     name="lakebench",
     help="Deploy and benchmark lakehouse architectures on Kubernetes",
     add_completion=False,
     no_args_is_help=True,
+    rich_markup_mode="rich",
+    epilog="[dim]Workflow: init -> validate -> deploy -> generate -> run -> report -> destroy[/dim]",
 )
 
 console = Console()
@@ -48,14 +63,18 @@ console = Console()
 # =============================================================================
 
 
-def resolve_config_path(config_file: Path | None) -> Path:
+def resolve_config_path(
+    config_file: Path | None,
+    file_option: Path | None = None,
+) -> Path:
     """Resolve config file path, using ./lakebench.yaml as default.
 
-    If no config_file is provided, looks for lakebench.yaml in the
-    current directory. Raises typer.Exit if no config can be found.
+    Supports both positional argument and --file/-f option.
+    If both are provided, --file takes precedence.
     """
-    if config_file is not None:
-        return config_file
+    path = file_option or config_file
+    if path is not None:
+        return path
 
     default = Path(DEFAULT_CONFIG)
     if default.exists():
@@ -99,6 +118,116 @@ def print_warning(message: str) -> None:
 def print_info(message: str) -> None:
     """Print an info message."""
     console.print(f"[blue]...[/blue] {message}")
+
+
+_journal_warned = False
+
+
+def _journal_safe(fn, *args, **kwargs) -> None:
+    """Call a journal function, logging failures instead of silently dropping them."""
+    global _journal_warned
+    try:
+        fn(*args, **kwargs)
+    except Exception:
+        if not _journal_warned:
+            logger.debug("Journal write failed (further warnings suppressed)", exc_info=True)
+            _journal_warned = True
+
+
+def _preflight_check(cfg) -> None:
+    """Run critical pre-flight checks before deployment.
+
+    Prints warnings for non-critical issues; exits on blockers.
+    """
+    # 1. S3 endpoint must be set
+    s3 = cfg.platform.storage.s3
+    if not s3.endpoint:
+        print_error("S3 endpoint not configured (platform.storage.s3.endpoint)")
+        print_info("Run 'lakebench validate' for detailed diagnostics")
+        raise typer.Exit(1)
+
+    # 2. S3 credentials must be present (inline or secret_ref)
+    has_inline = bool(s3.access_key and s3.secret_key)
+    has_ref = bool(getattr(s3, "secret_ref", None))
+    if not has_inline and not has_ref:
+        print_error("S3 credentials not configured (set access_key/secret_key or secret_ref)")
+        raise typer.Exit(1)
+
+    # 3. Check Stackable CRDs if catalog=hive
+    if cfg.architecture.catalog.type.value == "hive":
+        try:
+            # Check CRDs directly without instantiating a full deployer
+            from kubernetes import client as k8s_client
+
+            api_ext = k8s_client.ApiextensionsV1Api()
+            crds = api_ext.list_custom_resource_definition()
+            crd_names = {crd.metadata.name for crd in crds.items}
+            required = {
+                "hiveclusters.hive.stackable.tech": "hive-operator",
+                "secretclasses.secrets.stackable.tech": "secret-operator",
+            }
+            missing = [op for crd, op in required.items() if crd not in crd_names]
+            if missing:
+                print_warning(f"Missing Stackable operators: {', '.join(missing)}")
+                print_info("Deploy will fail at Hive step. Install operators first:")
+                for op in [
+                    "commons-operator",
+                    "listener-operator",
+                    "secret-operator",
+                    "hive-operator",
+                ]:
+                    console.print(
+                        f"  helm install {op} "
+                        f"oci://oci.stackable.tech/sdp-charts/{op} "
+                        f"--version 25.7.0 --namespace stackable --create-namespace"
+                    )
+        except Exception:
+            logger.debug("Preflight CRD check skipped (K8s not reachable)", exc_info=True)
+
+
+def _build_component_list(cfg) -> str:
+    """Build a config-aware component list for confirmation prompts."""
+    parts = ["PostgreSQL"]
+    cat = cfg.architecture.catalog.type.value
+    if cat == "hive":
+        parts.append("Hive Metastore")
+    elif cat == "polaris":
+        parts.append("Polaris Catalog")
+    engine = cfg.architecture.query_engine.type.value
+    if engine == "trino":
+        parts.append("Trino")
+    elif engine == "spark-thrift":
+        parts.append("Spark Thrift Server")
+    elif engine == "duckdb":
+        parts.append("DuckDB")
+    parts.append("Spark RBAC")
+    if cfg.observability.enabled:
+        if cfg.observability.prometheus_stack_enabled:
+            parts.append("Prometheus")
+        if cfg.observability.dashboards_enabled:
+            parts.append("Grafana")
+    return ", ".join(parts)
+
+
+def _build_destroy_list(cfg) -> str:
+    """Build a config-aware destruction list for confirmation prompt."""
+    items = ["PostgreSQL data"]
+    cat = cfg.architecture.catalog.type.value
+    if cat == "hive":
+        items.append("Hive Metastore")
+    elif cat == "polaris":
+        items.append("Polaris Catalog")
+    engine = cfg.architecture.query_engine.type.value
+    if engine == "trino":
+        items.append("Trino cluster")
+    elif engine == "spark-thrift":
+        items.append("Spark Thrift Server")
+    elif engine == "duckdb":
+        items.append("DuckDB")
+    if cfg.observability.enabled:
+        items.append("Prometheus + Grafana")
+    items.append("All secrets, configs, and namespace")
+    return "\n".join(f"  - {item}" for item in items)
 
 
 # =============================================================================
@@ -303,6 +432,14 @@ def validate(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
     verbose: Annotated[
         bool,
         typer.Option(
@@ -322,7 +459,7 @@ def validate(
     - Kubernetes context is accessible
     - Kubernetes namespace is accessible or can be created
     """
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
     console.print(Panel(f"Validating: [bold]{config_file}[/bold]", expand=False))
 
     # Journal (opened early so we can record config_loaded)
@@ -332,6 +469,7 @@ def validate(
     # Track validation results
     checks_passed = 0
     checks_failed = 0
+    checks_warned = 0
 
     # 1. Load and validate config
     console.print("\n[bold]Configuration[/bold]")
@@ -426,6 +564,12 @@ def validate(
         except Exception as e:
             print_warning(f"Cannot verify S3 secret: {e}")
 
+    # 2.6. Validate bucket name overlap
+    bucket_names = [s3.buckets.bronze, s3.buckets.silver, s3.buckets.gold]
+    if len(set(bucket_names)) < 3:
+        print_warning("Bronze, silver, and gold use overlapping bucket names")
+        checks_warned += 1
+
     # 3. Test Kubernetes connectivity
     console.print("\n[bold]Kubernetes Connectivity[/bold]")
     try:
@@ -484,6 +628,7 @@ def validate(
                     print_success(f"SCC '{scc.name}' assigned to '{scc.service_account}'")
                 else:
                     print_warning(f"SCC '{scc.name}' not assigned to '{scc.service_account}'")
+                    checks_warned += 1
                     if verbose:
                         console.print(
                             f"  Fix: oc adm policy add-scc-to-user {scc.name} -z {scc.service_account} -n {ns}"
@@ -557,6 +702,7 @@ def validate(
                                 f"StorageClass '{sc_name}' will be created during deploy ({purpose})"
                             )
                             checks_passed += 1
+                            checks_warned += 1
                     else:
                         print_warning(f"Could not check StorageClass '{sc_name}': {e.reason}")
     except Exception as e:
@@ -571,6 +717,7 @@ def validate(
         operator = SparkOperatorManager(
             namespace=spark_op_cfg.namespace,
             version=spark_op_cfg.version,
+            job_namespace=cfg.get_namespace(),
         )
         status = operator.check_status()
 
@@ -578,16 +725,43 @@ def validate(
             version_info = f" (v{status.version})" if status.version else ""
             print_success(f"Spark Operator ready in '{status.namespace}'{version_info}")
             checks_passed += 1
+
+            # Check namespace watching
+            if status.watching_namespace is False:
+                existing = status.watched_namespaces or []
+                new_list = ",".join(existing + [cfg.get_namespace()])
+                fix_cmd = (
+                    f"helm upgrade {operator.HELM_RELEASE_NAME} "
+                    f"{operator.HELM_CHART_NAME} "
+                    f"-n {spark_op_cfg.namespace} --reuse-values "
+                    f"--set 'spark.jobNamespaces={{{new_list}}}'"
+                )
+                if spark_op_cfg.install:
+                    print_warning(
+                        f"Spark Operator does NOT watch namespace '{cfg.get_namespace()}'"
+                    )
+                    print_info(f"Currently watching: {existing}")
+                    print_info("Namespace will be added automatically during run (install: true)")
+                    checks_warned += 1
+                else:
+                    print_error(f"Spark Operator does NOT watch namespace '{cfg.get_namespace()}'")
+                    print_info(f"Currently watching: {existing}")
+                    print_info(f"SparkApplications will hang. Fix with:\n  {fix_cmd}")
+                    checks_failed += 1
+            elif status.watching_namespace is None:
+                print_info("Could not verify namespace watching (helm values unavailable)")
         elif status.installed:
             print_warning(f"Spark Operator installed but not ready: {status.message}")
             if spark_op_cfg.install:
                 print_info("Operator will be repaired during deploy")
             checks_passed += 1  # Non-blocking warning
+            checks_warned += 1
         else:
             if spark_op_cfg.install:
                 print_warning(f"Spark Operator not installed: {status.message}")
-                print_info("Operator will be installed during deploy")
+                print_info("Operator will be auto-installed during deploy (install: true)")
                 checks_passed += 1  # Non-blocking if install=True
+                checks_warned += 1
             else:
                 print_error("Spark Operator not installed and install=False")
                 print_info("Set platform.compute.spark.operator.install: true or install manually")
@@ -624,6 +798,7 @@ def validate(
                 f"for scale {scale})"
             )
             checks_passed += 1  # warning, not failure
+            checks_warned += 1
         else:
             print_error(
                 f"Executors: {actual_executors} below minimum "
@@ -645,6 +820,7 @@ def validate(
                 f"for scale {scale})"
             )
             checks_passed += 1
+            checks_warned += 1
         else:
             print_error(
                 f"Memory: {actual_memory} below minimum {guidance.min_memory} for scale {scale}"
@@ -666,23 +842,36 @@ def validate(
     # Summary
     console.print("\n[bold]Summary[/bold]")
     if checks_failed == 0:
-        try:
-            j.end_command(success=True, message=f"All {checks_passed} checks passed")
-        except Exception:
-            pass
-        console.print(
-            Panel(
-                f"[green]All {checks_passed} checks passed[/green]\n"
-                f"Run [bold]lakebench deploy[/bold] to deploy",
-                title="Validation Successful",
-                expand=False,
+        if checks_warned > 0:
+            warn_s = "s" if checks_warned > 1 else ""
+            _journal_safe(
+                j.end_command,
+                success=True,
+                message=f"{checks_passed} passed, {checks_warned} warning{warn_s}",
             )
-        )
+            console.print(
+                Panel(
+                    f"[green]{checks_passed} passed[/green], "
+                    f"[yellow]{checks_warned} warning{warn_s}[/yellow]\n"
+                    f"Run [bold]lakebench deploy[/bold] to deploy",
+                    title="Validation Passed",
+                    expand=False,
+                )
+            )
+        else:
+            _journal_safe(j.end_command, success=True, message=f"All {checks_passed} checks passed")
+            console.print(
+                Panel(
+                    f"[green]All {checks_passed} checks passed[/green]\n"
+                    f"Run [bold]lakebench deploy[/bold] to deploy",
+                    title="Validation Successful",
+                    expand=False,
+                )
+            )
     else:
-        try:
-            j.end_command(success=False, message=f"{checks_passed} passed, {checks_failed} failed")
-        except Exception:
-            pass
+        _journal_safe(
+            j.end_command, success=False, message=f"{checks_passed} passed, {checks_failed} failed"
+        )
         console.print(
             Panel(
                 f"[green]{checks_passed} passed[/green], [red]{checks_failed} failed[/red]\n"
@@ -702,6 +891,14 @@ def status(
             help="Path to configuration YAML file (optional)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
     namespace: Annotated[
         str | None,
         typer.Option(
@@ -718,7 +915,7 @@ def status(
     # Determine namespace
     ns = namespace
     if not ns:
-        config_file = resolve_config_path(config_file)
+        config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
             cfg = load_config(config_file)
@@ -753,16 +950,38 @@ def status(
         table.add_column("Status", style="bold")
         table.add_column("Ready", justify="center")
 
-        # Check common components
-        components = [
-            ("lakebench-postgres", "StatefulSet"),
-            ("lakebench-hive-metastore-default", "StatefulSet"),
-            ("lakebench-trino-coordinator", "Deployment"),
-            ("lakebench-spark-thrift", "Deployment"),
-            ("lakebench-duckdb", "Deployment"),
-            ("lakebench-observability-prometheus", "StatefulSet"),
-            ("lakebench-observability-grafana", "Deployment"),
-        ]
+        # Build component list -- config-aware when a config file was loaded
+        if config_file:
+            components: list[tuple[str, str]] = [("lakebench-postgres", "StatefulSet")]
+            cat = cfg.architecture.catalog.type.value
+            if cat == "hive":
+                components.append(("lakebench-hive-metastore-default", "StatefulSet"))
+            elif cat == "polaris":
+                components.append(("lakebench-polaris", "Deployment"))
+            engine = cfg.architecture.query_engine.type.value
+            if engine == "trino":
+                components.append(("lakebench-trino-coordinator", "Deployment"))
+                components.append(("lakebench-trino-worker", "StatefulSet"))
+            elif engine == "spark-thrift":
+                components.append(("lakebench-spark-thrift", "Deployment"))
+            elif engine == "duckdb":
+                components.append(("lakebench-duckdb", "Deployment"))
+            if cfg.observability.enabled:
+                components.append(("lakebench-observability-prometheus", "StatefulSet"))
+                components.append(("lakebench-observability-grafana", "Deployment"))
+        else:
+            # Namespace-only mode (no config loaded) -- show all possible components
+            components = [
+                ("lakebench-postgres", "StatefulSet"),
+                ("lakebench-hive-metastore-default", "StatefulSet"),
+                ("lakebench-polaris", "Deployment"),
+                ("lakebench-trino-coordinator", "Deployment"),
+                ("lakebench-trino-worker", "StatefulSet"),
+                ("lakebench-spark-thrift", "Deployment"),
+                ("lakebench-duckdb", "Deployment"),
+                ("lakebench-observability-prometheus", "StatefulSet"),
+                ("lakebench-observability-grafana", "Deployment"),
+            ]
 
         for name, kind in components:
             try:
@@ -788,6 +1007,23 @@ def status(
 
         console.print(table)
 
+        # Check for datagen job status
+        try:
+            batch_v1 = k8s_client.BatchV1Api()
+            job = batch_v1.read_namespaced_job("lakebench-datagen", ns)
+            active = job.status.active or 0
+            succeeded = job.status.succeeded or 0
+            completions = job.spec.completions or 1
+            if active > 0 or succeeded < completions:
+                console.print()
+                console.print(
+                    f"[bold]Datagen:[/bold] {succeeded}/{completions} pods completed, "
+                    f"{active} active"
+                )
+        except k8s_client.rest.ApiException as e:
+            if e.status != 404:
+                logger.debug("Could not check datagen job: %s", e)
+
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -799,6 +1035,14 @@ def deploy(
         Path | None,
         typer.Argument(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
+        ),
+    ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
         ),
     ] = None,
     dry_run: Annotated[
@@ -837,7 +1081,7 @@ def deploy(
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
     try:
@@ -861,11 +1105,13 @@ def deploy(
 
     namespace = cfg.get_namespace()
 
+    # Pre-flight validation (BUG-012)
+    if not dry_run:
+        _preflight_check(cfg)
+
     # Confirmation prompt (mirrors destroy command pattern)
     if not yes and not dry_run:
-        components = "PostgreSQL, Hive, Trino, Spark RBAC"
-        if cfg.observability.enabled:
-            components += ", Observability Stack"
+        components = _build_component_list(cfg)
         console.print(
             Panel(
                 f"Deploying to namespace [bold]{namespace}[/bold]\n\nComponents: {components}",
@@ -884,6 +1130,7 @@ def deploy(
         console.print(Panel(f"Deploying: [bold]{cfg.name}[/bold]", expand=False))
 
     console.print(f"Namespace: {namespace}")
+    console.print(f"Config: {config_file.resolve()}")
     if cfg.observability.enabled:
         console.print("Observability: [green]Prometheus + Grafana[/green]")
     console.print()
@@ -910,25 +1157,20 @@ def deploy(
 
         # Record each component result in journal
         for r in results:
-            try:
-                j.record(
-                    EventType.DEPLOY_COMPONENT,
-                    message=r.message,
-                    success=r.status == DeploymentStatus.SUCCESS,
-                    details={
-                        "component": r.component,
-                        "status": r.status.value,
-                        "elapsed_seconds": r.elapsed_seconds,
-                    },
-                )
-            except Exception:
-                pass
+            _journal_safe(
+                j.record,
+                EventType.DEPLOY_COMPONENT,
+                message=r.message,
+                success=r.status == DeploymentStatus.SUCCESS,
+                details={
+                    "component": r.component,
+                    "status": r.status.value,
+                    "elapsed_seconds": r.elapsed_seconds,
+                },
+            )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
     # Summary
@@ -937,21 +1179,19 @@ def deploy(
     failed = sum(1 for r in results if r.status == DeploymentStatus.FAILED)
     skipped = sum(1 for r in results if r.status == DeploymentStatus.SKIPPED)
 
-    try:
-        j.record(
-            EventType.DEPLOY_COMPLETE,
-            message=f"{passed} succeeded, {failed} failed",
-            success=failed == 0,
-            details={
-                "components_succeeded": passed,
-                "components_failed": failed,
-                "components_skipped": skipped,
-                "dry_run": dry_run,
-            },
-        )
-        j.end_command(success=failed == 0)
-    except Exception:
-        pass
+    _journal_safe(
+        j.record,
+        EventType.DEPLOY_COMPLETE,
+        message=f"{passed} succeeded, {failed} failed",
+        success=failed == 0,
+        details={
+            "components_succeeded": passed,
+            "components_failed": failed,
+            "components_skipped": skipped,
+            "dry_run": dry_run,
+        },
+    )
+    _journal_safe(j.end_command, success=failed == 0)
 
     if failed == 0:
         # Build success message
@@ -997,11 +1237,19 @@ def deploy(
             )
         )
     else:
+        failed_component = next((r for r in results if r.status == DeploymentStatus.FAILED), None)
+        guidance = "Check the errors above, then re-run 'lakebench deploy'."
+        if failed_component:
+            guidance = (
+                f"Failed at: {failed_component.component}\n"
+                "Fix the issue above, then re-run 'lakebench deploy'.\n"
+                "Previously successful steps are idempotent and will be skipped on retry."
+            )
         console.print(
             Panel(
                 f"[red]{failed} failed[/red], {passed} succeeded"
                 + (f", {skipped} skipped" if skipped else "")
-                + "\n\nCheck the errors above and try again",
+                + f"\n\n{guidance}",
                 title="Deployment Failed",
                 expand=False,
             )
@@ -1015,6 +1263,13 @@ def destroy(
         Path | None,
         typer.Argument(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
+        ),
+    ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            help="Path to configuration YAML file (alternative to positional argument)",
         ),
     ] = None,
     force: Annotated[
@@ -1032,7 +1287,7 @@ def destroy(
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
     try:
@@ -1057,11 +1312,7 @@ def destroy(
         console.print(
             Panel(
                 f"[red]WARNING[/red]: This will destroy all Lakebench resources in namespace [bold]{namespace}[/bold]\n\n"
-                f"This includes:\n"
-                f"  - PostgreSQL data\n"
-                f"  - Hive Metastore\n"
-                f"  - Trino cluster\n"
-                f"  - All secrets and configs",
+                f"This includes:\n{_build_destroy_list(cfg)}",
                 title="Confirm Destruction",
                 expand=False,
             )
@@ -1072,6 +1323,7 @@ def destroy(
             raise typer.Exit(0)
 
     console.print(Panel(f"Destroying: [bold]{cfg.name}[/bold]", expand=False))
+    console.print(f"Config: {config_file.resolve()}")
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
@@ -1083,26 +1335,22 @@ def destroy(
             console.print(f"[blue]...[/blue] {message}")
         elif status == DeploymentStatus.SUCCESS:
             print_success(message)
-            try:
-                j.record(
-                    EventType.DESTROY_COMPONENT,
-                    message=message,
-                    success=True,
-                    details={"component": component, "status": "success"},
-                )
-            except Exception:
-                pass
+            _journal_safe(
+                j.record,
+                EventType.DESTROY_COMPONENT,
+                message=message,
+                success=True,
+                details={"component": component, "status": "success"},
+            )
         elif status == DeploymentStatus.FAILED:
             print_error(message)
-            try:
-                j.record(
-                    EventType.DESTROY_COMPONENT,
-                    message=message,
-                    success=False,
-                    details={"component": component, "status": "failed"},
-                )
-            except Exception:
-                pass
+            _journal_safe(
+                j.record,
+                EventType.DESTROY_COMPONENT,
+                message=message,
+                success=False,
+                details={"component": component, "status": "failed"},
+            )
 
     # Destroy
     try:
@@ -1110,10 +1358,7 @@ def destroy(
         results = engine.destroy_all(progress_callback=on_progress)
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
     # Summary
@@ -1121,17 +1366,15 @@ def destroy(
     passed = sum(1 for r in results if r.status == DeploymentStatus.SUCCESS)
     failed = sum(1 for r in results if r.status == DeploymentStatus.FAILED)
 
-    try:
-        j.record(
-            EventType.DESTROY_COMPLETE,
-            message=f"{passed} destroyed, {failed} failed",
-            success=failed == 0,
-            details={"components_destroyed": passed, "components_failed": failed},
-        )
-        j.end_command(success=failed == 0)
-        j.close_session()
-    except Exception:
-        pass
+    _journal_safe(
+        j.record,
+        EventType.DESTROY_COMPLETE,
+        message=f"{passed} destroyed, {failed} failed",
+        success=failed == 0,
+        details={"components_destroyed": passed, "components_failed": failed},
+    )
+    _journal_safe(j.end_command, success=failed == 0)
+    _journal_safe(j.close_session)
 
     if failed == 0:
         console.print(
@@ -1171,6 +1414,13 @@ def clean(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
     force: Annotated[
         bool,
         typer.Option(
@@ -1205,7 +1455,7 @@ def clean(
         print_error(f"Invalid target: '{target}'. Must be one of: {', '.join(CLEAN_TARGETS)}")
         raise typer.Exit(1)
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
     try:
@@ -1273,6 +1523,22 @@ def clean(
     total_deleted = 0
     errors = []
 
+    # Check for active datagen before cleaning S3 buckets
+    if bucket_targets:
+        try:
+            from kubernetes import client as k8s_client
+
+            ns = cfg.get_namespace()
+            batch_v1 = k8s_client.BatchV1Api()
+            job = batch_v1.read_namespaced_job("lakebench-datagen", ns)
+            active_pods = job.status.active or 0
+            if active_pods > 0:
+                print_warning(f"Datagen job has {active_pods} active pod(s)")
+                if not force:
+                    typer.confirm("Data generation is running. Clean anyway?", abort=True)
+        except Exception:
+            pass  # No datagen job or K8s unavailable -- safe to proceed
+
     # Clean S3 buckets
     if bucket_targets:
         try:
@@ -1286,9 +1552,12 @@ def clean(
                 path_style=s3_cfg.path_style,
             )
 
+            def _clean_progress(bkt: str, count: int) -> None:
+                console.print(f"  Deleting from s3://{bkt}/... ({count:,} objects so far)")
+
             for layer, bucket in bucket_targets.items():
                 try:
-                    deleted = s3.empty_bucket(bucket)
+                    deleted = s3.empty_bucket(bucket, progress_callback=_clean_progress)
                     total_deleted += deleted
                     if deleted > 0:
                         print_success(
@@ -1333,22 +1602,20 @@ def clean(
             print_info(f"Journal directory {journal_path}/ does not exist")
 
     # Journal recording
-    try:
-        j.record(
-            EventType.CLEAN_TARGET,
-            message=f"Cleaned {target}: {total_deleted:,} objects",
-            success=len(errors) == 0,
-            details={
-                "target": target,
-                "objects_deleted": total_deleted,
-                "buckets": list(bucket_targets.keys()) if bucket_targets else [],
-            },
-        )
-        j.end_command(success=len(errors) == 0)
-        if target == "data":
-            j.close_session()
-    except Exception:
-        pass
+    _journal_safe(
+        j.record,
+        EventType.CLEAN_TARGET,
+        message=f"Cleaned {target}: {total_deleted:,} objects",
+        success=len(errors) == 0,
+        details={
+            "target": target,
+            "objects_deleted": total_deleted,
+            "buckets": list(bucket_targets.keys()) if bucket_targets else [],
+        },
+    )
+    _journal_safe(j.end_command, success=len(errors) == 0)
+    if target == "data":
+        _journal_safe(j.close_session)
 
     # Summary
     console.print()
@@ -1380,6 +1647,14 @@ def generate(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
     wait: Annotated[
         bool,
         typer.Option(
@@ -1403,6 +1678,14 @@ def generate(
             help="Resume from checkpoint if previous generation was interrupted",
         ),
     ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip confirmation prompt",
+        ),
+    ] = False,
 ) -> None:
     """Generate synthetic data to bronze bucket.
 
@@ -1413,7 +1696,7 @@ def generate(
     """
     from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
     try:
@@ -1440,7 +1723,8 @@ def generate(
             namespace=cfg.get_namespace(),
         )
         cluster_cap = k8s_for_cap.get_cluster_capacity()
-    except Exception:
+    except Exception as e:
+        logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
     resolve_auto_sizing(cfg, cluster_cap)
 
@@ -1457,6 +1741,9 @@ def generate(
             expand=False,
         )
     )
+
+    if not yes:
+        typer.confirm("Start data generation?", default=True, abort=True)
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
@@ -1482,36 +1769,29 @@ def generate(
 
         if result.status != DeploymentStatus.SUCCESS:
             print_error(f"Failed to submit job: {result.message}")
-            try:
-                j.end_command(success=False, message=result.message)
-            except Exception:
-                pass
+            _journal_safe(j.end_command, success=False, message=result.message)
             raise typer.Exit(1)
 
         print_success("Datagen job submitted")
         console.print(f"  Parallelism: {result.details.get('parallelism', '?')} pods")
-        console.print(f"  Target: {result.details.get('target_size_bytes', 0) / (1024**3):.2f} GB")
+        target_tb = float(result.details.get("target_tb", 0))
+        console.print(f"  Target: {target_tb * 1024:.0f} GB")
 
-        try:
-            j.record(
-                EventType.GENERATE_START,
-                message="Data generation started",
-                details={
-                    "scale": dims.scale,
-                    "parallelism": datagen_cfg.parallelism,
-                    "target_gb": round(dims.approx_bronze_gb, 1),
-                    "bucket": cfg.platform.storage.s3.buckets.bronze,
-                },
-            )
-        except Exception:
-            pass
+        _journal_safe(
+            j.record,
+            EventType.GENERATE_START,
+            message="Data generation started",
+            details={
+                "scale": dims.scale,
+                "parallelism": datagen_cfg.parallelism,
+                "target_gb": round(dims.approx_bronze_gb, 1),
+                "bucket": cfg.platform.storage.s3.buckets.bronze,
+            },
+        )
 
         if not wait:
             print_info("Use 'lakebench status' to check progress")
-            try:
-                j.end_command(success=True, message="Job submitted (no-wait)")
-            except Exception:
-                pass
+            _journal_safe(j.end_command, success=True, message="Job submitted (no-wait)")
             return
 
         # Wait for completion with progress bar
@@ -1555,6 +1835,18 @@ def generate(
                     progress_bar.update(task, completed=total_completions)
                     break
 
+                # Surface pod failures early
+                if prog.get("oom_pods"):
+                    progress_bar.stop()
+                    print_error(f"OOMKilled: {', '.join(prog['oom_pods'])}")
+                    print_info("Increase datagen memory or reduce parallelism")
+                    _journal_safe(j.end_command, success=False, message="OOMKilled pods detected")
+                    raise typer.Exit(1)
+                if prog.get("pending_pods"):
+                    progress_bar.console.print(
+                        f"  [yellow]{len(prog['pending_pods'])} pod(s) pending[/yellow]"
+                    )
+
                 succeeded = prog.get("succeeded", 0)
                 progress_bar.update(task, completed=succeeded)
 
@@ -1565,20 +1857,18 @@ def generate(
 
         console.print()
         if completion_result.status == DeploymentStatus.SUCCESS:
-            try:
-                j.record(
-                    EventType.GENERATE_COMPLETE,
-                    message="Data generation complete",
-                    success=True,
-                    details={
-                        "succeeded_pods": completion_result.details.get("succeeded", 0),
-                        "failed_pods": completion_result.details.get("failed", 0),
-                        "elapsed_seconds": completion_result.elapsed_seconds,
-                    },
-                )
-                j.end_command(success=True)
-            except Exception:
-                pass
+            _journal_safe(
+                j.record,
+                EventType.GENERATE_COMPLETE,
+                message="Data generation complete",
+                success=True,
+                details={
+                    "succeeded_pods": completion_result.details.get("succeeded", 0),
+                    "failed_pods": completion_result.details.get("failed", 0),
+                    "elapsed_seconds": completion_result.elapsed_seconds,
+                },
+            )
+            _journal_safe(j.end_command, success=True)
 
             console.print(
                 Panel(
@@ -1591,20 +1881,18 @@ def generate(
                 )
             )
         else:
-            try:
-                j.record(
-                    EventType.GENERATE_COMPLETE,
-                    message=completion_result.message,
-                    success=False,
-                    details={
-                        "succeeded_pods": completion_result.details.get("succeeded", 0),
-                        "failed_pods": completion_result.details.get("failed", 0),
-                        "elapsed_seconds": completion_result.elapsed_seconds,
-                    },
-                )
-                j.end_command(success=False, message=completion_result.message)
-            except Exception:
-                pass
+            _journal_safe(
+                j.record,
+                EventType.GENERATE_COMPLETE,
+                message=completion_result.message,
+                success=False,
+                details={
+                    "succeeded_pods": completion_result.details.get("succeeded", 0),
+                    "failed_pods": completion_result.details.get("failed", 0),
+                    "elapsed_seconds": completion_result.elapsed_seconds,
+                },
+            )
+            _journal_safe(j.end_command, success=False, message=completion_result.message)
 
             console.print(
                 Panel(
@@ -1617,10 +1905,7 @@ def generate(
 
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
 
@@ -1632,6 +1917,14 @@ def run(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
     stage: Annotated[
         str | None,
         typer.Option(
@@ -1641,13 +1934,13 @@ def run(
         ),
     ] = None,
     timeout: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--timeout",
             "-t",
-            help="Timeout per job in seconds",
+            help="Timeout per job in seconds (auto-scaled from data scale if omitted)",
         ),
-    ] = 3600,
+    ] = None,
     skip_benchmark: Annotated[
         bool,
         typer.Option(
@@ -1699,7 +1992,7 @@ def run(
     from lakebench.spark import SparkJobManager, SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import JobState, JobType, get_executor_count, get_job_profile
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     # Load configuration
     try:
@@ -1726,9 +2019,17 @@ def run(
             namespace=cfg.get_namespace(),
         )
         cluster_cap = k8s_for_cap.get_cluster_capacity()
-    except Exception:
+    except Exception as e:
+        logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
     resolve_auto_sizing(cfg, cluster_cap)
+
+    # Auto-scale timeout if not explicitly set
+    if timeout is None:
+        scale = cfg.architecture.workload.datagen.get_effective_scale()
+        timeout = max(3600, scale * 60)
+        if scale >= 50:
+            print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
     # Branch: continuous streaming pipeline
     if continuous:
@@ -1768,11 +2069,19 @@ def run(
         operator = SparkOperatorManager(
             namespace=spark_op_cfg.namespace,
             version=spark_op_cfg.version if spark_op_cfg.install else None,
+            job_namespace=cfg.get_namespace(),
         )
         status = operator.ensure_installed() if spark_op_cfg.install else operator.check_status()
 
         if not status.ready:
             print_error(f"Spark Operator not ready: {status.message}")
+            pipeline_success = False
+            raise typer.Exit(1)
+
+        # Ensure operator watches the target namespace (self-heal if install=true)
+        ns_status = operator.ensure_namespace_watched(can_heal=spark_op_cfg.install)
+        if ns_status.watching_namespace is False:
+            print_error(ns_status.message)
             pipeline_success = False
             raise typer.Exit(1)
 
@@ -1787,9 +2096,12 @@ def run(
         job_manager = SparkJobManager(cfg, k8s)
         monitor = SparkJobMonitor(cfg, k8s)
 
-        # Deploy scripts ConfigMap
+        # Deploy scripts ConfigMap -- must succeed or pipeline jobs will fail
         print_info("Deploying Spark scripts...")
-        job_manager.deploy_scripts_configmap()
+        if not job_manager.deploy_scripts_configmap():
+            print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
+            _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
+            raise typer.Exit(1)
         print_success("Spark scripts deployed")
 
         # Run datagen if requested (full end-to-end measurement)
@@ -1827,8 +2139,8 @@ def run(
                     if dg_info.object_count:
                         # Estimate rows from scale factor (1.5M rows per scale unit)
                         _datagen_output_rows = cfg.architecture.workload.datagen.scale * 1_500_000
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("Could not measure bronze bucket size: %s", e)
             except Exception as e:
                 print_error(f"Datagen failed: {e}")
                 pipeline_success = False
@@ -1881,12 +2193,15 @@ def run(
 
             # Wait for completion -- capture max executor count seen
             _max_executors = 0
+            _last_reported_executors = -1
 
             def on_progress(status):
-                nonlocal _max_executors
+                nonlocal _max_executors, _last_reported_executors
                 if status.state == JobState.RUNNING:
                     _max_executors = max(_max_executors, status.executor_count)
-                    console.print(f"  Running... (executors: {status.executor_count})")
+                    if status.executor_count != _last_reported_executors:
+                        console.print(f"  Running... (executors: {status.executor_count})")
+                        _last_reported_executors = status.executor_count
 
             result = monitor.wait_for_completion(
                 f"lakebench-{stage_name}",
@@ -1990,29 +2305,27 @@ def run(
                     _bucket_info = _s3.get_bucket_size(_stage_bucket_map[stage_name])
                     if _bucket_info.size_bytes:
                         job_metrics.output_size_gb = _bucket_info.size_bytes / (1024**3)
-                except Exception:
-                    pass  # best-effort
+                except Exception as e:
+                    logger.warning("Could not measure %s bucket size: %s", stage_name, e)
 
             collector.record_job(job_metrics)
 
             if result.success:
                 print_success(f"{stage_name} completed in {result.elapsed_seconds:.0f}s")
                 results.append((stage_name, True, result.elapsed_seconds))
-                try:
-                    j.record(
-                        EventType.PIPELINE_STAGE,
-                        message=f"{stage_name} completed",
-                        success=True,
-                        details={
-                            "stage": stage_name,
-                            "success": True,
-                            "elapsed_seconds": result.elapsed_seconds,
-                            "input_gb": job_metrics.input_size_gb,
-                            "output_rows": job_metrics.output_rows,
-                        },
-                    )
-                except Exception:
-                    pass
+                _journal_safe(
+                    j.record,
+                    EventType.PIPELINE_STAGE,
+                    message=f"{stage_name} completed",
+                    success=True,
+                    details={
+                        "stage": stage_name,
+                        "success": True,
+                        "elapsed_seconds": result.elapsed_seconds,
+                        "input_gb": job_metrics.input_size_gb,
+                        "output_rows": job_metrics.output_rows,
+                    },
+                )
             else:
                 print_error(f"{stage_name} failed: {result.message}")
                 if result.driver_logs:
@@ -2020,19 +2333,17 @@ def run(
                     for line in result.driver_logs.split("\n")[-20:]:
                         console.print(f"  {line}")
                 results.append((stage_name, False, result.elapsed_seconds))
-                try:
-                    j.record(
-                        EventType.PIPELINE_STAGE,
-                        message=f"{stage_name} failed: {result.message}",
-                        success=False,
-                        details={
-                            "stage": stage_name,
-                            "success": False,
-                            "elapsed_seconds": result.elapsed_seconds,
-                        },
-                    )
-                except Exception:
-                    pass
+                _journal_safe(
+                    j.record,
+                    EventType.PIPELINE_STAGE,
+                    message=f"{stage_name} failed: {result.message}",
+                    success=False,
+                    details={
+                        "stage": stage_name,
+                        "success": False,
+                        "elapsed_seconds": result.elapsed_seconds,
+                    },
+                )
                 pipeline_success = False
                 raise typer.Exit(1)
 
@@ -2040,22 +2351,20 @@ def run(
         console.print()
         total_time = sum(r[2] for r in results)
 
-        try:
-            stages_succeeded = sum(1 for _, ok, _ in results if ok)
-            stages_failed = sum(1 for _, ok, _ in results if not ok)
-            j.record(
-                EventType.PIPELINE_COMPLETE,
-                message=f"Pipeline complete: {stages_succeeded} stages succeeded",
-                success=stages_failed == 0,
-                details={
-                    "run_id": run_id,
-                    "stages_succeeded": stages_succeeded,
-                    "stages_failed": stages_failed,
-                    "total_seconds": total_time,
-                },
-            )
-        except Exception:
-            pass
+        stages_succeeded = sum(1 for _, ok, _ in results if ok)
+        stages_failed = sum(1 for _, ok, _ in results if not ok)
+        _journal_safe(
+            j.record,
+            EventType.PIPELINE_COMPLETE,
+            message=f"Pipeline complete: {stages_succeeded} stages succeeded",
+            success=stages_failed == 0,
+            details={
+                "run_id": run_id,
+                "stages_succeeded": stages_succeeded,
+                "stages_failed": stages_failed,
+                "total_seconds": total_time,
+            },
+        )
 
         # Run Trino benchmark after pipeline completes
         benchmark_qph = None
@@ -2068,14 +2377,12 @@ def run(
                 console.print("[bold]Stage: benchmark[/bold]")
                 print_info("Running query benchmark (hot cache, power)...")
 
-                try:
-                    j.record(
-                        EventType.BENCHMARK_START,
-                        message="Benchmark started",
-                        details={"mode": "power", "cache": "hot"},
-                    )
-                except Exception:
-                    pass
+                _journal_safe(
+                    j.record,
+                    EventType.BENCHMARK_START,
+                    message="Benchmark started",
+                    details={"mode": "power", "cache": "hot"},
+                )
 
                 bench_runner = BenchmarkRunner(cfg)
                 bench_result = bench_runner.run_power(cache="hot")
@@ -2105,20 +2412,18 @@ def run(
                 )
                 collector.record_benchmark(bench_metrics)
 
-                try:
-                    j.record(
-                        EventType.BENCHMARK_COMPLETE,
-                        message=f"Benchmark complete: QpH={bench_result.qph:.1f}",
-                        success=True,
-                        details={
-                            "qph": round(bench_result.qph, 1),
-                            "total_seconds": round(bench_result.total_seconds, 2),
-                            "queries_passed": sum(1 for q in bench_result.queries if q.success),
-                            "queries_total": len(bench_result.queries),
-                        },
-                    )
-                except Exception:
-                    pass
+                _journal_safe(
+                    j.record,
+                    EventType.BENCHMARK_COMPLETE,
+                    message=f"Benchmark complete: QpH={bench_result.qph:.1f}",
+                    success=True,
+                    details={
+                        "qph": round(bench_result.qph, 1),
+                        "total_seconds": round(bench_result.total_seconds, 2),
+                        "queries_passed": sum(1 for q in bench_result.queries if q.success),
+                        "queries_total": len(bench_result.queries),
+                    },
+                )
 
             except Exception as e:
                 print_warning(f"Benchmark failed: {e}")
@@ -2144,10 +2449,7 @@ def run(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
     finally:
         # Measure actual S3 bucket sizes before saving metrics
@@ -2210,19 +2512,14 @@ def run(
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
 
-            try:
-                j.record(
-                    EventType.METRICS_SAVED,
-                    message=f"Metrics saved for run {run_id}",
-                    details={"run_id": run_id, "metrics_path": str(metrics_path)},
-                )
-            except Exception:
-                pass
+            _journal_safe(
+                j.record,
+                EventType.METRICS_SAVED,
+                message=f"Metrics saved for run {run_id}",
+                details={"run_id": run_id, "metrics_path": str(metrics_path)},
+            )
 
-        try:
-            j.end_command(success=pipeline_success)
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=pipeline_success)
 
 
 def _run_continuous(
@@ -2283,12 +2580,21 @@ def _run_continuous(
         operator = SparkOperatorManager(
             namespace=spark_op_cfg.namespace,
             version=spark_op_cfg.version if spark_op_cfg.install else None,
+            job_namespace=cfg.get_namespace(),
         )
         status = operator.ensure_installed() if spark_op_cfg.install else operator.check_status()
         if not status.ready:
             print_error(f"Spark Operator not ready: {status.message}")
             pipeline_success = False
             raise typer.Exit(1)
+
+        # Ensure operator watches the target namespace (self-heal if install=true)
+        ns_status = operator.ensure_namespace_watched(can_heal=spark_op_cfg.install)
+        if ns_status.watching_namespace is False:
+            print_error(ns_status.message)
+            pipeline_success = False
+            raise typer.Exit(1)
+
         print_success(f"Spark Operator ready (version: {status.version or 'unknown'})")
 
         k8s = get_k8s_client(
@@ -2298,9 +2604,12 @@ def _run_continuous(
         job_manager = SparkJobManager(cfg, k8s)
         monitor = SparkJobMonitor(cfg, k8s)
 
-        # Deploy scripts ConfigMap (includes streaming scripts)
+        # Deploy scripts ConfigMap (includes streaming scripts) -- must succeed
         print_info("Deploying Spark scripts...")
-        job_manager.deploy_scripts_configmap()
+        if not job_manager.deploy_scripts_configmap():
+            print_error("Failed to deploy Spark scripts ConfigMap -- pipeline cannot proceed")
+            _journal_safe(j.end_command, success=False, message="Scripts ConfigMap deploy failed")
+            raise typer.Exit(1)
         print_success("Spark scripts deployed")
 
         # Start datagen (runs concurrently with streaming jobs)
@@ -2317,31 +2626,27 @@ def _run_continuous(
         dims = cfg.get_scale_dimensions()
         console.print(f"  Scale: {dims.scale} (~{dims.approx_bronze_gb:.0f} GB)")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
-        try:
-            j.record(
-                EventType.GENERATE_START,
-                message="Datagen started for continuous pipeline",
-                details={
-                    "scale": dims.scale,
-                    "parallelism": cfg.architecture.workload.datagen.parallelism,
-                    "target_gb": round(dims.approx_bronze_gb, 1),
-                },
-            )
-        except Exception:
-            pass
+        _journal_safe(
+            j.record,
+            EventType.GENERATE_START,
+            message="Datagen started for continuous pipeline",
+            details={
+                "scale": dims.scale,
+                "parallelism": cfg.architecture.workload.datagen.parallelism,
+                "target_gb": round(dims.approx_bronze_gb, 1),
+            },
+        )
 
         # Launch all streaming jobs concurrently
         console.print()
         console.print("[bold]Launching streaming jobs...[/bold]")
 
-        try:
-            j.record(
-                EventType.STREAMING_START,
-                message="Starting streaming pipeline",
-                details={"jobs": [name for _, name in streaming_jobs]},
-            )
-        except Exception:
-            pass
+        _journal_safe(
+            j.record,
+            EventType.STREAMING_START,
+            message="Starting streaming pipeline",
+            details={"jobs": [name for _, name in streaming_jobs]},
+        )
 
         submitted = []
         for job_type, job_name in streaming_jobs:
@@ -2374,14 +2679,12 @@ def _run_continuous(
                 f"Streaming jobs running... ({remaining:.0f}s remaining)"
             )
 
-            try:
-                j.record(
-                    EventType.STREAMING_HEALTH,
-                    message="Health check",
-                    details={"elapsed_seconds": elapsed, "remaining_seconds": remaining},
-                )
-            except Exception:
-                pass
+            _journal_safe(
+                j.record,
+                EventType.STREAMING_HEALTH,
+                message="Health check",
+                details={"elapsed_seconds": elapsed, "remaining_seconds": remaining},
+            )
 
         # Measure bronze bucket for datagen stats (datagen runs concurrently,
         # so we measure after the monitoring window to capture all output)
@@ -2401,8 +2704,8 @@ def _run_continuous(
                 _datagen_output_gb = dg_info.size_bytes / (1024**3)
             if dg_info.object_count:
                 _datagen_output_rows = cfg.architecture.workload.datagen.scale * 1_500_000
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Could not measure streaming bronze bucket size: %s", e)
 
         # Capture driver logs BEFORE stopping jobs (pods are deleted on stop)
         console.print()
@@ -2449,14 +2752,12 @@ def _run_continuous(
             except Exception as e:
                 print_warning(f"Could not stop {job_name}: {e}")
 
-        try:
-            j.record(
-                EventType.STREAMING_STOP,
-                message="Streaming pipeline stopped",
-                details={"duration_seconds": run_duration},
-            )
-        except Exception:
-            pass
+        _journal_safe(
+            j.record,
+            EventType.STREAMING_STOP,
+            message="Streaming pipeline stopped",
+            details={"duration_seconds": run_duration},
+        )
 
         # Record streaming metrics (from pre-captured driver logs)
         console.print()
@@ -2556,10 +2857,7 @@ def _run_continuous(
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         pipeline_success = False
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
     finally:
         # Measure actual S3 bucket sizes before saving metrics
@@ -2620,10 +2918,7 @@ def _run_continuous(
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
 
-        try:
-            j.end_command(success=pipeline_success)
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=pipeline_success)
 
 
 @app.command()
@@ -2634,6 +2929,14 @@ def stop(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
 ) -> None:
     """Stop running streaming jobs.
 
@@ -2641,7 +2944,7 @@ def stop(
     gold-refresh) from the cluster.
     """
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
     try:
         cfg = load_config(config_file)
     except ConfigError as e:
@@ -2686,15 +2989,13 @@ def stop(
     else:
         print_info("No streaming jobs were running")
 
-    try:
-        j.record(
-            EventType.STREAMING_STOP,
-            message=f"Stopped {stopped} streaming jobs",
-            details={"stopped": stopped},
-        )
-        j.end_command(success=True)
-    except Exception:
-        pass
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_STOP,
+        message=f"Stopped {stopped} streaming jobs",
+        details={"stopped": stopped},
+    )
+    _journal_safe(j.end_command, success=True)
 
 
 @app.command()
@@ -2705,6 +3006,14 @@ def info(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
 ) -> None:
     """Show configuration summary with scale dimensions and compute guidance.
 
@@ -2712,7 +3021,7 @@ def info(
     schema, scale factor, derived dimensions, compute guidance,
     catalog, table format, and query engine.
     """
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
     try:
         cfg = load_config(config_file)
     except ConfigError as e:
@@ -2849,8 +3158,8 @@ def info(
                 f"  [red]Cluster undersized:[/red] {cluster_cores} cores available, {needed_cores} needed"
             )
             console.print("  [dim]Run 'lakebench recommend' to find max feasible scale[/dim]")
-    except Exception:
-        pass  # Can't check cluster, skip
+    except Exception as e:
+        logger.debug("Could not check cluster feasibility: %s", e)
 
 
 # =============================================================================
@@ -3055,6 +3364,14 @@ def query(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
     sql: Annotated[
         str | None,
         typer.Option(
@@ -3133,7 +3450,7 @@ def query(
 
     from lakebench.metrics import QueryMetrics
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     # Validate mutually exclusive options
     sources = sum(1 for x in [sql, example, file, interactive] if x)
@@ -3215,28 +3532,19 @@ def query(
         executor = get_executor(cfg, namespace)
     except ValueError as e:
         print_error(str(e))
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
     try:
         result = executor.execute_query(sql, timeout=query_timeout)
     except FileNotFoundError:
         print_error("kubectl not found on PATH")
-        try:
-            j.end_command(success=False, message="kubectl not found")
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message="kubectl not found")
         raise typer.Exit(1)  # noqa: B904
     except RuntimeError as e:
         print_error(str(e))
         print_info("Is the query engine deployed? Run: lakebench status")
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
     elapsed = result.duration_seconds
@@ -3245,20 +3553,18 @@ def query(
         print_error(f"Query failed ({elapsed:.2f}s)")
         if result.error:
             console.print(f"[red]{result.error}[/red]")
-        try:
-            j.record(
-                EventType.QUERY_EXECUTED,
-                message=f"Query '{query_name}' failed",
-                success=False,
-                details={
-                    "query_name": query_name,
-                    "elapsed_seconds": round(elapsed, 3),
-                    "success": False,
-                },
-            )
-            j.end_command(success=False, message="Query failed")
-        except Exception:
-            pass
+        _journal_safe(
+            j.record,
+            EventType.QUERY_EXECUTED,
+            message=f"Query '{query_name}' failed",
+            success=False,
+            details={
+                "query_name": query_name,
+                "elapsed_seconds": round(elapsed, 3),
+                "success": False,
+            },
+        )
+        _journal_safe(j.end_command, success=False, message="Query failed")
         raise typer.Exit(1)
 
     # Parse and display results
@@ -3270,7 +3576,15 @@ def query(
         if output_format == "json":
             import json
 
-            data = [row.split("\t") for row in rows]
+            parsed = [row.split("\t") for row in rows if row.strip()]
+            if len(parsed) > 1:
+                headers = [h.strip().strip('"') for h in parsed[0]]
+                data = [
+                    dict(zip(headers, [v.strip().strip('"') for v in r], strict=False))
+                    for r in parsed[1:]
+                ]
+            else:
+                data = parsed
             console.print(json.dumps({"rows": data, "count": len(data)}, indent=2))
         elif output_format == "csv":
             import csv
@@ -3279,7 +3593,8 @@ def query(
             buf = io.StringIO()
             writer = csv.writer(buf)
             for row in rows:
-                writer.writerow(row.split("\t"))
+                if row.strip():
+                    writer.writerow([c.strip().strip('"') for c in row.split("\t")])
             console.print(buf.getvalue().strip())
         else:  # table (default)
             console.print()
@@ -3290,21 +3605,19 @@ def query(
 
     console.print(f"\n[green]{row_count} rows in {elapsed:.2f}s[/green]")
 
-    try:
-        j.record(
-            EventType.QUERY_EXECUTED,
-            message=f"Query '{query_name}' returned {row_count} rows in {elapsed:.2f}s",
-            success=True,
-            details={
-                "query_name": query_name,
-                "elapsed_seconds": round(elapsed, 3),
-                "rows": row_count,
-                "success": True,
-            },
-        )
-        j.end_command(success=True)
-    except Exception:
-        pass
+    _journal_safe(
+        j.record,
+        EventType.QUERY_EXECUTED,
+        message=f"Query '{query_name}' returned {row_count} rows in {elapsed:.2f}s",
+        success=True,
+        details={
+            "query_name": query_name,
+            "elapsed_seconds": round(elapsed, 3),
+            "rows": row_count,
+            "success": True,
+        },
+    )
+    _journal_safe(j.end_command, success=True)
 
     # Record query metrics
     query_metrics = QueryMetrics(
@@ -3332,6 +3645,14 @@ def benchmark(
         Path | None,
         typer.Argument(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
+        ),
+    ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            "-f",
+            help="Path to configuration YAML file (alternative to positional argument)",
         ),
     ] = None,
     mode: Annotated[
@@ -3404,7 +3725,7 @@ def benchmark(
     from lakebench.benchmark import BenchmarkRunner
     from lakebench.metrics import BenchmarkMetrics, MetricsStorage
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     try:
         cfg = load_config(config_file)
@@ -3448,14 +3769,12 @@ def benchmark(
         },
     )
 
-    try:
-        j.record(
-            EventType.BENCHMARK_START,
-            message="Benchmark started",
-            details={"mode": effective_mode, "cache": effective_cache, "scale": scale},
-        )
-    except Exception:
-        pass
+    _journal_safe(
+        j.record,
+        EventType.BENCHMARK_START,
+        message="Benchmark started",
+        details={"mode": effective_mode, "cache": effective_cache, "scale": scale},
+    )
 
     try:
         runner = BenchmarkRunner(cfg)
@@ -3468,10 +3787,7 @@ def benchmark(
         )
     except RuntimeError as e:
         print_error(str(e))
-        try:
-            j.end_command(success=False, message=str(e))
-        except Exception:
-            pass
+        _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
     # Handle composite (returns tuple) vs single result
@@ -3511,23 +3827,21 @@ def benchmark(
         storage.save_run(latest_run)
         print_info(f"Benchmark metrics appended to run {latest_run.run_id}")
 
-    try:
-        j.record(
-            EventType.BENCHMARK_COMPLETE,
-            message=f"Benchmark complete: QpH={primary_result.qph:.1f}",
-            success=True,
-            details={
-                "mode": primary_result.mode,
-                "qph": round(primary_result.qph, 1),
-                "total_seconds": round(primary_result.total_seconds, 2),
-                "queries_passed": sum(1 for q in primary_result.queries if q.success),
-                "queries_total": len(primary_result.queries),
-                "streams": primary_result.streams,
-            },
-        )
-        j.end_command(success=True)
-    except Exception:
-        pass
+    _journal_safe(
+        j.record,
+        EventType.BENCHMARK_COMPLETE,
+        message=f"Benchmark complete: QpH={primary_result.qph:.1f}",
+        success=True,
+        details={
+            "mode": primary_result.mode,
+            "qph": round(primary_result.qph, 1),
+            "total_seconds": round(primary_result.total_seconds, 2),
+            "queries_passed": sum(1 for q in primary_result.queries if q.success),
+            "queries_total": len(primary_result.queries),
+            "streams": primary_result.streams,
+        },
+    )
+    _journal_safe(j.end_command, success=True)
 
 
 def _display_power_results(result: Any) -> None:
@@ -3801,6 +4115,13 @@ def logs(
             help="Path to configuration YAML file (default: ./lakebench.yaml)",
         ),
     ] = None,
+    file_option: Annotated[
+        Path | None,
+        typer.Option(
+            "--file",
+            help="Path to configuration YAML file (alternative to positional argument)",
+        ),
+    ] = None,
     follow: Annotated[
         bool,
         typer.Option(
@@ -3838,7 +4159,7 @@ def logs(
         print_info(f"Valid components: {', '.join(COMPONENT_SELECTORS.keys())}")
         raise typer.Exit(1)
 
-    config_file = resolve_config_path(config_file)
+    config_file = resolve_config_path(config_file, file_option)
 
     try:
         cfg = load_config(config_file)
@@ -3880,7 +4201,7 @@ def logs(
             try:
                 if process.stdout:
                     for line in iter(process.stdout.readline, ""):
-                        console.print(line, end="")
+                        console.print(_strip_ansi(line), end="")
             except KeyboardInterrupt:
                 process.terminate()
                 print_info("\nLog streaming stopped")
@@ -3901,7 +4222,7 @@ def logs(
                 return
 
             if result.stdout:
-                console.print(result.stdout)
+                console.print(_strip_ansi(result.stdout))
             else:
                 print_warning(f"No logs available for {component}")
 

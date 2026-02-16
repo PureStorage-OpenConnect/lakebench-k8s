@@ -88,10 +88,16 @@ class ObservabilityDeployer:
 
             if result.returncode != 0:
                 error = result.stderr.strip()[:300] if result.stderr else "Unknown error"
+                recovery = (
+                    f"\nRecovery:\n"
+                    f"  helm status {HELM_RELEASE_NAME} -n {namespace}\n"
+                    f"  helm uninstall {HELM_RELEASE_NAME} -n {namespace}\n"
+                    f"  lakebench deploy  # retry"
+                )
                 return DeploymentResult(
                     component="observability",
                     status=DeploymentStatus.FAILED,
-                    message=f"Helm install failed: {error}",
+                    message=f"Helm install failed: {error}{recovery}",
                     elapsed_seconds=time.time() - start,
                 )
 

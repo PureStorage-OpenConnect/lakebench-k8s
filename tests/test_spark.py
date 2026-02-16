@@ -895,3 +895,262 @@ class TestStreamingThroughputEnvVars:
         assert bronze_env["TARGET_FILE_SIZE_BYTES"] == str(512 * 1024 * 1024)
         assert silver_env["TARGET_FILE_SIZE_BYTES"] == str(512 * 1024 * 1024)
         assert gold_env["TARGET_FILE_SIZE_BYTES"] == str(128 * 1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# Spark Operator Namespace Watching
+# ---------------------------------------------------------------------------
+
+
+class TestSparkOperatorNamespaceWatching:
+    """Tests for Spark Operator namespace watching detection and self-healing."""
+
+    def test_operator_status_backward_compatible(self):
+        """OperatorStatus can be constructed without the new fields."""
+        from lakebench.spark.operator import OperatorStatus
+
+        status = OperatorStatus(
+            installed=True,
+            version="2.4.0",
+            namespace="spark-operator",
+            ready=True,
+            message="OK",
+        )
+        assert status.watching_namespace is None
+        assert status.watched_namespaces is None
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_get_watched_namespaces_returns_list(self, mock_run):
+        """When helm returns explicit namespaces, returns them as a list."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"spark":{"jobNamespaces":["default","lakebench-test"]}}',
+        )
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        result = mgr._get_watched_namespaces()
+        assert result == ["default", "lakebench-test"]
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_get_watched_namespaces_empty_means_all(self, mock_run):
+        """When jobNamespaces is empty list, returns None (watches all)."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"spark":{"jobNamespaces":[]}}',
+        )
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        result = mgr._get_watched_namespaces()
+        assert result is None
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_get_watched_namespaces_not_set_means_all(self, mock_run):
+        """When spark.jobNamespaces key is missing, returns None (watches all)."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"webhook":{"enable":true}}',
+        )
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        result = mgr._get_watched_namespaces()
+        assert result is None
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_get_watched_namespaces_empty_string_means_all(self, mock_run):
+        """When jobNamespaces is empty string, returns None (watches all)."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout='{"spark":{"jobNamespaces":""}}',
+        )
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        result = mgr._get_watched_namespaces()
+        assert result is None
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_get_watched_namespaces_helm_failure(self, mock_run):
+        """When helm fails, returns empty list (unknown)."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.return_value = MagicMock(
+            returncode=1,
+            stdout="",
+            stderr="Error: release not found",
+        )
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        result = mgr._get_watched_namespaces()
+        assert result == []
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_check_status_watching_namespace_true(self, mock_run):
+        """check_status sets watching_namespace=True when namespace is in list."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.side_effect = [
+            # CRD check
+            MagicMock(returncode=0, stdout="sparkapplications"),
+            # Deployment list
+            MagicMock(
+                returncode=0,
+                stdout="NAMESPACE       NAME\nspark-operator  spark-op-ctrl",
+            ),
+            # Ready replicas
+            MagicMock(returncode=0, stdout="1"),
+            # Helm version (helm list)
+            MagicMock(
+                returncode=0,
+                stdout='[{"chart":"spark-operator-2.4.0"}]',
+            ),
+            # Helm get values (for _get_watched_namespaces)
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["lakebench-test"]}}',
+            ),
+        ]
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        status = mgr.check_status()
+        assert status.ready is True
+        assert status.watching_namespace is True
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_check_status_watching_namespace_false(self, mock_run):
+        """check_status sets watching_namespace=False when namespace is NOT in list."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="sparkapplications"),
+            MagicMock(
+                returncode=0,
+                stdout="NAMESPACE       NAME\nspark-operator  spark-op-ctrl",
+            ),
+            MagicMock(returncode=0, stdout="1"),
+            MagicMock(
+                returncode=0,
+                stdout='[{"chart":"spark-operator-2.4.0"}]',
+            ),
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["default"]}}',
+            ),
+        ]
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        status = mgr.check_status()
+        assert status.ready is True
+        assert status.watching_namespace is False
+        assert "does NOT watch" in status.message
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_check_status_watches_all_namespaces(self, mock_run):
+        """check_status sets watching_namespace=True when operator watches all."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="sparkapplications"),
+            MagicMock(
+                returncode=0,
+                stdout="NAMESPACE       NAME\nspark-operator  spark-op-ctrl",
+            ),
+            MagicMock(returncode=0, stdout="1"),
+            MagicMock(
+                returncode=0,
+                stdout='[{"chart":"spark-operator-2.4.0"}]',
+            ),
+            # Empty jobNamespaces = watches all
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":[]}}',
+            ),
+        ]
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        status = mgr.check_status()
+        assert status.ready is True
+        assert status.watching_namespace is True
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_ensure_namespace_watched_provides_fix_command(self, mock_run):
+        """When can_heal=False, message contains the exact helm fix command."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        # check_status() returns watching_namespace=False
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="sparkapplications"),
+            MagicMock(
+                returncode=0,
+                stdout="NAMESPACE       NAME\nspark-operator  spark-op-ctrl",
+            ),
+            MagicMock(returncode=0, stdout="1"),
+            MagicMock(
+                returncode=0,
+                stdout='[{"chart":"spark-operator-2.4.0"}]',
+            ),
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
+            ),
+        ]
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        status = mgr.ensure_namespace_watched(can_heal=False)
+        assert status.watching_namespace is False
+        assert "helm upgrade" in status.message
+        assert "lakebench-test" in status.message
+        assert "lakebench,lakebench-test" in status.message
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_ensure_namespace_watched_self_heals(self, mock_run):
+        """When can_heal=True, adds namespace via helm upgrade."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        # First batch: check_status() returns watching_namespace=False
+        # Then: _add_namespace_to_watch() calls _get_watched_namespaces + helm upgrade
+        # Then: re-check_status() returns watching_namespace=True
+        mock_run.side_effect = [
+            # check_status() -- CRD, deployment, ready, helm version, helm values
+            MagicMock(returncode=0, stdout="sparkapplications"),
+            MagicMock(
+                returncode=0,
+                stdout="NAMESPACE       NAME\nspark-operator  spark-op-ctrl",
+            ),
+            MagicMock(returncode=0, stdout="1"),
+            MagicMock(
+                returncode=0,
+                stdout='[{"chart":"spark-operator-2.4.0"}]',
+            ),
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
+            ),
+            # _add_namespace_to_watch: _get_watched_namespaces
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
+            ),
+            # _add_namespace_to_watch: helm upgrade
+            MagicMock(returncode=0, stdout="Release updated"),
+            # _is_openshift check (returncode=1 -> not OpenShift)
+            MagicMock(returncode=1, stdout=""),
+            # _restart_operator: rollout restart + rollout status
+            MagicMock(returncode=0, stdout="deployment restarted"),
+            MagicMock(returncode=0, stdout="successfully rolled out"),
+            # re-check_status() -- CRD, deployment, ready, helm version, helm values
+            MagicMock(returncode=0, stdout="sparkapplications"),
+            MagicMock(
+                returncode=0,
+                stdout="NAMESPACE       NAME\nspark-operator  spark-op-ctrl",
+            ),
+            MagicMock(returncode=0, stdout="1"),
+            MagicMock(
+                returncode=0,
+                stdout='[{"chart":"spark-operator-2.4.0"}]',
+            ),
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["lakebench","lakebench-test"]}}',
+            ),
+        ]
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        status = mgr.ensure_namespace_watched(can_heal=True)
+        assert status.watching_namespace is True

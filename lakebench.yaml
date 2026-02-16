@@ -1,62 +1,274 @@
-# Lakebench example configuration
+# Lakebench Configuration
+# ========================
+# This file defines your lakehouse deployment configuration.
+# Only the fields you MUST set are uncommented. Everything else shows
+# available options with their defaults -- uncomment and modify as needed.
 #
-# Only `name` and S3 credentials are required. Everything else has defaults.
-# Use `recipe:` for quick setup, or set architecture fields individually.
-#
-# Recipes: hive-iceberg-trino (default), hive-iceberg-spark,
-#          hive-iceberg-none, hive-delta-trino, hive-delta-none,
-#          polaris-iceberg-trino, polaris-iceberg-spark, polaris-iceberg-none
-name: my-lakehouse
+# Full reference: docs/configuration.md
+# Recipe guide:   docs/recipes.md
 
-# Optional: set a recipe to auto-configure catalog + table format + query engine
-# recipe: hive-iceberg-trino
+# REQUIRED: Unique name for this deployment (also used as K8s namespace)
+name: lakehouse
 
+# Optional description
+# description: "My Lakebench lakehouse deployment"
+
+# Config schema version (always 1)
+# version: 1
+
+# ============================================================================
+# IMAGES
+# ============================================================================
+# Container images for all components. Override for private registries.
 images:
-  datagen: lakebench/datagen:latest
-  # spark: apache/spark:3.5.4-python3    # default
-  # postgres: postgres:17                 # default
-  pull_policy: IfNotPresent
+  datagen: docker.io/sillidata/lb-datagen:v2
+#   spark: apache/spark:3.5.4-python3
+#   postgres: postgres:17
+#   hive: apache/hive:3.1.3
+#   trino: trinodb/trino:479
+#   polaris: apache/polaris:1.3.0-incubating
+#   prometheus: prom/prometheus:v2.48.0
+#   grafana: grafana/grafana:10.2.0
+#   pull_policy: IfNotPresent        # Always | IfNotPresent | Never
+#   pull_secrets:                     # List of K8s imagePullSecret names
+#     - my-registry-secret
 
+# ============================================================================
+# LAYER 1: PLATFORM
+# ============================================================================
 platform:
   kubernetes:
-    namespace: ""                         # empty = use deployment name
-    create_namespace: true
+    # context: ""                    # Empty = use current kubectl context
+    namespace: "lakebench"                    # Empty = use deployment name
+    # create_namespace: true
 
   storage:
     s3:
-      endpoint: http://your-s3-endpoint:80
+      # REQUIRED: S3-compatible endpoint URL
+      # Examples:
+      #   FlashBlade: http://your-s3-endpoint:80
+      #   MinIO: http://minio:9000
+      #   AWS S3: https://s3.us-east-1.amazonaws.com
+      endpoint: http://10.21.221.41:80
+
+      # REQUIRED: S3 credentials (either inline or secret_ref)
+      access_key: PSFBSAZRLFCOEAGDPPGGAAIMOOAAKJEPMOGLBBIDDH
+      secret_key: 765D11B6Ecf49a00e+9c65/AA19CC9E82a19dc1MIFK
+      # secret_ref: ""               # OR: name of existing K8s Secret
+
       region: us-east-1
-      path_style: true
-      access_key: YOUR_ACCESS_KEY
-      secret_key: YOUR_SECRET_KEY
+      path_style: true             # true for FlashBlade/MinIO, false for AWS S3
       buckets:
-        bronze: lakebench-bronze
-        silver: lakebench-silver
-        gold: lakebench-gold
+        bronze: lb-bronze
+        silver: lb-silver
+        gold: lb-gold
+      # create_buckets: true
+
+    ## Scratch storage for Spark shuffle PVCs (Portworx / local-path)
     scratch:
-      enabled: false
-      storage_class: px-csi-scratch
+      enabled: true
+      storage_class: px-csi-scratch  # repl=1 recommended for shuffle data
       size: 100Gi
+      create_storage_class: true
 
   compute:
+    spark:
+      driver:
+        cores: 8
+        memory: 16g
+
+      # 30 executors x 8 cores = 240 cores (fits 316-core cluster with Trino overhead)
+      executor:
+        instances: 30
+        cores: 8
+        memory: 32g
+        memory_overhead: 8g
+
     postgres:
-      storage: 10Gi
-      storage_class: ""
+      storage: 100Gi
+      storage_class: px-csi-db
 
+# ============================================================================
+# LAYER 2: DATA ARCHITECTURE
+# ============================================================================
+# See docs/recipes.md for supported (catalog, table_format, query_engine)
+# combinations and guidance on choosing a recipe.
 architecture:
-  # These are set automatically when using `recipe:`. Set them individually
-  # to override or when not using a recipe.
-  # catalog:
-  #   type: hive                          # hive | polaris
-  # table_format:
-  #   type: iceberg                       # iceberg | delta
-  # query_engine:
-  #   type: trino                         # trino | spark-thrift | none
+  catalog:
+    type: hive                     # hive | polaris | none
+    ## Hive Metastore tuning (uncomment to override defaults)
+    # hive:
+    #   thrift:
+    #     min_threads: 10
+    #     max_threads: 50
+    #     client_timeout: 300s
+    #   resources:
+    #     cpu_min: 500m
+    #     cpu_max: "2"
+    #     memory: 4Gi
+    ## Polaris REST catalog settings (used when type: polaris)
+    # polaris:
+    #   version: 1.3.0-incubating    # Min 1.3.0 for FlashBlade/MinIO
+    #   port: 8181
+    #   resources:
+    #     cpu: "1"
+    #     memory: 2Gi
 
-  pipeline:
-    pattern: medallion                    # medallion | streaming | batch
+  # table_format:
+  #   type: iceberg                  # iceberg (only fully supported format)
+  #   iceberg:
+  #     version: "1.10.1"
+  #     file_format: parquet         # parquet | orc | avro
+  #     properties: {}               # Additional Iceberg table properties
+
+  query_engine:
+    type: trino                    # trino | spark-thrift | none
+    trino:
+      coordinator:
+        cpu: "4"
+        memory: 16Gi
+      worker:
+        replicas: 4
+        cpu: "8"
+        memory: 32Gi
+        spill_enabled: true
+        spill_max_per_node: 40Gi
+        storage: 50Gi
+        storage_class: "px-csi-scratch"          # Empty = cluster default
+      catalog_name: lakehouse      # Trino catalog name for Iceberg
+  #   ## Spark Thrift Server (alternative to Trino)
+  #   # spark_thrift:
+  #   #   cores: 2
+  #   #   memory: 4g
+
+  # pipeline:
+  #   pattern: medallion             # medallion | streaming | batch
+  #   ## Medallion layer configuration
+  #   medallion:
+  #     bronze:
+  #       format: parquet
+  #       path_template: customer/interactions
+  #     silver:
+  #       format: iceberg
+  #       table_name: customer_interactions_enriched
+  #       partition_by:
+  #         - date
+  #       transforms:
+  #         - normalize_email
+  #         - normalize_phone
+  #         - geo_enrichment
+  #         - customer_segmentation
+  #         - quality_flags
+  #     gold:
+  #       format: iceberg
+  #       tables:
+  #         - name: customer_executive_dashboard
+  #           partition_by: [date]
+  #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
+  #   ## Continuous/streaming settings (used with `lakebench run --continuous`)
+  #   continuous:
+  #     bronze_trigger_interval: "30 seconds"
+  #     silver_trigger_interval: "60 seconds"
+  #     gold_refresh_interval: "5 minutes"
+  #     run_duration: 1800           # Streaming run duration in seconds
+  #     checkpoint_base: checkpoints # S3 prefix for checkpoint data
+  #     ## Throughput tuning
+  #     max_files_per_trigger: 50    # Max Parquet files per micro-batch
+  #     bronze_target_file_size_mb: 512
+  #     silver_target_file_size_mb: 512
+  #     gold_target_file_size_mb: 128
 
   workload:
+    # schema: customer360            # customer360 | iot | financial
     datagen:
-      scale: 1                            # 1 unit ~ 10 GB bronze
-      file_size: 512mb
+      scale: 100                   # 1 unit ~ 10 GB bronze (100 = ~1 TB)
+      mode: continuous              # auto | batch | continuous
+      parallelism: 30              # 30 pods x 8 CPU = 240 cores
+      # cpu and memory are hard-locked by mode (continuous: 8 CPU, 20Gi)
+      # file_size: 512mb
+      # dirty_data_ratio: 0.08
+      # generators: 0                # Per-pod generator processes (0 = auto)
+      # uploaders: 0                 # Per-pod uploader threads (0 = auto)
+      # timestamp_start: "2024-01-01"
+      # timestamp_end: "2025-12-31"
+      # checkpoint:
+      #   enabled: true
+      #   path: .lakebench_checkpoint.json
+    ## Customer360 workload overrides
+    # customer360:
+    #   unique_customers: null       # Override: derived from scale if null
+    #   date_range_days: null        # Override: defaults to 365 if null
+    #   channels: [web, mobile, store, call_center, social_media]
+    #   event_types: [purchase, browse, support, login, abandoned_cart]
+    #   quality_distribution:
+    #     clean: 0.92
+    #     duplicate_suspected: 0.02
+    #     incomplete: 0.03
+    #     format_inconsistent: 0.03
+
+  ## Benchmark configuration (Trino query benchmark)
+  benchmark:
+    mode: composite                  # power + throughput combined score
+    streams: 4                       # Concurrent query streams (throughput mode)
+    cache: hot                       # hot | cold
+    iterations: 3                    # 3 iterations, uses median for stability
+
+  ## Table name overrides (namespace.table format)
+  # tables:
+  #   bronze: default.bronze_raw
+  #   silver: silver.customer_interactions_enriched
+  #   gold: gold.customer_executive_dashboard
+
+# ============================================================================
+# LAYER 3: OBSERVABILITY
+# ============================================================================
+# Flat schema -- use top-level keys under observability:
+#   enabled: true                  -- deploy kube-prometheus-stack (Prometheus + Grafana)
+#   prometheus_stack_enabled: true -- Prometheus collection
+#   s3_metrics_enabled: true       -- S3 operation metrics
+#   spark_metrics_enabled: true    -- Spark job metrics
+#   dashboards_enabled: true       -- Grafana dashboards
+#   retention: 7d                  -- Prometheus data retention
+#   storage: 10Gi                  -- Prometheus PVC size
+#   storage_class: ""              -- PVC storage class (empty = default)
+observability:
+  enabled: false
+  prometheus_stack_enabled: true
+  s3_metrics_enabled: true
+  spark_metrics_enabled: true
+  dashboards_enabled: true
+  retention: 7d
+  storage: 10Gi
+  storage_class: ""
+  reports:
+    enabled: true
+    output_dir: ./lakebench-output/runs
+    format: both                   # html | json | both
+    include:
+      summary: true
+      stage_breakdown: true
+      storage_metrics: true
+      resource_utilization: true
+      recommendations: true
+
+# ============================================================================
+# SPARK CONFIGURATION OVERRIDES
+# ============================================================================
+# Proven defaults for S3A and shuffle. Override as needed.
+# spark:
+#   conf:
+#     # S3A performance settings
+#     spark.hadoop.fs.s3a.connection.maximum: "500"
+#     spark.hadoop.fs.s3a.threads.max: "200"
+#     spark.hadoop.fs.s3a.fast.upload: "true"
+#     spark.hadoop.fs.s3a.multipart.size: "268435456"
+#     spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
+#     spark.hadoop.fs.s3a.attempts.maximum: "20"
+#     spark.hadoop.fs.s3a.retry.limit: "10"
+#     spark.hadoop.fs.s3a.retry.interval: "500ms"
+#     # Shuffle settings
+#     spark.sql.shuffle.partitions: "200"
+#     spark.default.parallelism: "200"
+#     # Memory settings
+#     spark.memory.fraction: "0.8"
+#     spark.memory.storageFraction: "0.3"

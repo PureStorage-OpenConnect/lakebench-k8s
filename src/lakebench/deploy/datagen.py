@@ -279,15 +279,32 @@ class DatagenDeployer:
             )
 
             pod_status = []
+            oom_pods: list[str] = []
+            crash_pods: list[str] = []
+            pending_pods: list[str] = []
             for pod in pods.items:
+                pod_name = pod.metadata.name
                 pod_info = {
-                    "name": pod.metadata.name,
+                    "name": pod_name,
                     "phase": pod.status.phase,
                     "index": pod.metadata.annotations.get(
                         "batch.kubernetes.io/job-completion-index", "?"
                     ),
                 }
                 pod_status.append(pod_info)
+
+                # Detect OOM and crash-looping containers
+                if pod.status.container_statuses:
+                    for cs in pod.status.container_statuses:
+                        terminated = cs.last_state and cs.last_state.terminated
+                        if terminated and terminated.reason == "OOMKilled":
+                            oom_pods.append(pod_name)
+                        elif cs.restart_count and cs.restart_count >= 3:
+                            crash_pods.append(pod_name)
+
+                # Detect pending pods
+                if pod.status.phase == "Pending":
+                    pending_pods.append(pod_name)
 
             return {
                 "running": active > 0 or (succeeded < completions and failed == 0),
@@ -297,6 +314,9 @@ class DatagenDeployer:
                 "completions": completions,
                 "progress_pct": (succeeded / completions * 100) if completions > 0 else 0,
                 "pods": pod_status,
+                "oom_pods": oom_pods,
+                "crash_pods": crash_pods,
+                "pending_pods": pending_pods,
             }
 
         except ApiException as e:

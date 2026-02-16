@@ -81,8 +81,8 @@ class SparkJobMonitor:
 
             status = self.job_manager.get_job_status(job_name)
 
-            # Call progress callback if state changed
-            if status.state != last_state:
+            # Call progress callback on state change or while RUNNING
+            if status.state != last_state or status.state == JobState.RUNNING:
                 if progress_callback:
                     progress_callback(status)
                 last_state = status.state
