@@ -156,6 +156,43 @@ platform:
       driver_memory: null
       driver_cores: null
 
+### Executor Override Guide
+
+The per-job executor overrides (`silver_executors`, `gold_executors`, etc.)
+bypass the auto-scaling formula. Use them when your cluster has more
+capacity than the formula provisions, or when you need deterministic
+resource allocation for benchmarking.
+
+Higher executor counts increase driver memory pressure because the Spark
+driver manages per-executor K8s API watches and aggregates serialized task
+results. The table below shows tested boundaries:
+
+| Executors | Driver Memory | Status |
+|:---------:|:------------:|--------|
+| 1--12     | 4g (default) | Proven stable |
+| 13--20    | 4--24g       | Stable; driver_memory override may be needed |
+| 21--24    | 24g          | Proven stable with 24g driver |
+| 25--28    | 24g          | Safe range; recommended maximum |
+| 29--32    | 24g+         | Risk of K8s API polling storms |
+| 33+       | any          | Not recommended -- fabric8 client overwhelms K8s API |
+
+`spark.driver.maxResultSize` is set automatically based on the effective
+executor count (formula: `min(16, max(4, count // 3))` GiB). Override it
+in `spark.conf` if needed.
+
+Recommended overrides by cluster size:
+
+| Cluster Cores | Silver Executors | Gold Executors |
+|:------------:|:----------------:|:--------------:|
+| 32           | 4--6             | 3--4           |
+| 64           | 8--12            | 6--8           |
+| 128          | 16--20           | 12--16         |
+| 256+         | 24--28           | 20--28         |
+
+These assume per-executor sizing from the proven profiles: silver uses
+4 cores + 60g (48g + 12g overhead) per executor, gold uses 4 cores +
+40g (32g + 8g overhead) per executor.
+
     postgres:
       storage: 10Gi
       storage_class: ""               # Empty = cluster default
@@ -171,7 +208,7 @@ architecture:
     type: iceberg                     # Only iceberg is currently supported
 
   query_engine:
-    type: trino                       # trino | spark-thrift | none
+    type: trino                       # trino | spark-thrift | duckdb | none
     trino:
       coordinator:
         cpu: "2"
@@ -187,9 +224,10 @@ architecture:
       catalog_name: lakehouse
 
   pipeline:
+    mode: batch                       # batch | continuous
     pattern: medallion                # medallion | streaming | batch
 
-    # Continuous mode tuning (used with `lakebench run --continuous`).
+    # Continuous mode tuning (active when mode: continuous or --continuous flag).
     continuous:
       bronze_trigger_interval: "30 seconds"
       silver_trigger_interval: "60 seconds"
@@ -222,29 +260,14 @@ architecture:
 # LAYER 3: OBSERVABILITY
 # ---------------------------------------------------------------------------
 observability:
-  metrics:
-    local:
-      output_dir: ./lakebench-output/runs
-    prometheus:
-      enabled: false
-      deploy: false
-      retention: 7d
-      storage: 10Gi
-    collect:
-      spark_metrics: true
-      trino_metrics: true
-      s3_metrics: true
-      kubernetes_metrics: true
-
-  dashboards:
-    grafana:
-      enabled: false
-      deploy: false
-      dashboards:
-        - spark-jobs
-        - trino-queries
-        - storage-throughput
-        - cluster-resources
+  enabled: false                      # Deploy Prometheus + Grafana stack
+  prometheus_stack_enabled: true      # Deploy kube-prometheus-stack
+  s3_metrics_enabled: true            # Collect S3 operation metrics
+  spark_metrics_enabled: true         # Collect Spark job metrics
+  dashboards_enabled: true            # Deploy Grafana dashboards
+  retention: 7d                       # Prometheus data retention
+  storage: 10Gi                       # Prometheus PVC size
+  storage_class: ""                   # Prometheus PVC StorageClass
 
   reports:
     enabled: true
@@ -396,7 +419,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.query_engine.type` | enum | `trino` | Query engine: `trino`, `spark-thrift`, or `none`. |
+| `architecture.query_engine.type` | enum | `trino` | Query engine: `trino`, `spark-thrift`, `duckdb`, or `none`. |
 | `architecture.query_engine.trino.coordinator.cpu` | string | `2` | Trino coordinator CPU. |
 | `architecture.query_engine.trino.coordinator.memory` | string | `8Gi` | Trino coordinator memory. |
 | `architecture.query_engine.trino.worker.replicas` | int | `2` | Number of Trino worker pods. |
@@ -410,6 +433,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.query_engine.spark_thrift.cores` | int | `2` | Spark Thrift Server CPU cores. |
 | `architecture.query_engine.spark_thrift.memory` | string | `4g` | Spark Thrift Server memory. |
 | `architecture.query_engine.spark_thrift.catalog_name` | string | `lakehouse` | Iceberg catalog name for Spark Thrift Server. |
+| `architecture.query_engine.duckdb.cores` | int | `2` | DuckDB CPU cores. |
+| `architecture.query_engine.duckdb.memory` | string | `4g` | DuckDB memory. |
+| `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | Iceberg catalog name for DuckDB. |
 
 ### Architecture -- Pipeline
 
@@ -417,6 +443,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
+| `architecture.pipeline.mode` | enum | `batch` | Pipeline execution mode: `batch` (sequential medallion jobs) or `continuous` (concurrent streaming jobs). The `--continuous` CLI flag overrides this. |
 | `architecture.pipeline.pattern` | enum | `medallion` | Pipeline pattern: `medallion`, `streaming`, `batch`, or `custom`. |
 | `architecture.pipeline.continuous.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
 | `architecture.pipeline.continuous.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
@@ -579,6 +606,51 @@ Use `lakebench info <config>` to see the resolved executor counts after
 auto-sizing. Override any auto-sized value with explicit settings in the config
 (e.g., `spark.bronze_executors: 4`).
 
+## Example: Scale 100 (~1 TB)
+
+A production-scale config for 1 TB benchmarking on a 64-core cluster:
+
+```yaml
+name: lakebench-1tb
+recipe: hive-iceberg-trino
+
+datagen:
+  scale: 100
+
+platform:
+  storage:
+    s3:
+      endpoint: http://<flashblade-data-vip>:80
+      access_key: <key>
+      secret_key: <secret>
+    scratch:
+      storage_class: px-csi-scratch
+  compute:
+    postgres:
+      storage_class: px-csi-db
+```
+
+No executor tuning needed -- auto-sizing handles it. At scale 100 the
+resolved resources are approximately:
+
+| Component | Instances | Per-Instance Resources |
+|---|---|---|
+| Datagen pods | 10 | 8 CPU, 24Gi |
+| Bronze-verify executors | 8 | 2 cores, 4g+2g overhead, 50Gi PVC |
+| Silver-build executors | 8 | 4 cores, 48g+12g overhead, 150Gi PVC |
+| Gold-finalize executors | 8 | 4 cores, 32g+8g overhead, 100Gi PVC |
+| Trino workers | 4 | 4 cores, 16Gi |
+
+Recommended timeouts:
+
+```bash
+lakebench generate lakebench.yaml --wait --timeout 14400  # 4 hours
+lakebench run lakebench.yaml --timeout 7200               # 2 hours
+```
+
+Use `lakebench recommend lakebench.yaml` to verify your cluster can handle
+this scale before deploying.
+
 ## Supported Component Combinations
 
 Not every catalog, table format, and query engine combination is valid.
@@ -589,9 +661,11 @@ clear error message.
 |---|---|---|---|
 | hive | iceberg | trino | Yes |
 | hive | iceberg | spark-thrift | Yes |
+| hive | iceberg | duckdb | Yes |
 | hive | iceberg | none | Yes |
 | polaris | iceberg | trino | Yes |
 | polaris | iceberg | spark-thrift | Yes |
+| polaris | iceberg | duckdb | Yes |
 | polaris | iceberg | none | Yes |
 | hive | delta | trino | Yes |
 | hive | delta | none | Yes |

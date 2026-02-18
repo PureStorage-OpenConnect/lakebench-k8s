@@ -14,6 +14,10 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+class _DeploymentReadError(Exception):
+    """Raised when the controller deployment spec cannot be read."""
+
+
 @dataclass
 class OperatorStatus:
     """Status of Spark Operator."""
@@ -140,11 +144,17 @@ class SparkOperatorManager:
             # Get version from Helm release if possible
             version = self._get_helm_version()
 
-            # Check namespace watching
+            # Check namespace watching -- use the deployment spec args as
+            # ground truth, NOT Helm values (which can be out of sync after
+            # a failed or partial helm upgrade).
             watching_namespace = None
             watched_namespaces = None
             if is_ready and self.job_namespace:
-                watched = self._get_watched_namespaces()
+                try:
+                    watched = self._get_active_namespaces(operator_ns)
+                except _DeploymentReadError:
+                    # Could not read deployment spec, fall back to Helm values
+                    watched = self._get_watched_namespaces()
                 if watched is None:
                     # Watches all namespaces (empty or unset)
                     watching_namespace = True
@@ -215,6 +225,60 @@ class SparkOperatorManager:
         except Exception:
             return None
 
+    def _get_active_namespaces(self, operator_ns: str | None = None) -> list[str] | None:
+        """Get namespaces from the running controller deployment spec.
+
+        Reads the ``--namespaces=...`` arg from the deployment's pod template.
+        This is the ground truth -- what the controller will actually watch
+        when its pods start.  Helm values can be out of sync after a failed
+        or partial upgrade.
+
+        Returns:
+            List of namespace strings if ``--namespaces`` is set,
+            None if the arg is absent or empty (watches all namespaces).
+            Raises ``_DeploymentReadError`` on error so the caller can
+            distinguish "watches all" from "could not read".
+        """
+        ns = operator_ns or self.namespace
+        try:
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "get",
+                    "deployment",
+                    "spark-operator-controller",
+                    "-n",
+                    ns,
+                    "-o",
+                    "jsonpath={.spec.template.spec.containers[0].args}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0 or not result.stdout:
+                raise _DeploymentReadError("kubectl failed or empty output")
+
+            import json
+
+            try:
+                args = json.loads(result.stdout)
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise _DeploymentReadError(f"bad JSON: {result.stdout!r}") from exc
+
+            for arg in args:
+                if isinstance(arg, str) and arg.startswith("--namespaces="):
+                    ns_str = arg.split("=", 1)[1]
+                    if not ns_str:
+                        return None  # Empty -- watches all
+                    return [n.strip() for n in ns_str.split(",") if n.strip()]
+
+            return None  # No --namespaces arg -- watches all
+
+        except _DeploymentReadError:
+            raise
+        except Exception as e:
+            raise _DeploymentReadError(str(e)) from e
+
     def _get_watched_namespaces(self) -> list[str] | None:
         """Get the namespaces the Spark Operator is configured to watch.
 
@@ -267,6 +331,30 @@ class SparkOperatorManager:
             logger.debug("Error reading Helm values: %s", e)
             return []
 
+    def _filter_existing_namespaces(self, namespaces: list[str]) -> list[str]:
+        """Return only namespaces that exist on the cluster.
+
+        Stale namespaces from previous test runs cause ``helm upgrade`` to
+        fail when the operator tries to create resources in non-existent
+        namespaces.
+        """
+        try:
+            from kubernetes import client as k8s_client
+
+            core_v1 = k8s_client.CoreV1Api()
+            existing = {ns.metadata.name for ns in core_v1.list_namespace().items}
+            live = [ns for ns in namespaces if ns in existing]
+            removed = set(namespaces) - set(live)
+            if removed:
+                logger.info(
+                    "Pruning stale namespaces from spark.jobNamespaces: %s",
+                    removed,
+                )
+            return live
+        except Exception as e:
+            logger.debug("Could not list namespaces, keeping all: %s", e)
+            return namespaces
+
     def _add_namespace_to_watch(self, namespace: str) -> bool:
         """Add a namespace to the Spark Operator's watched namespaces.
 
@@ -285,7 +373,9 @@ class SparkOperatorManager:
         if namespace in watched:
             return True
 
-        new_list = watched + [namespace]
+        # Filter out stale namespaces that no longer exist on the cluster
+        live_namespaces = self._filter_existing_namespaces(watched)
+        new_list = live_namespaces + [namespace]
         ns_set = ",".join(new_list)
 
         try:
@@ -331,51 +421,120 @@ class SparkOperatorManager:
             self._patch_openshift_deployments()
 
         # The Spark Operator reads jobNamespaces at startup and does not
-        # watch for config changes.  Restart the controller so it picks
-        # up the new namespace list.
-        self._restart_operator()
+        # watch for config changes.  Restart so it picks up the new list.
+        if not self._restart_operator():
+            logger.error("Operator restart failed after helm upgrade")
+            return False
+
+        # Verify the operator actually picked up the new namespace by
+        # checking the running pod's command-line args.
+        if not self._verify_namespace_watched(namespace, timeout=30):
+            logger.error(
+                "Operator restarted but is not watching namespace '%s'",
+                namespace,
+            )
+            return False
 
         return True
 
-    def _restart_operator(self) -> None:
-        """Restart the Spark Operator controller to pick up config changes.
+    def _restart_operator(self) -> bool:
+        """Restart the Spark Operator to pick up config changes.
 
         The operator reads ``spark.jobNamespaces`` at startup only, so a
-        ``helm upgrade`` alone is not enough -- the controller pod must be
-        recycled.
+        ``helm upgrade`` alone is not enough -- both the controller and
+        webhook pods must be recycled.
+
+        Returns:
+            True if both deployments restarted and rolled out successfully.
         """
-        result = subprocess.run(
-            [
-                "kubectl",
-                "rollout",
-                "restart",
-                "deployment/spark-operator-controller",
-                "-n",
-                self.namespace,
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            logger.warning("Failed to restart spark-operator-controller: %s", result.stderr)
-            return
+        deployments = ["spark-operator-controller", "spark-operator-webhook"]
 
-        logger.info("Restarting spark-operator-controller to apply namespace changes")
+        for deploy in deployments:
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "rollout",
+                    "restart",
+                    f"deployment/{deploy}",
+                    "-n",
+                    self.namespace,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.warning("Failed to restart %s: %s", deploy, result.stderr)
+                return False
 
-        # Wait for the rollout to complete (up to 120s)
-        subprocess.run(
-            [
-                "kubectl",
-                "rollout",
-                "status",
-                "deployment/spark-operator-controller",
-                "-n",
-                self.namespace,
-                "--timeout=120s",
-            ],
-            capture_output=True,
-            text=True,
+        logger.info("Restarting Spark Operator deployments to apply namespace changes")
+
+        for deploy in deployments:
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "rollout",
+                    "status",
+                    f"deployment/{deploy}",
+                    "-n",
+                    self.namespace,
+                    "--timeout=120s",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.warning("Rollout of %s did not complete: %s", deploy, result.stderr)
+                return False
+
+        return True
+
+    def _verify_namespace_watched(self, namespace: str, timeout: int = 30) -> bool:
+        """Verify the running operator controller is watching a namespace.
+
+        Checks the controller pod's command-line args for the target
+        namespace in ``--namespaces=...``.
+
+        Args:
+            namespace: The namespace that should appear in the arg list.
+            timeout: Seconds to wait for verification.
+
+        Returns:
+            True if the controller is confirmed watching the namespace.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            result = subprocess.run(
+                [
+                    "kubectl",
+                    "get",
+                    "pods",
+                    "-n",
+                    self.namespace,
+                    "-l",
+                    "app.kubernetes.io/component=controller",
+                    "-o",
+                    "jsonpath={.items[0].spec.containers[0].args}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and result.stdout:
+                # Args contain --namespaces=ns1,ns2,...
+                for arg in result.stdout.split(","):
+                    if namespace in arg:
+                        logger.info(
+                            "Verified operator controller is watching '%s'",
+                            namespace,
+                        )
+                        return True
+            time.sleep(3)
+
+        logger.warning(
+            "Could not verify operator is watching '%s' after %ds",
+            namespace,
+            timeout,
         )
+        return False
 
     @staticmethod
     def _is_openshift() -> bool:
@@ -583,7 +742,17 @@ class SparkOperatorManager:
                     "Spark Operator not watching '%s' -- adding via helm upgrade",
                     self.job_namespace,
                 )
-                self._add_namespace_to_watch(self.job_namespace)
+                if not self._add_namespace_to_watch(self.job_namespace):
+                    return OperatorStatus(
+                        installed=True,
+                        version=status.version,
+                        namespace=status.namespace,
+                        ready=False,
+                        message=(
+                            f"Failed to add namespace '{self.job_namespace}' "
+                            f"to spark.jobNamespaces via helm upgrade"
+                        ),
+                    )
                 status = self.check_status()
             return status
 

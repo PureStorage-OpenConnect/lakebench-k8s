@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lakebench-k8s"
-version = "1.0.2"
+version = "1.0.3"
 description = "Deploy and benchmark lakehouse stacks on Kubernetes"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"

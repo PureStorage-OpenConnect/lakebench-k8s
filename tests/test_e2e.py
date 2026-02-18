@@ -341,14 +341,18 @@ class TestBatchPipeline:
         )
 
         if result.returncode == 0:
-            # Should have some rows
+            # Parse the count from the pipe-delimited table output.
+            # Output looks like: | 91   |
             output = result.stdout
-            # Look for a number in the output
-            numbers = re.findall(r"\d+", output)
-            if numbers:
-                count = int(numbers[-1])  # Last number is likely the count
-                print(f"Gold table row count: {count}")
-                assert count > 0, "Gold table is empty"
+            count = 0
+            for line in output.splitlines():
+                # Match lines like "| 91   |" but skip header "| cnt  |"
+                m = re.match(r"^\|\s*(\d+)\s*\|$", line.strip())
+                if m:
+                    count = int(m.group(1))
+                    break
+            print(f"Gold table row count: {count}")
+            assert count > 0, "Gold table is empty"
 
 
 # =============================================================================
@@ -365,15 +369,16 @@ class TestContinuousPipeline:
         print("RUNNING CONTINUOUS PIPELINE")
         print(f"{'=' * 60}")
 
-        # Continuous pipeline runs for a duration then stops
-        # Use shorter duration for testing
+        # Continuous pipeline runs for --duration then stops.
+        # --timeout is per-job (batch mode); --duration controls
+        # the streaming monitoring window.
         result = run_lakebench(
             "run",
             str(test_config),
             "--continuous",
-            "--timeout",
-            "300",  # 5 min test run
-            timeout=360,
+            "--duration",
+            "120",  # 2 min streaming window
+            timeout=300,  # 5 min subprocess timeout (margin for startup + cleanup)
         )
 
         print(f"Exit code: {result.returncode}")
@@ -438,7 +443,8 @@ class TestCleanDestroy:
             text=True,
         )
 
-        # Namespace should not exist, OR if it exists, it should have no pods
+        # Namespace should not exist, OR if it exists, it should have no active pods.
+        # Completed/terminated pods may linger briefly during namespace teardown.
         if ns_result.returncode == 0:
             pods_result = subprocess.run(
                 ["kubectl", "get", "pods", "-n", namespace, "--no-headers"],
@@ -446,7 +452,13 @@ class TestCleanDestroy:
                 text=True,
             )
             pods = pods_result.stdout.strip()
-            assert not pods, f"Pods still exist in {namespace}:\n{pods}"
+            # Filter out pods in Completed/Terminated state (not real failures)
+            active_pods = [
+                line
+                for line in pods.splitlines()
+                if line and "Completed" not in line and "Terminating" not in line
+            ]
+            assert not active_pods, f"Active pods still exist in {namespace}:\n{pods}"
 
 
 # =============================================================================
@@ -625,6 +637,67 @@ class TestScaleMatrix:
         print(f"Timeout multiplier: {timeout_mult}x")
         print(f"{'=' * 60}")
 
+        # Pre-register the scale namespace with the Spark Operator.
+        # The operator reads jobNamespaces at startup only, so we must
+        # helm upgrade + restart before deploying to a new namespace.
+        print(f"\n[0/5] Registering namespace {namespace} with Spark Operator...")
+        ns_result = subprocess.run(
+            [
+                "helm",
+                "get",
+                "values",
+                "spark-operator",
+                "-n",
+                "spark-operator",
+                "--all",
+                "-o",
+                "json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if ns_result.returncode == 0:
+            import json as _json
+
+            values = _json.loads(ns_result.stdout)
+            current_ns = values.get("spark", {}).get("jobNamespaces", [])
+            if namespace not in current_ns:
+                new_ns = ",".join(current_ns + [namespace])
+                subprocess.run(
+                    [
+                        "helm",
+                        "upgrade",
+                        "spark-operator",
+                        "spark-operator/spark-operator",
+                        "-n",
+                        "spark-operator",
+                        "--reuse-values",
+                        "--set",
+                        f"spark.jobNamespaces={{{new_ns}}}",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                # Restart controller to pick up new namespace
+                subprocess.run(
+                    [
+                        "kubectl",
+                        "rollout",
+                        "restart",
+                        "deployment/spark-operator-controller",
+                        "-n",
+                        "spark-operator",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                time.sleep(15)  # Wait for controller restart
+                print(f"  Registered {namespace} with Spark Operator")
+            else:
+                print(f"  {namespace} already registered")
+        else:
+            print("  WARNING: Could not read Spark Operator values")
+
         try:
             # Deploy
             print(f"\n[1/5] Deploying infrastructure for scale {scale}...")
@@ -649,13 +722,11 @@ class TestScaleMatrix:
             )
             assert result.returncode == 0, f"Generate failed at scale {scale}"
 
-            # Run batch pipeline
+            # Run batch pipeline (default mode, no --mode flag needed)
             print(f"\n[3/5] Running batch pipeline at scale {scale}...")
             result = run_lakebench(
                 "run",
                 str(config_path),
-                "--mode",
-                "batch",
                 "--timeout",
                 str(PIPELINE_TIMEOUT * timeout_mult),
                 timeout=PIPELINE_TIMEOUT * timeout_mult + 120,
@@ -682,11 +753,14 @@ class TestScaleMatrix:
                 "120",
             )
             if result.returncode == 0:
-                numbers = re.findall(r"\d+", result.stdout)
-                if numbers:
-                    count = int(numbers[-1])
-                    print(f"Gold table rows at scale {scale}: {count}")
-                    assert count > 0, f"Gold table empty at scale {scale}"
+                count = 0
+                for line in result.stdout.splitlines():
+                    m = re.match(r"^\|\s*(\d+)\s*\|$", line.strip())
+                    if m:
+                        count = int(m.group(1))
+                        break
+                print(f"Gold table rows at scale {scale}: {count}")
+                assert count > 0, f"Gold table empty at scale {scale}"
 
             print(f"\nScale {scale} completed successfully")
 
@@ -738,11 +812,10 @@ class TestScaleMatrix:
             result = run_lakebench(
                 "run",
                 str(config_path),
-                "--mode",
-                "continuous",
-                "--timeout",
+                "--continuous",
+                "--duration",
                 str(run_duration),
-                timeout=run_duration + 120,
+                timeout=run_duration + 180,
             )
             # Continuous mode exits 0 or 1 (timeout is expected)
             assert result.returncode in (0, 1), f"Continuous pipeline crashed at scale {scale}"
@@ -816,12 +889,10 @@ class TestStressScales:
             )
             assert result.returncode == 0, f"Generate failed at stress scale {scale}"
 
-            # Run batch
+            # Run batch (default mode, no --mode flag needed)
             result = run_lakebench(
                 "run",
                 str(config_path),
-                "--mode",
-                "batch",
                 "--timeout",
                 str(PIPELINE_TIMEOUT * timeout_mult),
                 timeout=PIPELINE_TIMEOUT * timeout_mult + 300,

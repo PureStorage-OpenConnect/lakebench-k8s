@@ -53,6 +53,7 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
     rich_markup_mode="rich",
+    context_settings={"help_option_names": ["-h", "--help"]},
     epilog="[dim]Workflow: init -> validate -> deploy -> generate -> run -> report -> destroy[/dim]",
 )
 
@@ -135,11 +136,153 @@ def _journal_safe(fn, *args, **kwargs) -> None:
             _journal_warned = True
 
 
+def _print_pipeline_scorecard(
+    pb,
+    stage_results: list[tuple[str, bool, float]],
+    datagen_elapsed: float,
+    benchmark_qph: float | None,
+) -> None:
+    """Print the pipeline complete panel with full scorecard."""
+    # Stage timing lines
+    lines: list[str] = []
+    if datagen_elapsed > 0:
+        lines.append(f"  data-generation {datagen_elapsed:>8.0f}s")
+    for name, _ok, elapsed in stage_results:
+        lines.append(f"  {name:<16}{elapsed:>8.0f}s")
+    total_time = datagen_elapsed + sum(r[2] for r in stage_results)
+
+    body = "[green]Pipeline completed successfully[/green]\n\n"
+    body += "\n".join(lines)
+
+    # Scores section
+    scores: list[str] = []
+    if pb.pipeline_mode == "continuous":
+        if pb.data_freshness_seconds > 0:
+            scores.append(f"  Freshness:      {pb.data_freshness_seconds:>8.1f}s")
+        if pb.sustained_throughput_rps > 0:
+            scores.append(f"  Throughput:     {pb.sustained_throughput_rps:>8,.0f} rows/s")
+        if pb.stage_latency_profile:
+            lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
+            scores.append(f"  Latency (b/s/g):  {lat}ms")
+        if pb.ingestion_completeness_ratio > 0:
+            pct = pb.ingestion_completeness_ratio * 100
+            scores.append(f"  Completeness:   {pct:>7.1f}%")
+        if pb.pipeline_saturated:
+            scores.append("  [yellow]Pipeline saturated (completeness < 95%)[/yellow]")
+    else:
+        if pb.time_to_value_seconds > 0:
+            scores.append(f"  Time to Value:  {pb.time_to_value_seconds:>8.1f}s")
+        if pb.pipeline_throughput_gb_per_second > 0:
+            scores.append(f"  Throughput:     {pb.pipeline_throughput_gb_per_second:>8.3f} GB/s")
+        if pb.total_data_processed_gb > 0:
+            scores.append(f"  Data Processed: {pb.total_data_processed_gb:>8.1f} GB")
+        if pb.compute_efficiency_gb_per_core_hour > 0:
+            scores.append(
+                f"  Efficiency:     {pb.compute_efficiency_gb_per_core_hour:>8.3f} GB/core-hr"
+            )
+        if pb.scale_verified_ratio > 0:
+            pct = pb.scale_verified_ratio * 100
+            label = "[green]verified[/green]" if pct >= 95 else "[yellow]incomplete[/yellow]"
+            scores.append(f"  Scale:          {pct:>7.1f}% {label}")
+
+    if benchmark_qph is not None:
+        scores.append(f"  QpH:            {benchmark_qph:>8,.1f}")
+
+    if scores:
+        body += "\n\n[bold]Scores[/bold]\n" + "\n".join(scores)
+
+    body += f"\n\nTotal: {total_time:.0f}s\n\nFull report: [bold]lakebench report[/bold]"
+
+    console.print()
+    console.print(Panel(body, title="Pipeline Complete", expand=False))
+
+
+def _print_report_summary(metrics) -> None:
+    """Print key scores from saved metrics to the terminal."""
+    from rich.table import Table
+
+    pb = metrics.pipeline_benchmark
+    if pb is None:
+        print_warning("No pipeline benchmark data in this run.")
+        return
+
+    # Header
+    status = "[green]Passed[/green]" if pb.success else "[red]Failed[/red]"
+    header = (
+        f"[bold]{pb.deployment_name}[/bold]  run {pb.run_id}\n"
+        f"Mode: {pb.pipeline_mode} | Status: {status}"
+    )
+
+    # Stage table
+    table = Table(show_header=True, header_style="bold", expand=False)
+    table.add_column("Stage", style="cyan")
+    table.add_column("Time", justify="right")
+    table.add_column("In (GB)", justify="right")
+    table.add_column("Out (GB)", justify="right")
+    table.add_column("GB/s", justify="right")
+    table.add_column("Executors", justify="right")
+
+    for stage in pb.stages:
+        table.add_row(
+            stage.stage_name,
+            f"{stage.elapsed_seconds:.0f}s",
+            f"{stage.input_size_gb:.1f}" if stage.input_size_gb > 0 else "-",
+            f"{stage.output_size_gb:.1f}" if stage.output_size_gb > 0 else "-",
+            f"{stage.throughput_gb_per_second:.3f}" if stage.throughput_gb_per_second > 0 else "-",
+            str(stage.executor_count) if stage.executor_count > 0 else "-",
+        )
+
+    # Scores
+    scores: list[str] = []
+    if pb.pipeline_mode == "continuous":
+        if pb.data_freshness_seconds > 0:
+            scores.append(f"Freshness:       {pb.data_freshness_seconds:>8.1f}s")
+        if pb.sustained_throughput_rps > 0:
+            scores.append(f"Throughput:      {pb.sustained_throughput_rps:>8,.0f} rows/s")
+        if pb.stage_latency_profile:
+            lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
+            scores.append(f"Latency (b/s/g): {lat}ms")
+        if pb.ingestion_completeness_ratio > 0:
+            pct = pb.ingestion_completeness_ratio * 100
+            scores.append(f"Completeness:    {pct:>7.1f}%")
+        if pb.pipeline_saturated:
+            scores.append("[yellow]Pipeline saturated (completeness < 95%)[/yellow]")
+    else:
+        if pb.time_to_value_seconds > 0:
+            scores.append(f"Time to Value:   {pb.time_to_value_seconds:>8.1f}s")
+        if pb.pipeline_throughput_gb_per_second > 0:
+            scores.append(f"Throughput:      {pb.pipeline_throughput_gb_per_second:>8.3f} GB/s")
+        if pb.total_data_processed_gb > 0:
+            scores.append(f"Data Processed:  {pb.total_data_processed_gb:>8.1f} GB")
+        if pb.compute_efficiency_gb_per_core_hour > 0:
+            scores.append(
+                f"Efficiency:      {pb.compute_efficiency_gb_per_core_hour:>8.3f} GB/core-hr"
+            )
+        if pb.scale_verified_ratio > 0:
+            pct = pb.scale_verified_ratio * 100
+            label = "[green]verified[/green]" if pct >= 95 else "[yellow]incomplete[/yellow]"
+            scores.append(f"Scale:           {pct:>7.1f}% {label}")
+
+    if pb.query_benchmark:
+        scores.append(f"QpH:             {pb.query_benchmark.qph:>8,.1f}")
+
+    console.print()
+    console.print(Panel(header, title="Benchmark Summary", expand=False))
+    console.print(table)
+    if scores:
+        console.print()
+        for s in scores:
+            console.print(f"  {s}")
+    console.print()
+
+
 def _preflight_check(cfg) -> None:
     """Run critical pre-flight checks before deployment.
 
     Prints warnings for non-critical issues; exits on blockers.
     """
+    print_info("Tip: run 'lakebench validate' for a full prerequisite check")
+
     # 1. S3 endpoint must be set
     s3 = cfg.platform.storage.s3
     if not s3.endpoint:
@@ -479,16 +622,48 @@ def validate(
     checks_failed = 0
     checks_warned = 0
 
+    # --- Helpers for grouped section output ---
+    _section_items: list[tuple[str, str, str | None]] = []  # (status, msg, hint)
+
+    def _section_start(title: str) -> None:
+        _section_items.clear()
+        console.print(f"\n [bold]{title}[/bold]")
+
+    def _check_ok(msg: str, *, hint: str | None = None) -> None:
+        _section_items.append(("ok", msg, hint))
+
+    def _check_fail(msg: str, *, hint: str | None = None) -> None:
+        _section_items.append(("fail", msg, hint))
+
+    def _check_warn(msg: str, *, hint: str | None = None) -> None:
+        _section_items.append(("warn", msg, hint))
+
+    def _section_end() -> tuple[int, int, int]:
+        """Flush section items. Returns (passed, failed, warned)."""
+        ok = fail = warn = 0
+        for status, msg, hint in _section_items:
+            if status == "ok":
+                console.print(f"   [green]+[/green] {msg}")
+                ok += 1
+            elif status == "fail":
+                console.print(f"   [red]x[/red] {msg}")
+                fail += 1
+            else:
+                console.print(f"   [yellow]![/yellow] {msg}")
+                warn += 1
+            if hint:
+                for line in hint.split("\n"):
+                    console.print(f"     [dim]{line}[/dim]")
+        _section_items.clear()
+        return ok, fail, warn
+
     # 1. Load and validate config
-    console.print("\n[bold]Configuration[/bold]")
+    _section_start("Configuration")
     try:
         cfg = load_config(config_file)
-        print_success("Config syntax valid")
-        checks_passed += 1
-
+        _check_ok("Config syntax valid")
         if verbose:
-            console.print(f"  Name: {cfg.name}")
-            console.print(f"  Namespace: {cfg.get_namespace()}")
+            _check_ok(f"Name: {cfg.name}, Namespace: {cfg.get_namespace()}")
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -496,45 +671,44 @@ def validate(
         print_error("Config validation failed:")
         for err in e.errors:
             loc = ".".join(str(x) for x in err["loc"])
-            console.print(f"  [red]•[/red] {loc}: {err['msg']}")
+            console.print(f"  [red]x[/red] {loc}: {err['msg']}")
         raise typer.Exit(1)  # noqa: B904
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
 
-    # 1b. Check required CLI tools
-    console.print("\n[bold]CLI Tools[/bold]")
+    # 2. CLI tools
+    _section_start("CLI Tools")
     for tool in ["kubectl", "helm"]:
         if shutil.which(tool):
-            print_success(f"{tool} found on PATH")
-            checks_passed += 1
+            _check_ok(f"{tool} found")
         else:
-            print_error(f"{tool} not found on PATH")
-            checks_failed += 1
+            _check_fail(f"{tool} not found on PATH")
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
 
-    if not cfg.platform.storage.s3.endpoint:
-        print_warning("S3 endpoint not configured")
-        checks_failed += 1
-    else:
-        print_success(f"S3 endpoint configured: {cfg.platform.storage.s3.endpoint}")
-        checks_passed += 1
-
-    if not cfg.has_inline_s3_credentials() and not cfg.has_s3_secret_ref():
-        print_warning("S3 credentials not configured (neither inline nor secret_ref)")
-        checks_failed += 1
-    else:
-        print_success("S3 credentials configured")
-        checks_passed += 1
-
-    # 2. Test S3 connectivity
-    console.print("\n[bold]S3 Connectivity[/bold]")
+    # 3. S3 storage (endpoint + credentials + connectivity -- single group)
+    _section_start("S3 Storage")
     s3 = cfg.platform.storage.s3
 
     if not s3.endpoint:
-        print_warning("Skipping S3 tests (no endpoint configured)")
-    elif not cfg.has_inline_s3_credentials():
-        print_warning("Skipping S3 tests (no inline credentials)")
+        _check_fail("Endpoint not configured")
     else:
+        _check_ok(f"Endpoint: {s3.endpoint}")
+
+    if not cfg.has_inline_s3_credentials() and not cfg.has_s3_secret_ref():
+        _check_fail("Credentials not configured (neither inline nor secret_ref)")
+    else:
+        _check_ok("Credentials configured")
+
+    # Live connectivity
+    if s3.endpoint and cfg.has_inline_s3_credentials():
         results = test_s3_connectivity(
             endpoint=s3.endpoint,
             access_key=s3.access_key,
@@ -544,88 +718,75 @@ def validate(
         )
 
         if results["endpoint_reachable"]:
-            print_success(results["endpoint_message"])
-            checks_passed += 1
+            _check_ok("Endpoint reachable")
         else:
-            print_error(results["endpoint_message"])
-            checks_failed += 1
+            _check_fail(results["endpoint_message"])
 
         if results["credentials_valid"]:
-            print_success(results["credentials_message"])
-            checks_passed += 1
-
+            _check_ok("Credentials valid")
             if verbose and results["buckets"]:
-                console.print(f"  Existing buckets: {', '.join(results['buckets'])}")
+                _check_ok(f"Buckets: {', '.join(results['buckets'])}")
         elif results["endpoint_reachable"]:
-            print_error(results["credentials_message"])
-            checks_failed += 1
+            _check_fail(results["credentials_message"])
 
-    # 2.5. Validate S3 secret reference if configured
+    # Secret ref validation
     if cfg.has_s3_secret_ref():
         secret_name = cfg.platform.storage.s3.secret_ref
-        console.print("\n[bold]S3 Secret Reference[/bold]")
         try:
             k8s = get_k8s_client(
                 context=cfg.platform.kubernetes.context,
                 namespace=cfg.get_namespace(),
             )
             if k8s.secret_exists(secret_name, cfg.get_namespace()):
-                print_success(f"S3 secret '{secret_name}' exists in namespace")
-                checks_passed += 1
+                _check_ok(f"Secret '{secret_name}' exists")
             else:
-                print_error(
-                    f"S3 secret '{secret_name}' not found in namespace '{cfg.get_namespace()}'"
+                _check_fail(
+                    f"Secret '{secret_name}' not found in namespace '{cfg.get_namespace()}'"
                 )
-                checks_failed += 1
         except K8sConnectionError:
-            print_warning("Cannot verify S3 secret (K8s not connected yet)")
+            _check_warn("Cannot verify S3 secret (K8s not connected yet)")
         except Exception as e:
-            print_warning(f"Cannot verify S3 secret: {e}")
+            _check_warn(f"Cannot verify S3 secret: {e}")
 
-    # 2.6. Validate bucket name overlap
+    # Bucket name overlap
     bucket_names = [s3.buckets.bronze, s3.buckets.silver, s3.buckets.gold]
     if len(set(bucket_names)) < 3:
-        print_warning("Bronze, silver, and gold use overlapping bucket names")
-        checks_warned += 1
+        _check_warn("Bronze, silver, and gold use overlapping bucket names")
 
-    # 3. Test Kubernetes connectivity
-    console.print("\n[bold]Kubernetes Connectivity[/bold]")
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
+
+    # 4. Kubernetes cluster (connectivity + namespace + platform security)
+    _section_start("Kubernetes")
     try:
         k8s = get_k8s_client(
             context=cfg.platform.kubernetes.context,
             namespace=cfg.get_namespace(),
         )
 
-        # Test connectivity
         connected, msg = k8s.test_connectivity()
         if connected:
-            print_success(msg)
-            checks_passed += 1
+            _check_ok(msg)
         else:
-            print_error(msg)
-            checks_failed += 1
+            _check_fail(msg)
 
-        # Show context info
         ctx = k8s.get_current_context()
         if ctx and verbose:
-            console.print(f"  Context: {ctx.name}")
-            console.print(f"  Cluster: {ctx.cluster}")
+            _check_ok(f"Context: {ctx.name} / Cluster: {ctx.cluster}")
 
         ns = cfg.get_namespace()
         if k8s.namespace_exists(ns):
-            print_success(f"Namespace '{ns}' exists")
-            checks_passed += 1
+            _check_ok(f"Namespace '{ns}' exists")
         else:
             can_create, msg = k8s.can_create_namespace(ns)
             if can_create:
-                print_success(f"Namespace '{ns}' can be created")
-                checks_passed += 1
+                _check_ok(f"Namespace '{ns}' can be created")
             else:
-                print_error(f"Cannot create namespace '{ns}': {msg}")
-                checks_failed += 1
+                _check_fail(f"Cannot create namespace '{ns}': {msg}")
 
-        # 4. Platform security verification
-        console.print("\n[bold]Platform Security[/bold]")
+        # Platform security
         verifier = SecurityVerifier(k8s)
         platform = verifier.detect_platform()
         platform_version = verifier.get_platform_version()
@@ -633,57 +794,48 @@ def validate(
         platform_info = f"{platform.value}"
         if platform_version:
             platform_info += f" {platform_version}"
-        print_success(f"Platform detected: {platform_info}")
-        checks_passed += 1
+        _check_ok(f"Platform: {platform_info}")
 
-        # Verify security requirements
         security_result = verifier.verify_security(ns)
 
         if platform == PlatformType.OPENSHIFT:
-            # Show SCC status on OpenShift
             for scc in security_result.scc_status:
                 if scc.assigned:
-                    print_success(f"SCC '{scc.name}' assigned to '{scc.service_account}'")
+                    _check_ok(f"SCC '{scc.name}' assigned to '{scc.service_account}'")
                 else:
-                    print_warning(f"SCC '{scc.name}' not assigned to '{scc.service_account}'")
-                    checks_warned += 1
-                    if verbose:
-                        console.print(
-                            f"  Fix: oc adm policy add-scc-to-user {scc.name} -z {scc.service_account} -n {ns}"
-                        )
-
-        # Report issues and warnings
-        for issue in security_result.issues:
-            if verbose:
-                print_warning(issue)
-
-        for warning in security_result.warnings:
-            if verbose:
-                print_info(warning)
+                    fix_hint = (
+                        f"Fix: oc adm policy add-scc-to-user {scc.name} "
+                        f"-z {scc.service_account} -n {ns}"
+                    )
+                    _check_warn(
+                        f"SCC '{scc.name}' not assigned to '{scc.service_account}'",
+                        hint="Auto-configured during deploy" if not verbose else fix_hint,
+                    )
 
         if security_result.passed:
-            print_success("Platform security checks passed")
             checks_passed += security_result.checks_passed
         else:
-            print_warning(
-                f"Platform security: {security_result.checks_passed} passed, {security_result.checks_failed} need attention"
-            )
             if platform == PlatformType.OPENSHIFT:
-                print_info("SCC will be configured automatically during deploy")
+                _check_warn(
+                    f"Security: {security_result.checks_failed} item(s) need attention",
+                    hint="SCC will be configured automatically during deploy",
+                )
             checks_passed += security_result.checks_passed
-            # Don't fail on security warnings - they'll be fixed during deploy
 
         if verbose and security_result.recommendations:
-            console.print("\n[dim]Recommendations:[/dim]")
             for rec in security_result.recommendations:
-                console.print(f"  [dim]• {rec}[/dim]")
+                _check_ok(f"Tip: {rec}")
 
     except K8sConnectionError as e:
-        print_error(f"Kubernetes connection failed: {e}")
-        checks_failed += 1
+        _check_fail(f"Connection failed: {e}")
 
-    # 5. Storage Class Validation
-    console.print("\n[bold]Storage Classes[/bold]")
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
+
+    # 5. Storage classes
+    _section_start("Storage Classes")
     try:
         from kubernetes import client as k8s_client
         from kubernetes.client.rest import ApiException
@@ -693,7 +845,6 @@ def validate(
         storage_classes = []
         scratch_cfg = cfg.platform.storage.scratch
         if scratch_cfg.enabled and scratch_cfg.storage_class:
-            # If create_storage_class is True, it will be created during deploy
             storage_classes.append(
                 (scratch_cfg.storage_class, "scratch", not scratch_cfg.create_storage_class)
             )
@@ -703,32 +854,32 @@ def validate(
             storage_classes.append((pg_sc, "postgres", True))
 
         if not storage_classes:
-            print_info("No custom storage classes configured (using cluster defaults)")
+            _check_ok("Using cluster defaults (no custom storage classes)")
         else:
             for sc_name, purpose, required in storage_classes:
                 try:
                     storage_v1.read_storage_class(sc_name)
-                    print_success(f"StorageClass '{sc_name}' exists ({purpose})")
-                    checks_passed += 1
+                    _check_ok(f"{sc_name} ({purpose})")
                 except ApiException as e:
                     if e.status == 404:
                         if required:
-                            print_error(f"StorageClass '{sc_name}' not found ({purpose})")
-                            checks_failed += 1
+                            _check_fail(f"{sc_name} not found ({purpose})")
                         else:
-                            print_warning(
-                                f"StorageClass '{sc_name}' will be created during deploy ({purpose})"
+                            _check_warn(
+                                f"{sc_name} will be created during deploy ({purpose})",
                             )
-                            checks_passed += 1
-                            checks_warned += 1
                     else:
-                        print_warning(f"Could not check StorageClass '{sc_name}': {e.reason}")
+                        _check_warn(f"Could not check {sc_name}: {e.reason}")
     except Exception as e:
-        print_warning(f"Could not validate storage classes: {e}")
+        _check_warn(f"Could not validate storage classes: {e}")
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
 
-    # 5b. Catalog Prerequisites (Hive needs Stackable operators)
+    # 6. Catalog prerequisites
+    _section_start("Catalog")
     if cfg.architecture.catalog.type.value == "hive":
-        console.print("\n[bold]Catalog Prerequisites[/bold]")
         try:
             from kubernetes import client as k8s_client
 
@@ -741,32 +892,35 @@ def validate(
             }
             missing = [op for crd, op in required_crds.items() if crd not in crd_names]
             if missing:
-                print_error(f"Missing Stackable operators: {', '.join(missing)}")
-                print_info("Install with:")
-                for op in [
-                    "commons-operator",
-                    "listener-operator",
-                    "secret-operator",
-                    "hive-operator",
-                ]:
-                    console.print(
-                        f"  helm install {op} "
-                        f"oci://oci.stackable.tech/sdp-charts/{op} "
-                        f"--version 25.7.0 --namespace stackable --create-namespace"
-                    )
-                checks_failed += 1
+                install_hint = "Install with:\n" + "\n".join(
+                    f"  helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
+                    f"--version 25.7.0 --namespace stackable --create-namespace"
+                    for op in [
+                        "commons-operator",
+                        "listener-operator",
+                        "secret-operator",
+                        "hive-operator",
+                    ]
+                )
+                _check_fail(
+                    f"Missing Stackable operators: {', '.join(missing)}",
+                    hint=install_hint,
+                )
             else:
-                print_success("Stackable operators installed (Hive catalog)")
-                checks_passed += 1
+                _check_ok("Stackable operators installed (Hive)")
         except Exception:
-            print_warning("Could not verify Stackable operators (K8s not reachable)")
+            _check_warn("Could not verify Stackable operators (K8s not reachable)")
     elif cfg.architecture.catalog.type.value == "polaris":
-        console.print("\n[bold]Catalog Prerequisites[/bold]")
-        print_success("Polaris catalog (no external operators needed)")
-        checks_passed += 1
+        _check_ok("Polaris catalog (no external operators needed)")
+    else:
+        _check_ok(f"Catalog type: {cfg.architecture.catalog.type.value}")
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
 
-    # 6. Spark Operator Status
-    console.print("\n[bold]Spark Operator[/bold]")
+    # 7. Spark Operator
+    _section_start("Spark Operator")
     try:
         from lakebench.spark import SparkOperatorManager
 
@@ -779,9 +933,8 @@ def validate(
         status = operator.check_status()
 
         if status.ready:
-            version_info = f" (v{status.version})" if status.version else ""
-            print_success(f"Spark Operator ready in '{status.namespace}'{version_info}")
-            checks_passed += 1
+            version_info = f" v{status.version}" if status.version else ""
+            _check_ok(f"Ready in '{status.namespace}'{version_info}")
 
             # Check namespace watching
             if status.watching_namespace is False:
@@ -794,51 +947,56 @@ def validate(
                     f"--set 'spark.jobNamespaces={{{new_list}}}'"
                 )
                 if spark_op_cfg.install:
-                    print_warning(
-                        f"Spark Operator does NOT watch namespace '{cfg.get_namespace()}'"
+                    _check_warn(
+                        f"Does not watch namespace '{cfg.get_namespace()}'",
+                        hint=f"Currently watching: {existing}\n"
+                        f"Will be added automatically during run (install: true)",
                     )
-                    print_info(f"Currently watching: {existing}")
-                    print_info("Namespace will be added automatically during run (install: true)")
-                    checks_warned += 1
                 else:
-                    print_error(f"Spark Operator does NOT watch namespace '{cfg.get_namespace()}'")
-                    print_info(f"Currently watching: {existing}")
-                    print_info(f"SparkApplications will hang. Fix with:\n  {fix_cmd}")
-                    checks_failed += 1
+                    _check_fail(
+                        f"Does not watch namespace '{cfg.get_namespace()}'",
+                        hint=f"Currently watching: {existing}\n"
+                        f"SparkApplications will hang. Fix with:\n  {fix_cmd}",
+                    )
             elif status.watching_namespace is None:
-                print_info("Could not verify namespace watching (helm values unavailable)")
+                _check_ok(
+                    "Namespace watching unverified (helm values unavailable)",
+                )
         elif status.installed:
-            print_warning(f"Spark Operator installed but not ready: {status.message}")
             if spark_op_cfg.install:
-                print_info("Operator will be repaired during deploy")
-            checks_passed += 1  # Non-blocking warning
-            checks_warned += 1
+                _check_warn(
+                    f"Installed but not ready: {status.message}",
+                    hint="Operator will be repaired during deploy",
+                )
+            else:
+                _check_warn(f"Installed but not ready: {status.message}")
         else:
             if spark_op_cfg.install:
-                print_warning(f"Spark Operator not installed: {status.message}")
-                print_info("Operator will be auto-installed during deploy (install: true)")
-                checks_passed += 1  # Non-blocking if install=True
-                checks_warned += 1
+                _check_warn(
+                    "Not installed",
+                    hint="Will be auto-installed during deploy (install: true)",
+                )
             else:
                 ns = cfg.get_namespace()
-                print_error("Spark Operator not installed")
-                print_info(
-                    "Option 1: Set platform.compute.spark.operator.install: true (auto-install)"
-                )
-                print_info("Option 2: Install manually:")
-                console.print(
+                _check_fail(
+                    "Not installed",
+                    hint="Option 1: Set platform.compute.spark.operator.install: true\n"
+                    "Option 2: Install manually:\n"
                     f"  helm repo add spark-operator https://kubeflow.github.io/spark-operator\n"
                     f"  helm install spark-operator spark-operator/spark-operator \\\n"
                     f"    --namespace spark-operator --create-namespace \\\n"
                     f"    --set 'spark.jobNamespaces={{{ns}}}' \\\n"
-                    f"    --set webhook.enable=true"
+                    f"    --set webhook.enable=true",
                 )
-                checks_failed += 1
     except Exception as e:
-        print_warning(f"Could not check Spark Operator status: {e}")
+        _check_warn(f"Could not check status: {e}")
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
 
-    # Compute vs Scale validation
-    console.print("\n[bold]Compute Adequacy[/bold]")
+    # 8. Compute adequacy
+    _section_start("Compute")
     try:
         from lakebench.config.scale import compute_guidance as _cg
 
@@ -854,61 +1012,55 @@ def validate(
 
         # Executors
         if actual_executors >= guidance.recommended_executors:
-            print_success(
+            _check_ok(
                 f"Executors: {actual_executors} "
-                f"(recommended {guidance.recommended_executors} for scale {scale})"
+                f"(rec {guidance.recommended_executors} for scale {scale})"
             )
-            checks_passed += 1
         elif actual_executors >= guidance.min_executors:
-            console.print(
-                f"  [yellow]![/yellow] Executors: {actual_executors} "
+            _check_warn(
+                f"Executors: {actual_executors} "
                 f"(min {guidance.min_executors}, rec {guidance.recommended_executors} "
                 f"for scale {scale})"
             )
-            checks_passed += 1  # warning, not failure
-            checks_warned += 1
         else:
-            print_error(
+            _check_fail(
                 f"Executors: {actual_executors} below minimum "
                 f"{guidance.min_executors} for scale {scale}"
             )
-            checks_failed += 1
 
         # Memory
         if actual_mem_bytes >= rec_mem_bytes:
-            print_success(
-                f"Memory: {actual_memory} "
-                f"(recommended {guidance.recommended_memory} for scale {scale})"
+            _check_ok(
+                f"Memory: {actual_memory} (rec {guidance.recommended_memory} for scale {scale})"
             )
-            checks_passed += 1
         elif actual_mem_bytes >= min_mem_bytes:
-            console.print(
-                f"  [yellow]![/yellow] Memory: {actual_memory} "
+            _check_warn(
+                f"Memory: {actual_memory} "
                 f"(min {guidance.min_memory}, rec {guidance.recommended_memory} "
                 f"for scale {scale})"
             )
-            checks_passed += 1
-            checks_warned += 1
         else:
-            print_error(
+            _check_fail(
                 f"Memory: {actual_memory} below minimum {guidance.min_memory} for scale {scale}"
             )
-            checks_failed += 1
 
-        print_info(
-            f"Scale {scale}: ~{dims.approx_bronze_gb:.0f} GB bronze, "
-            f"{dims.customers:,} customers, {dims.approx_rows:,} rows "
-            f"[{guidance.tier_name} tier]"
+        _check_ok(
+            f"Scale {scale}: ~{dims.approx_bronze_gb:.0f} GB, "
+            f"{dims.customers:,} customers, {dims.approx_rows:,} rows"
         )
 
         if guidance.warning:
-            console.print(f"  [yellow]{guidance.warning}[/yellow]")
+            _check_warn(guidance.warning)
 
     except Exception as e:
-        console.print(f"  [yellow]Could not validate compute adequacy: {e}[/yellow]")
+        _check_warn(f"Could not validate compute adequacy: {e}")
+    p, f, w = _section_end()
+    checks_passed += p
+    checks_failed += f
+    checks_warned += w
 
     # Summary
-    console.print("\n[bold]Summary[/bold]")
+    console.print()
     if checks_failed == 0:
         if checks_warned > 0:
             warn_s = "s" if checks_warned > 1 else ""
@@ -1190,35 +1342,40 @@ def deploy(
         typer.confirm("Proceed with deployment?", abort=True)
 
     # Display deployment info
+    components = _build_component_list(cfg)
+    header = f"[bold]{cfg.name}[/bold]  ·  namespace: [bold]{namespace}[/bold]"
     if dry_run:
-        console.print(
-            Panel(f"[yellow]DRY RUN[/yellow] - Deploying: [bold]{cfg.name}[/bold]", expand=False)
+        header = f"[yellow]DRY RUN[/yellow]  ·  {header}"
+    console.print(
+        Panel(
+            f"{header}\nConfig: {config_file.resolve()}\nComponents: {components}",
+            title="Deploy",
+            expand=False,
         )
-    else:
-        console.print(Panel(f"Deploying: [bold]{cfg.name}[/bold]", expand=False))
-
-    console.print(f"Namespace: {namespace}")
-    console.print(f"Config: {config_file.resolve()}")
-    if cfg.observability.enabled:
-        console.print("Observability: [green]Prometheus + Grafana[/green]")
+    )
     console.print()
 
-    # Progress callback
+    # Progress callback -- timed steps, skip silently
+    _step_start: dict[str, float] = {}
+
     def on_progress(component: str, status: DeploymentStatus, message: str) -> None:
         if status == DeploymentStatus.IN_PROGRESS:
-            console.print(f"[blue]...[/blue] {message}")
-        elif status == DeploymentStatus.SUCCESS:
-            print_success(message)
-        elif status == DeploymentStatus.FAILED:
-            print_error(message)
+            _step_start[component] = time.time()
         elif status == DeploymentStatus.SKIPPED:
-            print_warning(message)
+            _step_start.pop(component, None)
+        elif status == DeploymentStatus.SUCCESS:
+            elapsed = time.time() - _step_start.pop(component, time.time())
+            console.print(f"  [green]+[/green] {message:<50} {elapsed:>6.1f}s")
+        elif status == DeploymentStatus.FAILED:
+            elapsed = time.time() - _step_start.pop(component, time.time())
+            console.print(f"  [red]x[/red] {message:<50} {elapsed:>6.1f}s")
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.DEPLOY, {"dry_run": dry_run})
 
     # Deploy
+    deploy_start = time.time()
     try:
         engine = DeploymentEngine(cfg, dry_run=dry_run)
         results = engine.deploy_all(progress_callback=on_progress)
@@ -1261,30 +1418,22 @@ def deploy(
     )
     _journal_safe(j.end_command, success=failed == 0)
 
+    deploy_elapsed = int(time.time() - deploy_start)
+
     if failed == 0:
         # Build success message
-        success_msg = f"[green]{passed} components deployed[/green]" + (
-            f", {skipped} skipped" if skipped else ""
-        )
+        success_msg = f"[green]{passed} components deployed in {deploy_elapsed}s[/green]"
 
         # Add monitoring access info if observability was deployed
-        grafana_result = next(
+        obs_result = next(
             (
                 r
                 for r in results
-                if r.component == "grafana" and r.status == DeploymentStatus.SUCCESS
+                if r.component == "observability" and r.status == DeploymentStatus.SUCCESS
             ),
             None,
         )
-        next(
-            (
-                r
-                for r in results
-                if r.component == "prometheus" and r.status == DeploymentStatus.SUCCESS
-            ),
-            None,
-        )
-        if grafana_result and grafana_result.details:
+        if obs_result and obs_result.details:
             namespace = cfg.get_namespace()
             success_msg += (
                 f"\n\n[bold]Monitoring (in-cluster):[/bold]"
@@ -1295,7 +1444,10 @@ def deploy(
                 f"\n  [cyan]kubectl port-forward svc/lakebench-prometheus 9090:9090 -n {namespace}[/cyan]"
             )
 
-        success_msg += "\n\nRun [bold]lakebench status[/bold] to check deployment"
+        success_msg += (
+            "\n\nNext: [bold]lakebench generate[/bold]  to create test data"
+            "\n      [bold]lakebench status[/bold]    to check deployment"
+        )
 
         console.print(
             Panel(
@@ -1311,13 +1463,11 @@ def deploy(
             guidance = (
                 f"Failed at: {failed_component.component}\n"
                 "Fix the issue above, then re-run 'lakebench deploy'.\n"
-                "Previously successful steps are idempotent and will be skipped on retry."
+                "Successful steps will be skipped on retry."
             )
         console.print(
             Panel(
-                f"[red]{failed} failed[/red], {passed} succeeded"
-                + (f", {skipped} skipped" if skipped else "")
-                + f"\n\n{guidance}",
+                f"[red]{failed} failed[/red], {passed} succeeded" + f"\n\n{guidance}",
                 title="Deployment Failed",
                 expand=False,
             )
@@ -1390,19 +1540,54 @@ def destroy(
             print_info("Destruction cancelled")
             raise typer.Exit(0)
 
-    console.print(Panel(f"Destroying: [bold]{cfg.name}[/bold]", expand=False))
-    console.print(f"Config: {config_file.resolve()}")
+    console.print(
+        Panel(
+            f"[bold]{cfg.name}[/bold]  ·  namespace: [bold]{namespace}[/bold]",
+            title="Destroy",
+            expand=False,
+        )
+    )
+    console.print()
 
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.DESTROY, {"force": force})
 
-    # Progress callback
+    # Progress callback -- phase headers with timed sub-steps
+    _destroy_groups = {
+        "spark-jobs": "Cleaning up jobs and pods",
+        "spark-pods": "Cleaning up jobs and pods",
+        "datagen-jobs": "Cleaning up jobs and pods",
+        "iceberg-tables": "Cleaning data",
+        "s3-buckets": "Cleaning data",
+        "observability": "Removing infrastructure",
+        "trino": "Removing infrastructure",
+        "spark-thrift": "Removing infrastructure",
+        "duckdb": "Removing infrastructure",
+        "hive": "Removing infrastructure",
+        "polaris": "Removing infrastructure",
+        "postgres": "Removing infrastructure",
+        "rbac": "Removing infrastructure",
+        "scratch-sc": "Removing infrastructure",
+        "namespace": "Removing namespace",
+    }
+    _dg_current_group = ""
+    _dg_step_start: dict[str, float] = {}
+
     def on_progress(component: str, status: DeploymentStatus, message: str) -> None:
+        nonlocal _dg_current_group
+        group = _destroy_groups.get(component, component)
+
         if status == DeploymentStatus.IN_PROGRESS:
-            console.print(f"[blue]...[/blue] {message}")
+            if group != _dg_current_group:
+                _dg_current_group = group
+                console.print(f"  [dim]{group}[/dim]")
+            _dg_step_start[component] = time.time()
+        elif status == DeploymentStatus.SKIPPED:
+            _dg_step_start.pop(component, None)
         elif status == DeploymentStatus.SUCCESS:
-            print_success(message)
+            elapsed = time.time() - _dg_step_start.pop(component, time.time())
+            console.print(f"    [green]+[/green] {message:<46} {elapsed:>6.1f}s")
             _journal_safe(
                 j.record,
                 EventType.DESTROY_COMPONENT,
@@ -1411,7 +1596,8 @@ def destroy(
                 details={"component": component, "status": "success"},
             )
         elif status == DeploymentStatus.FAILED:
-            print_error(message)
+            elapsed = time.time() - _dg_step_start.pop(component, time.time())
+            console.print(f"    [red]x[/red] {message:<46} {elapsed:>6.1f}s")
             _journal_safe(
                 j.record,
                 EventType.DESTROY_COMPONENT,
@@ -1421,6 +1607,7 @@ def destroy(
             )
 
     # Destroy
+    destroy_start = time.time()
     try:
         engine = DeploymentEngine(cfg)
         results = engine.destroy_all(progress_callback=on_progress)
@@ -1430,6 +1617,7 @@ def destroy(
         raise typer.Exit(1)  # noqa: B904
 
     # Summary
+    destroy_elapsed = int(time.time() - destroy_start)
     console.print()
     passed = sum(1 for r in results if r.status == DeploymentStatus.SUCCESS)
     failed = sum(1 for r in results if r.status == DeploymentStatus.FAILED)
@@ -1447,8 +1635,9 @@ def destroy(
     if failed == 0:
         console.print(
             Panel(
-                f"[green]All {passed} components destroyed[/green]",
-                title="Destruction Complete",
+                f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
+                f"\n\nTo re-deploy: [bold]lakebench deploy[/bold]",
+                title="Destroy Complete",
                 expand=False,
             )
         )
@@ -1457,7 +1646,7 @@ def destroy(
             Panel(
                 f"[red]{failed} failed[/red], {passed} succeeded\n\n"
                 f"Some resources may need manual cleanup",
-                title="Destruction Incomplete",
+                title="Destroy Incomplete",
                 expand=False,
             )
         )
@@ -1943,7 +2132,8 @@ def generate(
                     f"[green]Data generation complete![/green]\n\n"
                     f"Succeeded: {completion_result.details.get('succeeded', '?')} pods\n"
                     f"Elapsed: {completion_result.elapsed_seconds:.0f}s\n\n"
-                    f"Data written to: s3://{cfg.platform.storage.s3.buckets.bronze}/{cfg.architecture.pipeline.medallion.bronze.path_template}",
+                    f"Data written to: s3://{cfg.platform.storage.s3.buckets.bronze}/{cfg.architecture.pipeline.medallion.bronze.path_template}"
+                    f"\n\nNext: [bold]lakebench run[/bold]  to execute the pipeline",
                     title="Generation Complete",
                     expand=False,
                 )
@@ -2037,6 +2227,13 @@ def run(
             help="Run datagen before pipeline stages (full end-to-end measurement)",
         ),
     ] = False,
+    generate_data: Annotated[
+        bool,
+        typer.Option(
+            "--generate",
+            help="Generate data before running the pipeline (shorthand for --include-datagen)",
+        ),
+    ] = False,
 ) -> None:
     """Execute the data pipeline.
 
@@ -2046,19 +2243,22 @@ def run(
     After gold finalize, runs a query benchmark (QpH).
     Use --skip-benchmark to skip the benchmark stage.
 
+    With --generate, generates data first, then runs the full pipeline.
+    Equivalent to running 'lakebench generate' followed by 'lakebench run'.
+
     With --continuous, runs the streaming pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
     and gold-refresh as concurrent streaming jobs. Monitors for
     the configured duration, then stops streaming and runs benchmark.
-
-    With --include-datagen, runs data generation first, measuring
-    ingest time as the first stage in the pipeline benchmark.
     """
     import uuid
 
     from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage
     from lakebench.spark import SparkJobManager, SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import JobState, JobType, get_executor_count, get_job_profile
+
+    # --generate is a shorthand alias for --include-datagen
+    include_datagen = include_datagen or generate_data
 
     config_file = resolve_config_path(config_file, file_option)
 
@@ -2099,8 +2299,9 @@ def run(
         if scale >= 50:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
-    # Branch: continuous streaming pipeline
-    if continuous:
+    # Branch: continuous streaming pipeline (CLI flag overrides config)
+    use_continuous = continuous or cfg.architecture.pipeline.mode == "continuous"
+    if use_continuous:
         _run_continuous(cfg, config_file, timeout, skip_benchmark, duration)
         return
 
@@ -2129,6 +2330,8 @@ def run(
     _datagen_elapsed = 0.0
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
+    results: list[tuple[str, bool, float]] = []
+    benchmark_qph: float | None = None
 
     try:
         # Check Spark operator
@@ -2231,7 +2434,6 @@ def run(
             stages = all_stages
 
         # Run each stage
-        results = []
         for job_type, stage_name, description in stages:
             console.print()
             console.print(f"[bold]Stage: {stage_name}[/bold]")
@@ -2435,7 +2637,6 @@ def run(
         )
 
         # Run Trino benchmark after pipeline completes
-        benchmark_qph = None
         if not skip_benchmark:
             try:
                 from lakebench.benchmark import BenchmarkRunner
@@ -2499,20 +2700,8 @@ def run(
                     "Pipeline results are still valid. Run 'lakebench benchmark' separately."
                 )
 
-        # Build summary with optional QpH
-        qph_line = f"\nQpH: {benchmark_qph:.1f}" if benchmark_qph is not None else ""
-
-        console.print(
-            Panel(
-                "[green]Pipeline completed successfully![/green]\n\n"
-                + "\n".join([f"  {name}: {elapsed:.0f}s" for name, _, elapsed in results])
-                + f"\n\nTotal time: {total_time:.0f}s{qph_line}\n\n"
-                f"Query results: lakebench query --example count\n"
-                f"Generate report: lakebench report",
-                title="Pipeline Complete",
-                expand=False,
-            )
-        )
+        # Summary panel is printed in the finally block (after pipeline
+        # benchmark scores are computed) so it can include the full scorecard.
 
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
@@ -2556,25 +2745,26 @@ def run(
                     datagen_output_rows=_datagen_output_rows,
                 )
                 run_metrics.pipeline_benchmark = pb
-                if pb.pipeline_mode == "continuous":
-                    if pb.sustained_throughput_rps > 0:
-                        latency_str = (
-                            "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
-                            if pb.stage_latency_profile
-                            else "n/a"
-                        )
-                        print_info(
-                            f"Pipeline Score: {pb.data_freshness_seconds:.1f}s freshness"
-                            f" | {pb.sustained_throughput_rps:,.0f} rows/s sustained"
-                            f" | {latency_str}ms latency (b/s/g)"
-                        )
-                elif pb.time_to_value_seconds > 0:
-                    print_info(
-                        f"Pipeline Score: {pb.time_to_value_seconds:.1f}s time-to-value"
-                        f" | {pb.pipeline_throughput_gb_per_second:.3f} GB/s throughput"
-                    )
+
+                # Print full scorecard panel
+                if pipeline_success:
+                    _print_pipeline_scorecard(pb, results, _datagen_elapsed, benchmark_qph)
             except Exception as e:
                 console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
+                # Fallback summary if scorecard build failed
+                if pipeline_success and results:
+                    _total = sum(r[2] for r in results)
+                    _qph = f"\nQpH: {benchmark_qph:.1f}" if benchmark_qph else ""
+                    console.print(
+                        Panel(
+                            "[green]Pipeline complete[/green]\n\n"
+                            + "\n".join(f"  {n}: {el:.0f}s" for n, _, el in results)
+                            + f"\n\nTotal: {_total:.0f}s{_qph}"
+                            + "\n\nFull report: [bold]lakebench report[/bold]",
+                            title="Pipeline Complete",
+                            expand=False,
+                        )
+                    )
 
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
@@ -3156,6 +3346,7 @@ def info(
         ("Events/customer", f"~{dims.events_per_customer}"),
         ("Date range", f"{dims.date_range_days} days"),
         ("Approx rows", f"{dims.approx_rows:,}"),
+        ("Pipeline mode", f"{arch.pipeline.mode.value}"),
         ("Processing", f"{arch.pipeline.pattern.value} (bronze > silver > gold)"),
         ("Catalog", f"{arch.catalog.type.value}"),
         ("Table format", f"{arch.table_format.type.value} {arch.table_format.iceberg.version}"),
@@ -3967,10 +4158,19 @@ def report(
             help="List available runs instead of generating report",
         ),
     ] = False,
+    summary: Annotated[
+        bool,
+        typer.Option(
+            "--summary",
+            "-s",
+            help="Print key scores to the terminal (with or without HTML generation)",
+        ),
+    ] = False,
 ) -> None:
     """Generate benchmark report from collected metrics.
 
     Creates an HTML report inside the per-run directory.
+    Use --summary to print key scores to the terminal.
     """
     from lakebench.metrics import MetricsStorage
     from lakebench.reports import ReportGenerator
@@ -4010,25 +4210,34 @@ def report(
         console.print(table)
         return
 
-    # Generate report mode
+    # Generate report
     try:
         generator = ReportGenerator(metrics_dir)
         report_path = generator.generate_report(run_id)
-
-        console.print(
-            Panel(
-                f"[green]Report generated successfully![/green]\n\n"
-                f"Output: {report_path}\n\n"
-                f"Open in browser to view.",
-                title="Report Generated",
-                expand=False,
-            )
-        )
-
     except ValueError as e:
         print_error(str(e))
         print_info("Use 'lakebench report --list' to see available runs")
         raise typer.Exit(1)  # noqa: B904
+
+    # Print summary to terminal
+    if summary:
+        resolved_id = run_id
+        if not resolved_id:
+            # Extract run ID from report path (run-<id>/report.html)
+            resolved_id = report_path.parent.name.removeprefix("run-")
+        metrics = storage.load_run(resolved_id)
+        if metrics:
+            _print_report_summary(metrics)
+
+    console.print(
+        Panel(
+            f"[green]Report generated successfully![/green]\n\n"
+            f"Output: {report_path}\n\n"
+            + ("[dim]Scores printed above.[/dim]" if summary else "Open in browser to view."),
+            title="Report Generated",
+            expand=False,
+        )
+    )
 
 
 @app.command()

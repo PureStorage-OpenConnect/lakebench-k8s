@@ -36,7 +36,8 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 | `total_elapsed_seconds` | `sum(stage.elapsed_seconds)` | Sum of all stage durations. May exceed time-to-value if stages overlap. |
 | `total_data_processed_gb` | `sum(stage.input_size_gb)` | Total input data across all stages. |
 | `pipeline_throughput_gb_per_second` | `total_data_processed_gb / time_to_value_seconds` | Composite throughput across the whole pipeline. Higher is better. |
-| `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. |
+| `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Higher means better resource utilization. |
+| `scale_verified_ratio` | `total_gb / approx_bronze_gb` | Data completeness check. A ratio below 0.95 means data generation or ingestion was incomplete, which invalidates cross-run comparisons. |
 | `composite_qph` | QpH from the query benchmark | Query throughput against the gold layer. |
 
 ### Continuous Pipeline Scores
@@ -49,6 +50,8 @@ Continuous scoring answers: "How fresh is gold, and how fast are we sustaining i
 | `sustained_throughput_rps` | `bronze_input_rows / run_duration` | Aggregate sustained rows/sec the pipeline can maintain. Higher is better. |
 | `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency. Lower is better. |
 | `ingestion_completeness_ratio` | `bronze_rows / datagen_rows` | Fraction of generated data that made it through bronze. Below 0.95 flags saturation. |
+| `pipeline_saturated` | `ingestion_completeness_ratio < 0.95` | Boolean flag. True when the pipeline cannot keep pace with incoming data. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
+| `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage.input_rows)` | Total volume processed during the monitoring window. |
 | `composite_qph` | QpH from the query benchmark | Query throughput against the gold layer. |
 
@@ -141,6 +144,103 @@ Each pipeline stage (datagen, bronze, silver, gold, query) produces a uniform
 These per-stage metrics feed into the pipeline-level scores and are exported
 in the `stages` and `stage_matrix` sections of the metrics JSON.
 
+## Including Data Generation in Scoring
+
+By default, `lakebench run` only measures the pipeline stages (bronze-verify,
+silver-build, gold-finalize) and the query benchmark. Data generation is
+treated as a separate preparation step.
+
+To measure the full end-to-end pipeline including data ingestion, use the
+`--generate` flag:
+
+```bash
+lakebench run --generate
+```
+
+This runs data generation first, then the pipeline stages, then the query
+benchmark -- all in one invocation. The datagen stage is included in the
+pipeline benchmark as a `datagen` stage with `stage_type="datagen"` and
+`engine="datagen"`. It contributes to:
+
+- `time_to_value_seconds` -- wall-clock now starts from datagen begin
+- `total_elapsed_seconds` -- includes datagen duration
+- `total_data_processed_gb` -- includes datagen output size
+- `scale_verified_ratio` -- uses datagen output to verify completeness
+
+The datagen output size is measured from the bronze S3 bucket after generation
+completes. Row count is estimated from the scale factor (approximately 1.5M
+rows per scale unit).
+
+## Interpreting Scores
+
+### Batch Mode
+
+**Time to Value** is the primary score. It measures wall-clock time from when
+the first stage starts to when the last stage finishes. This is the number
+that answers "how long until my data is queryable?"
+
+- At scale 10 (~100 GB), expect 200--600s depending on cluster size
+- At scale 100 (~1 TB), expect 1200--3600s
+
+**Throughput** (GB/s) shows how fast the pipeline processes data overall.
+Higher is better. This number scales with executor count and cluster capacity.
+
+**Compute Efficiency** (GB/core-hour) measures how well you use allocated
+resources. A higher number means less wasted compute. This metric uses
+*requested* resources (what Spark asked Kubernetes for), not runtime
+utilization. It penalizes over-provisioning: if you request 100 cores but only
+use 20, efficiency drops.
+
+**Scale Verified Ratio** validates that the benchmark ran on the expected data
+volume. A ratio of 1.0 means the actual data matched the configured scale
+factor. Below 0.95 indicates incomplete data -- the benchmark results are not
+comparable to runs at the same nominal scale.
+
+**QpH** (Queries per Hour) measures query engine performance against the gold
+layer. This score depends on the query engine (Trino, Spark Thrift, DuckDB),
+worker count, and memory allocation. It is independent of pipeline throughput.
+
+### Continuous Mode
+
+**Data Freshness** is the primary score. It measures how far behind real-time
+the gold layer is -- the worst-case staleness across all streaming stages.
+Lower is better.
+
+- Under 30s is typical for a well-provisioned pipeline
+- Over 60s suggests a bottleneck in one of the stages
+
+**Sustained Throughput** (rows/sec) measures the steady-state ingestion rate
+through bronze. This is unique rows only -- gold-stage re-reads of silver data
+are excluded.
+
+**Stage Latency Profile** is a three-element vector `[bronze_ms, silver_ms,
+gold_ms]` showing per-stage micro-batch processing latency. If one stage has
+significantly higher latency, it is the bottleneck.
+
+**Ingestion Completeness** shows what fraction of generated data was actually
+consumed. Below 0.95 means the pipeline is saturated -- it cannot keep up with
+the data generation rate. When this happens, `pipeline_saturated` is set to
+`true`.
+
+**Pipeline Saturated** is a boolean flag derived from completeness. When true,
+increase executor count or reduce datagen parallelism to bring the pipeline
+back below capacity.
+
+### Resource Metrics
+
+All resource metrics use **requested** (allocated) values, not runtime
+utilization. This is intentional -- it measures what you asked Kubernetes for,
+which is what you pay for in a cloud environment. The key resource fields per
+stage are:
+
+- `executor_count` -- number of Spark executors
+- `executor_cores` -- cores per executor
+- `executor_memory_gb` -- memory per executor (not including overhead)
+
+These come from the job profiles in `spark/job.py` and the scale-derived
+executor count. They do not change between runs at the same scale unless you
+override executor counts in your config.
+
 ## Reading Results
 
 ### Metrics JSON
@@ -209,6 +309,19 @@ lakebench results --format json        # JSON output
 lakebench results --run <id>           # specific run
 ```
 
+Use `lakebench report --summary` to print key scores directly in the terminal
+without opening the HTML report:
+
+```bash
+lakebench report --summary                        # latest run
+lakebench report --summary --run <id>             # specific run
+lakebench report --summary --metrics <dir>        # custom metrics dir
+```
+
+The summary output includes a per-stage table (elapsed time, data volume,
+throughput, executor count) and mode-appropriate scores -- time-to-value and
+throughput for batch, data freshness and sustained throughput for continuous.
+
 ## Comparing Runs
 
 The metrics JSON is designed for diff and comparison across configurations.
@@ -226,7 +339,7 @@ and `stage_matrix` sections. The `config_snapshot` in each run records the
 exact configuration used, so you can attribute performance differences to
 specific changes (scale factor, executor count, memory, engine workers, etc.).
 
-The `scale_verified_ratio` field (batch mode) confirms that the actual data
-processed matches the expected volume for the configured scale factor. A ratio
-below 0.95 indicates incomplete data generation or ingestion, which would
-invalidate a cross-run comparison.
+Before comparing, check `scale_verified_ratio` (batch) or
+`ingestion_completeness_ratio` (continuous) to confirm both runs processed
+the expected data volume. Comparing runs with incomplete data gives misleading
+results.

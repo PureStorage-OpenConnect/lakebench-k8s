@@ -361,17 +361,16 @@ architecture:
   #       storage: 50Gi
   #       storage_class: ""          # Empty = cluster default
   #     catalog_name: lakehouse      # Trino catalog name for Iceberg
-  #   ## Spark Thrift Server (alternative to Trino)
-  #   # spark_thrift:
+  #   # spark_thrift:                 # Spark Thrift Server (alternative to Trino)
   #   #   cores: 2
   #   #   memory: 4g
-  #   ## DuckDB (lightweight in-process engine)
-  #   # duckdb:
+  #   # duckdb:                        # DuckDB (lightweight in-process engine)
   #   #   cores: 2
   #   #   memory: 4g
   #   #   catalog_name: lakehouse
 
-  # pipeline:
+  pipeline:
+    mode: batch                    # batch | continuous
   #   pattern: medallion             # medallion | streaming | batch
   #   ## Medallion layer configuration
   #   medallion:
@@ -395,7 +394,7 @@ architecture:
   #         - name: customer_executive_dashboard
   #           partition_by: [date]
   #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
-  #   ## Continuous/streaming settings (used with `lakebench run --continuous`)
+  #   ## Continuous/streaming settings (used when mode: continuous)
   #   continuous:
   #     bronze_trigger_interval: "30 seconds"
   #     silver_trigger_interval: "60 seconds"
@@ -413,8 +412,8 @@ architecture:
     datagen:
       # Image: configured via images.datagen (see docs/datagen-custom-images.md)
       scale: 10                    # 1 unit ~ 10 GB bronze (10 = ~100 GB)
-      # mode: auto                   # auto | batch | continuous
-      # parallelism: 4
+      # mode: auto                    # auto | batch | continuous
+      parallelism: 1                 # Number of datagen pods
       # file_size: 512mb
       # dirty_data_ratio: 0.08
       ## CPU and memory are hard-locked per mode (cannot be overridden):
