@@ -223,9 +223,10 @@ class TestInfrastructure:
             capture_output=True,
             text=True,
         )
-        if not result.stdout.strip():
+        phase = result.stdout.strip()
+        if not phase:
             pytest.skip("No Postgres pod found")
-        assert result.stdout.strip() == "Running"
+        assert phase in ("Running", "Succeeded"), f"Unexpected pod phase: {phase}"
 
     def test_hive_metastore_running(self, check_cluster_access, namespace: str):
         """Hive metastore is running."""

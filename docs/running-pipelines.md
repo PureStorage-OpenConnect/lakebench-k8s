@@ -86,7 +86,7 @@ QpH score is `(number_of_queries / total_seconds) * 3600`.
 | `--stage` | `-s` | (all) | Run a specific stage only: `bronze-verify`, `silver-build`, or `gold-finalize` |
 | `--timeout` | `-t` | auto | Timeout per job in seconds. Defaults to `max(3600, scale * 60)` when omitted. |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline stages |
-| `--continuous` | | `false` | Run in continuous streaming mode instead of batch |
+| `--continuous` | | `false` | Run in continuous streaming mode. Overrides `pipeline.mode` in config. |
 | `--duration` | | config value | Streaming run duration in seconds (continuous mode only) |
 | `--include-datagen` | | `false` | Run datagen before pipeline stages for full end-to-end measurement |
 
@@ -124,12 +124,24 @@ lakebench run my-config.yaml --include-datagen --timeout 7200
 
 ## Continuous Mode
 
-Continuous mode runs a streaming pipeline instead of batch. Activate it with
-the `--continuous` flag:
+Continuous mode runs a streaming pipeline instead of batch. Set it in the
+config file or activate it with the `--continuous` CLI flag:
+
+```yaml
+# In your config YAML:
+architecture:
+  pipeline:
+    mode: continuous              # batch | continuous
+```
 
 ```bash
+# Or as a one-off override:
 lakebench run my-config.yaml --continuous
 ```
+
+When `pipeline.mode` is set to `continuous` in the config, `lakebench run`
+uses the streaming pipeline automatically -- no CLI flag needed. The
+`--continuous` flag still works as an override for one-off runs.
 
 In continuous mode, three streaming Spark jobs run concurrently:
 
@@ -258,6 +270,35 @@ platform:
       silver_executors: 12
       gold_executors: 8
 ```
+
+### High Executor Count Considerations
+
+When overriding executor counts above 20, be aware of two scaling limits:
+
+**Driver memory:** The Spark driver maintains K8s API watches for each
+executor pod. Above 20 executors, the default driver memory may be
+insufficient. If you see OOM errors in the driver pod, set a global
+driver memory override:
+
+```yaml
+platform:
+  compute:
+    spark:
+      driver_memory: "24g"
+      silver_executors: 24
+```
+
+**K8s API polling storms:** At 32+ executors, the fabric8 Kubernetes
+client (used by Spark on K8s) polls the API server once per executor per
+heartbeat interval. This can overwhelm the API server, causing timeout
+errors that look like network failures. This is a hard infrastructure
+limit -- adding more driver memory does not help. Keep executor counts
+at 28 or below.
+
+**maxResultSize:** Lakebench automatically scales
+`spark.driver.maxResultSize` based on the effective executor count. You
+do not need to set this manually unless you see "serialized results"
+errors in driver logs. Override it in `spark.conf` if needed.
 
 ## Troubleshooting
 

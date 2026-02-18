@@ -535,6 +535,105 @@ class TestDriverResourceOverrides:
             assert manifest["spec"]["driver"]["cores"] == 6
 
 
+class TestMaxResultSizeScaling:
+    """Tests for dynamic spark.driver.maxResultSize based on executor count."""
+
+    def test_low_executor_count_gets_floor(self):
+        """At default scale (10), few executors -> maxResultSize = 4g."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        spark_conf = manifest["spec"]["sparkConf"]
+        # bronze at scale 1 -> 4 executors -> max(4, 4//3) = max(4,1) = 4
+        assert spark_conf["spark.driver.maxResultSize"] == "4g"
+
+    def test_high_executor_override_scales_max_result(self):
+        """24 executors -> maxResultSize = 8g (24 // 3)."""
+        config = _make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "http://minio:9000",
+                        "access_key": "ak",
+                        "secret_key": "sk",
+                        "buckets": {
+                            "bronze": "b",
+                            "silver": "s",
+                            "gold": "g",
+                        },
+                    }
+                },
+                "compute": {"spark": {"silver_executors": 24}},
+            }
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        spark_conf = manifest["spec"]["sparkConf"]
+        assert spark_conf["spark.driver.maxResultSize"] == "8g"
+
+    def test_max_result_size_capped_at_16g(self):
+        """Even at extreme executor counts, cap at 16g."""
+        config = _make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "http://minio:9000",
+                        "access_key": "ak",
+                        "secret_key": "sk",
+                        "buckets": {
+                            "bronze": "b",
+                            "silver": "s",
+                            "gold": "g",
+                        },
+                    }
+                },
+                "compute": {"spark": {"silver_executors": 60}},
+            }
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        spark_conf = manifest["spec"]["sparkConf"]
+        # min(16, max(4, 60//3)) = min(16, 20) = 16
+        assert spark_conf["spark.driver.maxResultSize"] == "16g"
+
+    def test_user_spark_conf_override_takes_precedence(self):
+        """If user sets maxResultSize in spark.conf, it wins."""
+        config = _make_config(spark={"conf": {"spark.driver.maxResultSize": "2g"}})
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        spark_conf = manifest["spec"]["sparkConf"]
+        assert spark_conf["spark.driver.maxResultSize"] == "2g"
+
+
+class TestMaxExecutorsCaps:
+    """Tests for max_executors limits in _JOB_PROFILES."""
+
+    def test_silver_max_executors_28(self):
+        """Silver auto-scale caps at 28."""
+        from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
+
+        count = _scale_executor_count(_JOB_PROFILES["silver-build"], 10000)
+        assert count == 28
+
+    def test_gold_max_executors_28(self):
+        """Gold auto-scale caps at 28."""
+        from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
+
+        count = _scale_executor_count(_JOB_PROFILES["gold-finalize"], 10000)
+        assert count == 28
+
+    def test_bronze_max_executors_20(self):
+        """Bronze auto-scale caps at 20 (unchanged)."""
+        from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
+
+        count = _scale_executor_count(_JOB_PROFILES["bronze-verify"], 10000)
+        assert count == 20
+
+
 class TestJobResult:
     """Tests for JobResult dataclass."""
 
@@ -1005,10 +1104,10 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='[{"chart":"spark-operator-2.4.0"}]',
             ),
-            # Helm get values (for _get_watched_namespaces)
+            # _get_active_namespaces: deployment spec args
             MagicMock(
                 returncode=0,
-                stdout='{"spark":{"jobNamespaces":["lakebench-test"]}}',
+                stdout='["controller","start","--namespaces=default,lakebench-test"]',
             ),
         ]
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
@@ -1032,9 +1131,10 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='[{"chart":"spark-operator-2.4.0"}]',
             ),
+            # _get_active_namespaces: deployment spec args (no lakebench-test)
             MagicMock(
                 returncode=0,
-                stdout='{"spark":{"jobNamespaces":["default"]}}',
+                stdout='["controller","start","--namespaces=default"]',
             ),
         ]
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
@@ -1059,10 +1159,39 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='[{"chart":"spark-operator-2.4.0"}]',
             ),
-            # Empty jobNamespaces = watches all
+            # _get_active_namespaces: no --namespaces arg = watches all
             MagicMock(
                 returncode=0,
-                stdout='{"spark":{"jobNamespaces":[]}}',
+                stdout='["controller","start","--zap-log-level=info"]',
+            ),
+        ]
+        mgr = SparkOperatorManager(job_namespace="lakebench-test")
+        status = mgr.check_status()
+        assert status.ready is True
+        assert status.watching_namespace is True
+
+    @patch("lakebench.spark.operator.subprocess.run")
+    def test_check_status_falls_back_to_helm_values(self, mock_run):
+        """check_status falls back to Helm values when deployment spec unreadable."""
+        from lakebench.spark.operator import SparkOperatorManager
+
+        mock_run.side_effect = [
+            MagicMock(returncode=0, stdout="sparkapplications"),
+            MagicMock(
+                returncode=0,
+                stdout="NAMESPACE       NAME\nspark-operator  spark-op-ctrl",
+            ),
+            MagicMock(returncode=0, stdout="1"),
+            MagicMock(
+                returncode=0,
+                stdout='[{"chart":"spark-operator-2.4.0"}]',
+            ),
+            # _get_active_namespaces: kubectl fails -> raises _DeploymentReadError
+            MagicMock(returncode=1, stdout="", stderr="not found"),
+            # _get_watched_namespaces: helm values fallback
+            MagicMock(
+                returncode=0,
+                stdout='{"spark":{"jobNamespaces":["default","lakebench-test"]}}',
             ),
         ]
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
@@ -1087,9 +1216,10 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='[{"chart":"spark-operator-2.4.0"}]',
             ),
+            # _get_active_namespaces: only has lakebench, not lakebench-test
             MagicMock(
                 returncode=0,
-                stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
+                stdout='["controller","start","--namespaces=lakebench"]',
             ),
         ]
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
@@ -1099,16 +1229,20 @@ class TestSparkOperatorNamespaceWatching:
         assert "lakebench-test" in status.message
         assert "lakebench,lakebench-test" in status.message
 
+    @patch(
+        "lakebench.spark.operator.SparkOperatorManager._filter_existing_namespaces",
+        side_effect=lambda ns: ns,
+    )
     @patch("lakebench.spark.operator.subprocess.run")
-    def test_ensure_namespace_watched_self_heals(self, mock_run):
-        """When can_heal=True, adds namespace via helm upgrade."""
+    def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter):
+        """When can_heal=True, adds namespace via helm upgrade + restart + verify."""
         from lakebench.spark.operator import SparkOperatorManager
 
         # First batch: check_status() returns watching_namespace=False
         # Then: _add_namespace_to_watch() calls _get_watched_namespaces + helm upgrade
-        # Then: re-check_status() returns watching_namespace=True
+        #       + restart (controller+webhook) + verify + re-check_status()
         mock_run.side_effect = [
-            # check_status() -- CRD, deployment, ready, helm version, helm values
+            # check_status() -- CRD, deployment, ready, helm version, deploy args
             MagicMock(returncode=0, stdout="sparkapplications"),
             MagicMock(
                 returncode=0,
@@ -1119,11 +1253,12 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='[{"chart":"spark-operator-2.4.0"}]',
             ),
+            # _get_active_namespaces: only lakebench, not lakebench-test
             MagicMock(
                 returncode=0,
-                stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
+                stdout='["controller","start","--namespaces=lakebench"]',
             ),
-            # _add_namespace_to_watch: _get_watched_namespaces
+            # _add_namespace_to_watch: _get_watched_namespaces (uses helm values)
             MagicMock(
                 returncode=0,
                 stdout='{"spark":{"jobNamespaces":["lakebench"]}}',
@@ -1132,10 +1267,18 @@ class TestSparkOperatorNamespaceWatching:
             MagicMock(returncode=0, stdout="Release updated"),
             # _is_openshift check (returncode=1 -> not OpenShift)
             MagicMock(returncode=1, stdout=""),
-            # _restart_operator: rollout restart + rollout status
+            # _restart_operator: rollout restart (controller + webhook)
             MagicMock(returncode=0, stdout="deployment restarted"),
+            MagicMock(returncode=0, stdout="deployment restarted"),
+            # _restart_operator: rollout status (controller + webhook)
             MagicMock(returncode=0, stdout="successfully rolled out"),
-            # re-check_status() -- CRD, deployment, ready, helm version, helm values
+            MagicMock(returncode=0, stdout="successfully rolled out"),
+            # _verify_namespace_watched: kubectl get pods
+            MagicMock(
+                returncode=0,
+                stdout='["controller","start","--namespaces=lakebench,lakebench-test"]',
+            ),
+            # re-check_status() -- CRD, deployment, ready, helm version, deploy args
             MagicMock(returncode=0, stdout="sparkapplications"),
             MagicMock(
                 returncode=0,
@@ -1146,9 +1289,10 @@ class TestSparkOperatorNamespaceWatching:
                 returncode=0,
                 stdout='[{"chart":"spark-operator-2.4.0"}]',
             ),
+            # _get_active_namespaces: now includes lakebench-test
             MagicMock(
                 returncode=0,
-                stdout='{"spark":{"jobNamespaces":["lakebench","lakebench-test"]}}',
+                stdout='["controller","start","--namespaces=lakebench,lakebench-test"]',
             ),
         ]
         mgr = SparkOperatorManager(job_namespace="lakebench-test")

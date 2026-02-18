@@ -59,26 +59,26 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     },
     "silver-build": {
         "driver_cores": 4,
-        "driver_memory": "16g",  # BUG-005: 8g OOM at scale 500 (26k tasks)
+        "driver_memory": "24g",  # BUG-005: 16g OOM when executor count > 20 (K8s API polling)
         "executor_cores": 4,
         "executor_memory": "48g",
         "executor_memory_overhead": "12g",
         "scratch_size": "150Gi",
         "base_executors": 8,  # scale <= 10
         "executors_per_100_scale": 12,  # add 12 per 100 scale units
-        "max_executors": 30,
+        "max_executors": 28,  # 32+ causes K8s API polling storms
         "base_partitions": 64,
     },
     "gold-finalize": {
         "driver_cores": 4,
-        "driver_memory": "16g",  # BUG-007: 8g causes GC death spiral at scale 500
+        "driver_memory": "24g",  # BUG-007: 16g OOM when executor count > 20 (K8s API polling)
         "executor_cores": 4,
         "executor_memory": "32g",
         "executor_memory_overhead": "8g",
         "scratch_size": "100Gi",
         "base_executors": 4,  # scale <= 10
         "executors_per_100_scale": 8,  # add 8 per 100 scale units
-        "max_executors": 20,
+        "max_executors": 28,  # 32+ causes K8s API polling storms
         "base_partitions": 32,
     },
     # -----------------------------------------------------------------------
@@ -558,6 +558,36 @@ class SparkJobManager:
             )
             driver_memory = spark_cfg.driver_memory
 
+        # Warn when executor count is high and driver resources may be insufficient
+        if executor_count > 24:
+            mem_lower = driver_memory.lower()
+            if mem_lower.endswith("g"):
+                try:
+                    mem_gb = int(mem_lower.rstrip("g"))
+                    if mem_gb < 24:
+                        logger.warning(
+                            "%s: %d executors but driver memory is %s -- "
+                            "recommend >= 24g for >24 executors "
+                            "(K8s API polling overhead)",
+                            job_type.value,
+                            executor_count,
+                            driver_memory,
+                        )
+                except ValueError:
+                    pass
+        if executor_count > 28:
+            logger.warning(
+                "%s: %d executors exceeds safe limit of 28 -- "
+                "32+ executors can cause K8s API polling storms",
+                job_type.value,
+                executor_count,
+            )
+
+        # Dynamic maxResultSize: scales with executor count.
+        # Each executor sends serialized task results to the driver.
+        # Floor 4g (proven at <=12 executors), cap 16g.
+        max_result_gb = min(16, max(4, executor_count // 3))
+
         # Select script based on job type
         # Scripts are mounted from ConfigMap at /opt/spark/scripts
         script_map = {
@@ -713,7 +743,6 @@ class SparkJobManager:
                 "spark.network.timeout": "600s",
                 "spark.executor.heartbeatInterval": "30s",
                 "spark.task.maxFailures": "4",
-                "spark.driver.maxResultSize": "4g",
                 "spark.rpc.askTimeout": "300s",
                 "spark.driver.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
                 "spark.executor.extraJavaOptions": "-XX:+UseG1GC -XX:MaxGCPauseMillis=200",
@@ -721,6 +750,11 @@ class SparkJobManager:
                 "spark.kubernetes.driver.service.deleteOnTermination": "true",
             }
         )
+
+        # Dynamic maxResultSize -- scales with executor count.
+        # Respect user override from spark.conf if already set.
+        if "spark.driver.maxResultSize" not in spark_conf:
+            spark_conf["spark.driver.maxResultSize"] = f"{max_result_gb}g"
 
         # Hive metastore client tuning (only for Hive catalog)
         if catalog_type != "polaris":

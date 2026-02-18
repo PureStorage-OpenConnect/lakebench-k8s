@@ -303,3 +303,108 @@ class TestScriptsConfigMapCheck:
 
         sig = inspect.signature(SparkJobManager.deploy_scripts_configmap)
         assert sig.return_annotation is bool or sig.return_annotation == "bool"
+
+
+# =============================================================================
+# report --summary flag
+# =============================================================================
+
+
+class TestReportSummary:
+    """Tests for 'lakebench report --summary'."""
+
+    def _seed_run(self, tmp_path):
+        """Write a minimal metrics.json with pipeline_benchmark."""
+        import json
+        from datetime import datetime, timezone
+
+        run_dir = tmp_path / "runs" / "run-summary-test"
+        run_dir.mkdir(parents=True)
+        now = datetime.now(tz=timezone.utc).isoformat()
+        data = {
+            "run_id": "summary-test",
+            "deployment_name": "test-deploy",
+            "start_time": now,
+            "end_time": now,
+            "total_elapsed_seconds": 120.0,
+            "success": True,
+            "jobs": [],
+            "queries": [],
+            "streaming": [],
+            "config_snapshot": {"name": "test-deploy", "scale": 10},
+            "pipeline_benchmark": {
+                "run_id": "summary-test",
+                "deployment_name": "test-deploy",
+                "pipeline_mode": "batch",
+                "start_time": now,
+                "end_time": now,
+                "success": True,
+                "scorecard": {
+                    "total_elapsed_seconds": 120.0,
+                    "total_data_processed_gb": 10.5,
+                    "pipeline_throughput_gb_per_second": 0.088,
+                    "time_to_value_seconds": 120.0,
+                    "compute_efficiency_gb_per_core_hour": 0.5,
+                    "scale_verified_ratio": 1.0,
+                    "composite_qph": 0.0,
+                },
+                "stages": [
+                    {
+                        "stage_name": "bronze",
+                        "stage_type": "batch",
+                        "engine": "spark",
+                        "elapsed_seconds": 40.0,
+                        "input_size_gb": 5.0,
+                        "output_size_gb": 5.0,
+                        "input_rows": 100000,
+                        "output_rows": 100000,
+                        "throughput_gb_per_second": 0.125,
+                        "throughput_rows_per_second": 2500.0,
+                        "executor_count": 4,
+                        "executor_cores": 2,
+                        "executor_memory_gb": 4.0,
+                        "success": True,
+                    },
+                    {
+                        "stage_name": "silver",
+                        "stage_type": "batch",
+                        "engine": "spark",
+                        "elapsed_seconds": 80.0,
+                        "input_size_gb": 5.5,
+                        "output_size_gb": 3.2,
+                        "input_rows": 100000,
+                        "output_rows": 80000,
+                        "throughput_gb_per_second": 0.069,
+                        "throughput_rows_per_second": 1000.0,
+                        "executor_count": 8,
+                        "executor_cores": 4,
+                        "executor_memory_gb": 48.0,
+                        "success": True,
+                    },
+                ],
+                "config_snapshot": {"name": "test-deploy", "scale": 10},
+            },
+        }
+        (run_dir / "metrics.json").write_text(json.dumps(data, indent=2))
+        return tmp_path / "runs"
+
+    def test_summary_prints_scores(self, tmp_path):
+        metrics_dir = self._seed_run(tmp_path)
+        result = runner.invoke(
+            app, ["report", "--summary", "--metrics", str(metrics_dir), "--run", "summary-test"]
+        )
+        assert result.exit_code == 0
+        assert "Benchmark Summary" in result.output
+        assert "test-deploy" in result.output
+        assert "bronze" in result.output
+        assert "silver" in result.output
+        assert "Time to Value" in result.output
+
+    def test_summary_without_flag_no_scores(self, tmp_path):
+        metrics_dir = self._seed_run(tmp_path)
+        result = runner.invoke(
+            app, ["report", "--metrics", str(metrics_dir), "--run", "summary-test"]
+        )
+        assert result.exit_code == 0
+        assert "Report Generated" in result.output
+        assert "Benchmark Summary" not in result.output

@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 import time
 from typing import TYPE_CHECKING
+
+from lakebench.k8s import PlatformType, SecurityVerifier
 
 from .engine import DeploymentResult, DeploymentStatus
 
@@ -74,20 +77,37 @@ class ObservabilityDeployer:
                 "--create-namespace",
                 "--wait",
                 "--timeout",
-                "5m",
+                "10m",
             ]
             for key, val in values.items():
                 cmd.extend(["--set", f"{key}={val}"])
+
+            # OpenShift: null out hardcoded securityContexts and disable
+            # node-exporter (requires hostNetwork/hostPID/hostPath which SCC blocks)
+            if self._is_openshift():
+                openshift_values_file = self._write_openshift_values_file()
+                cmd.extend(["-f", openshift_values_file])
 
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=360,
+                timeout=660,
             )
 
             if result.returncode != 0:
-                error = result.stderr.strip()[:300] if result.stderr else "Unknown error"
+                # Filter out K8s API warnings (I0216... lines) to find real errors
+                stderr_lines = (result.stderr or "").strip().splitlines()
+                error_lines = [
+                    ln
+                    for ln in stderr_lines
+                    if not ln.lstrip().startswith(("I0", "W0", '"Warning'))
+                ]
+                error = (
+                    "\n".join(error_lines).strip()[:500]
+                    or result.stderr.strip()[:500]
+                    or "Unknown error"
+                )
                 recovery = (
                     f"\nRecovery:\n"
                     f"  helm status {HELM_RELEASE_NAME} -n {namespace}\n"
@@ -118,7 +138,7 @@ class ObservabilityDeployer:
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.FAILED,
-                message="Helm install timed out (360s)",
+                message="Helm install timed out (660s)",
                 elapsed_seconds=time.time() - start,
             )
         except Exception as e:
@@ -199,10 +219,18 @@ class ObservabilityDeployer:
             timeout=60,
         )
 
+    def _is_openshift(self) -> bool:
+        """Detect if running on OpenShift."""
+        try:
+            verifier = SecurityVerifier(self.k8s)
+            return verifier.detect_platform() == PlatformType.OPENSHIFT
+        except Exception:
+            return False
+
     def _build_helm_values(self, namespace: str) -> dict[str, str]:
         """Build Helm --set values for kube-prometheus-stack."""
         obs = self.config.observability
-        return {
+        values: dict[str, str] = {
             "prometheus.prometheusSpec.retention": obs.retention,
             "prometheus.prometheusSpec.storageSpec.volumeClaimTemplate.spec.resources.requests.storage": obs.storage,
             "grafana.enabled": str(obs.dashboards_enabled).lower(),
@@ -211,3 +239,53 @@ class ObservabilityDeployer:
             "prometheus.prometheusSpec.podMonitorNamespaceSelector.matchNames[0]": namespace,
             "prometheus.prometheusSpec.serviceMonitorNamespaceSelector.matchNames[0]": namespace,
         }
+
+        return values
+
+    def _write_openshift_values_file(self) -> str:
+        """Write a temp values file that nulls out hardcoded securityContexts.
+
+        OpenShift assigns UIDs from the namespace annotation range.
+        The chart's hardcoded runAsUser/fsGroup values (e.g. 2000, 65534)
+        are rejected by SCC. A values file is needed because ``--set key=null``
+        passes the string literal "null", not YAML null.
+        """
+        import yaml
+
+        # Shared securityContext override -- null out everything
+        _null_sc: dict[str, None] = {
+            "runAsUser": None,
+            "runAsGroup": None,
+            "fsGroup": None,
+        }
+
+        overrides = {
+            "prometheusOperator": {
+                "securityContext": _null_sc,
+                "admissionWebhooks": {
+                    "patch": {
+                        "securityContext": _null_sc,
+                        "podSecurityContext": {
+                            "runAsUser": None,
+                            "runAsNonRoot": True,
+                        },
+                    },
+                },
+            },
+            "prometheus": {
+                "prometheusSpec": {"securityContext": _null_sc},
+            },
+            "alertmanager": {
+                "alertmanagerSpec": {"securityContext": _null_sc},
+            },
+            "grafana": {"securityContext": _null_sc},
+            "kube-state-metrics": {"securityContext": _null_sc},
+            # node-exporter needs hostNetwork/hostPID/hostPath -- blocked by SCC
+            "nodeExporter": {"enabled": False},
+            "prometheusNodeExporter": {"enabled": False},
+        }
+
+        fp = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", prefix="lb-obs-", delete=False)
+        yaml.safe_dump(overrides, fp, default_flow_style=False)
+        fp.close()
+        return fp.name

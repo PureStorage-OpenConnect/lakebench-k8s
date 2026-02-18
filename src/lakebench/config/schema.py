@@ -112,6 +112,19 @@ class DatagenMode(str, Enum):
     AUTO = "auto"
 
 
+class PipelineMode(str, Enum):
+    """Pipeline execution mode.
+
+    - batch: sequential medallion jobs
+      (bronze-verify -> silver-build -> gold-finalize)
+    - continuous: concurrent streaming jobs
+      (bronze-ingest + silver-stream + gold-refresh)
+    """
+
+    BATCH = "batch"
+    CONTINUOUS = "continuous"
+
+
 class ReportFormat(str, Enum):
     """Supported report output formats."""
 
@@ -572,6 +585,7 @@ class ProcessingConfig(BaseModel):
     """Processing pattern configuration."""
 
     pattern: ProcessingPattern = ProcessingPattern.MEDALLION
+    mode: PipelineMode = PipelineMode.BATCH
     medallion: MedallionConfig = Field(default_factory=MedallionConfig)
     continuous: ContinuousConfig = Field(default_factory=ContinuousConfig)
 

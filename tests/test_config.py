@@ -340,6 +340,35 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.uploaders == 0
 
 
+class TestPipelineModeConfig:
+    """Tests for pipeline mode configuration."""
+
+    def test_pipeline_mode_defaults_batch(self):
+        """Pipeline mode defaults to 'batch'."""
+        from lakebench.config.schema import PipelineMode
+
+        config = LakebenchConfig(name="test")
+        assert config.architecture.pipeline.mode == PipelineMode.BATCH
+
+    def test_pipeline_mode_continuous(self):
+        """Pipeline mode can be set to 'continuous'."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={"pipeline": {"mode": "continuous"}},
+        )
+        assert config.architecture.pipeline.mode.value == "continuous"
+
+    def test_pipeline_mode_invalid_rejected(self):
+        """Invalid pipeline mode is rejected by Pydantic."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            LakebenchConfig(
+                name="test",
+                architecture={"pipeline": {"mode": "invalid"}},
+            )
+
+
 class TestScratchStorageConfig:
     """Tests for scratch storage configuration."""
 

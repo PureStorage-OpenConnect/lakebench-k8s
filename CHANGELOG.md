@@ -4,6 +4,34 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.3] - 2026-02-17
+
+### Added
+- `architecture.pipeline.mode` config field (`batch` | `continuous`) sets the
+  pipeline execution mode in YAML. The `--continuous` CLI flag still works as
+  an override for one-off runs.
+- `report --summary` / `-s` flag prints key pipeline scores (per-stage table,
+  time-to-value, throughput, efficiency, QpH) to the terminal without opening
+  the HTML report.
+- `lakebench init` template includes `pipeline.mode: batch` in generated configs.
+- `info` command shows the active pipeline mode.
+
+### Changed
+- Scorecard stage label changed from "datagen" to "data-generation" for clarity.
+- `lakebench.yaml` example: flattened double-commented sections (`#   #` patterns)
+  to single-level comments for readability.
+
+### Fixed
+- Documentation: observability annotated example in `configuration.md` used the
+  old nested YAML structure (`metrics.prometheus.enabled`, `dashboards.grafana`).
+  Updated to match the flat schema (`observability.enabled`, etc.).
+- Documentation: `query_engine.type` reference table and supported combinations
+  table were missing `duckdb` as a valid option.
+- Documentation: `running-pipelines.md` and `configuration.md` now document
+  `pipeline.mode` config field alongside the `--continuous` CLI flag.
+- Documentation: `benchmarking.md` now documents `report --summary` in the
+  "Viewing Results on the Command Line" section.
+
 ## [1.0.2] - 2026-02-14
 
 ### Changed
@@ -44,6 +72,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Helm failure recovery commands in observability deployer error messages.
 - Workflow hint in CLI help epilog: `init -> validate -> deploy -> generate -> run -> report -> destroy`.
 - Minimum viable config block in generated YAML (3 required fields).
+- "Next step" hints in `deploy`, `generate`, and `destroy` success panels.
+- `deploy` preflight prints a validate reminder tip.
+- Scale 100 (~1 TB) configuration example in docs.
 
 ### Fixed
 - `generate` showed "Target: 0.00 GB" (wrong dict key `target_size_bytes`
@@ -58,6 +89,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 11 bare `except: pass` patterns replaced with `logger.debug()` or
   `logger.warning()` across cli.py, engine.py, k8s/client.py, s3/client.py,
   hive.py, and metrics/collector.py.
+- 6 e2e test bugs: continuous pipeline used `--timeout` instead of `--duration`,
+  destroy assertion failed on Completed pods, `--mode` flag doesn't exist (use
+  `--continuous`), gold row count regex matched run ID hex digits, scale matrix
+  namespace not registered with Spark Operator, integration test rejected
+  Succeeded postgres phase.
 
 ## [1.0.1] - 2026-02-13
 
