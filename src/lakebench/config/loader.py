@@ -326,6 +326,12 @@ architecture:
     type: hive                     # hive | polaris | none
     ## Hive Metastore tuning (uncomment to override defaults)
     # hive:
+    #   operator:
+    #     install: false             # Set true to auto-install Stackable operators.
+    #                                # Requires cluster-admin. Installs commons,
+    #                                # listener, secret, and hive operators.
+    #     namespace: stackable
+    #     version: "25.7.0"
     #   thrift:
     #     min_threads: 10
     #     max_threads: 50

@@ -348,9 +348,18 @@ class HiveResourcesConfig(BaseModel):
     memory: str = "4Gi"
 
 
+class StackableOperatorConfig(BaseModel):
+    """Stackable operator installation configuration."""
+
+    install: bool = False
+    namespace: str = "stackable"
+    version: str = "25.7.0"
+
+
 class HiveConfig(BaseModel):
     """Hive Metastore configuration."""
 
+    operator: StackableOperatorConfig = Field(default_factory=StackableOperatorConfig)
     thrift: HiveThriftConfig = Field(default_factory=HiveThriftConfig)
     resources: HiveResourcesConfig = Field(default_factory=HiveResourcesConfig)
 

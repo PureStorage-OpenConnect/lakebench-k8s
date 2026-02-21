@@ -108,7 +108,23 @@ Which catalog operators you need depends on your recipe choice:
 | `hive-*` | Hive Metastore | Stackable commons, secret, listener, and hive operators |
 | `polaris-*` | Apache Polaris | **None** -- Lakebench deploys Polaris directly |
 
-For **Hive** recipes (the default), install the Stackable operators:
+For **Hive** recipes (the default), the Stackable operators are required.
+You have two options:
+
+**Option A: Auto-install** (add to your config YAML):
+
+```yaml
+architecture:
+  catalog:
+    hive:
+      operator:
+        install: true    # lakebench deploy will install Stackable operators
+```
+
+This installs all four Stackable operators (commons, listener, secret, hive)
+via Helm during `lakebench deploy`. Requires cluster-admin.
+
+**Option B: Manual install:**
 
 ```bash
 helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \

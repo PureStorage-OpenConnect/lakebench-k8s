@@ -14,6 +14,7 @@ from lakebench.config import (
     parse_spark_memory,
     save_config,
 )
+from tests.conftest import make_config
 
 
 class TestParseSize:
@@ -161,6 +162,25 @@ class TestLakebenchConfig:
             LakebenchConfig(
                 name="test", architecture={"workload": {"datagen": {"dirty_data_ratio": 1.5}}}
             )
+
+
+class TestStackableOperatorConfig:
+    """Tests for StackableOperatorConfig defaults and override."""
+
+    def test_defaults(self):
+        cfg = make_config()
+        op = cfg.architecture.catalog.hive.operator
+        assert op.install is False
+        assert op.namespace == "stackable"
+        assert op.version == "25.7.0"
+
+    def test_override_install_true(self):
+        cfg = make_config(architecture={"catalog": {"hive": {"operator": {"install": True}}}})
+        assert cfg.architecture.catalog.hive.operator.install is True
+
+    def test_override_version(self):
+        cfg = make_config(architecture={"catalog": {"hive": {"operator": {"version": "24.3.0"}}}})
+        assert cfg.architecture.catalog.hive.operator.version == "24.3.0"
 
 
 class TestConfigLoader:

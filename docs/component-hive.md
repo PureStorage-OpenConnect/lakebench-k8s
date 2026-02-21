@@ -18,18 +18,42 @@ leave it unset) to use it.
 
 ## Stackable Operator
 
-The Stackable Hive Operator must be installed on the cluster before deploying
-Lakebench with a Hive catalog. Install it with Helm:
+The Stackable Hive Operator (plus commons, listener, and secret operators)
+must be present on the cluster before deploying a Hive catalog.
+
+Lakebench can auto-install the operators, or skip installation if they are
+already present on the cluster:
+
+```yaml
+architecture:
+  catalog:
+    hive:
+      operator:
+        install: false              # Set true to auto-install (requires cluster-admin)
+        namespace: "stackable"      # Where the operators run
+        version: "25.7.0"           # Stackable chart version
+```
+
+When `install: true`, `lakebench deploy` installs all four Stackable operators
+via Helm before deploying the HiveCluster. If the operators are already
+installed, the step is skipped.
+
+To install manually instead:
 
 ```bash
-helm install hive-operator \
-  oci://oci.stackable.tech/sdp-charts/hive-operator \
-  --version 25.7.0 \
-  --namespace stackable
+helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator \
+  --version 25.7.0 --namespace stackable --create-namespace
+helm install listener-operator oci://oci.stackable.tech/sdp-charts/listener-operator \
+  --version 25.7.0 --namespace stackable
+helm install secret-operator oci://oci.stackable.tech/sdp-charts/secret-operator \
+  --version 25.7.0 --namespace stackable
+helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
+  --version 25.7.0 --namespace stackable
 ```
 
 Lakebench checks for the `hiveclusters.hive.stackable.tech` CRD at deploy
-time. If the CRD is missing, deployment fails with an actionable error message.
+time. If the CRD is missing and `install` is false, deployment fails with an
+actionable error message.
 
 ### Managed Resources
 
