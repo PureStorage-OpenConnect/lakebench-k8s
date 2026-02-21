@@ -16,6 +16,9 @@ lakebench run my-config.yaml
 
 ## Minimum Viable Config
 
+> **Starting out?** Use a [quick-recipe](recipes.md#quick-recipes) for one-line
+> setup, then come back here to customize individual settings as needed.
+
 The smallest working config requires only a name, an S3 endpoint, and S3
 credentials. Everything else has working defaults (Hive + Iceberg + Trino,
 scale 1, Spark operator auto-installed).
@@ -68,7 +71,7 @@ version: 1
 
 # Optional recipe shorthand. Sets catalog, table_format, and query_engine
 # in one line. User overrides in architecture: always take precedence.
-# recipe: hive-iceberg-trino
+# recipe: hive-iceberg-spark-trino
 
 # ---------------------------------------------------------------------------
 # IMAGES
@@ -155,6 +158,7 @@ platform:
       # Global driver overrides (null = profile default).
       driver_memory: null
       driver_cores: null
+```
 
 ### Executor Override Guide
 
@@ -193,6 +197,7 @@ These assume per-executor sizing from the proven profiles: silver uses
 4 cores + 60g (48g + 12g overhead) per executor, gold uses 4 cores +
 40g (32g + 8g overhead) per executor.
 
+```yaml
     postgres:
       storage: 10Gi
       storage_class: ""               # Empty = cluster default
@@ -220,7 +225,7 @@ architecture:
         spill_enabled: true
         spill_max_per_node: 40Gi
         storage: 50Gi
-        storage_class: ""
+        storage_class: ""                 # Empty = emptyDir. Set a class for PVC.
       catalog_name: lakehouse
 
   pipeline:
@@ -235,6 +240,8 @@ architecture:
       run_duration: 1800              # Seconds (30 min default)
       max_files_per_trigger: 50
       checkpoint_base: checkpoints
+      benchmark_interval: 300         # Clamped to gold_refresh_interval at runtime
+      benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
 
   workload:
     schema: customer360               # customer360 | iot | financial
@@ -303,7 +310,7 @@ Fields marked **(required)** must be provided; everything else has a default.
 | `name` | string | **(required)** | Unique deployment name. Also used as the K8s namespace when `namespace` is empty. |
 | `description` | string | `""` | Optional human-readable description. |
 | `version` | int | `1` | Config schema version. Always `1`. |
-| `recipe` | string or null | `null` | Recipe shorthand (e.g., `hive-iceberg-trino`). Sets catalog, table format, and query engine defaults. See [Recipes](recipes.md). |
+| `recipe` | string or null | `null` | Recipe shorthand (e.g., `hive-iceberg-spark-trino`). Sets catalog, table format, and query engine defaults. See [Recipes](recipes.md). |
 
 ### Images
 
@@ -386,7 +393,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `platform.compute.postgres.storage` | string | `10Gi` | PVC size for PostgreSQL data. |
-| `platform.compute.postgres.storage_class` | string | `""` | StorageClass for PostgreSQL PVC. Empty = cluster default. |
+| `platform.compute.postgres.storage_class` | string | `""` | StorageClass for PostgreSQL PVC. Empty = cluster default StorageClass (requires one to exist -- see [Prerequisites](getting-started.md#default-storageclass)). |
 
 ### Architecture -- Catalog
 
@@ -408,12 +415,10 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.table_format.type` | enum | `iceberg` | Table format: `iceberg`, `delta`, or `hudi`. |
+| `architecture.table_format.type` | enum | `iceberg` | Table format. Only `iceberg` is currently supported. |
 | `architecture.table_format.iceberg.version` | string | `1.10.1` | Apache Iceberg runtime JAR version. |
 | `architecture.table_format.iceberg.file_format` | enum | `parquet` | Underlying file format: `parquet`, `orc`, or `avro`. |
 | `architecture.table_format.iceberg.properties` | dict | `{}` | Additional Iceberg table properties (key-value pairs). |
-| `architecture.table_format.delta.version` | string | `3.0.0` | Delta Lake version. |
-| `architecture.table_format.delta.properties` | dict | `{}` | Additional Delta table properties. |
 
 ### Architecture -- Query Engine
 
@@ -427,8 +432,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.query_engine.trino.worker.memory` | string | `16Gi` | Trino worker memory. |
 | `architecture.query_engine.trino.worker.spill_enabled` | bool | `true` | Enable query spill to disk. |
 | `architecture.query_engine.trino.worker.spill_max_per_node` | string | `40Gi` | Maximum spill size per worker. |
-| `architecture.query_engine.trino.worker.storage` | string | `50Gi` | Worker PVC size for spill and temp data. |
-| `architecture.query_engine.trino.worker.storage_class` | string | `""` | Worker PVC StorageClass. Empty = cluster default. |
+| `architecture.query_engine.trino.worker.storage` | string | `50Gi` | Worker storage size for spill and temp data. |
+| `architecture.query_engine.trino.worker.storage_class` | string | `""` | Worker StorageClass. Empty = emptyDir (ephemeral, no PVC needed). Set a class name to use PVC-backed persistent volumes instead. |
 | `architecture.query_engine.trino.catalog_name` | string | `lakehouse` | Trino catalog name for the Iceberg connector. |
 | `architecture.query_engine.spark_thrift.cores` | int | `2` | Spark Thrift Server CPU cores. |
 | `architecture.query_engine.spark_thrift.memory` | string | `4g` | Spark Thrift Server memory. |
@@ -451,6 +456,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.continuous.run_duration` | int | `1800` | Streaming run duration in seconds. Minimum 60. |
 | `architecture.pipeline.continuous.max_files_per_trigger` | int | `50` | Max Parquet files per micro-batch. Primary throughput cap. |
 | `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
+| `architecture.pipeline.continuous.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
+| `architecture.pipeline.continuous.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
 
 ### Architecture -- Workload & Datagen
 
@@ -612,7 +619,7 @@ A production-scale config for 1 TB benchmarking on a 64-core cluster:
 
 ```yaml
 name: lakebench-1tb
-recipe: hive-iceberg-trino
+recipe: hive-iceberg-spark-trino
 
 datagen:
   scale: 100
@@ -667,10 +674,6 @@ clear error message.
 | polaris | iceberg | spark-thrift | Yes |
 | polaris | iceberg | duckdb | Yes |
 | polaris | iceberg | none | Yes |
-| hive | delta | trino | Yes |
-| hive | delta | none | Yes |
-
-Polaris is an Apache Iceberg REST catalog. It does not support Delta Lake.
 
 ## Image Overrides
 
@@ -695,7 +698,7 @@ pulls the latest version.
 Use `lakebench init` to generate a starter configuration file interactively:
 
 ```bash
-lakebench init my-config.yaml
+lakebench init --output my-config.yaml
 ```
 
 This creates a well-commented YAML file with all defaults that you can

@@ -116,7 +116,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-benchmark` | | `false` | Skip the Trino query benchmark after pipeline |
 | `--continuous` | | `false` | Run streaming pipeline instead of batch |
 | `--duration` | | config value | Streaming run duration in seconds |
-| `--include-datagen` | | `false` | Run datagen before pipeline for end-to-end measurement |
+| `--generate` | | `false` | Run datagen before pipeline (batch mode only; continuous always runs datagen) |
 
 In batch mode, runs `bronze-verify`, `silver-build`, and `gold-finalize`
 sequentially as Spark jobs, then executes the query benchmark.
@@ -138,7 +138,7 @@ Deletes all streaming SparkApplications (`bronze-ingest`, `silver-stream`,
 
 ### benchmark
 
-Run the Trino query benchmark independently.
+Run the query engine benchmark independently.
 
 ```
 lakebench benchmark [CONFIG_FILE] [OPTIONS]
@@ -287,6 +287,7 @@ lakebench report [OPTIONS]
 |---|---|---|---|
 | `--metrics` | `-m` | `./lakebench-output/runs` | Directory containing run subdirectories |
 | `--run` | `-r` | latest | Specific run ID to report on |
+| `--summary` | `-s` | `false` | Print key scores to the terminal without opening the HTML report |
 | `--list` | `-l` | `false` | List available runs instead of generating report |
 
 ### results

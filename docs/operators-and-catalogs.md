@@ -76,30 +76,34 @@ oc adm policy add-scc-to-user privileged -z spark-operator-webhook -n spark-oper
 
 ## Catalog Roadmap
 
-### Phase 1: Hive Metastore (Current)
-- Universal compatibility (Iceberg, Delta, Hudi)
+### Hive Metastore
+- Iceberg table format support
 - Stackable operator for S3 support
 - PostgreSQL backend
 
-### Phase 2: Apache Polaris
+### Apache Polaris
 - Pure Iceberg REST catalog
-- Credential vending
-- Multi-cloud native
-- Migration after Hive is stable
+- OAuth2 client credentials
+- No STS credential vending (FlashBlade limitation)
+- PostgreSQL backend (separate `polaris` database)
 
 ### Catalog Comparison
 
-| Catalog | Format Support | Governance | Deployment |
-|---------|---------------|------------|------------|
-| Hive Metastore | Iceberg, Delta, Hudi | Basic | Stackable operator |
-| Apache Polaris | Iceberg only | Access control | K8s deployment |
-| Unity Catalog OSS | Iceberg, Delta, Hudi | Lineage, governance | K8s deployment |
-| Nessie | Iceberg | Git-style versioning | K8s deployment |
+Lakebench supports Hive Metastore and Apache Polaris. The others are listed
+for ecosystem context only -- they are not implemented.
 
-### Why Polaris Later
-- Iceberg-only (we may need mixed format support initially)
-- Need stable baseline first with Hive
-- Polaris is the modern direction once data paths are proven
+| Catalog | Format Support | Governance | Lakebench Status |
+|---------|---------------|------------|-----------------|
+| Hive Metastore | Iceberg | Basic | **Supported** (default) |
+| Apache Polaris | Iceberg only | Access control | **Supported** |
+| Unity Catalog OSS | Iceberg, Delta | Lineage, governance | Not implemented |
+| Nessie | Iceberg | Git-style versioning | Not implemented |
+
+### Choosing Between Hive and Polaris
+- Both are fully supported and tested
+- Hive is the default -- well-established, broad compatibility
+- Polaris is the modern option -- pure REST, better for multi-cloud setups
+- See [quickstart-polaris.md](quickstart-polaris.md) for Polaris setup
 
 ---
 
@@ -154,7 +158,7 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Stackable Listener Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Hive Metastore | 3.1.3 | Managed by Stackable |
 | Hadoop AWS | 3.3.4 | spark.jars.packages |
-| PostgreSQL | 15 | bitnami/postgresql |
+| PostgreSQL | 17 | postgres:17 |
 | Trino | 479 | trinodb/trino image |
 
 ## Stackable Installation
@@ -203,9 +207,9 @@ lakebench validate test-config.yaml --verbose
 
 # Output includes:
 # Platform Security
-# ✓ Platform detected: openshift 4.19.0
-# ✓ SCC 'anyuid' assigned to 'lakebench-spark-runner'
-# ✓ Platform security checks passed
+# + Platform detected: openshift 4.19.0
+# + SCC 'anyuid' assigned to 'lakebench-spark-runner'
+# + Platform security checks passed
 ```
 
 ### Production Recommendations
