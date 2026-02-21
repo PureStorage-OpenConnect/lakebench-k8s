@@ -4,6 +4,18 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.6] - 2026-02-20
+
+### Fixed
+- **Datagen templates missing from PyPI wheel.** The `datagen/` sdist exclude
+  pattern in `pyproject.toml` was unanchored, causing hatchling to also exclude
+  `templates/datagen/*.yaml.j2` from the wheel. `lakebench generate` and
+  `lakebench run --generate` failed with "'datagen/job.yaml.j2' not found in
+  search path" when installed from PyPI. Fixed by anchoring the exclude to the
+  repo root (`/datagen/`).
+- README rewritten for clarity. Value proposition, quick start, and example
+  scorecard output now front and center.
+
 ## [1.0.5] - 2026-02-20
 
 ### Added
