@@ -30,13 +30,12 @@ pip install lakebench-k8s
 > [GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
 
 ```bash
-lakebench init --interactive        # generate config with S3 prompts
-lakebench validate lakebench.yaml   # check config + cluster connectivity
-lakebench deploy lakebench.yaml     # deploy the stack
-lakebench generate lakebench.yaml --wait   # generate test data
-lakebench run lakebench.yaml        # run pipeline + benchmark
-lakebench report                    # view HTML scorecard
-lakebench destroy lakebench.yaml    # tear down everything
+lakebench init --interactive             # generate config with S3 prompts
+lakebench validate lakebench.yaml        # check config + cluster connectivity
+lakebench deploy lakebench.yaml          # deploy the stack
+lakebench run lakebench.yaml --generate  # generate data + run pipeline + benchmark
+lakebench report                         # view HTML scorecard
+lakebench destroy lakebench.yaml         # tear down everything
 ```
 
 The `recipe` field selects your architecture in one line. The `scale` field

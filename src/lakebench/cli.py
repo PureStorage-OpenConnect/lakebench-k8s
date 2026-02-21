@@ -314,24 +314,35 @@ def _preflight_check(cfg) -> None:
             logger.debug("Preflight CRD check skipped (K8s not reachable)", exc_info=True)
 
         if _missing_stackable:
-            print_error(f"Missing Stackable operators: {', '.join(_missing_stackable)}")
-            print_info("Install operators first:")
-            for op in [
-                "commons-operator",
-                "listener-operator",
-                "secret-operator",
-                "hive-operator",
-            ]:
-                console.print(
-                    f"  helm install {op} "
-                    f"oci://oci.stackable.tech/sdp-charts/{op} "
-                    f"--version 25.7.0 --namespace stackable --create-namespace"
-                )
-            print_info(
-                "Or switch to a Polaris recipe (no operators needed):\n"
-                "  Set recipe: polaris-iceberg-spark-trino in your config"
+            op_install = getattr(
+                getattr(getattr(cfg.architecture.catalog, "hive", None), "operator", None),
+                "install",
+                False,
             )
-            raise typer.Exit(1)
+            if op_install:
+                print_info(
+                    f"Stackable operators missing ({', '.join(_missing_stackable)}) "
+                    "-- will be auto-installed during deploy (install: true)"
+                )
+            else:
+                print_error(f"Missing Stackable operators: {', '.join(_missing_stackable)}")
+                print_info("Install operators first:")
+                for op in [
+                    "commons-operator",
+                    "listener-operator",
+                    "secret-operator",
+                    "hive-operator",
+                ]:
+                    console.print(
+                        f"  helm install {op} "
+                        f"oci://oci.stackable.tech/sdp-charts/{op} "
+                        f"--version 25.7.0 --namespace stackable --create-namespace"
+                    )
+                print_info(
+                    "Or switch to a Polaris recipe (no operators needed):\n"
+                    "  Set recipe: polaris-iceberg-spark-trino in your config"
+                )
+                raise typer.Exit(1)
 
 
 def _run_preflight_infra_check(cfg) -> None:
@@ -977,20 +988,32 @@ def validate(
             }
             missing = [op for crd, op in required_crds.items() if crd not in crd_names]
             if missing:
-                install_hint = "Install with:\n" + "\n".join(
-                    f"  helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
-                    f"--version 25.7.0 --namespace stackable --create-namespace"
-                    for op in [
-                        "commons-operator",
-                        "listener-operator",
-                        "secret-operator",
-                        "hive-operator",
-                    ]
-                )
-                _check_fail(
-                    f"Missing Stackable operators: {', '.join(missing)}",
-                    hint=install_hint,
-                )
+                hive_op_cfg = cfg.architecture.catalog.hive.operator
+                if hive_op_cfg.install:
+                    _check_warn(
+                        f"Missing Stackable operators: {', '.join(missing)}",
+                        hint="Will be auto-installed during deploy (install: true)",
+                    )
+                else:
+                    install_hint = (
+                        "Option 1: Set architecture.catalog.hive.operator.install: true\n"
+                        "Option 2: Install manually:\n"
+                        + "\n".join(
+                            f"  helm install {op} oci://oci.stackable.tech/sdp-charts/{op} "
+                            f"--version {hive_op_cfg.version} --namespace {hive_op_cfg.namespace}"
+                            " --create-namespace"
+                            for op in [
+                                "commons-operator",
+                                "listener-operator",
+                                "secret-operator",
+                                "hive-operator",
+                            ]
+                        )
+                    )
+                    _check_fail(
+                        f"Missing Stackable operators: {', '.join(missing)}",
+                        hint=install_hint,
+                    )
             else:
                 _check_ok("Stackable operators installed (Hive)")
         except Exception:
