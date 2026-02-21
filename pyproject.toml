@@ -124,6 +124,10 @@ ignore_missing_imports = true
 module = ["lakebench.spark.scripts.*"]
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+module = ["lakebench.reports.generator"]
+ignore_errors = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
