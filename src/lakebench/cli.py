@@ -164,8 +164,8 @@ def _print_pipeline_scorecard(
         if pb.stage_latency_profile:
             lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
             scores.append(f"  Latency (b/s/g):  {lat}ms")
-        if pb.ingestion_completeness_ratio > 0:
-            pct = pb.ingestion_completeness_ratio * 100
+        if pb.ingest_ratio > 0:
+            pct = pb.ingest_ratio * 100
             scores.append(f"  Completeness:   {pct:>7.1f}%")
         if pb.pipeline_saturated:
             scores.append("  [yellow]Pipeline saturated (completeness < 95%)[/yellow]")
@@ -180,8 +180,8 @@ def _print_pipeline_scorecard(
             scores.append(
                 f"  Efficiency:     {pb.compute_efficiency_gb_per_core_hour:>8.3f} GB/core-hr"
             )
-        if pb.scale_verified_ratio > 0:
-            pct = pb.scale_verified_ratio * 100
+        if pb.scale_ratio > 0:
+            pct = pb.scale_ratio * 100
             label = "[green]verified[/green]" if pct >= 95 else "[yellow]incomplete[/yellow]"
             scores.append(f"  Scale:          {pct:>7.1f}% {label}")
 
@@ -199,8 +199,6 @@ def _print_pipeline_scorecard(
 
 def _print_report_summary(metrics) -> None:
     """Print key scores from saved metrics to the terminal."""
-    from rich.table import Table
-
     pb = metrics.pipeline_benchmark
     if pb is None:
         print_warning("No pipeline benchmark data in this run.")
@@ -242,8 +240,8 @@ def _print_report_summary(metrics) -> None:
         if pb.stage_latency_profile:
             lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
             scores.append(f"Latency (b/s/g): {lat}ms")
-        if pb.ingestion_completeness_ratio > 0:
-            pct = pb.ingestion_completeness_ratio * 100
+        if pb.ingest_ratio > 0:
+            pct = pb.ingest_ratio * 100
             scores.append(f"Completeness:    {pct:>7.1f}%")
         if pb.pipeline_saturated:
             scores.append("[yellow]Pipeline saturated (completeness < 95%)[/yellow]")
@@ -258,8 +256,8 @@ def _print_report_summary(metrics) -> None:
             scores.append(
                 f"Efficiency:      {pb.compute_efficiency_gb_per_core_hour:>8.3f} GB/core-hr"
             )
-        if pb.scale_verified_ratio > 0:
-            pct = pb.scale_verified_ratio * 100
+        if pb.scale_ratio > 0:
+            pct = pb.scale_ratio * 100
             label = "[green]verified[/green]" if pct >= 95 else "[yellow]incomplete[/yellow]"
             scores.append(f"Scale:           {pct:>7.1f}% {label}")
 
@@ -331,9 +329,98 @@ def _preflight_check(cfg) -> None:
                 )
             print_info(
                 "Or switch to a Polaris recipe (no operators needed):\n"
-                "  Set recipe: polaris-iceberg-trino in your config"
+                "  Set recipe: polaris-iceberg-spark-trino in your config"
             )
             raise typer.Exit(1)
+
+
+def _run_preflight_infra_check(cfg) -> None:
+    """Check that required infrastructure is deployed before running the pipeline.
+
+    Verifies the namespace, Postgres, configured catalog, and configured query
+    engine are present and ready. Exits with actionable guidance if anything is
+    missing.
+    """
+    ns = cfg.get_namespace()
+
+    try:
+        k8s = get_k8s_client(
+            context=cfg.platform.kubernetes.context,
+            namespace=ns,
+        )
+    except K8sConnectionError as e:
+        print_error(f"Cannot connect to Kubernetes: {e}")
+        print_info("Check your kubectl context and cluster connectivity")
+        raise typer.Exit(1) from None
+
+    # 1. Namespace must exist
+    if not k8s.namespace_exists(ns):
+        print_error(f"Namespace '{ns}' does not exist")
+        print_info("Run 'lakebench deploy' to create the deployment first")
+        raise typer.Exit(1)
+
+    # 2. Build config-aware list of required components
+    from kubernetes import client as k8s_client
+
+    apps_v1 = k8s_client.AppsV1Api()
+
+    required: list[tuple[str, str, str]] = [
+        ("lakebench-postgres", "StatefulSet", "PostgreSQL"),
+    ]
+    cat = cfg.architecture.catalog.type.value
+    if cat == "hive":
+        required.append(("lakebench-hive-metastore-default", "StatefulSet", "Hive Metastore"))
+    elif cat == "polaris":
+        required.append(("lakebench-polaris", "Deployment", "Polaris Catalog"))
+
+    engine = cfg.architecture.query_engine.type.value
+    if engine == "trino":
+        required.append(("lakebench-trino-coordinator", "Deployment", "Trino coordinator"))
+        required.append(("lakebench-trino-worker", "StatefulSet", "Trino workers"))
+    elif engine == "spark-thrift":
+        required.append(("lakebench-spark-thrift", "Deployment", "Spark Thrift Server"))
+    elif engine == "duckdb":
+        required.append(("lakebench-duckdb", "Deployment", "DuckDB"))
+
+    # 3. Check each component
+    missing: list[str] = []
+    not_ready: list[str] = []
+    for name, kind, label in required:
+        try:
+            if kind == "StatefulSet":
+                obj = apps_v1.read_namespaced_stateful_set(name, ns)
+                ready = obj.status.ready_replicas or 0
+                desired = obj.spec.replicas or 1
+            else:
+                obj = apps_v1.read_namespaced_deployment(name, ns)
+                ready = obj.status.ready_replicas or 0
+                desired = obj.spec.replicas or 1
+            if ready < desired:
+                not_ready.append(f"{label} ({ready}/{desired} replicas ready)")
+        except k8s_client.rest.ApiException as e:
+            if e.status == 404:
+                missing.append(label)
+            else:
+                logger.warning("Preflight check error for %s: %s", name, e.reason)
+                not_ready.append(f"{label} (API error: {e.reason})")
+
+    # 4. Report and block
+    if missing or not_ready:
+        print_error("Infrastructure not ready -- cannot run pipeline")
+        if missing:
+            console.print(f"  [red]Missing:[/red] {', '.join(missing)}")
+        if not_ready:
+            console.print(f"  [yellow]Not ready:[/yellow] {', '.join(not_ready)}")
+        console.print()
+        if missing:
+            print_info("Run 'lakebench deploy' to create the missing components")
+        else:
+            print_info("Wait for components to become ready, or check 'lakebench status'")
+        # Show config mismatch hint if catalog/engine might be wrong
+        console.print(f"  Config expects: catalog={cat}, query_engine={engine} (namespace: {ns})")
+        raise typer.Exit(1)
+
+    print_success("Infrastructure check passed")
 
 
 def _build_component_list(cfg) -> str:
@@ -451,7 +538,7 @@ def init(
         typer.Option(
             "--recipe",
             "-r",
-            help="Architecture recipe (e.g. hive-iceberg-trino, default)",
+            help="Architecture recipe (e.g. hive-iceberg-spark-trino, default)",
         ),
     ] = "",
     interactive: Annotated[
@@ -543,8 +630,6 @@ def init(
         console.print()
 
     # Generate config with substitutions
-    import re
-
     config_content = generate_example_config_yaml()
     config_content = config_content.replace("name: my-lakehouse", f"name: {name}")
     config_content = re.sub(r"scale:\s*\d+", f"scale: {scale}", config_content)
@@ -568,7 +653,7 @@ def init(
 
     output.write_text(config_content)
     print_success(f"Created configuration file: {output}")
-    print_info(f"Scale: {scale} (~{scale * 10} GB)")
+    print_info(f"Scale: {scale}")
     if not endpoint:
         print_info("Edit the file to configure your S3 endpoint and credentials")
     print_info("Then run: lakebench validate")
@@ -1044,10 +1129,7 @@ def validate(
                 f"Memory: {actual_memory} below minimum {guidance.min_memory} for scale {scale}"
             )
 
-        _check_ok(
-            f"Scale {scale}: ~{dims.approx_bronze_gb:.0f} GB, "
-            f"{dims.customers:,} customers, {dims.approx_rows:,} rows"
-        )
+        _check_ok(f"Scale {scale}: {dims.customers:,} customers, {dims.approx_rows:,} rows")
 
         if guidance.warning:
             _check_warn(guidance.warning)
@@ -1991,7 +2073,7 @@ def generate(
     console.print(
         Panel(
             f"Generating data for: [bold]{cfg.name}[/bold]\n\n"
-            f"Scale: {dims.scale} (~{dims.approx_bronze_gb:.0f} GB)\n"
+            f"Scale: {dims.scale}\n"
             f"Customers: {dims.customers:,}\n"
             f"Parallelism: {datagen_cfg.parallelism} pods\n"
             f"Bucket: {cfg.platform.storage.s3.buckets.bronze}",
@@ -2223,15 +2305,8 @@ def run(
     include_datagen: Annotated[
         bool,
         typer.Option(
-            "--include-datagen",
-            help="Run datagen before pipeline stages (full end-to-end measurement)",
-        ),
-    ] = False,
-    generate_data: Annotated[
-        bool,
-        typer.Option(
             "--generate",
-            help="Generate data before running the pipeline (shorthand for --include-datagen)",
+            help="Run datagen before pipeline stages (batch mode only; continuous always runs datagen)",
         ),
     ] = False,
 ) -> None:
@@ -2243,8 +2318,8 @@ def run(
     After gold finalize, runs a query benchmark (QpH).
     Use --skip-benchmark to skip the benchmark stage.
 
-    With --generate, generates data first, then runs the full pipeline.
-    Equivalent to running 'lakebench generate' followed by 'lakebench run'.
+    With --generate (batch mode), generates data first, then runs the full
+    pipeline. Continuous mode always runs datagen automatically.
 
     With --continuous, runs the streaming pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
@@ -2256,9 +2331,6 @@ def run(
     from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage
     from lakebench.spark import SparkJobManager, SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import JobState, JobType, get_executor_count, get_job_profile
-
-    # --generate is a shorthand alias for --include-datagen
-    include_datagen = include_datagen or generate_data
 
     config_file = resolve_config_path(config_file, file_option)
 
@@ -2298,6 +2370,9 @@ def run(
         timeout = max(3600, scale * 60)
         if scale >= 50:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
+
+    # Preflight: verify infrastructure is deployed and ready
+    _run_preflight_infra_check(cfg)
 
     # Branch: continuous streaming pipeline (CLI flag overrides config)
     use_continuous = continuous or cfg.architecture.pipeline.mode == "continuous"
@@ -2734,6 +2809,9 @@ def run(
         # Always save metrics, even on failure
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
+            # Collect platform metrics from Prometheus (best-effort)
+            _collect_platform_metrics(cfg, run_metrics)
+
             # Build pipeline benchmark (stage-matrix view)
             try:
                 from lakebench.metrics import build_pipeline_benchmark
@@ -2778,6 +2856,387 @@ def run(
             )
 
         _journal_safe(j.end_command, success=pipeline_success)
+
+
+def _find_prometheus_svc(namespace: str) -> str | None:
+    """Find the Prometheus service name in the given namespace.
+
+    The kube-prometheus-stack Helm chart truncates the service name based on
+    the release name length, so we cannot predict it. We try the K8s Python
+    client first, then fall back to kubectl.
+    """
+    from lakebench.deploy.observability import HELM_RELEASE_NAME
+
+    label = f"release={HELM_RELEASE_NAME},app=kube-prometheus-stack-prometheus"
+
+    # Attempt 1: K8s Python client
+    try:
+        from kubernetes import client as k8s_client
+        from kubernetes import config as k8s_config
+
+        try:
+            k8s_config.load_incluster_config()
+        except k8s_config.ConfigException:
+            k8s_config.load_kube_config()
+
+        v1 = k8s_client.CoreV1Api()
+        svcs = v1.list_namespaced_service(namespace, label_selector=label)
+        if svcs.items:
+            return svcs.items[0].metadata.name
+    except Exception:
+        pass
+
+    # Attempt 2: kubectl fallback
+    try:
+        result = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "svc",
+                "-n",
+                namespace,
+                "-l",
+                label,
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        svc_name = result.stdout.strip()
+        if result.returncode == 0 and svc_name:
+            return svc_name
+    except Exception:
+        pass
+
+    return None
+
+
+def _collect_platform_metrics(cfg, run_metrics) -> None:
+    """Collect platform metrics from Prometheus and attach to run_metrics.
+
+    Only runs when observability is enabled. Best-effort -- failures are
+    logged as warnings but do not affect the pipeline result.
+
+    When running outside the K8s cluster (no CoreDNS), uses kubectl
+    port-forward to reach Prometheus.
+    """
+    if not cfg.observability.enabled:
+        return
+
+    try:
+        from lakebench.observability.platform_collector import PlatformCollector
+
+        namespace = cfg.get_namespace()
+        svc_name = _find_prometheus_svc(namespace)
+        if not svc_name:
+            console.print("  [yellow]Could not find Prometheus service[/yellow]")
+            return
+
+        # Try in-cluster DNS first (fast path when running inside K8s)
+        prometheus_url = f"http://{svc_name}.{namespace}.svc:9090"
+        try:
+            import httpx
+
+            httpx.get(f"{prometheus_url}/api/v1/status/config", timeout=5)
+            # DNS resolved and Prometheus responded -- use this URL
+        except Exception:
+            # DNS failed -- we are outside the cluster. Use port-forward.
+            import socket
+
+            local_port = _find_free_port()
+            pf_proc = subprocess.Popen(
+                [
+                    "kubectl",
+                    "port-forward",
+                    f"svc/{svc_name}",
+                    f"{local_port}:9090",
+                    "-n",
+                    namespace,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            # Wait for port-forward to be ready
+            import time
+
+            for _ in range(20):
+                time.sleep(0.5)
+                try:
+                    with socket.create_connection(("127.0.0.1", local_port), timeout=1):
+                        break
+                except OSError:
+                    continue
+            else:
+                pf_proc.kill()
+                console.print("  [yellow]Could not establish port-forward to Prometheus[/yellow]")
+                return
+
+            prometheus_url = f"http://127.0.0.1:{local_port}"
+
+        print_info("Collecting platform metrics from Prometheus...")
+        collector = PlatformCollector(prometheus_url, namespace)
+        pm = collector.collect(run_metrics.start_time, run_metrics.end_time or datetime.now())
+        run_metrics.platform_metrics = pm.to_dict()
+
+        # Clean up port-forward if we started one
+        if "pf_proc" in locals():
+            pf_proc.kill()
+            pf_proc.wait()
+
+        if pm.collection_error:
+            console.print(f"  [yellow]Platform metrics partial: {pm.collection_error}[/yellow]")
+        else:
+            pod_count = len(pm.pods)
+            engine_tag = ""
+            if pm.engine.has_data:
+                engine_tag = " (+ engine metrics)"
+            print_success(f"Platform metrics collected: {pod_count} pods{engine_tag}")
+    except Exception as e:
+        # Clean up port-forward on error
+        if "pf_proc" in locals():
+            pf_proc.kill()
+            pf_proc.wait()
+        console.print(f"  [yellow]Could not collect platform metrics: {e}[/yellow]")
+
+
+def _find_free_port() -> int:
+    """Find an available local TCP port."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _parse_spark_interval(interval_str: str) -> int:
+    """Parse a Spark-style interval string to seconds.
+
+    Handles: ``"30 seconds"``, ``"5 minutes"``, ``"1 minute"``.
+    Falls back to 300 if unparseable.
+    """
+    parts = interval_str.strip().lower().split()
+    if len(parts) != 2:
+        return 300
+    try:
+        value = int(parts[0])
+    except ValueError:
+        return 300
+    unit = parts[1].rstrip("s")  # "minutes" -> "minute"
+    if unit == "second":
+        return value
+    elif unit == "minute":
+        return value * 60
+    elif unit == "hour":
+        return value * 3600
+    return 300
+
+
+def _run_benchmark_round(
+    cfg,
+    bench_runner,
+    collector,
+    console,
+    round_index: int,
+    j,
+) -> None:
+    """Execute a single in-stream benchmark round.
+
+    Flushes the Trino metadata cache, probes gold-table freshness, runs
+    the full 8-query power benchmark, and records the result as a
+    benchmark round.  If Q9 (the gold-table query) fails, retries up to
+    twice with 30s/60s backoff to ride out the ``createOrReplace()``
+    window.
+    """
+    from lakebench.metrics import BenchmarkMetrics, BenchmarkRoundMeta
+
+    round_meta = BenchmarkRoundMeta(
+        round_index=round_index,
+        timestamp=datetime.now(),
+    )
+
+    # 1. Flush Trino metadata cache
+    try:
+        bench_runner.executor.flush_cache()
+    except Exception:
+        pass
+
+    # 2. Freshness probe: measure gold table staleness at query time
+    try:
+        catalog = bench_runner.catalog
+        gold_table = bench_runner.gold_table
+        freshness_sql = (
+            f"SELECT date_diff('second', CAST(MAX(interaction_date) AS timestamp), current_timestamp) "
+            f"FROM {catalog}.{gold_table}"
+        )
+        freshness_sql = bench_runner.executor.adapt_query(freshness_sql)
+        freshness_result = bench_runner.executor.execute_query(freshness_sql, timeout=30)
+        if freshness_result.success and freshness_result.raw_output.strip():
+            try:
+                round_meta.gold_freshness_seconds = float(
+                    freshness_result.raw_output.strip().split("\n")[0]
+                )
+            except (ValueError, IndexError):
+                pass
+    except Exception:
+        pass
+
+    # 3. Run the full 8-query power benchmark
+    bench_result = bench_runner.run_power(cache="hot")
+
+    # 4. Check Q9 for contention (gold-table query)
+    q9_failed = False
+    for qr in bench_result.queries:
+        if qr.query.name == "q9" and not qr.success:
+            q9_failed = True
+            break
+
+    if q9_failed:
+        round_meta.q9_contention_observed = True
+        q9_query = None
+        for qr in bench_result.queries:
+            if qr.query.name == "q9":
+                q9_query = qr.query
+                break
+        if q9_query is not None:
+            # Two retries with increasing backoff (30s, 60s) to ride out
+            # the gold createOrReplace() window at larger scales.
+            for attempt, wait in enumerate([30, 60], start=1):
+                console.print(f"    Q9 failed (gold contention) -- retry {attempt}/2 in {wait}s...")
+                time.sleep(wait)
+                try:
+                    bench_runner.executor.flush_cache()
+                except Exception:
+                    pass
+                retry_result = bench_runner._execute_single_query(q9_query)
+                if retry_result.success:
+                    round_meta.q9_retry_used = True
+                    # Replace Q9 in results
+                    for i, qr in enumerate(bench_result.queries):
+                        if qr.query.name == "q9":
+                            bench_result.queries[i] = retry_result
+                            break
+                    # Recompute total_seconds and qph
+                    bench_result.total_seconds = sum(
+                        qr.elapsed_seconds for qr in bench_result.queries
+                    )
+                    if bench_result.total_seconds > 0:
+                        bench_result.qph = (
+                            len(bench_result.queries) / bench_result.total_seconds
+                        ) * 3600
+                    break
+
+    # 5. Build BenchmarkMetrics with round_meta
+    passed = sum(1 for qr in bench_result.queries if qr.success)
+    total = len(bench_result.queries)
+
+    bench_metrics = BenchmarkMetrics(
+        mode=bench_result.mode,
+        cache=bench_result.cache,
+        scale=bench_result.scale,
+        qph=bench_result.qph,
+        total_seconds=bench_result.total_seconds,
+        queries=[q.to_dict() for q in bench_result.queries],
+        iterations=bench_result.iterations,
+        round_meta=round_meta,
+    )
+
+    # 6. Record the round
+    collector.record_benchmark_round(bench_metrics)
+
+    # 7. Print inline result
+    freshness_str = (
+        f" | Freshness: {round_meta.gold_freshness_seconds:.1f}s"
+        if round_meta.gold_freshness_seconds > 0
+        else ""
+    )
+    q9_str = ""
+    if round_meta.q9_contention_observed:
+        q9_str = " | Q9: retry" if round_meta.q9_retry_used else " | Q9: contention"
+    console.print(
+        f"  Round {round_index}: {passed}/{total} passed "
+        f"| QpH: {bench_result.qph:.1f}{freshness_str}{q9_str}"
+    )
+
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_HEALTH,
+        message=f"Benchmark round {round_index}",
+        details={
+            "round": round_index,
+            "qph": round(bench_result.qph, 1),
+            "passed": passed,
+            "total": total,
+            "freshness_seconds": round(round_meta.gold_freshness_seconds, 2),
+            "q9_contention": round_meta.q9_contention_observed,
+        },
+    )
+
+
+def _print_rounds_summary(console, rounds: list) -> None:
+    """Print a Rich table summarizing all in-stream benchmark rounds."""
+    table = Table(title="Benchmark Rounds (In-Stream)", expand=False)
+    table.add_column("Round", justify="right", style="bold")
+    table.add_column("QpH", justify="right")
+
+    # Collect query names from the first round
+    query_names: list[str] = []
+    if rounds and rounds[0].queries:
+        for q in rounds[0].queries:
+            name = q.get("name", "?")
+            query_names.append(name)
+            table.add_column(name, justify="right")
+
+    table.add_column("Freshness", justify="right")
+    table.add_column("Q9", justify="center")
+
+    import statistics
+
+    qph_values: list[float] = []
+    freshness_values: list[float] = []
+
+    for rnd in rounds:
+        meta = rnd.round_meta
+        row: list[str] = [str(meta.round_index if meta else "?")]
+        row.append(f"{rnd.qph:.1f}")
+        qph_values.append(rnd.qph)
+
+        # Per-query elapsed times
+        for qname in query_names:
+            matched = False
+            for q in rnd.queries:
+                if q.get("name") == qname:
+                    row.append(f"{q['elapsed_seconds']:.1f}s")
+                    matched = True
+                    break
+            if not matched:
+                row.append("-")
+
+        # Freshness
+        if meta and meta.gold_freshness_seconds > 0:
+            row.append(f"{meta.gold_freshness_seconds:.1f}s")
+            freshness_values.append(meta.gold_freshness_seconds)
+        else:
+            row.append("-")
+
+        # Q9 status
+        if meta and meta.q9_contention_observed:
+            row.append("retry" if meta.q9_retry_used else "FAIL")
+        else:
+            row.append("OK")
+
+        table.add_row(*row)
+
+    console.print(table)
+
+    # Summary line
+    median_qph = statistics.median(qph_values) if qph_values else 0.0
+    median_freshness = statistics.median(freshness_values) if freshness_values else 0.0
+    parts = [f"Median QpH: {median_qph:.1f}"]
+    if median_freshness > 0:
+        parts.append(f"Median freshness: {median_freshness:.1f}s")
+    console.print(f"  {' | '.join(parts)}")
 
 
 def _run_continuous(
@@ -2882,7 +3341,7 @@ def _run_continuous(
             raise typer.Exit(1)
         print_success("Datagen started (continuous mode)")
         dims = cfg.get_scale_dimensions()
-        console.print(f"  Scale: {dims.scale} (~{dims.approx_bronze_gb:.0f} GB)")
+        console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
         _journal_safe(
             j.record,
@@ -2916,22 +3375,126 @@ def _run_continuous(
             print_success(f"Submitted: lakebench-{job_name}")
             submitted.append((job_type, job_name))
 
-        # Monitor for configured duration
+        # Monitor for configured duration, running benchmark rounds at intervals
         console.print()
         print_info(
             f"Streaming pipeline running for {run_duration}s ({run_duration / 60:.0f} min)..."
         )
+
+        # In-stream benchmark scheduling
+        cont_cfg = cfg.architecture.pipeline.continuous
+        bench_warmup = cont_cfg.benchmark_warmup
+        bench_interval = cont_cfg.benchmark_interval
+        gold_interval_s = _parse_spark_interval(cont_cfg.gold_refresh_interval)
+
+        # Hard floor: both warmup and interval must be >= gold_refresh_interval.
+        # Gold rewrites the entire table each cycle via createOrReplace().
+        # Warmup < gold interval -> Q9 hits an empty/stale table, inflated QpH.
+        # Interval < gold interval -> rounds overlap with gold rewrites, Q9
+        # contention and inconsistent QpH across rounds.
+        if bench_warmup < gold_interval_s and not skip_benchmark:
+            print_warning(
+                f"benchmark_warmup ({bench_warmup}s) is less than "
+                f"gold_refresh_interval ({gold_interval_s}s) -- "
+                f"clamping warmup to {gold_interval_s}s."
+            )
+            bench_warmup = gold_interval_s
+        if bench_interval < gold_interval_s and not skip_benchmark:
+            print_warning(
+                f"benchmark_interval ({bench_interval}s) is less than "
+                f"gold_refresh_interval ({gold_interval_s}s) -- "
+                f"clamping interval to {gold_interval_s}s."
+            )
+            bench_interval = gold_interval_s
+
+        # Guard: skip in-stream rounds if run duration is too short
+        can_run_rounds = not skip_benchmark and run_duration >= bench_warmup + bench_interval
+        if not skip_benchmark and not can_run_rounds:
+            print_warning(
+                f"Run duration ({run_duration}s) too short for in-stream benchmarking "
+                f"(need >= {bench_warmup + bench_interval}s). "
+                f"No benchmark rounds will run."
+            )
+
+        # Pre-create benchmark runner for in-stream rounds
+        bench_runner_instream = None
+        if can_run_rounds:
+            try:
+                from lakebench.benchmark import BenchmarkRunner
+
+                bench_runner_instream = BenchmarkRunner(cfg)
+                print_info(
+                    f"In-stream benchmarking: warmup {bench_warmup}s, then every {bench_interval}s"
+                )
+            except Exception as e:
+                print_warning(f"Could not create benchmark runner: {e}")
+                can_run_rounds = False
+
         start = time.time()
         check_interval = 30
+        # First round fires after warmup (no offset -- Q9 contention
+        # is handled by the retry logic inside _run_benchmark_round).
+        next_round_at = bench_warmup if can_run_rounds else float("inf")
+        round_index = 0
+        # Adaptive guard: after the first round completes, use the
+        # observed duration * 1.2 as the minimum remaining time for
+        # subsequent rounds.  Before any round completes, use a small
+        # fixed floor (60s) so we don't skip the first attempt on
+        # short runs.  This scales naturally with cluster performance
+        # -- fast clusters get more rounds, slow clusters don't start
+        # rounds they can't finish.
+        last_round_seconds: float = 0.0
+        min_remaining_floor = 60
 
         while time.time() - start < run_duration:
-            remaining = run_duration - (time.time() - start)
-            sleep_time = min(check_interval, remaining)
+            elapsed = time.time() - start
+            remaining = run_duration - elapsed
+
+            # Adaptive guard: use observed round time when available
+            min_remaining = max(
+                min_remaining_floor,
+                last_round_seconds * 1.2,
+            )
+
+            # Check if it's time for a benchmark round
+            if (
+                can_run_rounds
+                and elapsed >= next_round_at
+                and remaining >= min_remaining
+                and bench_runner_instream is not None
+            ):
+                round_index += 1
+                console.print(
+                    f"\n  [{elapsed:.0f}s / {run_duration}s] "
+                    f"Starting benchmark round {round_index}..."
+                )
+                round_start = time.time()
+                _run_benchmark_round(
+                    cfg=cfg,
+                    bench_runner=bench_runner_instream,
+                    collector=collector,
+                    console=console,
+                    round_index=round_index,
+                    j=j,
+                )
+                last_round_seconds = time.time() - round_start
+                # Next round at interval from round completion
+                next_round_at = (time.time() - start) + bench_interval
+                continue
+
+            # Sleep until next event (health check or benchmark round)
+            sleep_until = min(
+                elapsed + check_interval,
+                next_round_at if can_run_rounds else float("inf"),
+                run_duration,
+            )
+            sleep_time = max(0, sleep_until - (time.time() - start))
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
             # Periodic health check
             elapsed = time.time() - start
+            remaining = run_duration - elapsed
             console.print(
                 f"  [{elapsed:.0f}s / {run_duration}s] "
                 f"Streaming jobs running... ({remaining:.0f}s remaining)"
@@ -3062,42 +3625,23 @@ def _run_continuous(
                 )
             collector.record_streaming(streaming_metrics)
 
-        # Run benchmark if requested
+        # Aggregate in-stream benchmark rounds
         if not skip_benchmark:
             try:
-                from lakebench.benchmark import BenchmarkRunner
-                from lakebench.metrics import BenchmarkMetrics
+                from lakebench.metrics import aggregate_benchmark_rounds
 
-                console.print()
-                console.print("[bold]Stage: benchmark[/bold]")
-                print_info("Running query benchmark (hot cache, power)...")
-
-                bench_runner = BenchmarkRunner(cfg)
-                bench_result = bench_runner.run_power(cache="hot")
-
-                for qr in bench_result.queries:
-                    status_str = "[green]PASS[/green]" if qr.success else "[red]FAIL[/red]"
+                rounds = collector.current_run.benchmark_rounds if collector.current_run else []
+                if rounds:
+                    aggregated = aggregate_benchmark_rounds(rounds)
+                    collector.record_benchmark(aggregated)
+                    console.print()
                     console.print(
-                        f"  {qr.query.name[:4]}  {qr.query.display_name:<34} "
-                        f"{qr.elapsed_seconds:>7.2f}s   "
-                        f"{qr.rows_returned:>6} rows   {status_str}"
+                        f"  In-stream median QpH: [bold]{aggregated.qph:.1f}[/bold] "
+                        f"({len(rounds)} rounds)"
                     )
-
-                console.print(f"\n  Total: {bench_result.total_seconds:.2f}s")
-                console.print(f"  [bold]QpH:   {bench_result.qph:.1f}[/bold]")
-
-                bench_metrics = BenchmarkMetrics(
-                    mode=bench_result.mode,
-                    cache=bench_result.cache,
-                    scale=bench_result.scale,
-                    qph=bench_result.qph,
-                    total_seconds=bench_result.total_seconds,
-                    queries=[q.to_dict() for q in bench_result.queries],
-                    iterations=bench_result.iterations,
-                )
-                collector.record_benchmark(bench_metrics)
+                    _print_rounds_summary(console, rounds)
             except Exception as e:
-                print_warning(f"Benchmark failed: {e}")
+                print_warning(f"Benchmark aggregation failed: {e}")
 
         # Summary
         console.print(
@@ -3142,6 +3686,9 @@ def _run_continuous(
 
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
+            # Collect platform metrics from Prometheus (best-effort)
+            _collect_platform_metrics(cfg, run_metrics)
+
             # Build pipeline benchmark (stage-matrix view)
             try:
                 from lakebench.metrics import build_pipeline_benchmark
@@ -3159,8 +3706,13 @@ def _run_continuous(
                             if pb.stage_latency_profile
                             else "n/a"
                         )
+                        freshness_label = "freshness"
+                        freshness_val = pb.data_freshness_seconds
+                        if pb.query_time_freshness_seconds > 0:
+                            freshness_label = "freshness (at query time)"
+                            freshness_val = pb.query_time_freshness_seconds
                         print_info(
-                            f"Pipeline Score: {pb.data_freshness_seconds:.1f}s freshness"
+                            f"Pipeline Score: {freshness_val:.1f}s {freshness_label}"
                             f" | {pb.sustained_throughput_rps:,.0f} rows/s sustained"
                             f" | {latency_str}ms latency (b/s/g)"
                         )
@@ -3341,7 +3893,7 @@ def info(
         ("Namespace", cfg.get_namespace()),
         ("Workload", workload_profile),
         ("Schema", workload.schema_type.value),
-        ("Scale", f"{scale} (~{dims.approx_bronze_gb:.0f} GB bronze)"),
+        ("Scale", f"{scale}"),
         ("Customers", f"{dims.customers:,}"),
         ("Events/customer", f"~{dims.events_per_customer}"),
         ("Date range", f"{dims.date_range_days} days"),
@@ -3993,7 +4545,6 @@ def benchmark(
         raise typer.Exit(1)  # noqa: B904
 
     scale = cfg.architecture.workload.datagen.get_effective_scale()
-    dims = cfg.get_scale_dimensions()
     cache_mode = "cold" if cold else None  # None = let runner use config default
 
     # Resolve effective mode for display
@@ -4006,7 +4557,7 @@ def benchmark(
         Panel(
             f"Lakebench Query Benchmark\n"
             f"{'=' * 25}\n"
-            f"Scale: {scale} (~{dims.approx_bronze_gb:.0f} GB Bronze)\n"
+            f"Scale: {scale}\n"
             f"Mode: {effective_mode}"
             + (f" ({effective_streams} streams)" if effective_mode != "power" else "")
             + f" ({iterations} iteration{'s' if iterations > 1 else ''})\n"
@@ -4185,8 +4736,6 @@ def report(
             return
 
         console.print(Panel(f"Available runs in [bold]{metrics_dir}[/bold]", expand=False))
-
-        from rich.table import Table
 
         table = Table()
         table.add_column("Run ID", style="cyan")

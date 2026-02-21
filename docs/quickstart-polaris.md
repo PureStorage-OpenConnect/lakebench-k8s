@@ -103,7 +103,7 @@ architecture:
 lakebench validate lakebench.yaml
 ```
 
-Validation confirms the `(polaris, iceberg, trino)` component combination is
+Validation confirms the `polaris-iceberg-spark-trino` recipe combination is
 supported and checks Kubernetes and S3 connectivity.
 
 ### 3. Deploy
@@ -209,8 +209,6 @@ overrides.
 
 ## Further Reading
 
-- [Polaris Reference](polaris-reference.md) -- full integration details,
-  credential chain analysis, server configuration, and the complete list of
-  bugs discovered during live deployment
+- [Apache Polaris](component-polaris.md) -- component reference, YAML config, sizing
 - [Operators and Catalogs](operators-and-catalogs.md) -- catalog comparison
   and Stackable Hive Operator setup

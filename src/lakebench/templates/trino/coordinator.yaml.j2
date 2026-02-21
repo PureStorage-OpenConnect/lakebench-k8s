@@ -36,6 +36,14 @@ spec:
           image: busybox:1.36
           command: ['sh', '-c', 'until nc -z lakebench-hive-metastore 9083; do echo waiting for hive; sleep 2; done']
         {% endif %}
+        {% if observability_enabled | default(false) %}
+        - name: jmx-exporter-init
+          image: {{ jmx_exporter_image }}
+          command: ['sh', '-c', 'cp /opt/bitnami/jmx-exporter/jmx_prometheus_javaagent.jar /opt/jmx-exporter/ 2>/dev/null || cp /opt/jmx_exporter/jmx_prometheus_javaagent*.jar /opt/jmx-exporter/jmx_prometheus_javaagent.jar 2>/dev/null || echo "WARN: could not find JMX exporter JAR in image"']
+          volumeMounts:
+            - name: jmx-exporter
+              mountPath: /opt/jmx-exporter
+        {% endif %}
       containers:
         - name: trino
           image: {{ trino_image | default('trinodb/trino:479') }}
@@ -43,6 +51,10 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+            {% if observability_enabled | default(false) %}
+            - containerPort: 9090
+              name: jmx-metrics
+            {% endif %}
           env:
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
@@ -72,6 +84,13 @@ spec:
               subPath: lakehouse.properties
             - name: data
               mountPath: /data/trino
+            {% if observability_enabled | default(false) %}
+            - name: jmx-exporter
+              mountPath: /opt/jmx-exporter
+            - name: config
+              mountPath: /etc/trino/jmx-exporter-config.yaml
+              subPath: jmx-exporter-config.yaml
+            {% endif %}
           resources:
             requests:
               cpu: "{{ trino_coordinator_cpu | default('2') }}"
@@ -101,3 +120,7 @@ spec:
             name: lakebench-trino-config
         - name: data
           emptyDir: {}
+        {% if observability_enabled | default(false) %}
+        - name: jmx-exporter
+          emptyDir: {}
+        {% endif %}

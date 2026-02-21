@@ -1,17 +1,17 @@
 # Recipes -- Component Combinations
 
-A **recipe** is the validated combination of catalog, table format, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates recipes at config load time against a whitelist of supported combinations and rejects anything unsupported with a clear error message. There are currently 10 supported recipes.
+A **recipe** (also called a **quick-recipe**) is the validated combination of catalog, table format, pipeline engine, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates recipes at config load time against a whitelist of supported combinations and rejects anything unsupported with a clear error message. There are currently 8 supported recipes.
 
-## Using the `recipe:` Shorthand
+## Quick-Recipes
 
-Instead of setting `catalog`, `table_format`, and `query_engine` individually, use the `recipe:` field for one-line setup:
+Instead of setting `catalog`, `table_format`, `engine`, and `query_engine` individually, use the `recipe:` field for one-line setup:
 
 ```yaml
 name: my-lakehouse
-recipe: polaris-iceberg-trino    # sets catalog, format, and engine in one line
+recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query engine in one line
 ```
 
-Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-trino` (or `default`), `hive-iceberg-spark`, `hive-iceberg-duckdb`, `hive-iceberg-none`, `hive-delta-trino`, `hive-delta-none`, `polaris-iceberg-trino`, `polaris-iceberg-spark`, `polaris-iceberg-duckdb`, `polaris-iceberg-none`.
+Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`.
 
 ## Quick Reference
 
@@ -20,10 +20,8 @@ Recipe defaults are merged without overwriting -- any explicit values you set in
 | **Standard** | hive | iceberg | trino | Ad-hoc SQL analytics | Stackable Hive Operator |
 | **Standard Headless** | hive | iceberg | none | ETL-only workloads | Stackable Hive Operator |
 | **Spark SQL** | hive | iceberg | spark-thrift | Spark-native analytics | Stackable Hive Operator |
-| **Delta Lake** | hive | delta | trino | Delta ecosystem compatibility | Stackable Hive Operator |
-| **Delta Headless** | hive | delta | none | Delta ETL pipelines | Stackable Hive Operator |
-| **Polaris** | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | None (Lakebench deploys Polaris) |
 | **DuckDB** | hive | iceberg | duckdb | Lightweight single-node analytics | Stackable Hive Operator |
+| **Polaris** | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | None (Lakebench deploys Polaris) |
 | **Polaris Headless** | polaris | iceberg | none | REST catalog ETL | None (Lakebench deploys Polaris) |
 | **Polaris Spark SQL** | polaris | iceberg | spark-thrift | Spark-native with REST catalog | None (Lakebench deploys Polaris) |
 | **Polaris DuckDB** | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | None (Lakebench deploys Polaris) |
@@ -32,11 +30,10 @@ Recipe defaults are merged without overwriting -- any explicit values you set in
 
 Use this decision tree to narrow down the right recipe:
 
-- **Need ad-hoc SQL after the pipeline runs?** Use `trino` as the query engine (Standard, Delta Lake, or Polaris).
+- **Need ad-hoc SQL after the pipeline runs?** Use `trino` as the query engine (Standard or Polaris).
 - **Need a REST catalog API?** Use `polaris` recipes. Polaris exposes an Iceberg REST API on port 8181, enabling multi-engine access and OAuth2 authentication.
 - **Already have the Stackable Hive Operator installed?** The `hive` recipes are simpler to reason about and use the battle-tested Thrift protocol.
-- **Only need ETL, no interactive queries?** Use a `none` query engine recipe (Standard Headless, Delta Headless, or Polaris Headless). This skips Trino deployment entirely.
-- **Need Delta Lake compatibility?** Only `hive` + `delta` recipes are supported. Polaris does not support Delta tables.
+- **Only need ETL, no interactive queries?** Use a `none` query engine recipe (Standard Headless or Polaris Headless). This skips Trino deployment entirely.
 
 ## Recipe Details
 
@@ -108,50 +105,6 @@ architecture:
 **Does not deploy:** Trino, Polaris.
 
 **Caveats:** Requires the Stackable Hive Operator. The Spark Thrift Server uses 2 cores and 4g memory by default (configurable via `architecture.query_engine.spark_thrift`).
-
----
-
-### Delta Lake
-
-Replaces Iceberg with Delta Lake as the table format. Trino reads Delta tables via its Delta Lake connector. Choose this when your ecosystem standardizes on Delta.
-
-```yaml
-architecture:
-  catalog:
-    type: hive
-  table_format:
-    type: delta
-  query_engine:
-    type: trino
-```
-
-**Deploys:** PostgreSQL, Hive Metastore (Stackable HiveCluster), Trino coordinator + workers (with Delta connector), Spark RBAC.
-
-**Does not deploy:** Polaris.
-
-**Caveats:** Requires the Stackable Hive Operator. Delta version defaults to 3.0.0 (configurable via `architecture.table_format.delta.version`). Polaris does not support Delta -- only `hive` catalog recipes work with Delta.
-
----
-
-### Delta Headless
-
-Delta Lake pipeline without a query engine. ETL-only.
-
-```yaml
-architecture:
-  catalog:
-    type: hive
-  table_format:
-    type: delta
-  query_engine:
-    type: none
-```
-
-**Deploys:** PostgreSQL, Hive Metastore (Stackable HiveCluster), Spark RBAC.
-
-**Does not deploy:** Trino, Polaris.
-
-**Caveats:** Same as Delta Lake, but the benchmark stage is skipped.
 
 ---
 
@@ -269,7 +222,7 @@ architecture:
 
 ## Pipeline Modes
 
-Recipes define the data architecture (catalog + format + query engine). Pipeline modes define how data flows through it. The three supported patterns are:
+Recipes define the data architecture (catalog + format + engine + query engine). Pipeline modes define how data flows through it. The three supported patterns are:
 
 | Pattern | Config Value | Description |
 |---|---|---|
@@ -314,6 +267,42 @@ lakebench recommend --scale 100000
 ```
 
 Combine the output of `recommend` with the recipe table above to configure your deployment. The recipe controls what gets deployed; the scale factor (informed by `recommend`) controls how large the deployment is.
+
+## Advanced Configuration
+
+Quick-recipes set the architecture axes (catalog, table format, pipeline engine, query engine) to validated defaults. Every other setting -- component versions, Spark sizing, executor counts, worker replicas, pipeline mode, datagen parallelism, timeouts, and observability -- can be overridden selectively without abandoning the recipe.
+
+Use a recipe as a starting point and override only what you need:
+
+```yaml
+name: my-lakehouse
+recipe: polaris-iceberg-spark-trino     # quick-recipe sets the architecture
+
+platform:
+  compute:
+    spark:
+      silver_executors: 16             # override auto-scaled executor count
+      gold_executors: 12
+
+architecture:
+  query_engine:
+    trino:
+      worker:
+        replicas: 4                    # more Trino workers than default
+        memory: 32Gi
+
+  pipeline:
+    mode: continuous                   # streaming instead of batch
+
+  workload:
+    datagen:
+      scale: 100                       # 1 TB test
+
+observability:
+  enabled: true                        # deploy Prometheus + Grafana
+```
+
+Recipe defaults are merged via `_deep_setdefault` -- your explicit values always take precedence. See the [Configuration Reference](configuration.md) for the full YAML schema.
 
 ## Cross-References
 

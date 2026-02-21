@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+import statistics
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,32 @@ class StreamingJobMetrics:
 
 
 @dataclass
+class BenchmarkRoundMeta:
+    """Per-round metadata for in-stream benchmark rounds.
+
+    Tracks which benchmark round this is, when it ran, the gold table
+    freshness measured at query time, and whether Q9 (the only gold-table
+    query) hit a contention window from ``createOrReplace()``.
+    """
+
+    round_index: int
+    timestamp: datetime | None = None
+    gold_freshness_seconds: float = 0.0
+    q9_contention_observed: bool = False
+    q9_retry_used: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "round_index": self.round_index,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+            "gold_freshness_seconds": round(self.gold_freshness_seconds, 2),
+            "q9_contention_observed": self.q9_contention_observed,
+            "q9_retry_used": self.q9_retry_used,
+        }
+
+
+@dataclass
 class QueryMetrics:
     """Metrics for a single query execution."""
 
@@ -132,8 +159,14 @@ class PipelineMetrics:
     # Benchmark results (optional -- populated after query benchmark runs)
     benchmark: BenchmarkMetrics | None = None
 
+    # In-stream benchmark rounds (continuous mode only)
+    benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
+
     # Pipeline benchmark (optional -- populated after build_pipeline_benchmark)
     pipeline_benchmark: PipelineBenchmark | None = None
+
+    # Platform metrics (optional -- populated when observability is enabled)
+    platform_metrics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -154,14 +187,24 @@ class PipelineMetrics:
         }
         if self.benchmark is not None:
             d["benchmark"] = self.benchmark.to_dict()
+        if self.benchmark_rounds:
+            d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
         if self.pipeline_benchmark is not None:
             d["pipeline_benchmark"] = self.pipeline_benchmark.to_dict()
+        if self.platform_metrics is not None:
+            d["platform_metrics"] = self.platform_metrics
         return d
 
 
 @dataclass
 class BenchmarkMetrics:
-    """Metrics from a Trino query benchmark run."""
+    """Metrics from a Trino query benchmark run.
+
+    When used as an in-stream benchmark round, ``round_meta`` carries
+    per-round metadata (round index, timestamp, freshness at query time,
+    Q9 contention status).  For aggregated benchmarks,
+    ``round_meta`` is ``None``.
+    """
 
     mode: str  # "power", "throughput", or "composite"
     cache: str  # "hot" or "cold"
@@ -172,6 +215,7 @@ class BenchmarkMetrics:
     iterations: int = 1
     streams: int = 1
     stream_results: list[dict[str, Any]] = field(default_factory=list)
+    round_meta: BenchmarkRoundMeta | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -188,6 +232,8 @@ class BenchmarkMetrics:
         }
         if self.stream_results:
             d["stream_results"] = self.stream_results
+        if self.round_meta is not None:
+            d["round_meta"] = self.round_meta.to_dict()
         return d
 
 
@@ -239,12 +285,12 @@ class StageMetrics:
     executor_cores: int = 0
     executor_memory_gb: float = 0.0
 
-    # Streaming-specific (zero for batch)
-    latency_ms: float = 0.0
-    freshness_seconds: float = 0.0
+    # Streaming-specific (None = unmeasurable, 0.0 = measured-and-zero)
+    latency_ms: float | None = None
+    freshness_seconds: float | None = None
     total_batches: int = 0
     batch_size: int = 0
-    unique_rows_processed: int = 0  # distinct input rows (gold re-reads inflate input_rows)
+    unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
 
     # Query-specific (zero for non-query)
     queries_executed: int = 0
@@ -365,6 +411,32 @@ class PipelineBenchmark:
     by stage name for spreadsheet/comparison use.
     """
 
+    # Human-readable descriptions for every JSON score key.
+    # Emitted as "score_descriptions" in to_dict() so downstream tools
+    # (and humans reading metrics.json) know what each field means.
+    _SCORE_DESCRIPTIONS: ClassVar[dict[str, str]] = {
+        # Both modes
+        "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+        "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+        "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+        "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+        "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+        "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+        # Continuous
+        "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
+        "sustained_throughput_rps": "Rows entering bronze per second (higher is better)",
+        "ingest_ratio": "Bronze rows ingested / datagen rows produced (1.0 = all data consumed)",
+        "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
+        "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input",
+        "total_rows_processed": "Cumulative rows processed across all streaming stages",
+        "query_time_freshness_seconds": "Diagnostic. Median gold staleness measured at benchmark query time (lower is better). Gap between this and data_freshness_seconds indicates freshness variability.",
+        "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
+        "benchmark_rounds_count": "Number of in-stream benchmark rounds executed",
+        # Batch
+        "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
+        "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
+    }
+
     run_id: str
     deployment_name: str
     pipeline_mode: str  # "batch" or "continuous"
@@ -383,18 +455,25 @@ class PipelineBenchmark:
     compute_efficiency_gb_per_core_hour: float = 0.0
 
     # Pipeline-level scores (batch only)
-    scale_verified_ratio: float = 0.0
+    scale_ratio: float = 0.0
 
-    # Pipeline-level scores (continuous -- zero for batch)
-    data_freshness_seconds: float = 0.0
+    # Pipeline-level scores (both modes)
+    total_core_hours: float = 0.0
+
+    # Pipeline-level scores (continuous -- None = unmeasurable)
+    data_freshness_seconds: float | None = None
     sustained_throughput_rps: float = 0.0
     stage_latency_profile: list[float] = field(default_factory=list)
     total_rows_processed: int = 0
-    ingestion_completeness_ratio: float = 0.0
+    ingest_ratio: float = 0.0
     pipeline_saturated: bool = False
 
     # Trino detail (preserved for drill-down)
     query_benchmark: BenchmarkMetrics | None = None
+
+    # In-stream benchmark rounds (continuous mode only)
+    benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
+    query_time_freshness_seconds: float = 0.0  # median freshness at Trino query time
 
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     success: bool = False
@@ -452,6 +531,7 @@ class PipelineBenchmark:
         total_core_hours = sum(
             s.executor_count * s.executor_cores * s.elapsed_seconds / 3600.0 for s in batch_stages
         )
+        self.total_core_hours = total_core_hours
         if total_core_hours > 0:
             self.compute_efficiency_gb_per_core_hour = (
                 self.total_data_processed_gb / total_core_hours
@@ -460,16 +540,25 @@ class PipelineBenchmark:
         # Scale verified ratio: actual GB / expected GB for this scale
         expected_gb = self.config_snapshot.get("approx_bronze_gb", 0)
         if expected_gb > 0:
-            self.scale_verified_ratio = self.total_data_processed_gb / expected_gb
+            self.scale_ratio = self.total_data_processed_gb / expected_gb
 
     def _compute_continuous_scores(self) -> None:
         """Compute continuous pipeline scores from streaming stage metrics."""
         streaming = [s for s in self.stages if s.stage_type == "streaming"]
 
-        # Worst-case freshness (max = most stale stage)
-        freshness_vals = [s.freshness_seconds for s in streaming if s.freshness_seconds > 0]
+        # Total data processed (shared with batch -- needed for GB/s and report)
+        self.total_data_processed_gb = sum(s.input_size_gb for s in self.stages)
+
+        # Worst-case freshness (max = most stale stage).
+        # None means unmeasurable (< 2 gold cycles or parse failed).
+        freshness_vals = [
+            s.freshness_seconds
+            for s in streaming
+            if s.freshness_seconds is not None and s.freshness_seconds > 0
+        ]
         if freshness_vals:
             self.data_freshness_seconds = max(freshness_vals)
+        # else: stays None (unmeasurable)
 
         # Sustained throughput: unique rows entering bronze / run duration
         bronze_stages = [s for s in streaming if s.stage_name == "bronze"]
@@ -478,11 +567,16 @@ class PipelineBenchmark:
         if run_duration > 0:
             self.sustained_throughput_rps = total_bronze_rows / run_duration
 
+        # Pipeline throughput in GB/s (total data / wall-clock duration)
+        if run_duration > 0 and self.total_data_processed_gb > 0:
+            self.pipeline_throughput_gb_per_second = self.total_data_processed_gb / run_duration
+
         # Stage latency profile: [bronze_avg_ms, silver_avg_ms, gold_avg_ms]
         profile: list[float] = []
         for name in ("bronze", "silver", "gold"):
             stage = next((s for s in streaming if s.stage_name == name), None)
-            profile.append(stage.latency_ms if stage else 0.0)
+            val = stage.latency_ms if stage and stage.latency_ms is not None else 0.0
+            profile.append(val)
         self.stage_latency_profile = profile
 
         # Total rows processed across all streaming stages
@@ -491,44 +585,103 @@ class PipelineBenchmark:
         # Ingestion completeness: bronze rows / datagen rows
         datagen_rows = self.config_snapshot.get("datagen_output_rows", 0)
         if datagen_rows > 0:
-            self.ingestion_completeness_ratio = total_bronze_rows / datagen_rows
-        self.pipeline_saturated = self.ingestion_completeness_ratio < 0.95
+            self.ingest_ratio = total_bronze_rows / datagen_rows
+        self.pipeline_saturated = self.ingest_ratio < 0.95
+
+        # Override total_elapsed_seconds for continuous mode.
+        # Streaming stages run concurrently -- use wall-clock, not sum.
+        if self.start_time and self.end_time:
+            self.total_elapsed_seconds = (self.end_time - self.start_time).total_seconds()
+        else:
+            # Fallback: max of stage durations (concurrent, not sum)
+            self.total_elapsed_seconds = max((s.elapsed_seconds for s in streaming), default=0.0)
+
+        # Query-time freshness from in-stream benchmark rounds
+        if self.benchmark_rounds:
+            round_freshness = [
+                r.round_meta.gold_freshness_seconds
+                for r in self.benchmark_rounds
+                if r.round_meta and r.round_meta.gold_freshness_seconds > 0
+            ]
+            if round_freshness:
+                self.query_time_freshness_seconds = statistics.median(round_freshness)
 
         # Compute efficiency: GB processed per core-hour requested
         total_input_gb = sum(s.input_size_gb for s in streaming)
         total_core_hours = sum(
             s.executor_count * s.executor_cores * s.elapsed_seconds / 3600.0 for s in streaming
         )
+        self.total_core_hours = total_core_hours
         if total_core_hours > 0:
             self.compute_efficiency_gb_per_core_hour = total_input_gb / total_core_hours
 
     def _scores_dict(self) -> dict[str, Any]:
         """Build the mode-appropriate scores sub-dict for JSON output."""
         qph = round(self.query_benchmark.qph, 1) if self.query_benchmark else 0.0
+
+        # If in-stream rounds exist, use their median QpH as the primary score
+        in_stream_qph = 0.0
+        if self.benchmark_rounds:
+            round_qphs = [r.qph for r in self.benchmark_rounds if r.qph > 0]
+            if round_qphs:
+                in_stream_qph = round(statistics.median(round_qphs), 1)
+
         if self.pipeline_mode == "continuous":
-            return {
-                "data_freshness_seconds": round(self.data_freshness_seconds, 2),
+            # stage_latency_profile: object with named keys (v2.0 format)
+            slp = (
+                {
+                    f"{name}_ms": round(v, 1)
+                    for name, v in zip(
+                        ["bronze", "silver", "gold"],
+                        self.stage_latency_profile,
+                        strict=False,
+                    )
+                }
+                if self.stage_latency_profile
+                else {}
+            )
+            # Composite QpH: None when no benchmark data supports a measurement
+            raw_qph = in_stream_qph if in_stream_qph > 0 else qph
+            composite_qph: float | None = raw_qph if raw_qph > 0 else None
+            scores: dict[str, Any] = {
+                "data_freshness_seconds": (
+                    round(self.data_freshness_seconds, 2)
+                    if self.data_freshness_seconds is not None
+                    else None
+                ),
                 "sustained_throughput_rps": round(self.sustained_throughput_rps, 1),
-                "ingestion_completeness_ratio": round(self.ingestion_completeness_ratio, 4),
+                "total_data_processed_gb": round(self.total_data_processed_gb, 3),
+                "pipeline_throughput_gb_per_second": round(
+                    self.pipeline_throughput_gb_per_second, 4
+                ),
+                "total_core_hours": round(self.total_core_hours, 2),
+                "ingest_ratio": round(self.ingest_ratio, 4),
                 "compute_efficiency_gb_per_core_hour": round(
                     self.compute_efficiency_gb_per_core_hour, 4
                 ),
-                "stage_latency_profile": [round(v, 1) for v in self.stage_latency_profile],
-                "composite_qph": qph,
+                "stage_latency_profile": slp,
+                "composite_qph": composite_qph,
                 "pipeline_saturated": self.pipeline_saturated,
                 "total_rows_processed": self.total_rows_processed,
                 "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
             }
+            if self.query_time_freshness_seconds > 0:
+                scores["query_time_freshness_seconds"] = round(self.query_time_freshness_seconds, 2)
+            if in_stream_qph > 0:
+                scores["in_stream_composite_qph"] = in_stream_qph
+                scores["benchmark_rounds_count"] = len(self.benchmark_rounds)
+            return scores
         return {
             "time_to_value_seconds": round(self.time_to_value_seconds, 2),
             "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
             "total_data_processed_gb": round(self.total_data_processed_gb, 3),
             "pipeline_throughput_gb_per_second": round(self.pipeline_throughput_gb_per_second, 4),
+            "total_core_hours": round(self.total_core_hours, 2),
             "compute_efficiency_gb_per_core_hour": round(
                 self.compute_efficiency_gb_per_core_hour, 4
             ),
             "composite_qph": qph,
-            "scale_verified_ratio": round(self.scale_verified_ratio, 3),
+            "scale_ratio": round(self.scale_ratio, 3),
         }
 
     def to_matrix(self) -> dict[str, dict[str, Any]]:
@@ -547,8 +700,10 @@ class PipelineBenchmark:
                 "executor_count": stage.executor_count,
                 "executor_cores": stage.executor_cores,
                 "executor_memory_gb": round(stage.executor_memory_gb, 1),
-                "latency_ms": round(stage.latency_ms, 1),
-                "freshness_seconds": round(stage.freshness_seconds, 1),
+                "latency_ms": round(stage.latency_ms, 1) if stage.latency_ms is not None else None,
+                "freshness_seconds": round(stage.freshness_seconds, 1)
+                if stage.freshness_seconds is not None
+                else None,
                 "queries_per_hour": round(stage.queries_per_hour, 1),
                 "success": stage.success,
             }
@@ -574,24 +729,32 @@ class PipelineBenchmark:
         }
         # Mode-specific top-level flags (spec Section 7.1)
         if self.pipeline_mode == "batch":
-            d["scale_verified_ratio"] = round(self.scale_verified_ratio, 3)
+            d["scale_ratio"] = round(self.scale_ratio, 3)
         else:
-            d["ingestion_completeness_ratio"] = round(self.ingestion_completeness_ratio, 4)
+            d["ingest_ratio"] = round(self.ingest_ratio, 4)
             d["pipeline_saturated"] = self.pipeline_saturated
         if self.query_benchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
+        if self.benchmark_rounds:
+            d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
+        # Include human-readable descriptions for every score key present
+        d["score_descriptions"] = {k: v for k, v in self._SCORE_DESCRIPTIONS.items() if k in scores}
+        # Tier 2 advanced metrics placeholder (populated when Prometheus deployed)
+        d["advanced_metrics"] = None
         return d
 
     def _bucket_sizes(self) -> dict[str, float]:
         """Extract measured S3 bucket sizes from stages or config snapshot."""
         sizes: dict[str, float] = {"bronze_gb": 0.0, "silver_gb": 0.0, "gold_gb": 0.0}
         for stage in self.stages:
-            if stage.stage_name == "bronze" and stage.stage_type == "batch":
+            if stage.stage_name == "bronze":
                 sizes["bronze_gb"] = round(stage.input_size_gb, 3)
             elif stage.stage_name == "silver":
-                sizes["silver_gb"] = round(stage.output_size_gb, 3)
+                val = stage.output_size_gb if stage.output_size_gb > 0 else stage.input_size_gb
+                sizes["silver_gb"] = round(val, 3)
             elif stage.stage_name == "gold":
-                sizes["gold_gb"] = round(stage.output_size_gb, 3)
+                val = stage.output_size_gb if stage.output_size_gb > 0 else stage.input_size_gb
+                sizes["gold_gb"] = round(val, 3)
         # Fallback to config snapshot if stages didn't have sizes
         if sizes["bronze_gb"] == 0.0:
             sizes["bronze_gb"] = round(self.config_snapshot.get("bronze_size_gb", 0.0), 3)
@@ -702,6 +865,23 @@ def build_pipeline_benchmark(
             executor_cores=job.executor_cores,
             executor_memory_gb=job.executor_memory_gb,
         )
+        # Backfill executor_cores from profile when progress callback missed it
+        if stage.executor_cores == 0:
+            try:
+                from lakebench.spark.job import get_job_profile as _get_profile
+
+                _b_profile = _get_profile(job.job_type)
+                if _b_profile:
+                    stage.executor_cores = _b_profile["executor_cores"]
+                    if stage.executor_memory_gb == 0.0:
+                        _mem_str = _b_profile.get("executor_memory", "0g")
+                        stage.executor_memory_gb = (
+                            float(_mem_str.rstrip("gG"))
+                            if _mem_str.rstrip("gG").replace(".", "").isdigit()
+                            else 0.0
+                        )
+            except Exception:
+                pass
         # Recompute throughput if input was corrected by fallback
         if input_gb != job.input_size_gb:
             stage.compute_derived()
@@ -727,6 +907,12 @@ def build_pipeline_benchmark(
                 _s_cores = _s_profile["executor_cores"]
                 _s_scale = run.config_snapshot.get("scale", 10)
                 _s_execs = _get_exec_count(sj.job_type, _s_scale)
+                # Check config overrides (streaming jobs may have explicit counts)
+                _override_key = sj.job_type.replace("-", "_")
+                _overrides = run.config_snapshot.get("spark", {}).get("executor_overrides", {})
+                _override_val = _overrides.get(_override_key)
+                if _override_val is not None:
+                    _s_execs = _override_val
                 _mem_str = _s_profile.get("executor_memory", "0g")
                 # Simple parse: strip trailing 'g'
                 _s_mem = (
@@ -745,12 +931,14 @@ def build_pipeline_benchmark(
             success=sj.success,
             error_message=sj.error_message,
             input_rows=sj.total_rows_processed,
-            unique_rows_processed=sj.unique_rows_processed
-            if sj.unique_rows_processed > 0
-            else sj.total_rows_processed,
+            unique_rows_processed=(
+                sj.unique_rows_processed
+                if sj.unique_rows_processed > 0
+                else (sj.total_rows_processed if sj.job_type != "gold-refresh" else None)
+            ),
             throughput_rows_per_second=sj.throughput_rps,
-            latency_ms=sj.micro_batch_duration_ms,
-            freshness_seconds=sj.freshness_seconds,
+            latency_ms=sj.micro_batch_duration_ms or None,
+            freshness_seconds=sj.freshness_seconds or None,
             total_batches=sj.total_batches,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
@@ -764,7 +952,7 @@ def build_pipeline_benchmark(
     # from bronze Iceberg table (bronze bucket), gold-refresh reads from silver.
     _STREAMING_SIZE_MAP = {
         "bronze": "bronze_size_gb",
-        "silver": "bronze_size_gb",
+        "silver": "silver_size_gb",
         "gold": "silver_size_gb",
     }
     for stage in stages:
@@ -801,11 +989,66 @@ def build_pipeline_benchmark(
         end_time=run.end_time,
         stages=stages,
         query_benchmark=run.benchmark,
+        benchmark_rounds=list(run.benchmark_rounds),
         config_snapshot=snapshot,
         success=run.success,
     )
     benchmark.compute_aggregates()
     return benchmark
+
+
+def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetrics:
+    """Aggregate multiple in-stream benchmark rounds into a single result.
+
+    Uses the median for QpH, total_seconds, and per-query elapsed times.
+    The aggregated result has no ``round_meta`` (it represents the combined
+    view, not a specific round).
+
+    Args:
+        rounds: List of per-round BenchmarkMetrics (must be non-empty).
+
+    Returns:
+        Aggregated BenchmarkMetrics with median values.
+
+    Raises:
+        ValueError: If ``rounds`` is empty.
+    """
+    if not rounds:
+        raise ValueError("Cannot aggregate zero benchmark rounds")
+
+    # Median QpH and total_seconds
+    median_qph = statistics.median([r.qph for r in rounds])
+    median_total = statistics.median([r.total_seconds for r in rounds])
+
+    # Per-query median elapsed times.  Build a dict of query_name -> list of elapsed values.
+    # All rounds should have the same queries in the same order, but handle
+    # missing queries defensively.
+    query_times: dict[str, list[float]] = {}
+    query_template: dict[str, dict[str, Any]] = {}
+    for rnd in rounds:
+        for q in rnd.queries:
+            name = q.get("name", "")
+            if name not in query_times:
+                query_times[name] = []
+                query_template[name] = dict(q)
+            query_times[name].append(q.get("elapsed_seconds", 0.0))
+
+    aggregated_queries: list[dict[str, Any]] = []
+    for name, times in query_times.items():
+        qd = dict(query_template[name])
+        qd["elapsed_seconds"] = round(statistics.median(times), 3)
+        aggregated_queries.append(qd)
+
+    return BenchmarkMetrics(
+        mode=rounds[0].mode,
+        cache=rounds[0].cache,
+        scale=rounds[0].scale,
+        qph=median_qph,
+        total_seconds=median_total,
+        queries=aggregated_queries,
+        iterations=rounds[0].iterations,
+        streams=rounds[0].streams,
+    )
 
 
 def build_config_snapshot(cfg: Any) -> dict[str, Any]:
@@ -866,6 +1109,7 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
         },
         "catalog": cfg.architecture.catalog.type.value,
         "table_format": cfg.architecture.table_format.type.value,
+        "pipeline_engine": cfg.architecture.pipeline_engine.value,
         "query_engine": cfg.architecture.query_engine.type.value,
         "continuous": {
             "bronze_trigger_interval": pipeline.continuous.bronze_trigger_interval,
@@ -876,6 +1120,8 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
             "bronze_target_file_size_mb": pipeline.continuous.bronze_target_file_size_mb,
             "silver_target_file_size_mb": pipeline.continuous.silver_target_file_size_mb,
             "gold_target_file_size_mb": pipeline.continuous.gold_target_file_size_mb,
+            "benchmark_interval": pipeline.continuous.benchmark_interval,
+            "benchmark_warmup": pipeline.continuous.benchmark_warmup,
         },
         "datagen": {
             "scale": datagen.scale,
@@ -984,6 +1230,16 @@ class MetricsCollector:
         """
         if self.current_run:
             self.current_run.benchmark = benchmark
+
+    def record_benchmark_round(self, benchmark: BenchmarkMetrics) -> None:
+        """Record an in-stream benchmark round.
+
+        Args:
+            benchmark: BenchmarkMetrics from a single round (should have
+                ``round_meta`` set)
+        """
+        if self.current_run:
+            self.current_run.benchmark_rounds.append(benchmark)
 
     def record_actual_sizes(
         self,
@@ -1161,7 +1417,7 @@ class MetricsCollector:
                 continue
 
             # Gold: "Cycle N: refreshed ... in X.Xs (Y KPI records)"
-            m = re.search(r"Cycle \d+: refreshed .+ in (\d+\.?\d*)s", line)
+            m = re.search(r"Cycle \d+: refreshed .+ in ([\d.]+)s", line)
             if m:
                 batch_durations.append(float(m.group(1)))
                 continue
@@ -1179,7 +1435,7 @@ class MetricsCollector:
                 continue
 
             # Gold: "Cycle N: data freshness Xs"
-            m = re.search(r"Cycle \d+: data freshness (\d+\.?\d*)s", line)
+            m = re.search(r"Cycle \d+: data freshness ([\d.]+)s", line)
             if m:
                 freshness_values.append(float(m.group(1)))
                 continue
@@ -1191,10 +1447,16 @@ class MetricsCollector:
             metrics.micro_batch_duration_ms = (sum(batch_durations) / len(batch_durations)) * 1000
 
         if freshness_values:
-            metrics.freshness_seconds = sum(freshness_values) / len(freshness_values)
+            metrics.freshness_seconds = max(freshness_values)
 
         if metrics.total_batches > 0:
             metrics.batch_size = total_rows // metrics.total_batches
+
+        # For bronze/silver, unique rows = total (no re-reads).
+        # For gold, leave as 0 -- gold re-reads silver each cycle so
+        # total_rows_processed includes amplification.
+        if job_type in ("bronze-ingest", "silver-stream"):
+            metrics.unique_rows_processed = metrics.total_rows_processed
 
         return metrics
 

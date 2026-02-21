@@ -127,7 +127,7 @@ Cleanup with `lakebench destroy` removes the observability Helm release and all 
 
 ## See Also
 
-- [Benchmarking](benchmarking.md) -- scoring methodology and query benchmark details
+- [Scoring and Benchmarking](benchmarking.md) -- pipeline scorecard and query engine benchmark
 - [Running Pipelines](running-pipelines.md) -- deploy, generate, and run workflow
 - [CLI Reference](cli-reference.md) -- full command and flag reference
 - [Configuration](configuration.md) -- complete YAML schema documentation

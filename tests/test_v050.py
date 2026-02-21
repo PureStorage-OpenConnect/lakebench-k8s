@@ -2,7 +2,7 @@
 
 Covers:
 - DuckDBConfig schema and defaults
-- DuckDB recipes (hive-iceberg-duckdb, polaris-iceberg-duckdb)
+- DuckDB recipes (hive-iceberg-spark-duckdb, polaris-iceberg-spark-duckdb)
 - DuckDB supported combinations
 - Flat ObservabilityConfig (replaces nested metrics/dashboards)
 - DuckDB co_resident_cpu_m
@@ -86,27 +86,27 @@ class TestDuckDBRecipes:
     """Tests for DuckDB recipe definitions."""
 
     def test_hive_iceberg_duckdb_recipe_exists(self):
-        assert "hive-iceberg-duckdb" in RECIPES
+        assert "hive-iceberg-spark-duckdb" in RECIPES
 
     def test_polaris_iceberg_duckdb_recipe_exists(self):
-        assert "polaris-iceberg-duckdb" in RECIPES
+        assert "polaris-iceberg-spark-duckdb" in RECIPES
 
     def test_hive_iceberg_duckdb_recipe_valid(self):
-        cfg = _make_config(recipe="hive-iceberg-duckdb")
+        cfg = _make_config(recipe="hive-iceberg-spark-duckdb")
         assert cfg.architecture.catalog.type.value == "hive"
         assert cfg.architecture.table_format.type.value == "iceberg"
         assert cfg.architecture.query_engine.type.value == "duckdb"
 
     def test_polaris_iceberg_duckdb_recipe_valid(self):
-        cfg = _make_config(recipe="polaris-iceberg-duckdb")
+        cfg = _make_config(recipe="polaris-iceberg-spark-duckdb")
         assert cfg.architecture.catalog.type.value == "polaris"
         assert cfg.architecture.table_format.type.value == "iceberg"
         assert cfg.architecture.query_engine.type.value == "duckdb"
 
     def test_total_recipes_count(self):
-        """10 named recipes + default alias."""
+        """8 named recipes + default alias."""
         named = [k for k in RECIPES if k != "default"]
-        assert len(named) == 10
+        assert len(named) == 8
 
 
 # ===========================================================================
@@ -120,18 +120,12 @@ class TestDuckDBCombinations:
     def test_hive_iceberg_duckdb_supported(self):
         from lakebench.config.schema import _SUPPORTED_COMBINATIONS
 
-        assert ("hive", "iceberg", "duckdb") in _SUPPORTED_COMBINATIONS
+        assert ("hive", "iceberg", "spark", "duckdb") in _SUPPORTED_COMBINATIONS
 
     def test_polaris_iceberg_duckdb_supported(self):
         from lakebench.config.schema import _SUPPORTED_COMBINATIONS
 
-        assert ("polaris", "iceberg", "duckdb") in _SUPPORTED_COMBINATIONS
-
-    def test_hive_delta_duckdb_not_supported(self):
-        """DuckDB only supports Iceberg."""
-        from lakebench.config.schema import _SUPPORTED_COMBINATIONS
-
-        assert ("hive", "delta", "duckdb") not in _SUPPORTED_COMBINATIONS
+        assert ("polaris", "iceberg", "spark", "duckdb") in _SUPPORTED_COMBINATIONS
 
 
 # ===========================================================================
@@ -179,7 +173,7 @@ class TestDuckDBCoResidentCpu:
     def test_co_resident_cpu_duckdb(self):
         from lakebench.config.autosizer import _co_resident_cpu_m
 
-        cfg = _make_config(recipe="hive-iceberg-duckdb")
+        cfg = _make_config(recipe="hive-iceberg-spark-duckdb")
         result = _co_resident_cpu_m(cfg)
         # DuckDB: default 2 cores = 2000m + 1000m infra = 3000m
         assert result == 3000
@@ -188,7 +182,7 @@ class TestDuckDBCoResidentCpu:
         from lakebench.config.autosizer import _co_resident_cpu_m
 
         cfg = _make_config(
-            recipe="hive-iceberg-duckdb",
+            recipe="hive-iceberg-spark-duckdb",
             architecture={
                 "query_engine": {"type": "duckdb", "duckdb": {"cores": 4}},
                 "catalog": {"type": "hive"},
@@ -211,7 +205,7 @@ class TestDuckDBExecutor:
     def test_get_executor_duckdb(self):
         from lakebench.benchmark.executor import DuckDBExecutor, get_executor
 
-        cfg = _make_config(recipe="hive-iceberg-duckdb")
+        cfg = _make_config(recipe="hive-iceberg-spark-duckdb")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, DuckDBExecutor)
         assert executor.engine_name() == "duckdb"
@@ -220,7 +214,7 @@ class TestDuckDBExecutor:
     def test_duckdb_executor_s3_config(self):
         from lakebench.benchmark.executor import DuckDBExecutor, get_executor
 
-        cfg = _make_config(recipe="hive-iceberg-duckdb")
+        cfg = _make_config(recipe="hive-iceberg-spark-duckdb")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, DuckDBExecutor)
         assert executor.s3_endpoint == "http://minio:9000"
@@ -271,7 +265,7 @@ class TestDuckDBDeployer:
         from lakebench.deploy.duckdb import DuckDBDeployer
         from lakebench.deploy.engine import DeploymentStatus
 
-        cfg = _make_config(recipe="hive-iceberg-trino")
+        cfg = _make_config(recipe="hive-iceberg-spark-trino")
         engine = MagicMock()
         engine.config = cfg
         deployer = DuckDBDeployer(engine)
@@ -284,7 +278,7 @@ class TestDuckDBDeployer:
         from lakebench.deploy.duckdb import DuckDBDeployer
         from lakebench.deploy.engine import DeploymentStatus
 
-        cfg = _make_config(recipe="hive-iceberg-duckdb")
+        cfg = _make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = True
@@ -305,7 +299,7 @@ class TestRunnerAdaptQuery:
     def test_runner_calls_adapt_query(self):
         from lakebench.benchmark.executor import QueryExecutorResult
 
-        cfg = _make_config(recipe="hive-iceberg-duckdb")
+        cfg = _make_config(recipe="hive-iceberg-spark-duckdb")
         mock_executor = MagicMock()
         mock_executor.engine_name.return_value = "duckdb"
         mock_executor.catalog_name = "lakehouse"
@@ -449,7 +443,9 @@ class TestPlatformCollector:
         )
         assert PlatformCollector._infer_component("lakebench-duckdb-abc123") == "duckdb"
         assert PlatformCollector._infer_component("lakebench-spark-thrift-xyz") == "spark-thrift"
-        assert PlatformCollector._infer_component("some-spark-driver-pod") == "spark-job"
+        assert PlatformCollector._infer_component("some-spark-driver-pod") == "spark-driver"
+        assert PlatformCollector._infer_component("bronze-exec-1") == "spark-executor"
+        assert PlatformCollector._infer_component("some-spark-process") == "spark-job"
         assert PlatformCollector._infer_component("random-pod") == "unknown"
 
     def test_platform_metrics_duration(self):

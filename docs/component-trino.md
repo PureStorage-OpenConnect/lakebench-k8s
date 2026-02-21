@@ -70,7 +70,7 @@ architecture:
 | `trino.worker.spill_enabled` | `true` | Enable spill-to-disk when queries exceed memory. |
 | `trino.worker.spill_max_per_node` | `"40Gi"` | Maximum spill data written per worker before the query fails. |
 | `trino.worker.storage` | `"50Gi"` | PVC size for each worker (used for spill and data directory). |
-| `trino.worker.storage_class` | `""` | StorageClass for worker PVCs. Empty uses the cluster default. |
+| `trino.worker.storage_class` | `""` | StorageClass for worker PVCs. Empty = emptyDir (ephemeral, no PVC needed). |
 | `trino.catalog_name` | `"lakehouse"` | The catalog name registered in Trino. Queries reference it as `SELECT ... FROM lakehouse.silver.table`. |
 
 ## Version Flexibility
@@ -134,13 +134,13 @@ General principles:
 - **Spill storage is your safety net.** With `spill_enabled: true` (the default), queries that exceed worker memory spill intermediate data to disk rather than failing with OOM. Keep `spill_max_per_node` at or below the PVC `storage` size.
 - **Coordinator sizing is modest.** The coordinator does not process data. The defaults of 2 CPU / 8Gi are sufficient for most workloads.
 
-**Recipes using Trino:** Standard, Delta Lake, Polaris, Polaris Spark SQL.
+**Recipes using Trino:** Standard, Polaris.
 See the [Recipes Guide](recipes.md) for all combinations.
 
 ## See Also
 
 - [Recipes](recipes.md) -- all supported component combinations
-- [Benchmarking](benchmarking.md) -- query suite execution and scoring
+- [Scoring and Benchmarking](benchmarking.md) -- query engine benchmark and pipeline scorecard
 - [Query Reference](query-reference.md) -- the benchmark queries Trino runs
 - [Architecture](architecture.md) -- how Trino fits into the overall Lakebench stack
 - [Configuration](configuration.md) -- full YAML schema reference

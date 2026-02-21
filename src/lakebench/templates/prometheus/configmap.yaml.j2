@@ -76,10 +76,10 @@ data:
           # Match Trino coordinator pods
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
             action: keep
-            regex: trino
+            regex: lakebench
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
             action: keep
-            regex: coordinator
+            regex: trino-coordinator
           # Rewrite target to JMX exporter port
           - source_labels: [__meta_kubernetes_pod_ip]
             target_label: __address__
@@ -99,10 +99,10 @@ data:
           # Match Trino worker pods
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
             action: keep
-            regex: trino
+            regex: lakebench
           - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_component]
             action: keep
-            regex: worker
+            regex: trino-worker
           # Rewrite target to JMX exporter port
           - source_labels: [__meta_kubernetes_pod_ip]
             target_label: __address__

@@ -1,11 +1,14 @@
 # Lakebench
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-blue)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
+
 CLI tool for deploying and benchmarking lakehouse architectures on Kubernetes.
 
 > **Note:** This package is published as `lakebench-k8s` on PyPI. Install with `pip install lakebench-k8s`. The CLI command is `lakebench`.
 
-Choosing between Hive and Polaris, Iceberg and Delta, or sizing Spark for 100 GB
-vs 10 TB shouldn't require weeks of manual setup. Lakebench deploys a complete
+Choosing between Hive and Polaris, sizing Spark for 100 GB vs 10 TB, or
+comparing batch and continuous pipelines shouldn't require weeks of manual setup. Lakebench deploys a complete
 lakehouse stack from a single YAML file, generates realistic data at any scale,
 runs the pipeline, benchmarks query performance, and tears everything down --so
 you can focus on comparing architectures, not plumbing.
@@ -35,9 +38,12 @@ for detailed install instructions.
 
 ## Quick Start
 
-A **recipe** selects the catalog + table format + query engine combination
-(e.g. `hive-iceberg-trino`). The **scale factor** controls data volume:
-1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB.
+A **quick-recipe** selects the catalog + table format + query engine
+combination in one line (e.g. `recipe: hive-iceberg-spark-trino`). The **scale
+factor** controls data volume: 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB.
+Every recipe default can be overridden individually -- see the
+[Configuration Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md)
+for advanced configuration options.
 
 ```bash
 # 1. Generate config (interactive prompts for S3 details)
@@ -88,7 +94,7 @@ lakebench destroy lakebench.yaml
 Lakebench deploys a three-layer stack on Kubernetes:
 
 1. **Platform** -- Kubernetes namespace, S3 secrets, PostgreSQL (metadata store)
-2. **Data architecture** -- catalog (Hive or Polaris), table format (Iceberg or Delta),
+2. **Data architecture** -- catalog (Hive or Polaris), table format (Iceberg),
    query engine (Trino, Spark Thrift, or DuckDB), all wired together via
    [recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
 3. **Observability** -- optional Prometheus + Grafana stack for platform metrics
@@ -114,7 +120,6 @@ doc for the full picture.
 | Apache Spark | 3.5.4 |
 | Spark Operator | 2.4.0 (Kubeflow) |
 | Apache Iceberg | 1.10.1 |
-| Delta Lake | 3.0.0 |
 | Hive Metastore | 3.1.3 (Stackable 25.7.0) |
 | Apache Polaris | 1.3.0-incubating |
 | Trino | 479 |
@@ -137,7 +142,7 @@ Full documentation is in the [docs/](https://github.com/PureStorage-OpenConnect/
 - [Deployment](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/deployment.md) -- deploy lifecycle and status checks
 - [Data Generation](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/data-generation.md) -- scale factors, parallelism, and monitoring
 - [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and streaming modes
-- [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- query suite and scoring
+- [Scoring and Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- pipeline scorecard and query engine benchmark
 - [Polaris Quick Start](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/quickstart-polaris.md) -- use Apache Polaris instead of Hive
 - [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design and component layers
 - [Troubleshooting](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/troubleshooting.md) -- common errors and fixes

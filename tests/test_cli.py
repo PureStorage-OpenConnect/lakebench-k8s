@@ -172,3 +172,267 @@ class TestPreflightCheck:
 
         # Should not raise (Stackable check skipped entirely)
         _preflight_check(cfg)
+
+
+class TestRunPreflightInfraCheck:
+    """Tests for _run_preflight_infra_check run guard."""
+
+    def _make_cfg(self, catalog="hive", engine="trino"):
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.get_namespace.return_value = "lakebench"
+        cfg.platform.kubernetes.context = ""
+        cfg.architecture.catalog.type.value = catalog
+        cfg.architecture.query_engine.type.value = engine
+        cfg.observability.enabled = False
+        return cfg
+
+    def test_blocks_when_namespace_missing(self):
+        """Exits 1 when the target namespace does not exist."""
+        from unittest.mock import patch
+
+        from lakebench.cli import _run_preflight_infra_check
+
+        cfg = self._make_cfg()
+        with (
+            patch("lakebench.cli.get_k8s_client") as mock_get,
+            pytest.raises(ClickExit),
+        ):
+            mock_get.return_value.namespace_exists.return_value = False
+            _run_preflight_infra_check(cfg)
+
+    def test_blocks_when_postgres_missing(self):
+        """Exits 1 when PostgreSQL is not deployed."""
+        from unittest.mock import MagicMock, patch
+
+        from kubernetes.client.rest import ApiException
+
+        from lakebench.cli import _run_preflight_infra_check
+
+        cfg = self._make_cfg()
+
+        def fake_read_sts(name, ns):
+            if name == "lakebench-postgres":
+                raise ApiException(status=404, reason="Not Found")
+            obj = MagicMock()
+            obj.status.ready_replicas = 1
+            obj.spec.replicas = 1
+            return obj
+
+        def fake_read_dep(name, ns):
+            obj = MagicMock()
+            obj.status.ready_replicas = 1
+            obj.spec.replicas = 1
+            return obj
+
+        with (
+            patch("lakebench.cli.get_k8s_client") as mock_get,
+            patch("kubernetes.client.AppsV1Api") as mock_apps,
+            pytest.raises(ClickExit),
+        ):
+            mock_get.return_value.namespace_exists.return_value = True
+            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
+            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
+            _run_preflight_infra_check(cfg)
+
+    def test_blocks_when_trino_not_ready(self):
+        """Exits 1 when Trino workers have 0 ready replicas."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _run_preflight_infra_check
+
+        cfg = self._make_cfg(engine="trino")
+
+        def fake_read_sts(name, ns):
+            obj = MagicMock()
+            if name == "lakebench-trino-worker":
+                obj.status.ready_replicas = 0
+                obj.spec.replicas = 4
+            else:
+                obj.status.ready_replicas = 1
+                obj.spec.replicas = 1
+            return obj
+
+        def fake_read_dep(name, ns):
+            obj = MagicMock()
+            obj.status.ready_replicas = 1
+            obj.spec.replicas = 1
+            return obj
+
+        with (
+            patch("lakebench.cli.get_k8s_client") as mock_get,
+            patch("kubernetes.client.AppsV1Api") as mock_apps,
+            pytest.raises(ClickExit),
+        ):
+            mock_get.return_value.namespace_exists.return_value = True
+            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
+            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
+            _run_preflight_infra_check(cfg)
+
+    def test_passes_when_all_ready(self):
+        """Does not exit when all components are deployed and ready."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _run_preflight_infra_check
+
+        cfg = self._make_cfg(engine="trino")
+
+        def fake_read_sts(name, ns):
+            obj = MagicMock()
+            if name == "lakebench-trino-worker":
+                obj.status.ready_replicas = 4
+                obj.spec.replicas = 4
+            else:
+                obj.status.ready_replicas = 1
+                obj.spec.replicas = 1
+            return obj
+
+        def fake_read_dep(name, ns):
+            obj = MagicMock()
+            obj.status.ready_replicas = 1
+            obj.spec.replicas = 1
+            return obj
+
+        with (
+            patch("lakebench.cli.get_k8s_client") as mock_get,
+            patch("kubernetes.client.AppsV1Api") as mock_apps,
+        ):
+            mock_get.return_value.namespace_exists.return_value = True
+            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
+            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
+            # Should not raise
+            _run_preflight_infra_check(cfg)
+
+    def test_polaris_duckdb_components(self):
+        """Checks Polaris + DuckDB components when configured."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _run_preflight_infra_check
+
+        cfg = self._make_cfg(catalog="polaris", engine="duckdb")
+
+        def fake_read_sts(name, ns):
+            obj = MagicMock()
+            obj.status.ready_replicas = 1
+            obj.spec.replicas = 1
+            return obj
+
+        def fake_read_dep(name, ns):
+            obj = MagicMock()
+            obj.status.ready_replicas = 1
+            obj.spec.replicas = 1
+            return obj
+
+        with (
+            patch("lakebench.cli.get_k8s_client") as mock_get,
+            patch("kubernetes.client.AppsV1Api") as mock_apps,
+        ):
+            mock_get.return_value.namespace_exists.return_value = True
+            mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
+            mock_apps.return_value.read_namespaced_deployment.side_effect = fake_read_dep
+            # Should not raise -- checks Polaris (Deployment) + DuckDB (Deployment)
+            _run_preflight_infra_check(cfg)
+
+
+class TestParseSparkInterval:
+    """Tests for _parse_spark_interval()."""
+
+    def test_seconds(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("30 seconds") == 30
+
+    def test_single_second(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("1 second") == 1
+
+    def test_minutes(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("5 minutes") == 300
+
+    def test_single_minute(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("1 minute") == 60
+
+    def test_hours(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("2 hours") == 7200
+
+    def test_fallback_on_junk(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("garbage") == 300
+
+    def test_fallback_on_empty(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("") == 300
+
+    def test_fallback_on_no_unit(self):
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("300") == 300
+
+    def test_parse_spark_interval_minutes(self):
+        """Verify that _parse_spark_interval handles '5 minutes'."""
+        from lakebench.cli import _parse_spark_interval
+
+        assert _parse_spark_interval("5 minutes") == 300
+
+
+class TestBenchmarkSchedulingFloors:
+    """Warmup and interval must be >= gold_refresh_interval."""
+
+    def test_warmup_below_gold_refresh_is_clamped(self):
+        """If warmup < gold_refresh_interval, warmup is raised to match."""
+        from lakebench.cli import _parse_spark_interval
+
+        gold_interval_s = _parse_spark_interval("5 minutes")
+        bench_warmup = 60  # user sets 60s, gold refresh is 300s
+
+        # Simulate the clamping logic from cli.py
+        if bench_warmup < gold_interval_s:
+            bench_warmup = gold_interval_s
+
+        assert bench_warmup == 300
+
+    def test_warmup_above_gold_refresh_unchanged(self):
+        """If warmup >= gold_refresh_interval, no clamping occurs."""
+        from lakebench.cli import _parse_spark_interval
+
+        gold_interval_s = _parse_spark_interval("5 minutes")
+        bench_warmup = 600  # user sets 10 min, gold refresh is 5 min
+
+        if bench_warmup < gold_interval_s:
+            bench_warmup = gold_interval_s
+
+        assert bench_warmup == 600
+
+    def test_interval_below_gold_refresh_is_clamped(self):
+        """If interval < gold_refresh_interval, interval is raised to match."""
+        from lakebench.cli import _parse_spark_interval
+
+        gold_interval_s = _parse_spark_interval("5 minutes")
+        bench_interval = 120  # user sets 120s, gold refresh is 300s
+
+        if bench_interval < gold_interval_s:
+            bench_interval = gold_interval_s
+
+        assert bench_interval == 300
+
+    def test_interval_above_gold_refresh_unchanged(self):
+        """If interval >= gold_refresh_interval, no clamping occurs."""
+        from lakebench.cli import _parse_spark_interval
+
+        gold_interval_s = _parse_spark_interval("5 minutes")
+        bench_interval = 600  # user sets 10 min, gold refresh is 5 min
+
+        if bench_interval < gold_interval_s:
+            bench_interval = gold_interval_s
+
+        assert bench_interval == 600
