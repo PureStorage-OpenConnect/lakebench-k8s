@@ -4,6 +4,23 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.7] - 2026-02-20
+
+### Added
+- **Stackable operator auto-install.** Set
+  `architecture.catalog.hive.operator.install: true` to auto-install all four
+  Stackable operators (commons, listener, secret, hive) via Helm during
+  `lakebench deploy`. Mirrors the existing Spark Operator auto-install pattern.
+  Requires cluster-admin. Operator namespace and version are configurable.
+- Preflight and validate commands are now install-aware -- they warn instead of
+  failing when Stackable CRDs are missing and auto-install is enabled.
+- Documentation updated across getting-started, component-hive, configuration
+  reference, and operators-and-catalogs guides.
+
+### Fixed
+- README Quick Start now shows `lakebench run --generate` as the single-command
+  option (6 steps instead of 7).
+
 ## [1.0.6] - 2026-02-20
 
 ### Fixed

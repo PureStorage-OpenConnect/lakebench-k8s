@@ -110,14 +110,17 @@ class TestPreflightCheck:
     """Tests for _preflight_check deploy guard."""
 
     def test_preflight_blocks_on_missing_stackable(self, monkeypatch):
-        """Preflight exits 1 when Stackable CRDs are missing for Hive catalog."""
+        """Preflight exits 1 when Stackable CRDs are missing and install is false."""
         from unittest.mock import MagicMock, patch
 
         from lakebench.cli import _preflight_check
 
-        # Build a config with catalog=hive and valid S3
+        # Build a config with catalog=hive, install=false, and valid S3
         cfg = MagicMock()
         cfg.architecture.catalog.type.value = "hive"
+        cfg.architecture.catalog.hive.operator.install = False
+        cfg.architecture.catalog.hive.operator.version = "25.7.0"
+        cfg.architecture.catalog.hive.operator.namespace = "stackable"
         cfg.platform.storage.s3.endpoint = "http://s3:80"
         cfg.platform.storage.s3.access_key = "key"
         cfg.platform.storage.s3.secret_key = "secret"
@@ -131,6 +134,27 @@ class TestPreflightCheck:
             pytest.raises(ClickExit),
         ):
             mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
+            _preflight_check(cfg)
+
+    def test_preflight_warns_on_missing_stackable_with_install(self, monkeypatch):
+        """Preflight warns (not fails) when Stackable CRDs are missing and install is true."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.cli import _preflight_check
+
+        cfg = MagicMock()
+        cfg.architecture.catalog.type.value = "hive"
+        cfg.architecture.catalog.hive.operator.install = True
+        cfg.platform.storage.s3.endpoint = "http://s3:80"
+        cfg.platform.storage.s3.access_key = "key"
+        cfg.platform.storage.s3.secret_key = "secret"
+
+        mock_crd_list = MagicMock()
+        mock_crd_list.items = []
+
+        with patch("kubernetes.client.ApiextensionsV1Api") as mock_api:
+            mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
+            # Should not raise -- warns instead of failing
             _preflight_check(cfg)
 
     def test_preflight_passes_when_stackable_present(self, monkeypatch):

@@ -42,6 +42,7 @@ When you omit optional sections, these defaults apply:
 | `catalog.type` | hive | Stackable Hive Metastore |
 | `query_engine.type` | trino | Trino coordinator + 2 workers |
 | `spark.operator.install` | false | Must opt in to auto-install Spark Operator |
+| `hive.operator.install` | false | Must opt in to auto-install Stackable operators (Hive recipes) |
 | `observability.enabled` | false | No Prometheus/Grafana |
 | `scratch.enabled` | false | emptyDir for shuffle |
 
@@ -400,6 +401,9 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `architecture.catalog.type` | enum | `hive` | Catalog service: `hive`, `polaris`, or `none`. |
+| `architecture.catalog.hive.operator.install` | bool | `false` | Auto-install Stackable operators via Helm. Requires cluster-admin. |
+| `architecture.catalog.hive.operator.namespace` | string | `stackable` | Namespace for Stackable operators. |
+| `architecture.catalog.hive.operator.version` | string | `25.7.0` | Stackable chart version. |
 | `architecture.catalog.hive.thrift.min_threads` | int | `10` | Hive Metastore thrift server minimum threads. |
 | `architecture.catalog.hive.thrift.max_threads` | int | `50` | Hive Metastore thrift server maximum threads. |
 | `architecture.catalog.hive.thrift.client_timeout` | string | `300s` | Hive Metastore client timeout. |

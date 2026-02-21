@@ -163,6 +163,11 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 
 ## Stackable Installation
 
+**Auto-install** -- set `architecture.catalog.hive.operator.install: true` in
+your config and `lakebench deploy` handles it. Requires cluster-admin.
+
+**Manual install:**
+
 ```bash
 # Install Stackable operators (required for Hive)
 helm install commons-operator oci://oci.stackable.tech/sdp-charts/commons-operator --version 25.7.0 --namespace stackable --create-namespace
