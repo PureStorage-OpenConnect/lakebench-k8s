@@ -160,8 +160,9 @@ On OpenShift, an `anyuid` SCC is automatically bound to the
 ### Trino
 
 Trino is deployed as a coordinator (Deployment) plus workers (StatefulSet).
-The coordinator exposes a ClusterIP service. Workers use persistent volumes
-for spill-to-disk when query memory pressure is high. Trino connects to
+The coordinator exposes a ClusterIP service. By default, workers use ephemeral
+storage (`emptyDir`) for spill-to-disk. When `storage_class` is set in the
+config, workers use PVC-backed persistent volumes instead. Trino connects to
 the catalog service (Hive or Polaris) for Iceberg metadata and reads data
 directly from S3.
 
@@ -224,9 +225,12 @@ The validated component combinations are:
 |---|---|---|
 | Hive | Iceberg | Trino |
 | Hive | Iceberg | Spark Thrift |
-| Hive | Delta | Trino |
+| Hive | Iceberg | DuckDB |
+| Hive | Iceberg | None |
 | Polaris | Iceberg | Trino |
 | Polaris | Iceberg | Spark Thrift |
+| Polaris | Iceberg | DuckDB |
+| Polaris | Iceberg | None |
 
 ## Storage
 

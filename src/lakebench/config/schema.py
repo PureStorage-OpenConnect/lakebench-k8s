@@ -37,7 +37,6 @@ class TableFormatType(str, Enum):
     """Supported table formats."""
 
     ICEBERG = "iceberg"
-    DELTA = "delta"
     HUDI = "hudi"
 
 
@@ -56,6 +55,12 @@ class QueryEngineType(str, Enum):
     SPARK_THRIFT = "spark-thrift"
     DUCKDB = "duckdb"
     NONE = "none"
+
+
+class PipelineEngineType(str, Enum):
+    """Supported pipeline processing engines."""
+
+    SPARK = "spark"
 
 
 class BenchmarkMode(str, Enum):
@@ -151,6 +156,7 @@ class ImagesConfig(BaseModel):
     duckdb: str = "python:3.11-slim"
     prometheus: str = "prom/prometheus:v2.48.0"
     grafana: str = "grafana/grafana:10.2.0"
+    jmx_exporter: str = "bitnami/jmx-exporter:latest"
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.IF_NOT_PRESENT
     pull_secrets: list[str] = Field(default_factory=list)
@@ -372,8 +378,6 @@ class PolarisConfig(BaseModel):
 class UnityConfig(BaseModel):
     """Unity Catalog configuration (placeholder for future)."""
 
-    pass
-
 
 class CatalogConfig(BaseModel):
     """Catalog service configuration."""
@@ -392,13 +396,6 @@ class IcebergConfig(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
-class DeltaConfig(BaseModel):
-    """Delta Lake table format configuration."""
-
-    version: str = "3.0.0"
-    properties: dict[str, Any] = Field(default_factory=dict)
-
-
 class HudiConfig(BaseModel):
     """Apache Hudi table format configuration."""
 
@@ -411,7 +408,6 @@ class TableFormatConfig(BaseModel):
 
     type: TableFormatType = TableFormatType.ICEBERG
     iceberg: IcebergConfig = Field(default_factory=IcebergConfig)
-    delta: DeltaConfig = Field(default_factory=DeltaConfig)
     hudi: HudiConfig = Field(default_factory=HudiConfig)
 
 
@@ -580,6 +576,56 @@ class ContinuousConfig(BaseModel):
         description="Target Iceberg file size for gold writes (MB)",
     )
 
+    # In-stream benchmark settings -- controls periodic benchmark
+    # rounds that run while streaming jobs are active.  Both warmup
+    # and interval are hard-floored to gold_refresh_interval so that
+    # every round lands in a clean window after gold has refreshed.
+    benchmark_interval: int = Field(
+        default=300,
+        ge=300,
+        le=3600,
+        description="Seconds between in-stream benchmark rounds",
+    )
+    benchmark_warmup: int = Field(
+        default=300,
+        ge=300,
+        le=1800,
+        description="Seconds before first in-stream benchmark round",
+    )
+
+    @model_validator(mode="after")
+    def _benchmark_ge_gold_refresh(self) -> ContinuousConfig:
+        """Clamp benchmark_warmup and benchmark_interval to gold_refresh_interval.
+
+        Gold rewrites the entire table each refresh cycle via
+        createOrReplace().  Benchmark rounds that fire before the first
+        refresh produce inflated QpH against an empty/stale gold table,
+        and intervals shorter than the gold cycle cause Q9 contention
+        as rounds overlap with gold rewrites.
+
+        Both fields are clamped up to gold_refresh_interval (default
+        300s).  Users who want more rounds must run the pipeline longer.
+        """
+        parts = self.gold_refresh_interval.strip().lower().split()
+        gold_s = 300  # fallback
+        if len(parts) == 2:
+            try:
+                val = int(parts[0])
+                unit = parts[1].rstrip("s")
+                if unit == "second":
+                    gold_s = val
+                elif unit == "minute":
+                    gold_s = val * 60
+                elif unit == "hour":
+                    gold_s = val * 3600
+            except ValueError:
+                pass
+        if self.benchmark_warmup < gold_s:
+            self.benchmark_warmup = gold_s
+        if self.benchmark_interval < gold_s:
+            self.benchmark_interval = gold_s
+        return self
+
 
 class ProcessingConfig(BaseModel):
     """Processing pattern configuration."""
@@ -733,17 +779,16 @@ class WorkloadConfig(BaseModel):
 # Supported component combinations (catalog, table_format, query_engine).
 # Unsupported combinations fail validation with a clear error.
 _SUPPORTED_COMBINATIONS = [
-    ("hive", "iceberg", "trino"),
-    ("hive", "iceberg", "spark-thrift"),
-    ("hive", "iceberg", "duckdb"),
-    ("hive", "iceberg", "none"),
-    ("hive", "delta", "trino"),
-    ("hive", "delta", "none"),
-    # Polaris REST catalog (Iceberg only -- Polaris doesn't support Delta)
-    ("polaris", "iceberg", "trino"),
-    ("polaris", "iceberg", "spark-thrift"),
-    ("polaris", "iceberg", "duckdb"),
-    ("polaris", "iceberg", "none"),
+    # (catalog, table_format, pipeline_engine, query_engine)
+    ("hive", "iceberg", "spark", "trino"),
+    ("hive", "iceberg", "spark", "spark-thrift"),
+    ("hive", "iceberg", "spark", "duckdb"),
+    ("hive", "iceberg", "spark", "none"),
+    # Polaris REST catalog (Iceberg only)
+    ("polaris", "iceberg", "spark", "trino"),
+    ("polaris", "iceberg", "spark", "spark-thrift"),
+    ("polaris", "iceberg", "spark", "duckdb"),
+    ("polaris", "iceberg", "spark", "none"),
 ]
 
 
@@ -813,6 +858,7 @@ class ArchitectureConfig(BaseModel):
 
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
     table_format: TableFormatConfig = Field(default_factory=TableFormatConfig)
+    pipeline_engine: PipelineEngineType = PipelineEngineType.SPARK
     query_engine: QueryEngineConfig = Field(default_factory=QueryEngineConfig)
     pipeline: ProcessingConfig = Field(default_factory=ProcessingConfig)
     workload: WorkloadConfig = Field(default_factory=WorkloadConfig)
@@ -845,16 +891,18 @@ class ArchitectureConfig(BaseModel):
         combo = (
             self.catalog.type.value,
             self.table_format.type.value,
+            self.pipeline_engine.value,
             self.query_engine.type.value,
         )
         if combo not in _SUPPORTED_COMBINATIONS:
             supported = "\n".join(
-                f"  - catalog={c}, table_format={t}, query_engine={q}"
-                for c, t, q in _SUPPORTED_COMBINATIONS
+                f"  - catalog={c}, table_format={t}, engine={e}, query_engine={q}"
+                for c, t, e, q in _SUPPORTED_COMBINATIONS
             )
             raise ValueError(
                 f"Unsupported component combination: catalog={combo[0]}, "
-                f"table_format={combo[1]}, query_engine={combo[2]}.\n"
+                f"table_format={combo[1]}, engine={combo[2]}, "
+                f"query_engine={combo[3]}.\n"
                 f"Supported combinations:\n{supported}"
             )
         return self

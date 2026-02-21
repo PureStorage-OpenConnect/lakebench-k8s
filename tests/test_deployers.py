@@ -26,7 +26,7 @@ class TestDuckDBDeployerSkip:
         from lakebench.deploy.duckdb import DuckDBDeployer
         from lakebench.deploy.engine import DeploymentStatus
 
-        cfg = make_config(recipe="hive-iceberg-trino")
+        cfg = make_config(recipe="hive-iceberg-spark-trino")
         engine = MagicMock()
         engine.config = cfg
         deployer = DuckDBDeployer(engine)
@@ -38,7 +38,7 @@ class TestDuckDBDeployerSkip:
         from lakebench.deploy.duckdb import DuckDBDeployer
         from lakebench.deploy.engine import DeploymentStatus
 
-        cfg = make_config(recipe="hive-iceberg-spark")
+        cfg = make_config(recipe="hive-iceberg-spark-thrift")
         engine = MagicMock()
         engine.config = cfg
         deployer = DuckDBDeployer(engine)
@@ -53,7 +53,7 @@ class TestDuckDBDeployerDryRun:
         from lakebench.deploy.duckdb import DuckDBDeployer
         from lakebench.deploy.engine import DeploymentStatus
 
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = True
@@ -80,7 +80,7 @@ class TestDuckDBDeployerWaitForReady:
     def test_wait_success(self):
         from lakebench.deploy.duckdb import DuckDBDeployer
 
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
         engine.config = cfg
         deployer = DuckDBDeployer(engine)
@@ -97,7 +97,7 @@ class TestDuckDBDeployerWaitForReady:
     def test_wait_timeout(self):
         from lakebench.deploy.duckdb import DuckDBDeployer
 
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
         engine.config = cfg
         deployer = DuckDBDeployer(engine)

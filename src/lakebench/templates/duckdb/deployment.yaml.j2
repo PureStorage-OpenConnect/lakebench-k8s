@@ -27,8 +27,10 @@ spec:
         - name: duckdb
           image: {{ duckdb_image }}
           imagePullPolicy: {{ image_pull_policy }}
-          command: ["sh", "-c", "pip install --quiet duckdb && sleep infinity"]
+          command: ["sh", "-c", "pip install --no-cache-dir --quiet duckdb && sleep infinity"]
           env:
+            - name: HOME
+              value: /tmp
             - name: AWS_REGION
               value: "{{ s3_region }}"
             - name: AWS_DEFAULT_REGION
@@ -54,13 +56,19 @@ spec:
             limits:
               cpu: "{{ duckdb_cores }}"
               memory: "{{ duckdb_memory_k8s }}"
+          startupProbe:
+            exec:
+              command: ["python", "-c", "import duckdb; print('ok')"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 30
           readinessProbe:
             exec:
               command: ["python", "-c", "import duckdb; print('ok')"]
-            initialDelaySeconds: 30
+            initialDelaySeconds: 5
             periodSeconds: 30
           livenessProbe:
             exec:
               command: ["python", "-c", "import duckdb; print('ok')"]
-            initialDelaySeconds: 45
+            initialDelaySeconds: 5
             periodSeconds: 60

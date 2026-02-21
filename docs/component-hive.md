@@ -140,7 +140,7 @@ The deployment engine enforces this ordering automatically.
 | Multi-engine sharing | Spark + Trino (same cluster) | Any engine with Iceberg REST support |
 | Credential vending | No (credentials injected via SecretClass) | Yes (server-side S3 credential vending) |
 | Multi-tenancy | Single catalog namespace | Namespace-level isolation |
-| Table format support | Iceberg, Delta | Iceberg only |
+| Table format support | Iceberg | Iceberg |
 
 **Choose Hive** when you want the simplest deployment path and your workload
 uses a single compute cluster. Hive is battle-tested at 1TB+ scale and
@@ -151,8 +151,8 @@ tables across multiple compute engines or clusters, or require server-side
 credential vending for S3 access. See [quickstart-polaris.md](quickstart-polaris.md)
 for migration steps.
 
-**Recipes using Hive:** Standard, Standard Headless, Spark SQL, Delta Lake,
-Delta Headless. See the [Recipes Guide](recipes.md) for all combinations.
+**Recipes using Hive:** Standard, Standard Headless, Spark SQL, DuckDB.
+See the [Recipes Guide](recipes.md) for all combinations.
 
 ## Cross-References
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from lakebench._constants import SPARK_SERVICE_ACCOUNT
+from lakebench._constants import POLARIS_CLIENT_ID, POLARIS_CLIENT_SECRET, SPARK_SERVICE_ACCOUNT
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
@@ -463,7 +463,7 @@ class SparkJobManager:
                 driver_pod=driver_info.get("podName"),
                 start_time=status.get("lastSubmissionAttemptTime"),
                 completion_time=status.get("terminationTime"),
-                executor_count=status.get("executorState", {}).__len__()
+                executor_count=len(status.get("executorState", {}))
                 if status.get("executorState")
                 else 0,
             )
@@ -671,7 +671,7 @@ class SparkJobManager:
                         s3.path_style
                     ).lower(),
                     # OAuth2 credential (client_id:client_secret)
-                    f"spark.sql.catalog.{catalog_name}.credential": "lakebench:lakebench-polaris-secret-2024",
+                    f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{POLARIS_CLIENT_SECRET}",
                     f"spark.sql.catalog.{catalog_name}.scope": "PRINCIPAL_ROLE:ALL",
                     f"spark.sql.catalog.{catalog_name}.token-refresh-enabled": "true",
                     # FlashBlade: static S3 credentials on catalog (no STS vending)
@@ -789,6 +789,12 @@ class SparkJobManager:
                     "spark.ui.prometheus.enabled": "true",
                     "spark.metrics.namespace": "lakebench",
                     "spark.metrics.appStatusSource.enabled": "true",
+                    # PrometheusServlet sink -- exposes metrics at driver
+                    # and executor scrape endpoints for Prometheus collection
+                    "spark.metrics.conf.*.sink.prometheusServlet.class": "org.apache.spark.metrics.sink.PrometheusServlet",
+                    "spark.metrics.conf.*.sink.prometheusServlet.path": "/metrics/prometheus",
+                    "spark.metrics.conf.master.sink.prometheusServlet.path": "/metrics/master/prometheus",
+                    "spark.metrics.conf.applications.sink.prometheusServlet.path": "/metrics/applications/prometheus",
                 }
             )
 
