@@ -1,6 +1,6 @@
 {# PodMonitor for Trino coordinator and worker metrics #}
 {# Requires Prometheus Operator CRDs to be installed #}
-{# Trino metrics are exposed via JMX exporter on port 9090 (Stackable injects this) #}
+{# Trino metrics are exposed via JMX exporter on port 9090 (init container injects the agent) #}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PodMonitor
@@ -10,12 +10,12 @@ metadata:
   labels:
     app.kubernetes.io/name: lakebench
     app.kubernetes.io/component: trino-metrics
-    release: prometheus
+    release: {{ prometheus_release | default('lakebench-observability') }}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: trino
-      app.kubernetes.io/component: coordinator
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: trino-coordinator
   namespaceSelector:
     matchNames:
       - {{ namespace }}
@@ -33,12 +33,12 @@ metadata:
   labels:
     app.kubernetes.io/name: lakebench
     app.kubernetes.io/component: trino-metrics
-    release: prometheus
+    release: {{ prometheus_release | default('lakebench-observability') }}
 spec:
   selector:
     matchLabels:
-      app.kubernetes.io/name: trino
-      app.kubernetes.io/component: worker
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: trino-worker
   namespaceSelector:
     matchNames:
       - {{ namespace }}

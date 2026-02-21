@@ -67,7 +67,7 @@ class DuckDBDeployer:
                     if doc:
                         self.k8s.apply_manifest(doc, namespace=namespace)
 
-            self._wait_for_ready(namespace, timeout_seconds=180)
+            self._wait_for_ready(namespace, timeout_seconds=300)
 
             return DeploymentResult(
                 component="duckdb",
@@ -84,7 +84,7 @@ class DuckDBDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def _wait_for_ready(self, namespace: str, timeout_seconds: int = 180) -> None:
+    def _wait_for_ready(self, namespace: str, timeout_seconds: int = 300) -> None:
         """Wait for the DuckDB Deployment to have ready replicas."""
         from kubernetes import client as k8s_client
 

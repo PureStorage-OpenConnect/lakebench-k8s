@@ -40,13 +40,13 @@ def default_config() -> LakebenchConfig:
 @pytest.fixture
 def duckdb_config() -> LakebenchConfig:
     """Config with DuckDB engine selected."""
-    return make_config(recipe="hive-iceberg-duckdb")
+    return make_config(recipe="hive-iceberg-spark-duckdb")
 
 
 @pytest.fixture
 def trino_config() -> LakebenchConfig:
     """Config with Trino engine selected."""
-    return make_config(recipe="hive-iceberg-trino")
+    return make_config(recipe="hive-iceberg-spark-trino")
 
 
 @pytest.fixture

@@ -29,6 +29,37 @@ class PodMetrics:
 
 
 @dataclass
+class EngineMetrics:
+    """Engine-level Tier 2 metrics from Spark and Trino.
+
+    Populated when Prometheus scrapes engine-native metrics (Spark
+    PrometheusServlet sink or Trino JMX exporter). All fields are
+    best-effort -- None means the metric was not available.
+    """
+
+    # Spark
+    spark_gc_seconds_total: float | None = None
+    spark_shuffle_read_bytes: float | None = None
+    spark_shuffle_write_bytes: float | None = None
+    spark_task_count: int | None = None
+    # Trino
+    trino_running_queries: int | None = None
+    trino_completed_queries: int | None = None
+    trino_failed_queries: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {}
+        for k, v in self.__dict__.items():
+            if v is not None:
+                d[k] = v
+        return d
+
+    @property
+    def has_data(self) -> bool:
+        return any(v is not None for v in self.__dict__.values())
+
+
+@dataclass
 class PlatformMetrics:
     """Platform-level metrics collected from Prometheus."""
 
@@ -38,6 +69,7 @@ class PlatformMetrics:
     s3_requests_total: int = 0
     s3_errors_total: int = 0
     s3_avg_latency_ms: float = 0.0
+    engine: EngineMetrics = field(default_factory=EngineMetrics)
     collection_error: str | None = None
 
     @property
@@ -50,6 +82,7 @@ class PlatformMetrics:
             "start_time": self.start_time.isoformat(),
             "end_time": self.end_time.isoformat(),
             "duration_seconds": self.duration_seconds,
+            "collection_window_seconds": self.duration_seconds,
             "pods": [
                 {
                     "pod_name": p.pod_name,
@@ -64,6 +97,7 @@ class PlatformMetrics:
             "s3_requests_total": self.s3_requests_total,
             "s3_errors_total": self.s3_errors_total,
             "s3_avg_latency_ms": round(self.s3_avg_latency_ms, 2),
+            "engine": self.engine.to_dict() if self.engine.has_data else None,
             "collection_error": self.collection_error,
         }
 
@@ -165,6 +199,9 @@ class PlatformCollector:
             if s3_errors is not None:
                 metrics.s3_errors_total = int(s3_errors)
 
+            # Engine-level Tier 2 metrics (best-effort)
+            self._collect_engine_metrics(client, metrics, start_time, end_time)
+
             client.close()
 
         except Exception as e:
@@ -186,8 +223,8 @@ class PlatformCollector:
             f"{self.prometheus_url}/api/v1/query_range",
             params={
                 "query": query,
-                "start": start.isoformat(),
-                "end": end.isoformat(),
+                "start": str(start.timestamp()),
+                "end": str(end.timestamp()),
                 "step": step,
             },
         )
@@ -203,7 +240,7 @@ class PlatformCollector:
             f"{self.prometheus_url}/api/v1/query",
             params={
                 "query": query,
-                "time": time_point.isoformat(),
+                "time": str(time_point.timestamp()),
             },
         )
         if resp.status_code != 200:
@@ -213,6 +250,67 @@ class PlatformCollector:
         if results and results[0].get("value"):
             return float(results[0]["value"][1])
         return None
+
+    def _collect_engine_metrics(
+        self,
+        client: Any,
+        metrics: PlatformMetrics,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> None:
+        """Collect Spark and Trino engine-level metrics (best-effort).
+
+        These require the Spark PrometheusServlet sink and Trino JMX
+        exporter to be enabled. If the metrics are not available,
+        fields stay None.
+        """
+        ns = self.namespace
+
+        # Spark GC time (total across all executors)
+        # Spark PrometheusServlet exposes metrics with the namespace prefix
+        gc = self._query_instant(
+            client,
+            f'sum(metrics_lakebench_executor_jvm_gc_time{{namespace="{ns}"}})',
+            end_time,
+        )
+        if gc is not None:
+            metrics.engine.spark_gc_seconds_total = gc
+
+        # Spark shuffle read bytes
+        shuffle_r = self._query_instant(
+            client,
+            f'sum(metrics_lakebench_executor_shuffle_read_bytes{{namespace="{ns}"}})',
+            end_time,
+        )
+        if shuffle_r is not None:
+            metrics.engine.spark_shuffle_read_bytes = shuffle_r
+
+        # Spark shuffle write bytes
+        shuffle_w = self._query_instant(
+            client,
+            f'sum(metrics_lakebench_executor_shuffle_write_bytes{{namespace="{ns}"}})',
+            end_time,
+        )
+        if shuffle_w is not None:
+            metrics.engine.spark_shuffle_write_bytes = shuffle_w
+
+        # Trino completed queries (from JMX exporter with lowercaseOutputName)
+        trino_completed = self._query_instant(
+            client,
+            f'sum(trino_execution_querymanager_completedqueries_totalcount{{namespace="{ns}"}})',
+            end_time,
+        )
+        if trino_completed is not None:
+            metrics.engine.trino_completed_queries = int(trino_completed)
+
+        # Trino failed queries
+        trino_failed = self._query_instant(
+            client,
+            f'sum(trino_execution_querymanager_failedqueries_totalcount{{namespace="{ns}"}})',
+            end_time,
+        )
+        if trino_failed is not None:
+            metrics.engine.trino_failed_queries = int(trino_failed)
 
     @staticmethod
     def _infer_component(pod_name: str) -> str:
@@ -227,9 +325,17 @@ class PlatformCollector:
             "polaris",
             "prometheus",
             "grafana",
+            "alertmanager",
+            "kube-state-metrics",
         ]:
             if component in pod_name:
                 return component
+        if "datagen" in pod_name:
+            return "datagen"
+        if "-driver" in pod_name:
+            return "spark-driver"
+        if "-exec-" in pod_name:
+            return "spark-executor"
         if "spark" in pod_name:
             return "spark-job"
         return "unknown"

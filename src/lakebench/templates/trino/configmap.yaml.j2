@@ -42,6 +42,9 @@ data:
     -XX:+HeapDumpOnOutOfMemoryError
     -XX:+ExitOnOutOfMemoryError
     -Djdk.attach.allowAttachSelf=true
+    {% if observability_enabled | default(false) %}
+    -javaagent:/opt/jmx-exporter/jmx_prometheus_javaagent.jar=9090:/etc/trino/jmx-exporter-config.yaml
+    {% endif %}
 
   jvm.config.worker: |
     -server
@@ -52,9 +55,24 @@ data:
     -XX:+HeapDumpOnOutOfMemoryError
     -XX:+ExitOnOutOfMemoryError
     -Djdk.attach.allowAttachSelf=true
+    {% if observability_enabled | default(false) %}
+    -javaagent:/opt/jmx-exporter/jmx_prometheus_javaagent.jar=9090:/etc/trino/jmx-exporter-config.yaml
+    {% endif %}
 
   log.properties: |
     io.trino=INFO
+
+  {% if observability_enabled | default(false) %}
+  jmx-exporter-config.yaml: |
+    lowercaseOutputName: true
+    lowercaseOutputLabelNames: true
+    whitelistObjectNames:
+      - "trino.execution:*"
+      - "trino.memory:*"
+      - "trino.failuredetector:*"
+    rules:
+      - pattern: ".*"
+  {% endif %}
 
   # Iceberg catalog configuration
   lakehouse.properties: |

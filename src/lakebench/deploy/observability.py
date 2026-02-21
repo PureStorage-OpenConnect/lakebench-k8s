@@ -2,7 +2,8 @@
 
 Deploys kube-prometheus-stack via Helm. The Helm chart bundles
 Prometheus, Grafana, node-exporter, and kube-state-metrics in a
-single install.
+single install. After Helm, renders and applies PodMonitor CRDs
+for Trino JMX and Spark PrometheusServlet scraping.
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import subprocess
 import tempfile
 import time
 from typing import TYPE_CHECKING
+
+import yaml
 
 from lakebench.k8s import PlatformType, SecurityVerifier
 
@@ -26,6 +29,72 @@ HELM_RELEASE_NAME = "lakebench-observability"
 HELM_CHART = "prometheus-community/kube-prometheus-stack"
 
 
+def _find_helm_service(namespace: str, app_label: str) -> str | None:
+    """Find a Helm-managed service by its app label.
+
+    The kube-prometheus-stack chart truncates service names based on
+    the release name length, making them unpredictable. This function
+    looks up the actual service name by Helm release + app labels.
+
+    Tries the K8s Python client first, then falls back to kubectl.
+    """
+    label = f"release={HELM_RELEASE_NAME},app={app_label}"
+
+    # Attempt 1: K8s Python client
+    try:
+        from kubernetes import client as k8s_client
+        from kubernetes import config as k8s_config
+
+        try:
+            k8s_config.load_incluster_config()
+        except k8s_config.ConfigException:
+            k8s_config.load_kube_config()
+
+        v1 = k8s_client.CoreV1Api()
+        svcs = v1.list_namespaced_service(namespace, label_selector=label)
+        if svcs.items:
+            return svcs.items[0].metadata.name
+    except Exception:
+        pass
+
+    # Attempt 2: kubectl fallback
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "kubectl",
+                "get",
+                "svc",
+                "-n",
+                namespace,
+                "-l",
+                label,
+                "-o",
+                "jsonpath={.items[0].metadata.name}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        svc_name = result.stdout.strip()
+        if result.returncode == 0 and svc_name:
+            return svc_name
+    except Exception:
+        pass
+
+    return None
+
+
+# PodMonitor templates applied after the Helm install so Prometheus
+# Operator can immediately reconcile them.
+PODMONITOR_TEMPLATES = [
+    "prometheus/podmonitor-trino.yaml.j2",
+    "prometheus/podmonitor-spark.yaml.j2",
+    "prometheus/configmap.yaml.j2",
+]
+
+
 class ObservabilityDeployer:
     """Deploys the observability stack via kube-prometheus-stack Helm chart."""
 
@@ -33,6 +102,8 @@ class ObservabilityDeployer:
         self.engine = engine
         self.config = engine.config
         self.k8s = engine.k8s
+        self.renderer = engine.renderer
+        self.context = engine.context
 
     def deploy(self) -> DeploymentResult:
         """Deploy the observability stack.
@@ -121,6 +192,22 @@ class ObservabilityDeployer:
                     elapsed_seconds=time.time() - start,
                 )
 
+            # Apply PodMonitor and Prometheus ConfigMap templates
+            self._apply_podmonitor_templates(namespace)
+
+            prom_svc = _find_helm_service(namespace, "kube-prometheus-stack-prometheus")
+            grafana_svc = _find_helm_service(namespace, "grafana")
+            prom_url = (
+                f"http://{prom_svc}.{namespace}.svc:9090"
+                if prom_svc
+                else f"http://{HELM_RELEASE_NAME}-prometheus.{namespace}.svc:9090"
+            )
+            grafana_url = (
+                f"http://{grafana_svc}.{namespace}.svc:80"
+                if grafana_svc
+                else f"http://{HELM_RELEASE_NAME}-grafana.{namespace}.svc:80"
+            )
+
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.SUCCESS,
@@ -128,8 +215,8 @@ class ObservabilityDeployer:
                 elapsed_seconds=time.time() - start,
                 details={
                     "helm_release": HELM_RELEASE_NAME,
-                    "prometheus_url": f"http://{HELM_RELEASE_NAME}-prometheus.{namespace}.svc:9090",
-                    "grafana_url": f"http://{HELM_RELEASE_NAME}-grafana.{namespace}.svc:80",
+                    "prometheus_url": prom_url,
+                    "grafana_url": grafana_url,
                     "retention": self.config.observability.retention,
                 },
             )
@@ -197,6 +284,19 @@ class ObservabilityDeployer:
                 message=f"Observability destroy failed: {e}",
                 elapsed_seconds=time.time() - start,
             )
+
+    def _apply_podmonitor_templates(self, namespace: str) -> None:
+        """Render and apply PodMonitor CRDs for Trino and Spark scraping."""
+        for template_name in PODMONITOR_TEMPLATES:
+            try:
+                yaml_content = self.renderer.render(template_name, self.context)
+                if not isinstance(yaml_content, str):
+                    continue
+                for doc in yaml.safe_load_all(yaml_content):
+                    if doc:
+                        self.k8s.apply_manifest(doc, namespace=namespace)
+            except Exception as e:
+                logger.warning("Failed to apply %s: %s", template_name, e)
 
     def _add_helm_repo(self) -> None:
         """Add the prometheus-community Helm repo if not present."""

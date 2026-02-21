@@ -44,7 +44,7 @@ def _make_pipeline_metrics(
                 success=True,
             )
         ],
-        config_snapshot={"scale": 1, "recipe": "hive-iceberg-trino"},
+        config_snapshot={"scale": 1, "recipe": "hive-iceberg-spark-trino"},
         bronze_size_gb=10.5,
         silver_size_gb=9.2,
         gold_size_gb=0.3,
@@ -215,7 +215,7 @@ class TestReportGeneratorEndToEnd:
 
         html = gen._generate_html(metrics)
 
-        assert "Job Performance" in html
+        assert "Batch Job Performance" in html
         assert "bronze-verify" in html
 
     def test_generate_html_with_benchmark(self) -> None:

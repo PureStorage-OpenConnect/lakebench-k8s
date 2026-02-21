@@ -391,7 +391,7 @@ class TestGetExecutorFactory:
     def test_trino_factory(self):
         from lakebench.benchmark.executor import TrinoExecutor, get_executor
 
-        cfg = make_config(recipe="hive-iceberg-trino")
+        cfg = make_config(recipe="hive-iceberg-spark-trino")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, TrinoExecutor)
         assert executor.engine_name() == "trino"
@@ -399,7 +399,7 @@ class TestGetExecutorFactory:
     def test_spark_thrift_factory(self):
         from lakebench.benchmark.executor import SparkThriftExecutor, get_executor
 
-        cfg = make_config(recipe="hive-iceberg-spark")
+        cfg = make_config(recipe="hive-iceberg-spark-thrift")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, SparkThriftExecutor)
         assert executor.engine_name() == "spark-thrift"
@@ -407,7 +407,7 @@ class TestGetExecutorFactory:
     def test_duckdb_factory(self):
         from lakebench.benchmark.executor import DuckDBExecutor, get_executor
 
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, DuckDBExecutor)
 
