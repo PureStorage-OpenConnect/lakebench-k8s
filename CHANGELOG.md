@@ -4,6 +4,195 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.4] - 2026-02-20
+
+### Added
+- In-stream periodic benchmarking for continuous pipelines. The full 8-query
+  Trino benchmark now runs at regular intervals *during* the streaming window,
+  producing per-round QpH and freshness measurements. The final continuous QpH
+  is the median across all in-stream rounds.
+- Query-time freshness: gold-table staleness is probed via SQL at the moment
+  Trino queries run, reported as `query_time_freshness_seconds` in the scorecard.
+- Q9 contention handling: gold `createOrReplace()` contention is detected,
+  retried up to twice with 30s/60s backoff, and reported per round
+  (`q9_contention_observed`, `q9_retry_used`). Benchmark rounds are offset
+  by half the gold refresh interval to land between rewrite cycles.
+- `benchmark_interval` and `benchmark_warmup` config fields on
+  `architecture.pipeline.continuous` control in-stream benchmark scheduling.
+- HTML report "In-Stream Benchmark Rounds" section with per-round QpH,
+  per-query times, freshness, and Q9 contention status.
+- Terminal rounds summary table after streaming completes, with median QpH
+  and freshness.
+- New continuous scores: `query_time_freshness_seconds`, `in_stream_composite_qph`,
+  `benchmark_rounds_count`.
+- Removed `--include-datagen` flag (redundant with `--generate`). Continuous mode
+  always runs datagen automatically.
+- `run` command preflight check: verifies namespace, Postgres, catalog, and query
+  engine are deployed and ready before starting the pipeline. Blocks with
+  actionable guidance if infrastructure is missing or misconfigured.
+- **Scorecard v2.0 report overhaul.** HTML report restructured into three
+  layers: Verdict (5 summary cards), Diagnosis (bottleneck, data validity,
+  query behavior), and Evidence (detail tables).
+- Bottleneck Identification section: stacked CPU bar chart and per-stage
+  breakdown table identifying the dominant pipeline stage.
+- Data Validity panel: green/red indicators for scale ratio (batch) or
+  ingest ratio (continuous), job success rate, and failed query count.
+- Query Behavior section: per-class QpH breakdown table showing relative
+  performance of scan, join, analytics, and aggregate query categories.
+- Stability Over Time section (continuous only): dual-axis inline SVG chart
+  plotting QpH and freshness per benchmark round, with trend analysis.
+- Contention Map section (continuous only): summary and detail table of Q9
+  gold-table contention events across benchmark rounds.
+- Query-Time Freshness diagnostic section (continuous only): shows median
+  query-time freshness vs worst-case data freshness with gap analysis and
+  variability interpretation.
+- `total_core_hours` field added to pipeline benchmark JSON output (both
+  batch and continuous modes).
+- `advanced_metrics` stub key in JSON output (null when Prometheus Tier 2
+  is not deployed).
+- **Tier 2 engine-level metrics.** Spark PrometheusServlet sink and Trino
+  JMX exporter are now enabled when `observability.enabled` is true.
+  - Spark: PrometheusServlet sink exposes GC, shuffle, and task metrics at
+    `:4040/metrics/prometheus`.
+  - Trino: JMX exporter JAR injected via init container from configurable
+    `images.jmx_exporter` image, exposes metrics at port 9090.
+  - PlatformCollector queries engine-level metrics (Spark GC, shuffle bytes,
+    Trino query counts) from Prometheus when available.
+  - Engine metrics rendered in the Platform section of the HTML report.
+- `images.jmx_exporter` config field for specifying the JMX exporter
+  container image (default: `bitnami/jmx-exporter:latest`).
+- Platform metrics are now collected from Prometheus at the end of each
+  pipeline run (both batch and continuous) when `observability.enabled` is
+  true. Pod CPU/memory, S3 metrics, and engine-level Tier 2 metrics (Spark GC,
+  shuffle, Trino query counts) are saved in `metrics.json` and rendered in the
+  HTML report's Platform Metrics section.
+- **Default StorageClass prerequisite documented.** Getting Started guide now
+  lists a default StorageClass as a cluster prerequisite (needed for PostgreSQL
+  metadata PVC).
+- **PostgreSQL PVC troubleshooting entry.** New section in troubleshooting guide
+  for diagnosing "PVC stuck in Pending" when no default StorageClass exists.
+
+### Removed
+- **Delta Lake recipes and support.** Removed `hive-delta-trino` and
+  `hive-delta-none` recipes, the `DELTA` enum value from `TableFormatType`,
+  `DeltaConfig` class, and both Delta entries from `_SUPPORTED_COMBINATIONS`.
+  Delta Lake was never tested or supported in the pipeline -- keeping it in the
+  codebase misled users. Recipe count drops from 10 to 8.
+
+### Changed
+- **4-slot recipe naming convention.** Recipe names now encode all four
+  architecture axes: `<catalog>-<format>-<engine>-<query_engine>`. Old 3-slot
+  names (`hive-iceberg-trino`) are replaced by 4-slot names
+  (`hive-iceberg-spark-trino`). The Spark Thrift query engine slot uses
+  `thrift` (not `spark`) to avoid `spark-spark` ambiguity. No backward
+  compatibility aliases -- clean break.
+- **`_SUPPORTED_COMBINATIONS` expanded to 4-tuples.** Validation now checks
+  `(catalog, table_format, engine, query_engine)` instead of 3-tuples. Added
+  `PipelineEngineType` enum with single value `SPARK`.
+- **Config snapshot includes `pipeline_engine`.** `build_config_snapshot()` and
+  the HTML report banner now render the full 4-slot recipe name.
+- **Trino workers default to ephemeral storage.** When `storage_class` is empty
+  (the default), Trino workers now use `emptyDir` instead of requiring a PVC.
+  This removes the need for a provisioned StorageClass on new clusters. Set
+  `storage_class` to a class name to opt back into PVC-backed storage.
+- Documentation restructured with **quick-recipe** terminology. The `recipe:`
+  field is now called a "quick-recipe" (one-line shorthand), with a new
+  "Advanced Configuration" section in the Recipes guide showing how to
+  override individual settings while keeping the recipe base.
+- Updated all documentation to remove Delta Lake references (README, recipes,
+  configuration, supported-components, getting-started, architecture,
+  component-hive, component-trino, operators-and-catalogs, docs index).
+- Streaming-log freshness metric changed from average to worst-case (max).
+  The worst staleness spike is what matters for streaming SLAs, not the average
+  that hides it.
+- Continuous pipeline no longer runs a post-stream benchmark. The in-stream
+  rounds are the benchmark -- measuring QpH against a different (larger) table
+  state after streaming stops is not a meaningful comparison.
+- Primary continuous `composite_qph` is the in-stream median QpH.
+- **HTML report overhaul for continuous mode.** Summary cards now show
+  streaming KPIs (duration, data processed, data throughput GB/s, sustained
+  throughput rows/s, in-stream QpH, data freshness) instead of batch-derived
+  zeros. Duplicate QpH card eliminated. Empty "Job Performance" section
+  hidden. Section renamed to "Pipeline Stages" with column tooltips.
+  Detail cards (ingest ratio, compute efficiency, total CPU-hours) placed
+  below stage table. Run context banner added (mode, dataset, stack,
+  duration). All cards have hint text explaining what each number means.
+- Batch summary: 5 primary cards (Time to Value, Pipeline Throughput,
+  Compute Efficiency, QpH, Scale Ratio) plus metadata row (Total Time,
+  Jobs). Replaces the previous variable-count card layout.
+- Continuous summary: 5 primary cards (Data Freshness, Sustained Throughput,
+  Compute Efficiency, In-Stream QpH, Total CPU-hours) plus metadata row
+  (Duration, Data Processed).
+- Data Freshness card always shows worst-case `data_freshness_seconds` from
+  streaming logs. Previously swapped to query-time freshness when available.
+- Trend analysis requires minimum 5 benchmark rounds (was 3). Rounds 2-4
+  show "Insufficient data" message instead of potentially misleading trends.
+- Pipeline Stages table: CPU-hours column added per stage. Latency column
+  auto-converts to seconds when values exceed 1000ms. Cores and memory
+  merged into "Cores x Mem" column.
+- Streaming table enriched with compute columns (Executors, Cores x Mem,
+  CPU-sec) and a total compute summary line.
+- Batch pipeline score cards updated with hint text (Time to Value, Pipeline
+  Throughput, Compute Efficiency, Scale Ratio).
+- `total_data_processed_gb` and `pipeline_throughput_gb_per_second` now
+  computed for continuous mode (previously batch-only). Both appear in
+  continuous JSON scorecard output.
+- `stage_latency_profile` JSON format changed from array to named object
+  (`{"bronze_ms": ..., "silver_ms": ..., "gold_ms": ...}`). Old array
+  format still loads via backward-compatible deserialization.
+- Run context banner includes `storage_backend` when available in config.
+- Renamed metric field `ingestion_completeness_ratio` to `ingest_ratio` and
+  `scale_verified_ratio` to `scale_ratio` in pipeline benchmark data model
+  and JSON output. Old JSON keys still load via backward-compatible
+  deserialization. Report labels updated: "Completeness" -> "Ingest Ratio",
+  "Scale Verified" -> "Scale Ratio".
+- Added `score_descriptions` dict to pipeline benchmark JSON output. Each
+  score key gets a human-readable explanation for downstream tools and
+  manual inspection.
+- `score_descriptions` updated with `total_core_hours` and reorganized into
+  batch, continuous, and shared sections. `data_freshness_seconds` marked
+  as "Primary freshness score", `query_time_freshness_seconds` marked as
+  "Diagnostic" with gap explanation.
+
+### Fixed
+- **DuckDB deploy fails on OpenShift.** The `python:3.11-slim` container runs
+  as non-root on OpenShift, causing `pip install duckdb` to fail with
+  `Permission denied: /.local`. Fixed by setting `HOME=/tmp` and using
+  `--no-cache-dir` in the DuckDB deployment template.
+- **DuckDB readiness probe too aggressive.** Added a `startupProbe` with
+  `failureThreshold: 30` (300s window) to allow time for `pip install`.
+  Reduced readiness/liveness `initialDelaySeconds` to 5 since the startup
+  probe handles the init window.
+- **DuckDB deployer timeout too short.** Increased from 180s to 300s.
+- **Prometheus service discovery for platform metrics.** The
+  kube-prometheus-stack Helm chart truncates service names based on release
+  name length, making the hardcoded URL
+  `lakebench-observability-prometheus` incorrect (actual name:
+  `lakebench-observability-ku-prometheus`). Platform metric collection now
+  discovers the Prometheus service dynamically via Helm release labels.
+- `benchmark_rounds` was serialized to JSON but never deserialized back
+  when loading saved runs. The Stability chart, Contention Map, and
+  Benchmark Rounds table were empty on `lakebench report` from saved data.
+  Now fully round-tripped including `BenchmarkRoundMeta` (Q9 contention
+  flags, freshness, timestamps).
+- Trino PodMonitor label selectors matched `app.kubernetes.io/name: trino`
+  and `app.kubernetes.io/component: coordinator`, but actual pod labels use
+  `app.kubernetes.io/name: lakebench` and
+  `app.kubernetes.io/component: trino-coordinator`. Fixed both coordinator
+  and worker PodMonitors.
+- Prometheus ConfigMap scrape configs for Trino had the same label mismatch.
+  Fixed to match actual pod labels.
+- PodMonitor templates were never rendered or applied. Wired
+  `_apply_podmonitor_templates()` into the observability deployer to apply
+  them after the kube-prometheus-stack Helm install.
+- PodMonitor `release` label was `prometheus` but the Helm release is
+  `lakebench-observability`. Fixed to match the actual Prometheus Operator
+  selector.
+- JMX exporter config with empty `rules: []` only exported JVM metrics.
+  Added catch-all rule to emit whitelisted Trino MBeans.
+- Default `images.jmx_exporter` was `bitnami/jmx-exporter:1.0.1` (does not
+  exist). Changed to `bitnami/jmx-exporter:latest`.
+
 ## [1.0.3] - 2026-02-17
 
 ### Added

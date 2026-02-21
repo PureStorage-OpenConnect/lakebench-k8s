@@ -97,11 +97,11 @@ class TestInitCommand:
         monkeypatch.chdir(tmp_path)
         output = tmp_path / "out.yaml"
         result = runner.invoke(
-            app, ["init", "--output", str(output), "--recipe", "polaris-iceberg-trino"]
+            app, ["init", "--output", str(output), "--recipe", "polaris-iceberg-spark-trino"]
         )
         assert result.exit_code == 0
         content = output.read_text()
-        assert "polaris-iceberg-trino" in content
+        assert "polaris-iceberg-spark-trino" in content
 
     def test_init_with_s3_creds(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -345,7 +345,7 @@ class TestReportSummary:
                     "pipeline_throughput_gb_per_second": 0.088,
                     "time_to_value_seconds": 120.0,
                     "compute_efficiency_gb_per_core_hour": 0.5,
-                    "scale_verified_ratio": 1.0,
+                    "scale_ratio": 1.0,
                     "composite_qph": 0.0,
                 },
                 "stages": [

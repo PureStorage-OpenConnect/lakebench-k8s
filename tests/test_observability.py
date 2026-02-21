@@ -114,11 +114,21 @@ class TestPlatformCollectorCollect:
         mock_httpx = MagicMock()
         mock_client = MagicMock()
         mock_httpx.Client.return_value = mock_client
+        # Engine metrics queries (5 instant queries, all return empty)
+        engine_empty = MagicMock()
+        engine_empty.status_code = 200
+        engine_empty.json.return_value = {"data": {"result": []}}
+
         mock_client.get.side_effect = [
             cpu_response,
             mem_response,
             s3_total_response,
             s3_errors_response,
+            engine_empty,  # spark GC
+            engine_empty,  # spark shuffle read
+            engine_empty,  # spark shuffle write
+            engine_empty,  # trino completed
+            engine_empty,  # trino failed
         ]
 
         with patch.dict("sys.modules", {"httpx": mock_httpx}):
@@ -159,6 +169,11 @@ class TestPlatformCollectorCollect:
             empty_response,
             s3_empty,
             s3_empty,
+            empty_response,  # spark GC
+            empty_response,  # spark shuffle read
+            empty_response,  # spark shuffle write
+            empty_response,  # trino completed
+            empty_response,  # trino failed
         ]
 
         with patch.dict("sys.modules", {"httpx": mock_httpx}):
@@ -275,10 +290,16 @@ class TestInferComponent:
                 f"Expected {expected} for {pod_name}"
             )
 
+    def test_spark_driver_and_executor(self):
+        from lakebench.observability.platform_collector import PlatformCollector
+
+        assert PlatformCollector._infer_component("some-spark-driver-pod") == "spark-driver"
+        assert PlatformCollector._infer_component("bronze-exec-1") == "spark-executor"
+
     def test_spark_job_fallback(self):
         from lakebench.observability.platform_collector import PlatformCollector
 
-        assert PlatformCollector._infer_component("some-spark-driver-pod") == "spark-job"
+        assert PlatformCollector._infer_component("some-spark-process") == "spark-job"
 
     def test_unknown_fallback(self):
         from lakebench.observability.platform_collector import PlatformCollector
@@ -314,6 +335,7 @@ class TestPlatformMetricsToDict:
         d = metrics.to_dict()
 
         assert d["duration_seconds"] == 300.0
+        assert d["collection_window_seconds"] == 300.0
         assert d["start_time"] == "2026-02-12T10:00:00"
         assert d["end_time"] == "2026-02-12T10:05:00"
         assert len(d["pods"]) == 1
@@ -333,6 +355,110 @@ class TestPlatformMetricsToDict:
         d = metrics.to_dict()
         assert d["pods"] == []
         assert d["duration_seconds"] == 30.0
+
+
+# ===========================================================================
+# CLI _collect_platform_metrics helper
+# ===========================================================================
+
+
+class TestCollectPlatformMetricsHelper:
+    """Tests for cli._collect_platform_metrics()."""
+
+    def test_skips_when_observability_disabled(self):
+        from unittest.mock import MagicMock
+
+        from lakebench.metrics import PipelineMetrics
+
+        cfg = MagicMock()
+        cfg.observability.enabled = False
+        run_metrics = PipelineMetrics(
+            run_id="test", deployment_name="test", start_time=datetime(2026, 1, 1)
+        )
+
+        from lakebench.cli import _collect_platform_metrics
+
+        _collect_platform_metrics(cfg, run_metrics)
+        assert run_metrics.platform_metrics is None
+
+    def test_collects_when_observability_enabled(self):
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.metrics import PipelineMetrics
+        from lakebench.observability.platform_collector import EngineMetrics, PlatformMetrics
+
+        cfg = MagicMock()
+        cfg.observability.enabled = True
+        cfg.get_namespace.return_value = "test-ns"
+
+        start = datetime(2026, 2, 19, 10, 0, 0)
+        end = datetime(2026, 2, 19, 10, 30, 0)
+        run_metrics = PipelineMetrics(
+            run_id="test", deployment_name="test", start_time=start, end_time=end
+        )
+
+        fake_pm = PlatformMetrics(
+            start_time=start,
+            end_time=end,
+            s3_requests_total=50,
+            engine=EngineMetrics(trino_completed_queries=41),
+        )
+
+        with (
+            patch(
+                "lakebench.cli._find_prometheus_svc",
+                return_value="prom-svc",
+            ),
+            patch("httpx.get") as mock_httpx_get,
+            patch(
+                "lakebench.observability.platform_collector.PlatformCollector",
+            ) as mock_cls,
+        ):
+            # Simulate in-cluster DNS success (httpx.get doesn't raise)
+            mock_httpx_get.return_value = MagicMock(status_code=200)
+            mock_cls.return_value.collect.return_value = fake_pm
+            from lakebench.cli import _collect_platform_metrics
+
+            _collect_platform_metrics(cfg, run_metrics)
+
+        assert run_metrics.platform_metrics is not None
+        assert run_metrics.platform_metrics["s3_requests_total"] == 50
+        assert run_metrics.platform_metrics["engine"]["trino_completed_queries"] == 41
+
+    def test_handles_exception_gracefully(self):
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.metrics import PipelineMetrics
+
+        cfg = MagicMock()
+        cfg.observability.enabled = True
+        cfg.get_namespace.return_value = "test-ns"
+
+        run_metrics = PipelineMetrics(
+            run_id="test",
+            deployment_name="test",
+            start_time=datetime(2026, 2, 19, 10, 0, 0),
+            end_time=datetime(2026, 2, 19, 10, 30, 0),
+        )
+
+        with (
+            patch(
+                "lakebench.cli._find_prometheus_svc",
+                return_value="prom-svc",
+            ),
+            patch("httpx.get") as mock_httpx_get,
+            patch(
+                "lakebench.observability.platform_collector.PlatformCollector",
+            ) as mock_cls,
+        ):
+            mock_httpx_get.return_value = MagicMock(status_code=200)
+            mock_cls.return_value.collect.side_effect = Exception("connection refused")
+            from lakebench.cli import _collect_platform_metrics
+
+            # Should not raise
+            _collect_platform_metrics(cfg, run_metrics)
+
+        assert run_metrics.platform_metrics is None
 
 
 # ===========================================================================

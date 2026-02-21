@@ -147,7 +147,7 @@ def renderer() -> TemplateRenderer:
 
 @pytest.fixture
 def default_engine() -> DeploymentEngine:
-    """DeploymentEngine with default (hive-iceberg-trino) config."""
+    """DeploymentEngine with default (hive-iceberg-spark-trino) config."""
     return _make_engine()
 
 
@@ -256,7 +256,7 @@ class TestTemplateVariableSubstitution:
 
     def test_duckdb_resources(self, renderer: TemplateRenderer):
         """DuckDB deployment should contain CPU/memory from config."""
-        engine = _make_engine(recipe="hive-iceberg-duckdb")
+        engine = _make_engine(recipe="hive-iceberg-spark-duckdb")
         ctx = _enrich_context(engine)
         rendered = renderer.render("duckdb/deployment.yaml.j2", ctx)
         parsed = yaml.safe_load(rendered)
@@ -298,6 +298,56 @@ class TestTemplateConditionals:
         rendered = renderer.render("postgres/statefulset.yaml.j2", ctx)
         assert "runAsUser" in rendered
 
+    def test_trino_worker_emptydir_when_no_storage_class(self, renderer: TemplateRenderer):
+        """With empty storage_class (default), workers use emptyDir, not PVCs."""
+        engine = _make_engine()
+        ctx = _enrich_context(engine)
+        assert not ctx["trino_worker_storage_class"]  # None or ""
+
+        rendered = renderer.render("trino/worker.yaml.j2", ctx)
+        parsed = yaml.safe_load(rendered)
+
+        # Should NOT have volumeClaimTemplates
+        assert "volumeClaimTemplates" not in parsed.get("spec", {}), (
+            "Expected no volumeClaimTemplates when storage_class is empty"
+        )
+
+        # Should have emptyDir volume named 'data'
+        volumes = parsed["spec"]["template"]["spec"]["volumes"]
+        data_vols = [v for v in volumes if v["name"] == "data"]
+        assert len(data_vols) == 1, "Expected exactly one 'data' volume"
+        assert "emptyDir" in data_vols[0], "Expected emptyDir for 'data' volume"
+        assert data_vols[0]["emptyDir"]["sizeLimit"] == "50Gi"
+
+    def test_trino_worker_pvc_when_storage_class_set(self, renderer: TemplateRenderer):
+        """With an explicit storage_class, workers use PVC volumeClaimTemplates."""
+        cfg = make_config(
+            architecture={
+                "query_engine": {
+                    "trino": {
+                        "worker": {"storage_class": "px-csi-scratch"},
+                    },
+                },
+            },
+        )
+        engine = _make_engine(cfg=cfg)
+        ctx = _enrich_context(engine)
+        assert ctx["trino_worker_storage_class"] == "px-csi-scratch"
+
+        rendered = renderer.render("trino/worker.yaml.j2", ctx)
+        parsed = yaml.safe_load(rendered)
+
+        # Should have volumeClaimTemplates
+        vcts = parsed["spec"].get("volumeClaimTemplates", [])
+        assert len(vcts) == 1, "Expected one volumeClaimTemplate"
+        assert vcts[0]["metadata"]["name"] == "data"
+        assert vcts[0]["spec"]["storageClassName"] == "px-csi-scratch"
+
+        # Should NOT have emptyDir volume named 'data'
+        volumes = parsed["spec"]["template"]["spec"].get("volumes", [])
+        data_vols = [v for v in volumes if v.get("name") == "data"]
+        assert len(data_vols) == 0, "Expected no emptyDir 'data' volume when using PVC"
+
     def test_observability_enabled_in_spark_thrift(self, renderer: TemplateRenderer):
         """With observability_enabled=True, prometheus config should appear."""
         cfg = make_config(observability={"enabled": True})
@@ -328,7 +378,7 @@ class TestTemplateConditionals:
 # ===========================================================================
 
 
-# Exclude the "default" alias to avoid duplicate testing (it maps to hive-iceberg-trino)
+# Exclude the "default" alias to avoid duplicate testing (it maps to hive-iceberg-spark-trino)
 _RECIPE_NAMES: list[str] = [r for r in RECIPES if r != "default"]
 
 

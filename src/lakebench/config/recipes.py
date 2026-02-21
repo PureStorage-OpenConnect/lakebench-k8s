@@ -1,11 +1,12 @@
 """Recipe definitions for Lakebench architecture presets.
 
-Each recipe encodes three architecture axes: catalog, table format, and query engine.
-Everything else (file format, Spark version, resource sizing) is a YAML override.
+Each recipe encodes four architecture axes: catalog, table format, pipeline
+engine, and query engine.  Everything else (file format, Spark version,
+resource sizing) is a YAML override.
 
-Naming convention: ``<catalog>-<format>-<engine>``
+Naming convention: ``<catalog>-<format>-<engine>-<query_engine>``
 
-One alias exists: ``default`` = ``hive-iceberg-trino``.
+One alias exists: ``default`` = ``hive-iceberg-spark-trino``.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Any
 # User-specified values always take precedence over recipe defaults.
 
 RECIPES: dict[str, dict[str, Any]] = {
-    "hive-iceberg-trino": {
+    "hive-iceberg-spark-trino": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
@@ -27,7 +28,7 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "trino"},
         },
     },
-    "hive-iceberg-spark": {
+    "hive-iceberg-spark-thrift": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
@@ -35,7 +36,7 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "spark-thrift"},
         },
     },
-    "hive-iceberg-none": {
+    "hive-iceberg-spark-none": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
@@ -43,23 +44,7 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "none"},
         },
     },
-    "hive-delta-trino": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "delta"},
-            "query_engine": {"type": "trino"},
-        },
-    },
-    "hive-delta-none": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
-        "architecture": {
-            "catalog": {"type": "hive"},
-            "table_format": {"type": "delta"},
-            "query_engine": {"type": "none"},
-        },
-    },
-    "polaris-iceberg-trino": {
+    "polaris-iceberg-spark-trino": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
@@ -67,7 +52,7 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "trino"},
         },
     },
-    "polaris-iceberg-spark": {
+    "polaris-iceberg-spark-thrift": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
@@ -75,7 +60,7 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "spark-thrift"},
         },
     },
-    "polaris-iceberg-none": {
+    "polaris-iceberg-spark-none": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
@@ -83,7 +68,7 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "none"},
         },
     },
-    "hive-iceberg-duckdb": {
+    "hive-iceberg-spark-duckdb": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
@@ -91,7 +76,7 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "duckdb", "duckdb": {"cores": 2, "memory": "4g"}},
         },
     },
-    "polaris-iceberg-duckdb": {
+    "polaris-iceberg-spark-duckdb": {
         "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
@@ -102,20 +87,18 @@ RECIPES: dict[str, dict[str, Any]] = {
 }
 
 # Alias
-RECIPES["default"] = RECIPES["hive-iceberg-trino"]
+RECIPES["default"] = RECIPES["hive-iceberg-spark-trino"]
 
 # Human-readable descriptions for CLI interactive flow
 RECIPE_DESCRIPTIONS: dict[str, str] = {
-    "default": "Hive + Iceberg + Trino (recommended)",
-    "hive-iceberg-spark": "Hive + Iceberg + Spark SQL",
-    "hive-iceberg-duckdb": "Hive + Iceberg + DuckDB",
-    "hive-iceberg-none": "Hive + Iceberg, no query engine",
-    "hive-delta-trino": "Hive + Delta + Trino",
-    "hive-delta-none": "Hive + Delta, no query engine",
-    "polaris-iceberg-trino": "Polaris + Iceberg + Trino",
-    "polaris-iceberg-spark": "Polaris + Iceberg + Spark SQL",
-    "polaris-iceberg-duckdb": "Polaris + Iceberg + DuckDB",
-    "polaris-iceberg-none": "Polaris + Iceberg, no query engine",
+    "default": "Hive + Iceberg + Spark + Trino (recommended)",
+    "hive-iceberg-spark-thrift": "Hive + Iceberg + Spark + Spark Thrift",
+    "hive-iceberg-spark-duckdb": "Hive + Iceberg + Spark + DuckDB",
+    "hive-iceberg-spark-none": "Hive + Iceberg + Spark, no query engine",
+    "polaris-iceberg-spark-trino": "Polaris + Iceberg + Spark + Trino",
+    "polaris-iceberg-spark-thrift": "Polaris + Iceberg + Spark + Spark Thrift",
+    "polaris-iceberg-spark-duckdb": "Polaris + Iceberg + Spark + DuckDB",
+    "polaris-iceberg-spark-none": "Polaris + Iceberg + Spark, no query engine",
 }
 
 

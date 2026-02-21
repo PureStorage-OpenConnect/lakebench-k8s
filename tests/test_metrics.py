@@ -8,6 +8,7 @@ import pytest
 
 from lakebench.metrics import (
     BenchmarkMetrics,
+    BenchmarkRoundMeta,
     JobMetrics,
     MetricsCollector,
     MetricsStorage,
@@ -16,6 +17,7 @@ from lakebench.metrics import (
     QueryMetrics,
     StageMetrics,
     StreamingJobMetrics,
+    aggregate_benchmark_rounds,
     build_config_snapshot,
     build_pipeline_benchmark,
 )
@@ -194,6 +196,35 @@ class TestPipelineMetrics:
         assert len(d["queries"]) == 1
         assert d["jobs"][0]["job_name"] == "lakebench-bronze-verify"
         assert d["queries"][0]["query_name"] == "rfm"
+
+    def test_pipeline_to_dict_includes_platform_metrics(self):
+        now = datetime.now()
+        pm = {
+            "pods": [{"pod_name": "test-pod", "component": "trino-coordinator"}],
+            "s3_requests_total": 50,
+            "engine": {"trino_completed_queries": 10},
+            "duration_seconds": 300,
+            "collection_error": None,
+        }
+        m = PipelineMetrics(
+            run_id="test-run",
+            deployment_name="test",
+            start_time=now,
+            platform_metrics=pm,
+        )
+        d = m.to_dict()
+        assert d["platform_metrics"] == pm
+        assert d["platform_metrics"]["engine"]["trino_completed_queries"] == 10
+
+    def test_pipeline_to_dict_omits_platform_metrics_when_none(self):
+        now = datetime.now()
+        m = PipelineMetrics(
+            run_id="test-run",
+            deployment_name="test",
+            start_time=now,
+        )
+        d = m.to_dict()
+        assert "platform_metrics" not in d
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +453,55 @@ class TestMetricsStorage:
         assert loaded.queries[0].query_name == "rfm"
         assert loaded.queries[0].elapsed_seconds == 3.42
 
+    def test_save_and_load_with_platform_metrics(self, tmp_path):
+        storage = MetricsStorage(tmp_path / "metrics")
+        now = datetime.now()
+        pm = {
+            "pods": [
+                {
+                    "pod_name": "trino-0",
+                    "component": "trino-coordinator",
+                    "cpu_avg_cores": 1.5,
+                    "cpu_max_cores": 2.0,
+                    "memory_avg_bytes": 1073741824,
+                    "memory_max_bytes": 2147483648,
+                }
+            ],
+            "s3_requests_total": 42,
+            "s3_errors_total": 0,
+            "s3_avg_latency_ms": 8.3,
+            "duration_seconds": 600,
+            "engine": {"trino_completed_queries": 32, "trino_failed_queries": 0},
+            "collection_error": None,
+        }
+        metrics = PipelineMetrics(
+            run_id="pm-test-001",
+            deployment_name="test",
+            start_time=now,
+            platform_metrics=pm,
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("pm-test-001")
+        assert loaded is not None
+        assert loaded.platform_metrics is not None
+        assert loaded.platform_metrics["pods"][0]["pod_name"] == "trino-0"
+        assert loaded.platform_metrics["engine"]["trino_completed_queries"] == 32
+        assert loaded.platform_metrics["duration_seconds"] == 600
+
+    def test_save_and_load_without_platform_metrics(self, tmp_path):
+        """Backward compat: old runs without platform_metrics load as None."""
+        storage = MetricsStorage(tmp_path / "metrics")
+        now = datetime.now()
+        metrics = PipelineMetrics(
+            run_id="no-pm-001",
+            deployment_name="test",
+            start_time=now,
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("no-pm-001")
+        assert loaded is not None
+        assert loaded.platform_metrics is None
+
     def test_load_nonexistent(self, tmp_path):
         storage = MetricsStorage(tmp_path / "metrics")
         assert storage.load_run("nonexistent") is None
@@ -614,7 +694,7 @@ class TestReportGenerator:
         assert report_path.suffix == ".html"
 
         html = report_path.read_text()
-        assert "Lakebench Benchmark Report" in html
+        assert "LakeBench Scorecard" in html
         assert "test-deploy" in html
 
     def test_report_contains_jobs_table(self, tmp_path):
@@ -628,7 +708,7 @@ class TestReportGenerator:
         report_path = generator.generate_report()
         html = report_path.read_text()
 
-        assert "Job Performance" in html
+        assert "Batch Job Performance" in html
         assert "lakebench-bronze-verify" in html
         assert "lakebench-silver-build" in html
 
@@ -672,6 +752,39 @@ class TestReportGenerator:
 
         # Query Performance section should NOT appear
         assert "Query Performance" not in html
+
+    def test_report_includes_platform_metrics_from_saved_data(self, tmp_path):
+        """generate_report() picks up platform_metrics from metrics.json."""
+        metrics_dir = tmp_path / "metrics"
+        metrics = self._make_sample_metrics()
+        metrics.platform_metrics = {
+            "pods": [
+                {
+                    "pod_name": "lakebench-trino-coordinator-0",
+                    "component": "trino-coordinator",
+                    "cpu_avg_cores": 2.5,
+                    "cpu_max_cores": 4.0,
+                    "memory_avg_bytes": 4 * 1024**3,
+                    "memory_max_bytes": 8 * 1024**3,
+                }
+            ],
+            "s3_requests_total": 99,
+            "s3_errors_total": 1,
+            "s3_avg_latency_ms": 11.5,
+            "duration_seconds": 300,
+            "engine": {"trino_completed_queries": 41},
+            "collection_error": None,
+        }
+        storage = MetricsStorage(metrics_dir)
+        storage.save_run(metrics)
+
+        generator = ReportGenerator(metrics_dir=metrics_dir)
+        report_path = generator.generate_report()
+        html = report_path.read_text()
+
+        assert "Platform Metrics" in html
+        assert "lakebench-trino-coordinator-0" in html
+        assert "Trino queries completed: 41" in html
 
     def test_generate_report_nonexistent_run(self, tmp_path):
         generator = ReportGenerator(
@@ -744,6 +857,252 @@ class TestReportGenerator:
 
         with pytest.raises(ValueError, match="Run not found"):
             generator.generate_report(run_id="nonexistent")
+
+
+class TestContinuousReport:
+    """Tests for continuous-mode HTML report rendering."""
+
+    @staticmethod
+    def _make_continuous_metrics() -> PipelineMetrics:
+        """Build a minimal continuous PipelineMetrics with streaming + pipeline benchmark."""
+        now = datetime.now()
+        return PipelineMetrics(
+            run_id="cont-report-001",
+            deployment_name="cont-deploy",
+            start_time=now,
+            end_time=now + timedelta(seconds=1800),
+            total_elapsed_seconds=1800.0,
+            success=True,
+            streaming=[
+                StreamingJobMetrics(
+                    job_name="lb-bronze-ingest",
+                    job_type="bronze-ingest",
+                    throughput_rps=5200.0,
+                    freshness_seconds=12.0,
+                    micro_batch_duration_ms=850.0,
+                    total_batches=2100,
+                    total_rows_processed=9_400_000,
+                    unique_rows_processed=9_400_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                ),
+                StreamingJobMetrics(
+                    job_name="lb-silver-stream",
+                    job_type="silver-stream",
+                    throughput_rps=4800.0,
+                    freshness_seconds=18.0,
+                    micro_batch_duration_ms=1200.0,
+                    total_batches=1500,
+                    total_rows_processed=8_600_000,
+                    unique_rows_processed=8_600_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                ),
+                StreamingJobMetrics(
+                    job_name="lb-gold-refresh",
+                    job_type="gold-refresh",
+                    throughput_rps=3000.0,
+                    freshness_seconds=25.0,
+                    micro_batch_duration_ms=5000.0,
+                    total_batches=360,
+                    total_rows_processed=5_400_000,
+                    unique_rows_processed=2_700_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                ),
+            ],
+            pipeline_benchmark=PipelineBenchmark(
+                run_id="cont-report-001",
+                deployment_name="cont-deploy",
+                pipeline_mode="continuous",
+                start_time=now,
+                end_time=now + timedelta(seconds=1800),
+                success=True,
+                stages=[
+                    StageMetrics(
+                        stage_name="bronze",
+                        stage_type="streaming",
+                        engine="spark",
+                        elapsed_seconds=1800.0,
+                        input_size_gb=85.0,
+                        input_rows=9_400_000,
+                        output_rows=9_400_000,
+                        throughput_rows_per_second=5222.0,
+                        latency_ms=850.0,
+                        freshness_seconds=12.0,
+                        executor_count=4,
+                        executor_cores=2,
+                        executor_memory_gb=4.0,
+                        success=True,
+                    ),
+                    StageMetrics(
+                        stage_name="silver",
+                        stage_type="streaming",
+                        engine="spark",
+                        elapsed_seconds=1800.0,
+                        input_size_gb=80.0,
+                        input_rows=8_600_000,
+                        output_rows=8_600_000,
+                        throughput_rows_per_second=4778.0,
+                        latency_ms=1200.0,
+                        freshness_seconds=18.0,
+                        executor_count=8,
+                        executor_cores=4,
+                        executor_memory_gb=48.0,
+                        success=True,
+                    ),
+                    StageMetrics(
+                        stage_name="gold",
+                        stage_type="streaming",
+                        engine="spark",
+                        elapsed_seconds=1800.0,
+                        input_size_gb=50.0,
+                        input_rows=5_400_000,
+                        output_rows=5_400_000,
+                        throughput_rows_per_second=3000.0,
+                        latency_ms=5000.0,
+                        freshness_seconds=25.0,
+                        executor_count=4,
+                        executor_cores=4,
+                        executor_memory_gb=32.0,
+                        success=True,
+                    ),
+                ],
+                data_freshness_seconds=25.0,
+                sustained_throughput_rps=5200.0,
+                total_data_processed_gb=215.0,
+                pipeline_throughput_gb_per_second=0.119,
+                stage_latency_profile=[850.0, 1200.0, 5000.0],
+                ingest_ratio=0.98,
+                compute_efficiency_gb_per_core_hour=0.42,
+                total_rows_processed=23_400_000,
+                total_elapsed_seconds=1800.0,
+                query_time_freshness_seconds=22.0,
+            ),
+            config_snapshot={
+                "name": "cont-deploy",
+                "scale": 50,
+                "catalog": "hive",
+                "table_format": "iceberg",
+                "pipeline_engine": "spark",
+                "query_engine": "trino",
+            },
+        )
+
+    def _render(self, metrics: PipelineMetrics | None = None) -> str:
+        gen = ReportGenerator(metrics_dir="/tmp/unused-cont-rg")
+        return gen._generate_html(metrics or self._make_continuous_metrics())
+
+    def test_continuous_summary_no_zeros(self):
+        """Summary cards should not show batch-derived zeros."""
+        html = self._render()
+        assert "0/0" not in html
+        assert "0.00 GB" not in html
+
+    def test_continuous_qph_single(self):
+        """QpH should appear at most once in the summary cards area."""
+        metrics = self._make_continuous_metrics()
+        # Add a benchmark to trigger QpH
+        metrics.pipeline_benchmark.benchmark_rounds = [
+            BenchmarkMetrics(
+                mode="power",
+                cache="cold",
+                scale=50,
+                qph=650.0,
+                total_seconds=44.3,
+            ),
+        ]
+        html = self._render(metrics)
+        # Count QpH occurrences in the top summary cards div
+        # (before the first <section>)
+        summary_area = html.split("<section>")[0]
+        assert summary_area.count("In-Stream QpH") <= 1
+
+    def test_continuous_no_batch_section(self):
+        """Continuous mode should not render Batch Job Performance."""
+        html = self._render()
+        assert "Batch Job Performance" not in html
+
+    def test_continuous_streaming_compute_columns(self):
+        """Streaming table should include compute columns."""
+        html = self._render()
+        assert "Executors" in html
+        assert "CPU-sec" in html
+        assert "Cores x Mem" in html
+
+    def test_continuous_run_context_banner(self):
+        """Context banner should show mode and scale."""
+        html = self._render()
+        assert "Continuous" in html
+        assert "scale 50" in html
+        assert "hive-iceberg-spark-trino" in html
+
+    def test_continuous_ingest_ratio_label(self):
+        """Should show 'Ingest Ratio', not 'Completeness'."""
+        html = self._render()
+        assert "Ingest Ratio" in html
+        assert "Completeness" not in html
+
+    def test_batch_report_unchanged(self):
+        """Batch metrics should still produce the original layout."""
+        now = datetime.now()
+        metrics = PipelineMetrics(
+            run_id="batch-check",
+            deployment_name="batch-deploy",
+            start_time=now,
+            end_time=now + timedelta(seconds=300),
+            total_elapsed_seconds=300.0,
+            success=True,
+            jobs=[
+                JobMetrics(
+                    job_name="lb-bronze-verify",
+                    job_type="bronze-verify",
+                    success=True,
+                    elapsed_seconds=100.0,
+                    input_size_gb=5.0,
+                    output_rows=500_000,
+                    throughput_gb_per_second=0.05,
+                ),
+            ],
+            pipeline_benchmark=PipelineBenchmark(
+                run_id="batch-check",
+                deployment_name="batch-deploy",
+                pipeline_mode="batch",
+                start_time=now,
+                end_time=now + timedelta(seconds=300),
+                success=True,
+                stages=[
+                    StageMetrics(
+                        stage_name="bronze",
+                        stage_type="batch",
+                        engine="spark",
+                        elapsed_seconds=100.0,
+                        input_size_gb=5.0,
+                        output_size_gb=5.0,
+                        input_rows=500_000,
+                        output_rows=500_000,
+                        throughput_gb_per_second=0.05,
+                        executor_count=4,
+                        executor_cores=2,
+                        executor_memory_gb=4.0,
+                        success=True,
+                    ),
+                ],
+                time_to_value_seconds=100.0,
+                pipeline_throughput_gb_per_second=0.05,
+                total_data_processed_gb=5.0,
+                scale_ratio=1.0,
+                compute_efficiency_gb_per_core_hour=0.5,
+            ),
+            config_snapshot={"name": "batch-deploy", "scale": 10},
+        )
+        gen = ReportGenerator(metrics_dir="/tmp/unused-batch-rg")
+        html = gen._generate_html(metrics)
+        assert "Batch Job Performance" in html
+        assert "Time to Value" in html
+        # Should NOT show streaming summary cards
+        assert "Data Throughput" not in html
+        assert "Sustained Throughput" not in html
 
 
 # ---------------------------------------------------------------------------
@@ -1210,8 +1569,8 @@ class TestStreamingTimingAndFreshness:
         metrics = c.parse_streaming_logs(logs, "gold-refresh")
         assert metrics.total_batches == 2
         assert metrics.total_rows_processed == 450_000
-        # freshness: (30 + 60) / 2 = 45
-        assert metrics.freshness_seconds == pytest.approx(45.0)
+        # freshness: max(30, 60) = 60 (worst-case staleness)
+        assert metrics.freshness_seconds == pytest.approx(60.0)
         # batch durations from "refreshed ... in Xs"
         assert metrics.micro_batch_duration_ms == pytest.approx(10850.0, abs=1.0)
 
@@ -1275,6 +1634,7 @@ class TestBuildConfigSnapshot:
         assert snapshot["spark"]["executor"]["cores"] == 4  # default
         assert snapshot["catalog"] == "hive"  # default
         assert snapshot["table_format"] == "iceberg"  # default
+        assert snapshot["pipeline_engine"] == "spark"  # default
         assert snapshot["query_engine"] == "trino"  # default
         assert snapshot["datagen"]["scale"] == 50
         assert "datagen" in snapshot["images"]
@@ -1831,8 +2191,8 @@ class TestPipelineBenchmark:
         # efficiency = 100 / 8 = 12.5
         assert pb.compute_efficiency_gb_per_core_hour == pytest.approx(12.5)
 
-    def test_scale_verified_ratio(self):
-        """scale_verified_ratio = total_gb / expected_gb from config."""
+    def test_scale_ratio(self):
+        """scale_ratio = total_gb / expected_gb from config."""
         now = datetime.now()
         stages = [
             StageMetrics(
@@ -1856,7 +2216,7 @@ class TestPipelineBenchmark:
             config_snapshot={"approx_bronze_gb": 100.0},
         )
         pb.compute_aggregates()
-        assert pb.scale_verified_ratio == pytest.approx(0.95)
+        assert pb.scale_ratio == pytest.approx(0.95)
 
     def test_to_dict(self):
         now = datetime.now()
@@ -1878,7 +2238,7 @@ class TestPipelineBenchmark:
         assert "scores" in d  # backward compat alias
         assert d["scorecard"]["total_elapsed_seconds"] == 200.0
         assert "compute_efficiency_gb_per_core_hour" in d["scorecard"]
-        assert "scale_verified_ratio" in d["scorecard"]
+        assert "scale_ratio" in d["scorecard"]
         assert len(d["stages"]) == 3
         assert "stage_matrix" in d
         assert d["stage_matrix"]["bronze"]["engine"] == "spark"
@@ -2532,17 +2892,30 @@ class TestContinuousPipelineScoring:
         # total_rows_processed = sum of input_rows
         assert pb.total_rows_processed == 500_000 + 480_000 + 450_000
 
-        # total_elapsed_seconds is universal
-        assert pb.total_elapsed_seconds == pytest.approx(5400.0)
+        # total_elapsed_seconds: continuous mode uses wall-clock (max), not sum
+        assert pb.total_elapsed_seconds == pytest.approx(1800.0)
+
+    def test_gold_unique_rows_is_none(self):
+        """Gold-refresh unique_rows_processed should be None (unknown), not 0."""
+        run = self._make_streaming_run()
+        pb = build_pipeline_benchmark(run)
+        gold = next(s for s in pb.stages if s.stage_name == "gold")
+        assert gold.unique_rows_processed is None
+        # Bronze and silver should have non-None values
+        bronze = next(s for s in pb.stages if s.stage_name == "bronze")
+        assert bronze.unique_rows_processed is not None
+        assert bronze.unique_rows_processed > 0
 
     def test_continuous_batch_scores_zero(self):
-        """Batch-oriented scores remain zero for a continuous pipeline."""
+        """Batch-only scores remain zero for a continuous pipeline."""
         run = self._make_streaming_run()
         pb = build_pipeline_benchmark(run)
 
+        # time_to_value is batch-only (based on start/end wall-clock span)
         assert pb.time_to_value_seconds == 0.0
-        assert pb.total_data_processed_gb == 0.0
-        assert pb.pipeline_throughput_gb_per_second == 0.0
+        # total_data_processed_gb and pipeline_throughput are now shared
+        assert pb.total_data_processed_gb > 0
+        assert pb.pipeline_throughput_gb_per_second > 0
 
     def test_batch_continuous_scores_zero(self):
         """Continuous scores remain zero for a batch pipeline."""
@@ -2571,7 +2944,7 @@ class TestContinuousPipelineScoring:
         pb = build_pipeline_benchmark(run)
 
         assert pb.pipeline_mode == "batch"
-        assert pb.data_freshness_seconds == 0.0
+        assert pb.data_freshness_seconds is None
         assert pb.sustained_throughput_rps == 0.0
         assert pb.stage_latency_profile == []
         assert pb.total_rows_processed == 0
@@ -2588,15 +2961,16 @@ class TestContinuousPipelineScoring:
         assert "data_freshness_seconds" in scores
         assert "sustained_throughput_rps" in scores
         assert "stage_latency_profile" in scores
-        assert "ingestion_completeness_ratio" in scores
+        assert "ingest_ratio" in scores
         assert "pipeline_saturated" in scores
         assert "total_rows_processed" in scores
         assert "total_elapsed_seconds" in scores
         assert "compute_efficiency_gb_per_core_hour" in scores
-        # Batch keys should NOT appear
+        # Batch-only key should NOT appear
         assert "time_to_value_seconds" not in scores
-        assert "total_data_processed_gb" not in scores
-        assert "pipeline_throughput_gb_per_second" not in scores
+        # Shared keys now appear in both modes
+        assert "total_data_processed_gb" in scores
+        assert "pipeline_throughput_gb_per_second" in scores
 
         # Values match computed scores
         assert scores["data_freshness_seconds"] == pytest.approx(15.0)
@@ -2649,7 +3023,7 @@ class TestContinuousPipelineScoring:
         assert lpb.sustained_throughput_rps == pytest.approx(500_000 / 1800.0, rel=1e-2)
         assert lpb.stage_latency_profile == [200.0, 350.0, 500.0]
         assert lpb.total_rows_processed == 1_430_000
-        assert lpb.total_elapsed_seconds == pytest.approx(5400.0)
+        assert lpb.total_elapsed_seconds == pytest.approx(1800.0)
         assert len(lpb.stages) == 3
 
     def test_continuous_report_cards(self, tmp_path):
@@ -2670,8 +3044,9 @@ class TestContinuousPipelineScoring:
 
         assert "Data Freshness" in html
         assert "Sustained Throughput" in html
-        assert "Stage Latency" in html
-        assert "continuous pipeline" in html
+        assert "Data Processed" in html
+        assert "CPU-hours" in html
+        assert "worst-case gold staleness" in html
         # Batch cards should NOT appear
         assert "Time to Value" not in html
 
@@ -2686,8 +3061,8 @@ class TestContinuousPipelineScoring:
 
         # Bronze reads from landing zone (bronze bucket)
         assert bronze.input_size_gb == pytest.approx(10.0)
-        # Silver reads from bronze Iceberg table (bronze bucket)
-        assert silver.input_size_gb == pytest.approx(10.0)
+        # Silver: measured silver bucket size during monitoring window
+        assert silver.input_size_gb == pytest.approx(5.0)
         # Gold reads from silver Iceberg table (silver bucket)
         assert gold.input_size_gb == pytest.approx(5.0)
 
@@ -2726,20 +3101,423 @@ class TestContinuousPipelineScoring:
         # Backfilled from run.bronze_size_gb
         assert bronze.input_size_gb == pytest.approx(10.0)
 
-    def test_ingestion_completeness_ratio(self):
-        """ingestion_completeness_ratio computed when datagen_output_rows provided."""
+    def test_ingest_ratio(self):
+        """ingest_ratio computed when datagen_output_rows provided."""
         run = self._make_streaming_run()
         pb = build_pipeline_benchmark(run, datagen_output_rows=600_000)
 
         # bronze processed 500_000 out of 600_000 datagen rows
-        assert pb.ingestion_completeness_ratio == pytest.approx(500_000 / 600_000, rel=1e-3)
+        assert pb.ingest_ratio == pytest.approx(500_000 / 600_000, rel=1e-3)
         assert pb.pipeline_saturated is True  # 0.833 < 0.95
 
-    def test_ingestion_completeness_not_saturated(self):
+    def test_ingest_ratio_not_saturated(self):
         """pipeline_saturated=False when completeness >= 0.95."""
         run = self._make_streaming_run()
         # 500_000 bronze rows / 500_000 datagen rows = 1.0 completeness
         pb = build_pipeline_benchmark(run, datagen_output_rows=500_000)
 
-        assert pb.ingestion_completeness_ratio == pytest.approx(1.0)
+        assert pb.ingest_ratio == pytest.approx(1.0)
         assert pb.pipeline_saturated is False
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkRoundMeta
+# ---------------------------------------------------------------------------
+
+
+class TestBenchmarkRoundMeta:
+    """Tests for the in-stream benchmark round metadata dataclass."""
+
+    def test_defaults(self):
+        meta = BenchmarkRoundMeta(round_index=1)
+        assert meta.round_index == 1
+        assert meta.timestamp is None
+        assert meta.gold_freshness_seconds == 0.0
+        assert meta.q9_contention_observed is False
+        assert meta.q9_retry_used is False
+
+    def test_to_dict(self):
+        now = datetime.now()
+        meta = BenchmarkRoundMeta(
+            round_index=3,
+            timestamp=now,
+            gold_freshness_seconds=42.5,
+            q9_contention_observed=True,
+            q9_retry_used=True,
+        )
+        d = meta.to_dict()
+        assert d["round_index"] == 3
+        assert d["timestamp"] == now.isoformat()
+        assert d["gold_freshness_seconds"] == 42.5
+        assert d["q9_contention_observed"] is True
+        assert d["q9_retry_used"] is True
+
+    def test_to_dict_no_timestamp(self):
+        meta = BenchmarkRoundMeta(round_index=1)
+        d = meta.to_dict()
+        assert d["timestamp"] is None
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkMetrics with round_meta
+# ---------------------------------------------------------------------------
+
+
+class TestBenchmarkMetricsRoundMeta:
+    """Tests for BenchmarkMetrics with round_meta field."""
+
+    def test_round_meta_default_none(self):
+        bm = BenchmarkMetrics(mode="power", cache="hot", scale=10, qph=200.0, total_seconds=30.0)
+        assert bm.round_meta is None
+
+    def test_to_dict_without_round_meta(self):
+        bm = BenchmarkMetrics(mode="power", cache="hot", scale=10, qph=200.0, total_seconds=30.0)
+        d = bm.to_dict()
+        assert "round_meta" not in d
+
+    def test_to_dict_with_round_meta(self):
+        now = datetime.now()
+        meta = BenchmarkRoundMeta(
+            round_index=2,
+            timestamp=now,
+            gold_freshness_seconds=38.0,
+        )
+        bm = BenchmarkMetrics(
+            mode="power",
+            cache="hot",
+            scale=10,
+            qph=245.0,
+            total_seconds=28.0,
+            round_meta=meta,
+        )
+        d = bm.to_dict()
+        assert "round_meta" in d
+        assert d["round_meta"]["round_index"] == 2
+        assert d["round_meta"]["gold_freshness_seconds"] == 38.0
+
+
+# ---------------------------------------------------------------------------
+# aggregate_benchmark_rounds
+# ---------------------------------------------------------------------------
+
+
+class TestAggregateBenchmarkRounds:
+    """Tests for the aggregate_benchmark_rounds function."""
+
+    def _make_round(
+        self,
+        round_index: int,
+        qph: float,
+        total_seconds: float,
+        q1_elapsed: float = 5.0,
+        q2_elapsed: float = 3.0,
+        freshness: float = 0.0,
+    ) -> BenchmarkMetrics:
+        meta = BenchmarkRoundMeta(
+            round_index=round_index,
+            timestamp=datetime.now(),
+            gold_freshness_seconds=freshness,
+        )
+        return BenchmarkMetrics(
+            mode="power",
+            cache="hot",
+            scale=10,
+            qph=qph,
+            total_seconds=total_seconds,
+            queries=[
+                {
+                    "name": "q1",
+                    "display_name": "Full Scan",
+                    "class": "scan",
+                    "elapsed_seconds": q1_elapsed,
+                    "rows_returned": 100,
+                    "success": True,
+                },
+                {
+                    "name": "q2",
+                    "display_name": "Date Filter",
+                    "class": "filter",
+                    "elapsed_seconds": q2_elapsed,
+                    "rows_returned": 50,
+                    "success": True,
+                },
+            ],
+            round_meta=meta,
+        )
+
+    def test_single_round(self):
+        rounds = [self._make_round(1, qph=200.0, total_seconds=30.0)]
+        result = aggregate_benchmark_rounds(rounds)
+        assert result.qph == 200.0
+        assert result.total_seconds == 30.0
+        assert result.round_meta is None  # aggregated has no round_meta
+
+    def test_median_of_three(self):
+        rounds = [
+            self._make_round(1, qph=200.0, total_seconds=30.0, q1_elapsed=5.0),
+            self._make_round(2, qph=300.0, total_seconds=25.0, q1_elapsed=4.0),
+            self._make_round(3, qph=250.0, total_seconds=28.0, q1_elapsed=4.5),
+        ]
+        result = aggregate_benchmark_rounds(rounds)
+        # Median of [200, 300, 250] = 250
+        assert result.qph == 250.0
+        # Median of [30, 25, 28] = 28
+        assert result.total_seconds == 28.0
+        # q1 elapsed median of [5.0, 4.0, 4.5] = 4.5
+        q1 = next(q for q in result.queries if q["name"] == "q1")
+        assert q1["elapsed_seconds"] == 4.5
+
+    def test_even_count_median(self):
+        rounds = [
+            self._make_round(1, qph=200.0, total_seconds=30.0),
+            self._make_round(2, qph=300.0, total_seconds=20.0),
+        ]
+        result = aggregate_benchmark_rounds(rounds)
+        # Median of [200, 300] = 250
+        assert result.qph == 250.0
+
+    def test_empty_raises(self):
+        with pytest.raises(ValueError, match="Cannot aggregate zero"):
+            aggregate_benchmark_rounds([])
+
+    def test_preserves_mode_and_cache(self):
+        rounds = [self._make_round(1, qph=200.0, total_seconds=30.0)]
+        result = aggregate_benchmark_rounds(rounds)
+        assert result.mode == "power"
+        assert result.cache == "hot"
+        assert result.scale == 10
+
+
+# ---------------------------------------------------------------------------
+# PipelineMetrics with benchmark_rounds
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineMetricsRounds:
+    """Tests for PipelineMetrics benchmark_rounds field."""
+
+    def test_default_empty(self):
+        m = PipelineMetrics(run_id="test", deployment_name="test", start_time=datetime.now())
+        assert m.benchmark_rounds == []
+
+    def test_to_dict_with_rounds(self):
+        now = datetime.now()
+        meta = BenchmarkRoundMeta(round_index=1, timestamp=now)
+        rnd = BenchmarkMetrics(
+            mode="power",
+            cache="hot",
+            scale=10,
+            qph=200.0,
+            total_seconds=30.0,
+            round_meta=meta,
+        )
+        m = PipelineMetrics(
+            run_id="test",
+            deployment_name="test",
+            start_time=now,
+            benchmark_rounds=[rnd],
+        )
+        d = m.to_dict()
+        assert "benchmark_rounds" in d
+        assert len(d["benchmark_rounds"]) == 1
+        assert d["benchmark_rounds"][0]["qph"] == 200.0
+
+    def test_to_dict_without_rounds(self):
+        m = PipelineMetrics(run_id="test", deployment_name="test", start_time=datetime.now())
+        d = m.to_dict()
+        assert "benchmark_rounds" not in d
+
+
+# ---------------------------------------------------------------------------
+# MetricsCollector record_benchmark_round
+# ---------------------------------------------------------------------------
+
+
+class TestRecordBenchmarkRound:
+    """Tests for MetricsCollector.record_benchmark_round."""
+
+    def test_records_round(self):
+        c = MetricsCollector()
+        c.start_run("test-run", "test", {})
+        meta = BenchmarkRoundMeta(round_index=1)
+        rnd = BenchmarkMetrics(
+            mode="power",
+            cache="hot",
+            scale=10,
+            qph=200.0,
+            total_seconds=30.0,
+            round_meta=meta,
+        )
+        c.record_benchmark_round(rnd)
+        assert len(c.current_run.benchmark_rounds) == 1
+        assert c.current_run.benchmark_rounds[0].qph == 200.0
+
+    def test_multiple_rounds(self):
+        c = MetricsCollector()
+        c.start_run("test-run", "test", {})
+        for i in range(3):
+            c.record_benchmark_round(
+                BenchmarkMetrics(
+                    mode="power",
+                    cache="hot",
+                    scale=10,
+                    qph=200.0 + i * 10,
+                    total_seconds=30.0,
+                    round_meta=BenchmarkRoundMeta(round_index=i + 1),
+                )
+            )
+        assert len(c.current_run.benchmark_rounds) == 3
+
+    def test_no_current_run(self):
+        c = MetricsCollector()
+        # Should not raise even without a current run
+        c.record_benchmark_round(
+            BenchmarkMetrics(
+                mode="power",
+                cache="hot",
+                scale=10,
+                qph=200.0,
+                total_seconds=30.0,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# PipelineBenchmark with benchmark_rounds and query_time_freshness
+# ---------------------------------------------------------------------------
+
+
+class TestPipelineBenchmarkRounds:
+    """Tests for PipelineBenchmark in-stream benchmark round integration."""
+
+    def _make_streaming_run_with_rounds(self) -> PipelineMetrics:
+        now = datetime.now()
+        rounds = []
+        for i in range(3):
+            meta = BenchmarkRoundMeta(
+                round_index=i + 1,
+                timestamp=now + timedelta(seconds=300 * (i + 1)),
+                gold_freshness_seconds=30.0 + i * 10,  # 30, 40, 50
+            )
+            rounds.append(
+                BenchmarkMetrics(
+                    mode="power",
+                    cache="hot",
+                    scale=10,
+                    qph=200.0 + i * 25,  # 200, 225, 250
+                    total_seconds=30.0,
+                    round_meta=meta,
+                )
+            )
+
+        return PipelineMetrics(
+            run_id="rounds-test",
+            deployment_name="test",
+            start_time=now,
+            success=True,
+            bronze_size_gb=10.0,
+            silver_size_gb=5.0,
+            gold_size_gb=0.5,
+            streaming=[
+                StreamingJobMetrics(
+                    job_name="lakebench-bronze-ingest",
+                    job_type="bronze-ingest",
+                    total_batches=100,
+                    total_rows_processed=500_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=277.8,
+                    micro_batch_duration_ms=200.0,
+                    freshness_seconds=5.0,
+                    batch_size=5000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-gold-refresh",
+                    job_type="gold-refresh",
+                    total_batches=6,
+                    total_rows_processed=450_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    freshness_seconds=15.0,
+                ),
+            ],
+            benchmark=BenchmarkMetrics(
+                mode="power",
+                cache="hot",
+                scale=10,
+                qph=260.0,
+                total_seconds=25.0,
+            ),
+            benchmark_rounds=rounds,
+        )
+
+    def test_rounds_passed_through(self):
+        run = self._make_streaming_run_with_rounds()
+        pb = build_pipeline_benchmark(run)
+        assert len(pb.benchmark_rounds) == 3
+
+    def test_query_time_freshness_computed(self):
+        run = self._make_streaming_run_with_rounds()
+        pb = build_pipeline_benchmark(run)
+        # Freshness values: 30, 40, 50 -- median = 40
+        assert pb.query_time_freshness_seconds == pytest.approx(40.0)
+
+    def test_scores_dict_with_rounds(self):
+        run = self._make_streaming_run_with_rounds()
+        pb = build_pipeline_benchmark(run)
+        d = pb.to_dict()
+        scores = d["scores"]
+
+        # In-stream median QpH: median of [200, 225, 250] = 225
+        assert scores["composite_qph"] == 225.0
+        assert scores["in_stream_composite_qph"] == 225.0
+        assert "post_stream_qph" not in scores
+        assert scores["benchmark_rounds_count"] == 3
+        assert scores["query_time_freshness_seconds"] == pytest.approx(40.0)
+
+    def test_to_dict_includes_rounds(self):
+        run = self._make_streaming_run_with_rounds()
+        pb = build_pipeline_benchmark(run)
+        d = pb.to_dict()
+        assert "benchmark_rounds" in d
+        assert len(d["benchmark_rounds"]) == 3
+
+    def test_no_rounds_no_in_stream_qph(self):
+        """Without in-stream rounds, no in-stream QpH scores are produced."""
+        run = self._make_streaming_run_with_rounds()
+        run.benchmark_rounds = []  # clear rounds
+        pb = build_pipeline_benchmark(run)
+        d = pb.to_dict()
+        scores = d["scores"]
+
+        # Without rounds, composite_qph falls back to benchmark field QpH
+        assert scores["composite_qph"] == 260.0
+        assert "in_stream_composite_qph" not in scores
+        assert "post_stream_qph" not in scores
+        assert "benchmark_rounds" not in d
+
+
+# ---------------------------------------------------------------------------
+# parse_streaming_logs freshness uses max (not average)
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingLogsFreshnessMax:
+    """Tests that parse_streaming_logs uses max (worst-case) freshness."""
+
+    def test_max_freshness_not_average(self):
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-02-01T12:00:01.000Z - Cycle 1: aggregating 100,000 Silver records
+[lb] 2026-02-01T12:00:07.000Z - Cycle 1: data freshness 10s
+[lb] 2026-02-01T12:00:08.000Z - Cycle 1: refreshed tbl in 7.0s (30 KPI records)
+[lb] 2026-02-01T12:05:01.000Z - Cycle 2: aggregating 100,000 Silver records
+[lb] 2026-02-01T12:05:11.000Z - Cycle 2: data freshness 50s
+[lb] 2026-02-01T12:05:14.000Z - Cycle 2: refreshed tbl in 13.0s (30 KPI records)
+[lb] 2026-02-01T12:10:01.000Z - Cycle 3: aggregating 100,000 Silver records
+[lb] 2026-02-01T12:10:05.000Z - Cycle 3: data freshness 20s
+[lb] 2026-02-01T12:10:09.000Z - Cycle 3: refreshed tbl in 8.0s (30 KPI records)
+"""
+        metrics = c.parse_streaming_logs(logs, "gold-refresh")
+        # max(10, 50, 20) = 50, NOT average (10+50+20)/3 = 26.67
+        assert metrics.freshness_seconds == pytest.approx(50.0)

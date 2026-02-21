@@ -58,7 +58,7 @@ class TestDuckDBBenchmarkWorkflow:
     @pytest.fixture
     def duckdb_runner(self):
         """BenchmarkRunner wired to a mocked DuckDB executor."""
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         mock_result = QueryExecutorResult(
             sql="SELECT 1",
             engine="duckdb",
@@ -291,16 +291,22 @@ class TestSparkThriftHealthCheck:
 class TestPerEngineBenchmarkWorkflow:
     """Verify the runner works correctly with each engine type."""
 
-    @pytest.fixture(params=["hive-iceberg-trino", "hive-iceberg-spark", "hive-iceberg-duckdb"])
+    @pytest.fixture(
+        params=[
+            "hive-iceberg-spark-trino",
+            "hive-iceberg-spark-thrift",
+            "hive-iceberg-spark-duckdb",
+        ]
+    )
     def engine_runner(self, request):
         """Parametrized runner for each engine type."""
         recipe = request.param
         cfg = make_config(recipe=recipe)
 
         engine_map = {
-            "hive-iceberg-trino": "trino",
-            "hive-iceberg-spark": "spark-thrift",
-            "hive-iceberg-duckdb": "duckdb",
+            "hive-iceberg-spark-trino": "trino",
+            "hive-iceberg-spark-thrift": "spark-thrift",
+            "hive-iceberg-spark-duckdb": "duckdb",
         }
         engine_name = engine_map[recipe]
 
@@ -368,7 +374,7 @@ class TestDuckDBDeployerWorkflow:
     def test_deploy_renders_and_applies_templates(self):
         from lakebench.deploy.duckdb import DuckDBDeployer
 
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = False
@@ -398,7 +404,7 @@ spec:
     def test_deploy_failure_returns_failed_status(self):
         from lakebench.deploy.duckdb import DuckDBDeployer
 
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = False
@@ -411,21 +417,19 @@ spec:
         assert "Template error" in result.message
 
     def test_full_recipe_to_deployer_skip_guard(self):
-        """All 10 recipes: DuckDB deployer only proceeds for duckdb recipes."""
+        """All 8 recipes: DuckDB deployer only proceeds for duckdb recipes."""
         from lakebench.deploy.duckdb import DuckDBDeployer
 
-        duckdb_recipes = {"hive-iceberg-duckdb", "polaris-iceberg-duckdb"}
+        duckdb_recipes = {"hive-iceberg-spark-duckdb", "polaris-iceberg-spark-duckdb"}
         all_recipes = [
-            "hive-iceberg-trino",
-            "hive-iceberg-spark",
-            "hive-iceberg-duckdb",
-            "hive-iceberg-none",
-            "hive-delta-trino",
-            "hive-delta-none",
-            "polaris-iceberg-trino",
-            "polaris-iceberg-spark",
-            "polaris-iceberg-duckdb",
-            "polaris-iceberg-none",
+            "hive-iceberg-spark-trino",
+            "hive-iceberg-spark-thrift",
+            "hive-iceberg-spark-duckdb",
+            "hive-iceberg-spark-none",
+            "polaris-iceberg-spark-trino",
+            "polaris-iceberg-spark-thrift",
+            "polaris-iceberg-spark-duckdb",
+            "polaris-iceberg-spark-none",
         ]
 
         for recipe in all_recipes:
@@ -489,7 +493,13 @@ class TestObservabilityDeployerWorkflow:
 
         deployer = ObservabilityDeployer(engine)
 
-        with patch("subprocess.run") as mock_run:
+        with (
+            patch("subprocess.run") as mock_run,
+            patch(
+                "lakebench.deploy.observability._find_helm_service",
+                return_value="mock-svc",
+            ),
+        ):
             mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
             result = deployer.deploy()
 
@@ -692,7 +702,7 @@ class TestConfigToRunnerPipeline:
 
     def test_duckdb_config_to_executor_to_runner(self):
         """Config with DuckDB recipe produces a working runner."""
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
 
         with patch("lakebench.benchmark.executor.get_executor") as mock_factory:
             mock_exec = MagicMock()
@@ -717,9 +727,9 @@ class TestConfigToRunnerPipeline:
             assert len(result.queries) == 8
 
     def test_polaris_duckdb_config_creates_executor(self):
-        """polaris-iceberg-duckdb recipe creates DuckDBExecutor with correct S3 config."""
+        """polaris-iceberg-spark-duckdb recipe creates DuckDBExecutor with correct S3 config."""
         cfg = make_config(
-            recipe="polaris-iceberg-duckdb",
+            recipe="polaris-iceberg-spark-duckdb",
             platform={
                 "storage": {
                     "s3": {
@@ -741,7 +751,7 @@ class TestConfigToRunnerPipeline:
 
     def test_run_method_dispatches_to_mode(self):
         """runner.run() dispatches based on config benchmark mode."""
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
 
         with patch("lakebench.benchmark.executor.get_executor") as mock_factory:
             mock_exec = MagicMock()
@@ -774,7 +784,7 @@ class TestDuckDBTemplateContext:
         """DeploymentEngine._build_context includes duckdb fields for duckdb recipes."""
         from lakebench.deploy.engine import DeploymentEngine
 
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
 
         with patch("lakebench.k8s.client.K8sClient"):
             engine = DeploymentEngine(cfg, dry_run=True)
@@ -792,7 +802,7 @@ class TestDuckDBTemplateContext:
         from lakebench.deploy.engine import DeploymentEngine
 
         cfg = make_config(
-            recipe="hive-iceberg-duckdb",
+            recipe="hive-iceberg-spark-duckdb",
             architecture={
                 "query_engine": {
                     "type": "duckdb",

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lakebench-k8s"
-version = "1.0.3"
+version = "1.0.5"
 description = "Deploy and benchmark lakehouse stacks on Kubernetes"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
@@ -23,7 +23,9 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Database",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+    "Topic :: System :: Clustering",
     "Topic :: System :: Systems Administration",
 ]
 dependencies = [

@@ -11,6 +11,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from lakebench._constants import POLARIS_CLIENT_SECRET
 from lakebench.config import LakebenchConfig
 from lakebench.k8s import K8sClient
 
@@ -231,6 +232,7 @@ class DeploymentEngine:
             "hive_image": cfg.images.hive,
             "trino_image": cfg.images.trino,
             "spark_image": cfg.images.spark,
+            "jmx_exporter_image": cfg.images.jmx_exporter,
             "image_pull_policy": cfg.images.pull_policy.value,
             # S3
             "s3_endpoint": s3.endpoint,
@@ -260,7 +262,7 @@ class DeploymentEngine:
             "polaris_port": cfg.architecture.catalog.polaris.port,
             "polaris_cpu": cfg.architecture.catalog.polaris.resources.cpu,
             "polaris_memory": cfg.architecture.catalog.polaris.resources.memory,
-            "polaris_client_secret": "lakebench-polaris-secret-2024",
+            "polaris_client_secret": POLARIS_CLIENT_SECRET,
             # Trino
             "trino_coordinator_cpu": cfg.architecture.query_engine.trino.coordinator.cpu,
             "trino_coordinator_memory": cfg.architecture.query_engine.trino.coordinator.memory,

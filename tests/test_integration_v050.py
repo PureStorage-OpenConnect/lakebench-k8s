@@ -66,7 +66,7 @@ class TestConfigToExecutorChain:
         from lakebench.benchmark.executor import DuckDBExecutor, get_executor
 
         cfg = make_config(
-            recipe="hive-iceberg-duckdb",
+            recipe="hive-iceberg-spark-duckdb",
             platform={
                 "storage": {
                     "s3": {
@@ -180,9 +180,9 @@ class TestAutosizerAllRecipes:
     def test_duckdb_cpu_scales_with_cores(self):
         from lakebench.config.autosizer import _co_resident_cpu_m
 
-        cfg_small = make_config(recipe="hive-iceberg-duckdb")
+        cfg_small = make_config(recipe="hive-iceberg-spark-duckdb")
         cfg_large = make_config(
-            recipe="hive-iceberg-duckdb",
+            recipe="hive-iceberg-spark-duckdb",
             architecture={
                 "query_engine": {"type": "duckdb", "duckdb": {"cores": 8}},
                 "catalog": {"type": "hive"},
@@ -203,7 +203,7 @@ class TestRunnerExecutorIntegration:
     """Tests that runner correctly uses executor methods."""
 
     def test_runner_uses_executor_from_factory(self):
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         mock_executor = MagicMock()
         mock_executor.engine_name.return_value = "duckdb"
         mock_executor.catalog_name = "lakehouse"
@@ -260,7 +260,7 @@ class TestDuckDBTemplateRendering:
         """Verify _build_context includes DuckDB variables."""
         # We can't easily call _build_context without a full engine,
         # so we test that the config provides the expected values
-        cfg = make_config(recipe="hive-iceberg-duckdb")
+        cfg = make_config(recipe="hive-iceberg-spark-duckdb")
         duckdb = cfg.architecture.query_engine.duckdb
         assert duckdb.cores == 2
         assert duckdb.memory == "4g"
@@ -276,7 +276,7 @@ class TestDuckDBTemplateRendering:
     def test_duckdb_memory_format(self):
         """DuckDB memory should be parseable as a K8s resource value."""
         cfg = make_config(
-            recipe="hive-iceberg-duckdb",
+            recipe="hive-iceberg-spark-duckdb",
             architecture={
                 "query_engine": {"type": "duckdb", "duckdb": {"memory": "8g"}},
                 "catalog": {"type": "hive"},

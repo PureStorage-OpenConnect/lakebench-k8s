@@ -29,6 +29,7 @@ from lakebench._constants import DEFAULT_OUTPUT_DIR
 
 from .collector import (
     BenchmarkMetrics,
+    BenchmarkRoundMeta,
     JobMetrics,
     PipelineBenchmark,
     PipelineMetrics,
@@ -40,6 +41,56 @@ from .collector import (
 logger = logging.getLogger(__name__)
 
 _DEFAULT_RUNS_DIR = str(Path(DEFAULT_OUTPUT_DIR) / "runs")
+
+
+def _deserialize_stage_latency_profile(raw: Any) -> list[float]:
+    """Deserialize stage_latency_profile from JSON.
+
+    Handles both the v2.0 object format (``{"bronze_ms": ..., ...}``) and
+    the legacy v1.x array format (``[bronze, silver, gold]``).
+    """
+    if isinstance(raw, dict):
+        return [
+            raw.get("bronze_ms", 0.0),
+            raw.get("silver_ms", 0.0),
+            raw.get("gold_ms", 0.0),
+        ]
+    if isinstance(raw, list):
+        return [float(v) for v in raw]
+    return []
+
+
+def _deserialize_benchmark_rounds(raw_rounds: list[dict[str, Any]]) -> list[BenchmarkMetrics]:
+    """Deserialize benchmark_rounds from JSON into BenchmarkMetrics objects."""
+    rounds: list[BenchmarkMetrics] = []
+    for r in raw_rounds:
+        round_meta = None
+        rm = r.get("round_meta")
+        if rm:
+            round_meta = BenchmarkRoundMeta(
+                round_index=rm.get("round_index", 0),
+                timestamp=(
+                    datetime.fromisoformat(rm["timestamp"]) if rm.get("timestamp") else None
+                ),
+                gold_freshness_seconds=rm.get("gold_freshness_seconds", 0.0),
+                q9_contention_observed=rm.get("q9_contention_observed", False),
+                q9_retry_used=rm.get("q9_retry_used", False),
+            )
+        rounds.append(
+            BenchmarkMetrics(
+                mode=r.get("mode", "power"),
+                cache=r.get("cache", "hot"),
+                scale=r.get("scale", 0),
+                qph=r.get("qph", 0.0),
+                total_seconds=r.get("total_seconds", 0.0),
+                queries=r.get("queries", []),
+                iterations=r.get("iterations", 1),
+                streams=r.get("streams", 1),
+                stream_results=r.get("stream_results", []),
+                round_meta=round_meta,
+            )
+        )
+    return rounds
 
 
 class MetricsStorage:
@@ -271,11 +322,15 @@ class MetricsStorage:
                     batch_size=s_data.get("batch_size", 0),
                     total_batches=s_data.get("total_batches", 0),
                     total_rows_processed=s_data.get("total_rows_processed", 0),
+                    unique_rows_processed=s_data.get("unique_rows_processed", 0),
                     elapsed_seconds=s_data.get("elapsed_seconds", 0.0),
                     success=s_data.get("success", False),
                     error_message=s_data.get("error_message"),
                 )
             )
+
+        # Deserialize top-level benchmark rounds
+        top_rounds = _deserialize_benchmark_rounds(data.get("benchmark_rounds", []))
 
         metrics = PipelineMetrics(
             run_id=data.get("run_id", ""),
@@ -290,6 +345,8 @@ class MetricsStorage:
             queries=queries,
             streaming=streaming,
             config_snapshot=data.get("config_snapshot", {}),
+            benchmark_rounds=top_rounds,
+            platform_metrics=data.get("platform_metrics"),
         )
 
         if data.get("end_time"):
@@ -331,10 +388,11 @@ class MetricsStorage:
                     executor_count=s_data.get("executor_count", 0),
                     executor_cores=s_data.get("executor_cores", 0),
                     executor_memory_gb=s_data.get("executor_memory_gb", 0.0),
-                    latency_ms=s_data.get("latency_ms", 0.0),
-                    freshness_seconds=s_data.get("freshness_seconds", 0.0),
+                    latency_ms=s_data.get("latency_ms"),
+                    freshness_seconds=s_data.get("freshness_seconds"),
                     total_batches=s_data.get("total_batches", 0),
                     batch_size=s_data.get("batch_size", 0),
+                    unique_rows_processed=s_data.get("unique_rows_processed"),
                     queries_executed=s_data.get("queries_executed", 0),
                     queries_per_hour=s_data.get("queries_per_hour", 0.0),
                 )
@@ -377,21 +435,27 @@ class MetricsStorage:
                 ),
                 time_to_value_seconds=scores.get("time_to_value_seconds", 0.0),
                 # Both modes
+                total_core_hours=scores.get("total_core_hours", 0.0),
                 compute_efficiency_gb_per_core_hour=scores.get(
                     "compute_efficiency_gb_per_core_hour", 0.0
                 ),
                 # Batch only
-                scale_verified_ratio=scores.get("scale_verified_ratio", 0.0),
-                # Continuous scores (default 0 for old batch JSONs)
-                data_freshness_seconds=scores.get("data_freshness_seconds", 0.0),
+                scale_ratio=scores.get("scale_ratio", scores.get("scale_verified_ratio", 0.0)),
+                # Continuous scores (None when unmeasurable)
+                data_freshness_seconds=scores.get("data_freshness_seconds"),
                 sustained_throughput_rps=scores.get("sustained_throughput_rps", 0.0),
-                stage_latency_profile=scores.get("stage_latency_profile", []),
+                stage_latency_profile=_deserialize_stage_latency_profile(
+                    scores.get("stage_latency_profile", [])
+                ),
                 total_rows_processed=scores.get("total_rows_processed", 0),
-                ingestion_completeness_ratio=scores.get("ingestion_completeness_ratio", 0.0),
+                ingest_ratio=scores.get(
+                    "ingest_ratio", scores.get("ingestion_completeness_ratio", 0.0)
+                ),
                 pipeline_saturated=scores.get("pipeline_saturated", False),
                 query_benchmark=query_benchmark,
                 config_snapshot=pb_data.get("config_snapshot", {}),
                 success=pb_data.get("success", False),
+                benchmark_rounds=_deserialize_benchmark_rounds(pb_data.get("benchmark_rounds", [])),
             )
             if pb_data.get("end_time"):
                 metrics.pipeline_benchmark.end_time = datetime.fromisoformat(pb_data["end_time"])

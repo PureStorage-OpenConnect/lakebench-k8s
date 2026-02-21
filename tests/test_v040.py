@@ -123,7 +123,7 @@ class TestRecipeSystem:
 
     def test_recipe_expansion(self):
         """Recipe defaults are applied correctly."""
-        cfg = _make_config(recipe="hive-iceberg-trino")
+        cfg = _make_config(recipe="hive-iceberg-spark-trino")
         assert cfg.architecture.catalog.type.value == "hive"
         assert cfg.architecture.table_format.type.value == "iceberg"
         assert cfg.architecture.query_engine.type.value == "trino"
@@ -131,7 +131,7 @@ class TestRecipeSystem:
     def test_recipe_user_override(self):
         """User explicit values win over recipe defaults."""
         cfg = _make_config(
-            recipe="hive-iceberg-trino",
+            recipe="hive-iceberg-spark-trino",
             images={"spark": "my-registry/spark:3.5.3-python3"},
         )
         # User override wins
@@ -145,11 +145,11 @@ class TestRecipeSystem:
             _make_config(recipe="nonexistent-recipe")
 
     def test_recipe_default_alias(self):
-        """'default' alias maps to hive-iceberg-trino."""
-        assert RECIPES["default"] is RECIPES["hive-iceberg-trino"]
+        """'default' alias maps to hive-iceberg-spark-trino."""
+        assert RECIPES["default"] is RECIPES["hive-iceberg-spark-trino"]
 
     def test_recipe_default_alias_expansion(self):
-        """'default' recipe expands the same as hive-iceberg-trino."""
+        """'default' recipe expands the same as hive-iceberg-spark-trino."""
         cfg = _make_config(recipe="default")
         assert cfg.architecture.catalog.type.value == "hive"
         assert cfg.architecture.table_format.type.value == "iceberg"
@@ -177,14 +177,14 @@ class TestRecipeSystem:
     def test_all_recipes_valid(self):
         """Every recipe expands to a valid LakebenchConfig."""
         named_recipes = [k for k in RECIPES if k != "default"]
-        assert len(named_recipes) == 10
+        assert len(named_recipes) == 8
         for name in named_recipes:
             cfg = _make_config(recipe=name)
             assert cfg.architecture is not None, f"Recipe {name} failed"
 
     def test_recipe_polaris_iceberg_spark(self):
         """Polaris + Iceberg + Spark Thrift recipe."""
-        cfg = _make_config(recipe="polaris-iceberg-spark")
+        cfg = _make_config(recipe="polaris-iceberg-spark-thrift")
         assert cfg.architecture.catalog.type.value == "polaris"
         assert cfg.architecture.table_format.type.value == "iceberg"
         assert cfg.architecture.query_engine.type.value == "spark-thrift"
@@ -201,7 +201,7 @@ class TestQueryExecutor:
     def test_get_executor_trino(self):
         from lakebench.benchmark.executor import TrinoExecutor, get_executor
 
-        cfg = _make_config(recipe="hive-iceberg-trino")
+        cfg = _make_config(recipe="hive-iceberg-spark-trino")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, TrinoExecutor)
         assert executor.engine_name() == "trino"
@@ -210,7 +210,7 @@ class TestQueryExecutor:
     def test_get_executor_spark_thrift(self):
         from lakebench.benchmark.executor import SparkThriftExecutor, get_executor
 
-        cfg = _make_config(recipe="hive-iceberg-spark")
+        cfg = _make_config(recipe="hive-iceberg-spark-thrift")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, SparkThriftExecutor)
         assert executor.engine_name() == "spark-thrift"
@@ -219,7 +219,7 @@ class TestQueryExecutor:
     def test_get_executor_none_raises(self):
         from lakebench.benchmark.executor import get_executor
 
-        cfg = _make_config(recipe="hive-iceberg-none")
+        cfg = _make_config(recipe="hive-iceberg-spark-none")
         with pytest.raises(ValueError, match="Cannot run queries"):
             get_executor(cfg, namespace="test-ns")
 
@@ -262,7 +262,7 @@ class TestSparkThriftDeployer:
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.spark_thrift import SparkThriftDeployer
 
-        cfg = _make_config(recipe="hive-iceberg-trino")
+        cfg = _make_config(recipe="hive-iceberg-spark-trino")
         engine = MagicMock()
         engine.config = cfg
         deployer = SparkThriftDeployer(engine)
@@ -275,7 +275,7 @@ class TestSparkThriftDeployer:
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.spark_thrift import SparkThriftDeployer
 
-        cfg = _make_config(recipe="hive-iceberg-spark")
+        cfg = _make_config(recipe="hive-iceberg-spark-thrift")
         engine = MagicMock()
         engine.config = cfg
         engine.dry_run = True
@@ -297,7 +297,7 @@ class TestCoResidentCpu:
     def test_co_resident_cpu_trino(self):
         from lakebench.config.autosizer import _co_resident_cpu_m
 
-        cfg = _make_config(recipe="hive-iceberg-trino")
+        cfg = _make_config(recipe="hive-iceberg-spark-trino")
         result = _co_resident_cpu_m(cfg)
         # Should include Trino coordinator + workers + infra
         # Default: coordinator 2 CPU + 2 workers * 2 CPU = 6000m + 1000m infra = 7000m
@@ -306,7 +306,7 @@ class TestCoResidentCpu:
     def test_co_resident_cpu_spark_thrift(self):
         from lakebench.config.autosizer import _co_resident_cpu_m
 
-        cfg = _make_config(recipe="hive-iceberg-spark")
+        cfg = _make_config(recipe="hive-iceberg-spark-thrift")
         result = _co_resident_cpu_m(cfg)
         # Spark thrift: default 2 cores = 2000m + 1000m infra = 3000m
         assert result == 3000
@@ -314,7 +314,7 @@ class TestCoResidentCpu:
     def test_co_resident_cpu_none(self):
         from lakebench.config.autosizer import _co_resident_cpu_m
 
-        cfg = _make_config(recipe="hive-iceberg-none")
+        cfg = _make_config(recipe="hive-iceberg-spark-none")
         result = _co_resident_cpu_m(cfg)
         # No engine: just infra = 1000m
         assert result == 1000
@@ -332,7 +332,7 @@ class TestBenchmarkRunnerMockExecutor:
         """BenchmarkRunner should use get_executor to create its executor."""
         from lakebench.benchmark.executor import QueryExecutorResult
 
-        cfg = _make_config(recipe="hive-iceberg-trino")
+        cfg = _make_config(recipe="hive-iceberg-spark-trino")
         mock_executor = MagicMock()
         mock_executor.engine_name.return_value = "trino"
         mock_executor.catalog_name = "lakehouse"

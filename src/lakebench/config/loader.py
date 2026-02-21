@@ -197,13 +197,13 @@ name: my-lakehouse
 # Optional description
 # description: "My Lakebench lakehouse deployment"
 
-# Recipe shorthand -- sets catalog + table_format + query_engine in one line.
-# Valid recipes: default, hive-iceberg-trino, hive-iceberg-spark,
-#   hive-iceberg-duckdb, hive-iceberg-none, hive-delta-trino, hive-delta-none,
-#   polaris-iceberg-trino, polaris-iceberg-spark, polaris-iceberg-duckdb,
-#   polaris-iceberg-none
+# Recipe shorthand -- sets catalog + table_format + engine + query_engine in one line.
+# Valid recipes: default, hive-iceberg-spark-trino, hive-iceberg-spark-thrift,
+#   hive-iceberg-spark-duckdb, hive-iceberg-spark-none,
+#   polaris-iceberg-spark-trino, polaris-iceberg-spark-thrift,
+#   polaris-iceberg-spark-duckdb, polaris-iceberg-spark-none
 # See docs/recipes.md for details.
-# recipe: hive-iceberg-trino
+# recipe: hive-iceberg-spark-trino
 
 # Config schema version (always 1)
 # version: 1
@@ -220,6 +220,8 @@ name: my-lakehouse
 #   hive: apache/hive:3.1.3
 #   trino: trinodb/trino:479
 #   polaris: apache/polaris:1.3.0-incubating
+#   duckdb: python:3.11-slim
+#   jmx_exporter: bitnami/jmx-exporter:latest
 #   prometheus: prom/prometheus:v2.48.0
 #   grafana: grafana/grafana:10.2.0
 #   pull_policy: IfNotPresent        # Always | IfNotPresent | Never
@@ -316,9 +318,10 @@ platform:
 # ============================================================================
 # LAYER 2: DATA ARCHITECTURE
 # ============================================================================
-# See docs/recipes.md for supported (catalog, table_format, query_engine)
+# See docs/recipes.md for supported (catalog, table_format, engine, query_engine)
 # combinations and guidance on choosing a recipe.
 architecture:
+  # pipeline_engine: spark           # Pipeline engine (spark only today)
   catalog:
     type: hive                     # hive | polaris | none
     ## Hive Metastore tuning (uncomment to override defaults)
@@ -359,7 +362,7 @@ architecture:
   #       spill_enabled: true
   #       spill_max_per_node: 40Gi
   #       storage: 50Gi
-  #       storage_class: ""          # Empty = cluster default
+  #       storage_class: ""          # Empty = emptyDir (ephemeral). Set a class name for PVC-backed storage.
   #     catalog_name: lakehouse      # Trino catalog name for Iceberg
   #   # spark_thrift:                 # Spark Thrift Server (alternative to Trino)
   #   #   cores: 2
@@ -406,6 +409,9 @@ architecture:
   #     bronze_target_file_size_mb: 512
   #     silver_target_file_size_mb: 512
   #     gold_target_file_size_mb: 128
+  #     ## In-stream benchmark rounds (runs Trino queries while streaming)
+  #     benchmark_interval: 300      # Seconds between rounds (300-3600)
+  #     benchmark_warmup: 300        # Seconds before first round (300-1800)
 
   workload:
     # schema: customer360            # customer360 | iot | financial

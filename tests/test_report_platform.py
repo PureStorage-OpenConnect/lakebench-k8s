@@ -107,10 +107,10 @@ class TestGeneratePlatformSection:
             "collection_error": None,
         }
         html = gen._generate_platform_section(data)
-        assert "S3 Requests" in html
         assert "999" in html
-        assert "S3 Errors" in html
-        assert "S3 Avg Latency" in html
+        assert "requests" in html
+        assert "errors" in html
+        assert "avg latency" in html
 
     def test_memory_conversion_to_gib(self):
         """Memory values should be converted to GiB in the display."""

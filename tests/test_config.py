@@ -520,7 +520,7 @@ class TestGeneratedYamlDrift:
         yaml_content = generate_example_config_yaml()
         assert "recipe:" in yaml_content
         # At least one known recipe name should appear
-        assert "hive-iceberg-trino" in yaml_content
+        assert "hive-iceberg-spark-trino" in yaml_content
 
     def test_datagen_image_matches_schema(self):
         """Generated YAML datagen image should match schema default."""
@@ -627,18 +627,6 @@ class TestComponentValidation:
         )
         assert config.architecture.catalog.type.value == "hive"
 
-    def test_hive_delta_trino(self):
-        """hive + delta + trino is supported."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={
-                "catalog": {"type": "hive"},
-                "table_format": {"type": "delta"},
-                "query_engine": {"type": "trino"},
-            },
-        )
-        assert config.architecture.table_format.type.value == "delta"
-
     def test_hive_iceberg_none_query_engine(self):
         """hive + iceberg + none query engine is supported (deploy-only)."""
         config = LakebenchConfig(
@@ -678,18 +666,6 @@ class TestComponentValidation:
         assert config.architecture.catalog.polaris.resources.cpu == "1"
         assert config.architecture.catalog.polaris.resources.memory == "2Gi"
 
-    def test_polaris_delta_rejected(self):
-        """polaris + delta is rejected (Polaris is Iceberg-only)."""
-        with pytest.raises(ValueError, match="Unsupported component combination"):
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "catalog": {"type": "polaris"},
-                    "table_format": {"type": "delta"},
-                    "query_engine": {"type": "trino"},
-                },
-            )
-
     def test_unity_rejected(self):
         """unity + iceberg + trino is rejected (not yet implemented)."""
         with pytest.raises(ValueError, match="Unsupported component combination"):
@@ -717,7 +693,7 @@ class TestComponentValidation:
     def test_error_message_lists_supported(self):
         """Error message lists all supported combinations."""
         with pytest.raises(
-            ValueError, match="catalog=hive, table_format=iceberg, query_engine=trino"
+            ValueError, match="catalog=hive, table_format=iceberg, engine=spark, query_engine=trino"
         ):
             LakebenchConfig(
                 name="test",
@@ -815,6 +791,174 @@ class TestContinuousThroughputConfig:
                 architecture={
                     "processing": {
                         "continuous": {"bronze_target_file_size_mb": 10},
+                    },
+                },
+            )
+
+
+class TestContinuousBenchmarkConfig:
+    """Tests for benchmark_interval and benchmark_warmup on ContinuousConfig."""
+
+    def test_defaults(self):
+        config = LakebenchConfig(name="test")
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_interval == 300
+        assert c.benchmark_warmup == 300
+
+    def test_custom_values(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "continuous": {
+                        "benchmark_interval": 600,
+                        "benchmark_warmup": 600,
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_interval == 600
+        assert c.benchmark_warmup == 600
+
+    def test_warmup_clamped_to_gold_refresh(self):
+        """Warmup below gold_refresh_interval is clamped up."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "continuous": {
+                        "gold_refresh_interval": "10 minutes",
+                        "benchmark_warmup": 300,
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_warmup == 600  # clamped to gold_refresh (10 min)
+
+    def test_warmup_not_clamped_when_above_gold_refresh(self):
+        """Warmup above gold_refresh_interval is left unchanged."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "continuous": {
+                        "gold_refresh_interval": "2 minutes",
+                        "benchmark_warmup": 300,
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_warmup == 300  # no clamp needed
+
+    def test_warmup_with_short_gold_refresh(self):
+        """With a 5-minute gold refresh, warmup of 300s is valid (matches floor)."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "continuous": {
+                        "gold_refresh_interval": "5 minutes",
+                        "benchmark_warmup": 300,
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_warmup == 300  # 300s >= 300s floor, matches gold_refresh
+
+    def test_interval_clamped_to_gold_refresh(self):
+        """Interval below gold_refresh_interval is clamped up."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "continuous": {
+                        "gold_refresh_interval": "10 minutes",
+                        "benchmark_interval": 300,
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_interval == 600  # clamped to gold_refresh (10 min)
+
+    def test_interval_not_clamped_when_above_gold_refresh(self):
+        """Interval above gold_refresh_interval is left unchanged."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "continuous": {
+                        "gold_refresh_interval": "2 minutes",
+                        "benchmark_interval": 300,
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_interval == 300  # no clamp needed
+
+    def test_interval_with_short_gold_refresh(self):
+        """With a 5-minute gold refresh, interval of 300s is valid (matches floor)."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "continuous": {
+                        "gold_refresh_interval": "5 minutes",
+                        "benchmark_interval": 300,
+                        "benchmark_warmup": 300,
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.continuous
+        assert c.benchmark_interval == 300  # 300s >= 300s floor, matches gold_refresh
+
+    def test_benchmark_interval_field_minimum(self):
+        """Field-level floor is 300s (Pydantic ge=300)."""
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={
+                    "processing": {
+                        "continuous": {"benchmark_interval": 120},  # min is 300
+                    },
+                },
+            )
+
+    def test_benchmark_interval_maximum(self):
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={
+                    "processing": {
+                        "continuous": {"benchmark_interval": 7200},  # max is 3600
+                    },
+                },
+            )
+
+    def test_benchmark_warmup_minimum(self):
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={
+                    "processing": {
+                        "continuous": {"benchmark_warmup": 120},  # min is 300
+                    },
+                },
+            )
+
+    def test_benchmark_warmup_maximum(self):
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={
+                    "processing": {
+                        "continuous": {"benchmark_warmup": 2400},  # max is 1800
                     },
                 },
             )
