@@ -4,7 +4,7 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [1.0.4] - 2026-02-20
+## [1.0.5] - 2026-02-20
 
 ### Added
 - In-stream periodic benchmarking for continuous pipelines. The full 8-query
