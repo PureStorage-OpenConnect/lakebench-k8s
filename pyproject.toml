@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lakebench-k8s"
-version = "1.0.5"
+version = "1.0.6"
 description = "Deploy and benchmark lakehouse stacks on Kubernetes"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
@@ -72,7 +72,7 @@ packages = ["src/lakebench"]
 exclude = [
     ".gitignore",
     ".github/",
-    "datagen/",
+    "/datagen/",
     "tests/",
     "conftest.py",
     "test-config*.yaml",

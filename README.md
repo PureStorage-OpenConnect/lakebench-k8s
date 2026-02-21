@@ -3,115 +3,137 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-blue)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
 
-CLI tool for deploying and benchmarking lakehouse architectures on Kubernetes.
+**A/B testing for lakehouse architectures on Kubernetes.**
 
-> **Note:** This package is published as `lakebench-k8s` on PyPI. Install with `pip install lakebench-k8s`. The CLI command is `lakebench`.
+Deploy a complete lakehouse stack from a single YAML, run a medallion pipeline
+at any scale, and get a scorecard you can compare across configurations.
 
-Choosing between Hive and Polaris, sizing Spark for 100 GB vs 10 TB, or
-comparing batch and continuous pipelines shouldn't require weeks of manual setup. Lakebench deploys a complete
-lakehouse stack from a single YAML file, generates realistic data at any scale,
-runs the pipeline, benchmarks query performance, and tears everything down --so
-you can focus on comparing architectures, not plumbing.
+<!-- TODO: Add terminal recording / screenshot of `lakebench run` output here -->
 
-## Installation
+## Why Lakebench?
+
+- **Compare stacks.** Swap catalogs (Hive, Polaris), query engines (Trino,
+  Spark Thrift, DuckDB), and table formats -- same data, same queries,
+  different architecture. Side-by-side scorecard comparison.
+- **Test at scale.** Run the same workload at 10 GB, 100 GB, and 1 TB to find
+  where throughput plateaus or resources saturate on your hardware.
+- **Measure freshness.** Continuous mode streams data through the pipeline and
+  benchmarks query performance under sustained ingest load.
+
+## Quick Start
 
 ```bash
 pip install lakebench-k8s
 ```
 
-Or with [pipx](https://pipx.pypa.io/): `pipx install lakebench-k8s`
-
-Pre-built binaries (no Python required) are available on
-[GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
-
-### Prerequisites
-
-- Python 3.10+
-- `kubectl` and `helm` on PATH
-- Kubernetes cluster (1.26+, minimum 8 CPU / 32 GB RAM for scale 1)
-- S3-compatible object storage (FlashBlade, MinIO, AWS S3, etc.)
-- [Kubeflow Spark Operator 2.4.0+](https://github.com/kubeflow/spark-operator) (or set `spark.operator.install: true` in config to auto-install)
-- [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) if using a Hive recipe (the default). Not needed for Polaris recipes.
-
-See [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
-for detailed install instructions.
-
-## Quick Start
-
-A **quick-recipe** selects the catalog + table format + query engine
-combination in one line (e.g. `recipe: hive-iceberg-spark-trino`). The **scale
-factor** controls data volume: 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB.
-Every recipe default can be overridden individually -- see the
-[Configuration Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md)
-for advanced configuration options.
+> Pre-built binaries (no Python required) are available on
+> [GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
 
 ```bash
-# 1. Generate config (interactive prompts for S3 details)
-lakebench init --interactive
-
-# 2. Validate config and cluster connectivity
-lakebench validate lakebench.yaml
-
-# 3. Deploy infrastructure
-lakebench deploy lakebench.yaml
-
-# 4. Generate test data
-lakebench generate lakebench.yaml --wait
-
-# 5. Run the pipeline + benchmark
-lakebench run lakebench.yaml
-
-# 6. View results
-lakebench report
-
-# 7. Tear down
-lakebench destroy lakebench.yaml
+lakebench init --interactive        # generate config with S3 prompts
+lakebench validate lakebench.yaml   # check config + cluster connectivity
+lakebench deploy lakebench.yaml     # deploy the stack
+lakebench generate lakebench.yaml --wait   # generate test data
+lakebench run lakebench.yaml        # run pipeline + benchmark
+lakebench report                    # view HTML scorecard
+lakebench destroy lakebench.yaml    # tear down everything
 ```
 
-> Deploy and generate will prompt for confirmation. Add `--yes` to skip
-> (e.g. `lakebench deploy lakebench.yaml --yes`).
+The `recipe` field selects your architecture in one line. The `scale` field
+controls data volume.
+
+```yaml
+# lakebench.yaml (minimal)
+deployment_name: my-test
+recipe: hive-iceberg-spark-trino   # or polaris-iceberg-spark-duckdb, etc.
+scale: 10                          # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
+s3:
+  endpoint: http://s3.example.com:80
+  access_key: ...
+  secret_key: ...
+```
+
+Eight recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
+for the full list.
+
+## What You Get
+
+After `lakebench run` completes, the terminal prints a scorecard:
+
+```
+ ─ Pipeline Complete ──────────────────────────────
+  bronze-verify         142.0 s
+  silver-build          891.0 s
+  gold-finalize         234.0 s
+  benchmark              87.0 s
+
+  Scores
+    Time to Value:        1354.0 s
+    Throughput:           0.782 GB/s
+    Efficiency:           3.41 GB/core-hr
+    Scale:                100.0% verified
+    QpH:                  2847.3
+
+  Full report: lakebench report
+ ──────────────────────────────────────────────────
+```
+
+`lakebench report` generates an HTML report with per-query latencies,
+bottleneck analysis, and optional platform metrics (CPU, memory, S3 I/O per
+pod).
+
+## How It Works
+
+```
+                    ┌──────────────────────────────────┐
+                    │         lakebench.yaml           │
+                    └────────────┬─────────────────────┘
+                                 │
+                    ┌────────────▼─────────────────────┐
+                    │   deploy (Kubernetes namespace,   │
+                    │   S3 secrets, PostgreSQL, catalog, │
+                    │   query engine, observability)     │
+                    └────────────┬─────────────────────┘
+                                 │
+     Raw Parquet ──► Bronze (validate) ──► Silver (enrich) ──► Gold (aggregate)
+         S3              Spark                Spark               Spark
+                                                                    │
+                                                        ┌───────────▼──────────┐
+                                                        │  8-query benchmark   │
+                                                        │  (Trino / DuckDB /   │
+                                                        │   Spark Thrift)      │
+                                                        └──────────────────────┘
+```
+
+## Prerequisites
+
+- `kubectl` and `helm` on PATH
+- Kubernetes 1.26+ (minimum 8 CPU / 32 GB RAM for scale 1)
+- S3-compatible object storage (FlashBlade, MinIO, AWS S3, etc.)
+- [Kubeflow Spark Operator 2.4.0+](https://github.com/kubeflow/spark-operator)
+  (or set `spark.operator.install: true`)
+- [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) for
+  Hive recipes (not needed for Polaris)
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `lakebench init` | Generate a starter configuration file |
-| `lakebench validate <config>` | Validate config and test connectivity |
-| `lakebench info <config>` | Show configuration summary |
-| `lakebench recommend` | Recommend cluster sizing for a scale factor |
-| `lakebench deploy <config>` | Deploy all infrastructure |
-| `lakebench generate <config>` | Generate synthetic data to bronze bucket |
-| `lakebench run <config>` | Execute the medallion pipeline with metrics |
-| `lakebench benchmark <config>` | Run 8-query benchmark against the active engine |
-| `lakebench query <config>` | Execute SQL queries against the active engine |
-| `lakebench status [config]` | Show deployment status |
-| `lakebench logs <component> [config]` | Stream logs from a component |
-| `lakebench report` | Generate HTML benchmark report |
-| `lakebench destroy <config>` | Tear down all resources |
+| `init` | Generate a starter config file |
+| `validate` | Check config and cluster connectivity |
+| `info` | Show deployment configuration summary |
+| `deploy` | Deploy all infrastructure components |
+| `generate` | Generate synthetic data at the configured scale |
+| `run` | Execute the medallion pipeline and benchmark |
+| `benchmark` | Run the 8-query benchmark standalone |
+| `query` | Execute ad-hoc SQL against the active engine |
+| `status` | Show deployment status |
+| `report` | Generate HTML scorecard report |
+| `recommend` | Recommend cluster sizing for a scale factor |
+| `destroy` | Tear down all deployed resources |
 
-## How It Works
-
-Lakebench deploys a three-layer stack on Kubernetes:
-
-1. **Platform** -- Kubernetes namespace, S3 secrets, PostgreSQL (metadata store)
-2. **Data architecture** -- catalog (Hive or Polaris), table format (Iceberg),
-   query engine (Trino, Spark Thrift, or DuckDB), all wired together via
-   [recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
-3. **Observability** -- optional Prometheus + Grafana stack for platform metrics
-
-Once deployed, the pipeline runs three Spark jobs in sequence:
-
-```
-Raw Parquet (S3)  -->  Bronze (validate, deduplicate)
-                  -->  Silver (normalize, enrich -- Iceberg table)
-                  -->  Gold (aggregate -- Iceberg table)
-                  -->  Benchmark (8 analytical queries via query engine)
-```
-
-The benchmark produces an HTML report with query latencies, throughput scores,
-and optional platform metrics (CPU, memory, S3 I/O per pod). See the
-[Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md)
-doc for the full picture.
+See [CLI Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/cli-reference.md)
+for flags and options.
 
 ## Component Versions
 
@@ -126,25 +148,17 @@ doc for the full picture.
 | DuckDB | bundled (Python 3.11) |
 | PostgreSQL | 17 |
 
-All versions are configurable. See
-[Supported Components](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/supported-components.md)
-for the full matrix of components, recipes, and override options.
+All versions are overridable in the YAML config. See
+[Supported Components](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/supported-components.md).
 
 ## Documentation
 
-Full documentation is in the [docs/](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/docs) directory:
-
-- [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md) -- prerequisites, install, first deployment
+- [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md) -- prerequisites, install, first run
 - [Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md) -- full YAML reference
-- [CLI Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/cli-reference.md) -- all commands and flags
-- [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md) -- supported component combinations
-- [Supported Components](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/supported-components.md) -- versions, images, and recipe matrix
-- [Deployment](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/deployment.md) -- deploy lifecycle and status checks
-- [Data Generation](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/data-generation.md) -- scale factors, parallelism, and monitoring
-- [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and streaming modes
-- [Scoring and Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- pipeline scorecard and query engine benchmark
-- [Polaris Quick Start](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/quickstart-polaris.md) -- use Apache Polaris instead of Hive
-- [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design and component layers
+- [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md) -- catalog + format + engine combinations
+- [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and continuous modes
+- [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- scorecard and query benchmark
+- [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design
 - [Troubleshooting](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/troubleshooting.md) -- common errors and fixes
 
 ## License
