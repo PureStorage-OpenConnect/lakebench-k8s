@@ -42,6 +42,33 @@ supported scale.
 
 If you are on OpenShift, `oc` works as a drop-in replacement for `kubectl`.
 
+### Default StorageClass
+
+Your cluster must have a **default StorageClass** (annotated with
+`storageclass.kubernetes.io/is-default-class: "true"`) for PostgreSQL metadata
+storage. Most managed Kubernetes distributions include one by default:
+
+- **EKS** -- `gp2` or `gp3`
+- **GKE** -- `standard` or `premium-rwo`
+- **AKS** -- `managed-premium` or `managed-csi`
+- **OpenShift** -- varies by platform (typically `thin-csi` or Portworx)
+
+Self-managed clusters (kubeadm, bare metal) may need a StorageClass created
+manually. Alternatively, set `platform.compute.postgres.storage_class`
+explicitly in your YAML config to bypass the default.
+
+Trino workers and Spark shuffle use ephemeral storage by default and do **not**
+require a StorageClass. Set their `storage_class` fields if you want
+PVC-backed storage instead.
+
+Check your cluster's default StorageClass:
+
+```bash
+kubectl get storageclass -o wide
+```
+
+Look for `(default)` next to one of the class names.
+
 ### S3-compatible object storage
 
 Lakebench needs an S3-compatible endpoint for the bronze, silver, and gold
@@ -173,8 +200,8 @@ Open `lakebench.yaml` and fill in your S3 connection details:
 ```yaml
 name: my-first-lakehouse
 
-# Optional: use a recipe for quick setup (sets catalog + format + engine)
-# recipe: hive-iceberg-trino
+# Optional: use a quick-recipe for one-line setup (sets catalog + format + engine)
+# recipe: hive-iceberg-spark-trino
 
 platform:
   storage:
@@ -442,25 +469,26 @@ in the `images` section of your YAML.
 
 ## Choosing a Recipe
 
-The default deployment uses Hive + Iceberg + Trino. Lakebench supports 10
+The default deployment uses Hive + Iceberg + Trino. Lakebench supports 8
 validated component combinations ("recipes"). Use the `recipe:` field for
 quick setup, or set architecture fields individually:
 
 ```yaml
-recipe: polaris-iceberg-trino   # one-line setup
+recipe: polaris-iceberg-spark-trino   # one-line setup
 ```
 
 | Recipe | `recipe:` value | Use case |
 |--------|----------------|----------|
-| Standard (default) | `hive-iceberg-trino` | Ad-hoc SQL analytics via Trino |
-| Spark SQL | `hive-iceberg-spark` | Spark-native analytics |
-| DuckDB | `hive-iceberg-duckdb` | Lightweight single-pod analytics |
-| Polaris | `polaris-iceberg-trino` | REST catalog API, OAuth2 access control |
-| Polaris + DuckDB | `polaris-iceberg-duckdb` | REST catalog with lightweight engine |
-| Headless | `hive-iceberg-none` | ETL-only, no query engine |
-| Delta Lake | `hive-delta-trino` | Delta ecosystem compatibility |
+| Standard (default) | `hive-iceberg-spark-trino` | Ad-hoc SQL analytics via Trino |
+| Spark SQL | `hive-iceberg-spark-thrift` | Spark-native analytics |
+| DuckDB | `hive-iceberg-spark-duckdb` | Lightweight single-pod analytics |
+| Headless | `hive-iceberg-spark-none` | ETL-only, no query engine |
+| Polaris | `polaris-iceberg-spark-trino` | REST catalog API, OAuth2 access control |
+| Polaris + Spark SQL | `polaris-iceberg-spark-thrift` | REST catalog with Spark-native analytics |
+| Polaris + DuckDB | `polaris-iceberg-spark-duckdb` | REST catalog with lightweight engine |
+| Polaris headless | `polaris-iceberg-spark-none` | REST catalog, ETL-only |
 
-See the [Recipes Guide](recipes.md) for all 10 combinations, decision guidance,
+See the [Recipes Guide](recipes.md) for all 8 combinations, decision guidance,
 and detailed YAML snippets.
 
 Use `lakebench recommend` to get cluster-aware sizing guidance before choosing
@@ -478,4 +506,3 @@ lakebench recommend --scale 100
 - [Polaris Quick Start](quickstart-polaris.md) -- use Apache Polaris instead of Hive
 - [Configuration Reference](configuration.md) -- full YAML schema with all options
 - [Operators and Catalogs](operators-and-catalogs.md) -- tested versions and troubleshooting
-- [Polaris Reference](polaris-reference.md) -- deep dive into Polaris integration details

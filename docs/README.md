@@ -1,9 +1,11 @@
 # Lakebench Documentation
 
+Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures on Kubernetes. It automates the full lifecycle -- deploy infrastructure, generate data, run pipelines, benchmark query engines, and collect results -- from a single YAML config.
+
 ## Getting Started
 
 - [Getting Started](getting-started.md) -- Prerequisites, installation, and first deployment
-- [Recipes](recipes.md) -- All 10 supported component combinations with decision guidance
+- [Recipes](recipes.md) -- All 8 supported component combinations with decision guidance
 - [Polaris Quickstart](quickstart-polaris.md) -- Switch from Hive Metastore to Apache Polaris
 
 ## Core Workflow
@@ -18,20 +20,30 @@
 - [Datagen Schema](datagen-schema.md) -- Customer360 schema, 41 columns, 7 realism features
 - [Custom Datagen Images](datagen-custom-images.md) -- Build, push, and configure custom images
 
-## Benchmarking
+## Scoring and Benchmarking
 
-- [Benchmarking](benchmarking.md) -- 8-query suite, QpH scoring, pipeline scores
+- [Scoring and Benchmarking](benchmarking.md) -- pipeline scorecard, query engine benchmark, QpH scoring
 - [Query Reference](query-reference.md) -- Per-query reference with categories and expected output
 
 ## Component Reference
 
-- [Trino](component-trino.md) -- Query engine configuration, coordinator/worker sizing, catalog integration
-- [Spark](component-spark.md) -- Spark Operator, driver/executor resources, per-job profiles, S3A tuning
+### Query Engines
+
+- [Trino](component-trino.md) -- Distributed query engine, coordinator/worker sizing, catalog integration
+- [Spark Thrift Server](component-spark-thrift.md) -- Spark-native query engine, single-pod, beeline interface
+- [DuckDB](component-duckdb.md) -- Lightweight single-pod engine, development and small-scale runs
+
+### Catalogs
+
 - [Hive Metastore](component-hive.md) -- Stackable operator, thrift settings, PostgreSQL backend
+- [Apache Polaris](component-polaris.md) -- REST catalog, OAuth2 authentication, bootstrap lifecycle
+
+### Infrastructure
+
+- [Spark](component-spark.md) -- Spark Operator, driver/executor resources, per-job profiles, S3A tuning
 - [S3 Storage](component-s3.md) -- Endpoint, credentials, buckets, FlashBlade specifics
 - [PostgreSQL](component-postgres.md) -- Metadata store, storage classes, deployment order
 - [Observability](component-observability.md) -- Prometheus, Grafana, local metrics, HTML reports
-- [Polaris Reference](polaris-reference.md) -- Polaris REST catalog deployment and gotchas
 - [Supported Components](supported-components.md) -- Versions, images, and recipe matrix
 
 ## Architecture & Reference

@@ -88,7 +88,7 @@ QpH score is `(number_of_queries / total_seconds) * 3600`.
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline stages |
 | `--continuous` | | `false` | Run in continuous streaming mode. Overrides `pipeline.mode` in config. |
 | `--duration` | | config value | Streaming run duration in seconds (continuous mode only) |
-| `--include-datagen` | | `false` | Run datagen before pipeline stages for full end-to-end measurement |
+| `--generate` | | `false` | Run datagen before pipeline stages (batch mode only -- continuous mode always runs datagen automatically) |
 
 ### Examples
 
@@ -119,7 +119,7 @@ lakebench run my-config.yaml --skip-benchmark
 Full end-to-end run including data generation:
 
 ```bash
-lakebench run my-config.yaml --include-datagen --timeout 7200
+lakebench run my-config.yaml --generate --timeout 7200
 ```
 
 ## Continuous Mode
@@ -157,15 +157,38 @@ bronze-ingest + silver-stream + gold-refresh  (concurrent)
   the silver table.
 
 Datagen runs concurrently with the streaming jobs, continuously producing
-new data for the pipeline to ingest.
+new data for the pipeline to ingest. This is automatic -- no `--generate`
+flag is needed. That flag only applies to batch mode.
 
 The pipeline runs for the configured duration (default: 1800 seconds / 30
-minutes), then stops all streaming jobs and optionally runs the Trino
-benchmark.
+minutes). During this window, Lakebench runs periodic Trino benchmark rounds
+to measure query performance while streaming is active. After the window ends,
+streaming jobs are stopped and the in-stream results are aggregated.
+
+### How Continuous Mode Works
+
+The three streaming jobs behave differently:
+
+- **bronze-ingest** and **silver-stream** are true streaming jobs. They
+  process data incrementally -- each micro-batch appends new rows to the
+  Iceberg table. Bronze reads Parquet files from S3; silver reads changes
+  from the bronze Iceberg table.
+
+- **gold-refresh** is a periodic batch aggregation. Every refresh cycle it
+  reads the entire silver table, computes daily KPI aggregates, and
+  **replaces** the gold table. It is not incremental -- the gold table is
+  fully rewritten each cycle.
+
+This means gold freshness depends on the refresh interval. With the default
+5-minute cycle, gold can be up to 5 minutes stale even when bronze and
+silver are seconds behind real-time.
+
+Gold refresh also causes **Q9 contention**: if a benchmark query reads the
+gold table while it's being rewritten, the query fails. Lakebench handles
+this with automatic retries (30s/60s backoff). The scorecard records
+contention events per round.
 
 ### Continuous Mode Configuration
-
-Tune streaming behavior in the config file:
 
 ```yaml
 architecture:
@@ -177,6 +200,8 @@ architecture:
       run_duration: 1800              # 30 minutes
       max_files_per_trigger: 50       # Files per micro-batch
       checkpoint_base: checkpoints
+      benchmark_interval: 300         # Seconds between in-stream rounds
+      benchmark_warmup: 300           # Seconds before first round
 ```
 
 Override the run duration on the command line:
@@ -185,14 +210,51 @@ Override the run duration on the command line:
 lakebench run my-config.yaml --continuous --duration 3600
 ```
 
+### Tuning Reference
+
+| Field | Default | What it controls | When to change |
+|---|---|---|---|
+| `bronze_trigger_interval` | 30s | How often bronze checks for new files. Lower = fresher data, higher CPU. | Reduce to 10-15s if freshness is critical. Increase to 60s+ for large scales where each batch is already large. |
+| `silver_trigger_interval` | 60s | How often silver reads new bronze rows. Lower = fresher silver, more micro-batches. | Keep at 2x bronze interval. Reducing below bronze interval wastes cycles on empty batches. |
+| `gold_refresh_interval` | 5 min | How often gold re-aggregates from silver. Sets the floor for gold freshness. | Reduce for fresher dashboards, but each cycle reads all of silver -- at large scales a refresh can take 30s+, so don't set the interval below the refresh duration. |
+| `max_files_per_trigger` | 50 | Files bronze processes per micro-batch (~122K rows/file, so 50 files = ~6.1M rows). Primary throughput cap. | Increase if `ingest_ratio < 0.95` (pipeline saturated). Decrease if bronze micro-batches are too large for executor memory. |
+| `run_duration` | 1800 | Total streaming window in seconds. Minimum useful duration is `gold_refresh_interval + benchmark_interval + round_time` (~7 min at defaults). For 5 rounds: `gold_refresh_interval + 5 * (benchmark_interval + round_time)`. | See [Scoring and Benchmarking](benchmarking.md) for a planning table. |
+| `benchmark_warmup` | 300s | Delay before first benchmark round. **Clamped to `gold_refresh_interval`** at runtime -- gold must complete at least one full refresh before benchmark rounds produce valid QpH. | Reduce only if you also reduce `gold_refresh_interval`. |
+| `benchmark_interval` | 300s | Time between benchmark rounds (measured from completion of previous round). **Clamped to `gold_refresh_interval`** at runtime -- intervals shorter than the gold cycle cause Q9 contention as rounds overlap with gold rewrites. | To get more rounds, increase `run_duration` instead of lowering the interval. |
+| `bronze_target_file_size_mb` | 512 | Target Iceberg data file size for bronze writes. | Reduce to 128-256 MB at small scales (< 10) where 512 MB files are never reached. |
+| `silver_target_file_size_mb` | 512 | Target Iceberg data file size for silver writes. | Same guidance as bronze. |
+| `gold_target_file_size_mb` | 128 | Target Iceberg data file size for gold writes. Smaller because gold is a compact aggregation table. | Rarely needs changing. |
+
+### In-Stream Benchmarking
+
+During the streaming window, Lakebench runs the full 8-query benchmark
+at regular intervals using the active query engine. The default schedule is:
+first round after 5 minutes of warmup, then every 5 minutes. Each round
+measures QpH, per-query latency, and gold-table freshness at the moment of
+query execution.
+
+The final continuous QpH is the **median** of all in-stream rounds. The
+terminal output shows a per-round summary table with QpH, per-query times,
+freshness, and Q9 contention status. The HTML report includes an "In-Stream
+Benchmark Rounds" section with the same data.
+
+If the run is too short for in-stream rounds, no benchmark runs and no QpH
+score is produced.
+
+For round count planning and the adaptive end-of-window guard, see
+[Scoring and Benchmarking](benchmarking.md).
+
 ### Continuous Mode Scoring
 
 Continuous mode produces a different set of scores than batch:
 
 | Score | Description |
 |---|---|
-| **data_freshness_seconds** | Worst-case gold table staleness. The primary score. |
+| **data_freshness_seconds** | Worst-case gold table staleness from streaming logs. |
+| **query_time_freshness_seconds** | Median gold staleness at Trino query time (when in-stream rounds ran). |
 | **sustained_throughput_rps** | Aggregate sustained rows/sec across all streaming stages. |
+| **composite_qph** | In-stream median QpH. |
+| **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |
 | **end_to_end_latency_ms** | Cumulative micro-batch processing latency bronze to gold. |
 | **total_rows_processed** | Total volume processed during the monitoring window. |
 
@@ -233,7 +295,7 @@ open lakebench-output/runs/run-*/report.html
 To generate a report from a previous run:
 
 ```bash
-lakebench report my-config.yaml
+lakebench report
 ```
 
 ## Executor Scaling

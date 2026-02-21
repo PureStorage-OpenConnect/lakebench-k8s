@@ -26,11 +26,11 @@ tuning, executor profiles, and version compatibility.
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 | Thrift-based catalog for Iceberg and Delta tables |
+| Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 | Thrift-based catalog for Iceberg tables |
 | Apache Polaris | 1.3.0-incubating | `apache/polaris:1.3.0-incubating` | REST-based Iceberg catalog with OAuth2 |
 
-Each recipe uses exactly one catalog. Hive supports both Iceberg and Delta
-table formats. Polaris supports Iceberg only. See
+Each recipe uses exactly one catalog. Both Hive and Polaris support Iceberg
+tables. See
 [Recipes](recipes.md) for valid combinations.
 
 **Hive prerequisites:** Stackable operators (commons, secret, listener, hive)
@@ -51,10 +51,8 @@ and troubleshooting.
 | Component | Default Version | Delivery | Role |
 |-----------|----------------|----------|------|
 | Apache Iceberg | 1.10.1 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12`) | Open table format with ACID transactions |
-| Delta Lake | 3.0.0 | Spark runtime JAR | Open table format (Hive catalog only) |
 
-Iceberg is the default and works with both catalogs. Delta is supported
-with the Hive catalog only.
+Iceberg is the supported table format and works with both catalogs (Hive and Polaris).
 
 ---
 
@@ -128,16 +126,14 @@ Which components are deployed for each recipe:
 
 | Recipe | Catalog | Format | Engine | Components Deployed |
 |--------|---------|--------|--------|---------------------|
-| `hive-iceberg-trino` | Hive | Iceberg | Trino | Postgres, Hive, Trino, Spark |
-| `hive-iceberg-spark` | Hive | Iceberg | Spark Thrift | Postgres, Hive, Spark Thrift, Spark |
-| `hive-iceberg-duckdb` | Hive | Iceberg | DuckDB | Postgres, Hive, DuckDB, Spark |
-| `hive-iceberg-none` | Hive | Iceberg | -- | Postgres, Hive, Spark |
-| `hive-delta-trino` | Hive | Delta | Trino | Postgres, Hive, Trino, Spark |
-| `hive-delta-none` | Hive | Delta | -- | Postgres, Hive, Spark |
-| `polaris-iceberg-trino` | Polaris | Iceberg | Trino | Postgres, Polaris, Trino, Spark |
-| `polaris-iceberg-spark` | Polaris | Iceberg | Spark Thrift | Postgres, Polaris, Spark Thrift, Spark |
-| `polaris-iceberg-duckdb` | Polaris | Iceberg | DuckDB | Postgres, Polaris, DuckDB, Spark |
-| `polaris-iceberg-none` | Polaris | Iceberg | -- | Postgres, Polaris, Spark |
+| `hive-iceberg-spark-trino` | Hive | Iceberg | Trino | Postgres, Hive, Trino, Spark |
+| `hive-iceberg-spark-thrift` | Hive | Iceberg | Spark Thrift | Postgres, Hive, Spark Thrift, Spark |
+| `hive-iceberg-spark-duckdb` | Hive | Iceberg | DuckDB | Postgres, Hive, DuckDB, Spark |
+| `hive-iceberg-spark-none` | Hive | Iceberg | -- | Postgres, Hive, Spark |
+| `polaris-iceberg-spark-trino` | Polaris | Iceberg | Trino | Postgres, Polaris, Trino, Spark |
+| `polaris-iceberg-spark-thrift` | Polaris | Iceberg | Spark Thrift | Postgres, Polaris, Spark Thrift, Spark |
+| `polaris-iceberg-spark-duckdb` | Polaris | Iceberg | DuckDB | Postgres, Polaris, DuckDB, Spark |
+| `polaris-iceberg-spark-none` | Polaris | Iceberg | -- | Postgres, Polaris, Spark |
 
 ---
 
@@ -163,8 +159,6 @@ architecture:
   table_format:
     iceberg:
       version: "1.10.1"
-    delta:
-      version: "3.0.0"
 ```
 
 See [Configuration](configuration.md) for the full YAML reference.

@@ -5,6 +5,44 @@ Common issues encountered when deploying and running Lakebench on Kubernetes
 
 ---
 
+## PostgreSQL PVC stuck in Pending
+
+**Symptom:** After `lakebench deploy`, the `lakebench-postgres-0` pod stays in
+`Pending`. Events show `waiting for a volume to be created` or `no persistent
+volumes available for this claim`.
+
+**Cause:** The cluster does not have a default StorageClass. PostgreSQL uses
+a PVC with no explicit `storageClassName`, which means Kubernetes looks for a
+StorageClass annotated with `storageclass.kubernetes.io/is-default-class: "true"`.
+Most managed Kubernetes distributions (EKS, GKE, AKS, OpenShift) include one by
+default, but self-managed clusters (kubeadm, bare metal) may not.
+
+**Diagnosis:**
+
+```bash
+# Check if any StorageClass is marked as default
+kubectl get storageclass -o wide
+# Look for "(default)" next to one of the class names
+
+# Check the PVC status
+kubectl get pvc -n <namespace> -l app=lakebench-postgres
+```
+
+**Fix:** Either create a default StorageClass for your cluster, or set the
+PostgreSQL storage class explicitly in your config:
+
+```yaml
+platform:
+  compute:
+    postgres:
+      storage_class: "your-storage-class"   # e.g., local-path, thin-csi, gp3
+```
+
+Then re-run `lakebench deploy`. The deploy command is idempotent -- it picks
+up where it left off.
+
+---
+
 ## "No space left on device" on silver-build
 
 **Symptom:** The silver-build Spark job fails with executor errors reporting
@@ -189,8 +227,8 @@ apache/polaris:1.3.0-incubating
 apache/polaris-admin-tool:1.3.0-incubating
 ```
 
-Note: `apache/polaris:1.3.0` (without the suffix) does not exist. Additionally,
-the Quarkus/SmallRye Config environment variable requires a double underscore:
+Note: `apache/polaris:1.3.0` (without the suffix) does not exist. The
+Quarkus/SmallRye Config environment variable also requires a double underscore:
 
 ```
 POLARIS_FEATURES__SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true
