@@ -341,6 +341,142 @@ back below capacity.
 
 ---
 
+## Tuning a Continuous Pipeline
+
+The continuous scorecard reveals imbalances between pipeline stages. This
+section walks through common patterns and how to fix them.
+
+### Reading the Stage Latency Profile
+
+The `stage_latency_profile` shows per-stage micro-batch processing latency
+in milliseconds. Compare each stage's latency to its trigger interval:
+
+| Stage | Trigger Interval | Healthy Latency |
+|---|---|---|
+| bronze | 30 seconds | < 30,000 ms |
+| silver | 60 seconds | < 60,000 ms |
+| gold | 5 minutes | < 300,000 ms |
+
+If a stage's latency exceeds its trigger interval, micro-batches pile up
+and freshness degrades. That stage is the bottleneck.
+
+### Ingest Ratio Above 1.0
+
+An `ingest_ratio` above 1.0 means bronze consumed more rows than the
+datagen estimate predicted. This typically happens because the row estimate
+(`scale * 1.5M`) was calibrated for batch mode. In continuous mode, 16 pods
+running for 30 minutes produce more data than the estimate expects.
+
+An ingest ratio of 1.0--1.4 with `pipeline_saturated: false` means the
+pipeline is keeping up -- the estimate is just conservative. The pipeline
+is only truly saturated when `ingest_ratio < 0.95` (data is being generated
+faster than bronze can ingest it).
+
+### Gold Re-Read Amplification
+
+Gold reads the entire silver table on every refresh cycle. With a 5-minute
+`gold_refresh_interval` and a 30-minute `run_duration`, gold executes 6
+refreshes. If silver has 93M rows, gold's `input_rows` will be
+approximately `93M * 6 = 558M` (or whatever fraction of silver was available
+at each refresh point).
+
+This is expected with `createOrReplace()` -- gold rewrites the whole table
+each cycle for consistency. The gold row count in the scorecard reflects
+total rows read across all refresh cycles, not unique rows.
+
+To reduce gold re-read amplification:
+- Increase `gold_refresh_interval` (fewer rewrites, higher staleness)
+- Decrease `run_duration` (fewer total cycles)
+
+### Reducing Data Freshness
+
+`data_freshness_seconds` is worst-case gold staleness. It is bounded below
+by `gold_refresh_interval` -- gold can never be fresher than its rewrite
+cycle.
+
+| Gold Refresh Interval | Best Achievable Freshness |
+|---|---|
+| 5 minutes | ~250--300 seconds |
+| 3 minutes | ~150--180 seconds |
+| 2 minutes | ~100--120 seconds |
+
+To lower freshness:
+1. Decrease `gold_refresh_interval`. This increases compute cost (more
+   silver full-table reads) and requires `benchmark_warmup` and
+   `benchmark_interval` to be at least as large as the gold interval.
+2. Add gold executors (`gold_refresh_executors`) to speed up each rewrite.
+
+### Stage-by-Stage Tuning
+
+**Bronze latency too high (> trigger interval):**
+- Increase `bronze_ingest_executors`. Bronze is I/O-bound (reading Parquet
+  from S3). More executors = more parallel reads.
+- Reduce `max_files_per_trigger` to process smaller batches (lower latency
+  per batch, more batches total).
+- Check if datagen `parallelism` is too high -- 16 pods writing at full
+  speed can overwhelm 3 bronze executors.
+
+**Silver latency too high (> trigger interval):**
+- Increase `silver_stream_executors`. Silver applies 5 column transforms
+  per micro-batch. It is CPU-bound at large batch sizes.
+- Increase `silver_trigger_interval` to process larger, less frequent
+  batches (better throughput, worse per-batch latency).
+
+**Gold latency too high (> refresh interval):**
+- Increase `gold_refresh_executors`. Gold reads the full silver table and
+  aggregates it. At large silver tables this is the slowest stage.
+- Increase `gold_refresh_interval` to give gold more time per cycle.
+  Trade-off: higher data freshness (more stale).
+
+### Example: Balancing a Scale-50 Continuous Run
+
+Starting point (imbalanced):
+
+```yaml
+# Bronze: 3 executors, 111s/batch latency (trigger: 30s) -- bottleneck
+# Silver: 10 executors, 53s/batch latency (trigger: 60s) -- healthy
+# Gold: 3 executors, 124s/batch latency (refresh: 5 min) -- healthy
+# Freshness: 275s (near the 5-min gold refresh floor)
+```
+
+Tuned configuration:
+
+```yaml
+platform:
+  compute:
+    spark:
+      bronze_ingest_executors: 6   # was 3 (auto) -- fix bronze bottleneck
+      silver_stream_executors: 10  # keep -- silver is balanced
+      gold_refresh_executors: 4    # slight bump for headroom
+
+architecture:
+  pipeline:
+    continuous:
+      gold_refresh_interval: "3 minutes"   # was 5 min -- lower freshness
+      benchmark_warmup: 300                # must be >= gold interval
+      benchmark_interval: 300              # must be >= gold interval
+      run_duration: 2700                   # 45 min -- more benchmark rounds
+```
+
+Expected result: bronze latency drops to ~55s/batch, data freshness
+improves to ~150--180s, and the longer run duration yields more benchmark
+rounds for trend analysis.
+
+### Diagnostic Checklist
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| `pipeline_saturated: true` | Bronze can't keep up with datagen | Add bronze executors or reduce datagen `parallelism` |
+| `ingest_ratio > 1.3` | Datagen estimate conservative | Not a real problem -- pipeline is keeping up |
+| `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
+| Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
+| Silver latency >> 60s | Too few silver executors | Increase `silver_stream_executors` |
+| Gold latency >> refresh interval | Silver table too large for gold executors | Increase `gold_refresh_executors` |
+| QpH dropping across rounds | Table growth degrading queries | Add Trino workers or memory |
+| Q9 contention > 20% | Benchmark rounds colliding with gold rewrites | Increase `gold_refresh_interval` or `benchmark_interval` |
+
+---
+
 ## Reading Results
 
 ### Metrics JSON
