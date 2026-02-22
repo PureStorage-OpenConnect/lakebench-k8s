@@ -4,6 +4,21 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.8] - 2026-02-21
+
+### Fixed
+- **scale_ratio formula was triple-counting data.** The batch scorecard's
+  `scale_ratio` used `total_data_processed_gb` (sum of bronze + silver + gold
+  inputs) divided by `approx_bronze_gb`. At scale 50 with three stages each
+  reading ~500 GB, this produced a ratio of ~3.0 instead of ~1.0. Now uses
+  only bronze stage input GB in the numerator.
+
+### Added
+- HTML report layout section in benchmarking docs -- describes every section
+  of the scorecard (verdict cards, bottleneck chart, data validity, stability,
+  freshness, contention, job tables, query performance, config, platform
+  metrics) and which sections appear in batch vs continuous mode.
+
 ## [1.0.7] - 2026-02-20
 
 ### Added
