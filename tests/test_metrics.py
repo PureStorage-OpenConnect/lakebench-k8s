@@ -2192,7 +2192,7 @@ class TestPipelineBenchmark:
         assert pb.compute_efficiency_gb_per_core_hour == pytest.approx(12.5)
 
     def test_scale_ratio(self):
-        """scale_ratio = total_gb / expected_gb from config."""
+        """scale_ratio uses only bronze input, not total across all stages."""
         now = datetime.now()
         stages = [
             StageMetrics(
@@ -2201,6 +2201,26 @@ class TestPipelineBenchmark:
                 engine="spark",
                 start_time=now,
                 end_time=now + timedelta(seconds=100),
+                elapsed_seconds=100.0,
+                success=True,
+                input_size_gb=95.0,
+            ),
+            StageMetrics(
+                stage_name="silver",
+                stage_type="batch",
+                engine="spark",
+                start_time=now + timedelta(seconds=100),
+                end_time=now + timedelta(seconds=200),
+                elapsed_seconds=100.0,
+                success=True,
+                input_size_gb=95.0,
+            ),
+            StageMetrics(
+                stage_name="gold",
+                stage_type="batch",
+                engine="spark",
+                start_time=now + timedelta(seconds=200),
+                end_time=now + timedelta(seconds=300),
                 elapsed_seconds=100.0,
                 success=True,
                 input_size_gb=95.0,
@@ -2216,6 +2236,7 @@ class TestPipelineBenchmark:
             config_snapshot={"approx_bronze_gb": 100.0},
         )
         pb.compute_aggregates()
+        # Should be 95/100 = 0.95, NOT 285/100 = 2.85 (old triple-count bug)
         assert pb.scale_ratio == pytest.approx(0.95)
 
     def test_to_dict(self):

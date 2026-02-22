@@ -537,10 +537,16 @@ class PipelineBenchmark:
                 self.total_data_processed_gb / total_core_hours
             )
 
-        # Scale verified ratio: actual GB / expected GB for this scale
+        # Scale verified ratio: bronze input GB / expected bronze GB for this scale.
+        # Uses only bronze input -- not total_data_processed_gb which sums all
+        # stages and would triple-count (bronze + silver + gold).
         expected_gb = self.config_snapshot.get("approx_bronze_gb", 0)
         if expected_gb > 0:
-            self.scale_ratio = self.total_data_processed_gb / expected_gb
+            bronze_stages = [s for s in self.stages if s.stage_name == "bronze"]
+            bronze_gb = (
+                bronze_stages[0].input_size_gb if bronze_stages else self.total_data_processed_gb
+            )
+            self.scale_ratio = bronze_gb / expected_gb
 
     def _compute_continuous_scores(self) -> None:
         """Compute continuous pipeline scores from streaming stage metrics."""
