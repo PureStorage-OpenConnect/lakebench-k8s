@@ -36,7 +36,7 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 | `total_data_processed_gb` | `sum(stage.input_size_gb)` | Total input data across all stages. |
 | `pipeline_throughput_gb_per_second` | `total_data_processed_gb / time_to_value_seconds` | Composite throughput across the whole pipeline. Higher is better. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Higher means better resource utilization. |
-| `scale_ratio` | `total_gb / approx_bronze_gb` | Data completeness check. A ratio below 0.95 means data generation or ingestion was incomplete, which invalidates cross-run comparisons. |
+| `scale_ratio` | `bronze_input_gb / approx_bronze_gb` | Data completeness check. Uses only bronze input -- not the total across all stages. A ratio below 0.95 means data generation or ingestion was incomplete, which invalidates cross-run comparisons. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
 
 ### Continuous Scores
@@ -421,6 +421,119 @@ lakebench report --summary --metrics <dir>        # custom metrics dir
 The summary output includes a per-stage table (elapsed time, data volume,
 throughput, executor count) and mode-appropriate scores -- time-to-value and
 throughput for batch, data freshness and sustained throughput for continuous.
+
+## HTML Report Layout
+
+The HTML scorecard (`lakebench report`) is organized in three layers: a verdict
+at the top, diagnostic charts in the middle, and raw evidence at the bottom.
+Some sections only appear in batch or continuous mode as noted below.
+
+### Header
+
+The header shows the deployment name, run ID, and an overall status badge:
+
+- **PASSED** (green) -- pipeline completed, data complete (scale/ingest ratio
+  0.95--1.05), all jobs succeeded, no failed queries.
+- **WARNING** (amber) -- pipeline completed but a ratio or job raised a
+  non-fatal flag.
+- **FAILED** (red) -- a stage or query failed, or data completeness is below
+  threshold.
+
+A one-line context banner below the header shows pipeline mode (Batch /
+Continuous), Customer360 scale factor, the recipe string
+(`catalog-format-engine-query_engine`), and wall-clock duration.
+
+### Summary Cards
+
+Five primary KPI cards. The cards change with pipeline mode:
+
+**Batch:** Time-to-Value, Data Processed (GB), Pipeline Throughput (GB/s), QpH,
+Job Status (pass/fail count).
+
+**Continuous:** Data Freshness, Sustained Throughput (rows/s), Compute
+Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
+CPU-hours.
+
+### Bottleneck Identification (batch and continuous)
+
+A stacked bar chart showing time and compute distribution across pipeline
+stages. Each stage is color-coded (bronze = amber, silver = indigo, gold =
+gold, query = cyan). The chart identifies which stage dominates elapsed time
+or compute. In continuous mode the chart uses micro-batch latency instead of
+elapsed seconds.
+
+### Data Validity (batch and continuous)
+
+Green/red status indicators for data quality checks:
+
+- **Scale Ratio** (batch) or **Ingest Ratio** (continuous) -- confirms the run
+  processed the expected data volume. Red when below 0.95 or above 1.05.
+- **Job Success** -- counts of passed and failed batch/streaming jobs.
+
+If any indicator is red, cross-run comparisons are unreliable.
+
+### Stability Over Time (continuous only)
+
+A dual-axis line chart showing QpH and gold data freshness trends across
+in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
+Helps identify performance degradation over time as table state grows.
+
+### Query-Time Freshness (continuous only)
+
+Shows median query-time freshness versus worst-case data freshness. The gap
+between these two values indicates how much freshness varies depending on
+when you query relative to the gold refresh cycle.
+
+### Q9 Contention (continuous only)
+
+A table of Q9 contention events across benchmark rounds. Q9 reads the gold
+table, which is rewritten every refresh cycle via `createOrReplace()`. This
+section shows when Q9 collided with a gold rewrite and whether retries were
+needed.
+
+### Batch Job Performance (batch only)
+
+A table with one row per Spark job (bronze-verify, silver-build,
+gold-finalize). Columns: job name, status, elapsed time, input/output data,
+throughput, executor count, cores, and total CPU seconds.
+
+### Streaming Pipeline (continuous only)
+
+A table with one row per streaming stage. Columns: job type, status, rows
+processed, throughput (rows/s), freshness, executor count, and compute
+resources.
+
+### Pipeline Stages (batch and continuous)
+
+Per-stage matrix table. In batch mode: GB in/out, rows in/out, GB/s, rows/s.
+In continuous mode: rows/s, micro-batch latency, freshness.
+
+### Query Performance (batch and continuous)
+
+Performance table for the 8-query engine benchmark. Columns: query name,
+display name, category, elapsed time, rows returned, and pass/fail status.
+The benchmark mode (power, throughput, composite), stream count, and final QpH
+appear in a summary row.
+
+### In-Stream Benchmark Rounds (continuous only)
+
+A transposed table with queries as rows and benchmark rounds as columns.
+Shows per-query times across rounds plus statistical measures (median, min,
+max). Each round header includes its QpH, gold freshness, and contention
+status.
+
+### Configuration
+
+Key configuration parameters extracted from the run: scale factor, S3 endpoint,
+executor specifications, catalog type, table format, and query engine settings.
+
+### Platform Metrics (when observability is enabled)
+
+Per-stage pod resource summary: CPU average/max, memory average/max, and pod
+counts. Infrastructure pods (Hive, Polaris, Trino, Postgres) are shown
+separately from pipeline pods.
+
+---
 
 ## Comparing Runs
 
