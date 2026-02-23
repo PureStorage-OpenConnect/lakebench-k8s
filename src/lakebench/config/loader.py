@@ -303,7 +303,7 @@ platform:
   #     # bronze_executors: null
   #     # silver_executors: null
   #     # gold_executors: null
-  #     ## Streaming job executor overrides (continuous mode)
+  #     ## Streaming job executor overrides (sustained mode)
   #     # bronze_ingest_executors: null
   #     # silver_stream_executors: null
   #     # gold_refresh_executors: null
@@ -379,7 +379,7 @@ architecture:
   #   #   catalog_name: lakehouse
 
   pipeline:
-    mode: batch                    # batch | continuous
+    mode: batch                    # batch | sustained
   #   pattern: medallion             # medallion | streaming | batch
   #   ## Medallion layer configuration
   #   medallion:
@@ -403,8 +403,8 @@ architecture:
   #         - name: customer_executive_dashboard
   #           partition_by: [date]
   #           aggregations: [daily_revenue, daily_engagement, churn_indicators, channel_performance]
-  #   ## Continuous/streaming settings (used when mode: continuous)
-  #   continuous:
+  #   ## Sustained pipeline settings (used when mode: sustained)
+  #   sustained:
   #     bronze_trigger_interval: "30 seconds"
   #     silver_trigger_interval: "60 seconds"
   #     gold_refresh_interval: "5 minutes"

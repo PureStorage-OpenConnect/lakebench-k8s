@@ -86,9 +86,9 @@ QpH score is `(number_of_queries / total_seconds) * 3600`.
 | `--stage` | `-s` | (all) | Run a specific stage only: `bronze-verify`, `silver-build`, or `gold-finalize` |
 | `--timeout` | `-t` | auto | Timeout per job in seconds. Defaults to `max(3600, scale * 60)` when omitted. |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline stages |
-| `--continuous` | | `false` | Run in continuous streaming mode. Overrides `pipeline.mode` in config. |
-| `--duration` | | config value | Streaming run duration in seconds (continuous mode only) |
-| `--generate` | | `false` | Run datagen before pipeline stages (batch mode only -- continuous mode always runs datagen automatically) |
+| `--sustained` | | `false` | Run in sustained streaming mode. Overrides `pipeline.mode` in config. |
+| `--duration` | | config value | Streaming run duration in seconds (sustained mode only) |
+| `--generate` | | `false` | Run datagen before pipeline stages (batch mode only -- sustained mode always runs datagen automatically) |
 
 ### Examples
 
@@ -125,25 +125,25 @@ lakebench run my-config.yaml --generate --timeout 7200
 ## Continuous Mode
 
 Continuous mode runs a streaming pipeline instead of batch. Set it in the
-config file or activate it with the `--continuous` CLI flag:
+config file or activate it with the `--sustained` CLI flag:
 
 ```yaml
 # In your config YAML:
 architecture:
   pipeline:
-    mode: continuous              # batch | continuous
+    mode: sustained              # batch | sustained
 ```
 
 ```bash
 # Or as a one-off override:
-lakebench run my-config.yaml --continuous
+lakebench run my-config.yaml --sustained
 ```
 
-When `pipeline.mode` is set to `continuous` in the config, `lakebench run`
+When `pipeline.mode` is set to `sustained` in the config, `lakebench run`
 uses the streaming pipeline automatically -- no CLI flag needed. The
-`--continuous` flag still works as an override for one-off runs.
+`--sustained` flag still works as an override for one-off runs.
 
-In continuous mode, three streaming Spark jobs run concurrently:
+In sustained mode, three streaming Spark jobs run concurrently:
 
 ```
 bronze-ingest + silver-stream + gold-refresh  (concurrent)
@@ -193,7 +193,7 @@ contention events per round.
 ```yaml
 architecture:
   pipeline:
-    continuous:
+    sustained:
       bronze_trigger_interval: "30 seconds"
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
@@ -207,7 +207,7 @@ architecture:
 Override the run duration on the command line:
 
 ```bash
-lakebench run my-config.yaml --continuous --duration 3600
+lakebench run my-config.yaml --sustained --duration 3600
 ```
 
 ### Tuning Reference
@@ -233,7 +233,7 @@ first round after 5 minutes of warmup, then every 5 minutes. Each round
 measures QpH, per-query latency, and gold-table freshness at the moment of
 query execution.
 
-The final continuous QpH is the **median** of all in-stream rounds. The
+The final sustained QpH is the **median** of all in-stream rounds. The
 terminal output shows a per-round summary table with QpH, per-query times,
 freshness, and Q9 contention status. The HTML report includes an "In-Stream
 Benchmark Rounds" section with the same data.
@@ -279,7 +279,7 @@ Key fields in the metrics JSON:
   executor count, CPU-seconds, memory allocated.
 - `benchmark` -- Query benchmark results: QpH, per-query timing and row counts.
 - `pipeline_benchmark.scores` -- Aggregate scores: `time_to_value_seconds`
-  (batch) or `data_freshness_seconds` (continuous), pipeline throughput.
+  (batch) or `data_freshness_seconds` (sustained), pipeline throughput.
 
 ### HTML Report
 

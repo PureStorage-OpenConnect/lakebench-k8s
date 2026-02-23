@@ -171,7 +171,7 @@ def _streaming_concurrent_budget(
 ) -> dict[JobType, int]:
     """Compute max executor count per streaming job for concurrent execution.
 
-    In continuous mode, datagen + 3 streaming jobs share the cluster.
+    In sustained mode, datagen + 3 streaming jobs share the cluster.
     Divides the available CPU (after Trino + infra + datagen) among
     streaming jobs proportionally to their uncapped demand.
 
@@ -282,7 +282,7 @@ class JobType(Enum):
     SILVER_BUILD = "silver-build"
     GOLD_FINALIZE = "gold-finalize"
 
-    # Streaming jobs (continuous pipeline)
+    # Streaming jobs (sustained pipeline)
     BRONZE_INGEST = "bronze-ingest"
     SILVER_STREAM = "silver-stream"
     GOLD_REFRESH = "gold-refresh"
@@ -991,21 +991,21 @@ class SparkJobManager:
 
         # Streaming-specific env vars
         if job_type is not None and job_type in _STREAMING_JOB_TYPES:
-            continuous = cfg.architecture.pipeline.continuous
-            checkpoint_base = continuous.checkpoint_base
+            sustained = cfg.architecture.pipeline.sustained
+            checkpoint_base = sustained.checkpoint_base
 
             # Per-job trigger interval and checkpoint location
             trigger_map = {
                 JobType.BRONZE_INGEST: (
-                    continuous.bronze_trigger_interval,
+                    sustained.bronze_trigger_interval,
                     f"s3a://{s3.buckets.bronze}/{checkpoint_base}/bronze-ingest/",
                 ),
                 JobType.SILVER_STREAM: (
-                    continuous.silver_trigger_interval,
+                    sustained.silver_trigger_interval,
                     f"s3a://{s3.buckets.silver}/{checkpoint_base}/silver-stream/",
                 ),
                 JobType.GOLD_REFRESH: (
-                    continuous.gold_refresh_interval,
+                    sustained.gold_refresh_interval,
                     f"s3a://{s3.buckets.gold}/{checkpoint_base}/gold-refresh/",
                 ),
             }
@@ -1013,9 +1013,9 @@ class SparkJobManager:
 
             # Per-job target file size (MB → bytes for Iceberg property)
             target_file_size_map = {
-                JobType.BRONZE_INGEST: continuous.bronze_target_file_size_mb,
-                JobType.SILVER_STREAM: continuous.silver_target_file_size_mb,
-                JobType.GOLD_REFRESH: continuous.gold_target_file_size_mb,
+                JobType.BRONZE_INGEST: sustained.bronze_target_file_size_mb,
+                JobType.SILVER_STREAM: sustained.silver_target_file_size_mb,
+                JobType.GOLD_REFRESH: sustained.gold_target_file_size_mb,
             }
             target_file_size_bytes = str(target_file_size_map[job_type] * 1024 * 1024)
 
@@ -1026,7 +1026,7 @@ class SparkJobManager:
                     {"name": "CHECKPOINT_LOCATION", "value": checkpoint_location},
                     {
                         "name": "MAX_FILES_PER_TRIGGER",
-                        "value": str(continuous.max_files_per_trigger),
+                        "value": str(sustained.max_files_per_trigger),
                     },
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]

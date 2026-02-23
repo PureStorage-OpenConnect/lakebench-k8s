@@ -38,7 +38,7 @@ Set `observability.enabled: true` to deploy the stack. All sub-flags (`prometheu
 
 Every `lakebench run` writes a `metrics.json` file to `lakebench-output/runs/run-<id>/`. No setup is needed. The file contains:
 
-- **Pipeline benchmark scores** -- time-to-value, throughput, and efficiency for batch runs; freshness, sustained throughput, and latency profile for continuous runs.
+- **Pipeline benchmark scores** -- time-to-value, throughput, and efficiency for batch runs; freshness, sustained throughput, and latency profile for sustained runs.
 - **Per-stage metrics** -- elapsed time, input/output sizes, row counts, throughput, and allocated executor resources for each pipeline stage (bronze, silver, gold, query).
 - **Query results** -- per-query elapsed time, row counts, and pass/fail status from the benchmark.
 - **Config snapshot** -- the full configuration used for the run, enabling cross-run comparison.
@@ -114,7 +114,7 @@ lakebench report --list
 
 The report includes:
 
-- **Summary cards** -- total time, job pass/fail counts, data processed, throughput, QpH score, and pipeline-level scores (time-to-value for batch, data freshness for continuous).
+- **Summary cards** -- total time, job pass/fail counts, data processed, throughput, QpH score, and pipeline-level scores (time-to-value for batch, data freshness for sustained).
 - **Pipeline benchmark table** -- the stage matrix showing per-stage elapsed time, input/output sizes, throughput, executor allocation, and status.
 - **Job performance table** -- per-Spark-job duration, input size, output rows, throughput, and CPU-seconds allocated.
 - **Query breakdown** -- per-query duration, rows returned, and pass/fail status.

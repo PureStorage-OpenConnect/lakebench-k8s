@@ -931,7 +931,7 @@ class TestStreamingThroughputEnvVars:
         config = _make_config(
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "max_files_per_trigger": 100,
                         "bronze_target_file_size_mb": 256,
                     },
@@ -950,7 +950,7 @@ class TestStreamingThroughputEnvVars:
         config = _make_config(
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "silver_target_file_size_mb": 1024,
                     },
                 },
@@ -967,7 +967,7 @@ class TestStreamingThroughputEnvVars:
         config = _make_config(
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "gold_target_file_size_mb": 64,
                     },
                 },
