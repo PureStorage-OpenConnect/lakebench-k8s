@@ -263,13 +263,9 @@ class ReportGenerator:
         # snapshot so the chart reflects actual cluster resource usage.
         cs = metrics.config_snapshot or {}
         trino_cfg = cs.get("trino", {})
-        trino_total_cores = float(
-            trino_cfg.get("coordinator", {}).get("cpu", 0)
-        ) + int(
+        trino_total_cores = float(trino_cfg.get("coordinator", {}).get("cpu", 0)) + int(
             trino_cfg.get("worker", {}).get("replicas", 0)
-        ) * float(
-            trino_cfg.get("worker", {}).get("cpu", 0)
-        )
+        ) * float(trino_cfg.get("worker", {}).get("cpu", 0))
 
         stage_data = []
         for s in pb.stages:
@@ -317,8 +313,11 @@ class ReportGenerator:
         dom_pct = dominant["weight_pct"] if is_sustained else dominant["cpu_pct"]
         if (
             len(sorted_by) >= 2
-            and abs(sorted_by[0]["weight_pct" if is_sustained else "cpu_pct"]
-                    - sorted_by[1]["weight_pct" if is_sustained else "cpu_pct"]) < 10
+            and abs(
+                sorted_by[0]["weight_pct" if is_sustained else "cpu_pct"]
+                - sorted_by[1]["weight_pct" if is_sustained else "cpu_pct"]
+            )
+            < 10
         ):
             callout = f"{'Latency' if is_sustained else 'Compute'} is balanced across stages (no single bottleneck)."
         elif dom_pct >= 50:
