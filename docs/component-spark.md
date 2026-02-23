@@ -209,7 +209,7 @@ The formula in `_scale_executor_count()`:
 | `silver-stream` | 4 | 8 | 20 |
 | `gold-refresh` | 2 | 4 | 10 |
 
-In continuous mode, streaming jobs share the cluster concurrently with datagen.
+In sustained mode, streaming jobs share the cluster concurrently with datagen.
 A budget calculation (`_streaming_concurrent_budget()`) proportionally caps each
 streaming job's executor count based on available cluster CPU after subtracting
 Trino, Hive, PostgreSQL, and datagen.

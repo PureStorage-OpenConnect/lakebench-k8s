@@ -122,12 +122,12 @@ class PipelineMode(str, Enum):
 
     - batch: sequential medallion jobs
       (bronze-verify -> silver-build -> gold-finalize)
-    - continuous: concurrent streaming jobs
+    - sustained: concurrent streaming jobs with periodic gold recomputation
       (bronze-ingest + silver-stream + gold-refresh)
     """
 
     BATCH = "batch"
-    CONTINUOUS = "continuous"
+    SUSTAINED = "sustained"
 
 
 class ReportFormat(str, Enum):
@@ -541,8 +541,8 @@ class MedallionConfig(BaseModel):
     gold: GoldLayerConfig = Field(default_factory=GoldLayerConfig)
 
 
-class ContinuousConfig(BaseModel):
-    """Continuous processing pattern configuration.
+class SustainedConfig(BaseModel):
+    """Sustained pipeline configuration.
 
     Controls trigger intervals for streaming jobs, run duration,
     checkpoint path prefix in S3, and throughput tuning knobs.
@@ -603,7 +603,7 @@ class ContinuousConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _benchmark_ge_gold_refresh(self) -> ContinuousConfig:
+    def _benchmark_ge_gold_refresh(self) -> SustainedConfig:
         """Clamp benchmark_warmup and benchmark_interval to gold_refresh_interval.
 
         Gold rewrites the entire table each refresh cycle via
@@ -642,7 +642,42 @@ class ProcessingConfig(BaseModel):
     pattern: ProcessingPattern = ProcessingPattern.MEDALLION
     mode: PipelineMode = PipelineMode.BATCH
     medallion: MedallionConfig = Field(default_factory=MedallionConfig)
-    continuous: ContinuousConfig = Field(default_factory=ContinuousConfig)
+    sustained: SustainedConfig = Field(default_factory=SustainedConfig)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_continuous_key(cls, data: object) -> object:
+        """Accept deprecated ``continuous`` key as alias for ``sustained``."""
+        if not isinstance(data, dict):
+            return data
+        if "continuous" in data:
+            import warnings
+
+            warnings.warn(
+                "'pipeline.continuous' is deprecated, use 'pipeline.sustained' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if "sustained" not in data:
+                data["sustained"] = data.pop("continuous")
+            else:
+                data.pop("continuous")
+        return data
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _migrate_continuous_mode(cls, v: object) -> object:
+        """Accept deprecated ``continuous`` value as alias for ``sustained``."""
+        if v == "continuous":
+            import warnings
+
+            warnings.warn(
+                "pipeline mode 'continuous' is deprecated, use 'sustained' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return "sustained"
+        return v
 
 
 class DatagenCheckpointConfig(BaseModel):

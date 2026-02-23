@@ -106,7 +106,7 @@ class ReportGenerator:
 
         Checks:
         - Pipeline completed without crash
-        - Continuous: ingest_ratio >= 0.95 (pipeline kept pace with datagen)
+        - Sustained: ingest_ratio >= 0.95 (pipeline kept pace with datagen)
         - Batch: scale_ratio >= 0.95 (all expected data was processed)
         - All jobs / streaming stages succeeded
         - No failed benchmark queries
@@ -118,21 +118,31 @@ class ReportGenerator:
             reasons.append("Pipeline crashed or was interrupted")
 
         pb = metrics.pipeline_benchmark
-        is_cont = self._is_continuous(metrics)
+        is_sustained = self._is_sustained(metrics)
 
         # Data completeness
         if pb:
-            if is_cont and pb.ingest_ratio < 0.95:
+            if is_sustained and pb.ingest_ratio < 0.95:
                 reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 (pipeline saturated)")
-            elif is_cont and pb.ingest_ratio > 1.05:
+            elif is_sustained and pb.ingest_ratio > 1.05:
                 warnings.append(
                     f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
                 )
-            if not is_cont and 0 < pb.scale_ratio < 0.95:
+            if not is_sustained and 0 < pb.scale_ratio < 0.95:
                 reasons.append(f"Scale ratio {pb.scale_ratio:.1%} < 95% (incomplete data)")
 
+        # Freshness -- sustained mode only
+        if is_sustained and pb and pb.data_freshness_seconds is not None:
+            run_dur = metrics.total_elapsed_seconds or 1.0
+            freshness_pct = pb.data_freshness_seconds / run_dur
+            if freshness_pct > 0.5:
+                reasons.append(
+                    f"Gold freshness {pb.data_freshness_seconds:,.0f}s "
+                    f"({freshness_pct:.0%} of run duration -- gold was stale for most of the run)"
+                )
+
         # Job / streaming success
-        if is_cont and metrics.streaming:
+        if is_sustained and metrics.streaming:
             failed = [s.job_name for s in metrics.streaming if not s.success]
             if failed:
                 reasons.append(f"Streaming jobs failed: {', '.join(failed)}")
@@ -153,16 +163,20 @@ class ReportGenerator:
 
         return (len(reasons) == 0, reasons, warnings)
 
-    def _is_continuous(self, metrics: PipelineMetrics) -> bool:
-        """Return True if this run used the continuous/streaming pipeline."""
+    def _is_sustained(self, metrics: PipelineMetrics) -> bool:
+        """Return True if this run used the sustained/streaming pipeline.
+
+        Accepts both ``"sustained"`` (current) and ``"continuous"`` (legacy
+        metrics.json files) for backward compatibility.
+        """
         if metrics.pipeline_benchmark:
-            return metrics.pipeline_benchmark.pipeline_mode == "continuous"
+            return metrics.pipeline_benchmark.pipeline_mode in ("sustained", "continuous")
         return bool(metrics.streaming)
 
     def _generate_run_context(self, metrics: PipelineMetrics) -> str:
         """Generate a one-line run context banner below the header."""
         cs = metrics.config_snapshot or {}
-        mode = "Continuous" if self._is_continuous(metrics) else "Batch"
+        mode = "Sustained" if self._is_sustained(metrics) else "Batch"
         scale = cs.get("scale", "-")
         catalog = cs.get("catalog", "-")
         table_fmt = cs.get("table_format", "-")
@@ -183,8 +197,8 @@ class ReportGenerator:
         </div>
         """
 
-    def _generate_continuous_detail_cards(self, pb) -> str:
-        """Generate detail cards for Pipeline Stages section (continuous only).
+    def _generate_sustained_detail_cards(self, pb) -> str:
+        """Generate detail cards for Pipeline Stages section (sustained mode only).
 
         Shows Ingest Ratio below the stage table.  Compute Efficiency and
         Total CPU-hours are now in the Layer 1 summary cards.
@@ -238,19 +252,36 @@ class ReportGenerator:
         if not pb or not pb.stages:
             return ""
 
-        is_cont = self._is_continuous(metrics)
+        is_sustained = self._is_sustained(metrics)
 
-        # For continuous mode, use latency_ms as the weight (stages run
+        # For sustained mode, use latency_ms as the weight (stages run
         # concurrently so elapsed times are similar).  For batch, use
         # elapsed_seconds.
+        #
+        # Trino CPU: the query stage has executor_count/cores == 0 because
+        # it runs on Trino, not Spark.  Pull Trino pod CPU from the config
+        # snapshot so the chart reflects actual cluster resource usage.
+        cs = metrics.config_snapshot or {}
+        trino_cfg = cs.get("trino", {})
+        trino_total_cores = float(
+            trino_cfg.get("coordinator", {}).get("cpu", 0)
+        ) + int(
+            trino_cfg.get("worker", {}).get("replicas", 0)
+        ) * float(
+            trino_cfg.get("worker", {}).get("cpu", 0)
+        )
+
         stage_data = []
         for s in pb.stages:
-            if s.stage_name in ("datagen",) and is_cont:
+            if s.stage_name in ("datagen",) and is_sustained:
                 continue
-            cpu_sec = s.executor_count * s.executor_cores * s.elapsed_seconds
+            if s.stage_name == "query" and trino_total_cores > 0:
+                cpu_sec = trino_total_cores * s.elapsed_seconds
+            else:
+                cpu_sec = s.executor_count * s.executor_cores * s.elapsed_seconds
             weight = (
                 s.latency_ms
-                if (is_cont and s.latency_ms is not None and s.latency_ms > 0)
+                if (is_sustained and s.latency_ms is not None and s.latency_ms > 0)
                 else s.elapsed_seconds
             )
             stage_data.append(
@@ -272,33 +303,44 @@ class ReportGenerator:
             d["weight_pct"] = d["weight"] / total_weight * 100
             d["cpu_pct"] = d["cpu_sec"] / total_cpu * 100
 
-        # Identify bottleneck
-        dominant = max(stage_data, key=lambda d: d["cpu_pct"])
-        sorted_by_cpu = sorted(stage_data, key=lambda d: d["cpu_pct"], reverse=True)
+        # Identify bottleneck -- in sustained mode latency is the primary
+        # dimension (stages run concurrently); in batch mode use compute.
+        if is_sustained:
+            dominant = max(stage_data, key=lambda d: d["weight_pct"])
+            sorted_by = sorted(stage_data, key=lambda d: d["weight_pct"], reverse=True)
+            dim_label = "latency"
+        else:
+            dominant = max(stage_data, key=lambda d: d["cpu_pct"])
+            sorted_by = sorted(stage_data, key=lambda d: d["cpu_pct"], reverse=True)
+            dim_label = "compute"
+
+        dom_pct = dominant["weight_pct"] if is_sustained else dominant["cpu_pct"]
         if (
-            len(sorted_by_cpu) >= 2
-            and abs(sorted_by_cpu[0]["cpu_pct"] - sorted_by_cpu[1]["cpu_pct"]) < 10
+            len(sorted_by) >= 2
+            and abs(sorted_by[0]["weight_pct" if is_sustained else "cpu_pct"]
+                    - sorted_by[1]["weight_pct" if is_sustained else "cpu_pct"]) < 10
         ):
-            callout = "Compute is balanced across stages (no single bottleneck)."
-        elif dominant["cpu_pct"] >= 60:
+            callout = f"{'Latency' if is_sustained else 'Compute'} is balanced across stages (no single bottleneck)."
+        elif dom_pct >= 50:
             callout = (
-                f"{dominant['name'].capitalize()} consumed {dominant['cpu_pct']:.0f}% "
-                f"of total compute and {dominant['weight_pct']:.0f}% of "
-                f"{'latency' if is_cont else 'wall-clock time'}."
+                f"{dominant['name'].capitalize()} consumed {dominant['weight_pct']:.0f}% "
+                f"of {'latency' if is_sustained else 'wall-clock time'} and "
+                f"{dominant['cpu_pct']:.0f}% of compute."
             )
         else:
             callout = (
                 f"{dominant['name'].capitalize()} is the largest stage at "
-                f"{dominant['cpu_pct']:.0f}% of compute."
+                f"{dom_pct:.0f}% of {dim_label}."
             )
 
-        # Stacked bar (pure CSS)
+        # Stacked bar -- always shows CPU share (the resource dimension
+        # common to all stages including Trino query).
         bar_segments = []
         for d in stage_data:
             color = self._STAGE_COLORS.get(d["name"], "#94a3b8")
             bar_segments.append(
-                f'<div style="width: {d["cpu_pct"]:.1f}%; background: {color}; '
-                f'height: 28px; display: inline-block;" '
+                f'<div style="flex: {d["cpu_pct"]:.2f}; background: {color}; '
+                f'height: 28px; min-width: 0;" '
                 f'title="{d["name"]}: {d["cpu_pct"]:.1f}% CPU"></div>'
             )
 
@@ -312,10 +354,10 @@ class ReportGenerator:
                 f"{d['name']} ({d['cpu_pct']:.0f}%)</span>"
             )
 
-        weight_col = "Latency" if is_cont else "Time (s)"
+        weight_col = "Latency" if is_sustained else "Time (s)"
         table_rows = ""
         for d in stage_data:
-            if is_cont:
+            if is_sustained:
                 weight_str = _format_duration_ms(d["weight"])
             else:
                 weight_str = f"{d['weight']:,.0f}s"
@@ -335,7 +377,7 @@ class ReportGenerator:
             <p style="margin-bottom: 1rem; color: var(--text-muted); font-style: italic;">
                 {callout}
             </p>
-            <div style="width: 100%; border-radius: 4px; overflow: hidden; font-size: 0; margin-bottom: 0.75rem;">
+            <div style="display: flex; width: 100%; border-radius: 4px; overflow: hidden; margin-bottom: 0.75rem;">
                 {bar_html}
             </div>
             <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 1rem;">
@@ -365,12 +407,12 @@ class ReportGenerator:
         trusted for cross-run comparison.
         """
         pb = metrics.pipeline_benchmark
-        is_cont = self._is_continuous(metrics)
+        is_sustained = self._is_sustained(metrics)
 
         indicators: list[tuple[str, str, str]] = []  # (label, status_class, value)
 
         # Scale Ratio / Ingest Ratio
-        if is_cont and pb:
+        if is_sustained and pb:
             ratio = pb.ingest_ratio
             if ratio < 0.95:
                 indicators.append(("Ingest Ratio", "status-failed", f"{ratio:.2f} SATURATED"))
@@ -393,7 +435,7 @@ class ReportGenerator:
                 indicators.append(("Scale Ratio", "status-success", f"{ratio:.1%} Complete"))
 
         # Job success
-        if is_cont and metrics.streaming:
+        if is_sustained and metrics.streaming:
             total = len(metrics.streaming)
             passed = sum(1 for s in metrics.streaming if s.success)
             cls = "status-success" if passed == total else "status-failed"
@@ -463,7 +505,7 @@ class ReportGenerator:
         """
 
     # ------------------------------------------------------------------
-    # Layer 2: Stability & Contention (continuous only)
+    # Layer 2: Stability & Contention (sustained mode only)
     # ------------------------------------------------------------------
 
     def _render_line_chart_svg(
@@ -590,11 +632,11 @@ class ReportGenerator:
         )
 
     def _generate_stability_section(self, metrics: PipelineMetrics) -> str:
-        """Generate stability over time section (Layer 2, continuous only).
+        """Generate stability over time section (Layer 2, sustained mode only).
 
         Shows QpH and freshness trends across in-stream benchmark rounds.
         """
-        if not self._is_continuous(metrics):
+        if not self._is_sustained(metrics):
             return ""
 
         pb = metrics.pipeline_benchmark
@@ -663,7 +705,7 @@ class ReportGenerator:
         with a gap analysis call-out.
         """
         pb = metrics.pipeline_benchmark
-        if not pb or pb.pipeline_mode != "continuous":
+        if not pb or not self._is_sustained(metrics):
             return ""
         if pb.query_time_freshness_seconds <= 0 or not pb.data_freshness_seconds:
             return ""
@@ -708,11 +750,11 @@ class ReportGenerator:
         """
 
     def _generate_contention_section(self, metrics: PipelineMetrics) -> str:
-        """Generate Q9 contention map (Layer 2, continuous only).
+        """Generate Q9 contention map (Layer 2, sustained mode only).
 
         Shows Q9 contention events across benchmark rounds.
         """
-        if not self._is_continuous(metrics):
+        if not self._is_sustained(metrics):
             return ""
 
         pb = metrics.pipeline_benchmark
@@ -825,7 +867,7 @@ class ReportGenerator:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LakeBench Scorecard - {metrics.deployment_name}</title>
+    <title>Lakebench Scorecard - {metrics.deployment_name}</title>
     <style>
         :root {{
             --primary: #2563eb;
@@ -1024,7 +1066,7 @@ class ReportGenerator:
 <body>
     <div class="container">
         <header>
-            <h1>LakeBench Scorecard</h1>
+            <h1>Lakebench Scorecard</h1>
             <div class="subtitle">
                 Deployment: <strong>{metrics.deployment_name}</strong> |
                 Run ID: <code class="mono">{metrics.run_id}</code> |
@@ -1080,15 +1122,15 @@ class ReportGenerator:
     ) -> str:
         """Generate summary cards HTML.
 
-        Continuous mode shows streaming-specific KPIs.
+        Sustained mode shows streaming-specific KPIs.
         Batch mode shows the original batch KPIs.
         """
-        if self._is_continuous(metrics):
-            return self._generate_continuous_summary(metrics)
+        if self._is_sustained(metrics):
+            return self._generate_sustained_summary(metrics)
         return self._generate_batch_summary(metrics)
 
-    def _generate_continuous_summary(self, metrics: PipelineMetrics) -> str:
-        """Generate summary cards for continuous/streaming mode.
+    def _generate_sustained_summary(self, metrics: PipelineMetrics) -> str:
+        """Generate summary cards for sustained/streaming mode.
 
         Five primary cards (the scores users compare across runs) plus a
         smaller metadata row with contextual info.
@@ -1301,7 +1343,7 @@ class ReportGenerator:
     ) -> str:
         """Generate batch jobs table HTML.
 
-        Returns empty string when no batch jobs exist (continuous mode).
+        Returns empty string when no batch jobs exist (sustained mode).
         """
         if not metrics.jobs:
             return ""
@@ -1671,7 +1713,7 @@ class ReportGenerator:
         the viewport and naturally groups the comparison users want --
         "how did this query perform across rounds?"
 
-        Only renders when benchmark_rounds is non-empty (continuous mode).
+        Only renders when benchmark_rounds is non-empty (sustained mode).
         Batch reports are unaffected.
         """
         if not metrics.benchmark_rounds:
@@ -1815,8 +1857,8 @@ class ReportGenerator:
     def _generate_pipeline_score_cards(self, metrics: PipelineMetrics) -> str:
         """Generate pipeline benchmark score cards for the batch summary.
 
-        Continuous mode uses _generate_continuous_summary() and
-        _generate_continuous_detail_cards() instead -- this method is
+        Sustained mode uses _generate_sustained_summary() and
+        _generate_sustained_detail_cards() instead -- this method is
         only called from _generate_batch_summary().
         """
         pb = metrics.pipeline_benchmark
@@ -1861,7 +1903,7 @@ class ReportGenerator:
             return ""
 
         rows = []
-        is_continuous = pb.pipeline_mode == "continuous"
+        is_sustained = self._is_sustained(metrics)
 
         for stage in pb.stages:
             status_class = "status-success" if stage.success else "status-failed"
@@ -1901,7 +1943,7 @@ class ReportGenerator:
             else:
                 cpu_hrs = "-"
 
-            if is_continuous:
+            if is_sustained:
                 rows.append(f"""
                 <tr>
                     <td><strong>{stage.stage_name}</strong></td>
@@ -1938,7 +1980,7 @@ class ReportGenerator:
                 </tr>
                 """)
 
-        if is_continuous:
+        if is_sustained:
             section_title = "Pipeline Stages"
             freshness_str = (
                 f"{pb.data_freshness_seconds:.1f}s"
@@ -1964,7 +2006,7 @@ class ReportGenerator:
                         <th title="executor_count x cores x elapsed / 3600">CPU-hours</th>
                         <th>QpH</th>
                         <th>Status</th>"""
-            detail_cards = self._generate_continuous_detail_cards(pb)
+            detail_cards = self._generate_sustained_detail_cards(pb)
         else:
             section_title = "Pipeline Benchmark"
             summary = (

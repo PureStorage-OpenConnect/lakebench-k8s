@@ -156,7 +156,7 @@ def _print_pipeline_scorecard(
 
     # Scores section
     scores: list[str] = []
-    if pb.pipeline_mode == "continuous":
+    if pb.pipeline_mode in ("sustained", "continuous"):
         if pb.data_freshness_seconds > 0:
             scores.append(f"  Freshness:      {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
@@ -232,7 +232,7 @@ def _print_report_summary(metrics) -> None:
 
     # Scores
     scores: list[str] = []
-    if pb.pipeline_mode == "continuous":
+    if pb.pipeline_mode in ("sustained", "continuous"):
         if pb.data_freshness_seconds > 0:
             scores.append(f"Freshness:       {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
@@ -1550,8 +1550,9 @@ def deploy(
             )
 
         success_msg += (
-            "\n\nNext: [bold]lakebench generate[/bold]  to create test data"
-            "\n      [bold]lakebench status[/bold]    to check deployment"
+            "\n\nNext: [bold]lakebench generate[/bold]      to create test data"
+            "\n      [bold]lakebench run --generate[/bold]  to generate data and run the pipeline"
+            "\n      [bold]lakebench status[/bold]          to check deployment"
         )
 
         console.print(
@@ -2311,11 +2312,19 @@ def run(
             help="Skip the query benchmark after pipeline completion",
         ),
     ] = False,
+    sustained: Annotated[
+        bool,
+        typer.Option(
+            "--sustained",
+            help="Run in sustained streaming mode (bronze-ingest → silver-stream → gold-refresh)",
+        ),
+    ] = False,
     continuous: Annotated[
         bool,
         typer.Option(
             "--continuous",
-            help="Run in continuous streaming mode (bronze-ingest → silver-stream → gold-refresh)",
+            help="Deprecated alias for --sustained",
+            hidden=True,
         ),
     ] = False,
     duration: Annotated[
@@ -2329,7 +2338,7 @@ def run(
         bool,
         typer.Option(
             "--generate",
-            help="Run datagen before pipeline stages (batch mode only; continuous always runs datagen)",
+            help="Run datagen before pipeline stages (batch mode only; sustained always runs datagen)",
         ),
     ] = False,
 ) -> None:
@@ -2342,9 +2351,9 @@ def run(
     Use --skip-benchmark to skip the benchmark stage.
 
     With --generate (batch mode), generates data first, then runs the full
-    pipeline. Continuous mode always runs datagen automatically.
+    pipeline. Sustained mode always runs datagen automatically.
 
-    With --continuous, runs the streaming pipeline instead:
+    With --sustained, runs the streaming pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
     and gold-refresh as concurrent streaming jobs. Monitors for
     the configured duration, then stops streaming and runs benchmark.
@@ -2397,10 +2406,10 @@ def run(
     # Preflight: verify infrastructure is deployed and ready
     _run_preflight_infra_check(cfg)
 
-    # Branch: continuous streaming pipeline (CLI flag overrides config)
-    use_continuous = continuous or cfg.architecture.pipeline.mode == "continuous"
-    if use_continuous:
-        _run_continuous(cfg, config_file, timeout, skip_benchmark, duration)
+    # Branch: sustained streaming pipeline (CLI flag overrides config)
+    use_sustained = sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
+    if use_sustained:
+        _run_sustained(cfg, config_file, timeout, skip_benchmark, duration)
         return
 
     console.print(
@@ -3262,14 +3271,14 @@ def _print_rounds_summary(console, rounds: list) -> None:
     console.print(f"  {' | '.join(parts)}")
 
 
-def _run_continuous(
+def _run_sustained(
     cfg,
     config_file: Path,
     timeout: int,
     skip_benchmark: bool,
     duration: int | None,
 ) -> None:
-    """Run the continuous streaming pipeline.
+    """Run the sustained streaming pipeline.
 
     Starts datagen concurrently with bronze-ingest, silver-stream, and
     gold-refresh streaming SparkApplications. Monitors for the configured
@@ -3282,11 +3291,11 @@ def _run_continuous(
     from lakebench.spark import SparkJobManager, SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import JobState, JobType
 
-    run_duration = duration or cfg.architecture.pipeline.continuous.run_duration
+    run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
 
     console.print(
         Panel(
-            f"Running continuous pipeline for: [bold]{cfg.name}[/bold]\n\n"
+            f"Running sustained pipeline for: [bold]{cfg.name}[/bold]\n\n"
             f"Stages: bronze-ingest + silver-stream + gold-refresh (concurrent)\n"
             f"Duration: {run_duration}s ({run_duration / 60:.0f} min)",
             expand=False,
@@ -3294,7 +3303,7 @@ def _run_continuous(
     )
 
     j = journal_open(config_file, config_name=cfg.name)
-    j.begin_command(CommandName.RUN, {"continuous": True, "duration": run_duration})
+    j.begin_command(CommandName.RUN, {"sustained": True, "duration": run_duration})
 
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
@@ -3362,14 +3371,14 @@ def _run_continuous(
             print_error(f"Failed to start datagen: {datagen_result.message}")
             pipeline_success = False
             raise typer.Exit(1)
-        print_success("Datagen started (continuous mode)")
+        print_success("Datagen started (sustained mode)")
         dims = cfg.get_scale_dimensions()
         console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
         _journal_safe(
             j.record,
             EventType.GENERATE_START,
-            message="Datagen started for continuous pipeline",
+            message="Datagen started for sustained pipeline",
             details={
                 "scale": dims.scale,
                 "parallelism": cfg.architecture.workload.datagen.parallelism,
@@ -3405,10 +3414,10 @@ def _run_continuous(
         )
 
         # In-stream benchmark scheduling
-        cont_cfg = cfg.architecture.pipeline.continuous
-        bench_warmup = cont_cfg.benchmark_warmup
-        bench_interval = cont_cfg.benchmark_interval
-        gold_interval_s = _parse_spark_interval(cont_cfg.gold_refresh_interval)
+        sustained_cfg = cfg.architecture.pipeline.sustained
+        bench_warmup = sustained_cfg.benchmark_warmup
+        bench_interval = sustained_cfg.benchmark_interval
+        gold_interval_s = _parse_spark_interval(sustained_cfg.gold_refresh_interval)
 
         # Hard floor: both warmup and interval must be >= gold_refresh_interval.
         # Gold rewrites the entire table each cycle via createOrReplace().
@@ -3669,12 +3678,12 @@ def _run_continuous(
         # Summary
         console.print(
             Panel(
-                f"[green]Continuous pipeline completed![/green]\n\n"
+                f"[green]Sustained pipeline completed![/green]\n\n"
                 f"  Duration: {run_duration}s ({run_duration / 60:.0f} min)\n"
                 f"  Streaming jobs: {len(submitted)}\n\n"
                 f"Query results: lakebench query --example count\n"
                 f"Generate report: lakebench report",
-                title="Continuous Pipeline Complete",
+                title="Sustained Pipeline Complete",
                 expand=False,
             )
         )
@@ -3722,7 +3731,7 @@ def _run_continuous(
                     datagen_output_rows=_datagen_output_rows,
                 )
                 run_metrics.pipeline_benchmark = pb
-                if pb.pipeline_mode == "continuous":
+                if pb.pipeline_mode in ("sustained", "continuous"):
                     if pb.sustained_throughput_rps > 0:
                         latency_str = (
                             "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)

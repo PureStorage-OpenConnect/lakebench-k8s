@@ -5,7 +5,7 @@ Uses a rate source with foreachBatch to periodically read the full Silver
 Iceberg table, compute daily KPI aggregations, and overwrite the Gold table.
 Each cycle produces a complete, consistent Gold snapshot.
 
-This is the continuous-pipeline equivalent of gold_finalize.py. Where
+This is the sustained-pipeline equivalent of gold_finalize.py. Where
 gold_finalize runs once as a batch job, gold_refresh re-aggregates on
 a timer (default every 5 minutes) so the Gold layer stays fresh.
 

@@ -13,7 +13,7 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 - [Configuration](configuration.md) -- Full YAML reference with annotated examples
 - [Deployment](deployment.md) -- Deploy, status, and destroy lifecycle
 - [Data Generation](data-generation.md) -- Generate command, scale factors, and monitoring
-- [Running Pipelines](running-pipelines.md) -- Pipeline stages, batch and continuous modes
+- [Running Pipelines](running-pipelines.md) -- Pipeline stages, batch and sustained modes
 
 ## Data Generation
 
