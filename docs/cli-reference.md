@@ -103,7 +103,7 @@ submitting jobs.
 
 ### run
 
-Execute the data pipeline (batch or continuous).
+Execute the data pipeline (batch or sustained).
 
 ```
 lakebench run [CONFIG_FILE] [OPTIONS]
@@ -114,14 +114,14 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
 | `--timeout` | `-t` | auto | Timeout per job in seconds (`max(3600, scale * 60)` when omitted) |
 | `--skip-benchmark` | | `false` | Skip the Trino query benchmark after pipeline |
-| `--continuous` | | `false` | Run streaming pipeline instead of batch |
+| `--sustained` | | `false` | Run streaming pipeline instead of batch |
 | `--duration` | | config value | Streaming run duration in seconds |
-| `--generate` | | `false` | Run datagen before pipeline (batch mode only; continuous always runs datagen) |
+| `--generate` | | `false` | Run datagen before pipeline (batch mode only; sustained always runs datagen) |
 
 In batch mode, runs `bronze-verify`, `silver-build`, and `gold-finalize`
 sequentially as Spark jobs, then executes the query benchmark.
 
-In continuous mode (`--continuous`), launches `bronze-ingest`, `silver-stream`,
+In sustained mode (`--sustained`), launches `bronze-ingest`, `silver-stream`,
 and `gold-refresh` as concurrent Spark Structured Streaming jobs, monitors
 for the configured duration, then stops streaming and runs the benchmark.
 
@@ -380,6 +380,6 @@ lakebench run --stage silver-build --timeout 3600
 ### Continuous Streaming Pipeline
 
 ```bash
-lakebench run --continuous --duration 3600
+lakebench run --sustained --duration 3600
 lakebench stop                        # stop streaming jobs manually
 ```

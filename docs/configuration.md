@@ -151,7 +151,7 @@ platform:
       silver_executors: null
       gold_executors: null
 
-      # Streaming job overrides (continuous mode).
+      # Streaming job overrides (sustained mode).
       bronze_ingest_executors: null
       silver_stream_executors: null
       gold_refresh_executors: null
@@ -230,11 +230,11 @@ architecture:
       catalog_name: lakehouse
 
   pipeline:
-    mode: batch                       # batch | continuous
+    mode: batch                       # batch | sustained
     pattern: medallion                # medallion | streaming | batch
 
-    # Continuous mode tuning (active when mode: continuous or --continuous flag).
-    continuous:
+    # Sustained pipeline tuning (active when mode: sustained or --sustained flag).
+    sustained:
       bronze_trigger_interval: "30 seconds"
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
@@ -452,16 +452,16 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `architecture.pipeline.mode` | enum | `batch` | Pipeline execution mode: `batch` (sequential medallion jobs) or `continuous` (concurrent streaming jobs). The `--continuous` CLI flag overrides this. |
+| `architecture.pipeline.mode` | enum | `batch` | Pipeline execution mode: `batch` (sequential medallion jobs) or `sustained` (concurrent streaming jobs). The `--sustained` CLI flag overrides this. |
 | `architecture.pipeline.pattern` | enum | `medallion` | Pipeline pattern: `medallion`, `streaming`, `batch`, or `custom`. |
-| `architecture.pipeline.continuous.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
-| `architecture.pipeline.continuous.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
-| `architecture.pipeline.continuous.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
-| `architecture.pipeline.continuous.run_duration` | int | `1800` | Streaming run duration in seconds. Minimum 60. |
-| `architecture.pipeline.continuous.max_files_per_trigger` | int | `50` | Max Parquet files per micro-batch. Primary throughput cap. |
-| `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
-| `architecture.pipeline.continuous.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
-| `architecture.pipeline.continuous.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
+| `architecture.pipeline.sustained.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
+| `architecture.pipeline.sustained.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
+| `architecture.pipeline.sustained.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
+| `architecture.pipeline.sustained.run_duration` | int | `1800` | Streaming run duration in seconds. Minimum 60. |
+| `architecture.pipeline.sustained.max_files_per_trigger` | int | `50` | Max Parquet files per micro-batch. Primary throughput cap. |
+| `architecture.pipeline.sustained.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
+| `architecture.pipeline.sustained.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
+| `architecture.pipeline.sustained.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
 
 ### Architecture -- Workload & Datagen
 
@@ -606,7 +606,7 @@ The algorithm:
 2. **Datagen and Spark** share the remaining CPU budget.
    - In **batch mode** (default), they run sequentially -- each gets the full
      remaining budget.
-   - In **streaming mode** (`--continuous`), they run concurrently -- the budget
+   - In **streaming mode** (`--sustained`), they run concurrently -- the budget
      is split 40% datagen, 60% Spark.
 3. **Small scales (1--50):** Resources are only capped downward to fit.
 4. **Large scales (51+):** Executor counts are scaled up to use available

@@ -5,7 +5,7 @@ Lakebench produces two distinct measurements:
 1. **Pipeline scorecard** -- end-to-end scoring of the medallion pipeline
    (datagen, bronze, silver, gold). Answers "how fast and how efficiently
    does raw data become queryable gold?" in batch mode, or "how fresh is
-   gold and can the pipeline keep up?" in continuous mode.
+   gold and can the pipeline keep up?" in sustained mode.
 
 2. **Query engine benchmark** -- an 8-query SQL benchmark against the
    silver and gold tables using whichever engine your recipe specifies
@@ -22,7 +22,7 @@ are separate operations. `lakebench run` produces both automatically.
 
 The pipeline scorecard normalizes heterogeneous stages (Spark batch, Spark
 streaming, query engines, datagen) into a single comparable view. Scoring
-is mode-conditional -- batch and continuous pipelines produce different
+is mode-conditional -- batch and sustained pipelines produce different
 score sets.
 
 ### Batch Scores
@@ -39,13 +39,13 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 | `scale_ratio` | `bronze_input_gb / approx_bronze_gb` | Data completeness check. Uses only bronze input -- not the total across all stages. A ratio below 0.95 means data generation or ingestion was incomplete, which invalidates cross-run comparisons. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
 
-### Continuous Scores
+### Sustained Scores
 
-Continuous scoring answers: "How fresh is gold, and how fast are we sustaining it?"
+Sustained scoring answers: "How fresh is gold, and how fast are we sustaining it?"
 
 | Score | Formula | Meaning |
 |---|---|---|
-| `data_freshness_seconds` | `max(stage.freshness_seconds)` | Worst-case gold staleness. The primary continuous score. Lower is better. |
+| `data_freshness_seconds` | `max(stage.freshness_seconds)` | Worst-case gold staleness. The primary sustained score. Lower is better. |
 | `sustained_throughput_rps` | `bronze_input_rows / run_duration` | Aggregate sustained rows/sec the pipeline can maintain. Higher is better. |
 | `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency. Lower is better. |
 | `ingest_ratio` | `bronze_rows / datagen_rows` | Fraction of generated data that made it through bronze. Below 0.95 flags saturation. Above 1.0 means re-reads inflate the count. |
@@ -85,7 +85,7 @@ lakebench run --generate
 This runs data generation first, then the pipeline stages, then the query
 engine benchmark -- all in one invocation.
 
-In **continuous** mode, datagen always runs automatically alongside the
+In **sustained** mode, datagen always runs automatically alongside the
 streaming jobs -- no `--generate` flag needed. The datagen stage is included in the
 pipeline scorecard as a `datagen` stage with `stage_type="datagen"` and
 `engine="datagen"`. It contributes to:
@@ -196,9 +196,9 @@ equivalents for Spark Thrift and DuckDB). In power mode with cold cache, the
 cache is flushed before each individual query. In throughput mode, it is
 flushed once before all streams start.
 
-### In-Stream Benchmarking (Continuous Mode)
+### In-Stream Benchmarking (Sustained Mode)
 
-In continuous mode, Lakebench runs query engine benchmark rounds at regular
+In sustained mode, Lakebench runs query engine benchmark rounds at regular
 intervals **while streaming jobs are active**. This measures engine
 performance under realistic conditions -- concurrent streaming writes, active
 compaction, and changing table state.
@@ -212,7 +212,7 @@ round start, so rounds don't pile up when queries take longer than expected.
 ```yaml
 architecture:
   pipeline:
-    continuous:
+    sustained:
       benchmark_warmup: 300     # seconds before first round (default 300)
       benchmark_interval: 300   # seconds between rounds (default 300)
 ```
@@ -224,7 +224,7 @@ Each round:
 3. Runs the full 8-query power benchmark
 4. Records per-round QpH, per-query times, and freshness
 
-The final QpH for the continuous pipeline scorecard is the **median** across
+The final QpH for the sustained pipeline scorecard is the **median** across
 all in-stream rounds.
 
 **Scheduling constraint:** Both `benchmark_warmup` and `benchmark_interval`
@@ -313,7 +313,7 @@ comparable to runs at the same nominal scale.
 layer. This score depends on the query engine (Trino, Spark Thrift, DuckDB),
 worker count, and memory allocation. It is independent of pipeline throughput.
 
-### Continuous Mode
+### Sustained Mode
 
 **Data Freshness** is the primary score. It measures how far behind real-time
 the gold layer is -- the worst-case staleness across all streaming stages.
@@ -341,9 +341,9 @@ back below capacity.
 
 ---
 
-## Tuning a Continuous Pipeline
+## Tuning a Sustained Pipeline
 
-The continuous scorecard reveals imbalances between pipeline stages. This
+The sustained scorecard reveals imbalances between pipeline stages. This
 section walks through common patterns and how to fix them.
 
 ### Reading the Stage Latency Profile
@@ -364,7 +364,7 @@ and freshness degrades. That stage is the bottleneck.
 
 An `ingest_ratio` above 1.0 means bronze consumed more rows than the
 datagen estimate predicted. This typically happens because the row estimate
-(`scale * 1.5M`) was calibrated for batch mode. In continuous mode, 16 pods
+(`scale * 1.5M`) was calibrated for batch mode. In sustained mode, 16 pods
 running for 30 minutes produce more data than the estimate expects.
 
 An ingest ratio of 1.0--1.4 with `pipeline_saturated: false` means the
@@ -428,7 +428,7 @@ To lower freshness:
 - Increase `gold_refresh_interval` to give gold more time per cycle.
   Trade-off: higher data freshness (more stale).
 
-### Example: Balancing a Scale-50 Continuous Run
+### Example: Balancing a Scale-50 Sustained Run
 
 Starting point (imbalanced):
 
@@ -451,7 +451,7 @@ platform:
 
 architecture:
   pipeline:
-    continuous:
+    sustained:
       gold_refresh_interval: "3 minutes"   # was 5 min -- lower freshness
       benchmark_warmup: 300                # must be >= gold interval
       benchmark_interval: 300              # must be >= gold interval
@@ -556,13 +556,13 @@ lakebench report --summary --metrics <dir>        # custom metrics dir
 
 The summary output includes a per-stage table (elapsed time, data volume,
 throughput, executor count) and mode-appropriate scores -- time-to-value and
-throughput for batch, data freshness and sustained throughput for continuous.
+throughput for batch, data freshness and sustained throughput for sustained.
 
 ## HTML Report Layout
 
 The HTML scorecard (`lakebench report`) is organized in three layers: a verdict
 at the top, diagnostic charts in the middle, and raw evidence at the bottom.
-Some sections only appear in batch or continuous mode as noted below.
+Some sections only appear in batch or sustained mode as noted below.
 
 ### Header
 
@@ -576,7 +576,7 @@ The header shows the deployment name, run ID, and an overall status badge:
   threshold.
 
 A one-line context banner below the header shows pipeline mode (Batch /
-Continuous), Customer360 scale factor, the recipe string
+Sustained), Customer360 scale factor, the recipe string
 (`catalog-format-engine-query_engine`), and wall-clock duration.
 
 ### Summary Cards
@@ -586,41 +586,41 @@ Five primary KPI cards. The cards change with pipeline mode:
 **Batch:** Time-to-Value, Data Processed (GB), Pipeline Throughput (GB/s), QpH,
 Job Status (pass/fail count).
 
-**Continuous:** Data Freshness, Sustained Throughput (rows/s), Compute
+**Sustained:** Data Freshness, Sustained Throughput (rows/s), Compute
 Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
 CPU-hours.
 
-### Bottleneck Identification (batch and continuous)
+### Bottleneck Identification (batch and sustained)
 
 A stacked bar chart showing time and compute distribution across pipeline
 stages. Each stage is color-coded (bronze = amber, silver = indigo, gold =
 gold, query = cyan). The chart identifies which stage dominates elapsed time
-or compute. In continuous mode the chart uses micro-batch latency instead of
+or compute. In sustained mode the chart uses micro-batch latency instead of
 elapsed seconds.
 
-### Data Validity (batch and continuous)
+### Data Validity (batch and sustained)
 
 Green/red status indicators for data quality checks:
 
-- **Scale Ratio** (batch) or **Ingest Ratio** (continuous) -- confirms the run
+- **Scale Ratio** (batch) or **Ingest Ratio** (sustained) -- confirms the run
   processed the expected data volume. Red when below 0.95 or above 1.05.
 - **Job Success** -- counts of passed and failed batch/streaming jobs.
 
 If any indicator is red, cross-run comparisons are unreliable.
 
-### Stability Over Time (continuous only)
+### Stability Over Time (sustained only)
 
 A dual-axis line chart showing QpH and gold data freshness trends across
 in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
 Helps identify performance degradation over time as table state grows.
 
-### Query-Time Freshness (continuous only)
+### Query-Time Freshness (sustained only)
 
 Shows median query-time freshness versus worst-case data freshness. The gap
 between these two values indicates how much freshness varies depending on
 when you query relative to the gold refresh cycle.
 
-### Q9 Contention (continuous only)
+### Q9 Contention (sustained only)
 
 A table of Q9 contention events across benchmark rounds. Q9 reads the gold
 table, which is rewritten every refresh cycle via `createOrReplace()`. This
@@ -633,25 +633,25 @@ A table with one row per Spark job (bronze-verify, silver-build,
 gold-finalize). Columns: job name, status, elapsed time, input/output data,
 throughput, executor count, cores, and total CPU seconds.
 
-### Streaming Pipeline (continuous only)
+### Streaming Pipeline (sustained only)
 
 A table with one row per streaming stage. Columns: job type, status, rows
 processed, throughput (rows/s), freshness, executor count, and compute
 resources.
 
-### Pipeline Stages (batch and continuous)
+### Pipeline Stages (batch and sustained)
 
 Per-stage matrix table. In batch mode: GB in/out, rows in/out, GB/s, rows/s.
-In continuous mode: rows/s, micro-batch latency, freshness.
+In sustained mode: rows/s, micro-batch latency, freshness.
 
-### Query Performance (batch and continuous)
+### Query Performance (batch and sustained)
 
 Performance table for the 8-query engine benchmark. Columns: query name,
 display name, category, elapsed time, rows returned, and pass/fail status.
 The benchmark mode (power, throughput, composite), stream count, and final QpH
 appear in a summary row.
 
-### In-Stream Benchmark Rounds (continuous only)
+### In-Stream Benchmark Rounds (sustained only)
 
 A transposed table with queries as rows and benchmark rounds as columns.
 Shows per-query times across rounds plus statistical measures (median, min,
@@ -689,6 +689,6 @@ exact configuration used, so you can attribute performance differences to
 specific changes (scale factor, executor count, memory, engine workers, etc.).
 
 Before comparing, check `scale_ratio` (batch) or
-`ingest_ratio` (continuous) to confirm both runs processed
+`ingest_ratio` (sustained) to confirm both runs processed
 the expected data volume. Comparing runs with incomplete data gives misleading
 results.

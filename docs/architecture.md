@@ -72,7 +72,7 @@ and computes Queries per Hour (QpH).
 
 ### Continuous Mode
 
-In addition to batch processing, Lakebench supports a continuous streaming
+In addition to batch processing, Lakebench supports a sustained streaming
 pipeline using Spark Structured Streaming:
 
 - `bronze-ingest` reads new Parquet files as they appear (via `maxFilesPerTrigger`)

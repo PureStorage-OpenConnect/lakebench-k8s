@@ -3,7 +3,7 @@
 These tests exercise the complete lakebench workflow:
 1. Deploy infrastructure
 2. Generate data
-3. Run pipeline (batch or continuous)
+3. Run pipeline (batch or sustained)
 4. Run benchmark
 5. Generate report
 6. Destroy everything
@@ -360,11 +360,11 @@ class TestBatchPipeline:
 # =============================================================================
 
 
-class TestContinuousPipeline:
-    """Test continuous (streaming) pipeline."""
+class TestSustainedPipeline:
+    """Test sustained (streaming) pipeline."""
 
-    def test_01_continuous_pipeline_starts(self, test_config: Path, generated_data: str):
-        """Start continuous pipeline and verify streaming jobs launch."""
+    def test_01_sustained_pipeline_starts(self, test_config: Path, generated_data: str):
+        """Start sustained pipeline and verify streaming jobs launch."""
         print(f"\n{'=' * 60}")
         print("RUNNING CONTINUOUS PIPELINE")
         print(f"{'=' * 60}")
@@ -375,7 +375,7 @@ class TestContinuousPipeline:
         result = run_lakebench(
             "run",
             str(test_config),
-            "--continuous",
+            "--sustained",
             "--duration",
             "120",  # 2 min streaming window
             timeout=300,  # 5 min subprocess timeout (margin for startup + cleanup)
@@ -776,7 +776,7 @@ class TestScaleMatrix:
                 )
 
     @pytest.mark.parametrize("scale,expected_gb,timeout_mult", SCALE_CONFIGS)
-    def test_continuous_pipeline_at_scale(
+    def test_sustained_pipeline_at_scale(
         self,
         base_config: Path,
         tmp_path_factory,
@@ -784,7 +784,7 @@ class TestScaleMatrix:
         expected_gb: float,
         timeout_mult: int,
     ):
-        """Run continuous pipeline at specified scale factor."""
+        """Run sustained pipeline at specified scale factor."""
         tmp_path = tmp_path_factory.mktemp(f"cont-scale{scale}")
         config_path = create_scale_config(base_config, scale, tmp_path)
 
@@ -807,12 +807,12 @@ class TestScaleMatrix:
 
             # Run continuous pipeline for limited duration
             run_duration = min(300, 120 * timeout_mult)  # 2-5 min depending on scale
-            print(f"Running continuous pipeline for {run_duration}s...")
+            print(f"Running sustained pipeline for {run_duration}s...")
 
             result = run_lakebench(
                 "run",
                 str(config_path),
-                "--continuous",
+                "--sustained",
                 "--duration",
                 str(run_duration),
                 timeout=run_duration + 180,

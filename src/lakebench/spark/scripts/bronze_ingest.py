@@ -4,7 +4,7 @@ Bronze Ingest - Structured Streaming ingestion from landing zone to Iceberg.
 Monitors the landing zone path in S3 for new Parquet files written by datagen,
 and appends rows to the managed Iceberg table `bronze_raw`.
 
-This is the continuous-pipeline equivalent of bronze_verify.py. Where bronze_verify
+This is the sustained-pipeline equivalent of bronze_verify.py. Where bronze_verify
 reads all data in a single batch pass, bronze_ingest consumes files incrementally
 as they arrive.
 

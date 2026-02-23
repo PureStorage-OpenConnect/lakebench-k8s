@@ -370,13 +370,13 @@ class TestPipelineModeConfig:
         config = LakebenchConfig(name="test")
         assert config.architecture.pipeline.mode == PipelineMode.BATCH
 
-    def test_pipeline_mode_continuous(self):
-        """Pipeline mode can be set to 'continuous'."""
+    def test_pipeline_mode_sustained(self):
+        """Pipeline mode can be set to 'sustained'."""
         config = LakebenchConfig(
             name="test",
-            architecture={"pipeline": {"mode": "continuous"}},
+            architecture={"pipeline": {"mode": "sustained"}},
         )
-        assert config.architecture.pipeline.mode.value == "continuous"
+        assert config.architecture.pipeline.mode.value == "sustained"
 
     def test_pipeline_mode_invalid_rejected(self):
         """Invalid pipeline mode is rejected by Pydantic."""
@@ -762,12 +762,12 @@ class TestRecipeName:
         assert recipe == "customer360-batch"
 
 
-class TestContinuousThroughputConfig:
-    """Tests for continuous streaming throughput tuning fields."""
+class TestSustainedThroughputConfig:
+    """Tests for sustained streaming throughput tuning fields."""
 
     def test_defaults(self):
         config = LakebenchConfig(name="test")
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.max_files_per_trigger == 50
         assert c.bronze_target_file_size_mb == 512
         assert c.silver_target_file_size_mb == 512
@@ -778,7 +778,7 @@ class TestContinuousThroughputConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "max_files_per_trigger": 200,
                         "bronze_target_file_size_mb": 256,
                         "silver_target_file_size_mb": 1024,
@@ -787,7 +787,7 @@ class TestContinuousThroughputConfig:
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.max_files_per_trigger == 200
         assert c.bronze_target_file_size_mb == 256
         assert c.silver_target_file_size_mb == 1024
@@ -799,7 +799,7 @@ class TestContinuousThroughputConfig:
                 name="test",
                 architecture={
                     "processing": {
-                        "continuous": {"max_files_per_trigger": 0},
+                        "sustained": {"max_files_per_trigger": 0},
                     },
                 },
             )
@@ -810,18 +810,18 @@ class TestContinuousThroughputConfig:
                 name="test",
                 architecture={
                     "processing": {
-                        "continuous": {"bronze_target_file_size_mb": 10},
+                        "sustained": {"bronze_target_file_size_mb": 10},
                     },
                 },
             )
 
 
-class TestContinuousBenchmarkConfig:
-    """Tests for benchmark_interval and benchmark_warmup on ContinuousConfig."""
+class TestSustainedBenchmarkConfig:
+    """Tests for benchmark_interval and benchmark_warmup on SustainedConfig."""
 
     def test_defaults(self):
         config = LakebenchConfig(name="test")
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 300
         assert c.benchmark_warmup == 300
 
@@ -830,14 +830,14 @@ class TestContinuousBenchmarkConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "benchmark_interval": 600,
                         "benchmark_warmup": 600,
                     },
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 600
         assert c.benchmark_warmup == 600
 
@@ -847,14 +847,14 @@ class TestContinuousBenchmarkConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "gold_refresh_interval": "10 minutes",
                         "benchmark_warmup": 300,
                     },
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_warmup == 600  # clamped to gold_refresh (10 min)
 
     def test_warmup_not_clamped_when_above_gold_refresh(self):
@@ -863,14 +863,14 @@ class TestContinuousBenchmarkConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "gold_refresh_interval": "2 minutes",
                         "benchmark_warmup": 300,
                     },
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_warmup == 300  # no clamp needed
 
     def test_warmup_with_short_gold_refresh(self):
@@ -879,14 +879,14 @@ class TestContinuousBenchmarkConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "gold_refresh_interval": "5 minutes",
                         "benchmark_warmup": 300,
                     },
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_warmup == 300  # 300s >= 300s floor, matches gold_refresh
 
     def test_interval_clamped_to_gold_refresh(self):
@@ -895,14 +895,14 @@ class TestContinuousBenchmarkConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "gold_refresh_interval": "10 minutes",
                         "benchmark_interval": 300,
                     },
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 600  # clamped to gold_refresh (10 min)
 
     def test_interval_not_clamped_when_above_gold_refresh(self):
@@ -911,14 +911,14 @@ class TestContinuousBenchmarkConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "gold_refresh_interval": "2 minutes",
                         "benchmark_interval": 300,
                     },
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 300  # no clamp needed
 
     def test_interval_with_short_gold_refresh(self):
@@ -927,7 +927,7 @@ class TestContinuousBenchmarkConfig:
             name="test",
             architecture={
                 "processing": {
-                    "continuous": {
+                    "sustained": {
                         "gold_refresh_interval": "5 minutes",
                         "benchmark_interval": 300,
                         "benchmark_warmup": 300,
@@ -935,7 +935,7 @@ class TestContinuousBenchmarkConfig:
                 },
             },
         )
-        c = config.architecture.pipeline.continuous
+        c = config.architecture.pipeline.sustained
         assert c.benchmark_interval == 300  # 300s >= 300s floor, matches gold_refresh
 
     def test_benchmark_interval_field_minimum(self):
@@ -945,7 +945,7 @@ class TestContinuousBenchmarkConfig:
                 name="test",
                 architecture={
                     "processing": {
-                        "continuous": {"benchmark_interval": 120},  # min is 300
+                        "sustained": {"benchmark_interval": 120},  # min is 300
                     },
                 },
             )
@@ -956,7 +956,7 @@ class TestContinuousBenchmarkConfig:
                 name="test",
                 architecture={
                     "processing": {
-                        "continuous": {"benchmark_interval": 7200},  # max is 3600
+                        "sustained": {"benchmark_interval": 7200},  # max is 3600
                     },
                 },
             )
@@ -967,7 +967,7 @@ class TestContinuousBenchmarkConfig:
                 name="test",
                 architecture={
                     "processing": {
-                        "continuous": {"benchmark_warmup": 120},  # min is 300
+                        "sustained": {"benchmark_warmup": 120},  # min is 300
                     },
                 },
             )
@@ -978,7 +978,7 @@ class TestContinuousBenchmarkConfig:
                 name="test",
                 architecture={
                     "processing": {
-                        "continuous": {"benchmark_warmup": 2400},  # max is 1800
+                        "sustained": {"benchmark_warmup": 2400},  # max is 1800
                     },
                 },
             )
