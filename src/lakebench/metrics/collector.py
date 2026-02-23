@@ -150,7 +150,7 @@ class PipelineMetrics:
     # Query metrics
     queries: list[QueryMetrics] = field(default_factory=list)
 
-    # Streaming job metrics (optional -- populated for continuous pipeline runs)
+    # Streaming job metrics (optional -- populated for sustained pipeline runs)
     streaming: list[StreamingJobMetrics] = field(default_factory=list)
 
     # Configuration snapshot
@@ -159,7 +159,7 @@ class PipelineMetrics:
     # Benchmark results (optional -- populated after query benchmark runs)
     benchmark: BenchmarkMetrics | None = None
 
-    # In-stream benchmark rounds (continuous mode only)
+    # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
 
     # Pipeline benchmark (optional -- populated after build_pipeline_benchmark)
@@ -349,8 +349,8 @@ class PipelineBenchmark:
     **pipeline_throughput_gb_per_second**
         ``total_data_processed_gb / total_elapsed_seconds``.  Higher is better.
 
-    Continuous scoring (pipeline_mode="continuous")
-    ------------------------------------------------
+    Sustained scoring (pipeline_mode="sustained")
+    -----------------------------------------------
     Answers: "How fresh is gold, and how fast are we sustaining it?"
 
     **data_freshness_seconds** (primary score)
@@ -406,7 +406,7 @@ class PipelineBenchmark:
     -----------
     ``to_dict()`` produces the structure stored under ``pipeline_benchmark``
     in the metrics JSON.  The ``scores`` sub-dict contains mode-appropriate
-    keys (batch keys for batch, continuous keys for continuous).
+    keys (batch keys for batch, sustained keys for sustained).
     ``to_matrix()`` produces the ``stage_matrix`` sub-object -- a dict keyed
     by stage name for spreadsheet/comparison use.
     """
@@ -422,7 +422,7 @@ class PipelineBenchmark:
         "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
         "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
         "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
-        # Continuous
+        # Sustained
         "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
         "sustained_throughput_rps": "Rows entering bronze per second (higher is better)",
         "ingest_ratio": "Bronze rows ingested / datagen rows produced (1.0 = all data consumed)",
@@ -439,7 +439,7 @@ class PipelineBenchmark:
 
     run_id: str
     deployment_name: str
-    pipeline_mode: str  # "batch" or "continuous"
+    pipeline_mode: str  # "batch" or "sustained"
     start_time: datetime
     end_time: datetime | None = None
 
@@ -460,7 +460,7 @@ class PipelineBenchmark:
     # Pipeline-level scores (both modes)
     total_core_hours: float = 0.0
 
-    # Pipeline-level scores (continuous -- None = unmeasurable)
+    # Pipeline-level scores (sustained -- None = unmeasurable)
     data_freshness_seconds: float | None = None
     sustained_throughput_rps: float = 0.0
     stage_latency_profile: list[float] = field(default_factory=list)
@@ -471,7 +471,7 @@ class PipelineBenchmark:
     # Trino detail (preserved for drill-down)
     query_benchmark: BenchmarkMetrics | None = None
 
-    # In-stream benchmark rounds (continuous mode only)
+    # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
     query_time_freshness_seconds: float = 0.0  # median freshness at Trino query time
 
@@ -491,7 +491,7 @@ class PipelineBenchmark:
             4. ``time_to_value_seconds`` -- wall clock: ``max(end_time) -
                min(start_time)``.  Falls back to (1) when timestamps absent.
 
-        **Continuous** (4 scores + shared ``total_elapsed_seconds``):
+        **Sustained** (4 scores + shared ``total_elapsed_seconds``):
             1. ``data_freshness_seconds`` -- worst-case gold staleness.
             2. ``sustained_throughput_rps`` -- aggregate rows/sec.
             3. ``stage_latency_profile`` -- per-stage processing latency [b/s/g].
@@ -503,8 +503,8 @@ class PipelineBenchmark:
         # Universal: total elapsed across all stages
         self.total_elapsed_seconds = sum(s.elapsed_seconds for s in self.stages)
 
-        if self.pipeline_mode == "continuous":
-            self._compute_continuous_scores()
+        if self.pipeline_mode == "sustained":
+            self._compute_sustained_scores()
         else:
             self._compute_batch_scores()
 
@@ -548,8 +548,8 @@ class PipelineBenchmark:
             )
             self.scale_ratio = bronze_gb / expected_gb
 
-    def _compute_continuous_scores(self) -> None:
-        """Compute continuous pipeline scores from streaming stage metrics."""
+    def _compute_sustained_scores(self) -> None:
+        """Compute sustained pipeline scores from streaming stage metrics."""
         streaming = [s for s in self.stages if s.stage_type == "streaming"]
 
         # Total data processed (shared with batch -- needed for GB/s and report)
@@ -594,7 +594,7 @@ class PipelineBenchmark:
             self.ingest_ratio = total_bronze_rows / datagen_rows
         self.pipeline_saturated = self.ingest_ratio < 0.95
 
-        # Override total_elapsed_seconds for continuous mode.
+        # Override total_elapsed_seconds for sustained mode.
         # Streaming stages run concurrently -- use wall-clock, not sum.
         if self.start_time and self.end_time:
             self.total_elapsed_seconds = (self.end_time - self.start_time).total_seconds()
@@ -632,7 +632,7 @@ class PipelineBenchmark:
             if round_qphs:
                 in_stream_qph = round(statistics.median(round_qphs), 1)
 
-        if self.pipeline_mode == "continuous":
+        if self.pipeline_mode == "sustained":
             # stage_latency_profile: object with named keys (v2.0 format)
             slp = (
                 {
@@ -893,7 +893,7 @@ def build_pipeline_benchmark(
             stage.compute_derived()
         stages.append(stage)
 
-    # Streaming stages (continuous mode)
+    # Streaming stages (sustained mode)
     _STREAMING_MAP: dict[str, str] = {
         "bronze-ingest": "bronze",
         "silver-stream": "silver",
@@ -990,7 +990,7 @@ def build_pipeline_benchmark(
     benchmark = PipelineBenchmark(
         run_id=run.run_id,
         deployment_name=run.deployment_name,
-        pipeline_mode="continuous" if run.streaming else "batch",
+        pipeline_mode="sustained" if run.streaming else "batch",
         start_time=run.start_time,
         end_time=run.end_time,
         stages=stages,
@@ -1117,17 +1117,17 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
         "table_format": cfg.architecture.table_format.type.value,
         "pipeline_engine": cfg.architecture.pipeline_engine.value,
         "query_engine": cfg.architecture.query_engine.type.value,
-        "continuous": {
-            "bronze_trigger_interval": pipeline.continuous.bronze_trigger_interval,
-            "silver_trigger_interval": pipeline.continuous.silver_trigger_interval,
-            "gold_refresh_interval": pipeline.continuous.gold_refresh_interval,
-            "run_duration": pipeline.continuous.run_duration,
-            "max_files_per_trigger": pipeline.continuous.max_files_per_trigger,
-            "bronze_target_file_size_mb": pipeline.continuous.bronze_target_file_size_mb,
-            "silver_target_file_size_mb": pipeline.continuous.silver_target_file_size_mb,
-            "gold_target_file_size_mb": pipeline.continuous.gold_target_file_size_mb,
-            "benchmark_interval": pipeline.continuous.benchmark_interval,
-            "benchmark_warmup": pipeline.continuous.benchmark_warmup,
+        "sustained": {
+            "bronze_trigger_interval": pipeline.sustained.bronze_trigger_interval,
+            "silver_trigger_interval": pipeline.sustained.silver_trigger_interval,
+            "gold_refresh_interval": pipeline.sustained.gold_refresh_interval,
+            "run_duration": pipeline.sustained.run_duration,
+            "max_files_per_trigger": pipeline.sustained.max_files_per_trigger,
+            "bronze_target_file_size_mb": pipeline.sustained.bronze_target_file_size_mb,
+            "silver_target_file_size_mb": pipeline.sustained.silver_target_file_size_mb,
+            "gold_target_file_size_mb": pipeline.sustained.gold_target_file_size_mb,
+            "benchmark_interval": pipeline.sustained.benchmark_interval,
+            "benchmark_warmup": pipeline.sustained.benchmark_warmup,
         },
         "datagen": {
             "scale": datagen.scale,

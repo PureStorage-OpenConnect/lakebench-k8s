@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [1.0.8] - 2026-02-21
 
+### Changed
+- Renamed pipeline mode `continuous` to `sustained`. The old `--continuous` CLI flag
+  and `mode: continuous` YAML value still work with a deprecation warning.
+- Bottleneck chart bar uses flexbox layout (no more line-wrap from subpixel rounding).
+- Bottleneck chart bar always shows CPU share -- the dimension common to all stages
+  including Trino query. Latency stays in the table column for sustained mode.
+- Bottleneck identification picks dominant stage by latency in sustained mode
+  (concurrent stages) and by compute in batch mode (sequential stages).
+- Query stage CPU now derived from Trino config snapshot (coordinator + workers)
+  instead of showing 0% (Trino has no Spark executors).
+- Report title/header: "LakeBench" renamed to "Lakebench".
+
 ### Fixed
 - **scale_ratio formula was triple-counting data.** The batch scorecard's
   `scale_ratio` used `total_data_processed_gb` (sum of bronze + silver + gold
@@ -14,10 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   only bronze stage input GB in the numerator.
 
 ### Added
+- Deploy success panel now shows `lakebench run --generate` as a "Next" option.
 - HTML report layout section in benchmarking docs -- describes every section
   of the scorecard (verdict cards, bottleneck chart, data validity, stability,
   freshness, contention, job tables, query performance, config, platform
-  metrics) and which sections appear in batch vs continuous mode.
+  metrics) and which sections appear in batch vs sustained mode.
 
 ## [1.0.7] - 2026-02-20
 

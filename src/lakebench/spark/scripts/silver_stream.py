@@ -5,7 +5,7 @@ Reads incrementally from the Iceberg bronze_raw table, applies the same
 Silver transformations as the batch silver_build.py job, and writes to the
 managed Iceberg table `customer_interactions_enriched`.
 
-This is the continuous-pipeline equivalent of silver_build.py. Where silver_build
+This is the sustained-pipeline equivalent of silver_build.py. Where silver_build
 processes all data in a single batch pass, silver_stream processes micro-batches
 as new rows arrive in bronze_raw.
 

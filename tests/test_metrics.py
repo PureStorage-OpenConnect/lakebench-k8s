@@ -694,7 +694,7 @@ class TestReportGenerator:
         assert report_path.suffix == ".html"
 
         html = report_path.read_text()
-        assert "LakeBench Scorecard" in html
+        assert "Lakebench Scorecard" in html
         assert "test-deploy" in html
 
     def test_report_contains_jobs_table(self, tmp_path):
@@ -859,12 +859,12 @@ class TestReportGenerator:
             generator.generate_report(run_id="nonexistent")
 
 
-class TestContinuousReport:
-    """Tests for continuous-mode HTML report rendering."""
+class TestSustainedReport:
+    """Tests for sustained-mode HTML report rendering."""
 
     @staticmethod
-    def _make_continuous_metrics() -> PipelineMetrics:
-        """Build a minimal continuous PipelineMetrics with streaming + pipeline benchmark."""
+    def _make_sustained_metrics() -> PipelineMetrics:
+        """Build a minimal sustained PipelineMetrics with streaming + pipeline benchmark."""
         now = datetime.now()
         return PipelineMetrics(
             run_id="cont-report-001",
@@ -914,7 +914,7 @@ class TestContinuousReport:
             pipeline_benchmark=PipelineBenchmark(
                 run_id="cont-report-001",
                 deployment_name="cont-deploy",
-                pipeline_mode="continuous",
+                pipeline_mode="sustained",
                 start_time=now,
                 end_time=now + timedelta(seconds=1800),
                 success=True,
@@ -991,17 +991,17 @@ class TestContinuousReport:
 
     def _render(self, metrics: PipelineMetrics | None = None) -> str:
         gen = ReportGenerator(metrics_dir="/tmp/unused-cont-rg")
-        return gen._generate_html(metrics or self._make_continuous_metrics())
+        return gen._generate_html(metrics or self._make_sustained_metrics())
 
-    def test_continuous_summary_no_zeros(self):
+    def test_sustained_summary_no_zeros(self):
         """Summary cards should not show batch-derived zeros."""
         html = self._render()
         assert "0/0" not in html
         assert "0.00 GB" not in html
 
-    def test_continuous_qph_single(self):
+    def test_sustained_qph_single(self):
         """QpH should appear at most once in the summary cards area."""
-        metrics = self._make_continuous_metrics()
+        metrics = self._make_sustained_metrics()
         # Add a benchmark to trigger QpH
         metrics.pipeline_benchmark.benchmark_rounds = [
             BenchmarkMetrics(
@@ -1018,26 +1018,26 @@ class TestContinuousReport:
         summary_area = html.split("<section>")[0]
         assert summary_area.count("In-Stream QpH") <= 1
 
-    def test_continuous_no_batch_section(self):
-        """Continuous mode should not render Batch Job Performance."""
+    def test_sustained_no_batch_section(self):
+        """Sustained mode should not render Batch Job Performance."""
         html = self._render()
         assert "Batch Job Performance" not in html
 
-    def test_continuous_streaming_compute_columns(self):
+    def test_sustained_streaming_compute_columns(self):
         """Streaming table should include compute columns."""
         html = self._render()
         assert "Executors" in html
         assert "CPU-sec" in html
         assert "Cores x Mem" in html
 
-    def test_continuous_run_context_banner(self):
+    def test_sustained_run_context_banner(self):
         """Context banner should show mode and scale."""
         html = self._render()
-        assert "Continuous" in html
+        assert "Sustained" in html
         assert "scale 50" in html
         assert "hive-iceberg-spark-trino" in html
 
-    def test_continuous_ingest_ratio_label(self):
+    def test_sustained_ingest_ratio_label(self):
         """Should show 'Ingest Ratio', not 'Completeness'."""
         html = self._render()
         assert "Ingest Ratio" in html
@@ -1640,11 +1640,11 @@ class TestBuildConfigSnapshot:
         assert "datagen" in snapshot["images"]
         assert "spark" in snapshot["images"]
         assert snapshot["trino"]["worker"]["replicas"] == 2  # default
-        assert snapshot["continuous"]["run_duration"] == 1800  # default
-        assert snapshot["continuous"]["max_files_per_trigger"] == 50  # default
-        assert snapshot["continuous"]["bronze_target_file_size_mb"] == 512
-        assert snapshot["continuous"]["silver_target_file_size_mb"] == 512
-        assert snapshot["continuous"]["gold_target_file_size_mb"] == 128
+        assert snapshot["sustained"]["run_duration"] == 1800  # default
+        assert snapshot["sustained"]["max_files_per_trigger"] == 50  # default
+        assert snapshot["sustained"]["bronze_target_file_size_mb"] == 512
+        assert snapshot["sustained"]["silver_target_file_size_mb"] == 512
+        assert snapshot["sustained"]["gold_target_file_size_mb"] == 128
 
     def test_captures_executor_overrides(self):
         from lakebench.config import LakebenchConfig
@@ -1816,7 +1816,7 @@ class TestListRunsEnriched:
             deployment_name="test",
             start_time=now,
             success=True,
-            config_snapshot={"continuous": True, "duration": 1800},
+            config_snapshot={"sustained": True, "duration": 1800},
         )
         storage.save_run(metrics)
 
@@ -2495,17 +2495,17 @@ class TestBuildPipelineBenchmark:
             ],
         )
         pb = build_pipeline_benchmark(run)
-        assert pb.pipeline_mode == "continuous"
+        assert pb.pipeline_mode == "sustained"
         assert len(pb.stages) == 1
         assert pb.stages[0].stage_name == "bronze"
         assert pb.stages[0].stage_type == "streaming"
-        # Continuous scores are computed from streaming data
+        # Sustained scores are computed from streaming data
         assert pb.data_freshness_seconds == 12.5
         # sustained = bronze input_rows / run_duration = 100_000 / 1800
         assert pb.sustained_throughput_rps == pytest.approx(100_000 / 1800.0)
         assert pb.stage_latency_profile == [450.0, 0.0, 0.0]
         assert pb.total_rows_processed == 100_000
-        # Batch scores remain zero for continuous
+        # Batch scores remain zero for sustained
         assert pb.time_to_value_seconds == 0.0
         assert pb.total_data_processed_gb == 0.0
         assert pb.pipeline_throughput_gb_per_second == 0.0
@@ -2834,12 +2834,12 @@ class TestPipelineBenchmarkReport:
 
 
 # ---------------------------------------------------------------------------
-# Continuous pipeline scoring
+# Sustained pipeline scoring
 # ---------------------------------------------------------------------------
 
 
-class TestContinuousPipelineScoring:
-    """Tests for continuous (streaming) pipeline scoring."""
+class TestSustainedPipelineScoring:
+    """Tests for sustained (streaming) pipeline scoring."""
 
     def _make_streaming_run(self) -> PipelineMetrics:
         """Helper: build a 3-stage streaming PipelineMetrics."""
@@ -2892,12 +2892,12 @@ class TestContinuousPipelineScoring:
             ],
         )
 
-    def test_continuous_scores_computed(self):
-        """Continuous scores are computed from streaming stage data."""
+    def test_sustained_scores_computed(self):
+        """Sustained scores are computed from streaming stage data."""
         run = self._make_streaming_run()
         pb = build_pipeline_benchmark(run)
 
-        assert pb.pipeline_mode == "continuous"
+        assert pb.pipeline_mode == "sustained"
         assert len(pb.stages) == 3
 
         # data_freshness_seconds = max freshness across stages (worst case)
@@ -2913,7 +2913,7 @@ class TestContinuousPipelineScoring:
         # total_rows_processed = sum of input_rows
         assert pb.total_rows_processed == 500_000 + 480_000 + 450_000
 
-        # total_elapsed_seconds: continuous mode uses wall-clock (max), not sum
+        # total_elapsed_seconds: sustained mode uses wall-clock (max), not sum
         assert pb.total_elapsed_seconds == pytest.approx(1800.0)
 
     def test_gold_unique_rows_is_none(self):
@@ -2927,8 +2927,8 @@ class TestContinuousPipelineScoring:
         assert bronze.unique_rows_processed is not None
         assert bronze.unique_rows_processed > 0
 
-    def test_continuous_batch_scores_zero(self):
-        """Batch-only scores remain zero for a continuous pipeline."""
+    def test_sustained_batch_scores_zero(self):
+        """Batch-only scores remain zero for a sustained pipeline."""
         run = self._make_streaming_run()
         pb = build_pipeline_benchmark(run)
 
@@ -2938,8 +2938,8 @@ class TestContinuousPipelineScoring:
         assert pb.total_data_processed_gb > 0
         assert pb.pipeline_throughput_gb_per_second > 0
 
-    def test_batch_continuous_scores_zero(self):
-        """Continuous scores remain zero for a batch pipeline."""
+    def test_batch_sustained_scores_zero(self):
+        """Sustained scores remain zero for a batch pipeline."""
         now = datetime.now()
         run = PipelineMetrics(
             run_id="batch-only",
@@ -2972,8 +2972,8 @@ class TestContinuousPipelineScoring:
         # Batch scores are populated
         assert pb.time_to_value_seconds > 0
 
-    def test_continuous_to_dict_scores(self):
-        """to_dict() outputs continuous score keys for continuous mode."""
+    def test_sustained_to_dict_scores(self):
+        """to_dict() outputs sustained score keys for sustained mode."""
         run = self._make_streaming_run()
         pb = build_pipeline_benchmark(run)
         d = pb.to_dict()
@@ -3022,12 +3022,12 @@ class TestContinuousPipelineScoring:
         assert "time_to_value_seconds" in scores
         assert "total_data_processed_gb" in scores
         assert "pipeline_throughput_gb_per_second" in scores
-        # Continuous keys should NOT appear
+        # Sustained keys should NOT appear
         assert "data_freshness_seconds" not in scores
         assert "sustained_throughput_rps" not in scores
 
-    def test_continuous_storage_roundtrip(self, tmp_path):
-        """Continuous pipeline benchmark survives save/load."""
+    def test_sustained_storage_roundtrip(self, tmp_path):
+        """Sustained pipeline benchmark survives save/load."""
         storage = MetricsStorage(tmp_path / "metrics")
         run = self._make_streaming_run()
         pb = build_pipeline_benchmark(run)
@@ -3039,7 +3039,7 @@ class TestContinuousPipelineScoring:
         assert loaded.pipeline_benchmark is not None
 
         lpb = loaded.pipeline_benchmark
-        assert lpb.pipeline_mode == "continuous"
+        assert lpb.pipeline_mode == "sustained"
         assert lpb.data_freshness_seconds == 15.0
         assert lpb.sustained_throughput_rps == pytest.approx(500_000 / 1800.0, rel=1e-2)
         assert lpb.stage_latency_profile == [200.0, 350.0, 500.0]
@@ -3047,8 +3047,8 @@ class TestContinuousPipelineScoring:
         assert lpb.total_elapsed_seconds == pytest.approx(1800.0)
         assert len(lpb.stages) == 3
 
-    def test_continuous_report_cards(self, tmp_path):
-        """Report contains continuous score cards for streaming pipeline."""
+    def test_sustained_report_cards(self, tmp_path):
+        """Report contains sustained score cards for streaming pipeline."""
         metrics_dir = tmp_path / "metrics"
         output_dir = tmp_path / "reports"
 
