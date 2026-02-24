@@ -17,7 +17,7 @@ at any scale, and get a scorecard you can compare across configurations.
   different architecture. Side-by-side scorecard comparison.
 - **Test at scale.** Run the same workload at 10 GB, 100 GB, and 1 TB to find
   where throughput plateaus or resources saturate on your hardware.
-- **Measure freshness.** Continuous mode streams data through the pipeline and
+- **Measure freshness.** Sustained mode streams data through the pipeline and
   benchmarks query performance under sustained ingest load.
 
 ## Quick Start
