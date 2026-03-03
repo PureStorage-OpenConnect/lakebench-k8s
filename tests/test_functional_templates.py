@@ -394,12 +394,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
@@ -431,12 +434,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
@@ -471,12 +477,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
@@ -522,12 +531,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
@@ -561,12 +573,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
@@ -603,12 +618,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
@@ -639,12 +657,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
@@ -675,12 +696,15 @@ class TestTemplateConditionals:
                 }
             },
         )
-        with patch(
-            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
-            return_value=False,
-        ), patch(
-            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
-            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        with (
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+                return_value=False,
+            ),
+            patch(
+                "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+                return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+            ),
         ):
             engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
         ctx = _enrich_context(engine)
