@@ -371,7 +371,7 @@ class DuckDBExecutor:
             f"conn.execute(\"SET s3_endpoint='{self.s3_endpoint.replace('http://', '').replace('https://', '')}'\"); "
             f"conn.execute(\"SET s3_region='{self.s3_region}'\"); "
             f"conn.execute(\"SET s3_url_style='{'path' if self.s3_path_style else 'vhost'}'\"); "
-            'conn.execute("SET s3_use_ssl=false"); '
+            f'conn.execute("SET s3_use_ssl={"true" if self.s3_endpoint.startswith("https://") else "false"}"); '
             "conn.execute(\"SET s3_access_key_id='\" + os.environ['AWS_ACCESS_KEY_ID'] + \"'\"); "
             "conn.execute(\"SET s3_secret_access_key='\" + os.environ['AWS_SECRET_ACCESS_KEY'] + \"'\"); "
             f"result = conn.execute('{escaped_sql}'); "

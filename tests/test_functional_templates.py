@@ -51,17 +51,7 @@ DEPLOYER_TEMPLATES: dict[str, list[str]] = {
         "rbac/rolebinding.yaml.j2",
     ],
     "prometheus": [
-        "prometheus/rbac.yaml.j2",
         "prometheus/configmap.yaml.j2",
-        "prometheus/service.yaml.j2",
-        "prometheus/statefulset.yaml.j2",
-    ],
-    "grafana": [
-        "grafana/configmap-datasources.yaml.j2",
-        "grafana/configmap-dashboard-provider.yaml.j2",
-        "grafana/configmap-dashboards.yaml.j2",
-        "grafana/service.yaml.j2",
-        "grafana/deployment.yaml.j2",
     ],
     "polaris": [
         "polaris/deployment.yaml.j2",
@@ -122,6 +112,22 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     ctx.setdefault("prometheus_storage_class", cfg.observability.storage_class or "")
     # Both grafana and prometheus templates use ``pull_policy`` (not image_pull_policy)
     ctx.setdefault("pull_policy", cfg.images.pull_policy.value)
+
+    # Datagen deployer injects these (see datagen.py _build_datagen_context)
+    ctx.setdefault("datagen_target_tb", "0.010000")
+    ctx.setdefault("datagen_file_size_mb", 512)
+    ctx.setdefault("datagen_payload_kb", 2)
+    ctx.setdefault("datagen_path_prefix", "customer/interactions/")
+    ctx.setdefault("datagen_seed", 42)
+    ctx.setdefault("datagen_resume", False)
+    ctx.setdefault("datagen_cpu", "2")
+    ctx.setdefault("datagen_memory", "4Gi")
+    ctx.setdefault("datagen_mode", "batch")
+    ctx.setdefault("datagen_workers", 4)
+    ctx.setdefault("datagen_dirty_ratio", 0.08)
+    ctx.setdefault("datagen_image", cfg.images.datagen)
+    ctx.setdefault("datagen_timestamp_start", None)
+    ctx.setdefault("datagen_timestamp_end", None)
 
     return ctx
 
@@ -371,6 +377,319 @@ class TestTemplateConditionals:
 
         rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
         assert "prometheusServlet" not in rendered
+
+    # -- HTTPS / TLS conditional tests --
+
+    def test_spark_thrift_ssl_enabled_for_https(self, renderer: TemplateRenderer):
+        """spark-thrift ssl.enabled should be true when endpoint is HTTPS."""
+        cfg = make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+        assert ctx["s3_use_ssl"] is True
+
+        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
+        assert "spark.hadoop.fs.s3a.connection.ssl.enabled=true" in rendered
+
+    def test_spark_thrift_ssl_disabled_for_http(self, renderer: TemplateRenderer):
+        """spark-thrift ssl.enabled should be false when endpoint is HTTP."""
+        engine = _make_engine()
+        ctx = _enrich_context(engine)
+        assert ctx["s3_use_ssl"] is False
+
+        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
+        assert "spark.hadoop.fs.s3a.connection.ssl.enabled=false" in rendered
+
+    def test_spark_thrift_truststore_when_ca_cert(self, renderer: TemplateRenderer):
+        """spark-thrift should have keytool init + JVM truststore when CA cert set."""
+        cfg = make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
+        assert "import-ca-cert" in rendered
+        assert "keytool" in rendered
+        assert "truststore.jks" in rendered
+        assert "javax.net.ssl.trustStore" in rendered
+
+    def test_spark_thrift_no_truststore_without_ca_cert(self, renderer: TemplateRenderer):
+        """spark-thrift should NOT have truststore init when no CA cert."""
+        engine = _make_engine()
+        ctx = _enrich_context(engine)
+        assert not ctx["s3_ca_cert_pem"]
+
+        rendered = renderer.render("spark-thrift/sparkapplication.yaml.j2", ctx)
+        assert "import-ca-cert" not in rendered
+        assert "javax.net.ssl.trustStore" not in rendered
+
+    def test_trino_jvm_truststore_when_ca_cert(self, renderer: TemplateRenderer):
+        """Trino JVM config should include truststore args when CA cert set."""
+        cfg = make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+
+        # Check configmap JVM config
+        rendered = renderer.render("trino/configmap.yaml.j2", ctx)
+        assert "javax.net.ssl.trustStore=/truststore/truststore.jks" in rendered
+        assert "javax.net.ssl.trustStorePassword=changeit" in rendered
+
+        # Check coordinator has init container + volumes
+        rendered = renderer.render("trino/coordinator.yaml.j2", ctx)
+        assert "import-ca-cert" in rendered
+        assert "lakebench-ca-certificate" in rendered
+
+        # Check worker has init container + volumes
+        rendered = renderer.render("trino/worker.yaml.j2", ctx)
+        assert "import-ca-cert" in rendered
+        assert "lakebench-ca-certificate" in rendered
+
+    def test_trino_no_truststore_without_ca_cert(self, renderer: TemplateRenderer):
+        """Trino should NOT have truststore config when no CA cert."""
+        engine = _make_engine()
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("trino/configmap.yaml.j2", ctx)
+        assert "javax.net.ssl.trustStore" not in rendered
+
+        rendered = renderer.render("trino/coordinator.yaml.j2", ctx)
+        assert "import-ca-cert" not in rendered
+
+    def test_polaris_truststore_when_ca_cert(self, renderer: TemplateRenderer):
+        """Polaris deployment should have truststore init when CA cert set."""
+        cfg = make_config(
+            recipe="polaris-iceberg-spark-trino",
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("polaris/deployment.yaml.j2", ctx)
+        assert "import-ca-cert" in rendered
+        assert "JAVA_TOOL_OPTIONS" in rendered
+        assert "truststore.jks" in rendered
+
+    def test_polaris_no_truststore_without_ca_cert(self, renderer: TemplateRenderer):
+        """Polaris deployment should NOT have truststore when no CA cert."""
+        cfg = make_config(recipe="polaris-iceberg-spark-trino")
+        engine = _make_engine(cfg=cfg)
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("polaris/deployment.yaml.j2", ctx)
+        assert "import-ca-cert" not in rendered
+        assert "JAVA_TOOL_OPTIONS" not in rendered
+
+    def test_secrets_ca_cert_when_pem_set(self, renderer: TemplateRenderer):
+        """Secrets template should include CA cert secret when PEM is provided."""
+        cfg = make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("secrets.yaml.j2", ctx)
+        docs = _parse_yaml_docs(rendered)
+        # Should have 3 documents: S3 creds, Postgres creds, CA cert
+        assert len(docs) == 3
+        ca_doc = docs[2]
+        assert ca_doc["metadata"]["name"] == "lakebench-ca-certificate"
+        assert "BEGIN CERTIFICATE" in ca_doc["stringData"]["ca.crt"]
+
+    def test_secrets_no_ca_cert_when_pem_empty(self, renderer: TemplateRenderer):
+        """Secrets template should NOT include CA cert secret when no PEM."""
+        engine = _make_engine()
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("secrets.yaml.j2", ctx)
+        docs = _parse_yaml_docs(rendered)
+        # Should have 2 documents: S3 creds, Postgres creds
+        assert len(docs) == 2
+
+    def test_datagen_ca_cert_env_vars_when_set(self, renderer: TemplateRenderer):
+        """Datagen job should have S3_CA_CERT env var when CA cert set."""
+        cfg = make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("datagen/job.yaml.j2", ctx)
+        assert "S3_CA_CERT" in rendered
+        assert "lakebench-ca-certificate" in rendered
+
+    def test_datagen_no_ca_cert_env_vars_when_empty(self, renderer: TemplateRenderer):
+        """Datagen job should NOT have S3_CA_CERT env var when no CA cert."""
+        engine = _make_engine()
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("datagen/job.yaml.j2", ctx)
+        assert "S3_CA_CERT" not in rendered
+
+    def test_hive_tls_block_when_https_with_ca(self, renderer: TemplateRenderer):
+        """Hive cluster should have TLS block when HTTPS + CA cert."""
+        cfg = make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
+        assert "lakebench-s3-ca-cert-class" in rendered
+        assert "tls:" in rendered or "secretClass" in rendered
+
+    def test_hive_no_tls_block_for_http(self, renderer: TemplateRenderer):
+        """Hive cluster should NOT have TLS block when HTTP endpoint."""
+        engine = _make_engine()
+        ctx = _enrich_context(engine)
+
+        rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
+        assert "lakebench-s3-ca-cert-class" not in rendered
+
+    def test_all_templates_render_with_https_context(self, renderer: TemplateRenderer):
+        """All templates should render without error with HTTPS + CA cert context."""
+        cfg = make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://s3.example.com:443",
+                        "access_key": "AK",
+                        "secret_key": "SK",
+                        "ca_cert": "/tmp/ca.pem",
+                    }
+                }
+            },
+        )
+        with patch(
+            "lakebench.deploy.engine.DeploymentEngine._detect_openshift",
+            return_value=False,
+        ), patch(
+            "lakebench.deploy.engine.DeploymentEngine._read_ca_cert_pem",
+            return_value="-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----",
+        ):
+            engine = DeploymentEngine(config=cfg, k8s_client=_mock_k8s(), dry_run=True)
+        ctx = _enrich_context(engine)
+
+        for template_name in ALL_TEMPLATES:
+            rendered = renderer.render(template_name, ctx)
+            assert len(rendered) > 0, f"{template_name} empty with HTTPS context"
+            docs = _parse_yaml_docs(rendered)
+            assert len(docs) > 0, f"{template_name} produced no YAML with HTTPS context"
 
 
 # ===========================================================================

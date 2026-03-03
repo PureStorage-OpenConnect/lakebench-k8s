@@ -9,7 +9,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
+from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from lakebench._constants import POLARIS_CLIENT_SECRET
 from lakebench.config import LakebenchConfig
@@ -86,6 +86,7 @@ class TemplateRenderer:
         self.env = Environment(
             loader=FileSystemLoader(str(template_dir)),
             autoescape=select_autoescape(["yaml", "yml", "j2"]),
+            undefined=StrictUndefined,
             trim_blocks=True,
             lstrip_blocks=True,
         )
@@ -226,6 +227,21 @@ class DeploymentEngine:
             )
         return ",".join(packages)
 
+    @staticmethod
+    def _read_ca_cert_pem(path: str) -> str:
+        """Read PEM certificate file content for embedding in K8s Secret.
+
+        Returns empty string if no path is provided.
+        """
+        if not path:
+            return ""
+        from pathlib import Path
+
+        cert_path = Path(path)
+        if not cert_path.is_file():
+            raise FileNotFoundError(f"CA certificate not found: {path}")
+        return cert_path.read_text()
+
     def _build_context(self) -> dict[str, Any]:
         """Build template context from configuration."""
         cfg = self.config
@@ -262,6 +278,10 @@ class DeploymentEngine:
             "s3_endpoint": s3.endpoint,
             "s3_host": s3_host,  # For Stackable HiveCluster
             "s3_port": s3_port,  # For Stackable HiveCluster
+            "s3_scheme": parsed_s3.scheme or "http",
+            "s3_use_ssl": parsed_s3.scheme == "https",
+            "s3_ca_cert_pem": self._read_ca_cert_pem(s3.ca_cert),
+            "s3_verify_ssl": s3.verify_ssl,
             "s3_region": s3.region,
             "s3_path_style": s3.path_style,
             "s3_access_key": s3.access_key,
@@ -283,6 +303,8 @@ class DeploymentEngine:
             "hive_client_timeout": cfg.architecture.catalog.hive.thrift.client_timeout,
             # Polaris
             "polaris_version": cfg.architecture.catalog.polaris.version,
+            "polaris_image": cfg.images.polaris,
+            "polaris_admin_tool_image": cfg.images.polaris_admin_tool,
             "polaris_port": cfg.architecture.catalog.polaris.port,
             "polaris_cpu": cfg.architecture.catalog.polaris.resources.cpu,
             "polaris_memory": cfg.architecture.catalog.polaris.resources.memory,
@@ -598,30 +620,28 @@ class DeploymentEngine:
             return False
 
     def _deploy_spark_operator(self) -> DeploymentResult:
-        """Install the Spark Operator if config has install: true.
+        """Ensure the Spark Operator is ready and watches the target namespace.
 
-        Skips if install is disabled. Uses SparkOperatorManager.ensure_installed()
-        which is idempotent -- safe to call when operator is already running.
+        When ``install=true``, installs the operator if missing.
+        When ``install=false``, still verifies the operator exists and
+        watches the target namespace -- adds it via ``helm upgrade`` if
+        needed.  Fails deployment if the operator is missing or broken,
+        rather than silently skipping and letting ``run`` fail later.
         """
         import time
 
         start = time.time()
 
         spark_op_cfg = self.config.platform.compute.spark.operator
-        if not spark_op_cfg.install:
-            return DeploymentResult(
-                component="spark-operator",
-                status=DeploymentStatus.SKIPPED,
-                message="Spark Operator install disabled (operator.install=false)",
-                elapsed_seconds=0,
-            )
+        job_ns = self.config.get_namespace()
 
         if self.dry_run:
+            action = "install" if spark_op_cfg.install else "verify"
             return DeploymentResult(
                 component="spark-operator",
                 status=DeploymentStatus.SUCCESS,
                 message=(
-                    f"Would install Spark Operator v{spark_op_cfg.version} "
+                    f"Would {action} Spark Operator v{spark_op_cfg.version} "
                     f"in namespace '{spark_op_cfg.namespace}'"
                 ),
                 elapsed_seconds=0,
@@ -633,15 +653,36 @@ class DeploymentEngine:
             operator = SparkOperatorManager(
                 namespace=spark_op_cfg.namespace,
                 version=spark_op_cfg.version,
-                job_namespace=self.config.get_namespace(),
+                job_namespace=job_ns,
             )
-            status = operator.ensure_installed()
+
+            if spark_op_cfg.install:
+                # Full install/upgrade path
+                status = operator.ensure_installed()
+            else:
+                # install=false: don't install, but DO ensure the operator
+                # watches the target namespace (add via helm upgrade).
+                status = operator.ensure_namespace_watched(can_heal=True)
 
             if not status.ready:
+                hint = ""
+                if not spark_op_cfg.install:
+                    hint = (
+                        " (operator.install is false -- set to true for "
+                        "auto-install, or install the operator manually)"
+                    )
                 return DeploymentResult(
                     component="spark-operator",
                     status=DeploymentStatus.FAILED,
-                    message=f"Spark Operator not ready: {status.message}",
+                    message=f"Spark Operator not ready: {status.message}{hint}",
+                    elapsed_seconds=time.time() - start,
+                )
+
+            if status.watching_namespace is False:
+                return DeploymentResult(
+                    component="spark-operator",
+                    status=DeploymentStatus.FAILED,
+                    message=status.message,
                     elapsed_seconds=time.time() - start,
                 )
 
@@ -650,7 +691,6 @@ class DeploymentEngine:
             # Role/RoleBinding were lost when the namespace was deleted.
             # Detect this and force-recreate the RBAC (remove + re-add
             # the namespace, patch OpenShift SCC, restart controller).
-            job_ns = self.config.get_namespace()
             if not self._operator_rbac_exists(job_ns):
                 logger.info(
                     "Spark Operator RBAC missing in '%s' -- recreating",
@@ -680,7 +720,7 @@ class DeploymentEngine:
             return DeploymentResult(
                 component="spark-operator",
                 status=DeploymentStatus.FAILED,
-                message=f"Spark Operator installation failed: {e}",
+                message=f"Spark Operator deployment failed: {e}",
                 elapsed_seconds=time.time() - start,
             )
 
@@ -744,12 +784,31 @@ class DeploymentEngine:
                 )
             )
             report("spark-jobs", DeploymentStatus.SUCCESS, "SparkApplications deleted")
-        except Exception:
+        except ApiException as e:
+            if e.status == 404:
+                results.append(
+                    DeploymentResult(
+                        component="spark-jobs",
+                        status=DeploymentStatus.SKIPPED,
+                        message="No SparkApplications found",
+                    )
+                )
+            else:
+                logger.warning("SparkApplication cleanup failed: %s", e)
+                results.append(
+                    DeploymentResult(
+                        component="spark-jobs",
+                        status=DeploymentStatus.FAILED,
+                        message=f"SparkApplication cleanup failed: {e}",
+                    )
+                )
+        except Exception as e:
+            logger.warning("SparkApplication cleanup failed: %s", e, exc_info=True)
             results.append(
                 DeploymentResult(
                     component="spark-jobs",
-                    status=DeploymentStatus.SUCCESS,
-                    message="No SparkApplications found",
+                    status=DeploymentStatus.SKIPPED,
+                    message=f"SparkApplication cleanup skipped: {e}",
                 )
             )
 
@@ -778,12 +837,31 @@ class DeploymentEngine:
                 )
             )
             report("spark-pods", DeploymentStatus.SUCCESS, "Spark pods cleaned")
-        except Exception:
+        except ApiException as e:
+            if e.status == 404:
+                results.append(
+                    DeploymentResult(
+                        component="spark-pods",
+                        status=DeploymentStatus.SKIPPED,
+                        message="No orphaned pods found",
+                    )
+                )
+            else:
+                logger.warning("Spark pod cleanup failed: %s", e)
+                results.append(
+                    DeploymentResult(
+                        component="spark-pods",
+                        status=DeploymentStatus.FAILED,
+                        message=f"Spark pod cleanup failed: {e}",
+                    )
+                )
+        except Exception as e:
+            logger.warning("Spark pod cleanup failed: %s", e, exc_info=True)
             results.append(
                 DeploymentResult(
                     component="spark-pods",
-                    status=DeploymentStatus.SUCCESS,
-                    message="No orphaned pods found",
+                    status=DeploymentStatus.SKIPPED,
+                    message=f"Spark pod cleanup skipped: {e}",
                 )
             )
 
@@ -831,12 +909,31 @@ class DeploymentEngine:
                 )
             )
             report("datagen-jobs", DeploymentStatus.SUCCESS, "Datagen jobs cleaned")
-        except Exception:
+        except ApiException as e:
+            if e.status == 404:
+                results.append(
+                    DeploymentResult(
+                        component="datagen-jobs",
+                        status=DeploymentStatus.SKIPPED,
+                        message="No datagen jobs found",
+                    )
+                )
+            else:
+                logger.warning("Datagen cleanup failed: %s", e)
+                results.append(
+                    DeploymentResult(
+                        component="datagen-jobs",
+                        status=DeploymentStatus.FAILED,
+                        message=f"Datagen cleanup failed: {e}",
+                    )
+                )
+        except Exception as e:
+            logger.warning("Datagen cleanup failed: %s", e, exc_info=True)
             results.append(
                 DeploymentResult(
                     component="datagen-jobs",
-                    status=DeploymentStatus.SUCCESS,
-                    message="No datagen jobs found",
+                    status=DeploymentStatus.SKIPPED,
+                    message=f"Datagen cleanup skipped: {e}",
                 )
             )
 
@@ -894,15 +991,16 @@ class DeploymentEngine:
                 results.append(
                     DeploymentResult(
                         component="iceberg-tables",
-                        status=DeploymentStatus.SUCCESS,
+                        status=DeploymentStatus.SKIPPED,
                         message="Trino not available, skipping table cleanup",
                     )
                 )
         except Exception as e:
+            logger.warning("Table cleanup failed: %s", e, exc_info=True)
             results.append(
                 DeploymentResult(
                     component="iceberg-tables",
-                    status=DeploymentStatus.SUCCESS,
+                    status=DeploymentStatus.SKIPPED,
                     message=f"Table cleanup skipped: {e}",
                 )
             )
@@ -1028,8 +1126,9 @@ class DeploymentEngine:
                         core_v1.delete_namespaced_persistent_volume_claim(
                             pvc.metadata.name, namespace
                         )
-                except ApiException:
-                    pass
+                except ApiException as e:
+                    if e.status != 404:
+                        logger.warning("Trino PVC cleanup failed: %s", e)
                 for svc_name in [
                     "lakebench-trino",
                     "lakebench-trino-coordinator",
@@ -1042,8 +1141,9 @@ class DeploymentEngine:
                             raise
                 try:
                     core_v1.delete_namespaced_config_map("lakebench-trino-config", namespace)
-                except ApiException:
-                    pass
+                except ApiException as e:
+                    if e.status != 404:
+                        logger.warning("Trino configmap cleanup failed: %s", e)
                 results.append(
                     DeploymentResult(
                         component="trino",

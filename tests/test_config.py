@@ -137,6 +137,48 @@ class TestLakebenchConfig:
         assert not config.has_inline_s3_credentials()
         assert config.has_s3_secret_ref()
 
+    def test_s3_tls_fields_defaults(self):
+        """Test S3Config ca_cert and verify_ssl default values."""
+        config = LakebenchConfig(name="test")
+        assert config.platform.storage.s3.ca_cert == ""
+        assert config.platform.storage.s3.verify_ssl is True
+
+    def test_s3_tls_fields_override(self):
+        """Test S3Config ca_cert and verify_ssl can be set."""
+        config = LakebenchConfig(
+            name="test",
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://flashblade:443",
+                        "ca_cert": "/etc/ssl/certs/fb-ca.pem",
+                        "verify_ssl": True,
+                        "access_key": "key",
+                        "secret_key": "secret",
+                    }
+                }
+            },
+        )
+        assert config.platform.storage.s3.ca_cert == "/etc/ssl/certs/fb-ca.pem"
+        assert config.platform.storage.s3.verify_ssl is True
+
+    def test_s3_verify_ssl_false(self):
+        """Test S3Config verify_ssl can be set to false."""
+        config = LakebenchConfig(
+            name="test",
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://flashblade:443",
+                        "verify_ssl": False,
+                        "access_key": "key",
+                        "secret_key": "secret",
+                    }
+                }
+            },
+        )
+        assert config.platform.storage.s3.verify_ssl is False
+
     def test_quality_distribution_validation(self):
         """Test that quality distribution must sum to 1.0."""
         with pytest.raises(ValueError, match="must sum to 1.0"):
@@ -326,9 +368,9 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.memory == "16Gi"
 
     def test_datagen_image_default(self):
-        """BUG-010: Default datagen image is docker.io/sillidata/lb-datagen:v2."""
+        """BUG-010: Default datagen image is docker.io/sillidata/lb-datagen:v3."""
         config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:v2"
+        assert config.images.datagen == "docker.io/sillidata/lb-datagen:v3"
 
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""

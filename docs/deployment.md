@@ -34,6 +34,8 @@ The deployment engine follows this fixed sequence:
    for it to finish before re-creating.
 2. **Secrets** -- Creates S3 credential secrets and PostgreSQL credential secrets
    from the config values (or references an existing secret via `secret_ref`).
+   When `s3.ca_cert` is set, also creates a CA certificate secret for HTTPS
+   endpoints (used by all components for TLS verification).
 3. **Scratch StorageClass** -- Creates a Portworx `repl=1` StorageClass for Spark
    shuffle volumes. Skipped if `platform.storage.scratch.enabled` is false.
    Non-fatal if creation fails (may need cluster-admin).

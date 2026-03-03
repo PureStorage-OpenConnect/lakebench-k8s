@@ -7,12 +7,15 @@ Queries are executed via ``kubectl exec`` into the DuckDB CLI
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
 import yaml
 
 from .engine import DeploymentResult, DeploymentStatus, image_tag
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -80,6 +83,7 @@ class DuckDBDeployer:
             )
 
         except Exception as e:
+            logger.exception("DuckDB deployment failed")
             return DeploymentResult(
                 component="duckdb",
                 status=DeploymentStatus.FAILED,

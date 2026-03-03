@@ -42,6 +42,17 @@ spec:
             - name: jmx-exporter
               mountPath: /opt/jmx-exporter
         {% endif %}
+        {% if s3_ca_cert_pem %}
+        - name: import-ca-cert
+          image: {{ trino_image | default('trinodb/trino:479') }}
+          command: ['bash', '-c', 'keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt 2>/dev/null || true']
+          volumeMounts:
+            - name: ca-cert
+              mountPath: /etc/ssl/certs/custom-ca
+              readOnly: true
+            - name: truststore
+              mountPath: /truststore
+        {% endif %}
       containers:
         - name: trino
           image: {{ trino_image | default('trinodb/trino:479') }}
@@ -89,6 +100,10 @@ spec:
               mountPath: /etc/trino/jmx-exporter-config.yaml
               subPath: jmx-exporter-config.yaml
             {% endif %}
+            {% if s3_ca_cert_pem %}
+            - name: truststore
+              mountPath: /truststore
+            {% endif %}
           resources:
             requests:
               cpu: "{{ trino_worker_cpu | default('4') }}"
@@ -122,6 +137,13 @@ spec:
         {% endif %}
         {% if observability_enabled | default(false) %}
         - name: jmx-exporter
+          emptyDir: {}
+        {% endif %}
+        {% if s3_ca_cert_pem %}
+        - name: ca-cert
+          secret:
+            secretName: lakebench-ca-certificate
+        - name: truststore
           emptyDir: {}
         {% endif %}
   {% if trino_worker_storage_class %}

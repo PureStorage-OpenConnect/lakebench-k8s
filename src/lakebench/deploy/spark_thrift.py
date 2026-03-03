@@ -10,12 +10,15 @@ Kubernetes Deployment is used instead.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
 import yaml
 
 from .engine import DeploymentResult, DeploymentStatus, image_tag
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -84,6 +87,7 @@ class SparkThriftDeployer:
             )
 
         except Exception as e:
+            logger.exception("Spark Thrift deployment failed")
             return DeploymentResult(
                 component="spark-thrift",
                 status=DeploymentStatus.FAILED,

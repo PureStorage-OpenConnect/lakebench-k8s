@@ -5,6 +5,7 @@ Deploys Trino coordinator and workers as the query engine.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,8 @@ from lakebench.k8s import (
 )
 
 from .engine import DeploymentResult, DeploymentStatus, image_tag
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -172,6 +175,7 @@ class TrinoDeployer:
             )
 
         except Exception as e:
+            logger.exception("Trino deployment failed")
             return DeploymentResult(
                 component="trino",
                 status=DeploymentStatus.FAILED,

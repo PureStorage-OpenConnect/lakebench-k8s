@@ -253,7 +253,10 @@ class HiveDeployer:
         """
         try:
             # Render and apply Stackable templates
-            for template_name in self.STACKABLE_TEMPLATES:
+            templates = list(self.STACKABLE_TEMPLATES)
+            if self.config.platform.storage.s3.ca_cert:
+                templates.insert(0, "hive/stackable-ca-secretclass.yaml.j2")
+            for template_name in templates:
                 yaml_content = self.renderer.render(template_name, self.context)
                 # Handle multi-document YAML
                 for doc in yaml.safe_load_all(yaml_content):
@@ -291,6 +294,7 @@ class HiveDeployer:
             )
 
         except Exception as e:
+            logger.exception("Hive deployment failed")
             return DeploymentResult(
                 component="hive",
                 status=DeploymentStatus.FAILED,
