@@ -73,6 +73,19 @@ class TestDuckDBBuildPythonScript:
         )
         script = executor._build_python_script("SELECT 1")
         assert "s3.amazonaws.com" in script
+        # HTTPS endpoint should enable SSL
+        assert "s3_use_ssl=true" in script
+
+    def test_s3_ssl_disabled_for_http(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        executor = DuckDBExecutor(
+            namespace="test",
+            catalog_name="lakehouse",
+            s3_endpoint="http://minio:9000",
+        )
+        script = executor._build_python_script("SELECT 1")
+        assert "s3_use_ssl=false" in script
 
     def test_path_style_true(self):
         from lakebench.benchmark.executor import DuckDBExecutor

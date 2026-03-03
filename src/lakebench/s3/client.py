@@ -56,6 +56,8 @@ class S3ConnectionInfo:
     region: str
     path_style: bool
     credentials: S3Credentials
+    ca_cert: str = ""  # Path to PEM CA bundle for HTTPS
+    verify_ssl: bool = True  # Set False to skip SSL verification
 
 
 @dataclass
@@ -84,15 +86,19 @@ class S3Client:
         secret_key: str,
         region: str = "us-east-1",
         path_style: bool = True,
+        ca_cert: str = "",
+        verify_ssl: bool = True,
     ):
         """Initialize S3 client.
 
         Args:
-            endpoint: S3 endpoint URL (e.g., http://your-s3-endpoint:80)
+            endpoint: S3 endpoint URL (e.g., http://your-s3:80 or https://your-s3:443)
             access_key: S3 access key
             secret_key: S3 secret key
             region: AWS region for signature compatibility
             path_style: Use path-style addressing (required for FlashBlade, MinIO)
+            ca_cert: Path to PEM CA certificate bundle for HTTPS endpoints
+            verify_ssl: Verify SSL certificates (set False for self-signed in dev)
         """
         self.endpoint = endpoint
         self.access_key = access_key
@@ -109,15 +115,21 @@ class S3Client:
             read_timeout=30,
         )
 
+        # TLS verification: CA cert path > verify_ssl toggle > boto3 default
+        client_kwargs: dict[str, Any] = {
+            "endpoint_url": endpoint,
+            "aws_access_key_id": access_key,
+            "aws_secret_access_key": secret_key,
+            "region_name": region,
+            "config": boto_config,
+        }
+        if ca_cert:
+            client_kwargs["verify"] = ca_cert
+        elif not verify_ssl:
+            client_kwargs["verify"] = False
+
         try:
-            self._client = boto3.client(
-                "s3",
-                endpoint_url=endpoint,
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-                region_name=region,
-                config=boto_config,
-            )
+            self._client = boto3.client("s3", **client_kwargs)
             self._init_error: str | None = None
         except (ValueError, Exception) as e:
             self._client = None  # type: ignore[assignment]
@@ -132,6 +144,8 @@ class S3Client:
             secret_key=info.credentials.secret_key,
             region=info.region,
             path_style=info.path_style,
+            ca_cert=info.ca_cert,
+            verify_ssl=info.verify_ssl,
         )
 
     def _check_client(self) -> None:
@@ -452,6 +466,8 @@ def test_s3_connectivity(
     secret_key: str,
     region: str = "us-east-1",
     path_style: bool = True,
+    ca_cert: str = "",
+    verify_ssl: bool = True,
 ) -> dict[str, Any]:
     """Test S3 connectivity and credentials.
 
@@ -492,6 +508,8 @@ def test_s3_connectivity(
             secret_key=secret_key,
             region=region,
             path_style=path_style,
+            ca_cert=ca_cert,
+            verify_ssl=verify_ssl,
         )
 
         reachable, msg = client.test_endpoint_reachable()

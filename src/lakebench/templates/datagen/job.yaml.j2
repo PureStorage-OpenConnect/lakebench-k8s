@@ -27,9 +27,15 @@ spec:
     spec:
       serviceAccountName: lakebench-spark-runner
       restartPolicy: OnFailure
+      {% if s3_ca_cert_pem %}
+      volumes:
+        - name: ca-cert
+          secret:
+            secretName: lakebench-ca-certificate
+      {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:v2') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:v3') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--target-tb"
@@ -61,6 +67,10 @@ spec:
             - "{{ datagen_timestamp_end }}"
             {% endif %}
             {% if datagen_resume %}- "--resume"{% endif %}
+            {% if datagen_duration is defined and datagen_duration %}
+            - "--duration"
+            - "{{ datagen_duration }}"
+            {% endif %}
           env:
             # JOB_COMPLETION_INDEX is automatically set by Kubernetes (0, 1, 2, ...)
             # Used as default --node-id in generate.py
@@ -80,6 +90,19 @@ spec:
                 secretKeyRef:
                   name: lakebench-s3-credentials
                   key: secretKey
+            {% if s3_ca_cert_pem %}
+            - name: S3_CA_CERT
+              value: "/etc/ssl/certs/custom-ca/ca.crt"
+            {% elif not s3_verify_ssl %}
+            - name: S3_VERIFY_SSL
+              value: "false"
+            {% endif %}
+          {% if s3_ca_cert_pem %}
+          volumeMounts:
+            - name: ca-cert
+              mountPath: /etc/ssl/certs/custom-ca
+              readOnly: true
+          {% endif %}
           resources:
             requests:
               cpu: "{{ datagen_cpu | default('2') }}"

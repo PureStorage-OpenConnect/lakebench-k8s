@@ -27,7 +27,7 @@ spec:
       initContainers:
         # Step 1: Bootstrap realm + root principal (direct DB access)
         - name: bootstrap-realm
-          image: apache/polaris-admin-tool:{{ polaris_version | default('1.3.0-incubating') }}
+          image: {{ polaris_admin_tool_image }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           env:
             - name: POLARIS_PERSISTENCE_TYPE

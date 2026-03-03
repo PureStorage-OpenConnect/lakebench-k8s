@@ -26,6 +26,7 @@ from lakebench.config import (
     load_config,
     parse_spark_memory,
 )
+from lakebench.config.schema import PipelineMode
 from lakebench.journal import DEFAULT_JOURNAL_DIR, CommandName, EventType, Journal
 from lakebench.k8s import K8sConnectionError, PlatformType, SecurityVerifier, get_k8s_client
 from lakebench.s3 import test_s3_connectivity
@@ -156,7 +157,7 @@ def _print_pipeline_scorecard(
 
     # Scores section
     scores: list[str] = []
-    if pb.pipeline_mode in ("sustained", "continuous"):
+    if pb.pipeline_mode == PipelineMode.SUSTAINED.value:
         if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"  Freshness:      {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
@@ -232,7 +233,7 @@ def _print_report_summary(metrics) -> None:
 
     # Scores
     scores: list[str] = []
-    if pb.pipeline_mode in ("sustained", "continuous"):
+    if pb.pipeline_mode == PipelineMode.SUSTAINED.value:
         if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"Freshness:       {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
@@ -522,7 +523,7 @@ def init(
         str,
         typer.Option(
             "--endpoint",
-            help="S3 endpoint URL (e.g. http://your-s3-endpoint:80)",
+            help="S3 endpoint URL (e.g. http://your-s3:80 or https://your-s3:443)",
         ),
     ] = "",
     access_key: Annotated[
@@ -619,7 +620,7 @@ def init(
 
         console.print()
         console.print("[dim]S3 endpoint examples:[/dim]")
-        console.print("[dim]  FlashBlade: http://your-s3-endpoint:80[/dim]")
+        console.print("[dim]  FlashBlade: http://your-s3:80 or https://your-s3:443[/dim]")
         console.print("[dim]  MinIO:      http://minio:9000[/dim]")
         console.print("[dim]  AWS S3:     https://s3.us-east-1.amazonaws.com[/dim]")
         if not endpoint:
@@ -813,6 +814,8 @@ def validate(
             secret_key=s3.secret_key,
             region=s3.region,
             path_style=s3.path_style,
+            ca_cert=s3.ca_cert,
+            verify_ssl=s3.verify_ssl,
         )
 
         if results["endpoint_reachable"]:
@@ -1929,6 +1932,8 @@ def clean(
                 secret_key=s3_cfg.secret_key,
                 region=s3_cfg.region,
                 path_style=s3_cfg.path_style,
+                ca_cert=s3_cfg.ca_cert,
+                verify_ssl=s3_cfg.verify_ssl,
             )
 
             def _clean_progress(bkt: str, count: int) -> None:
@@ -2475,8 +2480,8 @@ def run(
             pipeline_success = False
             raise typer.Exit(1)
 
-        # Ensure operator watches the target namespace (self-heal if install=true)
-        ns_status = operator.ensure_namespace_watched(can_heal=spark_op_cfg.install)
+        # Ensure operator watches the target namespace (always try to heal)
+        ns_status = operator.ensure_namespace_watched(can_heal=True)
         if ns_status.watching_namespace is False:
             print_error(ns_status.message)
             pipeline_success = False
@@ -2846,6 +2851,8 @@ def run(
                 secret_key=s3_cfg.secret_key,
                 region=s3_cfg.region,
                 path_style=s3_cfg.path_style,
+                ca_cert=s3_cfg.ca_cert,
+                verify_ssl=s3_cfg.verify_ssl,
             )
             print_info("Measuring actual S3 bucket sizes...")
             collector.record_actual_sizes(
@@ -3359,8 +3366,8 @@ def _run_sustained(
             pipeline_success = False
             raise typer.Exit(1)
 
-        # Ensure operator watches the target namespace (self-heal if install=true)
-        ns_status = operator.ensure_namespace_watched(can_heal=spark_op_cfg.install)
+        # Ensure operator watches the target namespace (always try to heal)
+        ns_status = operator.ensure_namespace_watched(can_heal=True)
         if ns_status.watching_namespace is False:
             print_error(ns_status.message)
             pipeline_success = False
@@ -3573,6 +3580,8 @@ def _run_sustained(
                 secret_key=s3_cfg.secret_key,
                 region=s3_cfg.region,
                 path_style=s3_cfg.path_style,
+                ca_cert=s3_cfg.ca_cert,
+                verify_ssl=s3_cfg.verify_ssl,
             )
             dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
             if dg_info.size_bytes:
@@ -3727,6 +3736,8 @@ def _run_sustained(
                 secret_key=s3_cfg.secret_key,
                 region=s3_cfg.region,
                 path_style=s3_cfg.path_style,
+                ca_cert=s3_cfg.ca_cert,
+                verify_ssl=s3_cfg.verify_ssl,
             )
             print_info("Measuring actual S3 bucket sizes...")
             collector.record_actual_sizes(
@@ -3753,7 +3764,7 @@ def _run_sustained(
                     datagen_output_rows=_datagen_output_rows,
                 )
                 run_metrics.pipeline_benchmark = pb
-                if pb.pipeline_mode in ("sustained", "continuous"):
+                if pb.pipeline_mode == PipelineMode.SUSTAINED.value:
                     if pb.sustained_throughput_rps > 0:
                         latency_str = (
                             "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
@@ -3916,6 +3927,8 @@ def info(
     effective_mode = _resolve_datagen_mode(cfg)
     workload_profile = f"{workload.schema_type.value}-{effective_mode}"
 
+    is_sustained = arch.pipeline.mode == PipelineMode.SUSTAINED
+
     # Per-job executor counts with auto/override labels
     override_map = {
         "bronze-verify": spark.bronze_executors,
@@ -3965,8 +3978,24 @@ def info(
             "Compute tier",
             f"{guidance.tier_name} (rec: {guidance.recommended_executors} executors, {guidance.recommended_memory})",
         ),
-        ("Executors", ", ".join(executor_parts)),
-        ("Streaming", ", ".join(streaming_executor_parts)),
+    ]
+
+    if is_sustained:
+        sustained_cfg = arch.pipeline.sustained
+        lines += [
+            ("Executors", ", ".join(streaming_executor_parts)),
+            (
+                "Trigger intervals",
+                f"bronze={sustained_cfg.bronze_trigger_interval}, silver={sustained_cfg.silver_trigger_interval}, gold={sustained_cfg.gold_refresh_interval}",
+            ),
+            ("Run duration", f"{sustained_cfg.run_duration}s"),
+        ]
+    else:
+        lines += [
+            ("Executors", ", ".join(executor_parts)),
+        ]
+
+    lines += [
         ("S3 endpoint", s3.endpoint or "(not set)"),
         ("Buckets", f"{s3.buckets.bronze}, {s3.buckets.silver}, {s3.buckets.gold}"),
     ]
@@ -4014,7 +4043,16 @@ def info(
         trino_cores = int(full_g.trino.coordinator_cpu) + full_g.trino.worker_replicas * int(
             full_g.trino.worker_cpu
         )
-        peak_cores = max(spark_cores, datagen_cores) + trino_cores + 4
+        if is_sustained:
+            # Sustained: datagen + streaming spark + trino all run concurrently
+            streaming_cores = sum(
+                _scale_executor_count(_JOB_PROFILES[j], scale) * _JOB_PROFILES[j]["executor_cores"]
+                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
+            )
+            peak_cores = datagen_cores + streaming_cores + trino_cores + 4
+        else:
+            # Batch: datagen and spark are sequential (never overlap)
+            peak_cores = max(spark_cores, datagen_cores) + trino_cores + 4
         needed_cores = int(peak_cores * 1.15)
 
         if cluster_cores >= needed_cores:
@@ -5248,9 +5286,24 @@ def recommend(
         typer.Option(
             "--extended",
             "-e",
-            help="Show extended scale (slower datagen, same Spark). Reduces datagen parallelism to fit cluster.",
+            help="[deprecated: use --slow-datagen] Reduces datagen parallelism to fit cluster.",
+            hidden=True,
         ),
     ] = False,
+    slow_datagen: Annotated[
+        bool,
+        typer.Option(
+            "--slow-datagen",
+            help="Reduce datagen parallelism to fit smaller clusters (slower generation, same Spark resources).",
+        ),
+    ] = False,
+    mode: Annotated[
+        str | None,
+        typer.Option(
+            "--mode",
+            help="Pipeline mode: batch (sequential phases) or sustained (concurrent datagen+streaming). Default: batch.",
+        ),
+    ] = None,
 ) -> None:
     """Show cluster sizing guidance for lakebench workloads.
 
@@ -5273,6 +5326,16 @@ def recommend(
         lakebench recommend --scale 100000      # what do I need for 1 PB?
     """
     from lakebench.config.scale import customer360_dimensions, full_compute_guidance
+    from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
+
+    # Resolve --extended -> --slow-datagen
+    use_slow_datagen = slow_datagen or extended
+    if extended:
+        console.print("[yellow]--extended is deprecated, use --slow-datagen instead[/yellow]\n")
+
+    # Resolve pipeline mode
+    pipeline_mode = mode or "batch"
+    is_sustained = pipeline_mode == "sustained"
 
     def format_data_size(gb: float) -> str:
         """Format data size in human-readable units."""
@@ -5284,19 +5347,26 @@ def recommend(
             return f"{gb / 1_000:.1f} TB"
         return f"{gb:.0f} GB"
 
+    def _streaming_resources(scale: int) -> tuple[int, int]:
+        """Compute total streaming cores and memory for sustained mode."""
+        streaming_jobs = ("bronze-ingest", "silver-stream", "gold-refresh")
+        cores = sum(
+            _scale_executor_count(_JOB_PROFILES[j], scale) * _JOB_PROFILES[j]["executor_cores"]
+            for j in streaming_jobs
+        )
+        mem_gi = sum(
+            _scale_executor_count(_JOB_PROFILES[j], scale)
+            * int(_JOB_PROFILES[j]["executor_memory"].rstrip("g"))
+            for j in streaming_jobs
+        )
+        return cores, mem_gi
+
     def compute_cluster_requirements(scale: int) -> dict:
         """Compute minimum cluster requirements for a given scale."""
         dims = customer360_dimensions(scale)
         guidance = full_compute_guidance(scale)
 
-        # Calculate total resource requirements
-        # Spark (batch mode uses sequential phases, so just max per phase)
-        spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-        spark_mem_gi = guidance.spark.recommended_executors * int(
-            guidance.spark.recommended_memory.rstrip("g")
-        )
-
-        # Datagen (runs concurrently with Trino in batch mode)
+        # Datagen
         datagen_cores = guidance.datagen.parallelism * int(guidance.datagen.cpu)
         datagen_mem_gi = guidance.datagen.parallelism * int(
             guidance.datagen.memory.rstrip("Gi").rstrip("gi")
@@ -5310,55 +5380,65 @@ def recommend(
             guidance.trino.coordinator_memory.rstrip("Gi")
         ) + guidance.trino.worker_replicas * int(guidance.trino.worker_memory.rstrip("Gi"))
 
-        # Infra overhead (Hive metastore, Postgres) ~4 cores, 8 Gi
+        # Infra overhead (Hive/Polaris, Postgres) ~4 cores, 8 Gi
         infra_cores = 4
         infra_mem_gi = 8
 
-        # Batch mode: datagen runs first, then Spark. They don't overlap.
-        # So peak is max(datagen, spark) + trino + infra
-        peak_workload_cores = max(spark_cores, datagen_cores)
-        peak_workload_mem = max(spark_mem_gi, datagen_mem_gi)
-
-        total_cores = peak_workload_cores + trino_cores + infra_cores
-        total_mem_gi = peak_workload_mem + trino_mem_gi + infra_mem_gi
+        if is_sustained:
+            # Sustained: datagen + streaming spark + trino all run concurrently
+            streaming_cores, streaming_mem = _streaming_resources(scale)
+            peak_cores = datagen_cores + streaming_cores + trino_cores + infra_cores
+            peak_mem = datagen_mem_gi + streaming_mem + trino_mem_gi + infra_mem_gi
+        else:
+            # Batch: datagen runs first, then Spark. They don't overlap.
+            spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
+            spark_mem_gi = guidance.spark.recommended_executors * int(
+                guidance.spark.recommended_memory.rstrip("g")
+            )
+            peak_cores = max(spark_cores, datagen_cores) + trino_cores + infra_cores
+            peak_mem = max(spark_mem_gi, datagen_mem_gi) + trino_mem_gi + infra_mem_gi
 
         # Add 15% headroom for system pods
-        total_cores = int(total_cores * 1.15)
-        total_mem_gi = int(total_mem_gi * 1.15)
+        total_cores = int(peak_cores * 1.15)
+        total_mem_gi = int(peak_mem * 1.15)
 
-        return {
+        result = {
             "scale": scale,
             "data_gb": dims.approx_bronze_gb,
             "tier": guidance.spark.tier_name,
-            "spark_executors": guidance.spark.recommended_executors,
-            "spark_cores_per_exec": guidance.spark.recommended_cores,
-            "spark_mem_per_exec": guidance.spark.recommended_memory,
             "datagen_pods": guidance.datagen.parallelism,
             "trino_workers": guidance.trino.worker_replicas,
             "total_cores": total_cores,
             "total_mem_gi": total_mem_gi,
         }
 
+        if is_sustained:
+            streaming_cores, _ = _streaming_resources(scale)
+            result["streaming_executors"] = sum(
+                _scale_executor_count(_JOB_PROFILES[j], scale)
+                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
+            )
+            result["streaming_cores"] = streaming_cores
+        else:
+            result["spark_executors"] = guidance.spark.recommended_executors
+            result["spark_cores_per_exec"] = guidance.spark.recommended_cores
+            result["spark_mem_per_exec"] = guidance.spark.recommended_memory
+
+        return result
+
     def is_feasible(scale: int, cores: int, mem_gb: int) -> bool:
         """Check if a scale is feasible on given cluster resources."""
         reqs = compute_cluster_requirements(scale)
         return cores >= reqs["total_cores"] and mem_gb >= reqs["total_mem_gi"]
 
-    def compute_spark_only_requirements(scale: int) -> dict:
+    def compute_slow_datagen_requirements(scale: int) -> dict:
         """Compute requirements assuming datagen runs with reduced parallelism.
 
-        In 'extended' mode, datagen parallelism is reduced to fit the cluster.
-        This means datagen takes longer, but Spark and Trino requirements remain.
-        The limiting factor becomes Spark phase, not datagen phase.
+        Datagen parallelism is reduced to fit the cluster. This means datagen
+        takes longer, but Spark/streaming and Trino requirements remain.
         """
         dims = customer360_dimensions(scale)
         guidance = full_compute_guidance(scale)
-
-        # Spark requirements (the actual compute workload)
-        spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-        spark_mem_gi = guidance.spark.recommended_executors * int(
-            guidance.spark.recommended_memory.rstrip("g")
-        )
 
         # Trino (always running)
         trino_cores = int(guidance.trino.coordinator_cpu) + guidance.trino.worker_replicas * int(
@@ -5372,35 +5452,56 @@ def recommend(
         infra_cores = 4
         infra_mem_gi = 8
 
-        # In extended mode, Spark phase is the constraint (datagen runs slower)
-        total_cores = spark_cores + trino_cores + infra_cores
-        total_mem_gi = spark_mem_gi + trino_mem_gi + infra_mem_gi
+        if is_sustained:
+            # Sustained slow-datagen: streaming + trino + infra (datagen reduced)
+            streaming_cores, streaming_mem = _streaming_resources(scale)
+            total_cores = streaming_cores + trino_cores + infra_cores
+            total_mem_gi = streaming_mem + trino_mem_gi + infra_mem_gi
+        else:
+            # Batch slow-datagen: spark + trino + infra (datagen reduced)
+            spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
+            spark_mem_gi = guidance.spark.recommended_executors * int(
+                guidance.spark.recommended_memory.rstrip("g")
+            )
+            total_cores = spark_cores + trino_cores + infra_cores
+            total_mem_gi = spark_mem_gi + trino_mem_gi + infra_mem_gi
 
         # Add 15% headroom
         total_cores = int(total_cores * 1.15)
         total_mem_gi = int(total_mem_gi * 1.15)
 
-        return {
+        result = {
             "scale": scale,
             "data_gb": dims.approx_bronze_gb,
             "tier": guidance.spark.tier_name,
-            "spark_executors": guidance.spark.recommended_executors,
-            "spark_cores_per_exec": guidance.spark.recommended_cores,
-            "spark_mem_per_exec": guidance.spark.recommended_memory,
             "datagen_pods": guidance.datagen.parallelism,
             "trino_workers": guidance.trino.worker_replicas,
             "total_cores": total_cores,
             "total_mem_gi": total_mem_gi,
         }
 
-    def is_feasible_extended(scale: int, cores: int, mem_gb: int) -> bool:
-        """Check feasibility in extended mode (Spark-limited, not datagen-limited)."""
-        reqs = compute_spark_only_requirements(scale)
+        if is_sustained:
+            streaming_cores, _ = _streaming_resources(scale)
+            result["streaming_executors"] = sum(
+                _scale_executor_count(_JOB_PROFILES[j], scale)
+                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
+            )
+            result["streaming_cores"] = streaming_cores
+        else:
+            result["spark_executors"] = guidance.spark.recommended_executors
+            result["spark_cores_per_exec"] = guidance.spark.recommended_cores
+            result["spark_mem_per_exec"] = guidance.spark.recommended_memory
+
+        return result
+
+    def is_feasible_slow_datagen(scale: int, cores: int, mem_gb: int) -> bool:
+        """Check feasibility with reduced datagen (Spark/streaming-limited)."""
+        reqs = compute_slow_datagen_requirements(scale)
         return cores >= reqs["total_cores"] and mem_gb >= reqs["total_mem_gi"]
 
-    def find_max_scale(cores: int, mem_gb: int, use_extended: bool = False) -> int:
+    def find_max_scale(cores: int, mem_gb: int, use_slow_datagen: bool = False) -> int:
         """Binary search to find max feasible scale."""
-        check_fn = is_feasible_extended if use_extended else is_feasible
+        check_fn = is_feasible_slow_datagen if use_slow_datagen else is_feasible
         if not check_fn(1, cores, mem_gb):
             return 0
 
@@ -5419,16 +5520,30 @@ def recommend(
         reqs = compute_cluster_requirements(target_scale)
         dims = customer360_dimensions(target_scale)
 
+        mode_label = "sustained" if is_sustained else "batch"
+        if is_sustained:
+            workload_line = (
+                f"  Streaming:       {reqs['streaming_executors']} executors "
+                f"({reqs['streaming_cores']} cores)"
+            )
+        else:
+            workload_line = (
+                f"  Spark:           {reqs['spark_executors']} x "
+                f"{reqs['spark_cores_per_exec']} cores x "
+                f"{reqs['spark_mem_per_exec']}"
+            )
+
         console.print(
             Panel(
                 f"[bold]Scale {target_scale:,}[/bold] ({format_data_size(reqs['data_gb'])})\n\n"
                 f"[dim]Tier:[/dim]             {reqs['tier']}\n"
-                f"[dim]Rows:[/dim]             {dims.approx_rows:,}\n\n"
+                f"[dim]Rows:[/dim]             {dims.approx_rows:,}\n"
+                f"[dim]Mode:[/dim]             {mode_label}\n\n"
                 f"[yellow]Minimum Cluster Requirements:[/yellow]\n"
                 f"  CPU cores:       [bold]{reqs['total_cores']:,}[/bold]\n"
                 f"  Memory:          [bold]{reqs['total_mem_gi']:,} GB[/bold]\n\n"
                 f"[dim]Breakdown:[/dim]\n"
-                f"  Spark:           {reqs['spark_executors']} × {reqs['spark_cores_per_exec']} cores × {reqs['spark_mem_per_exec']}\n"
+                f"{workload_line}\n"
                 f"  Datagen:         {reqs['datagen_pods']} pods\n"
                 f"  Trino:           {reqs['trino_workers']} workers\n"
                 f"  + infra overhead",
@@ -5460,7 +5575,8 @@ def recommend(
 
     if detected_cores is None or detected_mem is None:
         # Show reference table without cluster info
-        console.print("[bold]Cluster Sizing Reference[/bold]\n")
+        mode_label = "sustained" if is_sustained else "batch"
+        console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {mode_label})\n")
         console.print(
             "[dim]Tip: Connect to a cluster or use --cores/--memory for max scale calculation[/dim]\n"
         )
@@ -5486,11 +5602,12 @@ def recommend(
         return
 
     # Case 3: Find max feasible scale for this cluster
-    max_scale = find_max_scale(detected_cores, detected_mem, use_extended=extended)
-    max_scale_standard = find_max_scale(detected_cores, detected_mem, use_extended=False)
-    max_scale_extended = find_max_scale(detected_cores, detected_mem, use_extended=True)
+    max_scale = find_max_scale(detected_cores, detected_mem, use_slow_datagen=use_slow_datagen)
+    max_scale_standard = find_max_scale(detected_cores, detected_mem, use_slow_datagen=False)
+    max_scale_slow = find_max_scale(detected_cores, detected_mem, use_slow_datagen=True)
 
-    console.print(f"[bold]Cluster Capacity[/bold] ({cluster_source})")
+    mode_label = "sustained" if is_sustained else "batch"
+    console.print(f"[bold]Cluster Capacity[/bold] ({cluster_source}, mode: {mode_label})")
     console.print(f"  CPU cores: [bold]{detected_cores}[/bold]")
     console.print(f"  Memory:    [bold]{detected_mem} GB[/bold]\n")
 
@@ -5502,33 +5619,33 @@ def recommend(
         )
         return
 
-    # Show both modes
+    # Show both datagen modes
     std_reqs = compute_cluster_requirements(max_scale_standard)
-    ext_reqs = compute_spark_only_requirements(max_scale_extended)
+    slow_reqs = compute_slow_datagen_requirements(max_scale_slow)
 
-    if extended:
+    if use_slow_datagen:
         console.print(
-            "[bold yellow]Extended mode:[/bold yellow] Datagen runs with reduced parallelism (slower, same resources)\n"
+            "[bold yellow]Slow datagen:[/bold yellow] Datagen runs with reduced parallelism (slower generation, same compute resources)\n"
         )
         console.print(
-            f"[green]Maximum scale (extended):[/green] [bold]{max_scale_extended:,}[/bold] ({format_data_size(ext_reqs['data_gb'])})"
+            f"[green]Maximum scale (slow datagen):[/green] [bold]{max_scale_slow:,}[/bold] ({format_data_size(slow_reqs['data_gb'])})"
         )
         console.print(
-            f"[dim]Standard mode max:         {max_scale_standard:,} ({format_data_size(std_reqs['data_gb'])})[/dim]\n"
+            f"[dim]Standard max:              {max_scale_standard:,} ({format_data_size(std_reqs['data_gb'])})[/dim]\n"
         )
     else:
         console.print(
-            f"[green]Maximum scale (standard):[/green] [bold]{max_scale_standard:,}[/bold] ({format_data_size(std_reqs['data_gb'])})"
+            f"[green]Maximum scale:[/green] [bold]{max_scale_standard:,}[/bold] ({format_data_size(std_reqs['data_gb'])})"
         )
-        if max_scale_extended > max_scale_standard:
+        if max_scale_slow > max_scale_standard:
             console.print(
-                f"[dim]Extended mode max:         {max_scale_extended:,} ({format_data_size(ext_reqs['data_gb'])}) -- use --extended[/dim]"
+                f"[dim]With --slow-datagen:        {max_scale_slow:,} ({format_data_size(slow_reqs['data_gb'])})[/dim]"
             )
         console.print()
 
-    # Use appropriate requirements function based on mode
-    req_fn = compute_spark_only_requirements if extended else compute_cluster_requirements
-    check_fn = is_feasible_extended if extended else is_feasible
+    # Use appropriate requirements function based on datagen mode
+    req_fn = compute_slow_datagen_requirements if use_slow_datagen else compute_cluster_requirements
+    check_fn = is_feasible_slow_datagen if use_slow_datagen else is_feasible
 
     # Build a cleaner table: only show FEASIBLE milestones + max + next infeasible tier
     # This avoids confusion from non-monotonic tier boundaries
@@ -5570,7 +5687,7 @@ def recommend(
         feasible = check_fn(scale, detected_cores, detected_mem)
 
         if scale == max_scale:
-            status = "[green bold]← MAX[/green bold]"
+            status = "[green bold]<- MAX[/green bold]"
         elif feasible:
             status = "[green]OK[/green]"
         else:
@@ -5595,8 +5712,8 @@ def recommend(
 
     # Show next steps
     console.print()
-    if extended:
-        console.print("[dim]Extended mode: datagen runs slower to fit cluster resources[/dim]")
+    if use_slow_datagen:
+        console.print("[dim]Slow datagen: generation runs slower to fit cluster resources[/dim]")
     console.print(f"[dim]Next: lakebench init --scale {max_scale}[/dim]")
 
 

@@ -24,6 +24,13 @@ spec:
         host: {{ s3_host }}
         port: {{ s3_port }}
         accessStyle: "{{ 'Path' if s3_path_style else 'VirtualHosted' }}"
+        {% if s3_use_ssl and s3_ca_cert_pem %}
+        tls:
+          verification:
+            server:
+              caCert:
+                secretClass: "lakebench-s3-ca-cert-class"
+        {% endif %}
         credentials:
           secretClass: "lakebench-s3-credentials-class"
   metastore:

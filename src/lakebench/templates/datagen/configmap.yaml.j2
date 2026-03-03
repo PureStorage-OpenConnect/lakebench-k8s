@@ -237,7 +237,14 @@ data:
         def __init__(self, config: GeneratorConfig):
             self.config = config
             boto_config = BotoConfig(signature_version="s3v4", s3={"addressing_style": "path" if config.s3_path_style else "virtual"}, retries={"max_attempts": 3})
-            self.client = boto3.client("s3", endpoint_url=config.s3_endpoint, aws_access_key_id=config.access_key, aws_secret_access_key=config.secret_key, region_name=config.s3_region, config=boto_config)
+            client_kwargs = {"endpoint_url": config.s3_endpoint, "aws_access_key_id": config.access_key, "aws_secret_access_key": config.secret_key, "region_name": config.s3_region, "config": boto_config}
+            ca_cert = os.environ.get("S3_CA_CERT", "")
+            verify_ssl = os.environ.get("S3_VERIFY_SSL", "true").lower() != "false"
+            if ca_cert:
+                client_kwargs["verify"] = ca_cert
+            elif not verify_ssl:
+                client_kwargs["verify"] = False
+            self.client = boto3.client("s3", **client_kwargs)
 
         def write_table(self, table: pa.Table, file_id: int) -> dict:
             key = f"{self.config.s3_path_prefix}part-{file_id:05d}.parquet"

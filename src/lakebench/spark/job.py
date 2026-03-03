@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 # Using repl=2+ doubles the storage requirement with no benefit for scratch.
 # ---------------------------------------------------------------------------
 
+# fabric8 Kubernetes client causes API polling storms at 32+ executors.
+# 28 is the proven safe ceiling from scale testing.
+_MAX_EXECUTORS_SAFE = 28
+
 _JOB_PROFILES: dict[str, dict[str, Any]] = {
     "bronze-verify": {
         "driver_cores": 2,
@@ -66,7 +70,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "scratch_size": "150Gi",
         "base_executors": 8,  # scale <= 10
         "executors_per_100_scale": 12,  # add 12 per 100 scale units
-        "max_executors": 28,  # 32+ causes K8s API polling storms
+        "max_executors": _MAX_EXECUTORS_SAFE,
         "base_partitions": 64,
     },
     "gold-finalize": {
@@ -78,7 +82,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "scratch_size": "100Gi",
         "base_executors": 4,  # scale <= 10
         "executors_per_100_scale": 8,  # add 8 per 100 scale units
-        "max_executors": 28,  # 32+ causes K8s API polling storms
+        "max_executors": _MAX_EXECUTORS_SAFE,
         "base_partitions": 32,
     },
     # -----------------------------------------------------------------------
@@ -624,12 +628,13 @@ class SparkJobManager:
                         )
                 except ValueError:
                     pass
-        if executor_count > 28:
+        if executor_count > _MAX_EXECUTORS_SAFE:
             logger.warning(
-                "%s: %d executors exceeds safe limit of 28 -- "
+                "%s: %d executors exceeds safe limit of %d -- "
                 "32+ executors can cause K8s API polling storms",
                 job_type.value,
                 executor_count,
+                _MAX_EXECUTORS_SAFE,
             )
 
         # Dynamic maxResultSize: scales with executor count.
@@ -897,76 +902,139 @@ class SparkJobManager:
         if extra_conf:
             spark_conf.update(extra_conf)
 
-        # Build volumes list (operator webhook injects these)
-        volumes = [
+        # All volumes are defined exclusively in driver.template /
+        # executor.template pod templates.  spark-submit merges the
+        # template into its generated pod spec, avoiding duplicates
+        # with the operator webhook (which also injects .spec.volumes
+        # when it has RBAC).  ConfigMap volumes MUST go through the
+        # pod template because Spark's KubernetesVolumeUtils does not
+        # support the configMap type.
+        packages_str = ",".join(packages)
+        _pod_template_volumes: list[dict[str, Any]] = [
             {
                 "name": "spark-scripts",
-                "configMap": {
-                    "name": "lakebench-spark-scripts",
-                },
+                "configMap": {"name": "lakebench-spark-scripts"},
             },
             {
                 "name": "spark-work-dir",
-                "emptyDir": {
-                    "sizeLimit": "20Gi",
-                },
+                "emptyDir": {"sizeLimit": "20Gi"},
             },
             {
                 "name": "spark-ivy-cache",
-                "emptyDir": {
-                    "sizeLimit": "5Gi",
-                },
+                "emptyDir": {"sizeLimit": "5Gi"},
             },
         ]
-
-        # Volume mounts for driver and executor
-        driver_volume_mounts = [
+        _pod_template_volume_mounts = [
             {"name": "spark-scripts", "mountPath": "/opt/spark/scripts"},
             {"name": "spark-work-dir", "mountPath": "/opt/spark/work-dir"},
             {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
         ]
+        driver_pod_template: dict[str, Any] = {
+            "spec": {
+                "volumes": _pod_template_volumes,
+                "initContainers": [
+                    {
+                        "name": "resolve-deps",
+                        "image": cfg.images.spark,
+                        "imagePullPolicy": cfg.images.pull_policy.value,
+                        "securityContext": {
+                            "runAsUser": 185,
+                            "runAsGroup": 185,
+                        },
+                        "command": [
+                            "/bin/bash",
+                            "-c",
+                            (
+                                "set -e; "
+                                "/opt/spark/bin/spark-submit "
+                                f'--packages "{packages_str}" '
+                                "--conf spark.jars.ivy=/tmp/.ivy2 "
+                                "--class org.apache.spark.deploy.DummyNonExistent "
+                                "local:///dev/null 2>&1 || true; "
+                                "echo 'Ivy cache warmed:'; "
+                                "ls /tmp/.ivy2/jars/ 2>/dev/null | wc -l; "
+                                "echo 'jars resolved'"
+                            ),
+                        ],
+                        "volumeMounts": [
+                            {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
+                        ],
+                    },
+                ],
+                "containers": [
+                    {
+                        "name": "spark-kubernetes-driver",
+                        "volumeMounts": _pod_template_volume_mounts,
+                    },
+                ],
+            },
+        }
+        executor_pod_template: dict[str, Any] = {
+            "spec": {
+                "volumes": _pod_template_volumes,
+                "containers": [
+                    {
+                        "name": "spark-kubernetes-executor",
+                        "volumeMounts": _pod_template_volume_mounts,
+                    },
+                ],
+            },
+        }
 
-        executor_volume_mounts = [
-            {"name": "spark-scripts", "mountPath": "/opt/spark/scripts"},
-            {"name": "spark-work-dir", "mountPath": "/opt/spark/work-dir"},
-            {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
-        ]
-
-        # Init container to pre-warm the Ivy cache with all required jars.
-        # Without this, each Spark job independently resolves Maven/Ivy deps
-        # at startup, which can take 10-30+ minutes with Spark 4's larger
-        # Scala 2.13 dependency tree. The init container resolves once; the
-        # driver finds everything in /tmp/.ivy2 and skips network resolution.
-        packages_str = ",".join(packages)
-        init_containers = [
-            {
-                "name": "resolve-deps",
+        # TLS truststore for HTTPS S3 endpoints with custom CA
+        s3 = cfg.platform.storage.s3
+        if s3.ca_cert:
+            # Add CA cert secret + truststore emptyDir volumes
+            _pod_template_volumes.extend(
+                [
+                    {
+                        "name": "ca-cert",
+                        "secret": {"secretName": "lakebench-ca-certificate"},
+                    },
+                    {"name": "truststore", "emptyDir": {}},
+                ]
+            )
+            _truststore_mounts = [
+                {
+                    "name": "ca-cert",
+                    "mountPath": "/etc/ssl/certs/custom-ca",
+                    "readOnly": True,
+                },
+                {"name": "truststore", "mountPath": "/truststore"},
+            ]
+            # Init container: convert PEM to JKS truststore
+            truststore_init: dict[str, Any] = {
+                "name": "import-ca-cert",
                 "image": cfg.images.spark,
                 "imagePullPolicy": cfg.images.pull_policy.value,
-                "securityContext": {
-                    "runAsUser": 185,
-                    "runAsGroup": 185,
-                },
+                "securityContext": {"runAsUser": 185, "runAsGroup": 185},
                 "command": [
                     "/bin/bash",
                     "-c",
-                    (
-                        "set -e; "
-                        "/opt/spark/bin/spark-submit "
-                        f'--packages "{packages_str}" '
-                        "--conf spark.jars.ivy=/tmp/.ivy2 "
-                        "--class org.apache.spark.deploy.DummyNonExistent "
-                        "local:///dev/null 2>&1 || true; "
-                        "echo 'Ivy cache warmed:'; "
-                        "ls /tmp/.ivy2/jars/ 2>/dev/null | wc -l; "
-                        "echo 'jars resolved'"
-                    ),
+                    "keytool -import -trustcacerts -alias custom-ca "
+                    "-file /etc/ssl/certs/custom-ca/ca.crt "
+                    "-keystore /truststore/truststore.jks "
+                    "-storepass changeit -noprompt 2>/dev/null || true",
                 ],
-                "volumeMounts": [
-                    {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
-                ],
-            },
-        ]
+                "volumeMounts": _truststore_mounts,
+            }
+            driver_pod_template["spec"]["initContainers"].insert(0, truststore_init)
+            # Add truststore mount to driver + executor containers
+            for container in driver_pod_template["spec"]["containers"]:
+                container["volumeMounts"].append({"name": "truststore", "mountPath": "/truststore"})
+            for container in executor_pod_template["spec"]["containers"]:
+                container["volumeMounts"].append({"name": "truststore", "mountPath": "/truststore"})
+            # JVM truststore args for driver and executor
+            _ts_opts = (
+                " -Djavax.net.ssl.trustStore=/truststore/truststore.jks"
+                " -Djavax.net.ssl.trustStorePassword=changeit"
+            )
+            spark_conf["spark.driver.extraJavaOptions"] = (
+                spark_conf.get("spark.driver.extraJavaOptions", "") + _ts_opts
+            ).strip()
+            spark_conf["spark.executor.extraJavaOptions"] = (
+                spark_conf.get("spark.executor.extraJavaOptions", "") + _ts_opts
+            ).strip()
 
         # Check for scratch storage (Portworx) configuration
         scratch = cfg.platform.storage.scratch
@@ -1036,8 +1104,7 @@ class SparkJobManager:
                         "component": "driver",
                     },
                     "env": self._build_env_vars(job_type),
-                    "volumeMounts": driver_volume_mounts,
-                    "initContainers": init_containers,
+                    "template": driver_pod_template,
                 },
                 "executor": {
                     "cores": profile["executor_cores"],
@@ -1057,10 +1124,9 @@ class SparkJobManager:
                         "component": "executor",
                     },
                     "env": self._build_env_vars(job_type),
-                    "volumeMounts": executor_volume_mounts,
+                    "template": executor_pod_template,
                 },
                 "sparkConf": spark_conf,
-                "volumes": volumes,
             },
         }
 

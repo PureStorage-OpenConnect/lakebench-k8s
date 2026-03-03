@@ -26,6 +26,7 @@ import json
 import os
 import sys
 import threading
+import time
 import uuid
 from datetime import datetime
 from multiprocessing import Process
@@ -160,6 +161,7 @@ class Config:
         customer_id_max: int = 500000,
         duplicate_email_pct: float = 0.10,
         dirty_ratio: float = 0.08,
+        duration_seconds: int | None = None,
     ):
         self.target_tb = target_tb
         self.workers = workers
@@ -177,6 +179,7 @@ class Config:
         self.customer_id_max = customer_id_max
         self.duplicate_email_pct = duplicate_email_pct
         self.dirty_ratio = dirty_ratio
+        self.duration_seconds = duration_seconds
 
         # Calculated values
         self.target_bytes = int(target_tb * 1024 * 1024 * 1024 * 1024)
@@ -213,7 +216,13 @@ def get_s3_client(config: Config):
 
     if config.s3_endpoint:
         kwargs["endpoint_url"] = config.s3_endpoint
-        kwargs["verify"] = False  # For self-signed certs
+        # TLS verification: CA cert path > verify_ssl toggle > boto3 default
+        ca_cert = os.environ.get("S3_CA_CERT", "")
+        verify_ssl = os.environ.get("S3_VERIFY_SSL", "true").lower() != "false"
+        if ca_cert:
+            kwargs["verify"] = ca_cert  # Path to PEM CA bundle
+        elif not verify_ssl:
+            kwargs["verify"] = False
 
     return boto3.client("s3", **kwargs)
 
@@ -818,22 +827,38 @@ def _continuous_uploader_worker(
 def run_continuous(
     config: Config, my_files: list[int], completed: set, checkpoint_file: str
 ) -> tuple[int, int, list[dict]]:
-    """
-    Run continuous mode with multiprocessing generators and threading uploaders.
+    """Run continuous mode with multiprocessing generators and threading uploaders.
+
+    If ``config.duration_seconds`` is set, the function runs in two phases:
+
+    Phase 1 -- generate the initial file assignments (honours ``--target-tb``
+    as a minimum data volume).  File IDs come from the pre-computed ``my_files``
+    list, interleaved across pods.
+
+    Phase 2 -- after Phase 1 completes, if time remains, new files are generated
+    with auto-incrementing IDs (``total_files + cycle * total_nodes + node_id``)
+    until the duration timer expires.  Each pod produces unique IDs that never
+    collide with other pods.  Duration-phase files are NOT checkpointed.
+
+    Without ``--duration`` the function behaves as before: generate exactly
+    ``len(remaining)`` files and exit.
     """
     remaining = [f for f in my_files if f not in completed]
 
-    if not remaining:
+    if not remaining and not config.duration_seconds:
         return 0, 0, []
 
     file_queue = MPQueue()
     upload_queue = MPQueue(maxsize=QUEUE_DEPTH)
 
+    # Phase 1: enqueue initial file assignments
     for file_id in remaining:
         file_queue.put(file_id)
 
-    for _ in range(NUM_GENERATORS):
-        file_queue.put(None)
+    # If no duration mode, send poison pills now so generators stop after Phase 1
+    if not config.duration_seconds:
+        for _ in range(NUM_GENERATORS):
+            file_queue.put(None)
 
     config_dict = {
         "target_tb": config.target_tb,
@@ -898,9 +923,16 @@ def run_continuous(
         t.start()
         uploaders.append(t)
 
-    with tqdm(total=len(remaining), unit="files") as pbar:
+    start_time = time.monotonic()
+    phase1_target = max(len(remaining), 1)
+    phase1_done = False
+
+    with tqdm(total=phase1_target, unit="files") as pbar:
         last_done = 0
         checkpoint_interval = 10
+        # Duration-phase file ID counter -- starts beyond the initial file set
+        next_duration_id = config.total_files
+        duration_files_enqueued = 0
 
         while True:
             with progress_lock:
@@ -908,10 +940,50 @@ def run_continuous(
                 current_rows = total_rows
                 current_bytes = total_bytes
 
-            if current_done >= len(remaining):
-                if current_done > last_done:
-                    pbar.update(current_done - last_done)
-                break
+            # Check duration expiry
+            if config.duration_seconds:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= config.duration_seconds:
+                    # Time's up -- send poison pills to stop generators
+                    for _ in range(NUM_GENERATORS):
+                        file_queue.put(None)
+                    if current_done > last_done:
+                        pbar.update(current_done - last_done)
+                    pbar.set_description(f"Duration {config.duration_seconds}s reached")
+                    break
+
+            # Phase 1 completion check
+            if not phase1_done and current_done >= len(remaining):
+                phase1_done = True
+                if config.duration_seconds:
+                    # Phase 1 done but duration remains -- update progress bar
+                    if current_done > last_done:
+                        pbar.update(current_done - last_done)
+                        last_done = current_done
+                    remaining_secs = config.duration_seconds - (time.monotonic() - start_time)
+                    pbar.set_description(f"Phase 1 done, feeding for {remaining_secs:.0f}s more")
+                    pbar.total = None  # Switch to indeterminate mode
+                    pbar.refresh()
+                else:
+                    # No duration mode -- stop
+                    if current_done > last_done:
+                        pbar.update(current_done - last_done)
+                    break
+
+            # Phase 2: feed new file IDs if duration mode and queue is low
+            if config.duration_seconds and phase1_done:
+                try:
+                    queue_size = file_queue.qsize()
+                except NotImplementedError:
+                    queue_size = 0
+                # Keep the queue fed but not overloaded
+                while queue_size < NUM_GENERATORS * 2:
+                    # Each pod uses unique IDs: total_files + cycle * total_nodes + node_id
+                    file_id = next_duration_id + config.node_id
+                    next_duration_id += config.total_nodes
+                    file_queue.put(file_id)
+                    duration_files_enqueued += 1
+                    queue_size += 1
 
             if current_done > last_done:
                 pbar.update(current_done - last_done)
@@ -923,7 +995,7 @@ def run_continuous(
                     }
                 )
 
-                if current_done % checkpoint_interval == 0:
+                if not config.duration_seconds and current_done % checkpoint_interval == 0:
                     with results_lock:
                         for r in results:
                             if r["success"]:
@@ -942,9 +1014,10 @@ def run_continuous(
         if p.is_alive():
             p.terminate()
 
+    # Only checkpoint Phase 1 files (not duration-phase ephemeral files)
     with results_lock:
         for r in results:
-            if r["success"]:
+            if r["success"] and r["file_id"] < config.total_files:
                 completed.add(r["file_id"])
     save_checkpoint(checkpoint_file, completed)
 
@@ -1046,6 +1119,15 @@ def main():
         default="2025-12-31",
         help="End date for generated timestamps (ISO format, default: 2025-12-31)",
     )
+    parser.add_argument(
+        "--duration",
+        type=int,
+        default=None,
+        help="Generate data for this many seconds then exit. "
+        "After producing target-tb worth of files, continues generating "
+        "new files until the timer expires. Use with --mode continuous "
+        "for sustained pipeline feeding.",
+    )
 
     args = parser.parse_args()
 
@@ -1069,6 +1151,7 @@ def main():
         dirty_ratio=args.dirty_ratio,
         timestamp_start=args.timestamp_start,
         timestamp_end=args.timestamp_end,
+        duration_seconds=args.duration,
     )
 
     # Validate S3 credentials
@@ -1088,7 +1171,10 @@ def main():
 
     # Print summary
     if args.mode == "continuous":
-        mode_desc = f"continuous ({NUM_GENERATORS} generators, {NUM_UPLOADERS} uploaders)"
+        duration_info = f", duration: {config.duration_seconds}s" if config.duration_seconds else ""
+        mode_desc = (
+            f"continuous ({NUM_GENERATORS} generators, {NUM_UPLOADERS} uploaders{duration_info})"
+        )
     else:
         mode_desc = f"sequential ({config.workers} workers)"
     print(f"""
@@ -1104,7 +1190,7 @@ Bucket: s3://{config.bucket}/{config.prefix}/
 Endpoint: {config.s3_endpoint or "AWS default"}
 """)
 
-    if not remaining:
+    if not remaining and not config.duration_seconds:
         print("All files already generated. Use --resume=false to regenerate.")
         return
 
@@ -1125,7 +1211,12 @@ Endpoint: {config.s3_endpoint or "AWS default"}
     total_bytes = 0
     errors = []
 
-    print(f"\nGenerating {len(remaining):,} files...")
+    if config.duration_seconds:
+        print(
+            f"\nGenerating files for {config.duration_seconds}s ({len(remaining):,} initial files)..."
+        )
+    else:
+        print(f"\nGenerating {len(remaining):,} files...")
 
     if args.mode == "continuous":
         total_rows, total_bytes, all_results = run_continuous(

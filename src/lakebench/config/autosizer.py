@@ -78,11 +78,11 @@ def _resolve_datagen_mode(config: LakebenchConfig) -> str:
     """Resolve the effective datagen mode from config.
 
     If mode is 'auto', selects based on scale:
-      scale <= 10 (~100 GB) -> batch
-      scale > 10            -> continuous
+      scale <= 10 (~100 GB) -> DatagenMode.BATCH
+      scale > 10            -> DatagenMode.CONTINUOUS
 
     Returns:
-        "batch" or "continuous"
+        DatagenMode.BATCH.value or DatagenMode.CONTINUOUS.value
     """
     from lakebench.config.schema import DatagenMode
 
@@ -90,7 +90,7 @@ def _resolve_datagen_mode(config: LakebenchConfig) -> str:
     mode = datagen.mode
 
     if mode == DatagenMode.AUTO:
-        return "batch" if datagen.scale <= 10 else "continuous"
+        return DatagenMode.BATCH.value if datagen.scale <= 10 else DatagenMode.CONTINUOUS.value
     return mode.value
 
 
@@ -116,6 +116,8 @@ def resolve_auto_sizing(
         config: The Lakebench configuration -- **mutated in place**.
         cluster_capacity: Optional snapshot of cluster node resources.
     """
+    from lakebench.config.schema import DatagenMode
+
     scale = config.architecture.workload.datagen.scale
     guidance = full_compute_guidance(scale)
 
@@ -171,7 +173,7 @@ def resolve_auto_sizing(
     # Scaling is via parallelism (number of pods).
     datagen = config.architecture.workload.datagen
 
-    if effective_mode == "continuous":
+    if effective_mode == DatagenMode.CONTINUOUS.value:
         mode_cpu, mode_memory = "8", "24Gi"
         mode_generators, mode_uploaders = 8, 2
     else:

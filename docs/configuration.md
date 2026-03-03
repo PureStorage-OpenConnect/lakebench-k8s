@@ -103,9 +103,10 @@ platform:
   storage:
     s3:
       # REQUIRED: S3-compatible endpoint URL.
-      # FlashBlade:  http://10.0.0.1:80
-      # MinIO:       http://minio.minio.svc:9000
-      # AWS S3:      https://s3.us-east-1.amazonaws.com
+      # FlashBlade HTTP:  http://10.0.0.1:80
+      # FlashBlade HTTPS: https://10.0.0.1:443
+      # MinIO:            http://minio.minio.svc:9000
+      # AWS S3:           https://s3.us-east-1.amazonaws.com
       endpoint: ""
 
       region: us-east-1
@@ -115,6 +116,10 @@ platform:
       access_key: ""
       secret_key: ""
       # secret_ref: "my-existing-secret"
+
+      # TLS / HTTPS settings (for HTTPS S3 endpoints).
+      # ca_cert: "/path/to/ca-bundle.pem"  # PEM CA cert for self-signed endpoints
+      # verify_ssl: true                    # Set false to skip SSL verification (dev only)
 
       buckets:
         bronze: lakebench-bronze
@@ -343,7 +348,7 @@ registries or custom builds.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `platform.storage.s3.endpoint` | string | **(required)** | S3-compatible endpoint URL (e.g., `http://minio:9000`). |
+| `platform.storage.s3.endpoint` | string | **(required)** | S3-compatible endpoint URL (e.g., `http://minio:9000` or `https://s3.example.com:443`). HTTPS endpoints with self-signed CAs require `ca_cert`. |
 | `platform.storage.s3.region` | string | `us-east-1` | AWS region. Used by boto3 for signing. |
 | `platform.storage.s3.path_style` | bool | `true` | Path-style access (`true` for FlashBlade/MinIO, `false` for AWS S3). |
 | `platform.storage.s3.access_key` | string | `""` | Inline S3 access key. Provide this OR `secret_ref`. |
@@ -353,6 +358,8 @@ registries or custom builds.
 | `platform.storage.s3.buckets.silver` | string | `lakebench-silver` | Silver layer S3 bucket name. |
 | `platform.storage.s3.buckets.gold` | string | `lakebench-gold` | Gold layer S3 bucket name. |
 | `platform.storage.s3.create_buckets` | bool | `true` | Create buckets if they do not exist. |
+| `platform.storage.s3.ca_cert` | string | `""` | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. Empty = use system default CAs. The PEM content is read at deploy time and embedded into a Kubernetes Secret for all components. |
+| `platform.storage.s3.verify_ssl` | bool | `true` | Verify SSL certificates for HTTPS endpoints. Set `false` only for development with self-signed certs when you don't have the CA certificate file. |
 
 ### Platform -- Scratch Storage
 
@@ -661,6 +668,49 @@ lakebench run lakebench.yaml --timeout 7200               # 2 hours
 
 Use `lakebench recommend lakebench.yaml` to verify your cluster can handle
 this scale before deploying.
+
+## Example: HTTPS Endpoint with Self-Signed CA
+
+When your S3 endpoint uses HTTPS with a self-signed or private CA certificate
+(common with FlashBlade, MinIO, and on-prem object stores), provide the CA
+certificate PEM file:
+
+```yaml
+name: lakebench-https
+recipe: polaris-iceberg-spark-trino
+
+platform:
+  storage:
+    s3:
+      endpoint: https://10.21.227.93:443
+      access_key: <key>
+      secret_key: <secret>
+      ca_cert: ./flashblade-ca.pem
+      # verify_ssl: true  # default; set false only for dev
+```
+
+**How it works:** At deploy time, lakebench reads the PEM file and creates a
+Kubernetes Secret (`lakebench-ca-certificate`) containing the certificate.
+Each JVM component (Spark, Trino, Polaris, Hive) gets an init container that
+imports the CA into a JKS truststore. Python components (datagen, S3 client)
+receive the PEM path via environment variables for boto3.
+
+**Obtaining the certificate:** For self-signed endpoints, extract the CA
+certificate using `openssl`:
+
+```bash
+openssl s_client -connect 10.21.227.93:443 -showcerts </dev/null 2>/dev/null \
+  | openssl x509 -outform PEM > flashblade-ca.pem
+```
+
+For corporate CAs, your infrastructure team can provide the PEM file.
+
+**AWS S3 and public endpoints** use well-known CAs that are already trusted
+by the system CA bundle. No `ca_cert` is needed -- just use the HTTPS endpoint:
+
+```yaml
+endpoint: https://s3.us-east-1.amazonaws.com
+```
 
 ## Supported Component Combinations
 

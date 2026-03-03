@@ -3542,3 +3542,243 @@ class TestStreamingLogsFreshnessMax:
         metrics = c.parse_streaming_logs(logs, "gold-refresh")
         # max(10, 50, 20) = 50, NOT average (10+50+20)/3 = 26.67
         assert metrics.freshness_seconds == pytest.approx(50.0)
+
+
+# ---------------------------------------------------------------------------
+# Sustained scoring edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestSustainedScoringEdgeCases:
+    """Edge-case tests for sustained (streaming) pipeline scoring."""
+
+    def _make_streaming_run(
+        self,
+        streaming: list[StreamingJobMetrics] | None = None,
+        bronze_size_gb: float = 10.0,
+        silver_size_gb: float = 5.0,
+        gold_size_gb: float = 0.5,
+    ) -> PipelineMetrics:
+        """Helper: build a streaming PipelineMetrics with customizable stages."""
+        now = datetime.now()
+        if streaming is None:
+            streaming = [
+                StreamingJobMetrics(
+                    job_name="lakebench-bronze-ingest",
+                    job_type="bronze-ingest",
+                    total_batches=100,
+                    total_rows_processed=500_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=277.8,
+                    micro_batch_duration_ms=200.0,
+                    freshness_seconds=5.0,
+                    batch_size=5000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-silver-stream",
+                    job_type="silver-stream",
+                    total_batches=95,
+                    total_rows_processed=480_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=266.7,
+                    micro_batch_duration_ms=350.0,
+                    freshness_seconds=8.5,
+                    batch_size=5000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-gold-refresh",
+                    job_type="gold-refresh",
+                    total_batches=90,
+                    total_rows_processed=450_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=250.0,
+                    micro_batch_duration_ms=500.0,
+                    freshness_seconds=15.0,
+                    batch_size=5000,
+                ),
+            ]
+        return PipelineMetrics(
+            run_id="edge-test",
+            deployment_name="test",
+            start_time=now,
+            success=True,
+            bronze_size_gb=bronze_size_gb,
+            silver_size_gb=silver_size_gb,
+            gold_size_gb=gold_size_gb,
+            streaming=streaming,
+        )
+
+    def test_sustained_zero_batch_freshness(self):
+        """All stages with freshness_seconds=0.0 produce unmeasurable freshness."""
+        run = self._make_streaming_run(
+            streaming=[
+                StreamingJobMetrics(
+                    job_name="lakebench-bronze-ingest",
+                    job_type="bronze-ingest",
+                    total_batches=50,
+                    total_rows_processed=200_000,
+                    elapsed_seconds=600.0,
+                    success=True,
+                    throughput_rps=333.3,
+                    micro_batch_duration_ms=150.0,
+                    freshness_seconds=0.0,
+                    batch_size=4000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-silver-stream",
+                    job_type="silver-stream",
+                    total_batches=48,
+                    total_rows_processed=190_000,
+                    elapsed_seconds=600.0,
+                    success=True,
+                    throughput_rps=316.7,
+                    micro_batch_duration_ms=200.0,
+                    freshness_seconds=0.0,
+                    batch_size=4000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-gold-refresh",
+                    job_type="gold-refresh",
+                    total_batches=45,
+                    total_rows_processed=180_000,
+                    elapsed_seconds=600.0,
+                    success=True,
+                    throughput_rps=300.0,
+                    micro_batch_duration_ms=250.0,
+                    freshness_seconds=0.0,
+                    batch_size=4000,
+                ),
+            ],
+        )
+        pb = build_pipeline_benchmark(run)
+
+        assert pb.pipeline_mode == "sustained"
+        # freshness_seconds=0.0 is falsy, so stages get freshness_seconds=None.
+        # _compute_sustained_scores filters for > 0, finds nothing --
+        # data_freshness_seconds stays None (unmeasurable).
+        assert pb.data_freshness_seconds is None
+        # All stages should have freshness_seconds=None (0.0 converted to None)
+        for stage in pb.stages:
+            if stage.stage_type == "streaming":
+                assert stage.freshness_seconds is None
+
+    def test_sustained_saturation_detection(self):
+        """Pipeline is saturated when ingest_ratio < 0.95."""
+        run = self._make_streaming_run(
+            streaming=[
+                StreamingJobMetrics(
+                    job_name="lakebench-bronze-ingest",
+                    job_type="bronze-ingest",
+                    total_batches=80,
+                    total_rows_processed=400_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=222.2,
+                    micro_batch_duration_ms=200.0,
+                    freshness_seconds=10.0,
+                    batch_size=5000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-silver-stream",
+                    job_type="silver-stream",
+                    total_batches=75,
+                    total_rows_processed=380_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=211.1,
+                    micro_batch_duration_ms=350.0,
+                    freshness_seconds=12.0,
+                    batch_size=5000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-gold-refresh",
+                    job_type="gold-refresh",
+                    total_batches=70,
+                    total_rows_processed=350_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=194.4,
+                    micro_batch_duration_ms=500.0,
+                    freshness_seconds=20.0,
+                    batch_size=5000,
+                ),
+            ],
+        )
+        # Bronze processed 400,000 rows but datagen produced 500,000
+        pb = build_pipeline_benchmark(run, datagen_output_rows=500_000)
+
+        # ingest_ratio = 400_000 / 500_000 = 0.8 < 0.95 -> saturated
+        assert pb.pipeline_saturated is True
+        assert pb.ingest_ratio == pytest.approx(0.8, rel=1e-2)
+
+    def test_sustained_missing_stage(self):
+        """Streaming run with only bronze and silver (no gold) builds gracefully."""
+        run = self._make_streaming_run(
+            streaming=[
+                StreamingJobMetrics(
+                    job_name="lakebench-bronze-ingest",
+                    job_type="bronze-ingest",
+                    total_batches=100,
+                    total_rows_processed=500_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=277.8,
+                    micro_batch_duration_ms=200.0,
+                    freshness_seconds=5.0,
+                    batch_size=5000,
+                ),
+                StreamingJobMetrics(
+                    job_name="lakebench-silver-stream",
+                    job_type="silver-stream",
+                    total_batches=95,
+                    total_rows_processed=480_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=266.7,
+                    micro_batch_duration_ms=350.0,
+                    freshness_seconds=12.0,
+                    batch_size=5000,
+                ),
+            ],
+        )
+        pb = build_pipeline_benchmark(run)
+
+        assert pb.pipeline_mode == "sustained"
+        assert len(pb.stages) == 2
+        # data_freshness_seconds = max(5.0, 12.0) = 12.0
+        assert pb.data_freshness_seconds == pytest.approx(12.0)
+
+    def test_sustained_single_stage_only(self):
+        """Streaming run with only a single bronze stage builds gracefully."""
+        run = self._make_streaming_run(
+            streaming=[
+                StreamingJobMetrics(
+                    job_name="lakebench-bronze-ingest",
+                    job_type="bronze-ingest",
+                    total_batches=100,
+                    total_rows_processed=500_000,
+                    elapsed_seconds=1800.0,
+                    success=True,
+                    throughput_rps=277.8,
+                    micro_batch_duration_ms=200.0,
+                    freshness_seconds=7.5,
+                    batch_size=5000,
+                ),
+            ],
+        )
+        pb = build_pipeline_benchmark(run)
+
+        assert pb.pipeline_mode == "sustained"
+        assert len(pb.stages) == 1
+        # data_freshness_seconds = bronze freshness = 7.5
+        assert pb.data_freshness_seconds == pytest.approx(7.5)
+        # stage_latency_profile always has 3 entries (bronze, silver, gold)
+        # because _compute_sustained_scores iterates the fixed tuple.
+        # Missing stages get latency 0.0.
+        assert len(pb.stage_latency_profile) == 3
+        assert pb.stage_latency_profile[0] == pytest.approx(200.0)  # bronze
+        assert pb.stage_latency_profile[1] == 0.0  # silver absent
+        assert pb.stage_latency_profile[2] == 0.0  # gold absent

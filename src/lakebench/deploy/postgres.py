@@ -5,6 +5,7 @@ Deploys PostgreSQL as the metadata backend for Hive Metastore.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,8 @@ from lakebench.k8s import (
 )
 
 from .engine import DeploymentResult, DeploymentStatus, image_tag
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -123,6 +126,7 @@ class PostgresDeployer:
             )
 
         except Exception as e:
+            logger.exception("PostgreSQL deployment failed")
             return DeploymentResult(
                 component="postgres",
                 status=DeploymentStatus.FAILED,

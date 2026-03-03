@@ -24,9 +24,21 @@ spec:
         app.kubernetes.io/name: lakebench
         app.kubernetes.io/instance: {{ name }}
     spec:
+      {% if s3_ca_cert_pem %}
+      initContainers:
+        - name: import-ca-cert
+          image: {{ polaris_image }}
+          command: ['bash', '-c', 'keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt 2>/dev/null || true']
+          volumeMounts:
+            - name: ca-cert
+              mountPath: /etc/ssl/certs/custom-ca
+              readOnly: true
+            - name: truststore
+              mountPath: /truststore
+      {% endif %}
       containers:
         - name: polaris
-          image: apache/polaris:{{ polaris_version | default('1.3.0-incubating') }}
+          image: {{ polaris_image }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           ports:
             - containerPort: 8181
@@ -58,10 +70,18 @@ spec:
                   key: secretKey
             - name: AWS_REGION
               value: "{{ s3_region }}"
+            {% if s3_ca_cert_pem %}
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Djavax.net.ssl.trustStore=/truststore/truststore.jks -Djavax.net.ssl.trustStorePassword=changeit"
+            {% endif %}
           volumeMounts:
             - name: polaris-config
               mountPath: /deployments/config
               readOnly: true
+            {% if s3_ca_cert_pem %}
+            - name: truststore
+              mountPath: /truststore
+            {% endif %}
           resources:
             requests:
               cpu: "{{ polaris_cpu }}"
@@ -87,3 +107,10 @@ spec:
         - name: polaris-config
           configMap:
             name: lakebench-polaris-config
+        {% if s3_ca_cert_pem %}
+        - name: ca-cert
+          secret:
+            secretName: lakebench-ca-certificate
+        - name: truststore
+          emptyDir: {}
+        {% endif %}

@@ -4,6 +4,73 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.11] - 2026-03-02
+
+### Added
+- **HTTPS S3 endpoint support with self-signed CA certificates.** New config
+  fields `platform.storage.s3.ca_cert` (path to PEM certificate) and
+  `platform.storage.s3.verify_ssl` enable HTTPS for all components. At deploy
+  time, the PEM content is embedded into a Kubernetes Secret. JVM components
+  (Spark, Trino, Polaris, Hive) get an init container that imports the CA
+  into a JKS truststore. Python components (datagen, S3 client) pass the PEM
+  path to boto3. Supports both self-signed CAs (FlashBlade) and public CAs
+  (AWS S3). See [Configuration Reference](docs/configuration.md#example-https-endpoint-with-self-signed-ca).
+- 21 new tests for HTTPS support: config field validation (3), Spark
+  truststore manifest (2), DuckDB SSL conditional (2), and template rendering
+  across all component categories (17 -- spark-thrift, trino, polaris, hive,
+  datagen, secrets).
+- Datagen `--duration` mode for sustained pipelines. Generators now run for
+  the configured `run_duration` instead of exiting after a finite file count.
+  Fixes the 5TB scale-test blocker where datagen pods exited in 21 minutes,
+  leaving the streaming pipeline starved. Requires datagen image v3.
+- `lakebench recommend --mode sustained` computes concurrent resource budget
+  (datagen + streaming + trino running simultaneously).
+- `lakebench recommend --slow-datagen` replaces deprecated `--extended`.
+- 8 new tests: Polaris Spark manifest coverage (4) and sustained scoring
+  edge cases (4).
+
+### Changed
+- Default datagen image bumped from `lb-datagen:v2` to `lb-datagen:v3`.
+- `lakebench info` shows streaming executor counts, trigger intervals, and
+  run duration when config uses sustained mode.
+- `lakebench recommend` output includes pipeline mode label and mode-specific
+  resource breakdown.
+- String literal pipeline mode checks replaced with `PipelineMode` enum values.
+- Jinja2 template renderer uses `StrictUndefined` -- undefined variables now
+  raise errors instead of silently producing empty strings.
+- `_MAX_EXECUTORS_SAFE = 28` module constant replaces raw integer in job profiles.
+- Polaris templates use `{{ polaris_image }}` from `ImagesConfig` instead of
+  hardcoded image tags.
+
+### Fixed
+- **Datagen `verify=False` unconditionally disabled SSL.** `datagen/generate.py`
+  hardcoded `verify=False` for all custom endpoints, silently disabling SSL
+  certificate verification even on HTTPS endpoints. Now uses `S3_CA_CERT` and
+  `S3_VERIFY_SSL` environment variables for conditional verification.
+- **Spark Thrift `ssl.enabled=false` hardcoded.** The Spark Thrift Server
+  template hardcoded `spark.hadoop.fs.s3a.connection.ssl.enabled=false`. Now
+  conditional on the endpoint scheme (`{{ s3_use_ssl | lower }}`).
+- **DuckDB `s3_use_ssl=false` hardcoded.** The DuckDB executor always disabled
+  SSL regardless of the endpoint scheme. Now conditional on whether the
+  endpoint starts with `https://`.
+- **Spark Operator v2.4.0 volume injection.** ConfigMap volumes from
+  `.spec.volumes` / `.spec.driver.volumeMounts` are not injected into driver
+  pods by the v2 webhook. Fixed by using `driver.template` /
+  `executor.template` pod templates for ConfigMap volumes and
+  `spark.kubernetes.*.volumes.emptyDir.*` conf properties for emptyDir volumes.
+- `destroy_all()` no longer swallows exceptions as SUCCESS. Missing resources
+  report SKIPPED; real errors report FAILED with full traceback logging.
+- Deployer exception handlers now include `logger.exception()` for traceback
+  visibility.
+- Deprecation warnings for `mode: continuous` now also log via
+  `logger.warning()` (previously only `warnings.warn()`).
+
+### Removed
+- 8 orphaned Jinja2 templates (3 Prometheus, 5 Grafana) that were never
+  referenced by any deployer.
+- `--extended` flag hidden from `lakebench recommend` help (still works
+  with deprecation warning; replaced by `--slow-datagen`).
+
 ## [1.0.10] - 2026-03-02
 
 ### Changed

@@ -231,6 +231,7 @@ class ObservabilityDeployer:
                 elapsed_seconds=time.time() - start,
             )
         except Exception as e:
+            logger.exception("Observability deployment failed")
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.FAILED,
@@ -280,6 +281,7 @@ class ObservabilityDeployer:
                 elapsed_seconds=time.time() - start,
             )
         except Exception as e:
+            logger.exception("Observability destroy failed")
             return DeploymentResult(
                 component="observability",
                 status=DeploymentStatus.FAILED,

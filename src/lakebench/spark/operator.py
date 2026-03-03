@@ -484,11 +484,10 @@ class SparkOperatorManager:
             logger.error("Operator restart failed after helm upgrade")
             return False
 
-        # Verify the operator actually picked up the new namespace by
-        # checking the running pod's command-line args.
-        if not self._verify_namespace_watched(namespace, timeout=30):
+        # Verify the deployment spec includes the new namespace.
+        if not self._verify_namespace_watched(namespace, timeout=15):
             logger.error(
-                "Operator restarted but is not watching namespace '%s'",
+                "Operator restarted but deployment spec does not include namespace '%s'",
                 namespace,
             )
             return False
@@ -546,45 +545,42 @@ class SparkOperatorManager:
 
         return True
 
-    def _verify_namespace_watched(self, namespace: str, timeout: int = 30) -> bool:
-        """Verify the running operator controller is watching a namespace.
+    def _verify_namespace_watched(self, namespace: str, timeout: int = 60) -> bool:
+        """Verify the operator controller deployment includes a namespace.
 
-        Checks the controller pod's command-line args for the target
-        namespace in ``--namespaces=...``.
+        Checks the deployment spec's container args for the target
+        namespace in ``--namespaces=...``.  Uses the deployment spec
+        (not running pods) because after a rollout restart there can be
+        multiple pods and ``items[0]`` may hit the old terminating pod.
 
         Args:
             namespace: The namespace that should appear in the arg list.
             timeout: Seconds to wait for verification.
 
         Returns:
-            True if the controller is confirmed watching the namespace.
+            True if the deployment spec includes the namespace.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
-            result = subprocess.run(
-                [
-                    "kubectl",
-                    "get",
-                    "pods",
-                    "-n",
-                    self.namespace,
-                    "-l",
-                    "app.kubernetes.io/component=controller",
-                    "-o",
-                    "jsonpath={.items[0].spec.containers[0].args}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0 and result.stdout:
-                # Args contain --namespaces=ns1,ns2,...
-                for arg in result.stdout.split(","):
-                    if namespace in arg:
-                        logger.info(
-                            "Verified operator controller is watching '%s'",
-                            namespace,
-                        )
-                        return True
+            try:
+                watched = self._get_active_namespaces()
+            except _DeploymentReadError:
+                time.sleep(3)
+                continue
+
+            if watched is None:
+                # Watches all namespaces
+                logger.info(
+                    "Verified operator controller watches all namespaces (includes '%s')",
+                    namespace,
+                )
+                return True
+            if namespace in watched:
+                logger.info(
+                    "Verified operator controller is watching '%s'",
+                    namespace,
+                )
+                return True
             time.sleep(3)
 
         logger.warning(
