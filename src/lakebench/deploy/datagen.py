@@ -60,6 +60,7 @@ class DatagenDeployer:
                 "datagen_cpu": datagen.cpu,
                 "datagen_memory": datagen.memory,
                 "datagen_mode": effective_mode,
+                "datagen_workers": datagen.generators,
                 "datagen_dirty_ratio": datagen.dirty_data_ratio,
                 "datagen_image": cfg.images.datagen,
                 "datagen_timestamp_start": datagen.timestamp_start,

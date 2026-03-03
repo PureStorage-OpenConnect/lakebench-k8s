@@ -42,11 +42,28 @@ with its default value.
 
 ```yaml
 images:
-  spark: "apache/spark:3.5.4-python3"   # Spark container image
+  spark: "apache/spark:4.0.2-python3"   # Spark 4.0.x (default)
+  # spark: "apache/spark:3.5.8-python3" # Spark 3.5.x (also supported)
 ```
 
-The Spark version is parsed from the image tag to resolve Iceberg runtime JAR
-coordinates (e.g., `iceberg-spark-runtime-3.5_2.12`).
+**Supported versions:** Spark 3.5.x and 4.0.x only. The image tag must end
+with `-python3` (PySpark scripts require a Python-enabled image). Unsupported
+versions, non-Python images, and unparseable tags are rejected at config load
+time with a clear error.
+
+The Spark version is parsed from the image tag to resolve the correct
+dependency coordinates and driver resource profiles:
+
+| Spark | Scala | Hadoop AWS | AWS SDK | Iceberg runtime | Driver memory (silver/gold) |
+|-------|-------|-----------|---------|------------------------|---|
+| 3.5.x | 2.12 | 3.3.4 | 1.12.262 | `iceberg-spark-runtime-3.5_2.12` | 24g |
+| 4.0.x | 2.13 | 3.4.1 | 1.12.367 | `iceberg-spark-runtime-4.0_2.13` | 32g |
+
+Spark 4.0.x needs more driver memory because `hadoop-aws:3.4.1` pulls a
+558MB AWS SDK v2 bundle (vs 280MB SDK v1 on Spark 3.5.x). The extra heap
+pressure from serving larger jars to executors via the driver's netty file
+server requires the bump from 24g to 32g. This is handled automatically --
+the driver memory column above shows the default for each version.
 
 ### Operator
 
@@ -172,11 +189,11 @@ user-configurable. They live in
 
 ### Batch Jobs
 
-| Job | Executor Cores | Executor Memory | Overhead | Scratch PVC | Driver Memory |
-|---|---|---|---|---|---|
-| `bronze-verify` | 2 | 4g | 2g | 50Gi | 4g |
-| `silver-build` | 4 | 48g | 12g | 150Gi | 16g |
-| `gold-finalize` | 4 | 32g | 8g | 100Gi | 16g |
+| Job | Executor Cores | Executor Memory | Overhead | Scratch PVC | Driver (Spark 3) | Driver (Spark 4) |
+|---|---|---|---|---|---|---|
+| `bronze-verify` | 2 | 4g | 2g | 50Gi | 4g | 4g |
+| `silver-build` | 4 | 48g | 12g | 150Gi | 24g | 32g |
+| `gold-finalize` | 4 | 32g | 8g | 100Gi | 24g | 32g |
 
 ### Streaming Jobs
 

@@ -114,14 +114,14 @@ spec:
                     "type": "INTERNAL",
                     "storageConfigInfo": {
                       "storageType": "S3",
-                      "allowedLocations": ["s3://'"$BUCKET_BRONZE"'/", "s3://'"$BUCKET_SILVER"'/", "s3://'"$BUCKET_GOLD"'/"],
+                      "allowedLocations": ["s3://'"$BUCKET_BRONZE"'/", "s3a://'"$BUCKET_BRONZE"'/", "s3://'"$BUCKET_SILVER"'/", "s3a://'"$BUCKET_SILVER"'/", "s3://'"$BUCKET_GOLD"'/", "s3a://'"$BUCKET_GOLD"'/"],
                       "endpoint": "'"$S3_ENDPOINT"'",
                       "pathStyleAccess": true,
                       "stsUnavailable": true,
                       "region": "'"$S3_REGION"'"
                     },
                     "properties": {
-                      "default-base-location": "s3://'"$BUCKET_SILVER"'/warehouse/"
+                      "default-base-location": "s3://'"$BUCKET_BRONZE"'/"
                     }
                   }
                 }' 2>/dev/null || echo "000")
@@ -134,13 +134,23 @@ spec:
                 echo "WARNING: Catalog creation returned HTTP $HTTP_CODE"
               fi
 
-              # Create namespaces in the catalog
-              for NS in default bronze silver gold; do
+              # Create namespaces with per-layer storage locations.
+              # "default" and "bronze" map to the bronze bucket; silver/gold
+              # map to their respective buckets. Both s3:// and s3a:// schemes
+              # are covered by catalog allowedLocations above.
+              create_ns() {
+                local NS="$1" LOCATION="$2"
+                local BODY
+                if [ -n "$LOCATION" ]; then
+                  BODY='{"namespace": ["'"$NS"'"], "properties": {"location": "'"$LOCATION"'"}}'
+                else
+                  BODY='{"namespace": ["'"$NS"'"]}'
+                fi
                 NS_CODE=$(curl -sf -o /dev/null -w "%{http_code}" -X POST \
                   "$POLARIS_URI/api/catalog/v1/$CATALOG_NAME/namespaces" \
                   -H "Authorization: Bearer $TOKEN" \
                   -H "Content-Type: application/json" \
-                  -d '{"namespace": ["'"$NS"'"]}' 2>/dev/null || echo "000")
+                  -d "$BODY" 2>/dev/null || echo "000")
                 if [ "$NS_CODE" = "200" ]; then
                   echo "Namespace '$NS' created in catalog '$CATALOG_NAME'"
                 elif [ "$NS_CODE" = "409" ]; then
@@ -148,6 +158,11 @@ spec:
                 else
                   echo "WARNING: Namespace '$NS' creation returned HTTP $NS_CODE"
                 fi
-              done
+              }
+
+              create_ns "default" "s3://$BUCKET_BRONZE/default"
+              create_ns "bronze"  "s3://$BUCKET_BRONZE/bronze"
+              create_ns "silver"  "s3://$BUCKET_SILVER/silver"
+              create_ns "gold"    "s3://$BUCKET_GOLD/gold"
 
               echo "Polaris bootstrap complete"

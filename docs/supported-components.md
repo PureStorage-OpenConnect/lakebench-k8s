@@ -12,7 +12,7 @@ for the full YAML schema.
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Apache Spark | 3.5.4 | `apache/spark:3.5.4-python3` | Pipeline processing (bronze, silver, gold stages) |
+| Apache Spark | 3.5.x / 4.0.x | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` | Pipeline processing (bronze, silver, gold stages) |
 | Spark Operator | 2.4.0 | Kubeflow Helm chart | Submits SparkApplication CRDs to Kubernetes |
 
 Spark runs all data pipeline jobs. The Spark Operator manages job lifecycle
@@ -50,7 +50,7 @@ and troubleshooting.
 
 | Component | Default Version | Delivery | Role |
 |-----------|----------------|----------|------|
-| Apache Iceberg | 1.10.1 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12`) | Open table format with ACID transactions |
+| Apache Iceberg | 1.10.1 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12` or `4.0_2.13`) | Open table format with ACID transactions |
 
 Iceberg is the supported table format and works with both catalogs (Hive and Polaris).
 
@@ -61,7 +61,7 @@ Iceberg is the supported table format and works with both catalogs (Hive and Pol
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
 | Trino | 479 | `trinodb/trino:479` | Distributed SQL engine for interactive analytics |
-| Spark Thrift Server | 3.5.4 (same as Spark) | `apache/spark:3.5.4-python3` | Spark-native SQL via HiveServer2 JDBC |
+| Spark Thrift Server | 3.5.x / 4.0.x (same as Spark) | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` | Spark-native SQL via HiveServer2 JDBC |
 | DuckDB | Bundled in Python 3.11 | `python:3.11-slim` | Lightweight single-pod analytics engine |
 
 Each recipe uses at most one query engine (or `none` for ETL-only
@@ -146,7 +146,7 @@ Lakebench update:
 
 ```yaml
 images:
-  spark: apache/spark:3.5.4-python3
+  spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
   polaris: apache/polaris:1.3.0-incubating
