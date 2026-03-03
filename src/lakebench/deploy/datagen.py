@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 import yaml
 
 from .engine import DeploymentResult, DeploymentStatus
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -67,6 +70,14 @@ class DatagenDeployer:
                 "datagen_timestamp_end": datagen.timestamp_end,
             }
         )
+
+        # Duration-based generation for sustained pipelines
+        from lakebench.config.schema import PipelineMode
+
+        pipeline = cfg.architecture.pipeline
+        if pipeline.mode == PipelineMode.SUSTAINED:
+            context["datagen_duration"] = pipeline.sustained.run_duration
+
         return context
 
     def _parse_size_to_bytes(self, size_str: str) -> int:
@@ -141,6 +152,7 @@ class DatagenDeployer:
             )
 
         except Exception as e:
+            logger.exception("Datagen deployment failed")
             return DeploymentResult(
                 component="datagen",
                 status=DeploymentStatus.FAILED,

@@ -14,12 +14,14 @@ All S3 settings live under `platform.storage.s3` in your Lakebench config file:
 platform:
   storage:
     s3:
-      endpoint: ""                       # REQUIRED: e.g. http://your-s3-endpoint:80
+      endpoint: ""                       # REQUIRED: e.g. http://your-s3:80 or https://your-s3:443
       region: "us-east-1"               # AWS region (required even for non-AWS)
       path_style: true                   # Required for FlashBlade, MinIO
       access_key: ""                     # Inline S3 access key
       secret_key: ""                     # Inline S3 secret key
       secret_ref: ""                     # OR: name of existing K8s Secret
+      ca_cert: ""                        # PEM CA cert path (for HTTPS with self-signed CA)
+      verify_ssl: true                   # Set false to skip SSL verification (dev only)
       buckets:
         bronze: "lakebench-bronze"       # Bronze layer bucket name
         silver: "lakebench-silver"       # Silver layer bucket name
@@ -31,7 +33,7 @@ platform:
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `endpoint` | string | `""` (required) | Full URL of the S3 endpoint, including scheme and port. Example: `http://10.0.1.50:80`. |
+| `endpoint` | string | `""` (required) | Full URL of the S3 endpoint, including scheme and port. Example: `http://10.0.1.50:80` or `https://10.0.1.50:443`. |
 | `region` | string | `us-east-1` | AWS region for signature compatibility. Required even for non-AWS endpoints because boto3 uses it for S3v4 signing. |
 | `path_style` | bool | `true` | Use path-style bucket addressing (`http://endpoint/bucket`) instead of virtual-hosted style (`http://bucket.endpoint`). Must be `true` for FlashBlade and MinIO. |
 | `access_key` | string | `""` | S3 access key provided inline. Mutually exclusive with `secret_ref`. |
@@ -41,6 +43,8 @@ platform:
 | `buckets.silver` | string | `lakebench-silver` | Bucket name for the silver (enriched) data layer. |
 | `buckets.gold` | string | `lakebench-gold` | Bucket name for the gold (aggregated) data layer. |
 | `create_buckets` | bool | `true` | Automatically create buckets that do not exist. Set to `false` if buckets are pre-provisioned or if the credentials lack `CreateBucket` permission. |
+| `ca_cert` | string | `""` | Path to a PEM CA certificate bundle for HTTPS endpoints with self-signed or private CAs. At deploy time, the PEM content is read and embedded into a Kubernetes Secret for all components. Empty = system default CAs. |
+| `verify_ssl` | bool | `true` | Verify SSL certificates for HTTPS endpoints. Set `false` only for development when you don't have the CA certificate file. |
 
 ## Credential Management
 
@@ -56,7 +60,25 @@ If neither inline credentials nor a `secret_ref` is provided, validation is defe
 
 When using Pure Storage FlashBlade as the S3 backend, keep the following in mind:
 
-- **HTTP, not HTTPS.** FlashBlade object-store endpoints typically serve on port 80 over plain HTTP. Use `http://<IP>:80` as the endpoint.
+- **HTTP or HTTPS.** FlashBlade object-store endpoints serve on port 80 (HTTP) or port 443 (HTTPS). Use `http://<IP>:80` for HTTP or `https://<IP>:443` for HTTPS.
+- **HTTPS with self-signed CA.** FlashBlade uses a self-signed certificate by default. To use HTTPS, extract the CA certificate and set `ca_cert`:
+
+  ```bash
+  # Extract the CA certificate from FlashBlade
+  openssl s_client -connect <IP>:443 -showcerts </dev/null 2>/dev/null \
+    | openssl x509 -outform PEM > flashblade-ca.pem
+  ```
+
+  ```yaml
+  platform:
+    storage:
+      s3:
+        endpoint: https://<IP>:443
+        ca_cert: ./flashblade-ca.pem
+  ```
+
+  Lakebench automatically distributes the certificate to all components (Spark, Trino, Polaris, Hive, datagen) via a Kubernetes Secret and JVM truststore injection.
+
 - **Path-style access is required.** FlashBlade does not support virtual-hosted bucket addressing. Always set `path_style: true`.
 - **Multipart upload ghost objects.** After failed or aborted uploads, FlashBlade may report non-zero object counts in its management UI even though `list_objects_v2` returns nothing. These are incomplete multipart upload artifacts that FlashBlade garbage-collects asynchronously. The `empty_bucket()` method in the S3 client handles this by aborting all incomplete multipart uploads and then entering a retry-verify loop: it re-checks both `list_objects_v2` and `list_multipart_uploads` until both return empty, waiting up to `max_wait` seconds (default 300) for FlashBlade's async GC to catch up.
 

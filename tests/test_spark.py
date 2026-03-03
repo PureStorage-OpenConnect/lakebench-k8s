@@ -260,18 +260,81 @@ class TestSparkJobManager:
         assert "spark.hadoop.hive.metastore.client.socket.timeout" not in spark_conf
 
     def test_manifest_volumes(self):
-        """Manifest should include script, work-dir, and extra-jars volumes."""
+        """Volumes should be in pod templates (not top-level spec)."""
         config = _make_config()
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
 
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
-        volumes = manifest["spec"]["volumes"]
-        volume_names = [v["name"] for v in volumes]
 
-        assert "spark-scripts" in volume_names
-        assert "spark-work-dir" in volume_names
-        assert "spark-ivy-cache" in volume_names
+        # Volumes must NOT be in the top-level spec (avoids duplicates
+        # with the Spark Operator webhook which also injects .spec.volumes).
+        assert "volumes" not in manifest["spec"]
+
+        # Volumes should be in driver and executor pod templates
+        driver_tpl = manifest["spec"]["driver"]["template"]
+        driver_vols = [v["name"] for v in driver_tpl["spec"]["volumes"]]
+        assert "spark-scripts" in driver_vols
+        assert "spark-work-dir" in driver_vols
+        assert "spark-ivy-cache" in driver_vols
+
+        executor_tpl = manifest["spec"]["executor"]["template"]
+        executor_vols = [v["name"] for v in executor_tpl["spec"]["volumes"]]
+        assert "spark-scripts" in executor_vols
+        assert "spark-work-dir" in executor_vols
+        assert "spark-ivy-cache" in executor_vols
+
+    def test_manifest_truststore_when_ca_cert(self):
+        """When ca_cert is set, truststore volumes and init container are added."""
+        config = _make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "https://flashblade:443",
+                        "access_key": "key",
+                        "secret_key": "secret",
+                        "ca_cert": "/tmp/ca.pem",
+                        "buckets": {
+                            "bronze": "test-bronze",
+                            "silver": "test-silver",
+                            "gold": "test-gold",
+                        },
+                    }
+                }
+            },
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+
+        driver_tpl = manifest["spec"]["driver"]["template"]
+        driver_vols = [v["name"] for v in driver_tpl["spec"]["volumes"]]
+        assert "ca-cert" in driver_vols
+        assert "truststore" in driver_vols
+
+        # Check keytool init container exists
+        init_names = [ic["name"] for ic in driver_tpl["spec"]["initContainers"]]
+        assert "import-ca-cert" in init_names
+
+        # Check JVM truststore args
+        spark_conf = manifest["spec"]["sparkConf"]
+        assert "trustStore" in spark_conf.get("spark.driver.extraJavaOptions", "")
+        assert "trustStore" in spark_conf.get("spark.executor.extraJavaOptions", "")
+
+    def test_manifest_no_truststore_without_ca_cert(self):
+        """Without ca_cert, no truststore volumes or init container."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+
+        driver_tpl = manifest["spec"]["driver"]["template"]
+        driver_vols = [v["name"] for v in driver_tpl["spec"]["volumes"]]
+        assert "ca-cert" not in driver_vols
+        assert "truststore" not in driver_vols
+        assert "trustStore" not in manifest["spec"]["sparkConf"].get(
+            "spark.driver.extraJavaOptions", ""
+        )
 
     def test_manifest_env_vars(self):
         """Driver/executor should have S3 and bucket env vars."""
@@ -1335,3 +1398,86 @@ class TestSparkOperatorNamespaceWatching:
         ]
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
         assert mgr._add_namespace_to_watch("lakebench-test") is False
+
+
+# ---------------------------------------------------------------------------
+# Polaris Spark Manifest Tests
+# ---------------------------------------------------------------------------
+
+
+_POLARIS_ARCH = {
+    "catalog": {"type": "polaris"},
+    "table_format": {"type": "iceberg"},
+    "query_engine": {"type": "trino"},
+}
+
+
+class TestPolarisSparkManifest:
+    """Tests that Polaris catalog config is correctly injected into Spark manifests."""
+
+    def test_polaris_streaming_manifest(self):
+        """Streaming manifest uses RESTCatalog URI, not Hive type key."""
+        config = _make_config(architecture=_POLARIS_ARCH)
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.BRONZE_INGEST)
+        spark_conf = manifest["spec"]["sparkConf"]
+
+        assert "RESTCatalog" in spark_conf["spark.sql.catalog.lakehouse.catalog-impl"]
+        assert "polaris" in spark_conf["spark.sql.catalog.lakehouse.uri"]
+        assert "spark.sql.catalog.lakehouse.type" not in spark_conf
+
+    def test_polaris_spark4_packages(self):
+        """Spark 4 + Polaris uses iceberg-aws-bundle, drops aws-java-sdk-bundle."""
+        config = _make_config(
+            platform={
+                "storage": {
+                    "s3": {
+                        "endpoint": "http://minio:9000",
+                        "access_key": "minioadmin",
+                        "secret_key": "minioadmin",
+                        "buckets": {
+                            "bronze": "test-bronze",
+                            "silver": "test-silver",
+                            "gold": "test-gold",
+                        },
+                    }
+                },
+                "compute": {"spark": {"image": "apache/spark:4.0.0-python3"}},
+            },
+            architecture=_POLARIS_ARCH,
+            images={"spark": "apache/spark:4.0.0-python3"},
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        spark_conf = manifest["spec"]["sparkConf"]
+        packages = spark_conf["spark.jars.packages"]
+
+        assert "iceberg-spark-runtime-4" in packages
+        assert "iceberg-aws-bundle" in packages
+        assert "aws-java-sdk-bundle" not in packages
+        assert spark_conf["spark.sql.catalog.lakehouse.rest.http-client.type"] == "apache"
+
+    def test_polaris_oauth2_scope(self):
+        """Polaris manifest includes OAuth2 scope and credential."""
+        config = _make_config(architecture=_POLARIS_ARCH)
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        spark_conf = manifest["spec"]["sparkConf"]
+
+        assert spark_conf["spark.sql.catalog.lakehouse.scope"] == "PRINCIPAL_ROLE:ALL"
+        assert spark_conf.get("spark.sql.catalog.lakehouse.credential")
+
+    def test_polaris_s3_credentials_in_manifest(self):
+        """Polaris manifest includes static S3 credentials (no STS vending)."""
+        config = _make_config(architecture=_POLARIS_ARCH)
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        spark_conf = manifest["spec"]["sparkConf"]
+
+        assert "spark.sql.catalog.lakehouse.s3.access-key-id" in spark_conf
+        assert "spark.sql.catalog.lakehouse.s3.secret-access-key" in spark_conf
+        assert "spark.sql.catalog.lakehouse.s3.endpoint" in spark_conf
