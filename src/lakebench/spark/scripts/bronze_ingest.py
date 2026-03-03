@@ -34,9 +34,6 @@ target_file_size_bytes = env("TARGET_FILE_SIZE_BYTES", "536870912")
 landing_zone = bronze_uri + "customer/interactions/"
 bronze_table_path = env("LB_BRONZE_TABLE", "default.bronze_raw")
 table_name = f"{catalog_name}.{bronze_table_path}"
-# Derive warehouse location from table path (last segment)
-_bronze_table_short = bronze_table_path.rsplit(".", 1)[-1]
-table_location = bronze_uri + f"warehouse/{_bronze_table_short}/"
 
 # ---------------------------------------------------------------------------
 # Spark session
@@ -53,14 +50,33 @@ log(f"Trigger:      {trigger_interval}")
 
 
 # ---------------------------------------------------------------------------
-# Infer schema from existing Parquet files in the landing zone.
+# Wait for Parquet files in the landing zone, then infer schema.
 # Datagen v2 writes Parquet with self-describing schemas -- we read one
 # file to get the schema, then use it for the streaming reader.
+# In sustained mode, datagen starts concurrently and may not have written
+# any files yet when bronze-ingest starts.
 # ---------------------------------------------------------------------------
-log("Inferring schema from landing zone...")
-sample_df = spark.read.parquet(landing_zone)
-inferred_schema = sample_df.schema
-log(f"Inferred schema with {len(inferred_schema)} columns")
+_LANDING_WAIT_INTERVAL = 15  # seconds between checks
+_LANDING_WAIT_MAX = 1800  # 30 minutes
+
+_waited = 0
+while True:
+    try:
+        sample_df = spark.read.parquet(landing_zone)
+        inferred_schema = sample_df.schema
+        if len(inferred_schema) > 0:
+            log(f"Inferred schema with {len(inferred_schema)} columns (waited {_waited}s)")
+            break
+    except Exception as e:
+        if _waited == 0 or _waited % 60 == 0:
+            log(f"Landing zone probe error: {type(e).__name__}: {e}")
+    if _waited >= _LANDING_WAIT_MAX:
+        log(f"No Parquet files in {landing_zone} after {_waited}s, giving up")
+        spark.stop()
+        raise SystemExit(1)
+    log(f"Waiting for Parquet files in landing zone ({_waited}s elapsed)...")
+    time.sleep(_LANDING_WAIT_INTERVAL)
+    _waited += _LANDING_WAIT_INTERVAL
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +102,12 @@ def write_bronze_batch(batch_df, batch_id):
             spark.table(table_name)
             _table_created = True
         except Exception:
-            log(f"Batch {batch_id}: creating bronze table at {table_location}")
+            log(f"Batch {batch_id}: creating bronze table {table_name}")
             (
                 batch_df.writeTo(table_name)
                 .tableProperty("write.format.default", "parquet")
                 .tableProperty("write.parquet.compression-codec", "snappy")
                 .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
-                .tableProperty("location", table_location)
                 .create()
             )
             _table_created = True

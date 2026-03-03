@@ -42,7 +42,7 @@ oc adm policy add-scc-to-user privileged -z spark-operator-webhook -n spark-oper
 ```
 
 ### Learnings
-- Spark Operator version (2.4.0) is different from Apache Spark runtime version (3.5.4)
+- Spark Operator version (2.4.0) is different from Apache Spark runtime version (3.5.4 / 4.0.0)
 - `local://` URIs required for `mainApplicationFile` - scripts must be in container filesystem
 - ConfigMap volumes work correctly with v2.4.0 webhook
 
@@ -150,7 +150,7 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Component | Version | Source |
 |-----------|---------|--------|
 | Spark Operator | 2.4.0 | Kubeflow helm chart |
-| Apache Spark | 3.5.4 | apache/spark image |
+| Apache Spark | 3.5.4 / 4.0.0 | apache/spark image |
 | Iceberg | 1.10.1 | spark.jars.packages |
 | Stackable Hive Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Commons Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |

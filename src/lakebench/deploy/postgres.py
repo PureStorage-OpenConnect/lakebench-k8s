@@ -16,7 +16,7 @@ from lakebench.k8s import (
     wait_for_statefulset_ready,
 )
 
-from .engine import DeploymentResult, DeploymentStatus
+from .engine import DeploymentResult, DeploymentStatus, image_tag
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -107,16 +107,19 @@ class PostgresDeployer:
                     elapsed_seconds=time.time() - start,
                 )
 
+            pg_version = image_tag(self.config.images.postgres)
             return DeploymentResult(
                 component="postgres",
                 status=DeploymentStatus.SUCCESS,
-                message="PostgreSQL deployed and accepting connections",
+                message=f"PostgreSQL {pg_version} deployed and accepting connections",
                 elapsed_seconds=time.time() - start,
                 details={
                     "pod": "lakebench-postgres-0",
                     "service": "lakebench-postgres",
                     "port": 5432,
                 },
+                label="PostgreSQL",
+                detail=pg_version,
             )
 
         except Exception as e:

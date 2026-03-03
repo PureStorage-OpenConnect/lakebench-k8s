@@ -473,7 +473,7 @@ in the `images` section of your YAML.
 
 | Component | Default version | Image |
 |-----------|----------------|-------|
-| Apache Spark | 3.5.4 | `apache/spark:3.5.4-python3` |
+| Apache Spark | 3.5.x / 4.0.x | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` |
 | Spark Operator | 2.4.0 | Kubeflow Helm chart |
 | Apache Iceberg | 1.10.1 | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |

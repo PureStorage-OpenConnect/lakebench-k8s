@@ -11,7 +11,7 @@ import yaml
 
 from lakebench.k8s import WaitResult, WaitStatus
 
-from .engine import DeploymentResult, DeploymentStatus
+from .engine import DeploymentResult, DeploymentStatus, image_tag
 
 logger = logging.getLogger(__name__)
 
@@ -273,10 +273,11 @@ class HiveDeployer:
 
             pod_name = self._get_hive_pod_name(namespace)
 
+            hive_version = image_tag(self.config.images.hive)
             return DeploymentResult(
                 component="hive",
                 status=DeploymentStatus.SUCCESS,
-                message="Stackable HiveCluster deployed with S3 support",
+                message=f"Stackable HiveCluster {hive_version} deployed with S3 support",
                 elapsed_seconds=time.time() - start,
                 details={
                     "type": "stackable",
@@ -285,6 +286,8 @@ class HiveDeployer:
                     "port": 9083,
                     "thrift_uri": f"thrift://lakebench-hive-metastore.{namespace}.svc.cluster.local:9083",
                 },
+                label="Hive Metastore",
+                detail=hive_version,
             )
 
         except Exception as e:

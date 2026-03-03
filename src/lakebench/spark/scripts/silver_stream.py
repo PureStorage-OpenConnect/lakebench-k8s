@@ -104,6 +104,29 @@ def write_silver_batch(batch_df, batch_id):
 
 
 # ---------------------------------------------------------------------------
+# Wait for the Bronze table to exist before starting the streaming query.
+# Bronze-ingest creates bronze_raw on its first batch; silver-stream starts
+# concurrently and would crash with NoSuchTableException without this wait.
+# ---------------------------------------------------------------------------
+_TABLE_WAIT_INTERVAL = 15  # seconds between checks
+_TABLE_WAIT_MAX = 1800  # 30 minutes -- generous for large datagen
+
+_waited = 0
+while True:
+    try:
+        spark.table(bronze_tbl)
+        log(f"Bronze table {bronze_tbl} exists (waited {_waited}s)")
+        break
+    except Exception:
+        if _waited >= _TABLE_WAIT_MAX:
+            log(f"Bronze table {bronze_tbl} not found after {_waited}s, giving up")
+            spark.stop()
+            raise SystemExit(1) from None
+        log(f"Waiting for {bronze_tbl} to be created ({_waited}s elapsed)...")
+        time.sleep(_TABLE_WAIT_INTERVAL)
+        _waited += _TABLE_WAIT_INTERVAL
+
+# ---------------------------------------------------------------------------
 # Streaming query -- read from Iceberg bronze_raw
 # ---------------------------------------------------------------------------
 stream = spark.readStream.format("iceberg").load(bronze_tbl)

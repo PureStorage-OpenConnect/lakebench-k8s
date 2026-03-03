@@ -81,7 +81,7 @@ version: 1
 # registries or custom builds.
 images:
   datagen: docker.io/sillidata/lb-datagen:v2
-  spark: apache/spark:3.5.4-python3
+  spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
   polaris: apache/polaris:1.3.0-incubating
@@ -321,7 +321,7 @@ registries or custom builds.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `images.datagen` | string | `docker.io/sillidata/lb-datagen:v2` | Data generator image. |
-| `images.spark` | string | `apache/spark:3.5.4-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
+| `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
 | `images.polaris` | string | `apache/polaris:1.3.0-incubating` | Apache Polaris REST catalog image. |
@@ -687,7 +687,7 @@ useful for air-gapped environments or when running custom builds:
 ```yaml
 images:
   datagen: my-registry.internal/lakebench/datagen:v2
-  spark: my-registry.internal/apache/spark:3.5.4-python3
+  spark: my-registry.internal/apache/spark:4.0.2-python3
   trino: my-registry.internal/trinodb/trino:479
   pull_policy: Always
   pull_secrets:

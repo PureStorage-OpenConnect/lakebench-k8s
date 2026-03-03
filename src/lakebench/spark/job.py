@@ -59,7 +59,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     },
     "silver-build": {
         "driver_cores": 4,
-        "driver_memory": "24g",  # BUG-005: 16g OOM when executor count > 20 (K8s API polling)
+        "driver_memory": "32g",  # BUG-005: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
         "executor_cores": 4,
         "executor_memory": "48g",
         "executor_memory_overhead": "12g",
@@ -71,7 +71,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
     },
     "gold-finalize": {
         "driver_cores": 4,
-        "driver_memory": "24g",  # BUG-007: 16g OOM when executor count > 20 (K8s API polling)
+        "driver_memory": "32g",  # BUG-007: 24g OOM with Spark 4 (558MB SDK v2 bundle + K8s API polling)
         "executor_cores": 4,
         "executor_memory": "32g",
         "executor_memory_overhead": "8g",
@@ -236,42 +236,78 @@ def _scale_partitions(profile: dict[str, Any], scale: int, executor_count: int, 
     return str(executor_count * cores * 2)
 
 
-def _parse_spark_major(image: str) -> int:
-    """Parse Spark major version from image tag.
+# Supported Spark minor versions.  Each entry maps to a validated set of
+# Hadoop, Scala, and AWS SDK dependencies in ``_spark_compat()``.  Only
+# these (major, minor) pairs are accepted -- untested combinations risk
+# dependency mismatches at runtime.
+_SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
+    (3, 5): "3.5.x (Scala 2.12, Hadoop AWS 3.3.4)",
+    (4, 0): "4.0.x (Scala 2.13, Hadoop AWS 3.4.1)",
+}
 
-    Handles tags like ``apache/spark:3.5.4-python3``, ``apache/spark:4.0.0-python3``,
-    or custom registries like ``my-registry/spark:3.5.4``.  Falls back to 3 if the
-    tag cannot be parsed.
+
+def _parse_spark_major(image: str) -> int:
+    """Parse and validate the Spark version from an image tag.
+
+    Accepts tags like ``apache/spark:3.5.4-python3``, ``apache/spark:4.0.2-python3``,
+    or custom registries like ``my-registry/spark:3.5.4-python3``.  The ``-python3``
+    suffix is required -- PySpark scripts need a Python-enabled image.
+
+    Only tested minor versions are accepted (see ``_SUPPORTED_SPARK_VERSIONS``).
 
     Returns:
         3 or 4
+
+    Raises:
+        ValueError: If the image tag cannot be parsed, the version is not
+            supported, or the ``-python3`` suffix is missing.
     """
     tag = image.split(":")[-1]
+
+    # Require -python3 suffix (PySpark scripts need Python in the image)
+    if "-python3" not in tag:
+        raise ValueError(
+            f"Spark image '{image}' must use a '-python3' tag "
+            f"(e.g., 'apache/spark:3.5.4-python3'). "
+            f"PySpark scripts require a Python-enabled image."
+        )
+
     # Strip known suffixes so "3.5.4-python3" becomes "3.5.4"
     for suffix in ("-python3", "-java17", "-java11", "-scala2.12", "-scala2.13"):
         tag = tag.replace(suffix, "")
+
+    parts = tag.split(".")
     try:
-        major = int(tag.split(".")[0])
-        if major in (3, 4):
-            return major
+        major = int(parts[0])
+        minor = int(parts[1]) if len(parts) > 1 else -1
     except (ValueError, IndexError):
-        pass
-    logger.warning("Cannot parse Spark major version from image '%s', assuming 3.x", image)
-    return 3
+        raise ValueError(
+            f"Cannot parse Spark version from image '{image}'. "
+            f"Expected a tag like '3.5.4-python3' or '4.0.2-python3'."
+        ) from None
+
+    if (major, minor) in _SUPPORTED_SPARK_VERSIONS:
+        return major
+
+    supported = ", ".join(desc for desc in _SUPPORTED_SPARK_VERSIONS.values())
+    raise ValueError(
+        f"Unsupported Spark version {major}.{minor} in image '{image}'. "
+        f"Tested versions: {supported}."
+    )
 
 
-def _spark_compat(image: str) -> tuple[str, str]:
-    """Derive Scala suffix and Hadoop AWS version from Spark image tag.
+def _spark_compat(image: str) -> tuple[str, str, str]:
+    """Derive Scala suffix, Hadoop AWS version, and AWS SDK version from Spark image tag.
 
     Returns:
-        Tuple of (scala_suffix, hadoop_aws_version).
-        Spark 3.x → (``"_2.12"``, ``"3.3.4"``),
-        Spark 4.x → (``"_2.13"``, ``"3.4.1"``).
+        Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version).
+        Spark 3.x -> (``"_2.12"``, ``"3.3.4"``, ``"1.12.262"``),
+        Spark 4.x -> (``"_2.13"``, ``"3.4.1"``, ``"1.12.367"``).
     """
     major = _parse_spark_major(image)
     if major >= 4:
-        return "_2.13", "3.4.1"
-    return "_2.12", "3.3.4"
+        return "_2.13", "3.4.1", "1.12.367"
+    return "_2.12", "3.3.4", "1.12.262"
 
 
 class JobType(Enum):
@@ -496,6 +532,7 @@ class SparkJobManager:
         s3 = cfg.platform.storage.s3
 
         job_name = f"lakebench-{job_type.value}"
+        spark_major = _parse_spark_major(cfg.images.spark)
 
         # Per-job resource profile (proven at 1TB+ scale)
         profile = _JOB_PROFILES.get(job_type.value, _JOB_PROFILES["silver-build"])
@@ -543,6 +580,18 @@ class SparkJobManager:
         # Driver resource overrides (global, applies to all jobs)
         driver_cores = profile["driver_cores"]
         driver_memory = profile["driver_memory"]
+
+        # Version-conditional driver memory: Spark 4 needs 32g for silver/gold
+        # due to 558MB SDK v2 bundle + K8s API polling overhead. Spark 3 is
+        # fine with 24g (280MB SDK v1 bundle).  Profile defaults are the Spark 4
+        # values (safe ceiling); downsize for Spark 3 when no user override.
+        if (
+            spark_major < 4
+            and spark_cfg.driver_memory is None
+            and job_type in (JobType.SILVER_BUILD, JobType.GOLD_FINALIZE)
+        ):
+            driver_memory = "24g"
+
         if spark_cfg.driver_cores is not None:
             logger.info(
                 "Using driver cores override: %d (profile default: %d)",
@@ -585,8 +634,13 @@ class SparkJobManager:
 
         # Dynamic maxResultSize: scales with executor count.
         # Each executor sends serialized task results to the driver.
-        # Floor 4g (proven at <=12 executors), cap 16g.
-        max_result_gb = min(16, max(4, executor_count // 3))
+        # Spark 4 needs a higher floor (8g) because the larger SDK v2 bundle
+        # consumes more driver heap, leaving less room for result buffers.
+        # Spark 3 uses the original formula (floor 4g).
+        if spark_major >= 4:
+            max_result_gb = min(16, max(8, executor_count // 2))
+        else:
+            max_result_gb = min(16, max(4, executor_count // 3))
 
         # Select script based on job type
         # Scripts are mounted from ConfigMap at /opt/spark/scripts
@@ -614,15 +668,43 @@ class SparkJobManager:
         # Parse Spark version from image tag (e.g., apache/spark:3.5.4 -> 3.5)
         spark_image_tag = cfg.images.spark.split(":")[-1]
         spark_major_minor = ".".join(spark_image_tag.split(".")[:2])
-        scala_suffix, hadoop_version = _spark_compat(cfg.images.spark)
+        scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
 
-        # Build spark.jars.packages dynamically from config versions
+        # Build spark.jars.packages dynamically from config versions.
+        #
+        # All Spark versions need:
+        #   - iceberg-spark-runtime: Iceberg Spark integration
+        #   - iceberg-aws-bundle: Iceberg catalog S3 support (fat jar, bundles
+        #     AWS SDK v1 + v2 internally for Iceberg 1.10+)
+        #   - hadoop-aws: S3A FileSystem for direct Parquet reads from S3
+        #     (e.g., bronze_ingest reading landing zone Parquet files)
+        #
+        # Spark 3 also needs aws-java-sdk-bundle because iceberg-aws-bundle
+        # <1.8 is leaner and doesn't bundle the full SDK.
+        #
+        # Spark 4 / Hadoop 3.4.1: hadoop-aws pulls software.amazon.awssdk:bundle
+        # (558MB) transitively via S3 Transfer Manager. This is required at
+        # runtime -- S3AFileSystem uses SDK v2 classes that iceberg-aws-bundle
+        # does NOT fully provide (e.g. software.amazon.awssdk.transfer.s3).
+        #
+        # Spark 3 also needs aws-java-sdk-bundle (SDK v1, 310MB) because
+        # hadoop-aws 3.3.x uses SDK v1 and iceberg-aws-bundle <1.8 doesn't
+        # bundle it. With BOTH bundles the total jar payload is ~1.2GB,
+        # overwhelming the driver's netty file server.
+        #
+        # Spark 4 drops aws-java-sdk-bundle -- iceberg-aws-bundle 1.10+
+        # already bundles SDK v1 classes, and hadoop-aws 3.4.1 no longer
+        # needs the explicit v1 bundle.  Total payload: ~650MB (safe).
         packages = [
             f"org.apache.iceberg:iceberg-spark-runtime-{spark_major_minor}{scala_suffix}:{iceberg_version}",
             f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
             f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            "com.amazonaws:aws-java-sdk-bundle:1.12.262",
         ]
+        if spark_major < 4:
+            packages.append(
+                f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
+            )
+
         spark_conf["spark.jars.packages"] = ",".join(packages)
         spark_conf["spark.sql.extensions"] = (
             "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
@@ -659,8 +741,7 @@ class SparkJobManager:
                 f"http://lakebench-polaris.{self.namespace}"
                 f".svc.cluster.local:{polaris_port}/api/catalog"
             )
-            spark_conf.update(
-                {
+            polaris_conf = {
                     f"spark.sql.catalog.{catalog_name}": "org.apache.iceberg.spark.SparkCatalog",
                     f"spark.sql.catalog.{catalog_name}.catalog-impl": "org.apache.iceberg.rest.RESTCatalog",
                     f"spark.sql.catalog.{catalog_name}.uri": polaris_uri,
@@ -677,8 +758,14 @@ class SparkJobManager:
                     # FlashBlade: static S3 credentials on catalog (no STS vending)
                     f"spark.sql.catalog.{catalog_name}.s3.access-key-id": s3.access_key,
                     f"spark.sql.catalog.{catalog_name}.s3.secret-access-key": s3.secret_key,
-                }
-            )
+            }
+            # Spark 4 / Iceberg 1.10: the default Vert.x HTTP client blocks the
+            # driver event loop during REST catalog commits, causing RPC timeouts
+            # and executor task-result failures.  Switch to the Apache HttpClient
+            # which runs on its own thread pool and doesn't block the event loop.
+            if spark_major >= 4:
+                polaris_conf[f"spark.sql.catalog.{catalog_name}.rest.http-client.type"] = "apache"
+            spark_conf.update(polaris_conf)
         else:
             # Hive Metastore (default)
             spark_conf.update(
@@ -782,13 +869,21 @@ class SparkJobManager:
             }
         )
 
+        # Spark 4 AppStatusListener regression: processing
+        # SparkListenerExecutorMetricsUpdate events takes 25+ seconds each,
+        # causing the driver's task scheduler to starve and executors to time
+        # out.  Disable appStatusSource to prevent the listener from being
+        # registered.  The UI stays enabled for prometheus scraping, but the
+        # expensive per-event processing in AppStatusListener is eliminated.
+        if spark_major >= 4:
+            spark_conf["spark.metrics.appStatusSource.enabled"] = "false"
+
         # Prometheus metrics (for observability layer)
         if cfg.observability.enabled:
             spark_conf.update(
                 {
                     "spark.ui.prometheus.enabled": "true",
                     "spark.metrics.namespace": "lakebench",
-                    "spark.metrics.appStatusSource.enabled": "true",
                     # PrometheusServlet sink -- exposes metrics at driver
                     # and executor scrape endpoints for Prometheus collection
                     "spark.metrics.conf.*.sink.prometheusServlet.class": "org.apache.spark.metrics.sink.PrometheusServlet",
@@ -835,6 +930,42 @@ class SparkJobManager:
             {"name": "spark-scripts", "mountPath": "/opt/spark/scripts"},
             {"name": "spark-work-dir", "mountPath": "/opt/spark/work-dir"},
             {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
+        ]
+
+        # Init container to pre-warm the Ivy cache with all required jars.
+        # Without this, each Spark job independently resolves Maven/Ivy deps
+        # at startup, which can take 10-30+ minutes with Spark 4's larger
+        # Scala 2.13 dependency tree. The init container resolves once; the
+        # driver finds everything in /tmp/.ivy2 and skips network resolution.
+        packages_str = ",".join(packages)
+        init_containers = [
+            {
+                "name": "resolve-deps",
+                "image": cfg.images.spark,
+                "imagePullPolicy": cfg.images.pull_policy.value,
+                "securityContext": {
+                    "runAsUser": 185,
+                    "runAsGroup": 185,
+                },
+                "command": [
+                    "/bin/bash",
+                    "-c",
+                    (
+                        "set -e; "
+                        "/opt/spark/bin/spark-submit "
+                        f'--packages "{packages_str}" '
+                        "--conf spark.jars.ivy=/tmp/.ivy2 "
+                        "--class org.apache.spark.deploy.DummyNonExistent "
+                        "local:///dev/null 2>&1 || true; "
+                        "echo 'Ivy cache warmed:'; "
+                        "ls /tmp/.ivy2/jars/ 2>/dev/null | wc -l; "
+                        "echo 'jars resolved'"
+                    ),
+                ],
+                "volumeMounts": [
+                    {"name": "spark-ivy-cache", "mountPath": "/tmp/.ivy2"},
+                ],
+            },
         ]
 
         # Check for scratch storage (Portworx) configuration
@@ -906,6 +1037,7 @@ class SparkJobManager:
                     },
                     "env": self._build_env_vars(job_type),
                     "volumeMounts": driver_volume_mounts,
+                    "initContainers": init_containers,
                 },
                 "executor": {
                     "cores": profile["executor_cores"],

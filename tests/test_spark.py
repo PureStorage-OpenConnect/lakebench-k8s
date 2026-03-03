@@ -260,7 +260,7 @@ class TestSparkJobManager:
         assert "spark.hadoop.hive.metastore.client.socket.timeout" not in spark_conf
 
     def test_manifest_volumes(self):
-        """Manifest should include script, work-dir, and ivy volumes."""
+        """Manifest should include script, work-dir, and extra-jars volumes."""
         config = _make_config()
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
@@ -443,7 +443,11 @@ class TestDriverResourceOverrides:
     """Tests for driver memory/cores overrides in SparkJobManager manifests."""
 
     def test_no_override_uses_profile_default(self):
-        """Without overrides, driver resources come from _JOB_PROFILES."""
+        """Without overrides, driver resources come from _JOB_PROFILES.
+
+        The default image is Spark 4.0.x, which uses the profile's 32g
+        driver memory (Spark 4's SDK v2 jar payload needs more heap).
+        """
         from lakebench.spark.job import _JOB_PROFILES
 
         config = _make_config()
@@ -454,7 +458,8 @@ class TestDriverResourceOverrides:
         driver = manifest["spec"]["driver"]
 
         assert driver["cores"] == _JOB_PROFILES["silver-build"]["driver_cores"]
-        assert driver["memory"] == _JOB_PROFILES["silver-build"]["driver_memory"]
+        # Spark 4 uses profile default: 32g
+        assert driver["memory"] == "32g"
 
     def test_driver_memory_override(self):
         """driver_memory override changes driver memory in manifest."""
@@ -539,17 +544,17 @@ class TestMaxResultSizeScaling:
     """Tests for dynamic spark.driver.maxResultSize based on executor count."""
 
     def test_low_executor_count_gets_floor(self):
-        """At default scale (10), few executors -> maxResultSize = 4g."""
+        """At default scale (10), few executors -> maxResultSize = 8g (Spark 4 floor)."""
         config = _make_config()
         k8s = _mock_k8s()
         mgr = SparkJobManager(config, k8s)
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
         spark_conf = manifest["spec"]["sparkConf"]
-        # bronze at scale 1 -> 4 executors -> max(4, 4//3) = max(4,1) = 4
-        assert spark_conf["spark.driver.maxResultSize"] == "4g"
+        # Default image is Spark 4: min(16, max(8, 4//2)) = 8g
+        assert spark_conf["spark.driver.maxResultSize"] == "8g"
 
     def test_high_executor_override_scales_max_result(self):
-        """24 executors -> maxResultSize = 8g (24 // 3)."""
+        """24 executors -> maxResultSize = 12g (Spark 4: min(16, max(8, 24//2)))."""
         config = _make_config(
             platform={
                 "storage": {
@@ -571,7 +576,7 @@ class TestMaxResultSizeScaling:
         mgr = SparkJobManager(config, k8s)
         manifest = mgr._build_manifest(JobType.SILVER_BUILD)
         spark_conf = manifest["spec"]["sparkConf"]
-        assert spark_conf["spark.driver.maxResultSize"] == "8g"
+        assert spark_conf["spark.driver.maxResultSize"] == "12g"
 
     def test_max_result_size_capped_at_16g(self):
         """Even at extreme executor counts, cap at 16g."""
