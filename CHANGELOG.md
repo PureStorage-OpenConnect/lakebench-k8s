@@ -4,6 +4,69 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.10] - 2026-03-02
+
+### Changed
+- **Spark 4.0.x support.** Lakebench now supports Spark 4.0.x images alongside
+  Spark 3.5.x. `_spark_compat()` returns Scala 2.13 suffix, Hadoop AWS 3.4.1,
+  and AWS SDK 1.12.367 for Spark 4. Spark Thrift Server template uses
+  `{{ scala_suffix }}` instead of hardcoded `_2.12`.
+- **Spark Operator installed during `deploy`.** `lakebench deploy` now installs
+  the Spark Operator (when `operator.install: true`) instead of deferring to
+  `run`. `run` only verifies the operator is present.
+- **Deploy output shows component versions.** `lakebench deploy` now prints
+  component name, version, and elapsed time in columnar format. Each deployer
+  returns `label` and `detail` on `DeploymentResult`.
+- **Bronze ingest no longer sets explicit table location.** `bronze_ingest.py`
+  relied on the catalog to assign table locations instead of hardcoding
+  `s3a://<bucket>/warehouse/<table>/`. Both Hive and Polaris catalogs assign
+  correct locations from namespace defaults.
+- **Default Spark image bumped to 4.0.2.** Recipes, schema default, and init
+  template now use `apache/spark:4.0.2-python3`. Spark 3.5.x images remain
+  fully supported -- set `images.spark` to `apache/spark:3.5.8-python3` to
+  use Spark 3.
+
+### Fixed
+- **Spark 4 streaming job crash from jar bloat.** Iceberg 1.10.1's
+  `iceberg-aws-bundle` is self-contained (bundles Hadoop AWS + AWS SDK v1 + v2).
+  The packages list also included explicit `hadoop-aws` and
+  `aws-java-sdk-bundle`, doubling the jar payload to ~1.2GB per executor.
+  The driver's netty file server couldn't stream this to 12+ executors --
+  connections timed out with `StacklessClosedChannelException`. Fix: Spark 4
+  uses only 2 packages (iceberg-spark-runtime + iceberg-aws-bundle); Spark 3
+  keeps all 4 packages unchanged.
+- **Polaris allowed-locations scheme mismatch.** Polaris does literal prefix
+  matching on S3 URIs -- `s3a://` (Spark) did not match `s3://` in
+  `allowedLocations`. Bootstrap template now lists both `s3://` and `s3a://`
+  for each bucket. Per-namespace locations and `default-base-location` also
+  corrected to match the bucket-per-layer topology.
+- **Spark Operator RBAC lost after namespace recreate.** After
+  `lakebench destroy` + `deploy`, operator RBAC (Roles/RoleBindings) was lost
+  but `ensure_installed()` reported success because the namespace was still in
+  `spark.jobNamespaces`. Added `recreate_namespace_rbac()` that does a
+  remove-then-re-add Helm cycle to force fresh RBAC creation.
+- **Datagen batch OOM from hardcoded worker count.** The datagen template
+  hardcoded `--workers 4` regardless of mode. Batch mode only allocates 4Gi
+  memory, which is insufficient for 4 concurrent workers with v2 realism
+  features. Worker count now comes from the autosizer (`generators` config),
+  which sets 1 worker for batch and 8 for continuous.
+- **Benchmark executor kubectl stderr noise.** `kubectl exec` without `-c`
+  printed "Defaulted container" to stderr for multi-container pods, filling the
+  200-char error buffer before actual Trino errors. Added explicit `-c trino`
+  and `-c spark-thrift` container flags.
+- **Prometheus status check name mismatch.** `lakebench status` looked for
+  StatefulSet `lakebench-observability-prometheus` but the actual name is
+  `prometheus-lakebench-observability-ku-prometheus`.
+- **NoneType crash in sustained pipeline scorecard.** `data_freshness_seconds`
+  is `float | None` but was used in comparisons and format strings without
+  None guards.
+- **Polaris bootstrap job timeout race.** 180s timeout with 10s polling caused
+  a race condition. Bumped to 300s timeout with 5s polling.
+- **Ivy cache cold start in streaming jobs.** Three concurrent streaming jobs
+  each independently downloading ~200MB of Maven dependencies caused resolution
+  to exceed the run duration. Added `resolve-deps` init container to pre-warm
+  Ivy cache via shared emptyDir volume.
+
 ## [1.0.8] - 2026-02-21
 
 ### Changed

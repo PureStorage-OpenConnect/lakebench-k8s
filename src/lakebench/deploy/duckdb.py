@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from .engine import DeploymentResult, DeploymentStatus
+from .engine import DeploymentResult, DeploymentStatus, image_tag
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -69,11 +69,14 @@ class DuckDBDeployer:
 
             self._wait_for_ready(namespace, timeout_seconds=300)
 
+            duckdb_version = image_tag(self.config.images.duckdb)
             return DeploymentResult(
                 component="duckdb",
                 status=DeploymentStatus.SUCCESS,
-                message="DuckDB deployed",
+                message=f"DuckDB deployed (image {duckdb_version})",
                 elapsed_seconds=time.time() - start,
+                label="DuckDB",
+                detail=duckdb_version,
             )
 
         except Exception as e:

@@ -45,11 +45,13 @@ name: my-lakehouse
 # See docs/datagen-custom-images.md for building custom datagen images.
 # images:
 #   datagen: docker.io/sillidata/lb-datagen:v2    # Customizable (see docs/datagen-custom-images.md)
-#   spark: apache/spark:3.5.4-python3
+#   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
 #   trino: trinodb/trino:479
 #   polaris: apache/polaris:1.3.0-incubating
+#   duckdb: python:3.11-slim
+#   jmx_exporter: bitnami/jmx-exporter:latest
 #   prometheus: prom/prometheus:v2.48.0
 #   grafana: grafana/grafana:10.2.0
 #   pull_policy: IfNotPresent        # Always | IfNotPresent | Never
@@ -146,13 +148,20 @@ platform:
 # ============================================================================
 # LAYER 2: DATA ARCHITECTURE
 # ============================================================================
-# See docs/recipes.md for supported (catalog, table_format, query_engine)
+# See docs/recipes.md for supported (catalog, table_format, engine, query_engine)
 # combinations and guidance on choosing a recipe.
 architecture:
+  # pipeline_engine: spark           # Pipeline engine (spark only today)
   catalog:
     type: hive                     # hive | polaris | none
     ## Hive Metastore tuning (uncomment to override defaults)
     # hive:
+    #   operator:
+    #     install: false             # Set true to auto-install Stackable operators.
+    #                                # Requires cluster-admin. Installs commons,
+    #                                # listener, secret, and hive operators.
+    #     namespace: stackable
+    #     version: "25.7.0"
     #   thrift:
     #     min_threads: 10
     #     max_threads: 50
@@ -189,7 +198,7 @@ architecture:
   #       spill_enabled: true
   #       spill_max_per_node: 40Gi
   #       storage: 50Gi
-  #       storage_class: ""          # Empty = cluster default
+  #       storage_class: ""          # Empty = emptyDir (ephemeral). Set a class name for PVC-backed storage.
   #     catalog_name: lakehouse      # Trino catalog name for Iceberg
   #   # spark_thrift:                 # Spark Thrift Server (alternative to Trino)
   #   #   cores: 2
@@ -236,6 +245,9 @@ architecture:
   #     bronze_target_file_size_mb: 512
   #     silver_target_file_size_mb: 512
   #     gold_target_file_size_mb: 128
+  #     ## In-stream benchmark rounds (runs Trino queries while streaming)
+  #     benchmark_interval: 300      # Seconds between rounds (300-3600)
+  #     benchmark_warmup: 300        # Seconds before first round (300-1800)
 
   workload:
     # schema: customer360            # customer360 | iot | financial

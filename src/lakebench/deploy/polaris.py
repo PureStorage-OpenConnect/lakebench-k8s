@@ -22,7 +22,7 @@ import yaml
 
 from lakebench.k8s import WaitStatus, wait_for_deployment_ready
 
-from .engine import DeploymentResult, DeploymentStatus
+from .engine import DeploymentResult, DeploymentStatus, image_tag
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -122,7 +122,7 @@ class PolarisDeployer:
                     self.k8s.apply_manifest(doc, namespace=namespace)
 
             # Step 5: Wait for bootstrap job completion
-            bootstrap_result = self._wait_for_bootstrap_job(namespace, timeout_seconds=180)
+            bootstrap_result = self._wait_for_bootstrap_job(namespace, timeout_seconds=300)
 
             if not bootstrap_result:
                 return DeploymentResult(
@@ -133,10 +133,11 @@ class PolarisDeployer:
                 )
 
             port = self.config.architecture.catalog.polaris.port
+            polaris_version = image_tag(self.config.images.polaris)
             return DeploymentResult(
                 component="polaris",
                 status=DeploymentStatus.SUCCESS,
-                message="Polaris REST catalog deployed and bootstrapped",
+                message=f"Polaris REST catalog {polaris_version} deployed and bootstrapped",
                 elapsed_seconds=time.time() - start,
                 details={
                     "type": "polaris",
@@ -144,6 +145,8 @@ class PolarisDeployer:
                     "port": port,
                     "rest_uri": self.get_rest_uri(),
                 },
+                label="Polaris",
+                detail=polaris_version,
             )
 
         except Exception as e:
@@ -289,7 +292,7 @@ class PolarisDeployer:
                     else:
                         raise
 
-                time.sleep(10)
+                time.sleep(5)
 
             logger.error(f"Polaris bootstrap job timed out after {timeout_seconds}s")
             return False

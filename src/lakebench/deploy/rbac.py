@@ -80,6 +80,7 @@ class RBACDeployer:
                 scc_added = self.security_verifier.ensure_openshift_scc(namespace)
 
             message = "Created Spark RBAC resources"
+            rbac_detail = "OpenShift anyuid SCC" if scc_added else "SA + Role + RoleBinding"
             if scc_added:
                 message += " (with OpenShift anyuid SCC)"
 
@@ -94,6 +95,8 @@ class RBACDeployer:
                     "role_binding": SPARK_SERVICE_ACCOUNT,
                     "openshift_scc": "anyuid" if scc_added else None,
                 },
+                label="Spark RBAC",
+                detail=rbac_detail,
             )
 
         except Exception as e:

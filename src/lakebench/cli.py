@@ -157,7 +157,7 @@ def _print_pipeline_scorecard(
     # Scores section
     scores: list[str] = []
     if pb.pipeline_mode in ("sustained", "continuous"):
-        if pb.data_freshness_seconds > 0:
+        if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"  Freshness:      {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
             scores.append(f"  Throughput:     {pb.sustained_throughput_rps:>8,.0f} rows/s")
@@ -233,7 +233,7 @@ def _print_report_summary(metrics) -> None:
     # Scores
     scores: list[str] = []
     if pb.pipeline_mode in ("sustained", "continuous"):
-        if pb.data_freshness_seconds > 0:
+        if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"Freshness:       {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
             scores.append(f"Throughput:      {pb.sustained_throughput_rps:>8,.0f} rows/s")
@@ -450,6 +450,8 @@ def _build_component_list(cfg) -> str:
     elif engine == "duckdb":
         parts.append("DuckDB")
     parts.append("Spark RBAC")
+    if cfg.platform.compute.spark.operator.install:
+        parts.append("Spark Operator")
     if cfg.observability.enabled:
         if cfg.observability.prometheus_stack_enabled:
             parts.append("Prometheus")
@@ -1058,7 +1060,7 @@ def validate(
                     _check_warn(
                         f"Does not watch namespace '{cfg.get_namespace()}'",
                         hint=f"Currently watching: {existing}\n"
-                        f"Will be added automatically during run (install: true)",
+                        f"Will be added automatically during deploy (install: true)",
                     )
                 else:
                     _check_fail(
@@ -1292,7 +1294,7 @@ def status(
             elif engine == "duckdb":
                 components.append(("lakebench-duckdb", "Deployment"))
             if cfg.observability.enabled:
-                components.append(("lakebench-observability-prometheus", "StatefulSet"))
+                components.append(("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"))
                 components.append(("lakebench-observability-grafana", "Deployment"))
         else:
             # Namespace-only mode (no config loaded) -- show all possible components
@@ -1304,7 +1306,7 @@ def status(
                 ("lakebench-trino-worker", "StatefulSet"),
                 ("lakebench-spark-thrift", "Deployment"),
                 ("lakebench-duckdb", "Deployment"),
-                ("lakebench-observability-prometheus", "StatefulSet"),
+                ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"),
                 ("lakebench-observability-grafana", "Deployment"),
             ]
 
@@ -1396,13 +1398,13 @@ def deploy(
     """Deploy lakehouse infrastructure.
 
     Deploys all components in the correct order:
-    1. Namespace + Secrets
+    1. Namespace + Secrets + Scratch StorageClass
     2. PostgreSQL
-    3. Hive Metastore
-    4. Trino
-    5. Spark RBAC
-    6. Prometheus (if --include-observability or config enabled)
-    7. Grafana (if --include-observability or config enabled)
+    3. Catalog (Hive Metastore or Polaris)
+    4. Spark RBAC
+    5. Spark Operator (if operator.install: true)
+    6. Query Engine (Trino / Spark Thrift / DuckDB)
+    7. Observability (if enabled)
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
@@ -1460,21 +1462,6 @@ def deploy(
     )
     console.print()
 
-    # Progress callback -- timed steps, skip silently
-    _step_start: dict[str, float] = {}
-
-    def on_progress(component: str, status: DeploymentStatus, message: str) -> None:
-        if status == DeploymentStatus.IN_PROGRESS:
-            _step_start[component] = time.time()
-        elif status == DeploymentStatus.SKIPPED:
-            _step_start.pop(component, None)
-        elif status == DeploymentStatus.SUCCESS:
-            elapsed = time.time() - _step_start.pop(component, time.time())
-            console.print(f"  [green]+[/green] {message:<50} {elapsed:>6.1f}s")
-        elif status == DeploymentStatus.FAILED:
-            elapsed = time.time() - _step_start.pop(component, time.time())
-            console.print(f"  [red]x[/red] {message:<50} {elapsed:>6.1f}s")
-
     # Journal
     j = journal_open(config_file, config_name=cfg.name)
     j.begin_command(CommandName.DEPLOY, {"dry_run": dry_run})
@@ -1483,6 +1470,33 @@ def deploy(
     deploy_start = time.time()
     try:
         engine = DeploymentEngine(cfg, dry_run=dry_run)
+
+        # Progress callback -- columnar output with version info
+        _step_start: dict[str, float] = {}
+
+        def _fmt_deploy_line(icon: str, color: str, elapsed: float) -> str:
+            """Format a deploy progress line from the latest engine result."""
+            r = engine.results[-1] if engine.results else None
+            if r and r.label:
+                return (
+                    f"  [{color}]{icon}[/{color}] {r.label:<22} "
+                    f"{r.detail:<30} [dim]{elapsed:>6.1f}s[/dim]"
+                )
+            # Fallback for results without label/detail
+            return f"  [{color}]{icon}[/{color}] {r.message if r else '':<54} [dim]{elapsed:>6.1f}s[/dim]"
+
+        def on_progress(component: str, status: DeploymentStatus, message: str) -> None:
+            if status == DeploymentStatus.IN_PROGRESS:
+                _step_start[component] = time.time()
+            elif status == DeploymentStatus.SKIPPED:
+                _step_start.pop(component, None)
+            elif status == DeploymentStatus.SUCCESS:
+                elapsed = time.time() - _step_start.pop(component, time.time())
+                console.print(_fmt_deploy_line("+", "green", elapsed))
+            elif status == DeploymentStatus.FAILED:
+                elapsed = time.time() - _step_start.pop(component, time.time())
+                console.print(_fmt_deploy_line("x", "red", elapsed))
+
         results = engine.deploy_all(progress_callback=on_progress)
 
         # Record each component result in journal
@@ -1693,7 +1707,7 @@ def destroy(
             _dg_step_start.pop(component, None)
         elif status == DeploymentStatus.SUCCESS:
             elapsed = time.time() - _dg_step_start.pop(component, time.time())
-            console.print(f"    [green]+[/green] {message:<46} {elapsed:>6.1f}s")
+            console.print(f"    [green]+[/green] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
             _journal_safe(
                 j.record,
                 EventType.DESTROY_COMPONENT,
@@ -1703,7 +1717,7 @@ def destroy(
             )
         elif status == DeploymentStatus.FAILED:
             elapsed = time.time() - _dg_step_start.pop(component, time.time())
-            console.print(f"    [red]x[/red] {message:<46} {elapsed:>6.1f}s")
+            console.print(f"    [red]x[/red] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
             _journal_safe(
                 j.record,
                 EventType.DESTROY_COMPONENT,
@@ -2399,7 +2413,7 @@ def run(
     # Auto-scale timeout if not explicitly set
     if timeout is None:
         scale = cfg.architecture.workload.datagen.get_effective_scale()
-        timeout = max(3600, scale * 60)
+        timeout = max(3600, scale * 120)
         if scale >= 50:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
@@ -2449,10 +2463,13 @@ def run(
             version=spark_op_cfg.version if spark_op_cfg.install else None,
             job_namespace=cfg.get_namespace(),
         )
-        status = operator.ensure_installed() if spark_op_cfg.install else operator.check_status()
+        status = operator.check_status()
 
         if not status.ready:
-            print_error(f"Spark Operator not ready: {status.message}")
+            hint = ""
+            if not status.installed and spark_op_cfg.install:
+                hint = " -- run 'lakebench deploy' first to install it"
+            print_error(f"Spark Operator not ready: {status.message}{hint}")
             pipeline_success = False
             raise typer.Exit(1)
 
@@ -3331,9 +3348,12 @@ def _run_sustained(
             version=spark_op_cfg.version if spark_op_cfg.install else None,
             job_namespace=cfg.get_namespace(),
         )
-        status = operator.ensure_installed() if spark_op_cfg.install else operator.check_status()
+        status = operator.check_status()
         if not status.ready:
-            print_error(f"Spark Operator not ready: {status.message}")
+            hint = ""
+            if not status.installed and spark_op_cfg.install:
+                hint = " -- run 'lakebench deploy' first to install it"
+            print_error(f"Spark Operator not ready: {status.message}{hint}")
             pipeline_success = False
             raise typer.Exit(1)
 
@@ -3740,11 +3760,14 @@ def _run_sustained(
                         )
                         freshness_label = "freshness"
                         freshness_val = pb.data_freshness_seconds
-                        if pb.query_time_freshness_seconds > 0:
+                        if (pb.query_time_freshness_seconds or 0) > 0:
                             freshness_label = "freshness (at query time)"
                             freshness_val = pb.query_time_freshness_seconds
+                        freshness_str = (
+                            f"{freshness_val:.1f}s" if freshness_val is not None else "n/a"
+                        )
                         print_info(
-                            f"Pipeline Score: {freshness_val:.1f}s {freshness_label}"
+                            f"Pipeline Score: {freshness_str} {freshness_label}"
                             f" | {pb.sustained_throughput_rps:,.0f} rows/s sustained"
                             f" | {latency_str}ms latency (b/s/g)"
                         )

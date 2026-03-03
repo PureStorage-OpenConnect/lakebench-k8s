@@ -355,6 +355,64 @@ class SparkOperatorManager:
             logger.debug("Could not list namespaces, keeping all: %s", e)
             return namespaces
 
+    def recreate_namespace_rbac(self, namespace: str) -> bool:
+        """Force-recreate RBAC for a namespace the operator already watches.
+
+        After ``lakebench destroy`` deletes a namespace and ``deploy``
+        recreates it, the operator's per-namespace Role/RoleBinding are
+        lost.  ``_add_namespace_to_watch`` exits early because the
+        namespace is already in ``spark.jobNamespaces``.
+
+        This method forces Helm to regenerate the RBAC by removing the
+        namespace and re-adding it in two ``helm upgrade`` calls, then
+        applies the OpenShift SCC patch and restarts the controller.
+
+        Args:
+            namespace: The namespace whose RBAC should be recreated.
+
+        Returns:
+            True if the RBAC was successfully recreated.
+        """
+        watched = self._get_watched_namespaces()
+        if watched is None:
+            return True
+        if namespace not in watched:
+            # Not in the watch list -- delegate to normal add flow
+            return self._add_namespace_to_watch(namespace)
+
+        # Step 1: Remove the namespace so Helm deletes the Role/RoleBinding
+        without_ns = [ns for ns in watched if ns != namespace]
+        ns_set_without = ",".join(without_ns) if without_ns else "default"
+        result = subprocess.run(
+            [
+                "helm",
+                "upgrade",
+                self.HELM_RELEASE_NAME,
+                self.HELM_CHART_NAME,
+                "-n",
+                self.namespace,
+                "--reuse-values",
+                "--set",
+                f"spark.jobNamespaces={{{ns_set_without}}}",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            logger.error(
+                "helm upgrade (remove namespace) failed: %s",
+                result.stderr,
+            )
+            return False
+
+        logger.info(
+            "Removed namespace '%s' from spark.jobNamespaces to force RBAC recreation",
+            namespace,
+        )
+
+        # Step 2: Re-add the namespace -- Helm will create fresh RBAC
+        return self._add_namespace_to_watch(namespace)
+
     def _add_namespace_to_watch(self, namespace: str) -> bool:
         """Add a namespace to the Spark Operator's watched namespaces.
 

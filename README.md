@@ -138,7 +138,7 @@ for flags and options.
 
 | Component | Version |
 |-----------|---------|
-| Apache Spark | 3.5.4 |
+| Apache Spark | 3.5.4, 4.0.0 |
 | Spark Operator | 2.4.0 (Kubeflow) |
 | Apache Iceberg | 1.10.1 |
 | Hive Metastore | 3.1.3 (Stackable 25.7.0) |

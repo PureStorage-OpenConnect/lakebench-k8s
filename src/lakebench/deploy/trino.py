@@ -17,7 +17,7 @@ from lakebench.k8s import (
     wait_for_trino_catalog,
 )
 
-from .engine import DeploymentResult, DeploymentStatus
+from .engine import DeploymentResult, DeploymentStatus, image_tag
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -153,10 +153,11 @@ class TrinoDeployer:
                     elapsed_seconds=time.time() - start,
                 )
 
+            trino_version = image_tag(self.config.images.trino)
             return DeploymentResult(
                 component="trino",
                 status=DeploymentStatus.SUCCESS,
-                message=f"Trino deployed and catalog '{catalog_name}' verified",
+                message=f"Trino {trino_version} deployed and catalog '{catalog_name}' verified",
                 elapsed_seconds=time.time() - start,
                 details={
                     "coordinator_pod": pod_name,
@@ -166,6 +167,8 @@ class TrinoDeployer:
                     "worker_replicas": worker_replicas,
                     "jdbc_url": f"jdbc:trino://lakebench-trino.{namespace}.svc.cluster.local:8080/{catalog_name}",
                 },
+                label="Trino",
+                detail=trino_version,
             )
 
         except Exception as e:

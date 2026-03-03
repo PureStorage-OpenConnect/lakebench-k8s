@@ -17,7 +17,7 @@ import pytest
 
 from lakebench.config import LakebenchConfig
 from lakebench.config.recipes import RECIPES, _deep_setdefault
-from lakebench.spark.job import _parse_spark_major, _spark_compat
+from lakebench.spark.job import JobType, SparkJobManager, _parse_spark_major, _spark_compat
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,28 +53,110 @@ class TestSpark4xCompat:
     def test_parse_spark_major_3x(self):
         assert _parse_spark_major("apache/spark:3.5.4-python3") == 3
 
-    def test_parse_spark_major_3x_plain(self):
-        assert _parse_spark_major("apache/spark:3.5.4") == 3
+    def test_parse_spark_major_3x_patch_variant(self):
+        """Different patch versions within 3.5.x are accepted."""
+        assert _parse_spark_major("apache/spark:3.5.1-python3") == 3
 
     def test_parse_spark_major_4x(self):
         assert _parse_spark_major("apache/spark:4.0.0-python3") == 4
 
     def test_parse_spark_major_4x_custom_registry(self):
-        assert _parse_spark_major("my-registry.io/spark:4.1.0-java17") == 4
+        assert _parse_spark_major("my-registry.io/spark:4.0.2-python3") == 4
 
-    def test_parse_spark_major_unparseable(self):
-        """Unparseable tags fall back to 3 with a warning."""
-        assert _parse_spark_major("custom-image:latest") == 3
+    def test_parse_spark_major_rejects_no_python3(self):
+        """Images without -python3 suffix are rejected."""
+        with pytest.raises(ValueError, match="must use a '-python3' tag"):
+            _parse_spark_major("apache/spark:3.5.4")
+        with pytest.raises(ValueError, match="must use a '-python3' tag"):
+            _parse_spark_major("apache/spark:4.0.2-java17")
+
+    def test_parse_spark_major_unparseable_raises(self):
+        """Unparseable tags raise ValueError."""
+        with pytest.raises(ValueError, match="must use a '-python3' tag"):
+            _parse_spark_major("custom-image:latest")
+
+    def test_parse_spark_major_unsupported_version_raises(self):
+        """Unsupported versions (e.g. 2.4.x, 3.4.x, 4.1.x) raise ValueError."""
+        with pytest.raises(ValueError, match="Unsupported Spark version 2.4"):
+            _parse_spark_major("apache/spark:2.4.0-python3")
+        with pytest.raises(ValueError, match="Unsupported Spark version 5.0"):
+            _parse_spark_major("apache/spark:5.0.0-python3")
+
+    def test_parse_spark_major_untested_minor_raises(self):
+        """Untested minor versions within a supported major are rejected."""
+        with pytest.raises(ValueError, match="Unsupported Spark version 3.4"):
+            _parse_spark_major("apache/spark:3.4.0-python3")
+        with pytest.raises(ValueError, match="Unsupported Spark version 4.1"):
+            _parse_spark_major("apache/spark:4.1.0-python3")
+
+    def test_spark_image_validator_rejects_bad_image(self):
+        """ImagesConfig rejects unsupported Spark images at config load."""
+        with pytest.raises(Exception, match="must use a '-python3' tag"):
+            _make_config(images={"spark": "custom-image:latest"})
 
     def test_spark_compat_3x(self):
-        scala_suffix, hadoop_version = _spark_compat("apache/spark:3.5.4-python3")
+        scala_suffix, hadoop_version, aws_sdk = _spark_compat("apache/spark:3.5.4-python3")
         assert scala_suffix == "_2.12"
         assert hadoop_version == "3.3.4"
+        assert aws_sdk == "1.12.262"
 
     def test_spark_compat_4x(self):
-        scala_suffix, hadoop_version = _spark_compat("apache/spark:4.0.0-python3")
+        scala_suffix, hadoop_version, aws_sdk = _spark_compat("apache/spark:4.0.0-python3")
         assert scala_suffix == "_2.13"
         assert hadoop_version == "3.4.1"
+        assert aws_sdk == "1.12.367"
+
+
+class TestVersionConditionalResources:
+    """Tests for version-conditional driver_memory and maxResultSize."""
+
+    @staticmethod
+    def _build(spark_image: str, job_type: JobType) -> dict:
+        cfg = _make_config(images={"spark": spark_image})
+        k8s = MagicMock()
+        k8s.get_cluster_capacity.return_value = None
+        mgr = SparkJobManager(cfg, k8s)
+        return mgr._build_manifest(job_type)
+
+    def test_driver_memory_spark3_silver(self):
+        """Spark 3 silver-build uses 24g driver (smaller jar payload)."""
+        m = self._build("apache/spark:3.5.4-python3", JobType.SILVER_BUILD)
+        assert m["spec"]["driver"]["memory"] == "24g"
+
+    def test_driver_memory_spark4_silver(self):
+        """Spark 4 silver-build uses 32g driver (558MB SDK v2 bundle)."""
+        m = self._build("apache/spark:4.0.2-python3", JobType.SILVER_BUILD)
+        assert m["spec"]["driver"]["memory"] == "32g"
+
+    def test_driver_memory_spark3_gold(self):
+        """Spark 3 gold-finalize uses 24g driver."""
+        m = self._build("apache/spark:3.5.4-python3", JobType.GOLD_FINALIZE)
+        assert m["spec"]["driver"]["memory"] == "24g"
+
+    def test_driver_memory_spark4_gold(self):
+        """Spark 4 gold-finalize uses 32g driver."""
+        m = self._build("apache/spark:4.0.2-python3", JobType.GOLD_FINALIZE)
+        assert m["spec"]["driver"]["memory"] == "32g"
+
+    def test_driver_memory_bronze_unchanged(self):
+        """Bronze driver memory is the same for both versions."""
+        m3 = self._build("apache/spark:3.5.4-python3", JobType.BRONZE_VERIFY)
+        m4 = self._build("apache/spark:4.0.2-python3", JobType.BRONZE_VERIFY)
+        assert m3["spec"]["driver"]["memory"] == m4["spec"]["driver"]["memory"]
+
+    def test_max_result_size_spark3(self):
+        """Spark 3 uses floor=4g formula for maxResultSize."""
+        m = self._build("apache/spark:3.5.4-python3", JobType.SILVER_BUILD)
+        conf = m["spec"]["sparkConf"]
+        # Default scale=100 -> 12 executors -> max(4, 12//3) = 4g
+        assert conf["spark.driver.maxResultSize"] == "4g"
+
+    def test_max_result_size_spark4(self):
+        """Spark 4 uses floor=8g formula for maxResultSize."""
+        m = self._build("apache/spark:4.0.2-python3", JobType.SILVER_BUILD)
+        conf = m["spec"]["sparkConf"]
+        # Default scale=100 -> 12 executors -> max(8, 12//2) = 8g
+        assert conf["spark.driver.maxResultSize"] == "8g"
 
 
 # ===========================================================================

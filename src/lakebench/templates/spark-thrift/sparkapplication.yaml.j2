@@ -135,7 +135,7 @@ spec:
                 --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet \
                 --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus \
 {% endif %}
-                local:///opt/spark/jars/spark-hive-thriftserver_2.12-*.jar
+                local:///opt/spark/jars/spark-hive-thriftserver{{ scala_suffix }}-*.jar
           volumeMounts:
             - name: extra-jars
               mountPath: /extra-jars

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lakebench-k8s"
-version = "1.0.9"
+version = "1.0.10"
 description = "Deploy and benchmark lakehouse stacks on Kubernetes"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
@@ -131,7 +131,7 @@ ignore_errors = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short -m 'not e2e and not integration'"
 markers = [
     "unit: Unit tests (no external dependencies, fast)",
     "integration: Integration tests (require K8s/S3 connectivity)",

@@ -51,7 +51,7 @@ spec:
             - "--total-nodes"
             - "{{ datagen_parallelism | default(4) }}"
             - "--workers"
-            - "4"
+            - "{{ datagen_workers | default(4) }}"
             {% if datagen_timestamp_start %}
             - "--timestamp-start"
             - "{{ datagen_timestamp_start }}"
