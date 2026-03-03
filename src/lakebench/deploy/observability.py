@@ -219,6 +219,8 @@ class ObservabilityDeployer:
                     "grafana_url": grafana_url,
                     "retention": self.config.observability.retention,
                 },
+                label="Observability",
+                detail="kube-prometheus-stack",
             )
 
         except subprocess.TimeoutExpired:

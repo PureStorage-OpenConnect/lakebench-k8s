@@ -215,7 +215,7 @@ name: my-lakehouse
 # See docs/datagen-custom-images.md for building custom datagen images.
 # images:
 #   datagen: docker.io/sillidata/lb-datagen:v2    # Customizable (see docs/datagen-custom-images.md)
-#   spark: apache/spark:3.5.4-python3
+#   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
 #   trino: trinodb/trino:479

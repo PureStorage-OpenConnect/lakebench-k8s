@@ -18,6 +18,23 @@ from lakebench.k8s import K8sClient
 logger = logging.getLogger(__name__)
 
 
+def image_tag(image: str) -> str:
+    """Extract the version tag from a container image reference.
+
+    >>> image_tag("postgres:17")
+    '17'
+    >>> image_tag("apache/polaris:1.3.0-incubating")
+    '1.3.0-incubating'
+    >>> image_tag("myregistry.io/org/app")
+    'latest'
+    """
+    # Handle digest references (image@sha256:...)
+    if "@" in image:
+        return image.split("@", 1)[1][:12]
+    tag = image.rsplit(":", 1)[1] if ":" in image else "latest"
+    return tag
+
+
 class DeploymentStatus(Enum):
     """Status of a deployment step."""
 
@@ -37,6 +54,8 @@ class DeploymentResult:
     message: str
     elapsed_seconds: float = 0.0
     details: dict[str, Any] = field(default_factory=dict)
+    label: str = ""  # Short display name (e.g. "PostgreSQL")
+    detail: str = ""  # Version or context (e.g. "17")
 
 
 @dataclass
@@ -190,18 +209,21 @@ class DeploymentEngine:
 
     @staticmethod
     def _build_spark_thrift_packages(cfg: Any) -> str:
-        """Build the ``spark.jars.packages`` string for Spark Thrift Server."""
-        from lakebench.spark.job import _spark_compat
+        """Build ``spark.jars.packages`` CSV for Spark Thrift Server."""
+        from lakebench.spark.job import _parse_spark_major, _spark_compat
 
         iceberg_version = cfg.architecture.table_format.iceberg.version
         spark_major_minor = DeploymentEngine._get_spark_major_minor(cfg)
-        scala_suffix, hadoop_version = _spark_compat(cfg.images.spark)
+        scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
         packages = [
             f"org.apache.iceberg:iceberg-spark-runtime-{spark_major_minor}{scala_suffix}:{iceberg_version}",
             f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
             f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-            "com.amazonaws:aws-java-sdk-bundle:1.12.262",
         ]
+        if _parse_spark_major(cfg.images.spark) < 4:
+            packages.append(
+                f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
+            )
         return ",".join(packages)
 
     def _build_context(self) -> dict[str, Any]:
@@ -214,6 +236,8 @@ class DeploymentEngine:
 
         # Parse S3 endpoint for Stackable (needs host and port separately)
         from urllib.parse import urlparse
+
+        from lakebench.spark.job import _spark_compat
 
         parsed_s3 = urlparse(s3.endpoint)
         s3_host = (
@@ -298,6 +322,7 @@ class DeploymentEngine:
             # Spark Thrift packages (computed from config versions)
             "spark_thrift_packages": self._build_spark_thrift_packages(cfg),
             "spark_major_minor": self._get_spark_major_minor(cfg),
+            "scala_suffix": _spark_compat(cfg.images.spark)[0],
             # DuckDB
             "duckdb_image": cfg.images.duckdb,
             "duckdb_cores": cfg.architecture.query_engine.duckdb.cores,
@@ -353,6 +378,7 @@ class DeploymentEngine:
             ("hive", "Deploying Hive Metastore", hive.deploy),
             ("polaris", "Deploying Polaris Catalog", polaris.deploy),
             ("rbac", "Creating Spark RBAC", rbac.deploy),
+            ("spark-operator", "Installing Spark Operator", self._deploy_spark_operator),
             ("trino", "Deploying Trino", trino.deploy),
             ("spark-thrift", "Deploying Spark Thrift Server", spark_thrift.deploy),
             ("duckdb", "Deploying DuckDB", duckdb.deploy),
@@ -415,6 +441,8 @@ class DeploymentEngine:
                     status=DeploymentStatus.SUCCESS,
                     message=f"Namespace '{namespace}' already exists",
                     elapsed_seconds=time.time() - start,
+                    label="Namespace",
+                    detail=namespace,
                 )
 
         # Create namespace
@@ -430,6 +458,8 @@ class DeploymentEngine:
                 status=DeploymentStatus.SUCCESS,
                 message=f"Created namespace: {namespace}",
                 elapsed_seconds=time.time() - start,
+                label="Namespace",
+                detail=namespace,
             )
         else:
             return DeploymentResult(
@@ -471,6 +501,8 @@ class DeploymentEngine:
             status=DeploymentStatus.SUCCESS,
             message="Created S3 and PostgreSQL secrets",
             elapsed_seconds=time.time() - start,
+            label="Secrets",
+            detail="S3 + PostgreSQL",
         )
 
     def _deploy_scratch_storageclass(self) -> DeploymentResult:
@@ -518,6 +550,8 @@ class DeploymentEngine:
                     status=DeploymentStatus.SUCCESS,
                     message=f"StorageClass '{scratch_cfg.storage_class}' already exists",
                     elapsed_seconds=time.time() - start,
+                    label="StorageClass",
+                    detail=scratch_cfg.storage_class,
                 )
             except Exception:
                 logger.debug("StorageClass '%s' not found, will create", scratch_cfg.storage_class)
@@ -533,6 +567,8 @@ class DeploymentEngine:
                 status=DeploymentStatus.SUCCESS,
                 message=f"Created StorageClass: {scratch_cfg.storage_class}",
                 elapsed_seconds=time.time() - start,
+                label="StorageClass",
+                detail=scratch_cfg.storage_class,
             )
         except Exception as e:
             # Non-fatal -- cluster-admin may be needed
@@ -541,6 +577,113 @@ class DeploymentEngine:
                 component="scratch-sc",
                 status=DeploymentStatus.SKIPPED,
                 message=f"Scratch StorageClass creation failed (may need cluster-admin): {e}",
+                elapsed_seconds=time.time() - start,
+            )
+
+    @staticmethod
+    def _operator_rbac_exists(namespace: str) -> bool:
+        """Check if the Spark Operator's Role exists in the target namespace.
+
+        After a namespace is deleted and recreated, the operator's
+        per-namespace Role/RoleBinding are lost even though the operator
+        still claims to watch the namespace.
+        """
+        try:
+            from kubernetes import client as k8s_client
+
+            rbac_v1 = k8s_client.RbacAuthorizationV1Api()
+            rbac_v1.read_namespaced_role("spark-operator-controller", namespace)
+            return True
+        except Exception:
+            return False
+
+    def _deploy_spark_operator(self) -> DeploymentResult:
+        """Install the Spark Operator if config has install: true.
+
+        Skips if install is disabled. Uses SparkOperatorManager.ensure_installed()
+        which is idempotent -- safe to call when operator is already running.
+        """
+        import time
+
+        start = time.time()
+
+        spark_op_cfg = self.config.platform.compute.spark.operator
+        if not spark_op_cfg.install:
+            return DeploymentResult(
+                component="spark-operator",
+                status=DeploymentStatus.SKIPPED,
+                message="Spark Operator install disabled (operator.install=false)",
+                elapsed_seconds=0,
+            )
+
+        if self.dry_run:
+            return DeploymentResult(
+                component="spark-operator",
+                status=DeploymentStatus.SUCCESS,
+                message=(
+                    f"Would install Spark Operator v{spark_op_cfg.version} "
+                    f"in namespace '{spark_op_cfg.namespace}'"
+                ),
+                elapsed_seconds=0,
+            )
+
+        try:
+            from lakebench.spark import SparkOperatorManager
+
+            operator = SparkOperatorManager(
+                namespace=spark_op_cfg.namespace,
+                version=spark_op_cfg.version,
+                job_namespace=self.config.get_namespace(),
+            )
+            status = operator.ensure_installed()
+
+            if not status.ready:
+                return DeploymentResult(
+                    component="spark-operator",
+                    status=DeploymentStatus.FAILED,
+                    message=f"Spark Operator not ready: {status.message}",
+                    elapsed_seconds=time.time() - start,
+                )
+
+            # After destroy + re-deploy, the operator claims to watch our
+            # namespace (it's in spark.jobNamespaces) but the per-namespace
+            # Role/RoleBinding were lost when the namespace was deleted.
+            # Detect this and force-recreate the RBAC (remove + re-add
+            # the namespace, patch OpenShift SCC, restart controller).
+            job_ns = self.config.get_namespace()
+            if not self._operator_rbac_exists(job_ns):
+                logger.info(
+                    "Spark Operator RBAC missing in '%s' -- recreating",
+                    job_ns,
+                )
+                if not operator.recreate_namespace_rbac(job_ns):
+                    return DeploymentResult(
+                        component="spark-operator",
+                        status=DeploymentStatus.FAILED,
+                        message=(
+                            f"Spark Operator RBAC recreation failed for "
+                            f"namespace '{job_ns}'"
+                        ),
+                        elapsed_seconds=time.time() - start,
+                    )
+
+            return DeploymentResult(
+                component="spark-operator",
+                status=DeploymentStatus.SUCCESS,
+                message=(
+                    f"Spark Operator ready "
+                    f"(v{status.version or 'unknown'}, "
+                    f"namespace: {status.namespace or spark_op_cfg.namespace})"
+                ),
+                elapsed_seconds=time.time() - start,
+                label="Spark Operator",
+                detail=status.version or "unknown",
+            )
+        except Exception as e:
+            return DeploymentResult(
+                component="spark-operator",
+                status=DeploymentStatus.FAILED,
+                message=f"Spark Operator installation failed: {e}",
                 elapsed_seconds=time.time() - start,
             )
 

@@ -21,7 +21,7 @@ from typing import Any
 
 RECIPES: dict[str, dict[str, Any]] = {
     "hive-iceberg-spark-trino": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
@@ -29,7 +29,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-iceberg-spark-thrift": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
@@ -37,7 +37,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-iceberg-spark-none": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
@@ -45,7 +45,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-trino": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
@@ -53,7 +53,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-thrift": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
@@ -61,7 +61,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-none": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
@@ -69,7 +69,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "hive-iceberg-spark-duckdb": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
@@ -77,7 +77,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     "polaris-iceberg-spark-duckdb": {
-        "images": {"spark": "apache/spark:3.5.4-python3", "postgres": "postgres:17"},
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
             "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},

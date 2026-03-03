@@ -147,7 +147,7 @@ class ImagesConfig(BaseModel):
     """Container image configuration for all Lakebench components."""
 
     datagen: str = "docker.io/sillidata/lb-datagen:v2"
-    spark: str = "apache/spark:3.5.4-python3"
+    spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"
     hive: str = "apache/hive:3.1.3"
     polaris: str = "apache/polaris:1.3.0-incubating"
@@ -160,6 +160,15 @@ class ImagesConfig(BaseModel):
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.IF_NOT_PRESENT
     pull_secrets: list[str] = Field(default_factory=list)
+
+    @field_validator("spark")
+    @classmethod
+    def _validate_spark_image(cls, v: str) -> str:
+        """Validate that the Spark image tag contains a supported version."""
+        from lakebench.spark.job import _parse_spark_major
+
+        _parse_spark_major(v)  # raises ValueError for unsupported versions
+        return v
 
 
 # =============================================================================

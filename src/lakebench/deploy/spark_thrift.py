@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from .engine import DeploymentResult, DeploymentStatus
+from .engine import DeploymentResult, DeploymentStatus, image_tag
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -73,11 +73,14 @@ class SparkThriftDeployer:
             # Wait for the Deployment to become ready
             self._wait_for_ready(namespace, timeout_seconds=300)
 
+            spark_version = image_tag(self.config.images.spark)
             return DeploymentResult(
                 component="spark-thrift",
                 status=DeploymentStatus.SUCCESS,
-                message="Spark Thrift Server deployed",
+                message=f"Spark Thrift Server deployed (Spark {spark_version})",
                 elapsed_seconds=time.time() - start,
+                label="Spark Thrift",
+                detail=spark_version,
             )
 
         except Exception as e:
