@@ -660,10 +660,7 @@ class DeploymentEngine:
                     return DeploymentResult(
                         component="spark-operator",
                         status=DeploymentStatus.FAILED,
-                        message=(
-                            f"Spark Operator RBAC recreation failed for "
-                            f"namespace '{job_ns}'"
-                        ),
+                        message=(f"Spark Operator RBAC recreation failed for namespace '{job_ns}'"),
                         elapsed_seconds=time.time() - start,
                     )
 

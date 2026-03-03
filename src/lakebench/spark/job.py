@@ -742,22 +742,22 @@ class SparkJobManager:
                 f".svc.cluster.local:{polaris_port}/api/catalog"
             )
             polaris_conf = {
-                    f"spark.sql.catalog.{catalog_name}": "org.apache.iceberg.spark.SparkCatalog",
-                    f"spark.sql.catalog.{catalog_name}.catalog-impl": "org.apache.iceberg.rest.RESTCatalog",
-                    f"spark.sql.catalog.{catalog_name}.uri": polaris_uri,
-                    f"spark.sql.catalog.{catalog_name}.warehouse": catalog_name,
-                    f"spark.sql.catalog.{catalog_name}.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
-                    f"spark.sql.catalog.{catalog_name}.s3.endpoint": s3.endpoint,
-                    f"spark.sql.catalog.{catalog_name}.s3.path-style-access": str(
-                        s3.path_style
-                    ).lower(),
-                    # OAuth2 credential (client_id:client_secret)
-                    f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{POLARIS_CLIENT_SECRET}",
-                    f"spark.sql.catalog.{catalog_name}.scope": "PRINCIPAL_ROLE:ALL",
-                    f"spark.sql.catalog.{catalog_name}.token-refresh-enabled": "true",
-                    # FlashBlade: static S3 credentials on catalog (no STS vending)
-                    f"spark.sql.catalog.{catalog_name}.s3.access-key-id": s3.access_key,
-                    f"spark.sql.catalog.{catalog_name}.s3.secret-access-key": s3.secret_key,
+                f"spark.sql.catalog.{catalog_name}": "org.apache.iceberg.spark.SparkCatalog",
+                f"spark.sql.catalog.{catalog_name}.catalog-impl": "org.apache.iceberg.rest.RESTCatalog",
+                f"spark.sql.catalog.{catalog_name}.uri": polaris_uri,
+                f"spark.sql.catalog.{catalog_name}.warehouse": catalog_name,
+                f"spark.sql.catalog.{catalog_name}.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+                f"spark.sql.catalog.{catalog_name}.s3.endpoint": s3.endpoint,
+                f"spark.sql.catalog.{catalog_name}.s3.path-style-access": str(
+                    s3.path_style
+                ).lower(),
+                # OAuth2 credential (client_id:client_secret)
+                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{POLARIS_CLIENT_SECRET}",
+                f"spark.sql.catalog.{catalog_name}.scope": "PRINCIPAL_ROLE:ALL",
+                f"spark.sql.catalog.{catalog_name}.token-refresh-enabled": "true",
+                # FlashBlade: static S3 credentials on catalog (no STS vending)
+                f"spark.sql.catalog.{catalog_name}.s3.access-key-id": s3.access_key,
+                f"spark.sql.catalog.{catalog_name}.s3.secret-access-key": s3.secret_key,
             }
             # Spark 4 / Iceberg 1.10: the default Vert.x HTTP client blocks the
             # driver event loop during REST catalog commits, causing RPC timeouts

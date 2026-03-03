@@ -1294,7 +1294,9 @@ def status(
             elif engine == "duckdb":
                 components.append(("lakebench-duckdb", "Deployment"))
             if cfg.observability.enabled:
-                components.append(("prometheus-lakebench-observability-ku-prometheus", "StatefulSet"))
+                components.append(
+                    ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet")
+                )
                 components.append(("lakebench-observability-grafana", "Deployment"))
         else:
             # Namespace-only mode (no config loaded) -- show all possible components
