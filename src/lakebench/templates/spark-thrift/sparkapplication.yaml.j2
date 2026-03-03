@@ -40,6 +40,18 @@ spec:
           image: busybox:1.36
           command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port | default(8181) }}; do echo waiting for polaris; sleep 2; done']
 {% endif %}
+        {% if s3_ca_cert_pem %}
+        - name: import-ca-cert
+          image: {{ spark_image }}
+          imagePullPolicy: {{ image_pull_policy }}
+          command: ['bash', '-c', 'keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt 2>/dev/null || true']
+          volumeMounts:
+            - name: ca-cert
+              mountPath: /etc/ssl/certs/custom-ca
+              readOnly: true
+            - name: truststore
+              mountPath: /truststore
+        {% endif %}
         - name: download-jars
           image: {{ spark_image }}
           imagePullPolicy: {{ image_pull_policy }}
@@ -122,7 +134,7 @@ spec:
                 --conf spark.hadoop.fs.s3a.access.key={{ s3_access_key }} \
                 --conf spark.hadoop.fs.s3a.secret.key={{ s3_secret_key }} \
                 --conf spark.hadoop.fs.s3a.path.style.access={{ s3_path_style | lower }} \
-                --conf spark.hadoop.fs.s3a.connection.ssl.enabled=false \
+                --conf spark.hadoop.fs.s3a.connection.ssl.enabled={{ s3_use_ssl | lower }} \
                 --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
                 --conf spark.sql.defaultCatalog={{ spark_thrift_catalog_name }} \
                 --conf spark.hive.server2.thrift.port=10000 \
@@ -135,6 +147,9 @@ spec:
                 --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet \
                 --conf spark.metrics.conf.*.sink.prometheusServlet.path=/metrics/prometheus \
 {% endif %}
+{% if s3_ca_cert_pem %}
+                --conf "spark.driver.extraJavaOptions=-Djavax.net.ssl.trustStore=/truststore/truststore.jks -Djavax.net.ssl.trustStorePassword=changeit" \
+{% endif %}
                 local:///opt/spark/jars/spark-hive-thriftserver{{ scala_suffix }}-*.jar
           volumeMounts:
             - name: extra-jars
@@ -142,6 +157,10 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+            {% if s3_ca_cert_pem %}
+            - name: truststore
+              mountPath: /truststore
+            {% endif %}
           resources:
             requests:
               cpu: "{{ spark_thrift_cores }}"
@@ -164,3 +183,10 @@ spec:
           emptyDir: {}
         - name: tmp
           emptyDir: {}
+        {% if s3_ca_cert_pem %}
+        - name: ca-cert
+          secret:
+            secretName: lakebench-ca-certificate
+        - name: truststore
+          emptyDir: {}
+        {% endif %}

@@ -6,10 +6,13 @@ matching the specification in lakebench-spec.md Section 4.
 
 from __future__ import annotations
 
+import logging
 from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # Enums
@@ -146,11 +149,12 @@ class ReportFormat(str, Enum):
 class ImagesConfig(BaseModel):
     """Container image configuration for all Lakebench components."""
 
-    datagen: str = "docker.io/sillidata/lb-datagen:v2"
+    datagen: str = "docker.io/sillidata/lb-datagen:v3"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"
     hive: str = "apache/hive:3.1.3"
     polaris: str = "apache/polaris:1.3.0-incubating"
+    polaris_admin_tool: str = "apache/polaris-admin-tool:1.3.0-incubating"
     unity: str = "unitycatalog/unitycatalog:0.1.0"
     trino: str = "trinodb/trino:479"
     duckdb: str = "python:3.11-slim"
@@ -196,7 +200,8 @@ class S3Config(BaseModel):
     """S3/object storage configuration."""
 
     endpoint: str = Field(
-        default="", description="S3 endpoint URL (e.g., http://your-s3-endpoint:80)"
+        default="",
+        description="S3 endpoint URL (e.g., http://your-s3:80 or https://your-s3:443)",
     )
     region: str = "us-east-1"
     path_style: bool = True  # Required for FlashBlade, MinIO
@@ -205,6 +210,18 @@ class S3Config(BaseModel):
     access_key: str = ""
     secret_key: str = ""
     secret_ref: str = ""  # Name of existing K8s secret
+
+    # TLS / HTTPS support
+    ca_cert: str = Field(
+        default="",
+        description="Path to PEM CA certificate bundle for HTTPS S3 endpoints. "
+        "Empty = system default CAs.",
+    )
+    verify_ssl: bool = Field(
+        default=True,
+        description="Verify SSL certificates for HTTPS endpoints. "
+        "Set false only for self-signed certs in dev.",
+    )
 
     buckets: S3BucketsConfig = Field(default_factory=S3BucketsConfig)
     create_buckets: bool = True
@@ -662,6 +679,7 @@ class ProcessingConfig(BaseModel):
         if "continuous" in data:
             import warnings
 
+            logger.warning("'pipeline.continuous' is deprecated, use 'pipeline.sustained' instead.")
             warnings.warn(
                 "'pipeline.continuous' is deprecated, use 'pipeline.sustained' instead.",
                 DeprecationWarning,
@@ -680,6 +698,7 @@ class ProcessingConfig(BaseModel):
         if v == "continuous":
             import warnings
 
+            logger.warning("pipeline mode 'continuous' is deprecated, use 'sustained' instead.")
             warnings.warn(
                 "pipeline mode 'continuous' is deprecated, use 'sustained' instead.",
                 DeprecationWarning,

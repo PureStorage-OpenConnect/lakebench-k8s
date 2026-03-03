@@ -6,6 +6,7 @@ On OpenShift, also adds the anyuid SCC to the lakebench-spark-runner service acc
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,9 @@ import yaml
 from lakebench._constants import SPARK_SERVICE_ACCOUNT
 from lakebench.k8s import PlatformType, SecurityVerifier
 
-from .engine import DeploymentResult, DeploymentStatus
+from .engine import DeploymentResult, DeploymentStatus, image_tag
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .engine import DeploymentEngine
@@ -80,7 +83,10 @@ class RBACDeployer:
                 scc_added = self.security_verifier.ensure_openshift_scc(namespace)
 
             message = "Created Spark RBAC resources"
-            rbac_detail = "OpenShift anyuid SCC" if scc_added else "SA + Role + RoleBinding"
+            spark_ver = image_tag(self.config.images.spark)
+            rbac_detail = (
+                f"Spark {spark_ver}, OpenShift anyuid SCC" if scc_added else f"Spark {spark_ver}"
+            )
             if scc_added:
                 message += " (with OpenShift anyuid SCC)"
 
@@ -100,6 +106,7 @@ class RBACDeployer:
             )
 
         except Exception as e:
+            logger.exception("RBAC deployment failed")
             return DeploymentResult(
                 component="rbac",
                 status=DeploymentStatus.FAILED,

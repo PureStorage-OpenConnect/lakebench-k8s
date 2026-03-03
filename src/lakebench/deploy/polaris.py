@@ -150,6 +150,7 @@ class PolarisDeployer:
             )
 
         except Exception as e:
+            logger.exception("Polaris deployment failed")
             return DeploymentResult(
                 component="polaris",
                 status=DeploymentStatus.FAILED,
