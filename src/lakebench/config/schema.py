@@ -149,7 +149,7 @@ class ReportFormat(str, Enum):
 class ImagesConfig(BaseModel):
     """Container image configuration for all Lakebench components."""
 
-    datagen: str = "docker.io/sillidata/lb-datagen:v3"
+    datagen: str = "docker.io/sillidata/lb-datagen:latest"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"
     hive: str = "apache/hive:3.1.3"
@@ -162,7 +162,7 @@ class ImagesConfig(BaseModel):
     grafana: str = "grafana/grafana:10.2.0"
     jmx_exporter: str = "bitnami/jmx-exporter:latest"
 
-    pull_policy: ImagePullPolicy = ImagePullPolicy.IF_NOT_PRESENT
+    pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
     pull_secrets: list[str] = Field(default_factory=list)
 
     @field_validator("spark")
@@ -609,6 +609,23 @@ class SustainedConfig(BaseModel):
         default=128,
         ge=32,
         description="Target Iceberg file size for gold writes (MB)",
+    )
+
+    # Iceberg retention -- periodic expire_snapshots + remove_orphan_files
+    # via Trino to prevent unbounded snapshot/metadata growth during long
+    # sustained runs.
+    retention_interval: int = Field(
+        default=1800,
+        ge=300,
+        le=7200,
+        description="Seconds between Iceberg maintenance rounds (expire_snapshots + remove_orphan_files)",
+    )
+    retention_threshold: str = Field(
+        default="30m",
+        description=(
+            "Iceberg snapshot retention threshold passed to Trino "
+            "(e.g. '30m', '1h', '7d'). Snapshots older than this are expired."
+        ),
     )
 
     # In-stream benchmark settings -- controls periodic benchmark

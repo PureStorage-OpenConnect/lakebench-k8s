@@ -4,6 +4,40 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.12] - 2026-03-04
+
+### Added
+- **Iceberg retention for sustained pipelines.** Periodic `expire_snapshots` +
+  `remove_orphan_files` during the sustained monitoring loop. New config fields
+  `sustained.retention_interval` (default 1800s) and
+  `sustained.retention_threshold` (default `30m`).
+- **Engine-aware Iceberg maintenance.** Maintenance operations (sustained loop
+  and destroy path) now work with Trino or Spark Thrift Server. DuckDB is
+  read-only and skipped. Shared helpers in `deploy/iceberg.py`.
+- **Timestamp range documentation.** Config YAML and user docs now document
+  the impact of `timestamp_start`/`timestamp_end` on Iceberg partition count
+  and sustained-mode small-file proliferation.
+
+### Fixed
+- **S3 bucket creation during deploy.** `deploy_all()` now creates S3 buckets
+  (bronze, silver, gold) when `create_buckets: true` (the default). Previously
+  the config field existed but was never wired into the deploy engine, causing
+  datagen to fail with a 404 on HeadBucket on fresh deployments.
+- **Datagen Phase 2 race condition in duration mode.** Generator processes
+  exited on empty queue before the main loop could feed Phase 2 file IDs,
+  causing sustained pipelines to receive no new data after the initial burst.
+  Generators now wait for the explicit poison pill in duration mode.
+- **Trino coordinator label selector in Iceberg maintenance.** Both the
+  sustained monitoring loop and the destroy path used a wrong label selector
+  (`app=lakebench-trino-coordinator` instead of
+  `app=lakebench-trino,component=coordinator`), causing maintenance to
+  silently skip every cycle.
+
+### Changed
+- **Datagen image switched to `:latest` tag.** Default image is now
+  `docker.io/sillidata/lb-datagen:latest` (was `:v3`). Default `pull_policy`
+  changed from `IfNotPresent` to `Always` so pods always pull the current image.
+
 ## [1.0.11] - 2026-03-02
 
 ### Added

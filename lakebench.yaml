@@ -44,7 +44,7 @@ name: my-lakehouse
 # Container images for all components. Override for private registries.
 # See docs/datagen-custom-images.md for building custom datagen images.
 # images:
-#   datagen: docker.io/sillidata/lb-datagen:v3    # Customizable (see docs/datagen-custom-images.md)
+#   datagen: docker.io/sillidata/lb-datagen:latest # Customizable (see docs/datagen-custom-images.md)
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
@@ -251,6 +251,9 @@ architecture:
   #     bronze_target_file_size_mb: 512
   #     silver_target_file_size_mb: 512
   #     gold_target_file_size_mb: 128
+  #     ## Iceberg retention (periodic expire_snapshots + remove_orphan_files)
+  #     retention_interval: 1800     # Seconds between maintenance rounds (300-7200)
+  #     retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
   #     ## In-stream benchmark rounds (runs Trino queries while streaming)
   #     benchmark_interval: 300      # Seconds between rounds (300-3600)
   #     benchmark_warmup: 300        # Seconds before first round (300-1800)
@@ -269,6 +272,11 @@ architecture:
       ##   continuous: 8 CPU, 24Gi  (scale > 10)
       # generators: 0                # Per-pod generator processes (0 = auto)
       # uploaders: 0                 # Per-pod uploader threads (0 = auto)
+      ## Timestamp range for generated event_timestamp values.
+      ## Silver partitions by interaction_date (from event_timestamp).
+      ## Wide ranges (years) cause small-file proliferation in sustained mode
+      ## because each micro-batch writes tiny files across many date partitions.
+      ## Sustained: use narrow range (days/weeks). Batch: wider is fine.
       # timestamp_start: "2024-01-01"
       # timestamp_end: "2025-12-31"
       # checkpoint:

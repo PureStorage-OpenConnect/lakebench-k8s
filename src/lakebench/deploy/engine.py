@@ -395,6 +395,7 @@ class DeploymentEngine:
         steps = [
             ("namespace", "Creating namespace", self._deploy_namespace),
             ("secrets", "Creating secrets", self._deploy_secrets),
+            ("s3-buckets", "Creating S3 buckets", self._deploy_buckets),
             ("scratch-sc", "Creating scratch StorageClass", self._deploy_scratch_storageclass),
             ("postgres", "Deploying PostgreSQL", postgres.deploy),
             ("hive", "Deploying Hive Metastore", hive.deploy),
@@ -525,6 +526,85 @@ class DeploymentEngine:
             elapsed_seconds=time.time() - start,
             label="Secrets",
             detail="S3 + PostgreSQL",
+        )
+
+    def _deploy_buckets(self) -> DeploymentResult:
+        """Create S3 buckets if create_buckets is enabled.
+
+        Uses S3Client.ensure_buckets() which is idempotent -- existing
+        buckets are left untouched.
+        """
+        import time
+
+        start = time.time()
+
+        s3_cfg = self.config.platform.storage.s3
+        if not s3_cfg.create_buckets:
+            return DeploymentResult(
+                component="s3-buckets",
+                status=DeploymentStatus.SKIPPED,
+                message="Bucket creation disabled (create_buckets=false)",
+                elapsed_seconds=0,
+            )
+
+        if not s3_cfg.endpoint:
+            return DeploymentResult(
+                component="s3-buckets",
+                status=DeploymentStatus.SKIPPED,
+                message="No S3 endpoint configured",
+                elapsed_seconds=0,
+            )
+
+        bucket_names = [
+            s3_cfg.buckets.bronze,
+            s3_cfg.buckets.silver,
+            s3_cfg.buckets.gold,
+        ]
+
+        if self.dry_run:
+            return DeploymentResult(
+                component="s3-buckets",
+                status=DeploymentStatus.SUCCESS,
+                message=f"Would create buckets: {', '.join(bucket_names)}",
+                elapsed_seconds=0,
+            )
+
+        from lakebench.s3 import S3Client
+
+        s3 = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=s3_cfg.ca_cert,
+            verify_ssl=s3_cfg.verify_ssl,
+        )
+        if s3._init_error:
+            return DeploymentResult(
+                component="s3-buckets",
+                status=DeploymentStatus.FAILED,
+                message=f"S3 client init failed: {s3._init_error}",
+                elapsed_seconds=time.time() - start,
+            )
+
+        results = s3.ensure_buckets(bucket_names)
+        created = [name for name, was_created in results.items() if was_created]
+        existed = [name for name, was_created in results.items() if not was_created]
+
+        parts = []
+        if created:
+            parts.append(f"created {', '.join(created)}")
+        if existed:
+            parts.append(f"already existed: {', '.join(existed)}")
+
+        return DeploymentResult(
+            component="s3-buckets",
+            status=DeploymentStatus.SUCCESS,
+            message=f"S3 buckets ready ({'; '.join(parts)})",
+            elapsed_seconds=time.time() - start,
+            label="S3 Buckets",
+            detail=f"{len(created)} created, {len(existed)} existed",
         )
 
     def _deploy_scratch_storageclass(self) -> DeploymentResult:
@@ -939,16 +1019,21 @@ class DeploymentEngine:
 
         time.sleep(2)
 
-        # Step 3: Drop Iceberg tables via Trino (if available)
+        # Step 3: Drop Iceberg tables via available engine (Trino or Spark Thrift)
         report("iceberg-tables", DeploymentStatus.IN_PROGRESS, "Dropping Iceberg tables...")
         try:
-            catalog = self.config.architecture.query_engine.trino.catalog_name
-            core_v1 = k8s_client.CoreV1Api()
-            pods = core_v1.list_namespaced_pod(
-                namespace, label_selector="app=lakebench-trino-coordinator"
+            from lakebench.deploy.iceberg import (
+                build_drop_table_sql,
+                build_maintenance_sql,
+                exec_sql,
+                find_maintenance_engine,
             )
-            if pods.items:
-                pod_name = pods.items[0].metadata.name
+
+            engine, pod_name, catalog = find_maintenance_engine(
+                self.config,
+                namespace,
+            )
+            if engine and pod_name and catalog:
                 tables = self.config.architecture.tables
                 tables_to_drop = [
                     f"{catalog}.{tables.bronze}",
@@ -958,41 +1043,45 @@ class DeploymentEngine:
                 # Expire snapshots and remove orphan files
                 # before dropping tables to ensure S3 is fully cleaned
                 for table in tables_to_drop:
-                    for maintenance_sql in [
-                        f"ALTER TABLE {table} EXECUTE expire_snapshots(retention_threshold => '0s')",
-                        f"ALTER TABLE {table} EXECUTE remove_orphan_files(retention_threshold => '0s')",
-                    ]:
+                    for sql in build_maintenance_sql(engine, catalog, table, "0s"):
                         try:
-                            self.k8s.exec_in_pod(
-                                pod_name,
-                                ["trino", "--execute", maintenance_sql],
-                                namespace,
-                            )
+                            exec_sql(engine, self.k8s, pod_name, namespace, sql)
                         except Exception as e:
                             logger.warning(
                                 "Iceberg maintenance failed (table may not exist): %s", e
                             )
                 # Now drop the tables
                 for table in tables_to_drop:
-                    self.k8s.exec_in_pod(
-                        pod_name,
-                        ["trino", "--execute", f"DROP TABLE IF EXISTS {table}"],
-                        namespace,
-                    )
+                    drop_sql = build_drop_table_sql(engine, table)
+                    if drop_sql:
+                        try:
+                            exec_sql(engine, self.k8s, pod_name, namespace, drop_sql)
+                        except Exception as e:
+                            logger.warning("DROP TABLE failed for %s: %s", table, e)
                 results.append(
                     DeploymentResult(
                         component="iceberg-tables",
                         status=DeploymentStatus.SUCCESS,
-                        message="Iceberg tables dropped",
+                        message=f"Iceberg tables dropped (via {engine})",
                     )
                 )
-                report("iceberg-tables", DeploymentStatus.SUCCESS, "Iceberg tables dropped")
+                report(
+                    "iceberg-tables",
+                    DeploymentStatus.SUCCESS,
+                    f"Iceberg tables dropped (via {engine})",
+                )
             else:
+                engine_type = self.config.architecture.query_engine.type.value
+                msg = (
+                    "DuckDB cannot run Iceberg maintenance, skipping table cleanup"
+                    if engine_type == "duckdb"
+                    else "No capable engine pod found, skipping table cleanup"
+                )
                 results.append(
                     DeploymentResult(
                         component="iceberg-tables",
                         status=DeploymentStatus.SKIPPED,
-                        message="Trino not available, skipping table cleanup",
+                        message=msg,
                     )
                 )
         except Exception as e:
