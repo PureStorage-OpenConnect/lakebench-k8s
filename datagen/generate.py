@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Datagen v2: Synthetic Customer 360 Data Generator
+Synthetic Customer 360 Data Generator
 
 Synthetic Customer 360 data generator with 7 realism features:
   1. Zipf-distributed customer IDs (power-law activity)
@@ -730,14 +730,20 @@ def _continuous_generator_worker(
     compresses to Parquet bytes, and pushes to upload_queue.
     """
     config = Config(**config_dict)
+    has_duration = bool(config.duration_seconds)
 
     # Rebuild loyalty lookup in child process
     get_loyalty_lookup(config.seed, config.customer_id_max)
 
     while True:
         try:
-            file_id = file_queue.get(timeout=1)
+            file_id = file_queue.get(timeout=5)
         except Exception:
+            # In duration mode, the main loop feeds Phase 2 IDs after
+            # Phase 1 completes.  Generators must NOT exit on an empty
+            # queue -- only the None poison pill signals shutdown.
+            if has_duration:
+                continue
             if file_queue.empty():
                 break
             continue
@@ -877,6 +883,7 @@ def run_continuous(
         "customer_id_max": config.customer_id_max,
         "duplicate_email_pct": config.duplicate_email_pct,
         "dirty_ratio": config.dirty_ratio,
+        "duration_seconds": config.duration_seconds,
     }
 
     results = []
@@ -1178,7 +1185,7 @@ def main():
     else:
         mode_desc = f"sequential ({config.workers} workers)"
     print(f"""
-Datagen v2.0 (realism features enabled)
+Datagen (realism features enabled)
 ========================================
 Target: {config.target_tb} TB ({config.total_files:,} files total)
 Node: {config.node_id + 1}/{config.total_nodes}

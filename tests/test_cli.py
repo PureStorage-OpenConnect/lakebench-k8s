@@ -460,3 +460,174 @@ class TestBenchmarkSchedulingFloors:
             bench_interval = gold_interval_s
 
         assert bench_interval == 600
+
+
+class TestRunIcebergMaintenance:
+    """Tests for _run_iceberg_maintenance() engine-aware helper."""
+
+    def _make_cfg(self, engine_type="trino"):
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.get_namespace.return_value = "lakebench-sustained"
+        cfg.architecture.query_engine.type.value = engine_type
+        cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
+        cfg.architecture.query_engine.spark_thrift.catalog_name = "lakehouse"
+        cfg.architecture.tables.bronze = "default.bronze_raw"
+        cfg.architecture.tables.silver = "silver.customer_interactions_enriched"
+        cfg.architecture.tables.gold = "gold.customer_executive_dashboard"
+        return cfg
+
+    def test_runs_maintenance_on_all_tables_trino(self):
+        """Runs expire_snapshots + remove_orphan_files for each table via Trino."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_maintenance
+
+        cfg = self._make_cfg("trino")
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "trino-coordinator-0"
+        mock_pod_list = MagicMock()
+        mock_pod_list.items = [mock_pod]
+
+        with patch("kubernetes.client") as mock_core:
+            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
+            _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
+
+        # 3 tables * 2 operations = 6 exec_in_pod calls
+        assert k8s.exec_in_pod.call_count == 6
+        # Verify Trino SQL contains retention_threshold
+        for call in k8s.exec_in_pod.call_args_list:
+            cmd = call[0][1]
+            assert cmd[0] == "trino"
+            assert "30m" in cmd[2]
+
+    def test_runs_maintenance_on_all_tables_spark_thrift(self):
+        """Runs expire_snapshots + remove_orphan_files via Spark Thrift beeline."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_maintenance
+
+        cfg = self._make_cfg("spark-thrift")
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "spark-thrift-0"
+        mock_pod_list = MagicMock()
+        mock_pod_list.items = [mock_pod]
+
+        with patch("kubernetes.client") as mock_core:
+            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
+            _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
+
+        # 3 tables * 2 operations = 6 exec_in_pod calls
+        assert k8s.exec_in_pod.call_count == 6
+        # Verify beeline invocation
+        for call in k8s.exec_in_pod.call_args_list:
+            cmd = call[0][1]
+            assert cmd[0] == "/opt/spark/bin/beeline"
+
+    def test_skips_when_no_engine_pod(self):
+        """Does not crash when no engine pod is found."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_maintenance
+
+        cfg = self._make_cfg("trino")
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        mock_pod_list = MagicMock()
+        mock_pod_list.items = []
+
+        with patch("kubernetes.client") as mock_core:
+            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
+            _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
+
+        k8s.exec_in_pod.assert_not_called()
+
+    def test_skips_for_duckdb(self):
+        """DuckDB cannot run Iceberg maintenance -- skips cleanly."""
+        from unittest.mock import MagicMock
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_maintenance
+
+        cfg = self._make_cfg("duckdb")
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        # Should not attempt any pod lookups or exec calls
+        _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
+        k8s.exec_in_pod.assert_not_called()
+
+    def test_continues_on_per_table_failure(self):
+        """Failure on one table does not abort maintenance on others."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_maintenance
+
+        cfg = self._make_cfg("trino")
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "trino-coordinator-0"
+        mock_pod_list = MagicMock()
+        mock_pod_list.items = [mock_pod]
+
+        # First two calls (bronze) fail, rest succeed
+        k8s.exec_in_pod.side_effect = [
+            Exception("table not found"),
+            Exception("table not found"),
+            None,
+            None,
+            None,
+            None,
+        ]
+
+        with patch("kubernetes.client") as mock_core:
+            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
+            # Should not raise
+            _run_iceberg_maintenance(cfg, k8s, console, j, "1h")
+
+        # All 6 calls were attempted despite first 2 failing
+        assert k8s.exec_in_pod.call_count == 6
+
+    def test_handles_k8s_api_failure(self):
+        """Does not crash when K8s API listing fails."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_maintenance
+
+        cfg = self._make_cfg()
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        with patch("kubernetes.client.CoreV1Api") as mock_core:
+            mock_core.return_value.list_namespaced_pod.side_effect = Exception("API unreachable")
+            # Should not raise
+            _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
+
+        k8s.exec_in_pod.assert_not_called()

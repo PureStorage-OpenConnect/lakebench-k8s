@@ -80,7 +80,7 @@ version: 1
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:v2
+  datagen: docker.io/sillidata/lb-datagen:latest
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
@@ -88,7 +88,7 @@ images:
   trino: trinodb/trino:479
   prometheus: prom/prometheus:v2.48.0
   grafana: grafana/grafana:10.2.0
-  pull_policy: IfNotPresent           # Always | IfNotPresent | Never
+  pull_policy: Always                 # Always | IfNotPresent | Never
   pull_secrets: []                    # List of imagePullSecret names
 
 # ---------------------------------------------------------------------------
@@ -325,7 +325,7 @@ registries or custom builds.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:v2` | Data generator image. |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:latest` | Data generator image. |
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
@@ -333,7 +333,7 @@ registries or custom builds.
 | `images.trino` | string | `trinodb/trino:479` | Trino query engine image. |
 | `images.prometheus` | string | `prom/prometheus:v2.48.0` | Prometheus image. |
 | `images.grafana` | string | `grafana/grafana:10.2.0` | Grafana image. |
-| `images.pull_policy` | enum | `IfNotPresent` | `Always`, `IfNotPresent`, or `Never`. |
+| `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
 | `images.pull_secrets` | list | `[]` | List of Kubernetes `imagePullSecret` names. |
 
 ### Platform -- Kubernetes
@@ -469,6 +469,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.sustained.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
 | `architecture.pipeline.sustained.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
 | `architecture.pipeline.sustained.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
+| `architecture.pipeline.sustained.retention_interval` | int | `1800` | Seconds between Iceberg maintenance rounds (`expire_snapshots` + `remove_orphan_files`). Range: 300--7200. |
+| `architecture.pipeline.sustained.retention_threshold` | string | `30m` | Iceberg snapshot retention threshold. Snapshots older than this are expired. Uses Trino duration format (e.g., `30m`, `1h`, `7d`). |
 
 ### Architecture -- Workload & Datagen
 
@@ -487,8 +489,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.workload.datagen.uploaders` | int | `0` | Uploader threads per pod. 0 = auto (1 batch, 2 continuous). |
 | `architecture.workload.datagen.checkpoint.enabled` | bool | `true` | Enable datagen checkpoint for resume. |
 | `architecture.workload.datagen.checkpoint.path` | string | `.lakebench_checkpoint.json` | Checkpoint file path. |
-| `architecture.workload.datagen.timestamp_start` | string or null | `null` | Start date for generated timestamps (ISO format). Default: `2024-01-01`. |
-| `architecture.workload.datagen.timestamp_end` | string or null | `null` | End date for generated timestamps (ISO format). Default: `2025-12-31`. |
+| `architecture.workload.datagen.timestamp_start` | string or null | `null` | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
+| `architecture.workload.datagen.timestamp_end` | string or null | `null` | End date for generated timestamps (ISO format). Default: `2025-12-31`. See [Timestamp Range Impact](#timestamp-range-impact). |
 
 ### Architecture -- Customer360 Overrides
 
@@ -598,6 +600,32 @@ Executor counts auto-scale with the scale factor unless overridden by the
 `bronze_executors`, `silver_executors`, or `gold_executors` fields. Per-executor
 sizing (cores, memory, PVC size) is fixed from proven production profiles and
 does not change with scale.
+
+## Timestamp Range Impact
+
+The `timestamp_start` and `timestamp_end` fields control the range of
+`event_timestamp` values in generated data. This range directly affects
+Iceberg partition count because the silver table is partitioned by
+`interaction_date` (derived from `event_timestamp` via `to_date()`).
+
+**In sustained mode, use a narrow range (days to weeks).** Each streaming
+micro-batch writes small files across every date partition that appears in
+its data. A wide range (e.g., 3 years = ~1,095 date partitions) causes
+massive small-file proliferation -- each micro-batch creates a tiny file
+per date partition, leading to hundreds of thousands of data files within
+hours. This degrades Iceberg metadata operations and query planning.
+
+**In batch mode, wider ranges are fine.** Compaction runs once after the
+pipeline completes, consolidating small files.
+
+The range also affects the `customer_recency_score` derived column, which
+is computed as `30 - datediff(current_date(), event_timestamp)`. Timestamps
+far from today produce meaningless negative or inflated scores.
+
+| Mode | Recommended Range | Reason |
+|------|-------------------|--------|
+| Sustained | Days to weeks | Fewer partitions per micro-batch, larger files |
+| Batch | Months to years | Single compaction pass handles small files |
 
 ## Auto-Sizing
 
