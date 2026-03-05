@@ -3118,7 +3118,7 @@ def _run_iceberg_maintenance(
         return
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
-    if engine is None:
+    if engine is None or pod_name is None or catalog is None:
         console.print("  [dim]Iceberg maintenance skipped (no capable engine pod found)[/dim]")
         return
 
