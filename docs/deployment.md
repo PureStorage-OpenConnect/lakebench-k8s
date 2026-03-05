@@ -59,7 +59,7 @@ The deployment engine follows this fixed sequence:
 > to check this before deploying.
 
 8. **Prometheus** -- Deploys Prometheus for metrics collection. Only deployed when
-   `observability.metrics.prometheus.enabled` is true or the `--include-observability`
+   `observability.enabled` is true or the `--include-observability`
    flag is used.
 9. **Grafana** -- Deploys Grafana with pre-configured dashboards. Same activation
    conditions as Prometheus.
@@ -151,8 +151,10 @@ The destroy engine follows a specific sequence to ensure clean removal:
 2. **Spark pods** -- Force-deletes any orphaned driver and executor pods.
 3. **Datagen jobs** -- Deletes Kubernetes batch Jobs and pods from data generation.
 4. **Iceberg maintenance** -- Runs `expire_snapshots` and `remove_orphan_files`
-   on all tables via Trino to clean up S3 metadata files.
-5. **Drop tables** -- Drops all Iceberg tables (`bronze`, `silver`, `gold`) via Trino.
+   on all tables via the deployed query engine (Trino or Spark Thrift Server).
+   Skipped when the engine is DuckDB (read-only) or `none`.
+5. **Drop tables** -- Drops all Iceberg tables (`bronze`, `silver`, `gold`) via
+   the query engine.
 6. **S3 buckets** -- Empties all three S3 buckets, including aborting incomplete
    multipart uploads.
 7. **Grafana** -- Removes the Grafana Deployment and ConfigMaps.

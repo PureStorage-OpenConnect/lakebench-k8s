@@ -225,6 +225,35 @@ lakebench run my-config.yaml --sustained --duration 3600
 | `silver_target_file_size_mb` | 512 | Target Iceberg data file size for silver writes. | Same guidance as bronze. |
 | `gold_target_file_size_mb` | 128 | Target Iceberg data file size for gold writes. Smaller because gold is a compact aggregation table. | Rarely needs changing. |
 
+### Iceberg Retention
+
+Sustained streaming pipelines create new Iceberg snapshots every micro-batch.
+Without periodic maintenance, snapshot metadata and orphan data files grow
+unbounded -- a 24-hour run can produce over a million S3 objects.
+
+Lakebench runs periodic `expire_snapshots` and `remove_orphan_files` during
+the sustained monitoring loop. Two config fields control the schedule:
+
+```yaml
+architecture:
+  pipeline:
+    sustained:
+      retention_interval: 1800     # Seconds between maintenance rounds (300-7200)
+      retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
+```
+
+Maintenance uses whichever query engine is deployed:
+
+| Engine | Maintenance Support | Method |
+|--------|:-------------------:|--------|
+| Trino | Yes | `ALTER TABLE ... EXECUTE expire_snapshots(...)` |
+| Spark Thrift | Yes | `CALL catalog.system.expire_snapshots(...)` via beeline |
+| DuckDB | No | Read-only -- maintenance is skipped |
+
+When `query_engine.type` is `duckdb` or `none`, maintenance is skipped with
+a log message. Failures on individual tables (e.g., a table that doesn't exist
+yet early in the run) are logged but do not abort the pipeline.
+
 ### In-Stream Benchmarking
 
 During the streaming window, Lakebench runs the full 8-query benchmark

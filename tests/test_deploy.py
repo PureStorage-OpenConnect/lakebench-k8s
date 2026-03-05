@@ -301,6 +301,121 @@ class TestContextStorageVars:
         assert result.status == DeploymentStatus.SKIPPED
 
 
+class TestDeployBuckets:
+    """Tests for _deploy_buckets() -- S3 bucket creation during deploy."""
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    def test_buckets_dry_run(self, _mock_ocp):
+        """Dry-run returns success without calling S3."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s, dry_run=True)
+
+        result = engine._deploy_buckets()
+        assert result.status == DeploymentStatus.SUCCESS
+        assert "Would create" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    def test_buckets_skipped_when_disabled(self, _mock_ocp):
+        """Bucket creation skipped when create_buckets=false."""
+        config = _make_config()
+        config.platform.storage.s3.create_buckets = False
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        result = engine._deploy_buckets()
+        assert result.status == DeploymentStatus.SKIPPED
+        assert "create_buckets=false" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    def test_buckets_skipped_when_no_endpoint(self, _mock_ocp):
+        """Bucket creation skipped when no S3 endpoint configured."""
+        config = _make_config()
+        config.platform.storage.s3.endpoint = ""
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        result = engine._deploy_buckets()
+        assert result.status == DeploymentStatus.SKIPPED
+        assert "No S3 endpoint" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.s3.S3Client")
+    def test_buckets_created(self, mock_s3_cls, _mock_ocp):
+        """Buckets are created via S3Client.ensure_buckets()."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        mock_client = MagicMock()
+        mock_client._init_error = None
+        mock_client.ensure_buckets.return_value = {
+            "lakebench-bronze": True,
+            "lakebench-silver": True,
+            "lakebench-gold": True,
+        }
+        mock_s3_cls.return_value = mock_client
+
+        result = engine._deploy_buckets()
+        assert result.status == DeploymentStatus.SUCCESS
+        assert "created" in result.message
+        mock_client.ensure_buckets.assert_called_once_with(
+            ["lakebench-bronze", "lakebench-silver", "lakebench-gold"]
+        )
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.s3.S3Client")
+    def test_buckets_already_exist(self, mock_s3_cls, _mock_ocp):
+        """Already-existing buckets are reported correctly."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        mock_client = MagicMock()
+        mock_client._init_error = None
+        mock_client.ensure_buckets.return_value = {
+            "lakebench-bronze": False,
+            "lakebench-silver": False,
+            "lakebench-gold": False,
+        }
+        mock_s3_cls.return_value = mock_client
+
+        result = engine._deploy_buckets()
+        assert result.status == DeploymentStatus.SUCCESS
+        assert "already existed" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.s3.S3Client")
+    def test_buckets_s3_init_failure(self, mock_s3_cls, _mock_ocp):
+        """S3 client init failure returns FAILED result."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        mock_client = MagicMock()
+        mock_client._init_error = "bad endpoint"
+        mock_s3_cls.return_value = mock_client
+
+        result = engine._deploy_buckets()
+        assert result.status == DeploymentStatus.FAILED
+        assert "init failed" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    def test_deploy_all_includes_bucket_step(self, _mock_ocp):
+        """deploy_all() should include the s3-buckets step."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        k8s.namespace_exists.return_value = True
+        engine = DeploymentEngine(config, k8s_client=k8s, dry_run=True)
+
+        results = engine.deploy_all()
+        components = [r.component for r in results]
+        assert "s3-buckets" in components
+        # Buckets should come after secrets and before scratch-sc
+        bucket_idx = components.index("s3-buckets")
+        assert components[bucket_idx - 1] == "secrets"
+
+
 class TestAutoSizerIntegration:
     """Tests that autosizer runs during engine construction."""
 

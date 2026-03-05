@@ -368,9 +368,9 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.memory == "16Gi"
 
     def test_datagen_image_default(self):
-        """BUG-010: Default datagen image is docker.io/sillidata/lb-datagen:v3."""
+        """Default datagen image uses :latest tag."""
         config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:v3"
+        assert config.images.datagen == "docker.io/sillidata/lb-datagen:latest"
 
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""
@@ -1024,6 +1024,67 @@ class TestSustainedBenchmarkConfig:
                     },
                 },
             )
+
+
+class TestSustainedRetentionConfig:
+    """Tests for retention_interval and retention_threshold on SustainedConfig."""
+
+    def test_defaults(self):
+        config = LakebenchConfig(name="test")
+        c = config.architecture.pipeline.sustained
+        assert c.retention_interval == 1800
+        assert c.retention_threshold == "30m"
+
+    def test_custom_values(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "sustained": {
+                        "retention_interval": 900,
+                        "retention_threshold": "1h",
+                    },
+                },
+            },
+        )
+        c = config.architecture.pipeline.sustained
+        assert c.retention_interval == 900
+        assert c.retention_threshold == "1h"
+
+    def test_retention_interval_minimum(self):
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={
+                    "processing": {
+                        "sustained": {"retention_interval": 60},  # min is 300
+                    },
+                },
+            )
+
+    def test_retention_interval_maximum(self):
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={
+                    "processing": {
+                        "sustained": {"retention_interval": 10000},  # max is 7200
+                    },
+                },
+            )
+
+    def test_retention_interval_boundary_values(self):
+        """Boundary values 300 and 7200 are accepted."""
+        for val in (300, 7200):
+            config = LakebenchConfig(
+                name="test",
+                architecture={
+                    "processing": {
+                        "sustained": {"retention_interval": val},
+                    },
+                },
+            )
+            assert config.architecture.pipeline.sustained.retention_interval == val
 
 
 class TestBenchmarkConfig:
