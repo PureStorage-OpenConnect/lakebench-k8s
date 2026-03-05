@@ -3091,6 +3091,70 @@ def _parse_spark_interval(interval_str: str) -> int:
     return 300
 
 
+def _run_iceberg_maintenance(
+    cfg,
+    k8s,
+    console: Console,
+    j,
+    retention_threshold: str,
+) -> None:
+    """Run Iceberg expire_snapshots + remove_orphan_files.
+
+    Engine-aware: uses Trino (preferred) or Spark Thrift Server.
+    DuckDB cannot run Iceberg maintenance -- skipped with a warning.
+    Failures on individual tables are logged but do not abort.
+    """
+    from lakebench.deploy.iceberg import (
+        build_maintenance_sql,
+        exec_sql,
+        find_maintenance_engine,
+    )
+
+    namespace = cfg.get_namespace()
+    engine_type = cfg.architecture.query_engine.type.value
+
+    if engine_type == "duckdb":
+        console.print("  [dim]Iceberg maintenance skipped (DuckDB cannot run maintenance)[/dim]")
+        return
+
+    engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
+    if engine is None:
+        console.print("  [dim]Iceberg maintenance skipped (no capable engine pod found)[/dim]")
+        return
+
+    tables = cfg.architecture.tables
+    table_names = [
+        f"{catalog}.{tables.bronze}",
+        f"{catalog}.{tables.silver}",
+        f"{catalog}.{tables.gold}",
+    ]
+
+    maintained = 0
+    for table in table_names:
+        for sql in build_maintenance_sql(engine, catalog, table, retention_threshold):
+            try:
+                exec_sql(engine, k8s, pod_name, namespace, sql)
+                maintained += 1
+            except Exception as e:
+                logger.warning("Iceberg maintenance failed for %s: %s", table, e)
+
+    console.print(
+        f"  Iceberg maintenance ({engine}): {maintained}/{len(table_names) * 2} "
+        f"operations (threshold: {retention_threshold})"
+    )
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_HEALTH,
+        message="Iceberg maintenance",
+        details={
+            "engine": engine,
+            "retention_threshold": retention_threshold,
+            "operations_succeeded": maintained,
+            "operations_total": len(table_names) * 2,
+        },
+    )
+
+
 def _run_benchmark_round(
     cfg,
     bench_runner,
@@ -3491,6 +3555,14 @@ def _run_sustained(
                 print_warning(f"Could not create benchmark runner: {e}")
                 can_run_rounds = False
 
+        # Iceberg retention scheduling
+        retention_interval = sustained_cfg.retention_interval
+        retention_threshold = sustained_cfg.retention_threshold
+        next_maintenance_at = float(retention_interval)  # first run after one interval
+        print_info(
+            f"Iceberg retention: every {retention_interval}s (threshold: {retention_threshold})"
+        )
+
         start = time.time()
         check_interval = 30
         # First round fires after warmup (no offset -- Q9 contention
@@ -3543,10 +3615,16 @@ def _run_sustained(
                 next_round_at = (time.time() - start) + bench_interval
                 continue
 
-            # Sleep until next event (health check or benchmark round)
+            # Iceberg retention maintenance
+            if elapsed >= next_maintenance_at:
+                _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold)
+                next_maintenance_at = (time.time() - start) + retention_interval
+
+            # Sleep until next event (health check, benchmark round, or maintenance)
             sleep_until = min(
                 elapsed + check_interval,
                 next_round_at if can_run_rounds else float("inf"),
+                next_maintenance_at,
                 run_duration,
             )
             sleep_time = max(0, sleep_until - (time.time() - start))

@@ -214,7 +214,7 @@ name: my-lakehouse
 # Container images for all components. Override for private registries.
 # See docs/datagen-custom-images.md for building custom datagen images.
 # images:
-#   datagen: docker.io/sillidata/lb-datagen:v3    # Customizable (see docs/datagen-custom-images.md)
+#   datagen: docker.io/sillidata/lb-datagen:latest # Customizable (see docs/datagen-custom-images.md)
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
@@ -224,7 +224,7 @@ name: my-lakehouse
 #   jmx_exporter: bitnami/jmx-exporter:latest
 #   prometheus: prom/prometheus:v2.48.0
 #   grafana: grafana/grafana:10.2.0
-#   pull_policy: IfNotPresent        # Always | IfNotPresent | Never
+#   pull_policy: Always               # Always | IfNotPresent | Never
 #   pull_secrets:                     # List of K8s imagePullSecret names
 #     - my-registry-secret
 

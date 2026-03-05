@@ -185,6 +185,12 @@ architecture:
       memory: 4Gi                # Memory request per pod
       generators: 0              # Per-pod generator processes (0 = auto)
       uploaders: 0               # Per-pod uploader threads (0 = auto)
+      # Timestamp range -- affects Iceberg partition count.
+      # Silver partitions by interaction_date (from event_timestamp).
+      # Sustained mode: use a narrow range (days/weeks) to avoid
+      # small-file proliferation across many date partitions.
+      # Batch mode: wider ranges are fine (single compaction pass).
+      # See docs/configuration.md#timestamp-range-impact for details.
       timestamp_start: null      # Start date for timestamps (ISO format)
       timestamp_end: null        # End date for timestamps (ISO format)
       checkpoint:
@@ -207,7 +213,7 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:v2`) is built from the `datagen/`
+The default image (`docker.io/sillidata/lb-datagen:latest`) is built from the `datagen/`
 directory in this repository. To build and push a custom image:
 
 ```bash
