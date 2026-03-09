@@ -267,10 +267,14 @@ class SparkOperatorManager:
 
             for arg in args:
                 if isinstance(arg, str) and arg.startswith("--namespaces="):
-                    ns_str = arg.split("=", 1)[1]
+                    ns_str = arg.split("=", 1)[1].strip('"').strip("'")
                     if not ns_str:
                         return None  # Empty -- watches all
-                    return [n.strip() for n in ns_str.split(",") if n.strip()]
+                    return [
+                        n.strip().strip('"').strip("'")
+                        for n in ns_str.split(",")
+                        if n.strip().strip('"').strip("'")
+                    ]
 
             return None  # No --namespaces arg -- watches all
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import yaml
@@ -105,6 +106,108 @@ class DatagenDeployer:
 
         # Assume bytes if no suffix
         return int(size_str)
+
+    @staticmethod
+    def _cycle_timestamp_range(
+        cycle_index: int,
+        total_cycles: int,
+        timestamp_start: str | None = None,
+        timestamp_end: str | None = None,
+    ) -> tuple[str, str]:
+        """Compute the timestamp window for a given cycle.
+
+        Divides the configured date range evenly across cycles.
+        Non-overlapping, chronologically ordered.  Last cycle gets remainder.
+        """
+        start = datetime.strptime(timestamp_start or "2024-01-01", "%Y-%m-%d")
+        end = datetime.strptime(timestamp_end or "2025-12-31", "%Y-%m-%d")
+        total_days = (end - start).days
+        days_per_cycle = total_days // total_cycles
+
+        cycle_start = start + timedelta(days=days_per_cycle * cycle_index)
+        if cycle_index == total_cycles - 1:
+            cycle_end = end
+        else:
+            cycle_end = start + timedelta(days=days_per_cycle * (cycle_index + 1))
+
+        return cycle_start.strftime("%Y-%m-%d"), cycle_end.strftime("%Y-%m-%d")
+
+    def deploy_cycle(
+        self,
+        cycle_index: int,
+        total_cycles: int,
+        resume: bool = False,
+    ) -> DeploymentResult:
+        """Deploy datagen for a specific batch cycle.
+
+        Overrides the timestamp range and scale to produce a per-cycle
+        slice of the total data.  Data appends to the same bronze bucket.
+        """
+        start = time.time()
+        namespace = self.config.get_namespace()
+
+        if self.engine.dry_run:
+            return DeploymentResult(
+                component="datagen",
+                status=DeploymentStatus.SUCCESS,
+                message=f"Would deploy datagen job for cycle {cycle_index + 1}/{total_cycles}",
+                elapsed_seconds=0,
+            )
+
+        try:
+            context = self._build_datagen_context()
+            context["datagen_resume"] = resume
+
+            # Per-cycle timestamp window
+            datagen = self.config.architecture.workload.datagen
+            ts_start, ts_end = self._cycle_timestamp_range(
+                cycle_index,
+                total_cycles,
+                datagen.timestamp_start,
+                datagen.timestamp_end,
+            )
+            context["datagen_timestamp_start"] = ts_start
+            context["datagen_timestamp_end"] = ts_end
+
+            # Per-cycle scale (divide total evenly, minimum 1)
+            total_scale = datagen.get_effective_scale()
+            scale_per_cycle = max(1, total_scale // total_cycles)
+            dims = self.config.get_scale_dimensions()
+            target_tb = (dims.approx_bronze_gb / total_cycles) / 1024.0
+            context["datagen_target_tb"] = f"{target_tb:.6f}"
+
+            self._delete_existing_job(namespace)
+
+            for template_name in self.TEMPLATES:
+                yaml_content = self.renderer.render(template_name, context)
+                manifest = yaml.safe_load(yaml_content)
+                self.k8s.apply_manifest(manifest, namespace=namespace)
+
+            return DeploymentResult(
+                component="datagen",
+                status=DeploymentStatus.SUCCESS,
+                message=f"Datagen cycle {cycle_index + 1}/{total_cycles} submitted ({ts_start} to {ts_end})",
+                elapsed_seconds=time.time() - start,
+                details={
+                    "job_name": "lakebench-datagen",
+                    "namespace": namespace,
+                    "cycle_index": cycle_index,
+                    "total_cycles": total_cycles,
+                    "timestamp_start": ts_start,
+                    "timestamp_end": ts_end,
+                    "scale_per_cycle": scale_per_cycle,
+                    "target_tb": context["datagen_target_tb"],
+                },
+            )
+
+        except Exception as e:
+            logger.exception("Datagen cycle deployment failed")
+            return DeploymentResult(
+                component="datagen",
+                status=DeploymentStatus.FAILED,
+                message=f"Datagen cycle {cycle_index + 1} failed: {e}",
+                elapsed_seconds=time.time() - start,
+            )
 
     def deploy(self, resume: bool = False) -> DeploymentResult:
         """Deploy the datagen job.

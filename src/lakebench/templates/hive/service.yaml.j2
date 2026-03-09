@@ -16,4 +16,5 @@ spec:
       targetPort: 9083
       name: thrift
   selector:
-    app: lakebench-hive-metastore
+    app.kubernetes.io/instance: lakebench-hive
+    app.kubernetes.io/component: metastore

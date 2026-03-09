@@ -303,8 +303,86 @@ class SparkThriftExecutor:
         pass
 
     def adapt_query(self, sql: str) -> str:
-        """Spark SQL is compatible with the benchmark queries; no adaptation needed."""
+        """Translate Trino SQL dialect to Spark SQL where they differ.
+
+        Trino is the canonical query dialect for benchmark queries.  Two
+        functions use incompatible signatures:
+
+        - ``date_add('month', N, expr)`` (Trino 3-arg) -> ``add_months(expr, N)``
+        - ``DATE_DIFF('day', expr1, expr2)`` (Trino 3-arg) -> ``DATEDIFF(expr2, expr1)``
+          Note: Trino DATE_DIFF arg order is (unit, start, end) while Spark
+          DATEDIFF is (end, start).
+        """
+        sql = self._rewrite_date_add(sql)
+        sql = self._rewrite_date_diff(sql)
+
         return sql
+
+    @staticmethod
+    def _rewrite_date_add(sql: str) -> str:
+        """Rewrite Trino ``date_add('month', N, expr)`` to Spark ``add_months(expr, N)``."""
+        import re
+
+        pattern = re.compile(
+            r"date_add\(\s*'month'\s*,\s*(\d+)\s*,\s*",
+            re.IGNORECASE,
+        )
+        m = pattern.search(sql)
+        if not m:
+            return sql
+        n = m.group(1)
+        # Find the matching closing paren for this call
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(sql) and depth > 0:
+            if sql[i] == "(":
+                depth += 1
+            elif sql[i] == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return sql
+        expr = sql[start : i - 1]
+        replacement = f"add_months({expr}, {n})"
+        return sql[: m.start()] + replacement + sql[i:]
+
+    @staticmethod
+    def _rewrite_date_diff(sql: str) -> str:
+        """Rewrite Trino ``DATE_DIFF('day', start, end)`` to Spark ``DATEDIFF(end, start)``."""
+        import re
+
+        pattern = re.compile(
+            r"DATE_DIFF\(\s*'day'\s*,\s*",
+            re.IGNORECASE,
+        )
+        m = pattern.search(sql)
+        if not m:
+            return sql
+        # Parse the two comma-separated arguments after the match
+        start = m.end()
+        depth = 0
+        args: list[str] = []
+        arg_start = start
+        i = start
+        while i < len(sql):
+            ch = sql[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    args.append(sql[arg_start:i].strip())
+                    break
+                depth -= 1
+            elif ch == "," and depth == 0:
+                args.append(sql[arg_start:i].strip())
+                arg_start = i + 1
+            i += 1
+        if len(args) != 2:
+            return sql
+        # Spark DATEDIFF(end, start) -- note reversed arg order
+        replacement = f"DATEDIFF({args[1]}, {args[0]})"
+        return sql[: m.start()] + replacement + sql[i + 1 :]
 
 
 class DuckDBExecutor:
@@ -322,12 +400,16 @@ class DuckDBExecutor:
         s3_endpoint: str = "",
         s3_region: str = "us-east-1",
         s3_path_style: bool = True,
+        s3_buckets: dict[str, str] | None = None,
+        table_names: dict[str, str] | None = None,
     ):
         self.namespace = namespace
         self.catalog_name = catalog_name
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
         self.s3_path_style = s3_path_style
+        self.s3_buckets = s3_buckets or {}
+        self.table_names = table_names or {}
         self._pod: str | None = None
 
     def engine_name(self) -> str:
@@ -361,6 +443,9 @@ class DuckDBExecutor:
 
     def _build_python_script(self, sql: str) -> str:
         """Build a Python one-liner that executes SQL via duckdb."""
+        # Collapse multi-line SQL into a single line (the script is a one-liner,
+        # so newlines inside the SQL string literal would break Python parsing).
+        sql = " ".join(sql.split())
         # Escape single quotes in SQL for embedding in Python string
         escaped_sql = sql.replace("'", "\\'")
         return (
@@ -374,6 +459,7 @@ class DuckDBExecutor:
             f'conn.execute("SET s3_use_ssl={"true" if self.s3_endpoint.startswith("https://") else "false"}"); '
             "conn.execute(\"SET s3_access_key_id='\" + os.environ['AWS_ACCESS_KEY_ID'] + \"'\"); "
             "conn.execute(\"SET s3_secret_access_key='\" + os.environ['AWS_SECRET_ACCESS_KEY'] + \"'\"); "
+            "conn.execute('SET unsafe_enable_version_guessing = true'); "
             f"result = conn.execute('{escaped_sql}'); "
             "rows = result.fetchall(); "
             "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))"
@@ -461,17 +547,59 @@ class DuckDBExecutor:
         pass
 
     def adapt_query(self, sql: str) -> str:
-        """Translate Trino-style table references to DuckDB Iceberg syntax.
+        """Rewrite Trino SQL to DuckDB dialect.
 
-        Trino:  SELECT * FROM catalog.schema.table
-        DuckDB: SELECT * FROM catalog.schema.table
-                (when using DuckDB Iceberg catalog attach)
-
-        For now, DuckDB's Iceberg extension catalog mode uses the same
-        dotted notation. If iceberg_scan() is needed, this method handles
-        the rewrite.
+        Two kinds of rewrites:
+        1. Table references: ``catalog.namespace.table`` -> ``iceberg_scan(...)``
+        2. Dialect: Trino ``date_add('month', N, expr)`` -> DuckDB ``(expr + INTERVAL N MONTH)``
         """
+        # -- Table reference rewrites --
+        for layer, fq_name in self.table_names.items():
+            bucket = self.s3_buckets.get(layer, "")
+            if not bucket or not fq_name:
+                continue
+            parts = fq_name.split(".", 1)
+            if len(parts) != 2:
+                continue
+            namespace, table = parts
+            catalog_ref = f"{self.catalog_name}.{fq_name}"
+            warehouse_path = f"s3://{bucket}/warehouse/{namespace}.db/{table}"
+            scan_expr = f"iceberg_scan('{warehouse_path}', allow_moved_paths := true)"
+            sql = sql.replace(catalog_ref, scan_expr)
+
+        # -- Dialect rewrites --
+        sql = self._rewrite_date_add(sql)
         return sql
+
+    @staticmethod
+    def _rewrite_date_add(sql: str) -> str:
+        """Rewrite Trino ``date_add('month', N, expr)`` to ``(expr + INTERVAL N MONTH)``.
+
+        DuckDB's date_add macro does not accept the 3-arg Trino form.
+        """
+        import re
+
+        pattern = re.compile(r"date_add\(\s*'(\w+)'\s*,\s*(\d+)\s*,\s*", re.IGNORECASE)
+        m = pattern.search(sql)
+        if not m:
+            return sql
+        unit = m.group(1).upper()
+        n = m.group(2)
+        # Find the matching closing paren for the 3rd argument
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(sql) and depth > 0:
+            if sql[i] == "(":
+                depth += 1
+            elif sql[i] == ")":
+                depth -= 1
+            i += 1
+        if depth != 0:
+            return sql
+        expr = sql[start : i - 1]
+        replacement = f"({expr} + INTERVAL {n} {unit})"
+        return sql[: m.start()] + replacement + sql[i:]
 
 
 def get_executor(config: LakebenchConfig, namespace: str | None = None) -> QueryExecutor:
@@ -499,12 +627,21 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
     elif engine_type == "duckdb":
         s3 = config.platform.storage.s3
         catalog = config.architecture.query_engine.duckdb.catalog_name
+        tables = config.architecture.tables
         return DuckDBExecutor(
             namespace=ns,
             catalog_name=catalog,
             s3_endpoint=s3.endpoint,
             s3_region=s3.region,
             s3_path_style=s3.path_style,
+            s3_buckets={
+                "silver": s3.buckets.silver,
+                "gold": s3.buckets.gold,
+            },
+            table_names={
+                "silver": tables.silver,
+                "gold": tables.gold,
+            },
         )
     elif engine_type == "none":
         raise ValueError("Cannot run queries without a query engine (type=none)")

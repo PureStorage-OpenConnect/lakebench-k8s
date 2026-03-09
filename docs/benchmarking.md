@@ -38,6 +38,7 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Higher means better resource utilization. |
 | `scale_ratio` | `bronze_input_gb / approx_bronze_gb` | Data completeness check. Uses only bronze input -- not the total across all stages. A ratio below 0.95 means data generation or ingestion was incomplete, which invalidates cross-run comparisons. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
+| `cycle_progression` | Per-cycle elapsed, QpH, table health | (Multi-cycle only, when `cycles > 1`) Shows pipeline time and Iceberg metadata growth per cycle. |
 
 ### Sustained Scores
 
@@ -52,6 +53,8 @@ Sustained scoring answers: "How fresh is gold, and how fast are we sustaining it
 | `pipeline_saturated` | `ingest_ratio < 0.95` | Boolean flag. True when the pipeline cannot keep pace with incoming data. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage.input_rows)` | Total volume processed during the monitoring window. |
+| `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
+| `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
 
 ### Per-Stage Metrics
@@ -474,6 +477,7 @@ rounds for trend analysis.
 | Gold latency >> refresh interval | Silver table too large for gold executors | Increase `gold_refresh_executors` |
 | QpH dropping across rounds | Table growth degrading queries | Add Trino workers or memory |
 | Q9 contention > 20% | Benchmark rounds colliding with gold rewrites | Increase `gold_refresh_interval` or `benchmark_interval` |
+| `total_s3_objects` growing unbounded | Retention not keeping pace with snapshot growth | Decrease `retention_threshold` or `retention_interval` |
 
 ---
 

@@ -25,10 +25,43 @@ persistent state. Each benchmark query is executed via `kubectl exec` into
 the pod, which creates a fresh DuckDB connection, runs the SQL, and returns
 results as JSON.
 
+### Extension installation
+
+The DuckDB pod installs the Python `duckdb` module at startup via `pip`,
+then runs `INSTALL iceberg` and `INSTALL httpfs` to download the required
+DuckDB extensions. The startup probe verifies both extensions load
+successfully before the pod is marked ready. This means the pod needs
+internet access on first boot (or pre-cached extensions in a custom image).
+
+### Iceberg table access
+
+DuckDB does not connect to the Hive Metastore or Polaris catalog. Instead,
+it reads Iceberg tables directly from S3 using `iceberg_scan()`:
+
+```sql
+SELECT * FROM iceberg_scan('s3://bucket/warehouse/namespace.db/table',
+                           allow_moved_paths := true)
+```
+
+The `adapt_query()` method in `DuckDBExecutor` rewrites catalog references
+(e.g., `lakehouse.silver.customer_interactions_enriched`) to `iceberg_scan()`
+calls with the correct S3 warehouse path. Hive Metastore uses the
+`namespace.db/` directory convention for warehouse layout.
+
+### SQL dialect translation
+
+Benchmark queries are written in Trino SQL (the canonical dialect). DuckDB's
+`adapt_query()` rewrites Trino-specific functions:
+
+- `date_add('month', N, expr)` -> `(expr + INTERVAL N MONTH)`
+
+Other Trino functions (COUNT, SUM, AVG, LAG, window frames) work unchanged
+in DuckDB.
+
 ### Health checks
 
+- **Startup**: exec probe verifying `import duckdb; c.load_extension('iceberg'); c.load_extension('httpfs')`
 - **Readiness/Liveness**: exec probe running `python -c "import duckdb; print('ok')"`
-- Verifies the Python module loaded correctly
 
 ### Cache behavior
 
@@ -74,6 +107,9 @@ architecture:
   mode (concurrent streams) is not practical.
 - **No persistent cache.** Each query re-reads Iceberg metadata from S3.
   At large scales this adds latency compared to Trino's cached metadata.
+- **No Iceberg maintenance.** DuckDB is read-only for Iceberg tables.
+  `expire_snapshots`, `remove_orphan_files`, and compaction are skipped
+  when DuckDB is the only query engine. Table health probing still works.
 - **kubectl exec overhead.** Each query invocation has ~1-2s overhead from
   the kubectl exec round-trip.
 
