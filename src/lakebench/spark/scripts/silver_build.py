@@ -291,7 +291,16 @@ def apply_dynamic_config(spark, profile: DataProfile):
 # ============================================================
 
 
-def silver_simple(spark, bronze_uri, silver_tbl, catalog):
+def _table_exists(spark, table_name: str) -> bool:
+    """Check if an Iceberg table exists."""
+    try:
+        spark.table(table_name)
+        return True
+    except Exception:
+        return False
+
+
+def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
 
@@ -303,20 +312,24 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog):
     silver_count = silver_df.count()
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
-    (
-        silver_df.writeTo(silver_tbl)
-        .tableProperty("write.format.default", "parquet")
-        .tableProperty("write.parquet.compression-codec", "snappy")
-        .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-        .tableProperty("write.distribution-mode", "hash")
-        .partitionedBy("interaction_date")
-        .createOrReplace()
-    )
+    if incremental and _table_exists(spark, silver_tbl):
+        log("Appending to existing table (incremental mode)")
+        silver_df.writeTo(silver_tbl).append()
+    else:
+        (
+            silver_df.writeTo(silver_tbl)
+            .tableProperty("write.format.default", "parquet")
+            .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
+            .tableProperty("write.distribution-mode", "hash")
+            .partitionedBy("interaction_date")
+            .createOrReplace()
+        )
 
     return silver_count
 
 
-def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile):
+def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incremental=False):
     """STREAMING strategy: Direct write, no shuffle, single pass. For >= 100GB.
 
     Key insight: Column transformations don't require data redistribution.
@@ -339,15 +352,19 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile):
     silver_df = apply_silver_transformations(df_bronze)
 
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
-    (
-        silver_df.writeTo(silver_tbl)
-        .tableProperty("write.format.default", "parquet")
-        .tableProperty("write.parquet.compression-codec", "snappy")
-        .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-        .tableProperty("write.distribution-mode", "none")
-        .partitionedBy("interaction_date")
-        .createOrReplace()
-    )
+    if incremental and _table_exists(spark, silver_tbl):
+        log("Appending to existing table (incremental mode)")
+        silver_df.writeTo(silver_tbl).append()
+    else:
+        (
+            silver_df.writeTo(silver_tbl)
+            .tableProperty("write.format.default", "parquet")
+            .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
+            .tableProperty("write.distribution-mode", "none")
+            .partitionedBy("interaction_date")
+            .createOrReplace()
+        )
 
     silver_count = spark.table(silver_tbl).count()
     log(f"Wrote {silver_count:,} records")
@@ -535,11 +552,22 @@ apply_dynamic_config(spark, profile)
 silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
 log(f"Target table: {silver_tbl}")
 
+# Incremental mode: append to existing table instead of overwriting.
+# Controlled by LB_SILVER_INCREMENTAL env var set by lakebench for
+# batch cycles 2+ in multi-cycle runs.
+incremental_mode = os.environ.get("LB_SILVER_INCREMENTAL", "false").lower() == "true"
+if incremental_mode:
+    log("INCREMENTAL MODE: will append to existing table")
+
 # Execute selected strategy
 if strategy == SilverStrategy.SIMPLE:
-    silver_count = silver_simple(spark, bronze_uri, silver_tbl, catalog)
+    silver_count = silver_simple(
+        spark, bronze_uri, silver_tbl, catalog, incremental=incremental_mode
+    )
 elif strategy == SilverStrategy.STREAMING:
-    silver_count = silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile)
+    silver_count = silver_streaming(
+        spark, bronze_uri, silver_tbl, catalog, profile, incremental=incremental_mode
+    )
 elif strategy == SilverStrategy.CHUNKED:
     silver_count = silver_chunked(spark, bronze_uri, silver_tbl, catalog, profile)
 elif strategy == SilverStrategy.SALTED:

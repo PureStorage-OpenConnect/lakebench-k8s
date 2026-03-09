@@ -558,11 +558,11 @@ def init(
     interactive: Annotated[
         bool,
         typer.Option(
-            "--interactive",
+            "--interactive/--no-interactive",
             "-i",
-            help="Guided setup -- prompts for all required values",
+            help="Guided wizard setup (default when no flags given)",
         ),
-    ] = False,
+    ] = True,
     force: Annotated[
         bool,
         typer.Option(
@@ -574,12 +574,12 @@ def init(
 ) -> None:
     """Generate a starter configuration file.
 
-    Creates a well-documented YAML configuration file with sensible defaults
-    that you can customize for your environment.
+    Launches an interactive wizard by default. The wizard guides you through
+    5 steps: identity, recipe, storage, workload, and review.
 
-    Use --interactive for guided setup, or pass values directly with flags:
+    Use --no-interactive with flags for scripted/CI usage:
 
-        lakebench init --endpoint http://your-s3-endpoint:80 --access-key AAA --secret-key BBB
+        lakebench init --no-interactive --endpoint http://s3:80 --access-key A --secret-key B
 
     Use 'lakebench recommend' first to find the right scale for your cluster.
     """
@@ -588,74 +588,61 @@ def init(
         print_info("Use --force to overwrite")
         raise typer.Exit(1)
 
-    # Interactive mode: prompt for values not already provided via flags
-    if interactive:
-        console.print(Panel("Lakebench Configuration Setup", expand=False))
-        console.print()
+    # Detect whether user passed substantive flags -- if so, skip wizard
+    # even if --interactive wasn't explicitly set to false.
+    # Also skip wizard when stdin is not a TTY (CI, test runners, pipes).
+    import sys
 
-        if not name or name == "my-lakehouse":
-            name = typer.prompt("Deployment name", default="my-lakehouse")
+    has_flags = endpoint or access_key or secret_key
+    is_tty = hasattr(sys.stdin, "isatty") and sys.stdin.isatty()
 
-        # Recipe selection
-        if not recipe:
-            from lakebench.config.recipes import RECIPE_DESCRIPTIONS
+    if interactive and not has_flags and is_tty:
+        # Wizard mode
+        from lakebench.init_wizard import run_wizard
 
-            console.print()
-            console.print("[bold]Choose a recipe:[/bold]")
-            choices = list(RECIPE_DESCRIPTIONS.items())
-            for i, (rname, desc) in enumerate(choices, 1):
-                console.print(f"  [cyan]{i}[/cyan]. {rname:30s} {desc}")
-            console.print(
-                f"  [cyan]{len(choices) + 1}[/cyan]. {'custom':30s} Pick components individually"
-            )
-            console.print()
-            choice = typer.prompt(
-                "Recipe number",
-                default=1,
-                type=int,
-            )
-            if 1 <= choice <= len(choices):
-                recipe = choices[choice - 1][0]
-            # else: custom -- no recipe set
+        result = run_wizard(console)
+        if result is None:
+            raise typer.Exit(0)
 
-        console.print()
-        console.print("[dim]S3 endpoint examples:[/dim]")
-        console.print("[dim]  FlashBlade: http://your-s3:80 or https://your-s3:443[/dim]")
-        console.print("[dim]  MinIO:      http://minio:9000[/dim]")
-        console.print("[dim]  AWS S3:     https://s3.us-east-1.amazonaws.com[/dim]")
-        if not endpoint:
-            endpoint = typer.prompt("S3 endpoint URL")
+        # Apply any CLI flag overrides onto wizard state
+        if name != "my-lakehouse":
+            result.name = name
+        if namespace:
+            result.namespace = namespace
+        if recipe:
+            result.recipe = recipe
+        if scale != 10:
+            result.scale = scale
 
-        if not access_key:
-            access_key = typer.prompt("S3 access key")
-
-        if not secret_key:
-            secret_key = typer.prompt("S3 secret key", hide_input=True)
-
-        if not namespace:
-            namespace = typer.prompt("Kubernetes namespace", default=name)
+        # Confirm write
+        import typer as _typer
 
         console.print()
-        console.print("[dim]Scale factor: 1 unit = ~10 GB bronze data[/dim]")
-        console.print("[dim]  1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB, 1000 = ~10 TB[/dim]")
-        if scale == 10:  # only prompt if default wasn't overridden by flag
-            scale = typer.prompt("Scale factor", default=10, type=int)
+        if not _typer.confirm(f"  Write configuration to {output}?", default=True):
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
 
+        output.write_text(result.config_yaml)
         console.print()
+        print_success(f"Created configuration file: {output}")
+        print_info("Next steps:")
+        print_info("  1. lakebench validate       -- check config for errors")
+        print_info("  2. lakebench deploy          -- deploy infrastructure")
+        print_info("  3. lakebench generate --wait -- generate test data")
+        print_info("  4. lakebench run             -- run pipeline + benchmark")
+        return
 
-    # Generate config with substitutions
+    # Non-interactive / flag mode (backward compatible)
     config_content = generate_example_config_yaml()
     config_content = config_content.replace("name: my-lakehouse", f"name: {name}")
     config_content = re.sub(r"scale:\s*\d+", f"scale: {scale}", config_content)
 
-    # Inject recipe line after name
     if recipe:
         config_content = config_content.replace(
             f"name: {name}",
             f"name: {name}\nrecipe: {recipe}",
         )
 
-    # Fill in S3 and namespace values if provided
     if endpoint:
         config_content = config_content.replace('endpoint: ""', f'endpoint: "{endpoint}"', 1)
     if access_key:
@@ -2564,189 +2551,266 @@ def run(
         else:
             stages = all_stages
 
-        # Run each stage
-        for job_type, stage_name, description in stages:
-            console.print()
-            console.print(f"[bold]Stage: {stage_name}[/bold]")
-            print_info(description)
+        # Multi-cycle batch support (v1.1.0)
+        total_cycles = cfg.architecture.pipeline.cycles
 
-            job_start = datetime.now()
+        for cycle_idx in range(total_cycles):
+            # Track per-cycle metrics (v1.1.0)
+            _cycle_start = datetime.now()
+            _cycle_jobs: list[JobMetrics] = []
+            _cycle_ts_start = ""
+            _cycle_ts_end = ""
+            _cycle_dg_elapsed = 0.0
 
-            # Submit job
-            job_status = job_manager.submit_job(job_type)
-            if job_status.state == JobState.FAILED:
-                print_error(f"Failed to submit job: {job_status.message}")
-                collector.record_job(
-                    JobMetrics(
-                        job_name=f"lakebench-{stage_name}",
-                        job_type=stage_name,
-                        start_time=job_start,
-                        end_time=datetime.now(),
-                        elapsed_seconds=(datetime.now() - job_start).total_seconds(),
-                        success=False,
-                        error_message=job_status.message,
-                    )
-                )
-                pipeline_success = False
-                raise typer.Exit(1)
+            # Cycle header for multi-cycle runs
+            if total_cycles > 1:
+                console.print()
+                console.print(f"[bold cyan]Cycle {cycle_idx + 1}/{total_cycles}[/bold cyan]")
 
-            print_success(f"Job submitted: lakebench-{stage_name}")
-
-            # Wait for completion -- capture max executor count seen
-            _max_executors = 0
-            _last_reported_executors = -1
-
-            def on_progress(status):
-                nonlocal _max_executors, _last_reported_executors
-                if status.state == JobState.RUNNING:
-                    _max_executors = max(_max_executors, status.executor_count)
-                    if status.executor_count != _last_reported_executors:
-                        console.print(f"  Running... (executors: {status.executor_count})")
-                        _last_reported_executors = status.executor_count
-
-            result = monitor.wait_for_completion(
-                f"lakebench-{stage_name}",
-                timeout_seconds=timeout,
-                poll_interval=15,
-                progress_callback=on_progress,
-            )
-
-            job_end = datetime.now()
-
-            # Build job metrics
-            job_metrics = JobMetrics(
-                job_name=f"lakebench-{stage_name}",
-                job_type=stage_name,
-                start_time=job_start,
-                end_time=job_end,
-                elapsed_seconds=result.elapsed_seconds,
-                success=result.success,
-                error_message=result.message if not result.success else None,
-                executor_count=_max_executors,
-            )
-
-            # Parse driver logs for data metrics if available
-            if result.driver_logs:
-                parsed = collector.parse_driver_logs(result.driver_logs, stage_name)
-                job_metrics.input_size_gb = parsed.input_size_gb
-                job_metrics.output_size_gb = parsed.output_size_gb
-                job_metrics.input_rows = parsed.input_rows
-                job_metrics.output_rows = parsed.output_rows
-                job_metrics.throughput_gb_per_second = parsed.throughput_gb_per_second
-                job_metrics.throughput_rows_per_second = parsed.throughput_rows_per_second
-
-            # Populate resource metrics from job profile
-            _profile = get_job_profile(stage_name)
-            if _profile:
-                _scale = cfg.architecture.workload.datagen.get_effective_scale()
-                _expected_executors = get_executor_count(stage_name, _scale)
-
-                # Check per-job executor override
-                _override_map = {
-                    "bronze-verify": cfg.platform.compute.spark.bronze_executors,
-                    "silver-build": cfg.platform.compute.spark.silver_executors,
-                    "gold-finalize": cfg.platform.compute.spark.gold_executors,
-                }
-                _override = _override_map.get(stage_name)
-                if _override is not None:
-                    _expected_executors = _override
-
-                # Use deterministic count when progress callback didn't capture
-                if job_metrics.executor_count == 0:
-                    job_metrics.executor_count = _expected_executors
-
-                job_metrics.executor_cores = _profile["executor_cores"]
-                _mem_gb = parse_spark_memory(_profile["executor_memory"]) / (1024**3)
-                _overhead_gb = parse_spark_memory(_profile["executor_memory_overhead"]) / (1024**3)
-                job_metrics.executor_memory_gb = _mem_gb
-
-                # Requested CPU-seconds and peak memory
-                job_metrics.cpu_seconds_requested = (
-                    job_metrics.executor_count
-                    * job_metrics.executor_cores
-                    * job_metrics.elapsed_seconds
-                )
-                job_metrics.memory_gb_requested = job_metrics.executor_count * (
-                    _mem_gb + _overhead_gb
-                )
-
-            # Gold input fallback: gold reads from silver
-            if (
-                stage_name == "gold-finalize"
-                and job_metrics.input_size_gb == 0.0
-                and collector.current_run
-            ):
-                for _prev in collector.current_run.jobs:
-                    if _prev.job_type == "silver-build" and _prev.output_size_gb > 0:
-                        job_metrics.input_size_gb = _prev.output_size_gb
-                        if job_metrics.elapsed_seconds > 0:
-                            job_metrics.throughput_gb_per_second = (
-                                job_metrics.input_size_gb / job_metrics.elapsed_seconds
-                            )
-                        break
-
-            # Measure per-stage S3 output size
-            _stage_bucket_map = {
-                "bronze-verify": cfg.platform.storage.s3.buckets.bronze,
-                "silver-build": cfg.platform.storage.s3.buckets.silver,
-                "gold-finalize": cfg.platform.storage.s3.buckets.gold,
-            }
-            if stage_name in _stage_bucket_map and job_metrics.output_size_gb == 0:
+                # Run datagen for this cycle's time window
                 try:
-                    from lakebench.s3 import S3Client
+                    from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
-                    s3_cfg = cfg.platform.storage.s3
-                    _s3 = S3Client(
-                        endpoint=s3_cfg.endpoint,
-                        access_key=s3_cfg.access_key,
-                        secret_key=s3_cfg.secret_key,
-                        region=s3_cfg.region,
-                        path_style=s3_cfg.path_style,
-                    )
-                    _bucket_info = _s3.get_bucket_size(_stage_bucket_map[stage_name])
-                    if _bucket_info.size_bytes:
-                        job_metrics.output_size_gb = _bucket_info.size_bytes / (1024**3)
+                    _cycle_engine = DeploymentEngine(cfg)
+                    _cycle_datagen = DatagenDeployer(_cycle_engine)
+                    datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
+                    if datagen_result.status != DeploymentStatus.SUCCESS:
+                        print_warning(
+                            f"Datagen cycle {cycle_idx + 1} failed: {datagen_result.message}"
+                        )
+                    else:
+                        ts_start = datagen_result.details.get("timestamp_start", "")
+                        ts_end = datagen_result.details.get("timestamp_end", "")
+                        _cycle_ts_start = ts_start
+                        _cycle_ts_end = ts_end
+                        print_info(f"Datagen: {ts_start} to {ts_end}")
+
+                        # Wait for datagen completion
+                        _dg_start = datetime.now()
+                        dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
+                        _cycle_dg_elapsed = (datetime.now() - _dg_start).total_seconds()
+                        if dg_wait.status != DeploymentStatus.SUCCESS:
+                            print_warning(f"Datagen did not complete: {dg_wait.message}")
                 except Exception as e:
-                    logger.warning("Could not measure %s bucket size: %s", stage_name, e)
+                    print_warning(f"Cycle datagen failed: {e}")
 
-            collector.record_job(job_metrics)
+            # Cycle env vars for incremental mode (cycles 2+)
+            cycle_env: dict[str, str] | None = None
+            if cycle_idx > 0:
+                cycle_env = {
+                    "LB_SILVER_INCREMENTAL": "true",
+                    "LB_GOLD_INCREMENTAL": "true",
+                }
 
-            if result.success:
-                print_success(f"{stage_name} completed in {result.elapsed_seconds:.0f}s")
-                results.append((stage_name, True, result.elapsed_seconds))
-                _journal_safe(
-                    j.record,
-                    EventType.PIPELINE_STAGE,
-                    message=f"{stage_name} completed",
-                    success=True,
-                    details={
-                        "stage": stage_name,
-                        "success": True,
-                        "elapsed_seconds": result.elapsed_seconds,
-                        "input_gb": job_metrics.input_size_gb,
-                        "output_rows": job_metrics.output_rows,
-                    },
+            # Run each stage
+            for job_type, stage_name, description in stages:
+                console.print()
+                if total_cycles > 1:
+                    console.print(f"[bold]Stage: {stage_name} (cycle {cycle_idx + 1})[/bold]")
+                else:
+                    console.print(f"[bold]Stage: {stage_name}[/bold]")
+                print_info(description)
+
+                job_start = datetime.now()
+
+                # Submit job
+                job_status = job_manager.submit_job(job_type, cycle_env=cycle_env)
+                if job_status.state == JobState.FAILED:
+                    print_error(f"Failed to submit job: {job_status.message}")
+                    collector.record_job(
+                        JobMetrics(
+                            job_name=f"lakebench-{stage_name}",
+                            job_type=stage_name,
+                            start_time=job_start,
+                            end_time=datetime.now(),
+                            elapsed_seconds=(datetime.now() - job_start).total_seconds(),
+                            success=False,
+                            error_message=job_status.message,
+                        )
+                    )
+                    pipeline_success = False
+                    raise typer.Exit(1)
+
+                print_success(f"Job submitted: lakebench-{stage_name}")
+
+                # Wait for completion -- capture max executor count seen
+                _max_executors = 0
+                _last_reported_executors = -1
+
+                def on_progress(status):
+                    nonlocal _max_executors, _last_reported_executors
+                    if status.state == JobState.RUNNING:
+                        _max_executors = max(_max_executors, status.executor_count)
+                        if status.executor_count != _last_reported_executors:
+                            console.print(f"  Running... (executors: {status.executor_count})")
+                            _last_reported_executors = status.executor_count
+
+                result = monitor.wait_for_completion(
+                    f"lakebench-{stage_name}",
+                    timeout_seconds=timeout,
+                    poll_interval=15,
+                    progress_callback=on_progress,
                 )
-            else:
-                print_error(f"{stage_name} failed: {result.message}")
+
+                job_end = datetime.now()
+
+                # Build job metrics
+                job_metrics = JobMetrics(
+                    job_name=f"lakebench-{stage_name}",
+                    job_type=stage_name,
+                    start_time=job_start,
+                    end_time=job_end,
+                    elapsed_seconds=result.elapsed_seconds,
+                    success=result.success,
+                    error_message=result.message if not result.success else None,
+                    executor_count=_max_executors,
+                )
+
+                # Parse driver logs for data metrics if available
                 if result.driver_logs:
-                    console.print("[dim]Driver logs (last 20 lines):[/dim]")
-                    for line in result.driver_logs.split("\n")[-20:]:
-                        console.print(f"  {line}")
-                results.append((stage_name, False, result.elapsed_seconds))
-                _journal_safe(
-                    j.record,
-                    EventType.PIPELINE_STAGE,
-                    message=f"{stage_name} failed: {result.message}",
-                    success=False,
-                    details={
-                        "stage": stage_name,
-                        "success": False,
-                        "elapsed_seconds": result.elapsed_seconds,
-                    },
+                    parsed = collector.parse_driver_logs(result.driver_logs, stage_name)
+                    job_metrics.input_size_gb = parsed.input_size_gb
+                    job_metrics.output_size_gb = parsed.output_size_gb
+                    job_metrics.input_rows = parsed.input_rows
+                    job_metrics.output_rows = parsed.output_rows
+                    job_metrics.throughput_gb_per_second = parsed.throughput_gb_per_second
+                    job_metrics.throughput_rows_per_second = parsed.throughput_rows_per_second
+
+                # Populate resource metrics from job profile
+                _profile = get_job_profile(stage_name)
+                if _profile:
+                    _scale = cfg.architecture.workload.datagen.get_effective_scale()
+                    _expected_executors = get_executor_count(stage_name, _scale)
+
+                    # Check per-job executor override
+                    _override_map = {
+                        "bronze-verify": cfg.platform.compute.spark.bronze_executors,
+                        "silver-build": cfg.platform.compute.spark.silver_executors,
+                        "gold-finalize": cfg.platform.compute.spark.gold_executors,
+                    }
+                    _override = _override_map.get(stage_name)
+                    if _override is not None:
+                        _expected_executors = _override
+
+                    # Use deterministic count when progress callback didn't capture
+                    if job_metrics.executor_count == 0:
+                        job_metrics.executor_count = _expected_executors
+
+                    job_metrics.executor_cores = _profile["executor_cores"]
+                    _mem_gb = parse_spark_memory(_profile["executor_memory"]) / (1024**3)
+                    _overhead_gb = parse_spark_memory(_profile["executor_memory_overhead"]) / (
+                        1024**3
+                    )
+                    job_metrics.executor_memory_gb = _mem_gb
+
+                    # Requested CPU-seconds and peak memory
+                    job_metrics.cpu_seconds_requested = (
+                        job_metrics.executor_count
+                        * job_metrics.executor_cores
+                        * job_metrics.elapsed_seconds
+                    )
+                    job_metrics.memory_gb_requested = job_metrics.executor_count * (
+                        _mem_gb + _overhead_gb
+                    )
+
+                # Gold input fallback: gold reads from silver
+                if (
+                    stage_name == "gold-finalize"
+                    and job_metrics.input_size_gb == 0.0
+                    and collector.current_run
+                ):
+                    for _prev in collector.current_run.jobs:
+                        if _prev.job_type == "silver-build" and _prev.output_size_gb > 0:
+                            job_metrics.input_size_gb = _prev.output_size_gb
+                            if job_metrics.elapsed_seconds > 0:
+                                job_metrics.throughput_gb_per_second = (
+                                    job_metrics.input_size_gb / job_metrics.elapsed_seconds
+                                )
+                            break
+
+                # Measure per-stage S3 output size
+                _stage_bucket_map = {
+                    "bronze-verify": cfg.platform.storage.s3.buckets.bronze,
+                    "silver-build": cfg.platform.storage.s3.buckets.silver,
+                    "gold-finalize": cfg.platform.storage.s3.buckets.gold,
+                }
+                if stage_name in _stage_bucket_map and job_metrics.output_size_gb == 0:
+                    try:
+                        from lakebench.s3 import S3Client
+
+                        s3_cfg = cfg.platform.storage.s3
+                        _s3 = S3Client(
+                            endpoint=s3_cfg.endpoint,
+                            access_key=s3_cfg.access_key,
+                            secret_key=s3_cfg.secret_key,
+                            region=s3_cfg.region,
+                            path_style=s3_cfg.path_style,
+                        )
+                        _bucket_info = _s3.get_bucket_size(_stage_bucket_map[stage_name])
+                        if _bucket_info.size_bytes:
+                            job_metrics.output_size_gb = _bucket_info.size_bytes / (1024**3)
+                    except Exception as e:
+                        logger.warning("Could not measure %s bucket size: %s", stage_name, e)
+
+                collector.record_job(job_metrics)
+                _cycle_jobs.append(job_metrics)
+
+                if result.success:
+                    print_success(f"{stage_name} completed in {result.elapsed_seconds:.0f}s")
+                    results.append((stage_name, True, result.elapsed_seconds))
+                    _journal_safe(
+                        j.record,
+                        EventType.PIPELINE_STAGE,
+                        message=f"{stage_name} completed",
+                        success=True,
+                        details={
+                            "stage": stage_name,
+                            "success": True,
+                            "elapsed_seconds": result.elapsed_seconds,
+                            "input_gb": job_metrics.input_size_gb,
+                            "output_rows": job_metrics.output_rows,
+                        },
+                    )
+                else:
+                    print_error(f"{stage_name} failed: {result.message}")
+                    if result.driver_logs:
+                        console.print("[dim]Driver logs (last 20 lines):[/dim]")
+                        for line in result.driver_logs.split("\n")[-20:]:
+                            console.print(f"  {line}")
+                    results.append((stage_name, False, result.elapsed_seconds))
+                    _journal_safe(
+                        j.record,
+                        EventType.PIPELINE_STAGE,
+                        message=f"{stage_name} failed: {result.message}",
+                        success=False,
+                        details={
+                            "stage": stage_name,
+                            "success": False,
+                            "elapsed_seconds": result.elapsed_seconds,
+                        },
+                    )
+                    pipeline_success = False
+                    raise typer.Exit(1)
+
+            # Record CycleMetrics after all stages for this cycle (v1.1.0)
+            if total_cycles > 1:
+                _cycle_health: dict[str, int] = {}
+                try:
+                    _cycle_health = _probe_table_health(cfg, k8s)
+                except Exception:
+                    pass
+                from lakebench.metrics.collector import CycleMetrics as _CM
+
+                _cm = _CM(
+                    cycle_index=cycle_idx,
+                    timestamp_start=_cycle_ts_start,
+                    timestamp_end=_cycle_ts_end,
+                    datagen_elapsed_seconds=_cycle_dg_elapsed,
+                    jobs=list(_cycle_jobs),
+                    table_health=_cycle_health,
                 )
-                pipeline_success = False
-                raise typer.Exit(1)
+                if collector.current_run is not None:
+                    collector.current_run.cycles.append(_cm)
 
         # Summary
         console.print()
@@ -2766,6 +2830,18 @@ def run(
                 "total_seconds": total_time,
             },
         )
+
+        # Pre-benchmark maintenance (v1.1.0): compact + expire before
+        # measuring QpH so the benchmark reflects query engine performance,
+        # not Iceberg metadata overhead from accumulated writes.
+        if not skip_benchmark and cfg.architecture.pipeline.pre_benchmark_maintenance:
+            try:
+                console.print()
+                console.print("[bold]Pre-benchmark maintenance[/bold]")
+                _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold="0s")
+                _run_iceberg_compaction(cfg, k8s, console, j)
+            except Exception as e:
+                print_warning(f"Pre-benchmark maintenance failed (non-fatal): {e}")
 
         # Run Trino benchmark after pipeline completes
         if not skip_benchmark:
@@ -3155,6 +3231,117 @@ def _run_iceberg_maintenance(
     )
 
 
+def _run_iceberg_compaction(
+    cfg,
+    k8s,
+    console: Console,
+    j,
+    file_size_threshold: str = "128MB",
+) -> None:
+    """Run Iceberg compaction (optimize / rewrite_data_files).
+
+    Merges small files produced by streaming micro-batches or repeated
+    incremental writes.  Heavier than expire_snapshots.
+    DuckDB cannot run compaction -- skipped with a warning.
+    """
+    from lakebench.deploy.iceberg import (
+        build_compaction_sql,
+        exec_sql,
+        find_maintenance_engine,
+    )
+
+    namespace = cfg.get_namespace()
+    engine_type = cfg.architecture.query_engine.type.value
+
+    if engine_type == "duckdb":
+        console.print("  [dim]Iceberg compaction skipped (DuckDB read-only)[/dim]")
+        return
+
+    engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
+    if engine is None or pod_name is None or catalog is None:
+        console.print("  [dim]Iceberg compaction skipped (no capable engine pod found)[/dim]")
+        return
+
+    tables = cfg.architecture.tables
+    table_names = [
+        f"{catalog}.{tables.silver}",
+        f"{catalog}.{tables.gold}",
+    ]
+
+    compacted = 0
+    for table in table_names:
+        for sql in build_compaction_sql(engine, catalog, table, file_size_threshold):
+            try:
+                exec_sql(engine, k8s, pod_name, namespace, sql)
+                compacted += 1
+            except Exception as e:
+                logger.warning("Iceberg compaction failed for %s: %s", table, e)
+
+    console.print(
+        f"  Iceberg compaction ({engine}): {compacted}/{len(table_names)} "
+        f"tables (threshold: {file_size_threshold})"
+    )
+
+
+def _probe_table_health(cfg, k8s) -> dict[str, int]:
+    """Query Iceberg system tables for file/snapshot counts on silver and gold.
+
+    Returns a dict like {"silver_data_file_count": N, "silver_snapshot_count": N, ...}.
+    Returns empty dict if no engine is available.
+    """
+    from lakebench.deploy.iceberg import (
+        build_table_health_sql,
+        find_maintenance_engine,
+        query_sql,
+    )
+
+    namespace = cfg.get_namespace()
+    engine_type = cfg.architecture.query_engine.type.value
+
+    if engine_type == "duckdb":
+        return {}
+
+    engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
+    if engine is None or pod_name is None or catalog is None:
+        return {}
+
+    tables = cfg.architecture.tables
+    health: dict[str, int] = {}
+
+    for label, table_ref in [("silver", tables.silver), ("gold", tables.gold)]:
+        fq = f"{catalog}.{table_ref}"
+        for metric_name, sql in build_table_health_sql(engine, fq).items():
+            try:
+                import re as _re
+
+                stdout = query_sql(engine, k8s, pod_name, namespace, sql)
+                # Parse count from output.  Trino CLI prints a bare number;
+                # beeline wraps results in pipes and column headers.  Extract
+                # the first integer from any non-header line.
+                _found = False
+                for line in stdout.strip().splitlines():
+                    cleaned = line.strip().strip("|").strip().strip('"').strip()
+                    if not cleaned or cleaned.startswith("-"):
+                        continue
+                    # Skip column header lines (contain letters like "count")
+                    if _re.fullmatch(r"\d+", cleaned):
+                        health[f"{label}_{metric_name}"] = int(cleaned)
+                        _found = True
+                        break
+                    # Beeline tabular: number may be padded with spaces
+                    m = _re.fullmatch(r"\s*(\d+)\s*", cleaned)
+                    if m:
+                        health[f"{label}_{metric_name}"] = int(m.group(1))
+                        _found = True
+                        break
+                if not _found:
+                    health[f"{label}_{metric_name}"] = -1
+            except Exception:
+                health[f"{label}_{metric_name}"] = -1
+
+    return health
+
+
 def _run_benchmark_round(
     cfg,
     bench_runner,
@@ -3162,6 +3349,7 @@ def _run_benchmark_round(
     console,
     round_index: int,
     j,
+    k8s=None,
 ) -> None:
     """Execute a single in-stream benchmark round.
 
@@ -3177,6 +3365,17 @@ def _run_benchmark_round(
         round_index=round_index,
         timestamp=datetime.now(),
     )
+
+    # Table health probe (v1.1.0)
+    if k8s is not None:
+        try:
+            health = _probe_table_health(cfg, k8s)
+            round_meta.silver_data_file_count = health.get("silver_data_file_count", 0)
+            round_meta.silver_snapshot_count = health.get("silver_snapshot_count", 0)
+            round_meta.gold_data_file_count = health.get("gold_data_file_count", 0)
+            round_meta.gold_snapshot_count = health.get("gold_snapshot_count", 0)
+        except Exception:
+            pass  # Health probe failure should not block the benchmark
 
     # 1. Flush Trino metadata cache
     try:
@@ -3563,6 +3762,13 @@ def _run_sustained(
             f"Iceberg retention: every {retention_interval}s (threshold: {retention_threshold})"
         )
 
+        # Iceberg compaction scheduling (v1.1.0)
+        compaction_enabled = sustained_cfg.compaction_enabled
+        compaction_interval = sustained_cfg.compaction_interval
+        next_compaction_at = float(compaction_interval) if compaction_enabled else float("inf")
+        if compaction_enabled:
+            print_info(f"Iceberg compaction: every {compaction_interval}s")
+
         start = time.time()
         check_interval = 30
         # First round fires after warmup (no offset -- Q9 contention
@@ -3609,6 +3815,7 @@ def _run_sustained(
                     console=console,
                     round_index=round_index,
                     j=j,
+                    k8s=k8s,
                 )
                 last_round_seconds = time.time() - round_start
                 # Next round at interval from round completion
@@ -3620,11 +3827,17 @@ def _run_sustained(
                 _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold)
                 next_maintenance_at = (time.time() - start) + retention_interval
 
-            # Sleep until next event (health check, benchmark round, or maintenance)
+            # Iceberg compaction (v1.1.0)
+            if compaction_enabled and elapsed >= next_compaction_at:
+                _run_iceberg_compaction(cfg, k8s, console, j)
+                next_compaction_at = (time.time() - start) + compaction_interval
+
+            # Sleep until next event (health check, benchmark round, maintenance, or compaction)
             sleep_until = min(
                 elapsed + check_interval,
                 next_round_at if can_run_rounds else float("inf"),
                 next_maintenance_at,
+                next_compaction_at,
                 run_duration,
             )
             sleep_time = max(0, sleep_until - (time.time() - start))
@@ -3818,13 +4031,14 @@ def _run_sustained(
                 verify_ssl=s3_cfg.verify_ssl,
             )
             print_info("Measuring actual S3 bucket sizes...")
-            collector.record_actual_sizes(
+            _total_s3_objects = collector.record_actual_sizes(
                 s3_client,
                 s3_cfg.buckets.bronze,
                 s3_cfg.buckets.silver,
                 s3_cfg.buckets.gold,
             )
         except Exception as e:
+            _total_s3_objects = 0
             console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
 
         run_metrics = collector.end_run(success=pipeline_success)
@@ -3841,6 +4055,7 @@ def _run_sustained(
                     datagen_output_gb=_datagen_output_gb,
                     datagen_output_rows=_datagen_output_rows,
                 )
+                pb.total_s3_objects = _total_s3_objects
                 run_metrics.pipeline_benchmark = pb
                 if pb.pipeline_mode == PipelineMode.SUSTAINED.value:
                     if pb.sustained_throughput_rps > 0:

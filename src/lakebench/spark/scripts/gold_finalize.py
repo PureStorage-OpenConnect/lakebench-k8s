@@ -286,6 +286,12 @@ if silver_count == 0:
 # Determine and execute strategy
 strategy = determine_gold_strategy(spark, silver_tbl, gold_tbl)
 
+# Incremental mode override: forces INCREMENTAL strategy regardless of
+# data size.  Set by lakebench for batch cycles 2+ in multi-cycle runs.
+if os.environ.get("LB_GOLD_INCREMENTAL", "false").lower() == "true":
+    log("INCREMENTAL MODE: forced by LB_GOLD_INCREMENTAL env var")
+    strategy = GoldStrategy.INCREMENTAL
+
 if strategy == GoldStrategy.SIMPLE_AGG:
     kpi_count = gold_simple_agg(spark, silver_tbl, gold_tbl)
 elif strategy == GoldStrategy.TWO_PHASE_AGG:

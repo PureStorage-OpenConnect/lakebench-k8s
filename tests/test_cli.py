@@ -631,3 +631,64 @@ class TestRunIcebergMaintenance:
             _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
 
         k8s.exec_in_pod.assert_not_called()
+
+
+class TestRunIcebergCompaction:
+    """Tests for _run_iceberg_compaction() helper (v1.1.0)."""
+
+    def _make_cfg(self, engine_type="trino"):
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.get_namespace.return_value = "lakebench-test"
+        cfg.architecture.query_engine.type.value = engine_type
+        cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
+        cfg.architecture.query_engine.spark_thrift.catalog_name = "lakehouse"
+        cfg.architecture.tables.silver = "silver.customer_interactions_enriched"
+        cfg.architecture.tables.gold = "gold.customer_executive_dashboard"
+        return cfg
+
+    def test_runs_compaction_trino(self):
+        """Compaction runs optimize on silver and gold via Trino."""
+        from unittest.mock import MagicMock, patch
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_compaction
+
+        cfg = self._make_cfg("trino")
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        mock_pod = MagicMock()
+        mock_pod.metadata.name = "trino-coordinator-0"
+        mock_pod_list = MagicMock()
+        mock_pod_list.items = [mock_pod]
+
+        with patch("kubernetes.client") as mock_core:
+            mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
+            _run_iceberg_compaction(cfg, k8s, console, j)
+
+        # 2 tables * 1 compaction operation = 2 exec_in_pod calls
+        assert k8s.exec_in_pod.call_count == 2
+        for call in k8s.exec_in_pod.call_args_list:
+            cmd = call[0][1]
+            assert cmd[0] == "trino"
+            assert "optimize" in cmd[2].lower()
+
+    def test_skips_for_duckdb(self):
+        """DuckDB is read-only -- compaction skipped."""
+        from unittest.mock import MagicMock
+
+        from rich.console import Console
+
+        from lakebench.cli import _run_iceberg_compaction
+
+        cfg = self._make_cfg("duckdb")
+        k8s = MagicMock()
+        console = Console(quiet=True)
+        j = MagicMock()
+
+        _run_iceberg_compaction(cfg, k8s, console, j)
+        k8s.exec_in_pod.assert_not_called()
