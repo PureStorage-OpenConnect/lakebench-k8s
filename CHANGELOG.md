@@ -4,6 +4,84 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.1.0] - 2026-03-05
+
+### Added
+- **Iterative batch cycles.** New `pipeline.cycles` config field (1-50) runs N
+  batch iterations where cycle 1 is full overwrite and cycles 2-N are incremental
+  append/merge, simulating multi-day lakehouse behavior. Per-cycle datagen splits
+  the timestamp range evenly across cycles.
+- **Iceberg compaction.** New `build_compaction_sql()` in `deploy/iceberg.py`
+  runs `optimize` (Trino) or `rewrite_data_files` (Spark Thrift) to merge small
+  files. Pre-benchmark maintenance (`pipeline.pre_benchmark_maintenance`, default
+  true) runs compaction + expire before QpH measurement. Sustained mode runs
+  compaction on a separate timer (`sustained.compaction_interval`, default 2x
+  retention_interval).
+- **Table health tracking.** `BenchmarkRoundMeta` now captures
+  `silver_data_file_count`, `silver_snapshot_count`, `gold_data_file_count`,
+  `gold_snapshot_count` from Iceberg system tables at each benchmark round.
+- **QpH degradation metric.** `qph_degradation_pct` in sustained scores
+  compares first-half vs second-half median QpH across in-stream benchmark
+  rounds (requires 4+ rounds). Positive = degradation.
+- **`CycleMetrics` dataclass.** Per-cycle metrics including datagen timing,
+  job metrics, benchmark results, and table health snapshot.
+- **`cycle_progression` batch score.** When `cycles > 1`, the scores dict
+  includes per-cycle elapsed time, QpH, and table health.
+- **`query_sql()` in `deploy/iceberg.py`.** Variant of `exec_sql` that returns
+  stdout for table health queries.
+- **`build_table_health_sql()` in `deploy/iceberg.py`.** Generates queries for
+  Iceberg `$files` and `$snapshots` system tables.
+- **Interactive init wizard.** `lakebench init` now launches a 5-step guided
+  wizard by default (identity, recipe, storage, workload, review). Includes
+  Rich-formatted panels, inline S3 connectivity validation, config preview
+  with syntax highlighting, and back-navigation between steps. Use
+  `--no-interactive` for scripted/CI usage. Passing `--endpoint`/`--access-key`/
+  `--secret-key` flags auto-skips the wizard.
+
+### Changed
+- Spark scripts (`silver_build.py`, `gold_finalize.py`) support incremental
+  mode via `LB_SILVER_INCREMENTAL` and `LB_GOLD_INCREMENTAL` env vars.
+- `submit_job()` in `spark/job.py` accepts optional `cycle_env` dict for
+  per-cycle environment variable injection.
+- `DatagenDeployer` gains `deploy_cycle()` method for per-cycle timestamp
+  window and scaled-down data volume.
+
+### Fixed
+- **Spark Thrift benchmark Q2 and Q6 returning 0 rows.** Benchmark queries use
+  Trino SQL as the canonical dialect.  Q2's `date_add('month', 3, expr)` and
+  Q6's `DATE_DIFF('day', start, end)` are Trino-specific 3-arg forms that
+  Spark SQL silently misinterprets.  `SparkThriftExecutor.adapt_query()` now
+  rewrites these to `add_months()` and `DATEDIFF()` respectively.
+- **DuckDB benchmark returning 0 rows for all queries.** Three issues:
+  (1) `DuckDBExecutor.adapt_query()` never provided the S3 warehouse location
+  to `iceberg_scan()` -- now rewrites `catalog.namespace.table` references to
+  `iceberg_scan('s3://bucket/warehouse/namespace.db/table')` with Hive's `.db`
+  directory convention, `allow_moved_paths`, and `unsafe_enable_version_guessing`.
+  (2) Multi-line SQL from benchmark queries broke the `python -c` one-liner
+  with an unterminated string literal -- now collapsed to a single line via
+  `" ".join(sql.split())` before embedding in the script.
+  (3) Q2's Trino `date_add('month', 3, expr)` unsupported by DuckDB -- added
+  `_rewrite_date_add()` that translates to `(expr + INTERVAL 3 MONTH)`.
+  (4) DuckDB pod startup installed the Python package but not the `iceberg`
+  and `httpfs` extensions -- updated `deployment.yaml.j2` startup command
+  to `INSTALL` both extensions and startup probe to verify they load.
+- **Streaming log parser missing empty batches.** Silver and gold streaming
+  jobs log `"Batch N: empty, skipping"` when a micro-batch has no data, but
+  `parse_streaming_logs()` only matched data-carrying patterns.  Empty silver
+  and gold batches are now counted (bronze empty batches remain excluded).
+- **Table health probe always returning -1.** Two bugs: (1) `build_table_health_sql`
+  wrapped the full qualified name in double quotes (`"catalog.schema.table$files"`),
+  which Trino interprets as a single identifier with literal dots -- fixed by
+  quoting only the table segment (`catalog.schema."table$files"`).
+  (2) `_probe_table_health()` used `isdigit()` to extract counts from output,
+  which fails on padded lines -- switched to regex-based extraction.
+  (3) Trino CLI wraps scalar results in double quotes (`"91"`); the parsing
+  now strips quotes before numeric matching.
+- **CycleMetrics not populated in multi-cycle batch runs.** The CLI cycle
+  loop referenced `collector.cycles` (non-existent) instead of
+  `collector.current_run.cycles`.  Also, `build_pipeline_benchmark()` was
+  not passing cycles from the run to the benchmark object.
+
 ## [1.0.12] - 2026-03-04
 
 ### Added
@@ -17,6 +95,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Timestamp range documentation.** Config YAML and user docs now document
   the impact of `timestamp_start`/`timestamp_end` on Iceberg partition count
   and sustained-mode small-file proliferation.
+- **`total_s3_objects` sustained score.** Counts total S3 objects across
+  bronze/silver/gold buckets at end of run. Signals whether retention is
+  keeping pace with snapshot growth.
 
 ### Fixed
 - **S3 bucket creation during deploy.** `deploy_all()` now creates S3 buckets

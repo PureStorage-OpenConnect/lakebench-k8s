@@ -1153,3 +1153,126 @@ architecture:
                 name="test",
                 architecture={"benchmark": {"iterations": 101}},
             )
+
+
+# ---------------------------------------------------------------------------
+# Batch Cycles Config (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestBatchCyclesConfig:
+    """Tests for pipeline.cycles and pre_benchmark_maintenance fields."""
+
+    def test_cycles_default(self):
+        config = LakebenchConfig(name="test")
+        assert config.architecture.pipeline.cycles == 1
+
+    def test_pre_benchmark_maintenance_default(self):
+        config = LakebenchConfig(name="test")
+        assert config.architecture.pipeline.pre_benchmark_maintenance is True
+
+    def test_cycles_custom(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"cycles": 5}},
+        )
+        assert config.architecture.pipeline.cycles == 5
+
+    def test_cycles_minimum_boundary(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"cycles": 1}},
+        )
+        assert config.architecture.pipeline.cycles == 1
+
+    def test_cycles_maximum_boundary(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"cycles": 50}},
+        )
+        assert config.architecture.pipeline.cycles == 50
+
+    def test_cycles_below_minimum_rejected(self):
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={"processing": {"cycles": 0}},
+            )
+
+    def test_cycles_above_maximum_rejected(self):
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={"processing": {"cycles": 51}},
+            )
+
+    def test_cycles_gt1_requires_batch_mode(self):
+        """cycles > 1 is invalid with sustained mode."""
+        with pytest.raises(Exception):  # noqa: B017
+            LakebenchConfig(
+                name="test",
+                architecture={"processing": {"mode": "sustained", "cycles": 3}},
+            )
+
+    def test_cycles_1_with_sustained_mode_ok(self):
+        """cycles=1 (default) is fine with sustained mode."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"mode": "sustained"}},
+        )
+        assert config.architecture.pipeline.cycles == 1
+
+    def test_pre_benchmark_maintenance_false(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"pre_benchmark_maintenance": False}},
+        )
+        assert config.architecture.pipeline.pre_benchmark_maintenance is False
+
+
+# ---------------------------------------------------------------------------
+# Sustained Compaction Config (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestSustainedCompactionConfig:
+    """Tests for compaction_enabled and compaction_interval on SustainedConfig."""
+
+    def test_compaction_defaults(self):
+        config = LakebenchConfig(name="test")
+        c = config.architecture.pipeline.sustained
+        assert c.compaction_enabled is True
+        # Default compaction_interval=0 resolves to 2x retention_interval
+        assert c.compaction_interval == c.retention_interval * 2
+
+    def test_compaction_disabled(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={"processing": {"sustained": {"compaction_enabled": False}}},
+        )
+        assert config.architecture.pipeline.sustained.compaction_enabled is False
+
+    def test_compaction_interval_custom(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "sustained": {"compaction_interval": 7200},
+                },
+            },
+        )
+        assert config.architecture.pipeline.sustained.compaction_interval == 7200
+
+    def test_compaction_interval_zero_resolves_to_2x_retention(self):
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "processing": {
+                    "sustained": {
+                        "retention_interval": 600,
+                        "compaction_interval": 0,
+                    },
+                },
+            },
+        )
+        assert config.architecture.pipeline.sustained.compaction_interval == 1200

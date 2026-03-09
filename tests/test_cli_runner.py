@@ -408,3 +408,216 @@ class TestReportSummary:
         assert result.exit_code == 0
         assert "Report Generated" in result.output
         assert "Benchmark Summary" not in result.output
+
+
+# =============================================================================
+# Init wizard unit tests (v1.1.0)
+# =============================================================================
+
+
+class TestInitWizard:
+    """Tests for the init wizard steps and state."""
+
+    def test_wizard_state_defaults(self):
+        from lakebench.init_wizard import WizardState
+
+        s = WizardState()
+        assert s.name == "my-lakehouse"
+        assert s.namespace == ""
+        assert s.recipe == ""
+        assert s.endpoint == ""
+        assert s.scale == 10
+        assert s.mode == "batch"
+        assert s.cycles == 1
+
+    def test_step_identity(self):
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        from lakebench.init_wizard import WizardState, step_identity
+
+        state = WizardState()
+        console = Console(quiet=True)
+
+        with patch("typer.prompt", side_effect=["test-lake", "test-ns"]):
+            ok = step_identity(console, state)
+
+        assert ok is True
+        assert state.name == "test-lake"
+        assert state.namespace == "test-ns"
+
+    def test_step_identity_back(self):
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        from lakebench.init_wizard import WizardState, step_identity
+
+        state = WizardState()
+        console = Console(quiet=True)
+
+        with patch("typer.prompt", return_value="back"):
+            ok = step_identity(console, state)
+
+        assert ok is False
+
+    def test_step_recipe(self):
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        from lakebench.init_wizard import WizardState, step_recipe
+
+        state = WizardState()
+        console = Console(quiet=True)
+
+        # Select recipe #1 (default)
+        with patch("typer.prompt", return_value="1"):
+            ok = step_recipe(console, state)
+
+        assert ok is True
+        assert state.recipe == "default"
+
+    def test_step_storage(self):
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        from lakebench.init_wizard import WizardState, step_storage
+
+        state = WizardState()
+        console = Console(quiet=True)
+
+        # Endpoint, access key, secret key, region
+        with patch(
+            "typer.prompt", side_effect=["http://minio:9000", "admin", "secret", "us-east-1"]
+        ):
+            ok = step_storage(console, state)
+
+        assert ok is True
+        assert state.endpoint == "http://minio:9000"
+        assert state.access_key == "admin"
+        assert state.secret_key == "secret"
+
+    def test_step_workload_batch(self):
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        from lakebench.init_wizard import WizardState, step_workload
+
+        state = WizardState()
+        console = Console(quiet=True)
+
+        # Scale=100, mode=batch(1), cycles=3
+        with patch("typer.prompt", side_effect=["100", "1", "3"]):
+            ok = step_workload(console, state)
+
+        assert ok is True
+        assert state.scale == 100
+        assert state.mode == "batch"
+        assert state.cycles == 3
+
+    def test_step_workload_sustained(self):
+        from unittest.mock import patch
+
+        from rich.console import Console
+
+        from lakebench.init_wizard import WizardState, step_workload
+
+        state = WizardState()
+        console = Console(quiet=True)
+
+        # Scale=10, mode=sustained(2) -- no cycles prompt for sustained
+        with patch("typer.prompt", side_effect=["10", "2"]):
+            ok = step_workload(console, state)
+
+        assert ok is True
+        assert state.mode == "sustained"
+        assert state.cycles == 1
+
+    def test_step_review(self):
+        from rich.console import Console
+
+        from lakebench.init_wizard import WizardState, step_review
+
+        state = WizardState(
+            name="test-lake",
+            namespace="test-ns",
+            endpoint="http://s3:80",
+            access_key="key",
+            secret_key="secret",
+            scale=10,
+        )
+        console = Console(quiet=True)
+        ok = step_review(console, state)
+        assert ok is True
+        assert state.config_yaml != ""
+        assert "test-lake" in state.config_yaml
+
+    def test_build_config_yaml_sustained(self):
+        from lakebench.init_wizard import WizardState, _build_config_yaml
+
+        state = WizardState(
+            name="stream-lake",
+            mode="sustained",
+            endpoint="http://s3:80",
+            access_key="a",
+            secret_key="b",
+        )
+        yaml = _build_config_yaml(state)
+        assert "mode: sustained" in yaml
+
+    def test_build_config_yaml_cycles(self):
+        from lakebench.init_wizard import WizardState, _build_config_yaml
+
+        state = WizardState(
+            name="cycle-lake",
+            mode="batch",
+            cycles=5,
+            endpoint="http://s3:80",
+            access_key="a",
+            secret_key="b",
+        )
+        yaml = _build_config_yaml(state)
+        assert "cycles: 5" in yaml
+
+    def test_validate_endpoint(self):
+        from lakebench.init_wizard import _validate_endpoint
+
+        assert _validate_endpoint("http://minio:9000") is None
+        assert _validate_endpoint("https://s3.amazonaws.com") is None
+        assert _validate_endpoint("") is not None
+        assert _validate_endpoint("ftp://bad") is not None
+        assert _validate_endpoint("just-a-hostname") is not None
+
+    def test_init_no_interactive_with_flags(self, tmp_path, monkeypatch):
+        """When flags are passed, wizard is skipped even though interactive=True default."""
+        monkeypatch.chdir(tmp_path)
+        output = tmp_path / "flagged.yaml"
+        result = runner.invoke(
+            app,
+            [
+                "init",
+                "--output",
+                str(output),
+                "--endpoint",
+                "http://minio:9000",
+                "--access-key",
+                "aaa",
+                "--secret-key",
+                "bbb",
+            ],
+        )
+        assert result.exit_code == 0
+        content = output.read_text()
+        assert "http://minio:9000" in content
+
+    def test_init_no_interactive_explicit(self, tmp_path, monkeypatch):
+        """--no-interactive creates config without wizard."""
+        monkeypatch.chdir(tmp_path)
+        output = tmp_path / "nointeractive.yaml"
+        result = runner.invoke(app, ["init", "--output", str(output), "--no-interactive"])
+        assert result.exit_code == 0
+        assert output.exists()

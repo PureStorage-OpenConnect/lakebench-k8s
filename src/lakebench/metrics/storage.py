@@ -30,6 +30,7 @@ from lakebench._constants import DEFAULT_OUTPUT_DIR
 from .collector import (
     BenchmarkMetrics,
     BenchmarkRoundMeta,
+    CycleMetrics,
     JobMetrics,
     PipelineBenchmark,
     PipelineMetrics,
@@ -67,6 +68,8 @@ def _deserialize_benchmark_rounds(raw_rounds: list[dict[str, Any]]) -> list[Benc
         round_meta = None
         rm = r.get("round_meta")
         if rm:
+            # Table health fields from v1.1.0
+            th = rm.get("table_health", {})
             round_meta = BenchmarkRoundMeta(
                 round_index=rm.get("round_index", 0),
                 timestamp=(
@@ -75,6 +78,16 @@ def _deserialize_benchmark_rounds(raw_rounds: list[dict[str, Any]]) -> list[Benc
                 gold_freshness_seconds=rm.get("gold_freshness_seconds", 0.0),
                 q9_contention_observed=rm.get("q9_contention_observed", False),
                 q9_retry_used=rm.get("q9_retry_used", False),
+                silver_data_file_count=th.get(
+                    "silver_data_file_count", rm.get("silver_data_file_count", 0)
+                ),
+                silver_snapshot_count=th.get(
+                    "silver_snapshot_count", rm.get("silver_snapshot_count", 0)
+                ),
+                gold_data_file_count=th.get(
+                    "gold_data_file_count", rm.get("gold_data_file_count", 0)
+                ),
+                gold_snapshot_count=th.get("gold_snapshot_count", rm.get("gold_snapshot_count", 0)),
             )
         rounds.append(
             BenchmarkMetrics(
@@ -91,6 +104,52 @@ def _deserialize_benchmark_rounds(raw_rounds: list[dict[str, Any]]) -> list[Benc
             )
         )
     return rounds
+
+
+def _deserialize_cycles(raw_cycles: list[dict[str, Any]]) -> list[CycleMetrics]:
+    """Deserialize cycle metrics from JSON."""
+    cycles: list[CycleMetrics] = []
+    for c in raw_cycles:
+        jobs = []
+        for jd in c.get("jobs", []):
+            jobs.append(
+                JobMetrics(
+                    job_name=jd.get("job_name", ""),
+                    job_type=jd.get("job_type", ""),
+                    elapsed_seconds=jd.get("elapsed_seconds", 0),
+                    success=jd.get("success", False),
+                    error_message=jd.get("error_message"),
+                    input_size_gb=jd.get("input_size_gb", 0),
+                    output_size_gb=jd.get("output_size_gb", 0),
+                    input_rows=jd.get("input_rows", 0),
+                    output_rows=jd.get("output_rows", 0),
+                )
+            )
+        bench = None
+        bd = c.get("benchmark")
+        if bd:
+            bench = BenchmarkMetrics(
+                mode=bd.get("mode", "power"),
+                cache=bd.get("cache", "hot"),
+                scale=bd.get("scale", 0),
+                qph=bd.get("qph", 0.0),
+                total_seconds=bd.get("total_seconds", 0.0),
+                queries=bd.get("queries", []),
+                iterations=bd.get("iterations", 1),
+            )
+        cycles.append(
+            CycleMetrics(
+                cycle_index=c.get("cycle_index", 0),
+                timestamp_start=c.get("timestamp_start", ""),
+                timestamp_end=c.get("timestamp_end", ""),
+                datagen_elapsed_seconds=c.get("datagen_elapsed_seconds", 0.0),
+                datagen_output_gb=c.get("datagen_output_gb", 0.0),
+                jobs=jobs,
+                benchmark=bench,
+                table_health=c.get("table_health", {}),
+            )
+        )
+    return cycles
 
 
 class MetricsStorage:
@@ -347,6 +406,7 @@ class MetricsStorage:
             config_snapshot=data.get("config_snapshot", {}),
             benchmark_rounds=top_rounds,
             platform_metrics=data.get("platform_metrics"),
+            cycles=_deserialize_cycles(data.get("cycles", [])),
         )
 
         if data.get("end_time"):
@@ -452,10 +512,13 @@ class MetricsStorage:
                     "ingest_ratio", scores.get("ingestion_completeness_ratio", 0.0)
                 ),
                 pipeline_saturated=scores.get("pipeline_saturated", False),
+                total_s3_objects=scores.get("total_s3_objects", 0),
                 query_benchmark=query_benchmark,
                 config_snapshot=pb_data.get("config_snapshot", {}),
                 success=pb_data.get("success", False),
                 benchmark_rounds=_deserialize_benchmark_rounds(pb_data.get("benchmark_rounds", [])),
+                cycles=_deserialize_cycles(pb_data.get("cycles", [])),
+                qph_degradation_pct=scores.get("qph_degradation_pct"),
             )
             if pb_data.get("end_time"):
                 metrics.pipeline_benchmark.end_time = datetime.fromisoformat(pb_data["end_time"])

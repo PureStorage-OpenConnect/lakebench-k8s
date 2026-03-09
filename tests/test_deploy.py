@@ -621,3 +621,109 @@ class TestPolarisDeployer:
         assert ctx["polaris_version"] == "1.3.0-incubating"
         assert ctx["polaris_cpu"] == "1"
         assert ctx["polaris_memory"] == "2Gi"
+
+
+# ---------------------------------------------------------------------------
+# Iceberg SQL builders (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCompactionSql:
+    """Tests for build_compaction_sql() in deploy/iceberg.py."""
+
+    def test_trino_compaction(self):
+        from lakebench.deploy.iceberg import build_compaction_sql
+
+        sqls = build_compaction_sql(
+            "trino", "lakehouse", "lakehouse.silver.customer_interactions_enriched"
+        )
+        assert len(sqls) == 1
+        assert "optimize" in sqls[0].lower()
+        assert "128MB" in sqls[0]
+
+    def test_trino_compaction_custom_threshold(self):
+        from lakebench.deploy.iceberg import build_compaction_sql
+
+        sqls = build_compaction_sql(
+            "trino", "lakehouse", "lakehouse.silver.t", file_size_threshold="256MB"
+        )
+        assert "256MB" in sqls[0]
+
+    def test_spark_thrift_compaction(self):
+        from lakebench.deploy.iceberg import build_compaction_sql
+
+        sqls = build_compaction_sql(
+            "spark-thrift", "lakehouse", "lakehouse.silver.customer_interactions_enriched"
+        )
+        assert len(sqls) == 1
+        assert "rewrite_data_files" in sqls[0]
+
+
+class TestBuildTableHealthSql:
+    """Tests for build_table_health_sql() in deploy/iceberg.py."""
+
+    def test_trino_health_queries(self):
+        from lakebench.deploy.iceberg import build_table_health_sql
+
+        result = build_table_health_sql("trino", "lakehouse.silver.t")
+        assert "data_file_count" in result
+        assert "snapshot_count" in result
+        assert "$files" in result["data_file_count"]
+        assert "$snapshots" in result["snapshot_count"]
+
+    def test_spark_thrift_health_queries(self):
+        from lakebench.deploy.iceberg import build_table_health_sql
+
+        result = build_table_health_sql("spark-thrift", "lakehouse.silver.t")
+        assert "data_file_count" in result
+        assert "snapshot_count" in result
+        assert ".files" in result["data_file_count"]
+        assert ".snapshots" in result["snapshot_count"]
+
+
+# ---------------------------------------------------------------------------
+# Datagen cycle timestamp range (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestDatagenCycleTimestampRange:
+    """Tests for DatagenDeployer._cycle_timestamp_range()."""
+
+    def test_single_cycle(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        start, end = DatagenDeployer._cycle_timestamp_range(0, 1, "2024-01-01", "2024-12-31")
+        assert start == "2024-01-01"
+        assert end == "2024-12-31"
+
+    def test_two_cycles_first(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        start, end = DatagenDeployer._cycle_timestamp_range(0, 2, "2024-01-01", "2024-12-31")
+        assert start == "2024-01-01"
+        # ~182 days per cycle
+        assert end < "2024-12-31"
+
+    def test_two_cycles_last_gets_remainder(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        start, end = DatagenDeployer._cycle_timestamp_range(1, 2, "2024-01-01", "2024-12-31")
+        assert end == "2024-12-31"
+
+    def test_cycles_non_overlapping(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        ranges = []
+        for i in range(3):
+            s, e = DatagenDeployer._cycle_timestamp_range(i, 3, "2024-01-01", "2024-12-31")
+            ranges.append((s, e))
+        # Each cycle starts at or after previous cycle ends
+        for i in range(1, len(ranges)):
+            assert ranges[i][0] >= ranges[i - 1][1]
+
+    def test_default_timestamps(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        start, end = DatagenDeployer._cycle_timestamp_range(0, 1)
+        assert start == "2024-01-01"
+        assert end == "2025-12-31"

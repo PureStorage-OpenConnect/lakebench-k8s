@@ -628,6 +628,19 @@ class SustainedConfig(BaseModel):
         ),
     )
 
+    # Iceberg compaction -- periodic rewrite_data_files / optimize to
+    # merge small files produced by streaming micro-batches.  Heavier
+    # than expire_snapshots, so it runs less frequently.
+    compaction_enabled: bool = Field(
+        default=True,
+        description="Enable periodic Iceberg compaction (rewrite_data_files) during sustained runs",
+    )
+    compaction_interval: int = Field(
+        default=0,
+        ge=0,
+        description=("Seconds between compaction rounds. 0 = auto (2x retention_interval)."),
+    )
+
     # In-stream benchmark settings -- controls periodic benchmark
     # rounds that run while streaming jobs are active.  Both warmup
     # and interval are hard-floored to gold_refresh_interval so that
@@ -676,6 +689,9 @@ class SustainedConfig(BaseModel):
             self.benchmark_warmup = gold_s
         if self.benchmark_interval < gold_s:
             self.benchmark_interval = gold_s
+        # Resolve compaction_interval=0 to 2x retention_interval
+        if self.compaction_interval == 0:
+            self.compaction_interval = self.retention_interval * 2
         return self
 
 
@@ -684,6 +700,20 @@ class ProcessingConfig(BaseModel):
 
     pattern: ProcessingPattern = ProcessingPattern.MEDALLION
     mode: PipelineMode = PipelineMode.BATCH
+    cycles: int = Field(
+        default=1,
+        ge=1,
+        le=50,
+        description=(
+            "Number of batch iterations. "
+            "Cycle 1 = full overwrite (current behavior), "
+            "cycles 2-N = incremental append/merge."
+        ),
+    )
+    pre_benchmark_maintenance: bool = Field(
+        default=True,
+        description="Run Iceberg compaction + expire_snapshots before benchmark for clean QpH",
+    )
     medallion: MedallionConfig = Field(default_factory=MedallionConfig)
     sustained: SustainedConfig = Field(default_factory=SustainedConfig)
 
@@ -723,6 +753,15 @@ class ProcessingConfig(BaseModel):
             )
             return "sustained"
         return v
+
+    @model_validator(mode="after")
+    def _validate_cycles(self) -> ProcessingConfig:
+        """Ensure cycles > 1 is only used with batch mode."""
+        if self.cycles > 1 and self.mode != PipelineMode.BATCH:
+            raise ValueError(
+                "cycles > 1 requires pipeline mode 'batch' (sustained mode has its own iteration model)"
+            )
+        return self
 
 
 class DatagenCheckpointConfig(BaseModel):

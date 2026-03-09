@@ -1481,3 +1481,32 @@ class TestPolarisSparkManifest:
         assert "spark.sql.catalog.lakehouse.s3.access-key-id" in spark_conf
         assert "spark.sql.catalog.lakehouse.s3.secret-access-key" in spark_conf
         assert "spark.sql.catalog.lakehouse.s3.endpoint" in spark_conf
+
+
+class TestCycleEnv:
+    """Tests for cycle_env parameter in _build_manifest (v1.1.0)."""
+
+    def test_cycle_env_adds_env_vars(self):
+        config = _make_config()
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+
+        cycle_env = {"LB_SILVER_INCREMENTAL": "true", "LB_GOLD_INCREMENTAL": "true"}
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD, cycle_env=cycle_env)
+        env = manifest["spec"]["driver"]["env"]
+        env_dict = {e["name"]: e.get("value") for e in env}
+
+        assert env_dict.get("LB_SILVER_INCREMENTAL") == "true"
+        assert env_dict.get("LB_GOLD_INCREMENTAL") == "true"
+
+    def test_no_cycle_env_no_extra_vars(self):
+        config = _make_config()
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        env = manifest["spec"]["driver"]["env"]
+        env_names = [e["name"] for e in env]
+
+        assert "LB_SILVER_INCREMENTAL" not in env_names
+        assert "LB_GOLD_INCREMENTAL" not in env_names
