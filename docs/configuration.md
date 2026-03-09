@@ -239,6 +239,13 @@ architecture:
     pattern: medallion                # medallion | streaming | batch
 
     # Sustained pipeline tuning (active when mode: sustained or --sustained flag).
+    # Iterative batch cycles (v1.1.0). Runs N batch iterations where cycle 1
+    # is full overwrite and cycles 2-N are incremental append/merge. Simulates
+    # multi-day lakehouse table growth. Datagen timestamp range is split evenly
+    # across cycles so each cycle adds new data.
+    cycles: 1                         # 1 = single batch (default). 2-50 = multi-cycle.
+    pre_benchmark_maintenance: true   # Compact + expire before benchmark (recommended)
+
     sustained:
       bronze_trigger_interval: "30 seconds"
       silver_trigger_interval: "60 seconds"
@@ -461,6 +468,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 |---|---|---|---|
 | `architecture.pipeline.mode` | enum | `batch` | Pipeline execution mode: `batch` (sequential medallion jobs) or `sustained` (concurrent streaming jobs). The `--sustained` CLI flag overrides this. |
 | `architecture.pipeline.pattern` | enum | `medallion` | Pipeline pattern: `medallion`, `streaming`, `batch`, or `custom`. |
+| `architecture.pipeline.cycles` | int | `1` | Batch iterations (1--50). Cycle 1 is full overwrite; cycles 2+ are incremental append/merge. Simulates multi-day lakehouse behavior. Only valid when `mode: batch`. See [Multi-Cycle Batch](#multi-cycle-batch). |
+| `architecture.pipeline.pre_benchmark_maintenance` | bool | `true` | Run Iceberg compaction + expire_snapshots before the benchmark phase. Ensures QpH is measured against compacted tables, not fragmented small files from multi-cycle ingestion. |
 | `architecture.pipeline.sustained.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
 | `architecture.pipeline.sustained.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
 | `architecture.pipeline.sustained.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
@@ -471,6 +480,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.sustained.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
 | `architecture.pipeline.sustained.retention_interval` | int | `1800` | Seconds between Iceberg maintenance rounds (`expire_snapshots` + `remove_orphan_files`). Range: 300--7200. |
 | `architecture.pipeline.sustained.retention_threshold` | string | `30m` | Iceberg snapshot retention threshold. Snapshots older than this are expired. Uses Trino duration format (e.g., `30m`, `1h`, `7d`). |
+| `architecture.pipeline.sustained.compaction_enabled` | bool | `true` | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during sustained runs. |
+| `architecture.pipeline.sustained.compaction_interval` | int | `0` | Seconds between compaction rounds. `0` = 2x `retention_interval` (default: 3600s). Range: 0--14400. |
 
 ### Architecture -- Workload & Datagen
 
@@ -600,6 +611,60 @@ Executor counts auto-scale with the scale factor unless overridden by the
 `bronze_executors`, `silver_executors`, or `gold_executors` fields. Per-executor
 sizing (cores, memory, PVC size) is fixed from proven production profiles and
 does not change with scale.
+
+## Multi-Cycle Batch
+
+The `pipeline.cycles` field (v1.1.0) runs N batch iterations to simulate
+multi-day lakehouse behavior. Cycle 1 creates tables via full overwrite.
+Cycles 2-N use incremental append/merge, accumulating snapshots and data
+files like a production table that receives daily loads.
+
+```yaml
+architecture:
+  pipeline:
+    cycles: 3                         # 3 batch iterations
+    pre_benchmark_maintenance: true   # compact before benchmark
+```
+
+### How it works
+
+1. The configured datagen timestamp range is split evenly across cycles.
+   Each cycle generates data for its portion of the range.
+2. Cycle 1 runs standard `createOrReplace` for silver and gold tables.
+3. Cycles 2+ set `LB_SILVER_INCREMENTAL=true` and `LB_GOLD_INCREMENTAL=true`,
+   switching silver-build to `.append()` and gold-finalize to incremental
+   merge based on a watermark on `max(interaction_date)`.
+4. After all cycles, if `pre_benchmark_maintenance` is true, Lakebench runs
+   `expire_snapshots` (with `retention_threshold='0s'`) and Iceberg
+   compaction (`optimize` on Trino or `rewrite_data_files` on Spark Thrift)
+   before the benchmark phase.
+
+### Table health tracking
+
+At each cycle boundary, Lakebench probes Iceberg system tables to capture:
+- `silver_data_file_count` / `gold_data_file_count` -- number of data files
+- `silver_snapshot_count` / `gold_snapshot_count` -- number of snapshots
+
+These appear in the `cycles[].table_health` section of `metrics.json` and
+in the `cycle_progression` score when `cycles > 1`.
+
+### When to use multi-cycle
+
+- **Measuring QpH degradation.** After 5+ cycles, compare QpH against a
+  single-cycle run at the same scale. The `cycle_progression` score shows
+  per-cycle elapsed time and table health growth.
+- **Testing compaction effectiveness.** Run with and without
+  `pre_benchmark_maintenance` to measure how much compaction improves QpH.
+- **Simulating production table growth.** Multi-cycle runs produce realistic
+  table metadata bloat (many snapshots, small data files) that single-cycle
+  batch runs never exercise.
+
+### Limitations
+
+- `cycles > 1` requires `mode: batch`. Sustained mode has its own iteration
+  model via streaming micro-batches.
+- DuckDB cannot run Iceberg maintenance or compaction (read-only). Table
+  health is still probed but compaction is skipped.
 
 ## Timestamp Range Impact
 

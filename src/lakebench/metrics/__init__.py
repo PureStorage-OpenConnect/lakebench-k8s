@@ -6,6 +6,7 @@ Collects and stores performance metrics from pipeline runs.
 from .collector import (
     BenchmarkMetrics,
     BenchmarkRoundMeta,
+    CycleMetrics,
     JobMetrics,
     MetricsCollector,
     PipelineBenchmark,
@@ -22,6 +23,7 @@ from .storage import MetricsStorage
 __all__ = [
     "BenchmarkMetrics",
     "BenchmarkRoundMeta",
+    "CycleMetrics",
     "MetricsCollector",
     "JobMetrics",
     "PipelineBenchmark",

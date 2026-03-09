@@ -388,12 +388,15 @@ class SparkJobManager:
         self,
         job_type: JobType,
         extra_conf: dict[str, str] | None = None,
+        cycle_env: dict[str, str] | None = None,
     ) -> JobStatus:
         """Submit a Spark job.
 
         Args:
             job_type: Type of job to submit
             extra_conf: Additional Spark configuration
+            cycle_env: Extra environment variables for multi-cycle batch runs
+                       (e.g. LB_SILVER_INCREMENTAL, LB_GOLD_INCREMENTAL)
 
         Returns:
             Initial JobStatus
@@ -404,7 +407,7 @@ class SparkJobManager:
         self._delete_job(job_name)
 
         # Build SparkApplication manifest
-        manifest = self._build_manifest(job_type, extra_conf)
+        manifest = self._build_manifest(job_type, extra_conf, cycle_env=cycle_env)
 
         # Apply manifest
         from kubernetes import client as k8s_client
@@ -521,12 +524,14 @@ class SparkJobManager:
         self,
         job_type: JobType,
         extra_conf: dict[str, str] | None = None,
+        cycle_env: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Build SparkApplication manifest.
 
         Args:
             job_type: Type of job
             extra_conf: Additional Spark configuration
+            cycle_env: Extra env vars for multi-cycle batch (e.g. LB_SILVER_INCREMENTAL)
 
         Returns:
             SparkApplication manifest dict
@@ -1103,7 +1108,7 @@ class SparkJobManager:
                         "app": "lakebench-spark",
                         "component": "driver",
                     },
-                    "env": self._build_env_vars(job_type),
+                    "env": self._build_env_vars(job_type, cycle_env=cycle_env),
                     "template": driver_pod_template,
                 },
                 "executor": {
@@ -1123,7 +1128,7 @@ class SparkJobManager:
                         "app": "lakebench-spark",
                         "component": "executor",
                     },
-                    "env": self._build_env_vars(job_type),
+                    "env": self._build_env_vars(job_type, cycle_env=cycle_env),
                     "template": executor_pod_template,
                 },
                 "sparkConf": spark_conf,
@@ -1132,11 +1137,16 @@ class SparkJobManager:
 
         return manifest
 
-    def _build_env_vars(self, job_type: JobType | None = None) -> list[dict[str, Any]]:
+    def _build_env_vars(
+        self,
+        job_type: JobType | None = None,
+        cycle_env: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
         """Build environment variables for Spark pods.
 
         Args:
             job_type: Job type (used for streaming-specific env vars)
+            cycle_env: Extra env vars for multi-cycle batch runs
 
         Returns:
             List of env var dicts
@@ -1229,6 +1239,10 @@ class SparkJobManager:
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
             )
+
+        # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
+        if cycle_env:
+            env.extend({"name": k, "value": v} for k, v in cycle_env.items())
 
         return env
 

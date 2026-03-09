@@ -118,6 +118,66 @@ def build_maintenance_sql(
     return []
 
 
+def build_compaction_sql(
+    engine: str,
+    catalog: str,
+    table: str,
+    file_size_threshold: str = "128MB",
+) -> list[str]:
+    """Build Iceberg compaction SQL (rewrite_data_files / optimize).
+
+    Compaction merges small files produced by streaming micro-batches or
+    repeated incremental writes into larger, better-sized files.  This is
+    heavier than expire_snapshots and should run less frequently.
+    """
+    if engine == "trino":
+        return [
+            (
+                f"ALTER TABLE {table} EXECUTE "
+                f"optimize(file_size_threshold => '{file_size_threshold}')"
+            ),
+        ]
+    if engine == "spark-thrift":
+        return [
+            (f"CALL {catalog}.system.rewrite_data_files(table => '{table}')"),
+        ]
+    return []
+
+
+def build_table_health_sql(
+    engine: str,
+    table: str,
+) -> dict[str, str]:
+    """Build SQL queries to probe Iceberg table health metrics.
+
+    Returns a dict mapping metric name to SQL string.  The queries return
+    a single integer count each.
+    """
+    if engine == "trino":
+        # Trino system tables use "$files" / "$snapshots" suffix on the table
+        # name.  Only the table-name segment needs quoting (because of the "$"),
+        # not the catalog.schema prefix.
+        # Input: "catalog.schema.table" -> 'catalog.schema."table$files"'
+        parts = table.rsplit(".", 1)
+        if len(parts) == 2:
+            prefix, tbl = parts
+            files_ref = f'{prefix}."{tbl}$files"'
+            snaps_ref = f'{prefix}."{tbl}$snapshots"'
+        else:
+            files_ref = f'"{table}$files"'
+            snaps_ref = f'"{table}$snapshots"'
+        return {
+            "data_file_count": f"SELECT count(*) FROM {files_ref}",
+            "snapshot_count": f"SELECT count(*) FROM {snaps_ref}",
+        }
+    if engine == "spark-thrift":
+        return {
+            "data_file_count": f"SELECT count(*) FROM {table}.files",
+            "snapshot_count": f"SELECT count(*) FROM {table}.snapshots",
+        }
+    return {}
+
+
 def build_drop_table_sql(engine: str, table: str) -> str:
     """Build DROP TABLE SQL for the given engine."""
     if engine == "trino":
@@ -151,3 +211,43 @@ def exec_sql(
             namespace,
             container="spark-thrift",
         )
+
+
+def query_sql(
+    engine: str,
+    k8s: K8sClient,
+    pod_name: str,
+    namespace: str,
+    sql: str,
+) -> str:
+    """Execute a SQL query and return stdout.
+
+    Like :func:`exec_sql` but returns the raw stdout for result parsing.
+    Raises ``RuntimeError`` on non-zero exit code.
+    """
+    if engine == "trino":
+        rc, stdout, stderr = k8s.exec_in_pod(
+            pod_name,
+            ["trino", "--execute", sql],
+            namespace,
+        )
+    elif engine == "spark-thrift":
+        rc, stdout, stderr = k8s.exec_in_pod(
+            pod_name,
+            [
+                "/opt/spark/bin/beeline",
+                "-u",
+                "jdbc:hive2://localhost:10000",
+                "-e",
+                sql,
+                "--silent=true",
+            ],
+            namespace,
+            container="spark-thrift",
+        )
+    else:
+        raise ValueError(f"Unsupported engine for query_sql: {engine}")
+
+    if rc != 0:
+        raise RuntimeError(f"query_sql failed (rc={rc}): {stderr}")
+    return stdout

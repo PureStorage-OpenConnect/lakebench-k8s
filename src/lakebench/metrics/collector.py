@@ -80,6 +80,37 @@ class StreamingJobMetrics:
 
 
 @dataclass
+class CycleMetrics:
+    """Per-cycle metrics for multi-cycle batch runs.
+
+    Each cycle captures its own datagen window, per-stage job metrics,
+    optional benchmark result, and Iceberg table health snapshot.
+    """
+
+    cycle_index: int
+    timestamp_start: str = ""
+    timestamp_end: str = ""
+    datagen_elapsed_seconds: float = 0.0
+    datagen_output_gb: float = 0.0
+    jobs: list[JobMetrics] = field(default_factory=list)
+    benchmark: BenchmarkMetrics | None = None
+    table_health: dict[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "cycle_index": self.cycle_index,
+            "timestamp_start": self.timestamp_start,
+            "timestamp_end": self.timestamp_end,
+            "datagen_elapsed_seconds": round(self.datagen_elapsed_seconds, 2),
+            "datagen_output_gb": round(self.datagen_output_gb, 3),
+            "jobs": [j.to_dict() for j in self.jobs],
+            "benchmark": self.benchmark.to_dict() if self.benchmark else None,
+            "table_health": self.table_health,
+        }
+
+
+@dataclass
 class BenchmarkRoundMeta:
     """Per-round metadata for in-stream benchmark rounds.
 
@@ -93,16 +124,30 @@ class BenchmarkRoundMeta:
     gold_freshness_seconds: float = 0.0
     q9_contention_observed: bool = False
     q9_retry_used: bool = False
+    # Table health metrics (v1.1.0) -- captured at benchmark time
+    silver_data_file_count: int = 0
+    silver_snapshot_count: int = 0
+    gold_data_file_count: int = 0
+    gold_snapshot_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        return {
+        d: dict[str, Any] = {
             "round_index": self.round_index,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
             "gold_freshness_seconds": round(self.gold_freshness_seconds, 2),
             "q9_contention_observed": self.q9_contention_observed,
             "q9_retry_used": self.q9_retry_used,
         }
+        # Only include table health when populated (non-zero)
+        if self.silver_data_file_count or self.gold_data_file_count:
+            d["table_health"] = {
+                "silver_data_file_count": self.silver_data_file_count,
+                "silver_snapshot_count": self.silver_snapshot_count,
+                "gold_data_file_count": self.gold_data_file_count,
+                "gold_snapshot_count": self.gold_snapshot_count,
+            }
+        return d
 
 
 @dataclass
@@ -168,6 +213,9 @@ class PipelineMetrics:
     # Platform metrics (optional -- populated when observability is enabled)
     platform_metrics: dict[str, Any] | None = None
 
+    # Per-cycle metrics (multi-cycle batch runs only)
+    cycles: list[CycleMetrics] = field(default_factory=list)
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = {
@@ -193,6 +241,8 @@ class PipelineMetrics:
             d["pipeline_benchmark"] = self.pipeline_benchmark.to_dict()
         if self.platform_metrics is not None:
             d["platform_metrics"] = self.platform_metrics
+        if self.cycles:
+            d["cycles"] = [c.to_dict() for c in self.cycles]
         return d
 
 
@@ -429,12 +479,15 @@ class PipelineBenchmark:
         "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
         "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input",
         "total_rows_processed": "Cumulative rows processed across all streaming stages",
+        "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
         "query_time_freshness_seconds": "Diagnostic. Median gold staleness measured at benchmark query time (lower is better). Gap between this and data_freshness_seconds indicates freshness variability.",
         "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
         "benchmark_rounds_count": "Number of in-stream benchmark rounds executed",
+        "qph_degradation_pct": "QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)",
         # Batch
         "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
         "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
+        "cycle_progression": "Per-cycle elapsed time, QpH, and table health for multi-cycle batch runs",
     }
 
     run_id: str
@@ -474,6 +527,17 @@ class PipelineBenchmark:
     # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
     query_time_freshness_seconds: float = 0.0  # median freshness at Trino query time
+
+    # S3 object health (sustained mode -- set by cli.py after monitoring)
+    total_s3_objects: int = 0
+
+    # Multi-cycle batch metrics (v1.1.0)
+    cycles: list[CycleMetrics] = field(default_factory=list)
+
+    # QpH degradation (sustained mode, v1.1.0)
+    # Percent drop from first-half median to second-half median QpH.
+    # Positive = degradation, negative = improvement, None = insufficient data.
+    qph_degradation_pct: float | None = None
 
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     success: bool = False
@@ -612,6 +676,17 @@ class PipelineBenchmark:
             if round_freshness:
                 self.query_time_freshness_seconds = statistics.median(round_freshness)
 
+        # QpH degradation: compare first-half vs second-half median QpH
+        if self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
+            mid = len(self.benchmark_rounds) // 2
+            first_half = [r.qph for r in self.benchmark_rounds[:mid] if r.qph > 0]
+            second_half = [r.qph for r in self.benchmark_rounds[mid:] if r.qph > 0]
+            if first_half and second_half:
+                m1 = statistics.median(first_half)
+                m2 = statistics.median(second_half)
+                if m1 > 0:
+                    self.qph_degradation_pct = round((1 - m2 / m1) * 100, 2)
+
         # Compute efficiency: GB processed per core-hour requested
         total_input_gb = sum(s.input_size_gb for s in streaming)
         total_core_hours = sum(
@@ -670,14 +745,19 @@ class PipelineBenchmark:
                 "pipeline_saturated": self.pipeline_saturated,
                 "total_rows_processed": self.total_rows_processed,
                 "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
+                "total_s3_objects": self.total_s3_objects,
             }
             if self.query_time_freshness_seconds > 0:
                 scores["query_time_freshness_seconds"] = round(self.query_time_freshness_seconds, 2)
             if in_stream_qph > 0:
                 scores["in_stream_composite_qph"] = in_stream_qph
                 scores["benchmark_rounds_count"] = len(self.benchmark_rounds)
+            if self.qph_degradation_pct is not None:
+                scores["qph_degradation_pct"] = self.qph_degradation_pct
             return scores
-        return {
+
+        # Batch scores
+        batch_scores: dict[str, Any] = {
             "time_to_value_seconds": round(self.time_to_value_seconds, 2),
             "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
             "total_data_processed_gb": round(self.total_data_processed_gb, 3),
@@ -689,6 +769,17 @@ class PipelineBenchmark:
             "composite_qph": qph,
             "scale_ratio": round(self.scale_ratio, 3),
         }
+        if self.cycles:
+            batch_scores["cycle_progression"] = [
+                {
+                    "cycle": c.cycle_index,
+                    "elapsed_seconds": round(sum(j.elapsed_seconds for j in c.jobs), 2),
+                    "qph": round(c.benchmark.qph, 1) if c.benchmark else None,
+                    "table_health": c.table_health,
+                }
+                for c in self.cycles
+            ]
+        return batch_scores
 
     def to_matrix(self) -> dict[str, dict[str, Any]]:
         """Export as stage-columns, metric-rows matrix for spreadsheet use."""
@@ -743,6 +834,8 @@ class PipelineBenchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
         if self.benchmark_rounds:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
+        if self.cycles:
+            d["cycles"] = [c.to_dict() for c in self.cycles]
         # Include human-readable descriptions for every score key present
         d["score_descriptions"] = {k: v for k, v in self._SCORE_DESCRIPTIONS.items() if k in scores}
         # Tier 2 advanced metrics placeholder (populated when Prometheus deployed)
@@ -996,6 +1089,7 @@ def build_pipeline_benchmark(
         stages=stages,
         query_benchmark=run.benchmark,
         benchmark_rounds=list(run.benchmark_rounds),
+        cycles=list(run.cycles),
         config_snapshot=snapshot,
         success=run.success,
     )
@@ -1253,7 +1347,7 @@ class MetricsCollector:
         bronze_bucket: str,
         silver_bucket: str,
         gold_bucket: str,
-    ) -> None:
+    ) -> int:
         """Measure and record actual S3 bucket sizes.
 
         Uses paginated listing via ``s3_client.get_bucket_size()``
@@ -1264,9 +1358,13 @@ class MetricsCollector:
             bronze_bucket: Bronze bucket name
             silver_bucket: Silver bucket name
             gold_bucket: Gold bucket name
+
+        Returns:
+            Total object count across all three buckets (0 if unmeasurable).
         """
+        total_objects = 0
         if not self.current_run:
-            return
+            return total_objects
 
         for layer, bucket in [
             ("bronze", bronze_bucket),
@@ -1278,6 +1376,8 @@ class MetricsCollector:
                 if info.size_bytes is not None:
                     size_gb = info.size_bytes / (1024**3)
                     setattr(self.current_run, f"{layer}_size_gb", size_gb)
+                    if info.object_count is not None:
+                        total_objects += info.object_count
                     logger.info(
                         f"Measured {layer} bucket: {info.object_count:,} objects, {size_gb:.2f} GB"
                     )
@@ -1290,6 +1390,8 @@ class MetricsCollector:
                     logger.warning(f"Bucket '{bucket}' returned no size data")
             except Exception as e:
                 logger.warning(f"Could not measure {layer} bucket size: {e}")
+
+        return total_objects
 
     def parse_driver_logs(self, logs: str, job_type: str) -> JobMetrics:
         """Parse Spark driver logs to extract metrics.
@@ -1415,12 +1517,28 @@ class MetricsCollector:
                 total_rows += int(m.group(2).replace(",", ""))
                 continue
 
+            # Silver: "Batch N: empty, skipping" (no data in micro-batch).
+            # Only count empty batches for silver -- bronze uses the same
+            # log format but empty bronze batches are not meaningful.
+            if job_type == "silver-stream":
+                m = re.search(r"Batch (\d+): empty", line)
+                if m:
+                    batch_ids.add(int(m.group(1)))
+                    continue
+
             # Gold: "Cycle N: aggregating X Silver records"
             m = re.search(r"Cycle (\d+): aggregating ([\d,]+) Silver records", line)
             if m:
                 batch_ids.add(int(m.group(1)))
                 total_rows += int(m.group(2).replace(",", ""))
                 continue
+
+            # Gold: "Cycle N: Silver table is empty, skipping"
+            if job_type == "gold-refresh":
+                m = re.search(r"Cycle (\d+): Silver table is empty", line)
+                if m:
+                    batch_ids.add(int(m.group(1)))
+                    continue
 
             # Gold: "Cycle N: refreshed ... in X.Xs (Y KPI records)"
             m = re.search(r"Cycle \d+: refreshed .+ in ([\d.]+)s", line)

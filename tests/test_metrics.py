@@ -9,6 +9,7 @@ import pytest
 from lakebench.metrics import (
     BenchmarkMetrics,
     BenchmarkRoundMeta,
+    CycleMetrics,
     JobMetrics,
     MetricsCollector,
     MetricsStorage,
@@ -1694,12 +1695,13 @@ class TestRecordActualSizesBucketWarning:
         mock_s3.get_bucket_size.return_value = info
 
         with caplog.at_level(logging.WARNING, logger="lakebench.metrics.collector"):
-            c.record_actual_sizes(mock_s3, "lb-bronze", "lb-silver", "lb-gold")
+            total = c.record_actual_sizes(mock_s3, "lb-bronze", "lb-silver", "lb-gold")
 
         # Should have 3 warnings, one per bucket
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 3
         assert "lb-bronze" in warnings[0].message
+        assert total == 0  # Missing buckets contribute 0 objects
 
     def test_no_warning_on_successful_measurement(self, caplog):
         c = MetricsCollector()
@@ -1712,13 +1714,14 @@ class TestRecordActualSizesBucketWarning:
         mock_s3.get_bucket_size.return_value = info
 
         with caplog.at_level(logging.WARNING, logger="lakebench.metrics.collector"):
-            c.record_actual_sizes(mock_s3, "lb-bronze", "lb-silver", "lb-gold")
+            total = c.record_actual_sizes(mock_s3, "lb-bronze", "lb-silver", "lb-gold")
 
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings) == 0
 
         # Check sizes were recorded
         assert c.current_run.bronze_size_gb == pytest.approx(1.0)
+        assert total == 300  # 100 objects x 3 buckets
 
 
 # ---------------------------------------------------------------------------
@@ -2987,6 +2990,7 @@ class TestSustainedPipelineScoring:
         assert "total_rows_processed" in scores
         assert "total_elapsed_seconds" in scores
         assert "compute_efficiency_gb_per_core_hour" in scores
+        assert "total_s3_objects" in scores
         # Batch-only key should NOT appear
         assert "time_to_value_seconds" not in scores
         # Shared keys now appear in both modes
@@ -2996,6 +3000,8 @@ class TestSustainedPipelineScoring:
         # Values match computed scores
         assert scores["data_freshness_seconds"] == pytest.approx(15.0)
         assert scores["total_rows_processed"] == 500_000 + 480_000 + 450_000
+        # total_s3_objects defaults to 0 (set by cli.py at runtime)
+        assert scores["total_s3_objects"] == 0
 
     def test_batch_to_dict_scores(self):
         """to_dict() outputs batch score keys for batch mode."""
@@ -3025,6 +3031,7 @@ class TestSustainedPipelineScoring:
         # Sustained keys should NOT appear
         assert "data_freshness_seconds" not in scores
         assert "sustained_throughput_rps" not in scores
+        assert "total_s3_objects" not in scores
 
     def test_sustained_storage_roundtrip(self, tmp_path):
         """Sustained pipeline benchmark survives save/load."""
@@ -3046,6 +3053,22 @@ class TestSustainedPipelineScoring:
         assert lpb.total_rows_processed == 1_430_000
         assert lpb.total_elapsed_seconds == pytest.approx(1800.0)
         assert len(lpb.stages) == 3
+
+    def test_total_s3_objects_roundtrip(self, tmp_path):
+        """total_s3_objects set by cli.py survives save/load."""
+        storage = MetricsStorage(tmp_path / "metrics")
+        run = self._make_streaming_run()
+        pb = build_pipeline_benchmark(run)
+        pb.total_s3_objects = 842_315
+        run.pipeline_benchmark = pb
+        storage.save_run(run)
+
+        loaded = storage.load_run("cont-test")
+        assert loaded is not None
+        lpb = loaded.pipeline_benchmark
+        assert lpb.total_s3_objects == 842_315
+        scores = lpb.to_dict()["scores"]
+        assert scores["total_s3_objects"] == 842_315
 
     def test_sustained_report_cards(self, tmp_path):
         """Report contains sustained score cards for streaming pipeline."""
@@ -3782,3 +3805,231 @@ class TestSustainedScoringEdgeCases:
         assert pb.stage_latency_profile[0] == pytest.approx(200.0)  # bronze
         assert pb.stage_latency_profile[1] == 0.0  # silver absent
         assert pb.stage_latency_profile[2] == 0.0  # gold absent
+
+
+# ---------------------------------------------------------------------------
+# CycleMetrics (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestCycleMetrics:
+    """Tests for the CycleMetrics dataclass."""
+
+    def test_defaults(self):
+        cm = CycleMetrics(cycle_index=0)
+        assert cm.cycle_index == 0
+        assert cm.timestamp_start == ""
+        assert cm.timestamp_end == ""
+        assert cm.datagen_elapsed_seconds == 0.0
+        assert cm.datagen_output_gb == 0.0
+        assert cm.jobs == []
+        assert cm.benchmark is None
+        assert cm.table_health == {}
+
+    def test_to_dict(self):
+        job = JobMetrics(
+            job_name="lakebench-silver-build",
+            job_type="silver-build",
+            elapsed_seconds=120.0,
+            success=True,
+        )
+        cm = CycleMetrics(
+            cycle_index=2,
+            timestamp_start="2024-03-01",
+            timestamp_end="2024-06-01",
+            datagen_elapsed_seconds=45.0,
+            datagen_output_gb=10.5,
+            jobs=[job],
+            table_health={"silver_data_file_count": 42, "silver_snapshot_count": 5},
+        )
+        d = cm.to_dict()
+        assert d["cycle_index"] == 2
+        assert d["timestamp_start"] == "2024-03-01"
+        assert d["timestamp_end"] == "2024-06-01"
+        assert d["datagen_elapsed_seconds"] == 45.0
+        assert d["datagen_output_gb"] == 10.5
+        assert len(d["jobs"]) == 1
+        assert d["jobs"][0]["job_name"] == "lakebench-silver-build"
+        assert d["benchmark"] is None
+        assert d["table_health"]["silver_data_file_count"] == 42
+
+    def test_to_dict_with_benchmark(self):
+        bm = BenchmarkMetrics(mode="power", cache="hot", scale=10, qph=200.0, total_seconds=30.0)
+        cm = CycleMetrics(cycle_index=1, benchmark=bm)
+        d = cm.to_dict()
+        assert d["benchmark"]["qph"] == 200.0
+
+
+# ---------------------------------------------------------------------------
+# BenchmarkRoundMeta table health fields (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestBenchmarkRoundMetaTableHealth:
+    """Tests for table health fields on BenchmarkRoundMeta."""
+
+    def test_health_defaults(self):
+        meta = BenchmarkRoundMeta(round_index=1)
+        assert meta.silver_data_file_count == 0
+        assert meta.silver_snapshot_count == 0
+        assert meta.gold_data_file_count == 0
+        assert meta.gold_snapshot_count == 0
+
+    def test_health_to_dict(self):
+        meta = BenchmarkRoundMeta(
+            round_index=1,
+            silver_data_file_count=150,
+            silver_snapshot_count=20,
+            gold_data_file_count=30,
+            gold_snapshot_count=5,
+        )
+        d = meta.to_dict()
+        assert "table_health" in d
+        assert d["table_health"]["silver_data_file_count"] == 150
+        assert d["table_health"]["silver_snapshot_count"] == 20
+        assert d["table_health"]["gold_data_file_count"] == 30
+        assert d["table_health"]["gold_snapshot_count"] == 5
+
+    def test_health_to_dict_zero_values_omitted(self):
+        """When all health fields are 0, table_health key is absent."""
+        meta = BenchmarkRoundMeta(round_index=1)
+        d = meta.to_dict()
+        assert "table_health" not in d
+
+    def test_health_storage_roundtrip(self, tmp_path):
+        """Table health fields survive save/load roundtrip."""
+        meta = BenchmarkRoundMeta(
+            round_index=1,
+            timestamp=datetime.now(),
+            silver_data_file_count=100,
+            gold_snapshot_count=8,
+        )
+        bm = BenchmarkMetrics(
+            mode="power",
+            cache="hot",
+            scale=10,
+            qph=200.0,
+            total_seconds=30.0,
+            round_meta=meta,
+        )
+        pm = PipelineMetrics(
+            run_id="test-health-rt",
+            deployment_name="test",
+            start_time=datetime.now(),
+            benchmark_rounds=[bm],
+        )
+        storage = MetricsStorage(tmp_path)
+        storage.save_run(pm)
+        loaded = storage.load_run("test-health-rt")
+        assert loaded is not None
+        rm = loaded.benchmark_rounds[0].round_meta
+        assert rm is not None
+        assert rm.silver_data_file_count == 100
+        assert rm.gold_snapshot_count == 8
+
+
+# ---------------------------------------------------------------------------
+# QpH degradation metric (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestQphDegradation:
+    """Tests for qph_degradation_pct computation in sustained scoring."""
+
+    def _make_sustained_pb(self, qph_values):
+        """Create a PipelineBenchmark with benchmark rounds at given QpH values."""
+        now = datetime.now()
+        rounds = []
+        for i, qph in enumerate(qph_values):
+            rounds.append(
+                BenchmarkMetrics(
+                    mode="power",
+                    cache="hot",
+                    scale=10,
+                    qph=qph,
+                    total_seconds=30.0,
+                    round_meta=BenchmarkRoundMeta(
+                        round_index=i + 1,
+                        timestamp=now + timedelta(minutes=i * 10),
+                    ),
+                )
+            )
+        stage = StageMetrics(
+            stage_name="bronze-ingest",
+            stage_type="streaming",
+            engine="spark",
+            elapsed_seconds=3600.0,
+            success=True,
+            input_rows=1_000_000,
+            freshness_seconds=5.0,
+            latency_ms=100.0,
+        )
+        stage.start_time = now
+        stage.end_time = now + timedelta(hours=1)
+        pb = PipelineBenchmark(
+            run_id="test-deg",
+            deployment_name="test",
+            pipeline_mode="sustained",
+            start_time=now,
+            stages=[stage],
+            benchmark_rounds=rounds,
+            config_snapshot={"datagen_output_rows": 1_000_000},
+        )
+        pb.compute_aggregates()
+        return pb
+
+    def test_degradation_with_4_rounds(self):
+        """4 rounds: first half median 200, second half median 100 = 50% degradation."""
+        pb = self._make_sustained_pb([200, 200, 100, 100])
+        assert pb.qph_degradation_pct is not None
+        assert pb.qph_degradation_pct == pytest.approx(50.0)
+
+    def test_degradation_with_improvement(self):
+        """Negative degradation = improvement."""
+        pb = self._make_sustained_pb([100, 100, 200, 200])
+        assert pb.qph_degradation_pct is not None
+        assert pb.qph_degradation_pct == pytest.approx(-100.0)
+
+    def test_degradation_needs_4_rounds(self):
+        """Fewer than 4 rounds returns None."""
+        pb = self._make_sustained_pb([200, 100, 100])
+        assert pb.qph_degradation_pct is None
+
+    def test_degradation_in_scores_dict(self):
+        pb = self._make_sustained_pb([200, 200, 100, 100])
+        d = pb.to_dict()
+        assert "qph_degradation_pct" in d["scores"]
+
+
+# ---------------------------------------------------------------------------
+# CycleMetrics storage roundtrip (v1.1.0)
+# ---------------------------------------------------------------------------
+
+
+class TestCycleMetricsStorage:
+    """Tests for CycleMetrics serialization and deserialization."""
+
+    def test_pipeline_metrics_cycles_roundtrip(self, tmp_path):
+        """cycles survive save/load on PipelineMetrics."""
+        cm = CycleMetrics(
+            cycle_index=0,
+            timestamp_start="2024-01-01",
+            timestamp_end="2024-06-30",
+            datagen_elapsed_seconds=60.0,
+            datagen_output_gb=5.0,
+            table_health={"silver_data_file_count": 50},
+        )
+        pm = PipelineMetrics(
+            run_id="test-cycles-rt",
+            deployment_name="test",
+            start_time=datetime.now(),
+            cycles=[cm],
+        )
+        storage = MetricsStorage(tmp_path)
+        storage.save_run(pm)
+        loaded = storage.load_run("test-cycles-rt")
+        assert loaded is not None
+        assert len(loaded.cycles) == 1
+        assert loaded.cycles[0].cycle_index == 0
+        assert loaded.cycles[0].timestamp_start == "2024-01-01"
+        assert loaded.cycles[0].table_health["silver_data_file_count"] == 50

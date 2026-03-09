@@ -79,6 +79,35 @@ Runs 8 Trino queries against the silver and gold tables and computes a QpH
 The benchmark runs in power mode by default (single stream, hot cache). The
 QpH score is `(number_of_queries / total_seconds) * 3600`.
 
+## Multi-Cycle Batch
+
+When `pipeline.cycles` is set to 2 or more, the batch pipeline runs N
+iterations. Each cycle generates new data for its portion of the timestamp
+range, then runs the full bronze-verify -> silver-build -> gold-finalize
+sequence.
+
+```yaml
+architecture:
+  pipeline:
+    cycles: 3
+    pre_benchmark_maintenance: true
+```
+
+Cycle 1 creates tables via full overwrite. Cycles 2+ run in incremental
+mode -- silver appends new rows, gold merges based on a date watermark.
+This simulates multi-day table growth where each cycle is a new "day" of
+data.
+
+The terminal output shows cycle headers (`Cycle 1/3`, `Cycle 2/3`, etc.)
+and per-cycle timing. After all cycles complete, pre-benchmark maintenance
+runs compaction and snapshot expiry (if enabled), then the benchmark
+measures QpH against the accumulated table.
+
+Metrics include a `cycles[]` array with per-cycle datagen timing, job
+metrics, and table health (data file counts and snapshot counts from
+Iceberg system tables). The `cycle_progression` score shows how elapsed
+time and table state evolve across cycles.
+
 ## Command Flags
 
 | Flag | Short | Default | Description |

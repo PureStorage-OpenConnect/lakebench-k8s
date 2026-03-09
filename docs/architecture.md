@@ -70,6 +70,13 @@ After the pipeline completes, Lakebench runs an 8-query benchmark via the
 active query engine (Trino, Spark Thrift, or DuckDB) against the gold layer
 and computes Queries per Hour (QpH).
 
+### Multi-Cycle Batch (v1.1.0)
+
+The `pipeline.cycles` field runs N batch iterations to simulate multi-day
+table growth. Cycle 1 creates tables; cycles 2+ append incrementally.
+Iceberg compaction and table health tracking run between cycles. See
+[Configuration -- Multi-Cycle Batch](configuration.md#multi-cycle-batch).
+
 ### Continuous Mode
 
 In addition to batch processing, Lakebench supports a sustained streaming
