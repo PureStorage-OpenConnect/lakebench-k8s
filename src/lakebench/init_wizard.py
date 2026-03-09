@@ -18,8 +18,13 @@ from rich.text import Text
 
 logger = logging.getLogger(__name__)
 
+
+class _BackSentinel:
+    """Sentinel to signal 'go back one step'."""
+
+
 # Sentinel to signal "go back one step"
-_BACK = object()
+_BACK = _BackSentinel()
 
 
 @dataclass
@@ -47,7 +52,7 @@ def _prompt(
     hide_input: bool = False,
     validator: Any = None,
     hint: str = "",
-) -> str | object:
+) -> str | _BackSentinel:
     """Prompt with back-navigation support.
 
     Returns the input string, or ``_BACK`` if the user types 'back' or 'b'.
@@ -83,7 +88,7 @@ def _prompt_int(
     default: int = 0,
     min_val: int | None = None,
     max_val: int | None = None,
-) -> int | object:
+) -> int | _BackSentinel:
     """Prompt for an integer with bounds checking and back support."""
     import typer
 
@@ -136,7 +141,7 @@ def step_identity(console: Console, state: WizardState) -> bool:
         default=state.name,
         hint="Unique name for this lakehouse deployment",
     )
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.name = result
 
@@ -146,7 +151,7 @@ def step_identity(console: Console, state: WizardState) -> bool:
         default=state.namespace or state.name,
         hint="K8s namespace (defaults to deployment name)",
     )
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.namespace = result
 
@@ -183,7 +188,7 @@ def step_recipe(console: Console, state: WizardState) -> bool:
     )
 
     result = _prompt_int(console, "Recipe number", default=1, min_val=1, max_val=len(choices))
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
 
     state.recipe = choices[result - 1][0]
@@ -213,12 +218,12 @@ def step_storage(console: Console, state: WizardState) -> bool:
         default=state.endpoint,
         validator=_validate_endpoint,
     )
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.endpoint = result
 
     result = _prompt(console, "S3 access key", default=state.access_key)
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.access_key = result
 
@@ -228,12 +233,12 @@ def step_storage(console: Console, state: WizardState) -> bool:
         default=state.secret_key if state.secret_key else "",
         hide_input=True,
     )
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.secret_key = result
 
     result = _prompt(console, "S3 region", default=state.region)
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.region = result
 
@@ -302,7 +307,7 @@ def step_workload(console: Console, state: WizardState) -> bool:
     console.print()
 
     result = _prompt_int(console, "Scale factor", default=state.scale, min_val=1, max_val=10000)
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.scale = result
 
@@ -319,7 +324,7 @@ def step_workload(console: Console, state: WizardState) -> bool:
 
     current_default = 1 if state.mode == "batch" else 2
     result = _prompt_int(console, "Pipeline mode", default=current_default, min_val=1, max_val=2)
-    if result is _BACK:
+    if isinstance(result, _BackSentinel):
         return False
     state.mode = "batch" if result == 1 else "sustained"
 
@@ -332,7 +337,7 @@ def step_workload(console: Console, state: WizardState) -> bool:
             "  [dim]  Simulates multi-day lakehouse accumulation and QpH degradation.[/dim]"
         )
         result = _prompt_int(console, "Batch cycles", default=state.cycles, min_val=1, max_val=50)
-        if result is _BACK:
+        if isinstance(result, _BackSentinel):
             return False
         state.cycles = result
     else:
