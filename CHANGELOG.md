@@ -4,6 +4,67 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.0] - 2026-03-26
+
+### Added
+- **Delta Lake support.** Three new recipes: `hive-delta-spark-trino`,
+  `hive-delta-spark-thrift`, `hive-delta-spark-none`. Delta pipeline scripts
+  (`bronze_ingest_delta.py`, `silver_build_delta.py`, `silver_stream_delta.py`,
+  `gold_refresh_delta.py`, `gold_finalize_delta.py`) mirror the Iceberg variants.
+  Delta maintenance helpers in `deploy/delta_maintenance.py` (VACUUM, OPTIMIZE,
+  DESCRIBE DETAIL, DROP TABLE). Pre-benchmark OPTIMIZE is skipped for Delta+Trino
+  and Delta+Spark Thrift to avoid OOM.
+- **Spark 4.1.x support.** `_SUPPORTED_SPARK_VERSIONS` now includes `(4, 1)`.
+  `_ICEBERG_RUNTIME_SUFFIX` dict maps `(4,1) -> "4.0"` because Iceberg has no
+  `4.1_2.13` runtime artifact on Maven Central. `_delta_spark_artifact()` handles
+  Delta 4.1.0's new Maven coordinate naming (`delta-spark_4.1_2.13`).
+- **Spark 3.5.x support.** `(3, 5)` added to `_SUPPORTED_SPARK_VERSIONS`.
+  Only Iceberg is supported with Spark 3.5 (Delta 4.x requires Spark 4.x).
+- **Config-time format version auto-resolution.** `LakebenchConfig` model_validator
+  calls `resolve_format_version()` at load time. `DeltaConfig.version` defaults to
+  `"auto"` (previously `"4.0.0"`), resolving to the correct version for the Spark
+  image in use. Incompatible combinations (e.g. Delta 4.0.0 + Spark 4.1) are
+  rejected at config load with a clear error message.
+- **`PipelineEngine` protocol.** `src/lakebench/engine/protocol.py` defines a
+  `@runtime_checkable` Protocol with `engine_name`, `submit_job`,
+  `wait_for_completion`, `get_logs`, `cancel_job`. `get_engine(cfg, k8s)` factory
+  returns the appropriate engine (currently only `SparkJobManager`). Wired into
+  `cli.py` so `run` goes through the factory rather than instantiating
+  `SparkJobManager` directly.
+- **Unity Catalog infrastructure.** `deploy/unity.py` and `templates/unity/`
+  deploy OSS Unity Catalog as a K8s Deployment with PostgreSQL backend.
+  Unity + Delta excluded from v1.2 (STS issue on non-AWS S3, planned for v1.3).
+  Unity + Iceberg excluded (v0.4.0 REST API is read-only).
+- **`docs/compatibility-matrix.md`.** Spark + format version matrix for user reference.
+- **`examples/` directory.** Hardened example config YAMLs for all 11 recipes.
+
+### Changed
+- `DeltaConfig.version` default changed from `"4.0.0"` to `"auto"` to prevent
+  cross-version failures when switching Spark images.
+- `_FORMAT_VERSION_COMPAT[(4,1)]["delta"]` changed from `["4.0.0", "4.1.0"]` to
+  `["4.1.0"]` -- Delta 4.0.0 is not compatible with Spark 4.1.
+- PostgreSQL authentication changed from MD5 to SCRAM-SHA-256 (`pg_hba.conf` and
+  `password_encryption = scram-sha-256`).
+- `cli.py` batch and sustained paths use `get_engine()` factory instead of
+  instantiating `SparkJobManager` directly.
+
+### Fixed
+- **Iceberg runtime artifact for Spark 4.1.** `iceberg-spark-runtime-4.1_2.13` does
+  not exist on Maven Central. Spark 4.1.x must use the `4.0` runtime. Fixed with
+  `_ICEBERG_RUNTIME_SUFFIX` dict in `spark/job.py` and `deploy/engine.py`.
+- **Delta 4.0.0 incorrectly allowed with Spark 4.1.** The format version compat
+  matrix previously listed `4.0.0` as compatible with Spark `(4,1)`. Live cluster
+  UAT showed silver-build fails at runtime. Fixed by removing `4.0.0` from the
+  Spark 4.1 delta compat list.
+
+### Known Issues
+- **Delta + Spark Thrift Q2 ClassCastException.** `OptimizeMetadataOnlyDeltaQuery`
+  throws `ClassCastException: java.time.LocalDate cannot be cast to java.sql.Date`
+  on MIN/MAX date partition queries. Q2 is skipped for Delta+Spark Thrift.
+- **Unity + Delta** excluded. `UCSingleCatalog` 0.4.0 calls
+  `generateTemporaryTableCredentials` (STS) for managed tables. Non-AWS S3 has
+  no STS endpoint. Planned for v1.3.
+
 ## [1.1.0] - 2026-03-05
 
 ### Added

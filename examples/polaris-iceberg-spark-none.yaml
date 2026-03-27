@@ -1,0 +1,66 @@
+# Recipe: polaris-iceberg-spark-none
+#
+# Apache Polaris REST catalog + Iceberg + Spark pipeline, no query engine.
+# Runs the medallion pipeline only -- no benchmark queries.
+# Use this to measure pipeline throughput with Polaris as catalog.
+#
+# Deploys: namespace, S3 secrets, PostgreSQL, Polaris server + bootstrap job,
+#          Spark RBAC.
+#
+# Requirements:
+#   - Polaris minimum version: 1.3.0-incubating (earlier versions have STS bug)
+
+name: polaris-iceberg-pipeline
+recipe: polaris-iceberg-spark-none
+
+images:
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  polaris: apache/polaris:1.3.0-incubating
+  polaris_admin_tool: apache/polaris-admin-tool:1.3.0-incubating
+  pull_policy: Always
+
+platform:
+  kubernetes:
+    namespace: polaris-iceberg-pipeline
+    create_namespace: true
+
+  storage:
+    s3:
+      endpoint: <YOUR_S3_ENDPOINT>          # e.g. http://10.0.0.1:80
+      region: us-east-1
+      path_style: true                       # required for FlashBlade / MinIO
+      access_key: <YOUR_S3_ACCESS_KEY>
+      secret_key: <YOUR_S3_SECRET_KEY>
+      buckets:
+        bronze: polaris-iceberg-pipeline-bronze
+        silver: polaris-iceberg-pipeline-silver
+        gold: polaris-iceberg-pipeline-gold
+
+    scratch:
+      enabled: true
+      storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
+      create_storage_class: false
+
+  compute:
+    postgres:
+      storage: 10Gi
+      storage_class: <YOUR_DB_STORAGE_CLASS>       # Portworx: px-csi-db (repl=3)
+
+architecture:
+  catalog:
+    type: polaris
+
+  pipeline:
+    mode: batch
+
+  workload:
+    schema: customer360
+    datagen:
+      scale: 1                  # ~10 GB bronze data
+      file_size: 64mb
+      timestamp_start: "2024-01-01"
+      timestamp_end: "2025-01-01"
+
+  query_engine:
+    type: none

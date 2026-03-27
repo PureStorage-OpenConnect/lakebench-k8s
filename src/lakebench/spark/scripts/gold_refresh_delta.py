@@ -1,24 +1,29 @@
 """
-Gold Refresh - Periodic re-aggregation of Silver data into Gold KPIs.
+Gold Refresh (Delta Lake) - Periodic re-aggregation of Silver data into Gold KPIs.
+
+Delta Lake variant of gold_refresh.py. Uses Delta write APIs instead of
+Iceberg's DataFrameWriterV2.
 
 Uses a rate source with foreachBatch to periodically read the full Silver
-Iceberg table, compute daily KPI aggregations, and overwrite the Gold table.
+Delta table, compute daily KPI aggregations, and overwrite the Gold table.
 Each cycle produces a complete, consistent Gold snapshot.
 
-This is the sustained-pipeline equivalent of gold_finalize.py. Where
+This is the sustained-pipeline equivalent of gold_finalize_delta.py. Where
 gold_finalize runs once as a batch job, gold_refresh re-aggregates on
 a timer (default every 5 minutes) so the Gold layer stays fresh.
 
 Environment variables (set by job.py):
-    LB_ICEBERG_CATALOG   - Iceberg catalog name (e.g., "lakehouse")
+    LB_ICEBERG_CATALOG   - Catalog name (e.g., "lakehouse")
     CATALOG_NAME         - same as LB_ICEBERG_CATALOG
     CHECKPOINT_LOCATION  - s3a://gold-bucket/checkpoints/gold-refresh/
     TRIGGER_INTERVAL     - e.g., "5 minutes"
 """
 
+from __future__ import annotations
+
 import time
 
-from common import env, get_daily_kpi_aggregations, log
+from common import env, get_daily_kpi_aggregations, log, write_delta_table
 from pyspark.sql import SparkSession
 
 # ---------------------------------------------------------------------------
@@ -28,7 +33,6 @@ catalog = env("LB_ICEBERG_CATALOG", "ice")
 gold_uri = env("LB_GOLD_URI", "s3a://lb-gold/")
 checkpoint_location = env("CHECKPOINT_LOCATION")
 trigger_interval = env("TRIGGER_INTERVAL", "5 minutes")
-target_file_size_bytes = env("TARGET_FILE_SIZE_BYTES", "134217728")
 
 silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
 gold_tbl = f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard')}"
@@ -36,10 +40,10 @@ gold_tbl = f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard'
 # ---------------------------------------------------------------------------
 # Spark session
 # ---------------------------------------------------------------------------
-spark = SparkSession.builder.appName("lb-gold-refresh").getOrCreate()
+spark = SparkSession.builder.appName("lb-gold-refresh-delta").getOrCreate()
 
 log("=" * 60)
-log("Gold Refresh (Periodic Re-aggregation)")
+log("Gold Refresh (Delta) (Periodic Re-aggregation)")
 log("=" * 60)
 log(f"Source table: {silver_tbl}")
 log(f"Target table: {gold_tbl}")
@@ -47,15 +51,14 @@ log(f"Checkpoint:   {checkpoint_location}")
 log(f"Trigger:      {trigger_interval}")
 
 # ---------------------------------------------------------------------------
-# Ensure target namespace exists
+# Ensure target schema exists
 # ---------------------------------------------------------------------------
-log("Creating Iceberg namespace...")
+log("Creating Delta schema...")
 try:
-    gold_warehouse = gold_uri + "warehouse/"
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.gold LOCATION '{gold_warehouse}'")
-    log(f"Created namespace {catalog}.gold")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.gold")
+    log(f"Created schema {catalog}.gold")
 except Exception as e:
-    log(f"Namespace creation note: {str(e)}")
+    log(f"Schema creation note: {str(e)}")
 
 # Track refresh cycles and incremental state
 _refresh_count = 0
@@ -64,6 +67,14 @@ _incremental = env("LB_GOLD_INCREMENTAL", "false").lower() == "true"
 
 if _incremental:
     log("Incremental gold refresh enabled -- only new/changed partitions per cycle")
+
+
+def _delta_write_props() -> dict[str, str]:
+    """Common Delta table properties for gold writes."""
+    return {
+        "delta.logRetentionDuration": "interval 30 days",
+        "delta.deletedFileRetentionDuration": "interval 7 days",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -140,31 +151,30 @@ def refresh_gold(trigger_df, batch_id):
                 .unionByName(daily_kpis_consolidated)
                 .orderBy("interaction_date")
             )
-            (
-                merged.coalesce(1)
-                .writeTo(gold_tbl)
-                .tableProperty("write.format.default", "parquet")
-                .tableProperty("write.parquet.compression-codec", "snappy")
-                .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
-                .createOrReplace()
+            gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
+            opts = {"overwriteSchema": "true", "compression": "snappy"}
+            opts.update(_delta_write_props())
+            write_delta_table(
+                spark, merged.coalesce(1), gold_tbl, gold_bucket,
+                mode="overwrite", options=opts,
             )
         except Exception:
-            # Gold table doesn't exist yet -- fall through to createOrReplace
-            (
-                daily_kpis_consolidated.writeTo(gold_tbl)
-                .tableProperty("write.format.default", "parquet")
-                .tableProperty("write.parquet.compression-codec", "snappy")
-                .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
-                .createOrReplace()
+            # Gold table doesn't exist yet -- fall through to overwrite
+            gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
+            opts = {"overwriteSchema": "true", "compression": "snappy"}
+            opts.update(_delta_write_props())
+            write_delta_table(
+                spark, daily_kpis_consolidated, gold_tbl, gold_bucket,
+                mode="overwrite", options=opts,
             )
     else:
         # Full mode or first cycle: overwrite Gold table completely
-        (
-            daily_kpis_consolidated.writeTo(gold_tbl)
-            .tableProperty("write.format.default", "parquet")
-            .tableProperty("write.parquet.compression-codec", "snappy")
-            .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
-            .createOrReplace()
+        gold_bucket = env("LB_GOLD_URI", "s3a://lb-gold/")
+        opts = {"overwriteSchema": "true", "compression": "snappy"}
+        opts.update(_delta_write_props())
+        write_delta_table(
+            spark, daily_kpis_consolidated, gold_tbl, gold_bucket,
+            mode="overwrite", options=opts,
         )
 
     # Compute data freshness: how old is the most recent Silver data

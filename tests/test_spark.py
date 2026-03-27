@@ -1,5 +1,6 @@
 """Tests for Spark module (job submission, monitoring)."""
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from lakebench.config import LakebenchConfig
@@ -1510,3 +1511,145 @@ class TestCycleEnv:
 
         assert "LB_SILVER_INCREMENTAL" not in env_names
         assert "LB_GOLD_INCREMENTAL" not in env_names
+
+
+# ---------------------------------------------------------------------------
+# ConfigMap includes Delta scripts (v1.2)
+# ---------------------------------------------------------------------------
+
+
+class TestScriptsConfigMapDeltaScripts:
+    """Verify deploy_scripts_configmap includes Delta script files."""
+
+    def test_script_files_list_includes_delta_variants(self):
+        """The script_files list in deploy_scripts_configmap should include Delta scripts."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+
+        # Inspect the method source to verify the list, or call and check.
+        # We mock k8s.apply_manifest to capture the ConfigMap data.
+        k8s.apply_manifest.return_value = True
+
+        with patch("lakebench._resources.get_scripts_dir") as mock_dir:
+            import tempfile
+            from pathlib import Path
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                tmp = Path(tmpdir)
+                # Create all expected script files
+                expected_delta_scripts = [
+                    "silver_build_delta.py",
+                    "gold_finalize_delta.py",
+                    "gold_refresh_delta.py",
+                    "bronze_ingest_delta.py",
+                    "silver_stream_delta.py",
+                ]
+                expected_iceberg_scripts = [
+                    "common.py",
+                    "bronze_verify.py",
+                    "silver_build.py",
+                    "gold_finalize.py",
+                    "bronze_ingest.py",
+                    "silver_stream.py",
+                    "gold_refresh.py",
+                ]
+                all_scripts = expected_iceberg_scripts + expected_delta_scripts
+                for script in all_scripts:
+                    (tmp / script).write_text(f"# {script}\nprint('hello')\n")
+                mock_dir.return_value = tmp
+
+                result = mgr.deploy_scripts_configmap()
+                assert result is True
+
+                # Verify the ConfigMap data includes Delta scripts
+                call_args = k8s.apply_manifest.call_args[0][0]
+                configmap_data = call_args["data"]
+                for delta_script in expected_delta_scripts:
+                    assert delta_script in configmap_data, (
+                        f"Delta script {delta_script} missing from ConfigMap"
+                    )
+
+
+# ---------------------------------------------------------------------------
+# PipelineEngine protocol conformance
+# ---------------------------------------------------------------------------
+
+
+def test_pipeline_engine_protocol_exists():
+    """PipelineEngine protocol is importable and defines required methods."""
+    from lakebench.engine.protocol import PipelineEngine
+
+    required = ["engine_name", "submit_job", "wait_for_completion", "get_logs", "cancel_job"]
+    for method in required:
+        assert method in dir(PipelineEngine), f"PipelineEngine missing {method}"
+
+
+def test_spark_job_manager_has_core_protocol_methods():
+    """SparkJobManager has the core methods needed for the PipelineEngine protocol.
+
+    submit_job and engine_name are implemented. wait_for_completion, get_logs,
+    and cancel_job are in cli.py today -- they will be migrated to
+    SparkJobManager when the engine abstraction is fully wired.
+    """
+    from lakebench.spark.job import SparkJobManager
+
+    # These are implemented today
+    assert hasattr(SparkJobManager, "engine_name")
+    assert hasattr(SparkJobManager, "submit_job")
+    # These exist as get_job_status (will be renamed/wrapped)
+    assert hasattr(SparkJobManager, "get_job_status")
+
+
+def test_get_engine_returns_spark_job_manager():
+    """get_engine() returns a SparkJobManager for the default config."""
+    from unittest.mock import MagicMock
+
+    from lakebench.config import LakebenchConfig
+    from lakebench.engine import get_engine
+    from lakebench.spark.job import SparkJobManager
+
+    cfg = LakebenchConfig(
+        name="test-engine",
+        platform={
+            "storage": {
+                "s3": {
+                    "endpoint": "http://minio:9000",
+                    "access_key": "key",
+                    "secret_key": "secret",
+                }
+            }
+        },
+    )
+    k8s = MagicMock()
+    k8s.get_cluster_capacity.return_value = None
+    engine = get_engine(cfg, k8s)
+    assert isinstance(engine, SparkJobManager)
+    assert engine.engine_name() == "spark"
+
+
+def test_get_engine_rejects_unknown_engine():
+    """get_engine() raises ValueError for unsupported engine types."""
+    from unittest.mock import MagicMock, patch
+
+    from lakebench.config import LakebenchConfig
+    from lakebench.engine import get_engine
+
+    cfg = LakebenchConfig(
+        name="test-engine",
+        platform={
+            "storage": {
+                "s3": {
+                    "endpoint": "http://minio:9000",
+                    "access_key": "key",
+                    "secret_key": "secret",
+                }
+            }
+        },
+    )
+    k8s = MagicMock()
+    # Patch the engine type to something unsupported
+    with patch.object(cfg.architecture, "pipeline_engine") as mock_engine:
+        mock_engine.value = "flink"
+        with pytest.raises(ValueError, match="Unsupported pipeline engine"):
+            get_engine(cfg, k8s)

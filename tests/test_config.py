@@ -728,8 +728,8 @@ class TestComponentValidation:
         assert config.architecture.catalog.polaris.resources.cpu == "1"
         assert config.architecture.catalog.polaris.resources.memory == "2Gi"
 
-    def test_unity_rejected(self):
-        """unity + iceberg + trino is rejected (not yet implemented)."""
+    def test_unity_iceberg_rejected(self):
+        """unity + iceberg is not a supported combination (Unity is Delta-only)."""
         with pytest.raises(ValueError, match="Unsupported component combination"):
             LakebenchConfig(
                 name="test",
@@ -740,9 +740,21 @@ class TestComponentValidation:
                 },
             )
 
-    def test_hudi_rejected(self):
-        """hive + hudi + trino is rejected (not yet implemented)."""
+    def test_polaris_delta_rejected(self):
+        """polaris + delta is rejected (Polaris is Iceberg-native)."""
         with pytest.raises(ValueError, match="Unsupported component combination"):
+            LakebenchConfig(
+                name="test",
+                architecture={
+                    "catalog": {"type": "polaris"},
+                    "table_format": {"type": "delta"},
+                    "query_engine": {"type": "trino"},
+                },
+            )
+
+    def test_invalid_format_rejected(self):
+        """Invalid table format is rejected by Pydantic validation."""
+        with pytest.raises(ValueError):
             LakebenchConfig(
                 name="test",
                 architecture={
@@ -760,8 +772,8 @@ class TestComponentValidation:
             LakebenchConfig(
                 name="test",
                 architecture={
-                    "catalog": {"type": "unity"},
-                    "table_format": {"type": "iceberg"},
+                    "catalog": {"type": "polaris"},
+                    "table_format": {"type": "delta"},
                     "query_engine": {"type": "trino"},
                 },
             )

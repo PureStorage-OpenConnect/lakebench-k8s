@@ -38,32 +38,58 @@ def find_maintenance_engine(
     engine_type = cfg.architecture.query_engine.type.value
     core_v1 = k8s_client.CoreV1Api()
 
-    if engine_type == "trino":
-        try:
-            pods = core_v1.list_namespaced_pod(
-                namespace,
-                label_selector=_TRINO_SELECTOR,
-            )
-            if pods.items:
-                catalog = cfg.architecture.query_engine.trino.catalog_name
-                return "trino", pods.items[0].metadata.name, catalog
-        except Exception as e:
-            logger.warning("Iceberg maintenance: Trino pod lookup failed: %s", e)
+    # Try configured engine first, then fall back to the other.
+    # DuckDB cannot run maintenance.
+    engines_to_try: list[str] = []
+    if engine_type in ("trino", "spark-thrift"):
+        engines_to_try.append(engine_type)
+    # Add fallback engine
+    if engine_type != "trino":
+        engines_to_try.append("trino")
+    if engine_type != "spark-thrift":
+        engines_to_try.append("spark-thrift")
 
-    if engine_type == "spark-thrift":
-        try:
-            pods = core_v1.list_namespaced_pod(
-                namespace,
-                label_selector=_SPARK_THRIFT_SELECTOR,
-            )
-            if pods.items:
-                catalog = cfg.architecture.query_engine.spark_thrift.catalog_name
-                return "spark-thrift", pods.items[0].metadata.name, catalog
-        except Exception as e:
-            logger.warning(
-                "Iceberg maintenance: Spark Thrift pod lookup failed: %s",
-                e,
-            )
+    for engine in engines_to_try:
+        if engine == "trino":
+            try:
+                pods = core_v1.list_namespaced_pod(
+                    namespace,
+                    label_selector=_TRINO_SELECTOR,
+                )
+                if pods.items:
+                    catalog = cfg.architecture.query_engine.trino.catalog_name
+                    if engine != engine_type:
+                        logger.info(
+                            "Maintenance: falling back to Trino (configured engine %s unavailable)",
+                            engine_type,
+                        )
+                    return "trino", pods.items[0].metadata.name, catalog
+            except Exception as e:
+                logger.warning("Iceberg maintenance: Trino pod lookup failed: %s", e)
+
+        elif engine == "spark-thrift":
+            try:
+                pods = core_v1.list_namespaced_pod(
+                    namespace,
+                    label_selector=_SPARK_THRIFT_SELECTOR,
+                )
+                if pods.items:
+                    table_format = cfg.architecture.table_format.type.value
+                    if table_format == "delta":
+                        catalog = "spark_catalog"
+                    else:
+                        catalog = cfg.architecture.query_engine.spark_thrift.catalog_name
+                    if engine != engine_type:
+                        logger.info(
+                            "Maintenance: falling back to Spark Thrift (configured engine %s unavailable)",
+                            engine_type,
+                        )
+                    return "spark-thrift", pods.items[0].metadata.name, catalog
+            except Exception as e:
+                logger.warning(
+                    "Iceberg maintenance: Spark Thrift pod lookup failed: %s",
+                    e,
+                )
 
     return None, None, None
 

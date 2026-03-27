@@ -5,7 +5,7 @@ shared transformation logic used by both batch and streaming scripts.
 
 Environment variables set by lakebench job.py:
   BRONZE_BUCKET, SILVER_BUCKET, GOLD_BUCKET, CATALOG_NAME,
-  LB_BRONZE_URI, LB_SILVER_URI, LB_ICEBERG_CATALOG
+  LB_BRONZE_URI, LB_SILVER_URI, LB_ICEBERG_CATALOG, LB_CATALOG_TYPE
 """
 
 import os
@@ -307,3 +307,84 @@ def get_daily_kpi_aggregations():
         sum_(when(col("channel") == "mobile_app", 1).otherwise(0)).alias("mobile_interactions"),
         sum_(when(col("channel") == "store", 1).otherwise(0)).alias("store_interactions"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Delta table write helper -- handles managed vs EXTERNAL tables
+# ---------------------------------------------------------------------------
+
+def _is_unity_catalog():
+    """Check if the current catalog is Unity (requires EXTERNAL table writes)."""
+    return os.getenv("LB_CATALOG_TYPE", "hive") == "unity"
+
+
+def _s3_table_path(bucket_uri, fq_table):
+    """Build the S3 path for an EXTERNAL Delta table.
+
+    Args:
+        bucket_uri: S3A URI for the layer bucket (e.g. "s3a://lb-silver/")
+        fq_table: Fully-qualified table name WITHOUT catalog prefix
+                  (e.g. "silver.customer_interactions_enriched")
+
+    Returns:
+        S3 path like "s3a://lb-silver/warehouse/silver.db/customer_interactions_enriched"
+    """
+    parts = fq_table.split(".", 1)
+    if len(parts) == 2:
+        schema, table = parts
+    else:
+        schema, table = "default", fq_table
+    return f"{bucket_uri.rstrip('/')}/warehouse/{schema}.db/{table}"
+
+
+def write_delta_table(spark, df, fq_table, bucket_uri, mode="append",
+                      partition_cols=None, options=None):
+    """Write a DataFrame as a Delta table, handling managed vs EXTERNAL.
+
+    When LB_CATALOG_TYPE is "unity", writes data directly to S3 via
+    df.write.save(path) and registers the table with CREATE TABLE ...
+    LOCATION. This bypasses Unity's STS credential vending which fails
+    on non-AWS S3 (FlashBlade, MinIO).
+
+    When LB_CATALOG_TYPE is "hive" (default), uses saveAsTable() which
+    registers through the session catalog (DeltaCatalog over Hive).
+
+    Args:
+        spark: SparkSession
+        df: DataFrame to write
+        fq_table: Catalog-qualified table name (e.g. "lakehouse.silver.table")
+        bucket_uri: S3A URI for the layer (e.g. "s3a://lb-silver/")
+        mode: Write mode -- "append" or "overwrite"
+        partition_cols: List of partition column names, or None
+        options: Dict of writer options (e.g. Delta table properties)
+    """
+    options = options or {}
+    writer = df.write.format("delta").mode(mode)
+    for k, v in options.items():
+        writer = writer.option(k, v)
+    if partition_cols:
+        writer = writer.partitionBy(*partition_cols)
+
+    if _is_unity_catalog():
+        # EXTERNAL table path -- bypass credential vending
+        # Strip catalog prefix to get schema.table for path construction
+        parts = fq_table.split(".", 1)
+        schema_table = parts[1] if len(parts) > 1 else fq_table
+        table_path = _s3_table_path(bucket_uri, schema_table)
+
+        log(f"Writing EXTERNAL Delta table to {table_path} (mode={mode})")
+        writer.save(table_path)
+
+        # Register table in Unity catalog (idempotent)
+        partition_clause = ""
+        if partition_cols:
+            partition_clause = f" PARTITIONED BY ({', '.join(partition_cols)})"
+        spark.sql(
+            f"CREATE TABLE IF NOT EXISTS {fq_table} "
+            f"USING DELTA{partition_clause} "
+            f"LOCATION '{table_path}'"
+        )
+    else:
+        # Managed table path -- saveAsTable registers via DeltaCatalog/Hive
+        log(f"Writing managed Delta table {fq_table} (mode={mode})")
+        writer.saveAsTable(fq_table)

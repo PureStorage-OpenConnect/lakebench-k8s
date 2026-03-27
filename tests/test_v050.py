@@ -104,9 +104,9 @@ class TestDuckDBRecipes:
         assert cfg.architecture.query_engine.type.value == "duckdb"
 
     def test_total_recipes_count(self):
-        """8 named recipes + default alias."""
+        """11 named recipes + default alias."""
         named = [k for k in RECIPES if k != "default"]
-        assert len(named) == 8
+        assert len(named) == 11
 
 
 # ===========================================================================

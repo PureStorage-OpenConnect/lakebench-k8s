@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -194,8 +195,16 @@ class MetricsStorage:
         run = self.run_dir(metrics.run_id)
         filepath = run / "metrics.json"
 
-        with open(filepath, "w") as f:
-            json.dump(metrics.to_dict(), f, indent=2)
+        import tempfile
+
+        fd, tmp_path = tempfile.mkstemp(dir=run, suffix=".json.tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump(metrics.to_dict(), f, indent=2)
+            os.rename(tmp_path, filepath)
+        except BaseException:
+            os.unlink(tmp_path)
+            raise
 
         logger.info(f"Saved metrics to {filepath}")
         return filepath

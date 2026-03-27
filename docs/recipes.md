@@ -1,6 +1,6 @@
 # Recipes -- Component Combinations
 
-A **recipe** (also called a **quick-recipe**) is the validated combination of catalog, table format, pipeline engine, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates recipes at config load time against a whitelist of supported combinations and rejects anything unsupported with a clear error message. There are currently 8 supported recipes.
+A **recipe** (also called a **quick-recipe**) is the validated combination of catalog, table format, pipeline engine, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates recipes at config load time against a whitelist of supported combinations and rejects anything unsupported with a clear error message. There are currently 11 supported recipes.
 
 ## Quick-Recipes
 
@@ -11,7 +11,7 @@ name: my-lakehouse
 recipe: polaris-iceberg-spark-trino    # sets catalog, format, engine, and query engine in one line
 ```
 
-Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`.
+Recipe defaults are merged without overwriting -- any explicit values you set in `architecture:` always take precedence. Available recipe names: `hive-iceberg-spark-trino` (or `default`), `hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`, `hive-iceberg-spark-none`, `polaris-iceberg-spark-trino`, `polaris-iceberg-spark-thrift`, `polaris-iceberg-spark-duckdb`, `polaris-iceberg-spark-none`, `hive-delta-spark-trino`, `hive-delta-spark-thrift`, `hive-delta-spark-none`.
 
 ## Quick Reference
 
@@ -25,6 +25,9 @@ Recipe defaults are merged without overwriting -- any explicit values you set in
 | **Polaris Headless** | polaris | iceberg | none | REST catalog ETL | None (Lakebench deploys Polaris) |
 | **Polaris Spark SQL** | polaris | iceberg | spark-thrift | Spark-native with REST catalog | None (Lakebench deploys Polaris) |
 | **Polaris DuckDB** | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | None (Lakebench deploys Polaris) |
+| **Hive Delta Trino** | hive | delta | trino | Databricks-comparable analytics | Stackable Hive Operator |
+| **Hive Delta Spark SQL** | hive | delta | spark-thrift | Delta + Spark-native analytics | Stackable Hive Operator |
+| **Hive Delta Headless** | hive | delta | none | Delta ETL-only workloads | Stackable Hive Operator |
 
 ## Choosing a Recipe
 
