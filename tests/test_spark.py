@@ -1,7 +1,8 @@
 """Tests for Spark module (job submission, monitoring)."""
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from lakebench.config import LakebenchConfig
 from lakebench.spark.job import JobState, JobStatus, JobType, SparkJobManager
