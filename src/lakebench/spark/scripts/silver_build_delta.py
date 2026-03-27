@@ -310,8 +310,13 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
         opts = {"overwriteSchema": "true", "compression": "snappy"}
         opts.update(_delta_write_props())
         write_delta_table(
-            spark, silver_df, silver_tbl, silver_bucket,
-            mode=write_mode, partition_cols=["interaction_date"], options=opts,
+            spark,
+            silver_df,
+            silver_tbl,
+            silver_bucket,
+            mode=write_mode,
+            partition_cols=["interaction_date"],
+            options=opts,
         )
 
     return silver_count
@@ -348,8 +353,13 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
         opts = {"overwriteSchema": "true", "compression": "snappy"}
         opts.update(_delta_write_props())
         write_delta_table(
-            spark, silver_df, silver_tbl, silver_bucket,
-            mode=write_mode, partition_cols=["interaction_date"], options=opts,
+            spark,
+            silver_df,
+            silver_tbl,
+            silver_bucket,
+            mode=write_mode,
+            partition_cols=["interaction_date"],
+            options=opts,
         )
 
     silver_count = spark.table(silver_tbl).count()
@@ -401,8 +411,13 @@ def silver_salted(spark, bronze_uri, silver_tbl, catalog, profile):
     opts = {"overwriteSchema": "true", "compression": "snappy"}
     opts.update(_delta_write_props())
     write_delta_table(
-        spark, silver_df, silver_tbl, silver_bucket,
-        mode=write_mode, partition_cols=["interaction_date"], options=opts,
+        spark,
+        silver_df,
+        silver_tbl,
+        silver_bucket,
+        mode=write_mode,
+        partition_cols=["interaction_date"],
+        options=opts,
     )
 
     return silver_count

@@ -346,7 +346,9 @@ class TestRecipeSystem:
     def test_unity_delta_recipes_excluded(self):
         """Unity + Delta excluded from v1.2 (UCSingleCatalog STS limitation)."""
         for suffix in ("trino", "thrift", "none"):
-            with pytest.raises(ValueError, match="Unsupported component combination|Unknown recipe"):
+            with pytest.raises(
+                ValueError, match="Unsupported component combination|Unknown recipe"
+            ):
                 _make_config(recipe=f"unity-delta-spark-{suffix}")
 
     def test_no_polaris_delta_recipe_exists(self):

@@ -235,9 +235,7 @@ class DeploymentEngine:
             ]
             if catalog_type == "unity":
                 unity_version = cfg.architecture.catalog.unity.spark_connector_version
-                packages.append(
-                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}"
-                )
+                packages.append(f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}")
         else:
             iceberg_version = cfg.architecture.table_format.iceberg.version
             key = _parse_spark_major_minor(cfg.images.spark)

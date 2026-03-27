@@ -94,8 +94,12 @@ def write_silver_batch(batch_df, batch_id):
         # Table does not exist -- create with partitioning
         log(f"Batch {batch_id}: creating Silver table with partitioning")
         write_delta_table(
-            spark, enriched, silver_tbl, silver_bucket,
-            mode="overwrite", partition_cols=["interaction_date"],
+            spark,
+            enriched,
+            silver_tbl,
+            silver_bucket,
+            mode="overwrite",
+            partition_cols=["interaction_date"],
             options={"delta.logRetentionDuration": "interval 30 days"},
         )
 

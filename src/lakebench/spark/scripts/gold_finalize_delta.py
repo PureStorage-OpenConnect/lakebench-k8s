@@ -164,8 +164,12 @@ def gold_simple_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
     opts = {"overwriteSchema": "true", "compression": "snappy"}
     opts.update(_delta_write_props())
     write_delta_table(
-        spark, daily_kpis_consolidated, gold_tbl, gold_bucket,
-        mode=_safe_write_mode(spark, gold_tbl), options=opts,
+        spark,
+        daily_kpis_consolidated,
+        gold_tbl,
+        gold_bucket,
+        mode=_safe_write_mode(spark, gold_tbl),
+        options=opts,
     )
 
     return kpi_count
@@ -203,8 +207,12 @@ def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
     opts = {"overwriteSchema": "true", "compression": "snappy"}
     opts.update(_delta_write_props())
     write_delta_table(
-        spark, daily_kpis_consolidated, gold_tbl, gold_bucket,
-        mode=_safe_write_mode(spark, gold_tbl), options=opts,
+        spark,
+        daily_kpis_consolidated,
+        gold_tbl,
+        gold_bucket,
+        mode=_safe_write_mode(spark, gold_tbl),
+        options=opts,
     )
 
     return kpi_count
@@ -258,14 +266,22 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
         opts = {"overwriteSchema": "true", "compression": "snappy"}
         opts.update(_delta_write_props())
         write_delta_table(
-            spark, new_kpis_consolidated, gold_tbl, gold_bucket,
-            mode=_safe_write_mode(spark, gold_tbl), options=opts,
+            spark,
+            new_kpis_consolidated,
+            gold_tbl,
+            gold_bucket,
+            mode=_safe_write_mode(spark, gold_tbl),
+            options=opts,
         )
     else:
         # Append new records (dates don't overlap due to filter)
         log("Appending to existing Gold table...")
         write_delta_table(
-            spark, new_kpis_consolidated, gold_tbl, gold_bucket, mode="append",
+            spark,
+            new_kpis_consolidated,
+            gold_tbl,
+            gold_bucket,
+            mode="append",
         )
 
     total_count = spark.table(gold_tbl).count()

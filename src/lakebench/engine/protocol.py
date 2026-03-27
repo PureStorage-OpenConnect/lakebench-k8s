@@ -65,7 +65,4 @@ def get_engine(cfg: LakebenchConfig, k8s: K8sClient) -> PipelineEngine:
 
         return SparkJobManager(cfg, k8s)
 
-    raise ValueError(
-        f"Unsupported pipeline engine: {engine_type!r}. "
-        f"Currently supported: spark."
-    )
+    raise ValueError(f"Unsupported pipeline engine: {engine_type!r}. Currently supported: spark.")

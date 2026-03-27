@@ -155,8 +155,12 @@ def refresh_gold(trigger_df, batch_id):
             opts = {"overwriteSchema": "true", "compression": "snappy"}
             opts.update(_delta_write_props())
             write_delta_table(
-                spark, merged.coalesce(1), gold_tbl, gold_bucket,
-                mode="overwrite", options=opts,
+                spark,
+                merged.coalesce(1),
+                gold_tbl,
+                gold_bucket,
+                mode="overwrite",
+                options=opts,
             )
         except Exception:
             # Gold table doesn't exist yet -- fall through to overwrite
@@ -164,8 +168,12 @@ def refresh_gold(trigger_df, batch_id):
             opts = {"overwriteSchema": "true", "compression": "snappy"}
             opts.update(_delta_write_props())
             write_delta_table(
-                spark, daily_kpis_consolidated, gold_tbl, gold_bucket,
-                mode="overwrite", options=opts,
+                spark,
+                daily_kpis_consolidated,
+                gold_tbl,
+                gold_bucket,
+                mode="overwrite",
+                options=opts,
             )
     else:
         # Full mode or first cycle: overwrite Gold table completely
@@ -173,8 +181,12 @@ def refresh_gold(trigger_df, batch_id):
         opts = {"overwriteSchema": "true", "compression": "snappy"}
         opts.update(_delta_write_props())
         write_delta_table(
-            spark, daily_kpis_consolidated, gold_tbl, gold_bucket,
-            mode="overwrite", options=opts,
+            spark,
+            daily_kpis_consolidated,
+            gold_tbl,
+            gold_bucket,
+            mode="overwrite",
+            options=opts,
         )
 
     # Compute data freshness: how old is the most recent Silver data
