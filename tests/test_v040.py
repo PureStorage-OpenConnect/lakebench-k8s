@@ -17,7 +17,13 @@ import pytest
 
 from lakebench.config import LakebenchConfig
 from lakebench.config.recipes import RECIPES, _deep_setdefault
-from lakebench.spark.job import JobType, SparkJobManager, _parse_spark_major, _spark_compat
+from lakebench.spark.job import (
+    JobType,
+    SparkJobManager,
+    _delta_spark_artifact,
+    _parse_spark_major,
+    _spark_compat,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -86,8 +92,67 @@ class TestSpark4xCompat:
         """Untested minor versions within a supported major are rejected."""
         with pytest.raises(ValueError, match="Unsupported Spark version 3.4"):
             _parse_spark_major("apache/spark:3.4.0-python3")
-        with pytest.raises(ValueError, match="Unsupported Spark version 4.1"):
-            _parse_spark_major("apache/spark:4.1.0-python3")
+        with pytest.raises(ValueError, match="Unsupported Spark version 4.2"):
+            _parse_spark_major("apache/spark:4.2.0-python3")
+
+    def test_parse_spark_41_accepted(self):
+        """Spark 4.1.x is a supported version."""
+        assert _parse_spark_major("apache/spark:4.1.1-python3") == 4
+
+
+class TestFormatVersionResolution:
+    """Auto-version resolution and validation for table format versions."""
+
+    def test_delta_auto_resolves_for_spark_40(self):
+        from lakebench.spark.job import resolve_format_version
+
+        assert resolve_format_version("apache/spark:4.0.2-python3", "delta", "") == "4.0.0"
+
+    def test_delta_auto_resolves_for_spark_41(self):
+        from lakebench.spark.job import resolve_format_version
+
+        assert resolve_format_version("apache/spark:4.1.1-python3", "delta", "") == "4.1.0"
+
+    def test_iceberg_auto_resolves_for_all_spark(self):
+        from lakebench.spark.job import resolve_format_version
+
+        assert resolve_format_version("apache/spark:3.5.4-python3", "iceberg", "") == "1.10.1"
+        assert resolve_format_version("apache/spark:4.0.2-python3", "iceberg", "") == "1.10.1"
+        assert resolve_format_version("apache/spark:4.1.1-python3", "iceberg", "") == "1.10.1"
+
+    def test_delta_not_supported_on_spark_35(self):
+        from lakebench.spark.job import resolve_format_version
+
+        with pytest.raises(ValueError, match="Delta is not supported with Spark 3.5"):
+            resolve_format_version("apache/spark:3.5.4-python3", "delta", "")
+
+    def test_explicit_delta_400_on_spark_41_rejected(self):
+        from lakebench.spark.job import resolve_format_version
+
+        with pytest.raises(ValueError, match="not compatible"):
+            resolve_format_version("apache/spark:4.1.1-python3", "delta", "4.0.0")
+
+    def test_explicit_delta_410_on_spark_40_rejected(self):
+        from lakebench.spark.job import resolve_format_version
+
+        with pytest.raises(ValueError, match="not compatible"):
+            resolve_format_version("apache/spark:4.0.2-python3", "delta", "4.1.0")
+
+    def test_explicit_iceberg_old_version_accepted(self):
+        from lakebench.spark.job import resolve_format_version
+
+        assert resolve_format_version("apache/spark:4.0.2-python3", "iceberg", "1.9.1") == "1.9.1"
+
+    def test_explicit_iceberg_incompatible_rejected(self):
+        from lakebench.spark.job import resolve_format_version
+
+        with pytest.raises(ValueError, match="not compatible"):
+            resolve_format_version("apache/spark:4.1.1-python3", "iceberg", "1.5.2")
+
+    def test_auto_sentinel_resolves(self):
+        from lakebench.spark.job import resolve_format_version
+
+        assert resolve_format_version("apache/spark:4.1.1-python3", "delta", "auto") == "4.1.0"
 
     def test_spark_image_validator_rejects_bad_image(self):
         """ImagesConfig rejects unsupported Spark images at config load."""
@@ -259,7 +324,7 @@ class TestRecipeSystem:
     def test_all_recipes_valid(self):
         """Every recipe expands to a valid LakebenchConfig."""
         named_recipes = [k for k in RECIPES if k != "default"]
-        assert len(named_recipes) == 8
+        assert len(named_recipes) == 11
         for name in named_recipes:
             cfg = _make_config(recipe=name)
             assert cfg.architecture is not None, f"Recipe {name} failed"
@@ -270,6 +335,27 @@ class TestRecipeSystem:
         assert cfg.architecture.catalog.type.value == "polaris"
         assert cfg.architecture.table_format.type.value == "iceberg"
         assert cfg.architecture.query_engine.type.value == "spark-thrift"
+
+    def test_hive_delta_recipes_set_correct_format(self):
+        """Hive + Delta recipes set table format to delta."""
+        for suffix in ("trino", "thrift", "none"):
+            cfg = _make_config(recipe=f"hive-delta-spark-{suffix}")
+            assert cfg.architecture.catalog.type.value == "hive"
+            assert cfg.architecture.table_format.type.value == "delta"
+
+    def test_unity_delta_recipes_excluded(self):
+        """Unity + Delta excluded from v1.2 (UCSingleCatalog STS limitation)."""
+        for suffix in ("trino", "thrift", "none"):
+            with pytest.raises(ValueError, match="Unsupported component combination|Unknown recipe"):
+                _make_config(recipe=f"unity-delta-spark-{suffix}")
+
+    def test_no_polaris_delta_recipe_exists(self):
+        """Polaris + Delta combination should NOT exist in recipes."""
+        named_recipes = [k for k in RECIPES if k != "default"]
+        for name in named_recipes:
+            assert not ("polaris" in name and "delta" in name), (
+                f"Unexpected polaris+delta recipe: {name}"
+            )
 
 
 # ===========================================================================
@@ -436,3 +522,91 @@ class TestBenchmarkRunnerMockExecutor:
             runner = BenchmarkRunner(cfg)
             assert runner.executor is mock_executor
             assert runner.catalog == "lakehouse"
+
+
+# ===========================================================================
+# Delta Maven Artifact Naming
+# ===========================================================================
+
+
+class TestDeltaSparkArtifact:
+    """Tests for _delta_spark_artifact Maven coordinate construction."""
+
+    def test_delta_400_uses_plain_suffix(self):
+        result = _delta_spark_artifact("_2.13", "4.0.0")
+        assert result == "io.delta:delta-spark_2.13:4.0.0"
+
+    def test_delta_410_uses_version_prefix(self):
+        result = _delta_spark_artifact("_2.13", "4.1.0")
+        assert result == "io.delta:delta-spark_4.1_2.13:4.1.0"
+
+    def test_delta_future_42_uses_version_prefix(self):
+        result = _delta_spark_artifact("_2.13", "4.2.0")
+        assert result == "io.delta:delta-spark_4.2_2.13:4.2.0"
+
+
+# ===========================================================================
+# Config-Time Format Version Auto-Resolution
+# ===========================================================================
+
+
+class TestConfigAutoResolve:
+    """Tests for format version auto-resolution at config load time."""
+
+    def test_iceberg_default_unchanged_spark40(self):
+        """Spark 4.0.2 + Iceberg default 1.10.1 stays 1.10.1."""
+        cfg = _make_config(images={"spark": "apache/spark:4.0.2-python3"})
+        assert cfg.architecture.table_format.iceberg.version == "1.10.1"
+
+    def test_iceberg_default_unchanged_spark41(self):
+        """Spark 4.1.1 + Iceberg default 1.10.1 stays 1.10.1."""
+        cfg = _make_config(images={"spark": "apache/spark:4.1.1-python3"})
+        assert cfg.architecture.table_format.iceberg.version == "1.10.1"
+
+    def test_delta_default_spark41_auto_resolves(self):
+        """Spark 4.1.1 + Delta auto-resolves to 4.1.0 (Delta 4.0 is incompatible with Spark 4.1)."""
+        cfg = _make_config(
+            images={"spark": "apache/spark:4.1.1-python3"},
+            architecture={
+                "table_format": {"type": "delta"},
+                "catalog": {"type": "hive"},
+                "query_engine": {"type": "none"},
+            },
+        )
+        assert cfg.architecture.table_format.delta.version == "4.1.0"
+
+    def test_delta_auto_sentinel_resolves_spark41(self):
+        """Spark 4.1.1 + Delta version='auto' resolves to 4.1.0."""
+        cfg = _make_config(
+            images={"spark": "apache/spark:4.1.1-python3"},
+            architecture={
+                "table_format": {"type": "delta", "delta": {"version": "auto"}},
+                "catalog": {"type": "hive"},
+                "query_engine": {"type": "none"},
+            },
+        )
+        assert cfg.architecture.table_format.delta.version == "4.1.0"
+
+    def test_delta_auto_sentinel_resolves_spark40(self):
+        """Spark 4.0.2 + Delta version='auto' resolves to 4.0.0."""
+        cfg = _make_config(
+            images={"spark": "apache/spark:4.0.2-python3"},
+            architecture={
+                "table_format": {"type": "delta", "delta": {"version": "auto"}},
+                "catalog": {"type": "hive"},
+                "query_engine": {"type": "none"},
+            },
+        )
+        assert cfg.architecture.table_format.delta.version == "4.0.0"
+
+    def test_incompatible_version_raises(self):
+        """Spark 4.0.2 + Delta 4.1.0 raises at config load."""
+        with pytest.raises(Exception, match="not compatible"):
+            _make_config(
+                images={"spark": "apache/spark:4.0.2-python3"},
+                architecture={
+                    "table_format": {"type": "delta", "delta": {"version": "4.1.0"}},
+                    "catalog": {"type": "hive"},
+                    "query_engine": {"type": "none"},
+                },
+            )

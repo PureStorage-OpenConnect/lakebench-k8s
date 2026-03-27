@@ -247,6 +247,44 @@ def _scale_partitions(profile: dict[str, Any], scale: int, executor_count: int, 
 _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
     (3, 5): "3.5.x (Scala 2.12, Hadoop AWS 3.3.4)",
     (4, 0): "4.0.x (Scala 2.13, Hadoop AWS 3.4.1)",
+    (4, 1): "4.1.x (Scala 2.13, Hadoop AWS 3.4.1)",
+}
+
+# ---------------------------------------------------------------------------
+# Table format version compatibility matrix
+# ---------------------------------------------------------------------------
+# Maps (spark_major, spark_minor) -> {format: [compatible_versions]}.
+# Used by resolve_format_version() and validate_format_version().
+
+_FORMAT_VERSION_COMPAT: dict[tuple[int, int], dict[str, list[str]]] = {
+    (3, 5): {
+        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1"],
+        "delta": [],  # Delta 4.x requires Spark 4.x
+    },
+    (4, 0): {
+        "iceberg": ["1.7.1", "1.8.1", "1.9.1", "1.10.1"],
+        "delta": ["4.0.0"],
+    },
+    (4, 1): {
+        "iceberg": ["1.8.1", "1.9.1", "1.10.1"],
+        "delta": ["4.1.0"],
+    },
+}
+
+# Default format version per Spark version (auto-selected when user doesn't override).
+_FORMAT_VERSION_DEFAULTS: dict[tuple[int, int], dict[str, str]] = {
+    (3, 5): {"iceberg": "1.10.1", "delta": ""},
+    (4, 0): {"iceberg": "1.10.1", "delta": "4.0.0"},
+    (4, 1): {"iceberg": "1.10.1", "delta": "4.1.0"},
+}
+
+# Iceberg runtime artifact suffix per Spark version.  Iceberg publishes
+# one runtime jar per Spark major release (3.5, 4.0) -- Spark 4.1 reuses
+# the 4.0 runtime because Iceberg hasn't published a 4.1-specific artifact.
+_ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
+    (3, 5): "3.5",
+    (4, 0): "4.0",
+    (4, 1): "4.0",  # Iceberg 1.10.1 has no 4.1 runtime; 4.0 is compatible
 }
 
 
@@ -300,6 +338,21 @@ def _parse_spark_major(image: str) -> int:
     )
 
 
+def _parse_spark_major_minor(image: str) -> tuple[int, int]:
+    """Parse Spark major.minor version from image tag.
+
+    Returns (major, minor) tuple, e.g. (4, 1) for ``apache/spark:4.1.1-python3``.
+    """
+    tag = image.split(":")[-1]
+    for suffix in ("-python3", "-java17", "-java11", "-scala2.12", "-scala2.13"):
+        tag = tag.replace(suffix, "")
+    parts = tag.split(".")
+    try:
+        return int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+    except (ValueError, IndexError):
+        return 0, 0
+
+
 def _spark_compat(image: str) -> tuple[str, str, str]:
     """Derive Scala suffix, Hadoop AWS version, and AWS SDK version from Spark image tag.
 
@@ -312,6 +365,69 @@ def _spark_compat(image: str) -> tuple[str, str, str]:
     if major >= 4:
         return "_2.13", "3.4.1", "1.12.367"
     return "_2.12", "3.3.4", "1.12.262"
+
+
+def _delta_spark_artifact(scala_suffix: str, delta_version: str) -> str:
+    """Build the Maven artifact ID for delta-spark.
+
+    Delta 4.1.0+ changed the naming convention to include the Spark version
+    prefix in the artifact ID: ``delta-spark_4.1_2.13``.  Earlier versions
+    (4.0.x) use the plain ``delta-spark_2.13`` naming.
+    """
+    parts = delta_version.split(".")
+    major = int(parts[0]) if parts else 0
+    minor = int(parts[1]) if len(parts) > 1 else 0
+    if major >= 4 and minor >= 1:
+        return f"io.delta:delta-spark_{major}.{minor}{scala_suffix}:{delta_version}"
+    return f"io.delta:delta-spark{scala_suffix}:{delta_version}"
+
+
+def resolve_format_version(spark_image: str, format_type: str, user_version: str) -> str:
+    """Resolve the table format version for the given Spark image.
+
+    If *user_version* is the schema default (matching the hardcoded default in
+    IcebergConfig or DeltaConfig), returns the auto-selected version for the
+    Spark major.minor. Otherwise validates *user_version* against the
+    compatibility matrix and returns it unchanged.
+
+    Raises:
+        ValueError: If *user_version* is incompatible with the Spark version.
+    """
+    major, minor = _parse_spark_major_minor(spark_image)
+    key = (major, minor)
+
+    defaults = _FORMAT_VERSION_DEFAULTS.get(key, {})
+    compat = _FORMAT_VERSION_COMPAT.get(key, {})
+
+    # Auto-resolve: return default for this Spark+format combo
+    if not user_version or user_version == "auto":
+        default = defaults.get(format_type, "")
+        if not default:
+            raise ValueError(
+                f"{format_type.title()} is not supported with Spark {major}.{minor}."
+            )
+        return default
+
+    # Validate user-specified version
+    compatible = compat.get(format_type, [])
+    if not compatible:
+        raise ValueError(
+            f"{format_type.title()} is not supported with Spark {major}.{minor}."
+        )
+    if user_version not in compatible:
+        raise ValueError(
+            f"{format_type.title()} {user_version} is not compatible with "
+            f"Spark {major}.{minor}. Compatible versions: {', '.join(compatible)}."
+        )
+    return user_version
+
+
+def validate_format_version(spark_image: str, format_type: str, version: str) -> None:
+    """Validate that a table format version is compatible with the Spark image.
+
+    Raises ValueError if incompatible.
+    """
+    resolve_format_version(spark_image, format_type, version)
 
 
 class JobType(Enum):
@@ -363,7 +479,14 @@ class JobStatus:
 
 
 class SparkJobManager:
-    """Manages Spark job submission and tracking."""
+    """Manages Spark job submission and tracking.
+
+    Implements the PipelineEngine protocol defined in lakebench.engine.
+    """
+
+    def engine_name(self) -> str:
+        """Return engine identifier."""
+        return "spark"
 
     def __init__(self, config: LakebenchConfig, k8s: K8sClient):
         """Initialize Spark job manager.
@@ -415,30 +538,56 @@ class SparkJobManager:
 
         custom_api = k8s_client.CustomObjectsApi()
 
-        try:
-            custom_api.create_namespaced_custom_object(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
-                namespace=self.namespace,
-                plural="sparkapplications",
-                body=manifest,
-            )
+        retryable_codes = {429, 500, 502, 503, 504}
+        last_exc: ApiException | None = None
 
-            logger.info(f"Submitted Spark job: {job_name}")
+        for attempt in range(4):  # 1 initial + 3 retries
+            try:
+                custom_api.create_namespaced_custom_object(
+                    group="sparkoperator.k8s.io",
+                    version="v1beta2",
+                    namespace=self.namespace,
+                    plural="sparkapplications",
+                    body=manifest,
+                )
 
-            return JobStatus(
-                name=job_name,
-                state=JobState.SUBMITTED,
-                message=f"Job {job_name} submitted",
-            )
+                logger.info(f"Submitted Spark job: {job_name}")
 
-        except ApiException as e:
-            logger.error(f"Failed to submit job: {e}")
-            return JobStatus(
-                name=job_name,
-                state=JobState.FAILED,
-                message=f"Failed to submit: {e.reason}",
-            )
+                return JobStatus(
+                    name=job_name,
+                    state=JobState.SUBMITTED,
+                    message=f"Job {job_name} submitted",
+                )
+
+            except ApiException as e:
+                if e.status not in retryable_codes or attempt == 3:
+                    logger.error(f"Failed to submit job: {e}")
+                    return JobStatus(
+                        name=job_name,
+                        state=JobState.FAILED,
+                        message=f"Failed to submit: {e.reason}",
+                    )
+                last_exc = e
+                import random
+                import time
+
+                delay = (2**attempt) + random.uniform(0, 0.5)
+                logger.warning(
+                    "Transient K8s API error submitting %s (attempt %d/4), retrying in %.1fs: %s",
+                    job_name,
+                    attempt + 1,
+                    delay,
+                    e.reason,
+                )
+                time.sleep(delay)
+
+        # Should not reach here, but satisfy type checker
+        logger.error(f"Failed to submit job after retries: {last_exc}")
+        return JobStatus(
+            name=job_name,
+            state=JobState.FAILED,
+            message=f"Failed to submit after retries: {last_exc}",
+        )
 
     def _delete_job(self, job_name: str) -> None:
         """Delete existing Spark job if present.
@@ -652,8 +801,11 @@ class SparkJobManager:
         else:
             max_result_gb = min(16, max(4, executor_count // 3))
 
-        # Select script based on job type
-        # Scripts are mounted from ConfigMap at /opt/spark/scripts
+        # Select script based on job type and table format.
+        # Scripts are mounted from ConfigMap at /opt/spark/scripts.
+        # Delta scripts use *_delta.py variants; format-agnostic scripts
+        # (bronze_verify) are shared.
+        table_format = cfg.architecture.table_format.type.value
         script_map = {
             JobType.BRONZE_VERIFY: "bronze_verify.py",
             JobType.SILVER_BUILD: "silver_build.py",
@@ -662,6 +814,16 @@ class SparkJobManager:
             JobType.SILVER_STREAM: "silver_stream.py",
             JobType.GOLD_REFRESH: "gold_refresh.py",
         }
+        if table_format == "delta":
+            script_map.update(
+                {
+                    JobType.SILVER_BUILD: "silver_build_delta.py",
+                    JobType.GOLD_FINALIZE: "gold_finalize_delta.py",
+                    JobType.BRONZE_INGEST: "bronze_ingest_delta.py",
+                    JobType.SILVER_STREAM: "silver_stream_delta.py",
+                    JobType.GOLD_REFRESH: "gold_refresh_delta.py",
+                }
+            )
         # Use local:// to reference scripts already in the container filesystem
         # (mounted from lakebench-spark-scripts ConfigMap)
         main_file = f"local:///opt/spark/scripts/{script_map[job_type]}"
@@ -673,52 +835,56 @@ class SparkJobManager:
         spark_conf["spark.sql.shuffle.partitions"] = shuffle_partitions
         spark_conf["spark.default.parallelism"] = shuffle_partitions
 
-        # Extract versions from config
-        iceberg_version = cfg.architecture.table_format.iceberg.version
         # Parse Spark version from image tag (e.g., apache/spark:3.5.4 -> 3.5)
         spark_image_tag = cfg.images.spark.split(":")[-1]
-        spark_major_minor = ".".join(spark_image_tag.split(".")[:2])
+        major_minor_key = _parse_spark_major_minor(cfg.images.spark)
         scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
+        # Iceberg runtime artifact suffix (Spark 4.1 reuses the 4.0 runtime)
+        iceberg_runtime_suffix = _ICEBERG_RUNTIME_SUFFIX.get(major_minor_key, f"{major_minor_key[0]}.{major_minor_key[1]}")
 
-        # Build spark.jars.packages dynamically from config versions.
-        #
-        # All Spark versions need:
-        #   - iceberg-spark-runtime: Iceberg Spark integration
-        #   - iceberg-aws-bundle: Iceberg catalog S3 support (fat jar, bundles
-        #     AWS SDK v1 + v2 internally for Iceberg 1.10+)
-        #   - hadoop-aws: S3A FileSystem for direct Parquet reads from S3
-        #     (e.g., bronze_ingest reading landing zone Parquet files)
-        #
-        # Spark 3 also needs aws-java-sdk-bundle because iceberg-aws-bundle
-        # <1.8 is leaner and doesn't bundle the full SDK.
-        #
-        # Spark 4 / Hadoop 3.4.1: hadoop-aws pulls software.amazon.awssdk:bundle
-        # (558MB) transitively via S3 Transfer Manager. This is required at
-        # runtime -- S3AFileSystem uses SDK v2 classes that iceberg-aws-bundle
-        # does NOT fully provide (e.g. software.amazon.awssdk.transfer.s3).
-        #
-        # Spark 3 also needs aws-java-sdk-bundle (SDK v1, 310MB) because
-        # hadoop-aws 3.3.x uses SDK v1 and iceberg-aws-bundle <1.8 doesn't
-        # bundle it. With BOTH bundles the total jar payload is ~1.2GB,
-        # overwhelming the driver's netty file server.
-        #
-        # Spark 4 drops aws-java-sdk-bundle -- iceberg-aws-bundle 1.10+
-        # already bundles SDK v1 classes, and hadoop-aws 3.4.1 no longer
-        # needs the explicit v1 bundle.  Total payload: ~650MB (safe).
-        packages = [
-            f"org.apache.iceberg:iceberg-spark-runtime-{spark_major_minor}{scala_suffix}:{iceberg_version}",
-            f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
-            f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-        ]
-        if spark_major < 4:
-            packages.append(
-                f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
+        # Catalog type needed for packages and catalog config
+        catalog_name = cfg.architecture.query_engine.trino.catalog_name
+        catalog_type = cfg.architecture.catalog.type.value
+
+        # Build spark.jars.packages and extensions based on table format
+        if table_format == "delta":
+            delta_version = cfg.architecture.table_format.delta.version
+            packages = [
+                _delta_spark_artifact(scala_suffix, delta_version),
+                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
+            ]
+            if spark_major < 4:
+                packages.append(
+                    f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
+                )
+            if catalog_type == "unity":
+                unity_version = cfg.architecture.catalog.unity.spark_connector_version
+                packages.append(
+                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
+                )
+            spark_conf["spark.jars.packages"] = ",".join(packages)
+            spark_conf["spark.sql.extensions"] = "io.delta.sql.DeltaSparkSessionExtension"
+        else:
+            # Iceberg (default)
+            iceberg_version = cfg.architecture.table_format.iceberg.version
+            packages = [
+                f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_runtime_suffix}{scala_suffix}:{iceberg_version}",
+                f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
+                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
+            ]
+            if spark_major < 4:
+                packages.append(
+                    f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
+                )
+            if catalog_type == "unity":
+                unity_version = cfg.architecture.catalog.unity.spark_connector_version
+                packages.append(
+                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
+                )
+            spark_conf["spark.jars.packages"] = ",".join(packages)
+            spark_conf["spark.sql.extensions"] = (
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
             )
-
-        spark_conf["spark.jars.packages"] = ",".join(packages)
-        spark_conf["spark.sql.extensions"] = (
-            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
-        )
 
         # Warehouse bucket depends on which stage writes: gold jobs target the
         # gold bucket, bronze-ingest targets the bronze bucket, all others
@@ -730,10 +896,6 @@ class SparkJobManager:
         else:
             warehouse_bucket = s3.buckets.silver
 
-        # Add S3 and catalog configuration
-        catalog_name = cfg.architecture.query_engine.trino.catalog_name
-        catalog_type = cfg.architecture.catalog.type.value
-
         # S3A endpoint (shared -- both Hive and Polaris catalogs use S3A for data I/O)
         spark_conf.update(
             {
@@ -744,8 +906,43 @@ class SparkJobManager:
             }
         )
 
-        # Catalog-specific config
-        if catalog_type == "polaris":
+        # Catalog-specific config -- varies by table format AND catalog type
+        if table_format == "delta":
+            # Delta Lake catalog configuration
+            if catalog_type == "unity":
+                unity_port = cfg.architecture.catalog.unity.port
+                # UCSingleCatalog adds /api/2.1/unity-catalog internally --
+                # pass the base URL only.
+                unity_uri = (
+                    f"http://lakebench-unity.{self.namespace}"
+                    f".svc.cluster.local:{unity_port}"
+                )
+                spark_conf.update(
+                    {
+                        # Named catalog for Unity table registration
+                        f"spark.sql.catalog.{catalog_name}": "io.unitycatalog.spark.UCSingleCatalog",
+                        f"spark.sql.catalog.{catalog_name}.uri": unity_uri,
+                        f"spark.sql.catalog.{catalog_name}.token": "",
+                        # Delta also requires DeltaCatalog on spark_catalog
+                        # for EXTERNAL table writes (CREATE TABLE ... USING DELTA)
+                        "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+                    }
+                )
+            else:
+                # Delta + Hive Metastore
+                # DeltaCatalog is a CatalogExtension -- must override spark_catalog
+                # (not a named catalog) so Spark wires up the Hive delegate correctly.
+                hive_uri = f"thrift://lakebench-hive-metastore.{self.namespace}.svc.cluster.local:9083"
+                spark_conf.update(
+                    {
+                        "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+                        "spark.sql.catalogImplementation": "hive",
+                        "spark.hadoop.hive.metastore.uris": hive_uri,
+                        "spark.sql.warehouse.dir": f"s3a://{warehouse_bucket}/warehouse/",
+                    }
+                )
+        elif catalog_type == "polaris":
+            # Iceberg + Polaris REST catalog
             polaris_port = cfg.architecture.catalog.polaris.port
             polaris_uri = (
                 f"http://lakebench-polaris.{self.namespace}"
@@ -769,15 +966,28 @@ class SparkJobManager:
                 f"spark.sql.catalog.{catalog_name}.s3.access-key-id": s3.access_key,
                 f"spark.sql.catalog.{catalog_name}.s3.secret-access-key": s3.secret_key,
             }
-            # Spark 4 / Iceberg 1.10: the default Vert.x HTTP client blocks the
-            # driver event loop during REST catalog commits, causing RPC timeouts
-            # and executor task-result failures.  Switch to the Apache HttpClient
-            # which runs on its own thread pool and doesn't block the event loop.
             if spark_major >= 4:
                 polaris_conf[f"spark.sql.catalog.{catalog_name}.rest.http-client.type"] = "apache"
             spark_conf.update(polaris_conf)
+        elif catalog_type == "unity":
+            # Iceberg + Unity Catalog (uses UCSingleCatalog for read+write)
+            # Unity OSS Iceberg REST only supports GET -- table creation
+            # must go via Unity's native API, which UCSingleCatalog handles.
+            # UCSingleCatalog adds /api/2.1/unity-catalog internally.
+            unity_port = cfg.architecture.catalog.unity.port
+            unity_uri = (
+                f"http://lakebench-unity.{self.namespace}"
+                f".svc.cluster.local:{unity_port}"
+            )
+            spark_conf.update(
+                {
+                    f"spark.sql.catalog.{catalog_name}": "io.unitycatalog.spark.UCSingleCatalog",
+                    f"spark.sql.catalog.{catalog_name}.uri": unity_uri,
+                    f"spark.sql.catalog.{catalog_name}.token": "",
+                }
+            )
         else:
-            # Hive Metastore (default)
+            # Iceberg + Hive Metastore (default)
             spark_conf.update(
                 {
                     f"spark.sql.catalog.{catalog_name}": "org.apache.iceberg.spark.SparkCatalog",
@@ -793,15 +1003,16 @@ class SparkJobManager:
                 }
             )
 
-        # Iceberg catalog tuning (shared across catalog types)
-        spark_conf.update(
-            {
-                f"spark.sql.catalog.{catalog_name}.s3.multipart.size": "268435456",
-                f"spark.sql.catalog.{catalog_name}.io.threads": "32",
-                f"spark.sql.catalog.{catalog_name}.io.manifest-encoder-threads": "16",
-                "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
-            }
-        )
+        # Table-format-specific tuning (only for Iceberg)
+        if table_format == "iceberg":
+            spark_conf.update(
+                {
+                    f"spark.sql.catalog.{catalog_name}.s3.multipart.size": "268435456",
+                    f"spark.sql.catalog.{catalog_name}.io.threads": "32",
+                    f"spark.sql.catalog.{catalog_name}.io.manifest-encoder-threads": "16",
+                    "spark.sql.iceberg.handle-timestamp-without-timezone": "true",
+                }
+            )
 
         # Ivy cache must be writable
         spark_conf["spark.jars.ivy"] = "/tmp/.ivy2"
@@ -1189,8 +1400,15 @@ class SparkJobManager:
             {"name": "LB_GOLD_URI", "value": f"s3a://{s3.buckets.gold}/"},
             {
                 "name": "LB_ICEBERG_CATALOG",
-                "value": cfg.architecture.query_engine.trino.catalog_name,
+                # Delta + Hive must use spark_catalog (session catalog);
+                # all other formats use the named catalog from the recipe.
+                "value": "spark_catalog"
+                if cfg.architecture.table_format.type.value == "delta"
+                and cfg.architecture.catalog.type.value != "unity"
+                else cfg.architecture.query_engine.trino.catalog_name,
             },
+            # Catalog type -- used by Delta scripts to choose managed vs EXTERNAL writes
+            {"name": "LB_CATALOG_TYPE", "value": cfg.architecture.catalog.type.value},
             # Table names (configurable via architecture.tables)
             {"name": "LB_BRONZE_TABLE", "value": cfg.architecture.tables.bronze},
             {"name": "LB_SILVER_TABLE", "value": cfg.architecture.tables.silver},
@@ -1269,6 +1487,12 @@ class SparkJobManager:
             "bronze_ingest.py",
             "silver_stream.py",
             "gold_refresh.py",
+            # Delta variants (same pipeline logic, Delta write API)
+            "silver_build_delta.py",
+            "gold_finalize_delta.py",
+            "gold_refresh_delta.py",
+            "bronze_ingest_delta.py",
+            "silver_stream_delta.py",
         ]
 
         # Build ConfigMap data

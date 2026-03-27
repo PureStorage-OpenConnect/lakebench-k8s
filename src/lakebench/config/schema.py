@@ -40,7 +40,7 @@ class TableFormatType(str, Enum):
     """Supported table formats."""
 
     ICEBERG = "iceberg"
-    HUDI = "hudi"
+    DELTA = "delta"
 
 
 class FileFormatType(str, Enum):
@@ -94,8 +94,6 @@ class WorkloadSchema(str, Enum):
     """Supported workload schemas for data generation."""
 
     CUSTOMER360 = "customer360"
-    IOT = "iot"
-    FINANCIAL = "financial"
     CUSTOM = "custom"
 
 
@@ -151,11 +149,11 @@ class ImagesConfig(BaseModel):
 
     datagen: str = "docker.io/sillidata/lb-datagen:latest"
     spark: str = "apache/spark:4.0.2-python3"
-    postgres: str = "postgres:17"
+    postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
     polaris: str = "apache/polaris:1.3.0-incubating"
     polaris_admin_tool: str = "apache/polaris-admin-tool:1.3.0-incubating"
-    unity: str = "unitycatalog/unitycatalog:0.1.0"
+    unity: str = "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
     trino: str = "trinodb/trino:479"
     duckdb: str = "python:3.11-slim"
     prometheus: str = "prom/prometheus:v2.48.0"
@@ -411,7 +409,16 @@ class PolarisConfig(BaseModel):
 
 
 class UnityConfig(BaseModel):
-    """Unity Catalog configuration (placeholder for future)."""
+    """Unity Catalog configuration.
+
+    OSS Unity Catalog is a self-hosted REST catalog server (Apache-licensed).
+    Uses PostgreSQL for persistence, similar to Polaris.
+    """
+
+    version: str = "0.4.0"
+    spark_connector_version: str = "0.4.0"
+    port: int = 8080
+    resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
 
 class CatalogConfig(BaseModel):
@@ -431,10 +438,10 @@ class IcebergConfig(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
-class HudiConfig(BaseModel):
-    """Apache Hudi table format configuration."""
+class DeltaConfig(BaseModel):
+    """Delta Lake table format configuration."""
 
-    version: str = "0.14.0"
+    version: str = "auto"
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -443,7 +450,7 @@ class TableFormatConfig(BaseModel):
 
     type: TableFormatType = TableFormatType.ICEBERG
     iceberg: IcebergConfig = Field(default_factory=IcebergConfig)
-    hudi: HudiConfig = Field(default_factory=HudiConfig)
+    delta: DeltaConfig = Field(default_factory=DeltaConfig)
 
 
 class TrinoCoordinatorConfig(BaseModel):
@@ -908,15 +915,25 @@ class WorkloadConfig(BaseModel):
 # Unsupported combinations fail validation with a clear error.
 _SUPPORTED_COMBINATIONS = [
     # (catalog, table_format, pipeline_engine, query_engine)
+    # -- Hive + Iceberg (v1.1) --
     ("hive", "iceberg", "spark", "trino"),
     ("hive", "iceberg", "spark", "spark-thrift"),
     ("hive", "iceberg", "spark", "duckdb"),
     ("hive", "iceberg", "spark", "none"),
-    # Polaris REST catalog (Iceberg only)
+    # -- Polaris REST catalog + Iceberg (v1.1) --
     ("polaris", "iceberg", "spark", "trino"),
     ("polaris", "iceberg", "spark", "spark-thrift"),
     ("polaris", "iceberg", "spark", "duckdb"),
     ("polaris", "iceberg", "spark", "none"),
+    # -- Hive + Delta Lake (v1.2) --
+    ("hive", "delta", "spark", "trino"),
+    ("hive", "delta", "spark", "spark-thrift"),
+    ("hive", "delta", "spark", "none"),
+    # Note: Unity + Delta excluded from v1.2. UCSingleCatalog 0.4.0 always
+    # calls generateTemporaryTableCredentials (STS) even for CREATE TABLE
+    # ... LOCATION (EXTERNAL tables). No workaround without upstream fix
+    # or direct REST API table registration. Planned for v1.3.
+    # Note: Polaris + Delta is excluded -- Polaris is Iceberg-native.
 ]
 
 
@@ -1181,6 +1198,34 @@ class LakebenchConfig(BaseModel):
         """Validate required fields are present."""
         if not self.name:
             raise ValueError("'name' is required")
+        return self
+
+    @model_validator(mode="after")
+    def resolve_format_versions(self) -> LakebenchConfig:
+        """Auto-resolve table format versions based on the Spark image.
+
+        When the user hasn't overridden the format version (or set it to
+        ``"auto"``), this picks the best default for the configured Spark
+        major.minor.  When the user *has* specified a version, this
+        validates it against the compatibility matrix.
+        """
+        from lakebench.spark.job import resolve_format_version
+
+        spark_image = self.images.spark
+        fmt = self.architecture.table_format
+
+        if fmt.type == TableFormatType.ICEBERG:
+            resolved = resolve_format_version(
+                spark_image, "iceberg", fmt.iceberg.version,
+            )
+            if resolved != fmt.iceberg.version:
+                fmt.iceberg.version = resolved
+        elif fmt.type == TableFormatType.DELTA:
+            resolved = resolve_format_version(
+                spark_image, "delta", fmt.delta.version,
+            )
+            if resolved != fmt.delta.version:
+                fmt.delta.version = resolved
         return self
 
     def get_s3_endpoint_url(self) -> str:

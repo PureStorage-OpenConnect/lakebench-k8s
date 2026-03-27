@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import functools
 import logging
+import random
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,6 +14,48 @@ from kubernetes import client, config
 from kubernetes.client.rest import ApiException
 
 logger = logging.getLogger(__name__)
+
+# Status codes worth retrying (transient server errors + rate limiting)
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_MAX_RETRIES = 3
+_BASE_DELAY = 1.0  # seconds
+
+
+def retry_k8s_api(func):
+    """Retry decorator for K8s API calls with exponential backoff and jitter.
+
+    Retries on transient ApiException (429/5xx), ConnectionError, and
+    TimeoutError. 3 retries with 1s/2s/4s base delay + random jitter.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except ApiException as e:
+                if e.status not in _RETRYABLE_STATUS_CODES:
+                    raise
+                last_exc = e
+            except (ConnectionError, TimeoutError) as e:
+                last_exc = e
+
+            if attempt < _MAX_RETRIES:
+                delay = _BASE_DELAY * (2**attempt) + random.uniform(0, 0.5)
+                logger.warning(
+                    "K8s API call %s failed (attempt %d/%d), retrying in %.1fs: %s",
+                    func.__name__,
+                    attempt + 1,
+                    _MAX_RETRIES + 1,
+                    delay,
+                    last_exc,
+                )
+                time.sleep(delay)
+
+        raise last_exc  # type: ignore[misc]
+
+    return wrapper
 
 
 class K8sError(Exception):
@@ -202,6 +247,7 @@ class K8sClient:
         except ApiException as e:
             return False, f"Error checking permissions: {e.reason}"
 
+    @retry_k8s_api
     def create_namespace(self, name: str) -> bool:
         """Create a namespace.
 
@@ -230,6 +276,7 @@ class K8sClient:
                 return False
             raise K8sResourceError(f"Failed to create namespace: {e}")  # noqa: B904
 
+    @retry_k8s_api
     def delete_namespace(self, name: str) -> bool:
         """Delete a namespace.
 
@@ -267,6 +314,7 @@ class K8sClient:
                 return False
             raise K8sResourceError(f"Error checking secret: {e}")  # noqa: B904
 
+    @retry_k8s_api
     def apply_manifest(self, manifest: dict[str, Any], namespace: str | None = None) -> bool:
         """Apply a Kubernetes manifest (create or update).
 

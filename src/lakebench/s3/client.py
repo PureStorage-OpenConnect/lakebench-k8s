@@ -234,7 +234,13 @@ class S3Client:
             error_code = e.response.get("Error", {}).get("Code", "")
             if error_code in ("404", "NoSuchBucket"):
                 return False
-            # Re-raise other errors (e.g., access denied)
+            if error_code in ("403", "AccessDenied"):
+                logger.warning(
+                    "Access denied checking bucket %s (treating as non-existent)",
+                    bucket_name,
+                )
+                return False
+            # Re-raise other errors
             raise S3BucketError(f"Error checking bucket {bucket_name}: {e}")  # noqa: B904
 
     def create_bucket(self, bucket_name: str) -> bool:

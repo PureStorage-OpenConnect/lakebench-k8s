@@ -562,3 +562,181 @@ class TestBenchmarkMetricsStreams:
         d = bm.to_dict()
         assert d["streams"] == 1
         assert "stream_results" not in d
+
+
+# ---------------------------------------------------------------------------
+# Executor Format Awareness (v1.2)
+# ---------------------------------------------------------------------------
+
+
+class TestTrinoExecutorFormatAwareness:
+    """Tests for TrinoExecutor table_format parameter and behavior."""
+
+    def test_trino_accepts_table_format_param(self):
+        from lakebench.benchmark.executor import TrinoExecutor
+
+        executor = TrinoExecutor(
+            namespace="test-ns", catalog_name="lakehouse", table_format="delta"
+        )
+        assert executor.table_format == "delta"
+
+    def test_trino_default_table_format_is_iceberg(self):
+        from lakebench.benchmark.executor import TrinoExecutor
+
+        executor = TrinoExecutor(namespace="test-ns", catalog_name="lakehouse")
+        assert executor.table_format == "iceberg"
+
+    def test_trino_flush_cache_noop_for_delta(self):
+        """flush_cache should NOT call subprocess when table_format is delta."""
+        from unittest.mock import patch
+
+        from lakebench.benchmark.executor import TrinoExecutor
+
+        executor = TrinoExecutor(
+            namespace="test-ns", catalog_name="lakehouse", table_format="delta"
+        )
+        with patch("lakebench.benchmark.executor.subprocess") as mock_sub:
+            executor.flush_cache()
+            mock_sub.run.assert_not_called()
+
+    def test_trino_flush_cache_calls_subprocess_for_iceberg(self):
+        """flush_cache should attempt subprocess call for iceberg format."""
+        from unittest.mock import MagicMock, patch
+
+        from lakebench.benchmark.executor import TrinoExecutor
+
+        executor = TrinoExecutor(
+            namespace="test-ns", catalog_name="lakehouse", table_format="iceberg"
+        )
+        executor._pod = "trino-coordinator-0"  # skip pod discovery
+        with patch("lakebench.benchmark.executor.subprocess") as mock_sub:
+            mock_sub.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            mock_sub.TimeoutExpired = TimeoutError
+            mock_sub.SubprocessError = Exception
+            executor.flush_cache()
+            mock_sub.run.assert_called_once()
+
+
+class TestDuckDBExecutorFormatAwareness:
+    """Tests for DuckDB executor table_format-dependent behavior."""
+
+    def test_build_python_script_loads_delta_extension(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        executor = DuckDBExecutor(
+            namespace="test-ns",
+            catalog_name="lakehouse",
+            table_format="delta",
+        )
+        script = executor._build_python_script("SELECT 1")
+        assert "load_extension('delta')" in script
+
+    def test_build_python_script_loads_iceberg_extension(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        executor = DuckDBExecutor(
+            namespace="test-ns",
+            catalog_name="lakehouse",
+            table_format="iceberg",
+        )
+        script = executor._build_python_script("SELECT 1")
+        assert "load_extension('iceberg')" in script
+
+    def test_adapt_query_delta_scan(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        executor = DuckDBExecutor(
+            namespace="test-ns",
+            catalog_name="lakehouse",
+            table_format="delta",
+            s3_buckets={"silver": "lb-silver"},
+            table_names={"silver": "silver_ns.my_table"},
+        )
+        sql = "SELECT * FROM lakehouse.silver_ns.my_table"
+        adapted = executor.adapt_query(sql)
+        assert "delta_scan(" in adapted
+        assert "iceberg_scan(" not in adapted
+
+    def test_adapt_query_iceberg_scan(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        executor = DuckDBExecutor(
+            namespace="test-ns",
+            catalog_name="lakehouse",
+            table_format="iceberg",
+            s3_buckets={"silver": "lb-silver"},
+            table_names={"silver": "silver_ns.my_table"},
+        )
+        sql = "SELECT * FROM lakehouse.silver_ns.my_table"
+        adapted = executor.adapt_query(sql)
+        assert "iceberg_scan(" in adapted
+        assert "delta_scan(" not in adapted
+
+
+class TestGetExecutorPassesTableFormat:
+    """Test that get_executor passes table_format from config."""
+
+    def test_get_executor_trino_with_delta_format(self):
+        from lakebench.benchmark.executor import TrinoExecutor, get_executor
+        from tests.conftest import make_config
+
+        cfg = make_config(recipe="hive-delta-spark-trino")
+        executor = get_executor(cfg, namespace="test-ns")
+        assert isinstance(executor, TrinoExecutor)
+        assert executor.table_format == "delta"
+
+    def test_get_executor_trino_with_iceberg_format(self):
+        from lakebench.benchmark.executor import TrinoExecutor, get_executor
+        from tests.conftest import make_config
+
+        cfg = make_config(recipe="hive-iceberg-spark-trino")
+        executor = get_executor(cfg, namespace="test-ns")
+        assert isinstance(executor, TrinoExecutor)
+        assert executor.table_format == "iceberg"
+
+    def test_get_executor_duckdb_with_delta_format(self):
+        """DuckDB executor correctly receives delta table_format.
+
+        Note: delta+duckdb recipes were removed (DuckDB delta-kernel-rs
+        cannot connect to non-AWS S3), but the executor itself still
+        supports the delta table format if configured directly.
+        """
+        from lakebench.benchmark.executor import DuckDBExecutor, get_executor
+        from tests.conftest import make_config
+
+        cfg = make_config(
+            recipe="hive-iceberg-spark-duckdb",
+        )
+        # Override table format post-construction
+        cfg.architecture.table_format.type = (
+            cfg.architecture.table_format.type.__class__("delta")
+        )
+        executor = get_executor(cfg, namespace="test-ns")
+        assert isinstance(executor, DuckDBExecutor)
+        assert executor.table_format == "delta"
+
+
+class TestDuckDBDateDiffRewrite:
+    """Test DuckDB DATE_DIFF to DATEDIFF rewrite."""
+
+    def test_rewrite_date_diff(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        sql = "SELECT DATE_DIFF('day', a, b) FROM t"
+        result = DuckDBExecutor._rewrite_date_diff(sql)
+        assert "DATEDIFF(" in result
+        assert "DATE_DIFF(" not in result
+
+    def test_rewrite_date_diff_case_insensitive(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        sql = "SELECT date_diff('day', a, b) FROM t"
+        result = DuckDBExecutor._rewrite_date_diff(sql)
+        assert "DATEDIFF(" in result
+
+    def test_no_rewrite_when_no_match(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        sql = "SELECT 1 FROM t"
+        result = DuckDBExecutor._rewrite_date_diff(sql)
+        assert result == sql
