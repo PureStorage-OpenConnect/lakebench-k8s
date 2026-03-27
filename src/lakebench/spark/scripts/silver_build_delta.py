@@ -1,5 +1,8 @@
 """
-Adaptive Silver Build - Scale-aware transformation pipeline
+Adaptive Silver Build (Delta Lake) - Scale-aware transformation pipeline
+
+Delta Lake variant of silver_build.py. Uses Delta write APIs instead of
+Iceberg's DataFrameWriterV2.
 
 Automatically selects the optimal processing strategy based on data size:
 - SIMPLE: < 100GB, standard processing
@@ -15,7 +18,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from common import apply_silver_transformations, env, log
+from common import apply_silver_transformations, env, log, write_delta_table
+from delta.tables import DeltaTable
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     approx_count_distinct,
@@ -192,23 +196,9 @@ def select_silver_strategy(profile: DataProfile) -> SilverStrategy:
 
     SALTED is only used for SIMPLE-range datasets (<100GB) with extreme skew,
     where the count() and hash distribution write could be affected.
-
-    BUG-001: Previously, skew >100x was checked first, which caused SALTED
-    to be selected for all Zipf-distributed data (v2 datagen). SALTED performs
-    repartition() + count() + hash writes, filling 150Gi PVCs with shuffle
-    spill at scale 50+.
-
-    BUG-002: CHUNKED was previously selected at >= 5TB. Despite the comment
-    claiming "no shuffle", CHUNKED does repartition() per chunk -- causing a
-    full shuffle of each chunk's data. At scale 500 (5 TB, 90 date chunks),
-    each chunk re-scans the entire 5 TB bronze dataset to filter down to one
-    day (~55 GB), then shuffles that 55 GB. This resulted in 30+ hour runtimes.
-    STREAMING (single pass, no shuffle) handles 5 TB+ correctly -- column
-    transforms don't require data redistribution, and Iceberg's
-    write.distribution-mode=hash handles file layout.
     """
     # STREAMING for all datasets >= 100 GB -- single pass, no shuffle.
-    # Column transforms are row-independent; Iceberg handles file distribution.
+    # Column transforms are row-independent; Delta handles file layout.
     if profile.total_size_gb >= 100:
         return SilverStrategy.STREAMING
 
@@ -277,12 +267,25 @@ def apply_dynamic_config(spark, profile: DataProfile):
 
 
 def _table_exists(spark, table_name: str) -> bool:
-    """Check if an Iceberg table exists."""
+    """Check if a Delta table exists."""
     try:
-        spark.table(table_name)
-        return True
+        return DeltaTable.isDeltaTable(spark, table_name)
     except Exception:
-        return False
+        # isDeltaTable may not work with catalog-qualified names;
+        # fall back to trying to read the table
+        try:
+            spark.table(table_name)
+            return True
+        except Exception:
+            return False
+
+
+def _delta_write_props() -> dict[str, str]:
+    """Common Delta table properties for silver writes."""
+    return {
+        "delta.logRetentionDuration": "interval 30 days",
+        "delta.deletedFileRetentionDuration": "interval 7 days",
+    }
 
 
 def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
@@ -297,18 +300,18 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     silver_count = silver_df.count()
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
+    silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     if incremental and _table_exists(spark, silver_tbl):
         log("Appending to existing table (incremental mode)")
-        silver_df.writeTo(silver_tbl).append()
+        write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
     else:
-        (
-            silver_df.writeTo(silver_tbl)
-            .tableProperty("write.format.default", "parquet")
-            .tableProperty("write.parquet.compression-codec", "snappy")
-            .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-            .tableProperty("write.distribution-mode", "hash")
-            .partitionedBy("interaction_date")
-            .createOrReplace()
+        table_exists = _table_exists(spark, silver_tbl)
+        write_mode = "overwrite" if table_exists else "append"
+        opts = {"overwriteSchema": "true", "compression": "snappy"}
+        opts.update(_delta_write_props())
+        write_delta_table(
+            spark, silver_df, silver_tbl, silver_bucket,
+            mode=write_mode, partition_cols=["interaction_date"], options=opts,
         )
 
     return silver_count
@@ -320,11 +323,9 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
     Key insight: Column transformations don't require data redistribution.
     - No repartition() - avoid shuffle that caused OOM at 1TB+
     - No intermediate count() - avoid extra data passes
-    - distribution-mode=none: avoids Iceberg's ClusteredDistribution shuffle
-      that fills scratch PVCs at 5TB+ (BUG-003). Partitioning still works
-      because Iceberg routes rows to partition files by column value regardless
-      of distribution mode.
-    - Let AQE handle partition coalescing, Iceberg handle file sizing
+    - overwriteSchema=true: Delta equivalent of distribution-mode=none
+      (no extra sort/shuffle imposed by the writer)
+    - Let AQE handle partition coalescing, Delta handle file sizing
     """
     log("Executing STREAMING strategy (no shuffle, single pass)...")
     log(
@@ -336,19 +337,19 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
     # Apply transformations - all column operations, no joins
     silver_df = apply_silver_transformations(df_bronze)
 
+    silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
     if incremental and _table_exists(spark, silver_tbl):
         log("Appending to existing table (incremental mode)")
-        silver_df.writeTo(silver_tbl).append()
+        write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
     else:
-        (
-            silver_df.writeTo(silver_tbl)
-            .tableProperty("write.format.default", "parquet")
-            .tableProperty("write.parquet.compression-codec", "snappy")
-            .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-            .tableProperty("write.distribution-mode", "none")
-            .partitionedBy("interaction_date")
-            .createOrReplace()
+        table_exists = _table_exists(spark, silver_tbl)
+        write_mode = "overwrite" if table_exists else "append"
+        opts = {"overwriteSchema": "true", "compression": "snappy"}
+        opts.update(_delta_write_props())
+        write_delta_table(
+            spark, silver_df, silver_tbl, silver_bucket,
+            mode=write_mode, partition_cols=["interaction_date"], options=opts,
         )
 
     silver_count = spark.table(silver_tbl).count()
@@ -394,14 +395,14 @@ def silver_salted(spark, bronze_uri, silver_tbl, catalog, profile):
     silver_count = silver_df.count()
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
-    (
-        silver_df.writeTo(silver_tbl)
-        .tableProperty("write.format.default", "parquet")
-        .tableProperty("write.parquet.compression-codec", "snappy")
-        .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-        .tableProperty("write.distribution-mode", "hash")
-        .partitionedBy("interaction_date")
-        .createOrReplace()
+    silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
+    table_exists = _table_exists(spark, silver_tbl)
+    write_mode = "overwrite" if table_exists else "append"
+    opts = {"overwriteSchema": "true", "compression": "snappy"}
+    opts.update(_delta_write_props())
+    write_delta_table(
+        spark, silver_df, silver_tbl, silver_bucket,
+        mode=write_mode, partition_cols=["interaction_date"], options=opts,
     )
 
     return silver_count
@@ -416,10 +417,10 @@ bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 silver_uri = env("LB_SILVER_URI", "s3a://lb-silver/")
 
 log("=" * 60)
-log("Customer 360 Silver Build - Adaptive Transformation Pipeline")
+log("Customer 360 Silver Build (Delta) - Adaptive Transformation Pipeline")
 log("=" * 60)
 
-spark = SparkSession.builder.appName("lb-silver-build").getOrCreate()
+spark = SparkSession.builder.appName("lb-silver-build-delta").getOrCreate()
 
 # Check for legacy shuffle partition override
 shuffle_override = os.getenv("LB_SILVER_SHUFFLE_PARTITIONS")
@@ -427,13 +428,13 @@ if shuffle_override:
     spark.conf.set("spark.sql.shuffle.partitions", shuffle_override)
     log(f"Legacy shuffle partitions override: {shuffle_override}")
 
-# Create Iceberg namespaces
-log("Creating Iceberg namespaces...")
+# Create Delta schema
+log("Creating Delta schema...")
 try:
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.silver")
-    log(f"Created namespace {catalog}.silver")
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.silver")
+    log(f"Created schema {catalog}.silver")
 except Exception as e:
-    log(f"Namespace creation note: {str(e)}")
+    log(f"Schema creation note: {str(e)}")
 
 # Profile data and select strategy
 import time  # noqa: E402
@@ -496,7 +497,7 @@ else:
 total_time = time.time() - start_time
 
 log("=" * 60)
-log("Customer 360 Silver Build COMPLETED")
+log("Customer 360 Silver Build (Delta) COMPLETED")
 log("=" * 60)
 log(f"Strategy: {strategy.value}")
 log(f"Records written: {silver_count:,}")

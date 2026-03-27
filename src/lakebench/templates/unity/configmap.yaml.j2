@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-unity
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/managed-by: lakebench
+data:
+  server.properties: |
+    server.env=dev
+    server.authorization=disable
+    server.managed-table.enabled=true
+    # S3 storage (index-based per-bucket config)
+    # Each bucket needs its own endpoint + path-style settings (Unity OSS)
+    s3.bucketPath.0=s3://{{ bucket_bronze }}
+    s3.region.0={{ s3_region }}
+    s3.accessKey.0={{ s3_access_key }}
+    s3.secretKey.0={{ s3_secret_key }}
+    s3.endpoint.0={{ s3_endpoint }}
+    s3.forcePathStyle.0={{ s3_path_style | lower }}
+    s3.bucketPath.1=s3://{{ bucket_silver }}
+    s3.region.1={{ s3_region }}
+    s3.accessKey.1={{ s3_access_key }}
+    s3.secretKey.1={{ s3_secret_key }}
+    s3.endpoint.1={{ s3_endpoint }}
+    s3.forcePathStyle.1={{ s3_path_style | lower }}
+    s3.bucketPath.2=s3://{{ bucket_gold }}
+    s3.region.2={{ s3_region }}
+    s3.accessKey.2={{ s3_access_key }}
+    s3.secretKey.2={{ s3_secret_key }}
+    s3.endpoint.2={{ s3_endpoint }}
+    s3.forcePathStyle.2={{ s3_path_style | lower }}
+  hibernate.properties: |
+    hibernate.connection.driver_class=org.postgresql.Driver
+    hibernate.connection.url=jdbc:postgresql://lakebench-postgres.{{ namespace }}.svc.cluster.local:5432/unity
+    hibernate.connection.username=unity
+    hibernate.connection.password=lakebench-unity-2024
+    hibernate.hbm2ddl.auto=update
+    hibernate.show_sql=false
+    hibernate.archive.autodetection=class
+    hibernate.use_sql_comments=true

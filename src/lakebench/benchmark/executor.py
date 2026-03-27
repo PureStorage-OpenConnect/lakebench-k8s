@@ -60,9 +60,10 @@ class QueryExecutor(Protocol):
 class TrinoExecutor:
     """Executes queries via ``kubectl exec`` into the Trino CLI."""
 
-    def __init__(self, namespace: str, catalog_name: str):
+    def __init__(self, namespace: str, catalog_name: str, table_format: str = "iceberg"):
         self.namespace = namespace
         self.catalog_name = catalog_name
+        self.table_format = table_format
         self._pod: str | None = None
 
     def engine_name(self) -> str:
@@ -160,6 +161,8 @@ class TrinoExecutor:
 
     def flush_cache(self) -> None:
         """Flush Trino's Iceberg metadata cache."""
+        if self.table_format == "delta":
+            return  # Delta Trino connector has no metadata cache flush
         try:
             pod = self._discover_pod()
             subprocess.run(
@@ -402,9 +405,11 @@ class DuckDBExecutor:
         s3_path_style: bool = True,
         s3_buckets: dict[str, str] | None = None,
         table_names: dict[str, str] | None = None,
+        table_format: str = "iceberg",
     ):
         self.namespace = namespace
         self.catalog_name = catalog_name
+        self.table_format = table_format
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
         self.s3_path_style = s3_path_style
@@ -451,7 +456,7 @@ class DuckDBExecutor:
         return (
             "import duckdb, json, os; "
             "conn = duckdb.connect(); "
-            "conn.load_extension('iceberg'); "
+            f"conn.load_extension('{'delta' if self.table_format == 'delta' else 'iceberg'}'); "
             "conn.load_extension('httpfs'); "
             f"conn.execute(\"SET s3_endpoint='{self.s3_endpoint.replace('http://', '').replace('https://', '')}'\"); "
             f"conn.execute(\"SET s3_region='{self.s3_region}'\"); "
@@ -564,12 +569,27 @@ class DuckDBExecutor:
             namespace, table = parts
             catalog_ref = f"{self.catalog_name}.{fq_name}"
             warehouse_path = f"s3://{bucket}/warehouse/{namespace}.db/{table}"
-            scan_expr = f"iceberg_scan('{warehouse_path}', allow_moved_paths := true)"
+            if self.table_format == "delta":
+                scan_expr = f"delta_scan('{warehouse_path}')"
+            else:
+                scan_expr = f"iceberg_scan('{warehouse_path}', allow_moved_paths := true)"
             sql = sql.replace(catalog_ref, scan_expr)
 
         # -- Dialect rewrites --
         sql = self._rewrite_date_add(sql)
+        sql = self._rewrite_date_diff(sql)
         return sql
+
+    @staticmethod
+    def _rewrite_date_diff(sql: str) -> str:
+        """Rewrite Trino ``DATE_DIFF(...)`` to DuckDB ``DATEDIFF(...)``.
+
+        DuckDB uses ``DATEDIFF`` (no underscore) but supports the same
+        3-argument form ``DATEDIFF('day', start, end)``.
+        """
+        import re
+
+        return re.sub(r"\bDATE_DIFF\s*\(", "DATEDIFF(", sql, flags=re.IGNORECASE)
 
     @staticmethod
     def _rewrite_date_add(sql: str) -> str:
@@ -617,12 +637,19 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
     """
     ns = namespace or config.get_namespace()
     engine_type = config.architecture.query_engine.type.value
+    table_format = config.architecture.table_format.type.value
 
     if engine_type == "trino":
         catalog = config.architecture.query_engine.trino.catalog_name
-        return TrinoExecutor(namespace=ns, catalog_name=catalog)
+        return TrinoExecutor(namespace=ns, catalog_name=catalog, table_format=table_format)
     elif engine_type == "spark-thrift":
-        catalog = config.architecture.query_engine.spark_thrift.catalog_name
+        catalog_type = config.architecture.catalog.type.value
+        # Delta+Hive tables are in spark_catalog (session catalog override).
+        # Delta+Unity tables are in a named UCSingleCatalog.
+        if table_format == "delta" and catalog_type != "unity":
+            catalog = "spark_catalog"
+        else:
+            catalog = config.architecture.query_engine.spark_thrift.catalog_name
         return SparkThriftExecutor(namespace=ns, catalog_name=catalog)
     elif engine_type == "duckdb":
         s3 = config.platform.storage.s3
@@ -642,6 +669,7 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
                 "silver": tables.silver,
                 "gold": tables.gold,
             },
+            table_format=table_format,
         )
     elif engine_type == "none":
         raise ValueError("Cannot run queries without a query engine (type=none)")

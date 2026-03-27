@@ -70,7 +70,7 @@ class DuckDBDeployer:
                     if doc:
                         self.k8s.apply_manifest(doc, namespace=namespace)
 
-            self._wait_for_ready(namespace, timeout_seconds=300)
+            self._wait_for_ready(namespace, timeout_seconds=600)
 
             duckdb_version = image_tag(self.config.images.duckdb)
             return DeploymentResult(

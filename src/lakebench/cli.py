@@ -2368,8 +2368,9 @@ def run(
     """
     import uuid
 
+    from lakebench.engine import get_engine
     from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage
-    from lakebench.spark import SparkJobManager, SparkJobMonitor, SparkOperatorManager
+    from lakebench.spark import SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import JobState, JobType, get_executor_count, get_job_profile
 
     config_file = resolve_config_path(config_file, file_option)
@@ -2482,7 +2483,7 @@ def run(
             namespace=cfg.get_namespace(),
         )
 
-        job_manager = SparkJobManager(cfg, k8s)
+        job_manager = get_engine(cfg, k8s)
         monitor = SparkJobMonitor(cfg, k8s)
 
         # Deploy scripts ConfigMap -- must succeed or pipeline jobs will fail
@@ -2840,6 +2841,10 @@ def run(
                 console.print("[bold]Pre-benchmark maintenance[/bold]")
                 _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold="0s")
                 _run_iceberg_compaction(cfg, k8s, console, j)
+                # Compaction (especially Delta OPTIMIZE) can OOM and restart
+                # Trino worker pods.  Wait for the query engine to be healthy
+                # before starting the benchmark so queries don't fail mid-run.
+                _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
             except Exception as e:
                 print_warning(f"Pre-benchmark maintenance failed (non-fatal): {e}")
 
@@ -3174,28 +3179,35 @@ def _run_iceberg_maintenance(
     j,
     retention_threshold: str,
 ) -> None:
-    """Run Iceberg expire_snapshots + remove_orphan_files.
+    """Run table maintenance (format-aware).
+
+    - Iceberg: expire_snapshots + remove_orphan_files
+    - Delta: VACUUM
 
     Engine-aware: uses Trino (preferred) or Spark Thrift Server.
-    DuckDB cannot run Iceberg maintenance -- skipped with a warning.
+    DuckDB cannot run maintenance -- skipped with a warning.
     Failures on individual tables are logged but do not abort.
     """
     from lakebench.deploy.iceberg import (
-        build_maintenance_sql,
         exec_sql,
         find_maintenance_engine,
     )
 
     namespace = cfg.get_namespace()
     engine_type = cfg.architecture.query_engine.type.value
+    table_format = cfg.architecture.table_format.type.value
 
     if engine_type == "duckdb":
-        console.print("  [dim]Iceberg maintenance skipped (DuckDB cannot run maintenance)[/dim]")
+        console.print(
+            f"  [dim]{table_format.title()} maintenance skipped (DuckDB cannot run maintenance)[/dim]"
+        )
         return
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
     if engine is None or pod_name is None or catalog is None:
-        console.print("  [dim]Iceberg maintenance skipped (no capable engine pod found)[/dim]")
+        console.print(
+            f"  [dim]{table_format.title()} maintenance skipped (no capable engine pod found)[/dim]"
+        )
         return
 
     tables = cfg.architecture.tables
@@ -3205,28 +3217,49 @@ def _run_iceberg_maintenance(
         f"{catalog}.{tables.gold}",
     ]
 
+    # Build SQL based on table format
+    if table_format == "delta":
+        from lakebench.deploy.delta_maintenance import (
+            build_delta_maintenance_sql,
+            parse_retention_to_hours,
+        )
+
+        retention_hours = parse_retention_to_hours(retention_threshold)
+
+        def build_sql(tbl):
+            return build_delta_maintenance_sql(engine, catalog, tbl, retention_hours)
+    else:
+        from lakebench.deploy.iceberg import build_maintenance_sql
+
+        def build_sql(tbl):
+            return build_maintenance_sql(engine, catalog, tbl, retention_threshold)
+
     maintained = 0
+    expected_ops = 0
     for table in table_names:
-        for sql in build_maintenance_sql(engine, catalog, table, retention_threshold):
+        ops = build_sql(table)
+        expected_ops += len(ops)
+        for sql in ops:
             try:
                 exec_sql(engine, k8s, pod_name, namespace, sql)
                 maintained += 1
             except Exception as e:
-                logger.warning("Iceberg maintenance failed for %s: %s", table, e)
+                logger.warning("%s maintenance failed for %s: %s", table_format.title(), table, e)
 
     console.print(
-        f"  Iceberg maintenance ({engine}): {maintained}/{len(table_names) * 2} "
+        f"  {table_format.title()} maintenance ({engine}): {maintained}/{expected_ops} "
         f"operations (threshold: {retention_threshold})"
     )
     _journal_safe(
         j.record,
         EventType.STREAMING_HEALTH,
-        message="Iceberg maintenance",
+        message=f"{table_format.title()} maintenance",
         details={
             "engine": engine,
+            "table_format": table_format,
             "retention_threshold": retention_threshold,
             "operations_succeeded": maintained,
-            "operations_total": len(table_names) * 2,
+            "operations_total": expected_ops,
         },
     )
 
@@ -3238,28 +3271,45 @@ def _run_iceberg_compaction(
     j,
     file_size_threshold: str = "128MB",
 ) -> None:
-    """Run Iceberg compaction (optimize / rewrite_data_files).
+    """Run table compaction (format-aware).
+
+    - Iceberg: rewrite_data_files / optimize
+    - Delta: OPTIMIZE
 
     Merges small files produced by streaming micro-batches or repeated
-    incremental writes.  Heavier than expire_snapshots.
-    DuckDB cannot run compaction -- skipped with a warning.
+    incremental writes.  DuckDB cannot run compaction -- skipped.
     """
     from lakebench.deploy.iceberg import (
-        build_compaction_sql,
         exec_sql,
         find_maintenance_engine,
     )
 
     namespace = cfg.get_namespace()
     engine_type = cfg.architecture.query_engine.type.value
+    table_format = cfg.architecture.table_format.type.value
 
     if engine_type == "duckdb":
-        console.print("  [dim]Iceberg compaction skipped (DuckDB read-only)[/dim]")
+        console.print(f"  [dim]{table_format.title()} compaction skipped (DuckDB read-only)[/dim]")
+        return
+
+    # Delta OPTIMIZE rewrites the entire table in a single pass.  Both Trino
+    # workers (~8GiB) and Spark Thrift Server (~4GiB) can OOM and restart,
+    # causing benchmark queries to fail.  In batch mode, Delta tables are
+    # written in a single Spark job and don't accumulate the small files that
+    # OPTIMIZE is designed to fix.  Skip it pre-benchmark to avoid crashing
+    # the query engine.  OPTIMIZE is still run in the sustained monitoring
+    # loop where small-file proliferation is the actual problem.
+    if table_format == "delta" and engine_type in ("trino", "spark-thrift"):
+        console.print(
+            f"  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]"
+        )
         return
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
     if engine is None or pod_name is None or catalog is None:
-        console.print("  [dim]Iceberg compaction skipped (no capable engine pod found)[/dim]")
+        console.print(
+            f"  [dim]{table_format.title()} compaction skipped (no capable engine pod found)[/dim]"
+        )
         return
 
     tables = cfg.architecture.tables
@@ -3268,35 +3318,114 @@ def _run_iceberg_compaction(
         f"{catalog}.{tables.gold}",
     ]
 
+    # Build SQL based on table format
+    if table_format == "delta":
+        from lakebench.deploy.delta_maintenance import build_delta_compaction_sql
+
+        def build_sql(tbl):
+            return build_delta_compaction_sql(engine, catalog, tbl)
+    else:
+        from lakebench.deploy.iceberg import build_compaction_sql
+
+        def build_sql(tbl):
+            return build_compaction_sql(engine, catalog, tbl, file_size_threshold)
+
     compacted = 0
     for table in table_names:
-        for sql in build_compaction_sql(engine, catalog, table, file_size_threshold):
+        for sql in build_sql(table):
             try:
                 exec_sql(engine, k8s, pod_name, namespace, sql)
                 compacted += 1
             except Exception as e:
-                logger.warning("Iceberg compaction failed for %s: %s", table, e)
+                logger.warning("%s compaction failed for %s: %s", table_format.title(), table, e)
 
     console.print(
-        f"  Iceberg compaction ({engine}): {compacted}/{len(table_names)} "
+        f"  {table_format.title()} compaction ({engine}): {compacted}/{len(table_names)} "
         f"tables (threshold: {file_size_threshold})"
     )
 
 
-def _probe_table_health(cfg, k8s) -> dict[str, int]:
-    """Query Iceberg system tables for file/snapshot counts on silver and gold.
+def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
+    """Poll the Trino cluster until all expected worker nodes are active.
 
+    Compaction (e.g. Delta OPTIMIZE via Trino) can exhaust per-node memory
+    and cause Trino worker pods to restart.  A SELECT 1 health check passes
+    as soon as the coordinator responds, even while workers are still
+    reconnecting.  Instead, query system.runtime.nodes and wait until the
+    expected worker count is present -- this guarantees distributed queries
+    will succeed.
+
+    Silently returns if the engine is DuckDB or Spark Thrift (no pod restart risk).
+    """
+    import time
+
+    engine_type = cfg.architecture.query_engine.type.value
+    if engine_type not in ("trino",):
+        return
+
+    from lakebench.benchmark.executor import get_executor
+
+    namespace = cfg.get_namespace()
+    executor = get_executor(cfg, namespace)
+
+    # Determine expected worker count from Trino StatefulSet replica count
+    try:
+        import subprocess as _sp
+
+        result = _sp.run(
+            [
+                "kubectl", "get", "statefulset", "lakebench-trino-worker",
+                "-n", namespace,
+                "-o", "jsonpath={.spec.replicas}",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        expected_workers = int(result.stdout.strip() or "1")
+    except Exception:
+        expected_workers = 1
+
+    deadline = time.monotonic() + timeout
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        try:
+            result = executor.execute_query(
+                "SELECT COUNT(*) FROM system.runtime.nodes WHERE state = 'active' AND coordinator = false",
+                timeout=15,
+            )
+            if result.success and result.raw_output.strip().strip('"').isdigit():
+                active_workers = int(result.raw_output.strip().strip('"'))
+                if active_workers >= expected_workers:
+                    if attempt > 1:
+                        console.print(
+                            f"  [dim]Trino workers ready: {active_workers}/{expected_workers} "
+                            f"(waited {attempt * 5}s)[/dim]"
+                        )
+                    return
+        except Exception:
+            pass
+        time.sleep(5)
+
+    console.print(
+        f"  [dim]Trino worker readiness check timed out after {timeout}s -- proceeding[/dim]"
+    )
+
+
+def _probe_table_health(cfg, k8s) -> dict[str, int]:
+    """Query table metadata for file/snapshot counts on silver and gold.
+
+    Format-aware: uses Iceberg system tables or Delta DESCRIBE DETAIL.
     Returns a dict like {"silver_data_file_count": N, "silver_snapshot_count": N, ...}.
     Returns empty dict if no engine is available.
     """
     from lakebench.deploy.iceberg import (
-        build_table_health_sql,
         find_maintenance_engine,
         query_sql,
     )
 
     namespace = cfg.get_namespace()
     engine_type = cfg.architecture.query_engine.type.value
+    table_format = cfg.architecture.table_format.type.value
 
     if engine_type == "duckdb":
         return {}
@@ -3308,9 +3437,21 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
     tables = cfg.architecture.tables
     health: dict[str, int] = {}
 
+    # Format-conditional health SQL builder
+    if table_format == "delta":
+        from lakebench.deploy.delta_maintenance import build_delta_table_health_sql
+
+        def _build_health(eng, tbl):
+            return build_delta_table_health_sql(eng, catalog, tbl)
+    else:
+        from lakebench.deploy.iceberg import build_table_health_sql
+
+        def _build_health(eng, tbl):
+            return build_table_health_sql(eng, tbl)
+
     for label, table_ref in [("silver", tables.silver), ("gold", tables.gold)]:
         fq = f"{catalog}.{table_ref}"
-        for metric_name, sql in build_table_health_sql(engine, fq).items():
+        for metric_name, sql in _build_health(engine, fq).items():
             try:
                 import re as _re
 
@@ -3576,8 +3717,9 @@ def _run_sustained(
     import uuid
 
     from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
+    from lakebench.engine import get_engine
     from lakebench.metrics import MetricsCollector, MetricsStorage, StreamingJobMetrics
-    from lakebench.spark import SparkJobManager, SparkJobMonitor, SparkOperatorManager
+    from lakebench.spark import SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import JobState, JobType
 
     run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
@@ -3642,7 +3784,7 @@ def _run_sustained(
             context=cfg.platform.kubernetes.context,
             namespace=cfg.get_namespace(),
         )
-        job_manager = SparkJobManager(cfg, k8s)
+        job_manager = get_engine(cfg, k8s)
         monitor = SparkJobMonitor(cfg, k8s)
 
         # Deploy scripts ConfigMap (includes streaming scripts) -- must succeed
@@ -4264,7 +4406,10 @@ def info(
         ("Pipeline mode", f"{arch.pipeline.mode.value}"),
         ("Processing", f"{arch.pipeline.pattern.value} (bronze > silver > gold)"),
         ("Catalog", f"{arch.catalog.type.value}"),
-        ("Table format", f"{arch.table_format.type.value} {arch.table_format.iceberg.version}"),
+        (
+            "Table format",
+            f"{arch.table_format.type.value} {arch.table_format.delta.version if arch.table_format.type.value == 'delta' else arch.table_format.iceberg.version}",
+        ),
         ("Query engine", f"{arch.query_engine.type.value}"),
         ("Parallelism", str(workload.datagen.parallelism)),
         (

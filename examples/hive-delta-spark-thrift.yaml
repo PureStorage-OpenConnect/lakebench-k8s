@@ -1,0 +1,66 @@
+# Recipe: hive-delta-spark-thrift
+#
+# Hive Metastore + Delta Lake + Spark pipeline + Spark Thrift Server.
+# Uses Delta Lake 4.0.0 as the table format instead of Iceberg.
+# Delta 4.0.0 requires Spark 4.0.x -- do not use with Spark 3.5.x.
+#
+# Deploys: namespace, S3 secrets, PostgreSQL, Hive Metastore (Stackable),
+#          Spark RBAC, Spark Thrift Server.
+
+name: hive-delta-thrift
+recipe: hive-delta-spark-thrift
+
+images:
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  pull_policy: Always
+
+platform:
+  kubernetes:
+    namespace: hive-delta-thrift
+    create_namespace: true
+
+  storage:
+    s3:
+      endpoint: <YOUR_S3_ENDPOINT>          # e.g. http://10.0.0.1:80
+      region: us-east-1
+      path_style: true                       # required for FlashBlade / MinIO
+      access_key: <YOUR_S3_ACCESS_KEY>
+      secret_key: <YOUR_S3_SECRET_KEY>
+      buckets:
+        bronze: hive-delta-thrift-bronze
+        silver: hive-delta-thrift-silver
+        gold: hive-delta-thrift-gold
+
+    scratch:
+      enabled: true
+      storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
+      create_storage_class: false
+
+  compute:
+    postgres:
+      storage: 10Gi
+      storage_class: <YOUR_DB_STORAGE_CLASS>       # Portworx: px-csi-db (repl=3)
+
+architecture:
+  table_format:
+    type: delta
+    delta:
+      version: "4.0.0"          # requires Spark 4.0.x
+
+  pipeline:
+    mode: batch
+
+  workload:
+    schema: customer360
+    datagen:
+      scale: 1                  # ~10 GB bronze data
+      file_size: 64mb
+      timestamp_start: "2024-01-01"
+      timestamp_end: "2025-01-01"
+
+  query_engine:
+    type: spark-thrift
+    spark_thrift:
+      cores: 2
+      memory: 4g

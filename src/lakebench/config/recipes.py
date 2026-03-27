@@ -84,6 +84,32 @@ RECIPES: dict[str, dict[str, Any]] = {
             "query_engine": {"type": "duckdb", "duckdb": {"cores": 2, "memory": "4g"}},
         },
     },
+    # -- Hive + Delta Lake (v1.2) --
+    "hive-delta-spark-trino": {
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "architecture": {
+            "catalog": {"type": "hive"},
+            "table_format": {"type": "delta", "delta": {"version": "4.0.0"}},
+            "query_engine": {"type": "trino"},
+        },
+    },
+    "hive-delta-spark-thrift": {
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "architecture": {
+            "catalog": {"type": "hive"},
+            "table_format": {"type": "delta", "delta": {"version": "4.0.0"}},
+            "query_engine": {"type": "spark-thrift"},
+        },
+    },
+    "hive-delta-spark-none": {
+        "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
+        "architecture": {
+            "catalog": {"type": "hive"},
+            "table_format": {"type": "delta", "delta": {"version": "4.0.0"}},
+            "query_engine": {"type": "none"},
+        },
+    },
+    # Unity + Delta excluded from v1.2. See schema.py for rationale.
 }
 
 # Alias
@@ -99,6 +125,9 @@ RECIPE_DESCRIPTIONS: dict[str, str] = {
     "polaris-iceberg-spark-thrift": "Polaris + Iceberg + Spark + Spark Thrift",
     "polaris-iceberg-spark-duckdb": "Polaris + Iceberg + Spark + DuckDB",
     "polaris-iceberg-spark-none": "Polaris + Iceberg + Spark, no query engine",
+    "hive-delta-spark-trino": "Hive + Delta + Spark + Trino",
+    "hive-delta-spark-thrift": "Hive + Delta + Spark + Spark Thrift",
+    "hive-delta-spark-none": "Hive + Delta + Spark, no query engine",
 }
 
 
