@@ -3301,7 +3301,7 @@ def _run_iceberg_compaction(
     # loop where small-file proliferation is the actual problem.
     if table_format == "delta" and engine_type in ("trino", "spark-thrift"):
         console.print(
-            f"  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]"
+            "  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]"
         )
         return
 
