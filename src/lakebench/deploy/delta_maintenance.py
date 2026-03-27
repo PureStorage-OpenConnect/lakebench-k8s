@@ -92,9 +92,7 @@ def build_delta_maintenance_sql(
         # Override the connector session property when a shorter threshold
         # is requested (e.g. retention_hours=0 on destroy path).
         if retention_hours < 168.0:
-            stmts.append(
-                f"SET SESSION {catalog}.vacuum_min_retention = '0s'"
-            )
+            stmts.append(f"SET SESSION {catalog}.vacuum_min_retention = '0s'")
         stmts.append(
             f"CALL {catalog}.system.vacuum("
             f"schema_name => '{schema}', "

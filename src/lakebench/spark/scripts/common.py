@@ -313,6 +313,7 @@ def get_daily_kpi_aggregations():
 # Delta table write helper -- handles managed vs EXTERNAL tables
 # ---------------------------------------------------------------------------
 
+
 def _is_unity_catalog():
     """Check if the current catalog is Unity (requires EXTERNAL table writes)."""
     return os.getenv("LB_CATALOG_TYPE", "hive") == "unity"
@@ -337,8 +338,9 @@ def _s3_table_path(bucket_uri, fq_table):
     return f"{bucket_uri.rstrip('/')}/warehouse/{schema}.db/{table}"
 
 
-def write_delta_table(spark, df, fq_table, bucket_uri, mode="append",
-                      partition_cols=None, options=None):
+def write_delta_table(
+    spark, df, fq_table, bucket_uri, mode="append", partition_cols=None, options=None
+):
     """Write a DataFrame as a Delta table, handling managed vs EXTERNAL.
 
     When LB_CATALOG_TYPE is "unity", writes data directly to S3 via

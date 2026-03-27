@@ -403,17 +403,13 @@ def resolve_format_version(spark_image: str, format_type: str, user_version: str
     if not user_version or user_version == "auto":
         default = defaults.get(format_type, "")
         if not default:
-            raise ValueError(
-                f"{format_type.title()} is not supported with Spark {major}.{minor}."
-            )
+            raise ValueError(f"{format_type.title()} is not supported with Spark {major}.{minor}.")
         return default
 
     # Validate user-specified version
     compatible = compat.get(format_type, [])
     if not compatible:
-        raise ValueError(
-            f"{format_type.title()} is not supported with Spark {major}.{minor}."
-        )
+        raise ValueError(f"{format_type.title()} is not supported with Spark {major}.{minor}.")
     if user_version not in compatible:
         raise ValueError(
             f"{format_type.title()} {user_version} is not compatible with "
@@ -840,7 +836,9 @@ class SparkJobManager:
         major_minor_key = _parse_spark_major_minor(cfg.images.spark)
         scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
         # Iceberg runtime artifact suffix (Spark 4.1 reuses the 4.0 runtime)
-        iceberg_runtime_suffix = _ICEBERG_RUNTIME_SUFFIX.get(major_minor_key, f"{major_minor_key[0]}.{major_minor_key[1]}")
+        iceberg_runtime_suffix = _ICEBERG_RUNTIME_SUFFIX.get(
+            major_minor_key, f"{major_minor_key[0]}.{major_minor_key[1]}"
+        )
 
         # Catalog type needed for packages and catalog config
         catalog_name = cfg.architecture.query_engine.trino.catalog_name
@@ -914,8 +912,7 @@ class SparkJobManager:
                 # UCSingleCatalog adds /api/2.1/unity-catalog internally --
                 # pass the base URL only.
                 unity_uri = (
-                    f"http://lakebench-unity.{self.namespace}"
-                    f".svc.cluster.local:{unity_port}"
+                    f"http://lakebench-unity.{self.namespace}.svc.cluster.local:{unity_port}"
                 )
                 spark_conf.update(
                     {
@@ -932,7 +929,9 @@ class SparkJobManager:
                 # Delta + Hive Metastore
                 # DeltaCatalog is a CatalogExtension -- must override spark_catalog
                 # (not a named catalog) so Spark wires up the Hive delegate correctly.
-                hive_uri = f"thrift://lakebench-hive-metastore.{self.namespace}.svc.cluster.local:9083"
+                hive_uri = (
+                    f"thrift://lakebench-hive-metastore.{self.namespace}.svc.cluster.local:9083"
+                )
                 spark_conf.update(
                     {
                         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
@@ -975,10 +974,7 @@ class SparkJobManager:
             # must go via Unity's native API, which UCSingleCatalog handles.
             # UCSingleCatalog adds /api/2.1/unity-catalog internally.
             unity_port = cfg.architecture.catalog.unity.port
-            unity_uri = (
-                f"http://lakebench-unity.{self.namespace}"
-                f".svc.cluster.local:{unity_port}"
-            )
+            unity_uri = f"http://lakebench-unity.{self.namespace}.svc.cluster.local:{unity_port}"
             spark_conf.update(
                 {
                     f"spark.sql.catalog.{catalog_name}": "io.unitycatalog.spark.UCSingleCatalog",

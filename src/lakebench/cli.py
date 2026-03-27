@@ -3300,9 +3300,7 @@ def _run_iceberg_compaction(
     # the query engine.  OPTIMIZE is still run in the sustained monitoring
     # loop where small-file proliferation is the actual problem.
     if table_format == "delta" and engine_type in ("trino", "spark-thrift"):
-        console.print(
-            "  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]"
-        )
+        console.print("  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]")
         return
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
@@ -3374,11 +3372,18 @@ def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
 
         result = _sp.run(
             [
-                "kubectl", "get", "statefulset", "lakebench-trino-worker",
-                "-n", namespace,
-                "-o", "jsonpath={.spec.replicas}",
+                "kubectl",
+                "get",
+                "statefulset",
+                "lakebench-trino-worker",
+                "-n",
+                namespace,
+                "-o",
+                "jsonpath={.spec.replicas}",
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         expected_workers = int(result.stdout.strip() or "1")
     except Exception:

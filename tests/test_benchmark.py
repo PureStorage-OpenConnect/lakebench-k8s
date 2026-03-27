@@ -708,9 +708,7 @@ class TestGetExecutorPassesTableFormat:
             recipe="hive-iceberg-spark-duckdb",
         )
         # Override table format post-construction
-        cfg.architecture.table_format.type = (
-            cfg.architecture.table_format.type.__class__("delta")
-        )
+        cfg.architecture.table_format.type = cfg.architecture.table_format.type.__class__("delta")
         executor = get_executor(cfg, namespace="test-ns")
         assert isinstance(executor, DuckDBExecutor)
         assert executor.table_format == "delta"

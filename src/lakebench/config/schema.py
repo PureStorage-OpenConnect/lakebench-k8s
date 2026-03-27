@@ -153,7 +153,9 @@ class ImagesConfig(BaseModel):
     hive: str = "apache/hive:3.1.3"
     polaris: str = "apache/polaris:1.3.0-incubating"
     polaris_admin_tool: str = "apache/polaris-admin-tool:1.3.0-incubating"
-    unity: str = "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
+    unity: str = (
+        "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
+    )
     trino: str = "trinodb/trino:479"
     duckdb: str = "python:3.11-slim"
     prometheus: str = "prom/prometheus:v2.48.0"
@@ -1216,13 +1218,17 @@ class LakebenchConfig(BaseModel):
 
         if fmt.type == TableFormatType.ICEBERG:
             resolved = resolve_format_version(
-                spark_image, "iceberg", fmt.iceberg.version,
+                spark_image,
+                "iceberg",
+                fmt.iceberg.version,
             )
             if resolved != fmt.iceberg.version:
                 fmt.iceberg.version = resolved
         elif fmt.type == TableFormatType.DELTA:
             resolved = resolve_format_version(
-                spark_image, "delta", fmt.delta.version,
+                spark_image,
+                "delta",
+                fmt.delta.version,
             )
             if resolved != fmt.delta.version:
                 fmt.delta.version = resolved

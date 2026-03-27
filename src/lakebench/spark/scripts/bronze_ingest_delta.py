@@ -107,7 +107,10 @@ def write_bronze_batch(batch_df, batch_id):
         else:
             log(f"Batch {batch_id}: creating bronze table {table_name}")
             write_delta_table(
-                spark, batch_df, table_name, bronze_bucket,
+                spark,
+                batch_df,
+                table_name,
+                bronze_bucket,
                 mode="overwrite",
                 options={
                     "overwriteSchema": "true",
