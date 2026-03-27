@@ -210,17 +210,43 @@ class DeploymentEngine:
 
     @staticmethod
     def _build_spark_thrift_packages(cfg: Any) -> str:
-        """Build ``spark.jars.packages`` CSV for Spark Thrift Server."""
-        from lakebench.spark.job import _parse_spark_major, _spark_compat
+        """Build ``spark.jars.packages`` CSV for Spark Thrift Server.
 
-        iceberg_version = cfg.architecture.table_format.iceberg.version
-        spark_major_minor = DeploymentEngine._get_spark_major_minor(cfg)
+        Format-aware: uses Iceberg or Delta packages depending on the
+        configured table format.
+        """
+        from lakebench.spark.job import (
+            _ICEBERG_RUNTIME_SUFFIX,
+            _delta_spark_artifact,
+            _parse_spark_major,
+            _parse_spark_major_minor,
+            _spark_compat,
+        )
+
+        table_format = cfg.architecture.table_format.type.value
         scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-        packages = [
-            f"org.apache.iceberg:iceberg-spark-runtime-{spark_major_minor}{scala_suffix}:{iceberg_version}",
-            f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
-            f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
-        ]
+
+        if table_format == "delta":
+            delta_version = cfg.architecture.table_format.delta.version
+            catalog_type = cfg.architecture.catalog.type.value
+            packages = [
+                _delta_spark_artifact(scala_suffix, delta_version),
+                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
+            ]
+            if catalog_type == "unity":
+                unity_version = cfg.architecture.catalog.unity.spark_connector_version
+                packages.append(
+                    f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}"
+                )
+        else:
+            iceberg_version = cfg.architecture.table_format.iceberg.version
+            key = _parse_spark_major_minor(cfg.images.spark)
+            iceberg_suffix = _ICEBERG_RUNTIME_SUFFIX.get(key, f"{key[0]}.{key[1]}")
+            packages = [
+                f"org.apache.iceberg:iceberg-spark-runtime-{iceberg_suffix}{scala_suffix}:{iceberg_version}",
+                f"org.apache.iceberg:iceberg-aws-bundle:{iceberg_version}",
+                f"org.apache.hadoop:hadoop-aws:{hadoop_version}",
+            ]
         if _parse_spark_major(cfg.images.spark) < 4:
             packages.append(
                 f"com.amazonaws:aws-java-sdk-bundle:{aws_sdk_version}",
@@ -294,6 +320,8 @@ class DeploymentEngine:
             "storage_class": cfg.platform.compute.postgres.storage_class or None,
             # Catalog type (used in conditional templates)
             "catalog_type": cfg.architecture.catalog.type.value,
+            # Table format type (iceberg or delta)
+            "table_format_type": cfg.architecture.table_format.type.value,
             # Hive
             "hive_cpu_min": cfg.architecture.catalog.hive.resources.cpu_min,
             "hive_cpu_max": cfg.architecture.catalog.hive.resources.cpu_max,
@@ -309,6 +337,11 @@ class DeploymentEngine:
             "polaris_cpu": cfg.architecture.catalog.polaris.resources.cpu,
             "polaris_memory": cfg.architecture.catalog.polaris.resources.memory,
             "polaris_client_secret": POLARIS_CLIENT_SECRET,
+            # Unity
+            "unity_image": cfg.images.unity,
+            "unity_port": cfg.architecture.catalog.unity.port,
+            "unity_cpu": cfg.architecture.catalog.unity.resources.cpu,
+            "unity_memory": cfg.architecture.catalog.unity.resources.memory,
             # Trino
             "trino_coordinator_cpu": cfg.architecture.query_engine.trino.coordinator.cpu,
             "trino_coordinator_memory": cfg.architecture.query_engine.trino.coordinator.memory,
@@ -378,11 +411,13 @@ class DeploymentEngine:
         from .rbac import RBACDeployer
         from .spark_thrift import SparkThriftDeployer
         from .trino import TrinoDeployer
+        from .unity import UnityDeployer
 
         # Initialize deployers
         postgres = PostgresDeployer(self)
         hive = HiveDeployer(self)
         polaris = PolarisDeployer(self)
+        unity = UnityDeployer(self)
         trino = TrinoDeployer(self)
         spark_thrift = SparkThriftDeployer(self)
         duckdb = DuckDBDeployer(self)
@@ -401,6 +436,7 @@ class DeploymentEngine:
             ("hive", "Deploying Hive Metastore", hive.deploy),
             ("polaris", "Deploying Polaris Catalog", polaris.deploy),
             ("rbac", "Creating Spark RBAC", rbac.deploy),
+            ("unity", "Deploying Unity Catalog", unity.deploy),
             ("spark-operator", "Installing Spark Operator", self._deploy_spark_operator),
             ("trino", "Deploying Trino", trino.deploy),
             ("spark-thrift", "Deploying Spark Thrift Server", spark_thrift.deploy),
@@ -1019,12 +1055,12 @@ class DeploymentEngine:
 
         time.sleep(2)
 
-        # Step 3: Drop Iceberg tables via available engine (Trino or Spark Thrift)
-        report("iceberg-tables", DeploymentStatus.IN_PROGRESS, "Dropping Iceberg tables...")
+        # Step 3: Drop tables via available engine (Trino or Spark Thrift)
+        table_format = self.config.architecture.table_format.type.value
+        report("table-cleanup", DeploymentStatus.IN_PROGRESS, f"Dropping {table_format} tables...")
         try:
             from lakebench.deploy.iceberg import (
                 build_drop_table_sql,
-                build_maintenance_sql,
                 exec_sql,
                 find_maintenance_engine,
             )
@@ -1040,15 +1076,26 @@ class DeploymentEngine:
                     f"{catalog}.{tables.silver}",
                     f"{catalog}.{tables.gold}",
                 ]
-                # Expire snapshots and remove orphan files
-                # before dropping tables to ensure S3 is fully cleaned
+                # Run maintenance before dropping tables to clean S3
                 for table in tables_to_drop:
-                    for sql in build_maintenance_sql(engine, catalog, table, "0s"):
+                    if table_format == "delta":
+                        from lakebench.deploy.delta_maintenance import (
+                            build_delta_maintenance_sql,
+                        )
+
+                        maint_sqls = build_delta_maintenance_sql(engine, catalog, table, 0.0)
+                    else:
+                        from lakebench.deploy.iceberg import build_maintenance_sql
+
+                        maint_sqls = build_maintenance_sql(engine, catalog, table, "0s")
+                    for sql in maint_sqls:
                         try:
                             exec_sql(engine, self.k8s, pod_name, namespace, sql)
                         except Exception as e:
                             logger.warning(
-                                "Iceberg maintenance failed (table may not exist): %s", e
+                                "%s maintenance failed (table may not exist): %s",
+                                table_format.title(),
+                                e,
                             )
                 # Now drop the tables
                 for table in tables_to_drop:
@@ -1060,26 +1107,26 @@ class DeploymentEngine:
                             logger.warning("DROP TABLE failed for %s: %s", table, e)
                 results.append(
                     DeploymentResult(
-                        component="iceberg-tables",
+                        component="table-cleanup",
                         status=DeploymentStatus.SUCCESS,
-                        message=f"Iceberg tables dropped (via {engine})",
+                        message=f"{table_format.title()} tables dropped (via {engine})",
                     )
                 )
                 report(
-                    "iceberg-tables",
+                    "table-cleanup",
                     DeploymentStatus.SUCCESS,
-                    f"Iceberg tables dropped (via {engine})",
+                    f"{table_format.title()} tables dropped (via {engine})",
                 )
             else:
                 engine_type = self.config.architecture.query_engine.type.value
                 msg = (
-                    "DuckDB cannot run Iceberg maintenance, skipping table cleanup"
+                    "DuckDB cannot run table maintenance, skipping table cleanup"
                     if engine_type == "duckdb"
                     else "No capable engine pod found, skipping table cleanup"
                 )
                 results.append(
                     DeploymentResult(
-                        component="iceberg-tables",
+                        component="table-cleanup",
                         status=DeploymentStatus.SKIPPED,
                         message=msg,
                     )
@@ -1445,7 +1492,60 @@ class DeploymentEngine:
                 )
             )
 
-        # Step 7: Remove PostgreSQL
+        # Unity
+        if catalog_type == "unity":
+            report("unity", DeploymentStatus.IN_PROGRESS, "Removing Unity Catalog...")
+            try:
+                apps_v1 = k8s_client.AppsV1Api()
+                core_v1 = k8s_client.CoreV1Api()
+                batch_v1 = k8s_client.BatchV1Api()
+                try:
+                    apps_v1.delete_namespaced_deployment("lakebench-unity", namespace)
+                except ApiException as e:
+                    if e.status != 404:
+                        raise
+                try:
+                    core_v1.delete_namespaced_service("lakebench-unity", namespace)
+                except ApiException:
+                    pass
+                try:
+                    batch_v1.delete_namespaced_job(
+                        "lakebench-unity-bootstrap",
+                        namespace,
+                        propagation_policy="Background",
+                    )
+                except ApiException:
+                    pass
+                try:
+                    core_v1.delete_namespaced_config_map("lakebench-unity", namespace)
+                except ApiException:
+                    pass
+                results.append(
+                    DeploymentResult(
+                        component="unity",
+                        status=DeploymentStatus.SUCCESS,
+                        message="Unity Catalog removed",
+                    )
+                )
+                report("unity", DeploymentStatus.SUCCESS, "Unity Catalog removed")
+            except Exception as e:
+                results.append(
+                    DeploymentResult(
+                        component="unity",
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
+                )
+        else:
+            results.append(
+                DeploymentResult(
+                    component="unity",
+                    status=DeploymentStatus.SKIPPED,
+                    message="Unity not configured",
+                )
+            )
+
+        # Step 8: Remove PostgreSQL
         report("postgres", DeploymentStatus.IN_PROGRESS, "Removing PostgreSQL...")
         try:
             apps_v1 = k8s_client.AppsV1Api()

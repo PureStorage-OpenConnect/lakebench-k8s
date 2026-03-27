@@ -52,8 +52,10 @@ s3:
   secret_key: ...
 ```
 
-Eight recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
-for the full list.
+Eleven recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
+for the full list. v1.2 adds Delta Lake support via three new Hive+Delta recipes.
+
+For all recipes, see [`examples/`](examples/) or run `lakebench init --interactive`.
 
 ## What You Get
 
@@ -138,14 +140,15 @@ for flags and options.
 
 | Component | Version |
 |-----------|---------|
-| Apache Spark | 3.5.4, 4.0.0 |
+| Apache Spark | 3.5.4, 4.0.2 |
 | Spark Operator | 2.4.0 (Kubeflow) |
 | Apache Iceberg | 1.10.1 |
+| Delta Lake | 4.0.0 |
 | Hive Metastore | 3.1.3 (Stackable 25.7.0) |
 | Apache Polaris | 1.3.0-incubating |
 | Trino | 479 |
 | DuckDB | bundled (Python 3.11) |
-| PostgreSQL | 17 |
+| PostgreSQL | 16, 17, 18 |
 
 All versions are overridable in the YAML config. See
 [Supported Components](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/supported-components.md).
@@ -155,6 +158,7 @@ All versions are overridable in the YAML config. See
 - [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md) -- prerequisites, install, first run
 - [Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md) -- full YAML reference
 - [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md) -- catalog + format + engine combinations
+- [Compatibility Matrix](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/compatibility-matrix.md) -- Spark, Iceberg, and Delta version support
 - [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and sustained modes
 - [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- scorecard and query benchmark
 - [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design

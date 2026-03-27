@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lakebench-unity-bootstrap
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/managed-by: lakebench
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: lakebench-unity-bootstrap
+    spec:
+      serviceAccountName: lakebench-spark-runner
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              UNITY_URL="http://lakebench-unity.{{ namespace }}.svc.cluster.local:{{ unity_port }}"
+              # Wait for Unity Catalog to be ready
+              echo "Waiting for Unity Catalog at $UNITY_URL..."
+              until wget -qO- "$UNITY_URL/api/2.1/unity-catalog/catalogs" >/dev/null 2>&1; do
+                echo "Waiting for Unity Catalog..."
+                sleep 5
+              done
+              echo "Unity Catalog is ready"
+              # Create default catalog with storage root for managed tables
+              wget -qO- --post-data='{"name": "{{ trino_catalog_name }}", "comment": "Lakebench catalog", "storage_root": "s3://{{ bucket_silver }}/warehouse"}' \
+                --header='Content-Type: application/json' \
+                "$UNITY_URL/api/2.1/unity-catalog/catalogs" 2>&1 || echo "Catalog may already exist"
+              # Create default namespace (for bronze tables) with managed location
+              wget -qO- --post-data='{"name": "default", "catalog_name": "{{ trino_catalog_name }}", "comment": "Default namespace", "storage_root": "s3://{{ bucket_bronze }}/warehouse"}' \
+                --header='Content-Type: application/json' \
+                "$UNITY_URL/api/2.1/unity-catalog/schemas" 2>&1 || echo "Schema may already exist"
+              # Create silver schema with managed location
+              wget -qO- --post-data='{"name": "silver", "catalog_name": "{{ trino_catalog_name }}", "comment": "Silver layer", "storage_root": "s3://{{ bucket_silver }}/warehouse"}' \
+                --header='Content-Type: application/json' \
+                "$UNITY_URL/api/2.1/unity-catalog/schemas" 2>&1 || echo "Schema may already exist"
+              # Create gold schema with managed location
+              wget -qO- --post-data='{"name": "gold", "catalog_name": "{{ trino_catalog_name }}", "comment": "Gold layer", "storage_root": "s3://{{ bucket_gold }}/warehouse"}' \
+                --header='Content-Type: application/json' \
+                "$UNITY_URL/api/2.1/unity-catalog/schemas" 2>&1 || echo "Schema may already exist"
+              echo "Bootstrap complete"

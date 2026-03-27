@@ -39,6 +39,10 @@ spec:
         - name: wait-for-polaris
           image: busybox:1.36
           command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port | default(8181) }}; do echo waiting for polaris; sleep 2; done']
+{% elif catalog_type == "unity" %}
+        - name: wait-for-unity
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lakebench-unity {{ unity_port | default(8080) }}; do echo waiting for unity; sleep 2; done']
 {% endif %}
         {% if s3_ca_cert_pem %}
         - name: import-ca-cert
@@ -114,6 +118,18 @@ spec:
                 --class org.apache.spark.sql.hive.thriftserver.HiveThriftServer2 \
                 --deploy-mode client \
                 --conf spark.jars.ivy=/tmp/.ivy2 \
+{% if table_format_type == "delta" and catalog_type == "unity" %}
+                --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}=io.unitycatalog.spark.UCSingleCatalog \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.uri=http://lakebench-unity.{{ namespace }}.svc.cluster.local:{{ unity_port | default(8080) }} \
+                --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.token= \
+                --conf spark.sql.defaultCatalog={{ spark_thrift_catalog_name }} \
+{% elif table_format_type == "delta" %}
+                --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
+                --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+                --conf spark.sql.catalogImplementation=hive \
+                --conf spark.hadoop.hive.metastore.uris=thrift://lakebench-hive-metastore.{{ namespace }}.svc.cluster.local:9083 \
+{% else %}
                 --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions \
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}=org.apache.iceberg.spark.SparkCatalog \
 {% if catalog_type == "hive" %}
@@ -130,13 +146,14 @@ spec:
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.s3.endpoint={{ s3_endpoint }} \
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.s3.path-style-access={{ s3_path_style | lower }} \
                 --conf spark.sql.catalog.{{ spark_thrift_catalog_name }}.client.region={{ s3_region }} \
+                --conf spark.sql.defaultCatalog={{ spark_thrift_catalog_name }} \
+{% endif %}
                 --conf spark.hadoop.fs.s3a.endpoint={{ s3_endpoint }} \
                 --conf spark.hadoop.fs.s3a.access.key={{ s3_access_key }} \
                 --conf spark.hadoop.fs.s3a.secret.key={{ s3_secret_key }} \
                 --conf spark.hadoop.fs.s3a.path.style.access={{ s3_path_style | lower }} \
                 --conf spark.hadoop.fs.s3a.connection.ssl.enabled={{ s3_use_ssl | lower }} \
                 --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
-                --conf spark.sql.defaultCatalog={{ spark_thrift_catalog_name }} \
                 --conf spark.hive.server2.thrift.port=10000 \
                 --conf spark.driver.memory={{ spark_thrift_memory }} \
                 --conf spark.driver.cores={{ spark_thrift_cores }} \

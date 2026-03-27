@@ -27,7 +27,11 @@ spec:
     spec:
       # Init container to wait for catalog service
       initContainers:
-        {% if catalog_type == "polaris" %}
+        {% if catalog_type == "unity" %}
+        - name: wait-for-unity
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z lakebench-unity {{ unity_port | default(8080) }}; do echo waiting for unity; sleep 2; done']
+        {% elif catalog_type == "polaris" %}
         - name: wait-for-polaris
           image: busybox:1.36
           command: ['sh', '-c', 'until nc -z lakebench-polaris {{ polaris_port | default(8181) }}; do echo waiting for polaris; sleep 2; done']

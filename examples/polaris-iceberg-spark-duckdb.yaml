@@ -1,0 +1,70 @@
+# Recipe: polaris-iceberg-spark-duckdb
+#
+# Apache Polaris REST catalog + Iceberg + Spark pipeline + DuckDB query engine.
+# Combines the Polaris REST catalog with DuckDB for lightweight analytics.
+# DuckDB reads Iceberg tables in read-only mode -- no write or maintenance support.
+#
+# Deploys: namespace, S3 secrets, PostgreSQL, Polaris server + bootstrap job,
+#          Spark RBAC, DuckDB pod.
+#
+# Requirements:
+#   - Polaris minimum version: 1.3.0-incubating (earlier versions have STS bug)
+
+name: polaris-iceberg-duckdb
+recipe: polaris-iceberg-spark-duckdb
+
+images:
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  polaris: apache/polaris:1.3.0-incubating
+  polaris_admin_tool: apache/polaris-admin-tool:1.3.0-incubating
+  duckdb: python:3.11-slim
+  pull_policy: Always
+
+platform:
+  kubernetes:
+    namespace: polaris-iceberg-duckdb
+    create_namespace: true
+
+  storage:
+    s3:
+      endpoint: <YOUR_S3_ENDPOINT>          # e.g. http://10.0.0.1:80
+      region: us-east-1
+      path_style: true                       # required for FlashBlade / MinIO
+      access_key: <YOUR_S3_ACCESS_KEY>
+      secret_key: <YOUR_S3_SECRET_KEY>
+      buckets:
+        bronze: polaris-iceberg-duckdb-bronze
+        silver: polaris-iceberg-duckdb-silver
+        gold: polaris-iceberg-duckdb-gold
+
+    scratch:
+      enabled: true
+      storage_class: <YOUR_SCRATCH_STORAGE_CLASS>  # Portworx: px-csi-scratch (repl=1)
+      create_storage_class: false
+
+  compute:
+    postgres:
+      storage: 10Gi
+      storage_class: <YOUR_DB_STORAGE_CLASS>       # Portworx: px-csi-db (repl=3)
+
+architecture:
+  catalog:
+    type: polaris
+
+  pipeline:
+    mode: batch
+
+  workload:
+    schema: customer360
+    datagen:
+      scale: 1                  # ~10 GB bronze data
+      file_size: 64mb
+      timestamp_start: "2024-01-01"
+      timestamp_end: "2025-01-01"
+
+  query_engine:
+    type: duckdb
+    duckdb:
+      cores: 2
+      memory: 4g
