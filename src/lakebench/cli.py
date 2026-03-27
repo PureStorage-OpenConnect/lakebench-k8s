@@ -2371,7 +2371,13 @@ def run(
     from lakebench.engine import get_engine
     from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage
     from lakebench.spark import SparkJobMonitor, SparkOperatorManager
-    from lakebench.spark.job import JobState, JobType, get_executor_count, get_job_profile
+    from lakebench.spark.job import (
+        JobState,
+        JobType,
+        SparkJobManager,
+        get_executor_count,
+        get_job_profile,
+    )
 
     config_file = resolve_config_path(config_file, file_option)
 
@@ -2483,7 +2489,7 @@ def run(
             namespace=cfg.get_namespace(),
         )
 
-        job_manager = get_engine(cfg, k8s)
+        job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
         monitor = SparkJobMonitor(cfg, k8s)
 
         # Deploy scripts ConfigMap -- must succeed or pipeline jobs will fail
@@ -3394,12 +3400,12 @@ def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
     while time.monotonic() < deadline:
         attempt += 1
         try:
-            result = executor.execute_query(
+            qr = executor.execute_query(
                 "SELECT COUNT(*) FROM system.runtime.nodes WHERE state = 'active' AND coordinator = false",
                 timeout=15,
             )
-            if result.success and result.raw_output.strip().strip('"').isdigit():
-                active_workers = int(result.raw_output.strip().strip('"'))
+            if qr.success and qr.raw_output.strip().strip('"').isdigit():
+                active_workers = int(qr.raw_output.strip().strip('"'))
                 if active_workers >= expected_workers:
                     if attempt > 1:
                         console.print(
@@ -3725,7 +3731,7 @@ def _run_sustained(
     from lakebench.engine import get_engine
     from lakebench.metrics import MetricsCollector, MetricsStorage, StreamingJobMetrics
     from lakebench.spark import SparkJobMonitor, SparkOperatorManager
-    from lakebench.spark.job import JobState, JobType
+    from lakebench.spark.job import JobState, JobType, SparkJobManager
 
     run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
 
@@ -3789,7 +3795,7 @@ def _run_sustained(
             context=cfg.platform.kubernetes.context,
             namespace=cfg.get_namespace(),
         )
-        job_manager = get_engine(cfg, k8s)
+        job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
         monitor = SparkJobMonitor(cfg, k8s)
 
         # Deploy scripts ConfigMap (includes streaming scripts) -- must succeed
