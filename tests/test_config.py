@@ -256,12 +256,12 @@ platform:
         with pytest.raises(Exception):  # ConfigParseError  # noqa: B017
             load_config(config_path)
 
-    def test_load_missing_required(self, tmp_path):
-        """Test loading config with missing required fields."""
+    def test_load_minimal_config_auto_names(self, tmp_path):
+        """Config with only version gets auto-generated name (v1.3)."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text("version: 1")
-        with pytest.raises(ConfigValidationError):
-            load_config(config_path)
+        cfg = load_config(config_path)
+        assert cfg.name.startswith("lb-")
 
     def test_save_and_load_roundtrip(self, tmp_path):
         """Test that saving and loading preserves config."""

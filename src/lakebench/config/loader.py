@@ -116,6 +116,56 @@ class ConfigValidationError(ConfigError):
         self.errors = errors or []
 
 
+# -- Auto-generated name with state persistence ------------------------------
+
+
+def _resolve_auto_name(config_dir: Path) -> str:
+    """Generate or retrieve a stable deployment name.
+
+    Checks ``.lakebench/state.json`` in *config_dir* for an existing name.
+    If found, reuses it (stability across runs). Otherwise generates
+    ``lb-YYYYMMDD-HHMMSS`` and persists it.
+    """
+    import json
+    import logging
+    from datetime import datetime
+
+    logger = logging.getLogger(__name__)
+
+    state_dir = config_dir / ".lakebench"
+    state_file = state_dir / "state.json"
+
+    # Try to load existing name from state file
+    if state_file.exists():
+        try:
+            with open(state_file) as f:
+                state = json.load(f)
+            name = state.get("name", "")
+            if name:
+                logger.debug("Reusing auto-generated name from %s: %s", state_file, name)
+                return name
+        except (json.JSONDecodeError, OSError):
+            pass  # Corrupt state file -- regenerate
+
+    # Generate new name
+    name = f"lb-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    # Persist to state file
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with open(state_file, "w") as f:
+            json.dump(
+                {"name": name, "created": datetime.now().isoformat()},
+                f,
+                indent=2,
+            )
+        logger.debug("Persisted auto-generated name to %s: %s", state_file, name)
+    except OSError as e:
+        logger.warning("Could not persist auto-generated name: %s", e)
+
+    return name
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load YAML file and return as dictionary.
 
@@ -168,6 +218,10 @@ def load_config(path: str | Path) -> LakebenchConfig:
     path = Path(path)
     data = load_yaml(path)
     data = _apply_flat_fields(data)
+
+    # Auto-generate name if not provided (v1.3)
+    if not data.get("name"):
+        data["name"] = _resolve_auto_name(path.parent)
 
     try:
         return LakebenchConfig.model_validate(data)
