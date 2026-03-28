@@ -39,6 +39,7 @@ are easier to write and read than the full nested structure:
 | `endpoint` | `platform.storage.s3.endpoint` | (required) |
 | `access_key` | `platform.storage.s3.access_key` | (required) |
 | `secret_key` | `platform.storage.s3.secret_key` | (required) |
+| `secret_ref` | `platform.storage.s3.secret_ref` | (none) |
 | `scale` | `architecture.workload.datagen.scale` | 10 |
 | `name` | root `name` | auto-generated |
 | `recipe` | root `recipe` | default (hive-iceberg-spark-trino) |

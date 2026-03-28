@@ -147,8 +147,9 @@ def _run_single(
     Returns the metrics dict, or an error dict if the run failed.
     """
     import subprocess
+    import sys
 
-    cmd = ["lakebench", "run", str(config_path), "--timeout", str(timeout)]
+    cmd = [sys.executable, "-m", "lakebench", "run", str(config_path), "--timeout", str(timeout)]
     if skip_benchmark:
         cmd.append("--skip-benchmark")
 
@@ -165,7 +166,7 @@ def _run_single(
     # Destroy unless --keep
     if not keep:
         subprocess.run(
-            ["lakebench", "destroy", str(config_path), "--force"],
+            [sys.executable, "-m", "lakebench", "destroy", str(config_path), "--force"],
             capture_output=True,
             timeout=600,
         )

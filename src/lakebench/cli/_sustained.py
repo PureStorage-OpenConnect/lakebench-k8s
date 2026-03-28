@@ -22,13 +22,12 @@ from lakebench.k8s import K8sConnectionError, get_k8s_client
 
 logger = logging.getLogger(__name__)
 
-# Module-level console for Rich output (same as cli/__init__.py)
-console = Console()
-
-# Shared helpers imported from cli package. Not circular at runtime because
-# these are all defined before __init__.py imports this module (at the bottom).
+# Shared helpers and console imported from cli package. Not circular at
+# runtime because these are all defined before __init__.py imports this
+# module (at the bottom of __init__.py).
 from lakebench.cli import (  # noqa: E402
     _journal_safe,
+    console,
     journal_open,
     print_error,
     print_info,
