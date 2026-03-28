@@ -63,6 +63,11 @@ from lakebench.cli._config import config_app  # noqa: E402
 
 app.add_typer(config_app)
 
+# Compare command (registered from separate module)
+from lakebench.cli._compare import compare as _compare_fn  # noqa: E402
+
+app.command(name="compare")(_compare_fn)
+
 console = Console()
 
 
@@ -576,17 +581,26 @@ def init(
             help="Overwrite existing file",
         ),
     ] = False,
+    advanced: Annotated[
+        bool,
+        typer.Option(
+            "--advanced",
+            help="Full 5-step wizard (recipe, scale, mode). Default is quick mode (4 fields).",
+        ),
+    ] = False,
 ) -> None:
     """Generate a starter configuration file.
 
-    Launches an interactive wizard by default. The wizard guides you through
-    5 steps: identity, recipe, storage, workload, and review.
+    Quick mode (default): asks 4 questions -- endpoint, access key, secret
+    key, scale. Produces a minimal flat config. Name is auto-generated.
 
-    Use --no-interactive with flags for scripted/CI usage:
+    Advanced mode (--advanced): full 5-step wizard with recipe selection,
+    mode, and detailed review.
 
-        lakebench init --no-interactive --endpoint http://s3:80 --access-key A --secret-key B
+    Non-interactive mode (--no-interactive): flags-based config generation
+    for scripted/CI usage.
 
-    Use 'lakebench recommend' first to find the right scale for your cluster.
+    Use 'lakebench config recommend' for cluster sizing guidance.
     """
     if output.exists() and not force:
         print_error(f"File already exists: {output}")
@@ -2352,6 +2366,49 @@ def run(
         typer.Option(
             "--generate",
             help="Run datagen before pipeline stages (batch mode only; sustained always runs datagen)",
+        ),
+    ] = False,
+    skip_deploy: Annotated[
+        bool,
+        typer.Option(
+            "--skip-deploy",
+            help="Assume infrastructure is already deployed (skip deploy phase)",
+        ),
+    ] = False,
+    skip_generate: Annotated[
+        bool,
+        typer.Option(
+            "--skip-generate",
+            help="Assume data already exists in bronze bucket",
+        ),
+    ] = False,
+    skip_maintenance: Annotated[
+        bool,
+        typer.Option(
+            "--skip-maintenance",
+            help="Skip pre-benchmark maintenance (compaction, snapshot expiry)",
+        ),
+    ] = False,
+    deploy_only: Annotated[
+        bool,
+        typer.Option(
+            "--deploy-only",
+            help="Deploy infrastructure and exit (do not generate or run pipeline)",
+        ),
+    ] = False,
+    generate_only: Annotated[
+        bool,
+        typer.Option(
+            "--generate-only",
+            help="Deploy + generate data and exit (do not run pipeline)",
+        ),
+    ] = False,
+    yes: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            "-y",
+            help="Skip all confirmation prompts",
         ),
     ] = False,
 ) -> None:
