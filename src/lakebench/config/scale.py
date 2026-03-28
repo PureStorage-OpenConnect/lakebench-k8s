@@ -82,7 +82,7 @@ class DatagenGuidance:
     parallelism: int
     cpu: str
     memory: str
-    mode: str = "batch"  # "batch" or "continuous"
+    mode: str = "batch"  # "batch" or "sustained"
     generators: int = 1  # per-pod generator processes
     uploaders: int = 1  # per-pod uploader threads
 
@@ -321,7 +321,7 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
                 parallelism=max(4, scale // 5),
                 cpu="8",
                 memory="24Gi",
-                mode="continuous",
+                mode="sustained",
                 generators=8,
                 uploaders=2,
             )
@@ -333,12 +333,12 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
             coordinator_memory="8Gi",
         )
     elif scale <= 500:
-        # Performance: ~510 GB - 5 TB, continuous mode
+        # Performance: ~510 GB - 5 TB, sustained mode
         datagen = DatagenGuidance(
             parallelism=max(8, scale // 10),
             cpu="8",
             memory="24Gi",
-            mode="continuous",
+            mode="sustained",
             generators=8,
             uploaders=2,
         )
@@ -350,12 +350,12 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
             coordinator_memory="16Gi",
         )
     else:
-        # Extreme: > 5 TB, continuous mode
+        # Extreme: > 5 TB, sustained mode
         datagen = DatagenGuidance(
             parallelism=max(16, scale // 30),
             cpu="8",
             memory="24Gi",
-            mode="continuous",
+            mode="sustained",
             generators=8,
             uploaders=2,
         )
