@@ -2480,8 +2480,29 @@ def run(
         if scale >= 50:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
+    # Flag mutual exclusivity
+    if deploy_only and generate_only:
+        print_error("--deploy-only and --generate-only are mutually exclusive")
+        raise typer.Exit(1)
+
+    # deploy_only: deploy infrastructure and exit
+    if deploy_only:
+        print_info("--deploy-only: deploying infrastructure...")
+        deploy(config_file=config_file)
+        return
+
+    # generate_only: deploy + generate and exit
+    if generate_only:
+        print_info("--generate-only: deploying and generating data...")
+        deploy(config_file=config_file)
+        generate(config_file=config_file, wait=True, timeout=timeout or 14400)
+        return
+
     # Preflight: verify infrastructure is deployed and ready
-    _run_preflight_infra_check(cfg)
+    if not skip_deploy:
+        _run_preflight_infra_check(cfg)
+    else:
+        print_info("Skipping infrastructure check (--skip-deploy)")
 
     # Branch: sustained streaming pipeline (CLI flag overrides config)
     use_sustained = sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
@@ -2563,7 +2584,7 @@ def run(
         print_success("Spark scripts deployed")
 
         # Run datagen if requested (full end-to-end measurement)
-        if include_datagen:
+        if include_datagen and not skip_generate:
             console.print()
             console.print("[bold]Stage: datagen (ingest)[/bold]")
             print_info("Generating data for pipeline benchmark...")
@@ -2903,7 +2924,7 @@ def run(
         # Pre-benchmark maintenance (v1.1.0): compact + expire before
         # measuring QpH so the benchmark reflects query engine performance,
         # not Iceberg metadata overhead from accumulated writes.
-        if not skip_benchmark and cfg.architecture.pipeline.pre_benchmark_maintenance:
+        if not skip_benchmark and not skip_maintenance and cfg.architecture.pipeline.pre_benchmark_maintenance:
             try:
                 console.print()
                 console.print("[bold]Pre-benchmark maintenance[/bold]")
