@@ -619,7 +619,7 @@ def init(
         # Wizard mode
         from lakebench.init_wizard import run_wizard
 
-        result = run_wizard(console)
+        result = run_wizard(console, advanced=advanced)
         if result is None:
             raise typer.Exit(0)
 
