@@ -136,13 +136,21 @@ def config_validate(
 def config_recommend(
     config_file: Annotated[
         Path,
-        typer.Argument(help="Configuration file path", exists=True),
+        typer.Argument(help="Configuration file path (used for mode detection)", exists=True),
     ] = Path("lakebench.yaml"),
 ) -> None:
     """Show sizing guidance for your cluster."""
     from lakebench.cli import recommend as _recommend
+    from lakebench.config import load_config
 
-    _recommend(config_file)
+    # Extract pipeline mode from config to pass to recommend
+    try:
+        cfg = load_config(config_file)
+        mode = cfg.architecture.pipeline.mode.value
+    except Exception:
+        mode = None
+
+    _recommend(mode=mode)
 
 
 @config_app.command("upgrade")

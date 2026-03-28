@@ -101,7 +101,7 @@ class PolarisDeployer:
                 self.k8s,
                 "lakebench-polaris",
                 namespace,
-                timeout_seconds=300,
+                timeout_seconds=600,
                 poll_interval=5,
             )
 
@@ -121,7 +121,7 @@ class PolarisDeployer:
                     self.k8s.apply_manifest(doc, namespace=namespace)
 
             # Step 5: Wait for bootstrap job completion
-            bootstrap_result = self._wait_for_bootstrap_job(namespace, timeout_seconds=300)
+            bootstrap_result = self._wait_for_bootstrap_job(namespace, timeout_seconds=600)
 
             if not bootstrap_result:
                 return DeploymentResult(

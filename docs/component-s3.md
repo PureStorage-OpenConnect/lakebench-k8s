@@ -56,6 +56,100 @@ Lakebench supports two credential strategies:
 
 If neither inline credentials nor a `secret_ref` is provided, validation is deferred to runtime. The deployment will fail when the S3 client attempts to authenticate.
 
+## Minimum S3 Permissions (IAM Policy)
+
+The S3 credentials used by Lakebench must have the following permissions.
+This applies regardless of the S3 provider (AWS, FlashBlade, MinIO, Ceph).
+
+### Required Permissions
+
+| Permission | Used By | Purpose |
+|---|---|---|
+| `s3:ListAllMyBuckets` | CLI (boto3) | Connectivity test during `lakebench config validate` and pre-flight checks |
+| `s3:HeadBucket` | CLI (boto3) | Check whether buckets exist before creating them |
+| `s3:ListBucket` | CLI (boto3), Spark (S3A), Trino, DuckDB | List objects for verification, cleanup, and query engine reads |
+| `s3:GetObject` | Spark (S3A), Trino, DuckDB | Read data files from bronze, silver, and gold layers |
+| `s3:PutObject` | Spark (S3A) | Write data files to silver and gold layers, write Iceberg/Delta metadata |
+| `s3:DeleteObject` | CLI (boto3), Spark (S3A) | Cleanup during `lakebench destroy`, Iceberg orphan file removal |
+
+### Required for Multipart Upload Cleanup
+
+Large files (Parquet, ORC) are written via S3 multipart uploads. If a Spark
+job fails mid-write, incomplete uploads must be cleaned up to avoid ghost
+objects (especially on FlashBlade).
+
+| Permission | Used By | Purpose |
+|---|---|---|
+| `s3:ListMultipartUploadParts` | CLI (boto3) | Discover parts of incomplete uploads |
+| `s3:AbortMultipartUpload` | CLI (boto3) | Abort incomplete multipart uploads during cleanup |
+| `s3:ListBucketMultipartUploads` | CLI (boto3) | List all incomplete uploads in a bucket |
+
+### Optional
+
+| Permission | Used By | Purpose |
+|---|---|---|
+| `s3:CreateBucket` | CLI (boto3) | Auto-create bronze/silver/gold buckets during `lakebench deploy`. Only needed when `create_buckets: true` (the default). Set `create_buckets: false` if buckets are pre-provisioned or credentials lack this permission. |
+| `s3:DeleteBucket` | CLI (boto3) | Delete buckets during `lakebench destroy`. Not strictly required -- destroy will skip bucket deletion and log a warning if this permission is missing. |
+
+### Example IAM Policy (AWS Format)
+
+This policy works on AWS S3, MinIO, and any S3-compatible store that supports
+AWS-style IAM policies:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "LakebenchListBuckets",
+      "Effect": "Allow",
+      "Action": "s3:ListAllMyBuckets",
+      "Resource": "*"
+    },
+    {
+      "Sid": "LakebenchBucketOps",
+      "Effect": "Allow",
+      "Action": [
+        "s3:HeadBucket",
+        "s3:ListBucket",
+        "s3:ListBucketMultipartUploads",
+        "s3:CreateBucket",
+        "s3:DeleteBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::lakebench-*"
+      ]
+    },
+    {
+      "Sid": "LakebenchObjectOps",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject",
+        "s3:DeleteObject",
+        "s3:ListMultipartUploadParts",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": [
+        "arn:aws:s3:::lakebench-*/*"
+      ]
+    }
+  ]
+}
+```
+
+Adjust the `Resource` ARNs to match your bucket naming convention. If you use
+custom bucket names (e.g., `my-project-bronze`), update the resource patterns
+accordingly.
+
+For **FlashBlade**, IAM policies are managed through the FlashBlade management
+UI or CLI under the S3 account settings. The permission model is simpler --
+FlashBlade typically grants full S3 access per account. Ensure the account has
+read/write/delete permissions on the target buckets.
+
+For **MinIO**, use `mc admin policy` to create and attach a custom policy with
+the permissions listed above.
+
 ## FlashBlade Specifics
 
 When using Pure Storage FlashBlade as the S3 backend, keep the following in mind:
