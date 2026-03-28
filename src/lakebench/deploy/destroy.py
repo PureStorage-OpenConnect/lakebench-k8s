@@ -311,7 +311,7 @@ def destroy_all(
         logger.warning("Table cleanup failed: %s", e, exc_info=True)
         results.append(
             DeploymentResult(
-                component="iceberg-tables",
+                component="table-cleanup",
                 status=DeploymentStatus.SKIPPED,
                 message=f"Table cleanup skipped: {e}",
             )
@@ -396,7 +396,7 @@ def destroy_all(
             results.append(
                 DeploymentResult(
                     component="observability",
-                    status=DeploymentStatus.SUCCESS,
+                    status=DeploymentStatus.SKIPPED,
                     message=f"Observability cleanup skipped: {e}",
                 )
             )

@@ -175,19 +175,20 @@ def _check_s3_connectivity(cfg) -> PrereqResult:
     try:
         from lakebench.s3 import test_s3_connectivity
 
-        ok, msg = test_s3_connectivity(
+        result = test_s3_connectivity(
             endpoint=s3.endpoint,
             access_key=s3.access_key,
             secret_key=s3.secret_key,
             region=s3.region,
             path_style=s3.path_style,
         )
-        if ok:
+        if result["overall_success"]:
             return PrereqResult(
                 name="s3-connectivity",
                 passed=True,
                 message="S3 credentials valid (ListBuckets OK)",
             )
+        msg = result.get("credentials_message") or result.get("endpoint_message", "unknown error")
         return PrereqResult(
             name="s3-connectivity",
             passed=False,
