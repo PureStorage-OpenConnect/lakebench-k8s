@@ -2498,17 +2498,41 @@ def run(
         generate(config_file=config_file, wait=True, timeout=timeout or 14400)
         return
 
-    # Preflight: verify infrastructure is deployed and ready
+    # -- Phase 1/7: Prerequisites ------------------------------------------------
+    console.print()
+    console.print("[bold dim]Phase 1/7: Prerequisites[/bold dim]")
+
     if not skip_deploy:
+        from lakebench.cli._prerequisites import run_prerequisites
+
+        prereq_report = run_prerequisites(cfg)
+        for check in prereq_report.checks:
+            icon = "[green]✓[/green]" if check.passed else "[red]✗[/red]"
+            console.print(f"  {icon} {check.name}: {check.message}")
+            if not check.passed and check.hint:
+                for line in check.hint.split("\n"):
+                    console.print(f"      [dim]{line}[/dim]")
+
+        if not prereq_report.all_passed:
+            print_error("Prerequisites not met -- cannot proceed")
+            raise typer.Exit(1)
+        print_success("All prerequisites passed")
+
+        # Also run infrastructure readiness check
         _run_preflight_infra_check(cfg)
     else:
-        print_info("Skipping infrastructure check (--skip-deploy)")
+        print_info("Skipping prerequisites (--skip-deploy)")
 
     # Branch: sustained streaming pipeline (CLI flag overrides config)
     use_sustained = sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
     if use_sustained:
         _run_sustained(cfg, config_file, timeout, skip_benchmark, duration)
         return
+
+    # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
+    console.print()
+    console.print("[bold dim]Phase 2/7: Infrastructure[/bold dim]")
+    print_success("Infrastructure verified (deploy with 'lakebench deploy' if needed)")
 
     console.print(
         Panel(
@@ -2583,7 +2607,7 @@ def run(
             raise typer.Exit(1)
         print_success("Spark scripts deployed")
 
-        # Run datagen if requested (full end-to-end measurement)
+        # -- Phase 3/7: Generate data -----------------------------------------------
         if include_datagen and not skip_generate:
             console.print()
             console.print("[bold]Stage: datagen (ingest)[/bold]")
@@ -2625,7 +2649,9 @@ def run(
                 pipeline_success = False
                 raise typer.Exit(1)  # noqa: B904
 
-        # Determine stages to run
+        # -- Phase 4/7: Pipeline stages ---------------------------------------------
+        console.print()
+        console.print("[bold dim]Phase 4/7: Pipeline[/bold dim]")
         all_stages = [
             (JobType.BRONZE_VERIFY, "bronze-verify", "Verifying bronze data"),
             (JobType.SILVER_BUILD, "silver-build", "Building silver layer"),
@@ -2921,7 +2947,9 @@ def run(
             },
         )
 
-        # -- Maintenance cost measurement (v1.3) --
+        # -- Phase 5/7: Maintenance ------------------------------------------------
+        console.print()
+        console.print("[bold dim]Phase 5/7: Maintenance[/bold dim]")
         # Flow: pre-compaction benchmark -> maintenance -> post-compaction benchmark
         # The pre/post delta quantifies the value of table maintenance.
         pre_compaction_qph = 0.0
@@ -2982,6 +3010,9 @@ def run(
             except Exception as e:
                 print_warning(f"Maintenance cost measurement failed (non-fatal): {e}")
 
+        # -- Phase 6/7: Benchmark --------------------------------------------------
+        console.print()
+        console.print("[bold dim]Phase 6/7: Benchmark[/bold dim]")
         # Run post-compaction benchmark (or the only benchmark if maintenance skipped)
         if not skip_benchmark:
             try:
@@ -3068,6 +3099,9 @@ def run(
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
     finally:
+        # -- Phase 7/7: Results ----------------------------------------------------
+        console.print()
+        console.print("[bold dim]Phase 7/7: Results[/bold dim]")
         # Measure actual S3 bucket sizes before saving metrics
         try:
             from lakebench.s3 import S3Client
