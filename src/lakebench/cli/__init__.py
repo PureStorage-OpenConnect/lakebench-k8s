@@ -12,12 +12,28 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from lakebench import __version__
 from lakebench._constants import DEFAULT_OUTPUT_DIR
+from lakebench.cli._helpers import (
+    DEFAULT_CONFIG as DEFAULT_CONFIG,
+)
+from lakebench.cli._helpers import (
+    _journal_safe,
+    _strip_ansi,
+    console,
+    journal_open,
+    print_error,
+    print_info,
+    print_success,
+    print_warning,
+    resolve_config_path,
+)
+from lakebench.cli._helpers import (
+    get_journal as get_journal,
+)
 from lakebench.config import (
     ConfigError,
     ConfigFileNotFoundError,
@@ -31,21 +47,7 @@ from lakebench.journal import DEFAULT_JOURNAL_DIR, CommandName, EventType, Journ
 from lakebench.k8s import K8sConnectionError, PlatformType, SecurityVerifier, get_k8s_client
 from lakebench.s3 import test_s3_connectivity
 
-# Default config file name for auto-discovery
-DEFAULT_CONFIG = "lakebench.yaml"
-
 logger = logging.getLogger(__name__)
-
-# Global journal instance (lazy-initialized)
-_journal: Journal | None = None
-
-# ANSI escape code stripper for log output
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-
-
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes from text."""
-    return _ANSI_RE.sub("", text)
 
 
 app = typer.Typer(
@@ -67,84 +69,6 @@ app.add_typer(config_app)
 from lakebench.cli._compare import compare as _compare_fn  # noqa: E402
 
 app.command(name="compare")(_compare_fn)
-
-console = Console()
-
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-
-def resolve_config_path(
-    config_file: Path | None,
-    file_option: Path | None = None,
-) -> Path:
-    """Resolve config file path, using ./lakebench.yaml as default.
-
-    Supports both positional argument and --file/-f option.
-    If both are provided, --file takes precedence.
-    """
-    path = file_option or config_file
-    if path is not None:
-        return path
-
-    default = Path(DEFAULT_CONFIG)
-    if default.exists():
-        return default
-
-    console.print(f"[red]ERROR[/red] No config file specified and ./{DEFAULT_CONFIG} not found")
-    console.print("[blue]INFO[/blue] Create one with: lakebench init")
-    raise typer.Exit(1)
-
-
-def get_journal() -> Journal:
-    """Get or create the global journal instance."""
-    global _journal
-    if _journal is None:
-        _journal = Journal()
-    return _journal
-
-
-def journal_open(config_path: Path | None, config_name: str = "") -> Journal:
-    """Open journal session for a command that loads config."""
-    j = get_journal()
-    j.open_session(config_path=config_path, config_name=config_name)
-    return j
-
-
-def print_success(message: str) -> None:
-    """Print a success message."""
-    console.print(f"[green]OK[/green] {message}")
-
-
-def print_error(message: str) -> None:
-    """Print an error message."""
-    console.print(f"[red]ERROR[/red] {message}")
-
-
-def print_warning(message: str) -> None:
-    """Print a warning message."""
-    console.print(f"[yellow]WARN[/yellow] {message}")
-
-
-def print_info(message: str) -> None:
-    """Print an info message."""
-    console.print(f"[blue]...[/blue] {message}")
-
-
-_journal_warned = False
-
-
-def _journal_safe(fn, *args, **kwargs) -> None:
-    """Call a journal function, logging failures instead of silently dropping them."""
-    global _journal_warned
-    try:
-        fn(*args, **kwargs)
-    except Exception:
-        if not _journal_warned:
-            logger.debug("Journal write failed (further warnings suppressed)", exc_info=True)
-            _journal_warned = True
 
 
 def _print_pipeline_scorecard(
@@ -2488,13 +2412,13 @@ def run(
     # deploy_only: deploy infrastructure and exit
     if deploy_only:
         print_info("--deploy-only: deploying infrastructure...")
-        deploy(config_file=config_file)
+        deploy(config_file=config_file, yes=yes)
         return
 
     # generate_only: deploy + generate and exit
     if generate_only:
         print_info("--generate-only: deploying and generating data...")
-        deploy(config_file=config_file)
+        deploy(config_file=config_file, yes=yes)
         generate(config_file=config_file, wait=True, timeout=timeout or 14400)
         return
 
@@ -2608,8 +2532,9 @@ def run(
         print_success("Spark scripts deployed")
 
         # -- Phase 3/7: Generate data -----------------------------------------------
+        console.print()
+        console.print("[bold dim]Phase 3/7: Generate[/bold dim]")
         if include_datagen and not skip_generate:
-            console.print()
             console.print("[bold]Stage: datagen (ingest)[/bold]")
             print_info("Generating data for pipeline benchmark...")
             datagen_start = datetime.now()
@@ -2648,6 +2573,8 @@ def run(
                 print_error(f"Datagen failed: {e}")
                 pipeline_success = False
                 raise typer.Exit(1)  # noqa: B904
+        else:
+            print_info("Skipped (use --generate to include datagen)")
 
         # -- Phase 4/7: Pipeline stages ---------------------------------------------
         console.print()

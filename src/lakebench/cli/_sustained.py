@@ -10,22 +10,16 @@ import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
-from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from lakebench.config.schema import PipelineMode
-from lakebench.journal import CommandName, EventType
-from lakebench.k8s import K8sConnectionError, get_k8s_client
+if TYPE_CHECKING:
+    from rich.console import Console
 
-logger = logging.getLogger(__name__)
-
-# Shared helpers and console imported from cli package. Not circular at
-# runtime because these are all defined before __init__.py imports this
-# module (at the bottom of __init__.py).
-from lakebench.cli import (  # noqa: E402
+from lakebench.cli._helpers import (
     _journal_safe,
     console,
     journal_open,
@@ -34,6 +28,11 @@ from lakebench.cli import (  # noqa: E402
     print_success,
     print_warning,
 )
+from lakebench.config.schema import PipelineMode
+from lakebench.journal import CommandName, EventType
+from lakebench.k8s import K8sConnectionError, get_k8s_client
+
+logger = logging.getLogger(__name__)
 
 
 def _find_prometheus_svc(namespace: str) -> str | None:

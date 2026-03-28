@@ -1,8 +1,12 @@
 """Module registry for Lakebench component types.
 
-Central registry where catalog, query engine, pipeline engine, and table
-format modules register themselves. The deployment engine and job builder
-use the registry instead of hardcoded conditionals.
+Infrastructure for registry-driven deployment (v1.4). Currently the
+deployment engine uses hardcoded deployer imports. This registry will
+replace those conditionals when adapter classes are created for each
+module type.
+
+Used by: test_characterization.py (validates registry API).
+Not yet used by: deploy/engine.py, deploy/destroy.py.
 """
 
 from __future__ import annotations

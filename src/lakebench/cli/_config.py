@@ -204,7 +204,14 @@ def config_upgrade(
             v2["recipe"] = recipe_name
             break
 
-    # Preserve any spark conf overrides
+    # Preserve spark conf overrides from the original config
+    from lakebench.config.loader import load_yaml
+
+    raw = load_yaml(config_file)
+    spark_conf = raw.get("spark", {}).get("conf")
+    if spark_conf:
+        v2["spark"] = {"conf": spark_conf}
+
     out_path = output or config_file
     with open(out_path, "w") as f:
         yaml.safe_dump(v2, f, default_flow_style=False, sort_keys=False)
