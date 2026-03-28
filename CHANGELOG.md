@@ -4,6 +4,51 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.0] - 2026-03-27
+
+### Added
+- **Config Schema v2.** Flat top-level fields (`endpoint`, `access_key`,
+  `secret_key`, `scale`, `namespace`, `mode`, `cycles`, `spark_image`) for
+  minimal 4-line configs. Environment variable substitution with `${VAR}` and
+  `${VAR:-default}` syntax. Auto-generated deployment names persisted to
+  `.lakebench/state.json`.
+- **`compare` command.** Run two configs sequentially and display side-by-side
+  scorecard comparison. Supports `--format` (table/json/csv) and `--output`.
+- **`config` subcommands.** `config show` (resolved config with source
+  annotations), `config validate`, `config recommend`, `config upgrade`
+  (v1.2 nested -> v1.3 flat format).
+- **Maintenance cost metrics.** 11 new scoring fields: pre/post compaction
+  file counts, compaction ratio, maintenance elapsed time, pre/post compaction
+  QpH, and maintenance value percentage. Run flow changed to measure QpH
+  before and after maintenance.
+- **Prerequisite detection.** 8-check engine (kubectl, helm, K8s cluster, S3
+  config, S3 connectivity, Spark Operator, Stackable operators, namespace)
+  with actionable error messages. Runs as Phase 1 of the 7-phase run flow.
+- **7-phase run output.** Progress headers (Phase 1/7 through 7/7) for
+  Prerequisites, Infrastructure, Generate, Pipeline, Maintenance, Benchmark,
+  Results.
+- **Run command flags.** `--skip-deploy`, `--skip-generate`,
+  `--skip-maintenance`, `--deploy-only`, `--generate-only`, `--yes/-y`.
+- **Init quick mode.** Default 2-step wizard (endpoint/keys + review).
+  `--advanced` for full 5-step wizard with recipe and mode selection.
+
+### Changed
+- `cli.py` (6,181 lines) converted to `cli/` package with sustained helpers
+  extracted to `cli/_sustained.py` (1,279 lines).
+- `deploy/engine.py` reduced from 1,682 to 859 lines by extracting
+  `destroy_all()` to `deploy/destroy.py`.
+- All component implementations extracted to `modules/` package:
+  query engines, catalogs, table formats, pipeline engine.
+- Module Protocol interfaces (`CatalogModule`, `QueryEngineModule`,
+  `PipelineEngineModule`, `TableFormatModule`) and `ModuleRegistry`.
+- Old commands (`validate`, `info`, `recommend`) marked deprecated in favor
+  of `config` subcommands.
+- Polaris bootstrap template: pinned `curlimages/curl:latest` to `8.11.1`.
+
+### Fixed
+- `config/scale.py`: `compute_guidance()` mode field changed from
+  `"continuous"` to `"sustained"` (advisory only, not Docker image mode).
+
 ## [1.2.0] - 2026-03-26
 
 ### Added
