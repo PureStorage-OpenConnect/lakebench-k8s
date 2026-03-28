@@ -58,7 +58,7 @@ spec:
       containers:
         # Step 2: Create catalog + assign privileges via REST API
         - name: setup-catalog
-          image: curlimages/curl:latest
+          image: curlimages/curl:8.11.1
           env:
             - name: POLARIS_URI
               value: "http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port | default(8181) }}"
