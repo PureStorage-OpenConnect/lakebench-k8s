@@ -2419,7 +2419,7 @@ def run(
     if generate_only:
         print_info("--generate-only: deploying and generating data...")
         deploy(config_file=config_file, yes=yes)
-        generate(config_file=config_file, wait=True, timeout=timeout or 14400)
+        generate(config_file=config_file, wait=True, timeout=timeout or 14400, yes=yes)
         return
 
     # -- Phase 1/7: Prerequisites ------------------------------------------------

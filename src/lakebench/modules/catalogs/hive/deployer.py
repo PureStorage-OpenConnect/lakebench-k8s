@@ -263,7 +263,7 @@ class HiveDeployer:
                         self.k8s.apply_manifest(doc, namespace=namespace)
 
             # Wait for HiveCluster to be ready
-            result = self._wait_for_hivecluster(namespace, timeout_seconds=300)
+            result = self._wait_for_hivecluster(namespace, timeout_seconds=600)
 
             if result.status != WaitStatus.READY:
                 return DeploymentResult(
