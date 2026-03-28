@@ -262,11 +262,11 @@ _FORMAT_VERSION_COMPAT: dict[tuple[int, int], dict[str, list[str]]] = {
         "delta": [],  # Delta 4.x requires Spark 4.x
     },
     (4, 0): {
-        "iceberg": ["1.7.1", "1.8.1", "1.9.1", "1.10.1"],
+        "iceberg": ["1.10.0", "1.10.1"],
         "delta": ["4.0.0"],
     },
     (4, 1): {
-        "iceberg": ["1.8.1", "1.9.1", "1.10.1"],
+        "iceberg": ["1.10.0", "1.10.1"],
         "delta": ["4.1.0"],
     },
 }
