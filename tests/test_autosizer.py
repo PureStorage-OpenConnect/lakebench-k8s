@@ -50,10 +50,10 @@ class TestFullComputeGuidance:
         assert g.datagen.mode == "batch"
         assert g.datagen.generators == 1
 
-    def test_datagen_mode_continuous_above_boundary(self):
-        """scale > 10 should get continuous mode."""
+    def test_datagen_mode_sustained_above_boundary(self):
+        """scale > 10 should get sustained mode."""
         g = full_compute_guidance(20)
-        assert g.datagen.mode == "continuous"
+        assert g.datagen.mode == "sustained"
         assert g.datagen.generators == 8
         assert g.datagen.uploaders == 2
 
