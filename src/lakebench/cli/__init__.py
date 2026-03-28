@@ -3634,10 +3634,10 @@ def query(
             help="Run a built-in example query (count, revenue, channels, engagement, funnel, clv)",
         ),
     ] = None,
-    file: Annotated[
+    sql_file: Annotated[
         Path | None,
         typer.Option(
-            "--file",
+            "--sql-file",
             help="Read SQL from file (use '-' for stdin)",
         ),
     ] = None,
@@ -3684,9 +3684,9 @@ def query(
 
         lakebench query --sql "SELECT count(*) FROM lakehouse.gold.customer_executive_dashboard"
 
-        lakebench query --file query.sql
+        lakebench query --sql-file query.sql
 
-        lakebench query --file - < query.sql
+        lakebench query --sql-file - < query.sql
 
         lakebench query --interactive
 
@@ -3699,9 +3699,9 @@ def query(
     config_file = resolve_config_path(config_file, file_option)
 
     # Validate mutually exclusive options
-    sources = sum(1 for x in [sql, example, file, interactive] if x)
+    sources = sum(1 for x in [sql, example, sql_file, interactive] if x)
     if sources > 1:
-        print_error("Specify only one of: --sql, --example, --file, --interactive")
+        print_error("Specify only one of: --sql, --example, --sql-file, --interactive")
         raise typer.Exit(1)
 
     # Handle interactive mode early
@@ -3711,8 +3711,8 @@ def query(
 
     # Handle file input
     query_name = "custom"
-    if file is not None:
-        if str(file) == "-":
+    if sql_file is not None:
+        if str(sql_file) == "-":
             if sys.stdin.isatty():
                 print_error("No input from stdin (pipe SQL or use --sql/--example)")
                 raise typer.Exit(1)
@@ -3720,10 +3720,10 @@ def query(
             query_name = "stdin"
         else:
             try:
-                sql = file.read_text().strip()
-                query_name = file.stem
+                sql = sql_file.read_text().strip()
+                query_name = sql_file.stem
             except FileNotFoundError:
-                print_error(f"File not found: {file}")
+                print_error(f"File not found: {sql_file}")
                 raise typer.Exit(1)  # noqa: B904
             except Exception as e:
                 print_error(f"Error reading file: {e}")
