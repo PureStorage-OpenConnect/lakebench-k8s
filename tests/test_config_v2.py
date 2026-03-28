@@ -182,6 +182,56 @@ class TestFlatConfigIntegration:
         assert config.architecture.catalog.type.value == "polaris"
         assert config.architecture.query_engine.type.value == "trino"
 
+    def test_auto_generated_name(self, tmp_path):
+        """Config without name field gets auto-generated lb-YYYYMMDD-HHMMSS name."""
+        cfg_file = tmp_path / "lakebench.yaml"
+        cfg_file.write_text(
+            textwrap.dedent("""\
+            endpoint: http://minio:9000
+            access_key: minioadmin
+            secret_key: minioadmin
+            """)
+        )
+        config = load_config(cfg_file)
+        assert config.name.startswith("lb-")
+        assert len(config.name) == 18  # lb-YYYYMMDD-HHMMSS
+
+    def test_auto_name_persists_to_state_json(self, tmp_path):
+        """Auto-generated name is persisted to .lakebench/state.json."""
+        import json
+
+        cfg_file = tmp_path / "lakebench.yaml"
+        cfg_file.write_text(
+            textwrap.dedent("""\
+            endpoint: http://minio:9000
+            access_key: minioadmin
+            secret_key: minioadmin
+            """)
+        )
+        config1 = load_config(cfg_file)
+        state_file = tmp_path / ".lakebench" / "state.json"
+        assert state_file.exists()
+        state = json.loads(state_file.read_text())
+        assert state["name"] == config1.name
+
+        # Second load reuses the same name
+        config2 = load_config(cfg_file)
+        assert config2.name == config1.name
+
+    def test_explicit_name_overrides_auto(self, tmp_path):
+        """Explicit name in config takes precedence over state.json."""
+        cfg_file = tmp_path / "lakebench.yaml"
+        cfg_file.write_text(
+            textwrap.dedent("""\
+            name: my-explicit-name
+            endpoint: http://minio:9000
+            access_key: minioadmin
+            secret_key: minioadmin
+            """)
+        )
+        config = load_config(cfg_file)
+        assert config.name == "my-explicit-name"
+
     def test_backward_compat_nested_config(self, tmp_path):
         """A v1.2-style nested config still works."""
         cfg_file = tmp_path / "lakebench.yaml"
