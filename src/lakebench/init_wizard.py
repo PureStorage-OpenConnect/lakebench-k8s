@@ -431,8 +431,23 @@ def _build_config_yaml(state: WizardState) -> str:
 # ---------------------------------------------------------------------------
 
 
+def step_quick_scale(console: Console, state: WizardState) -> bool:
+    """Quick mode: ask for scale only (skip mode/cycles)."""
+    console.print()
+    console.print("  [dim]Scale factor: 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB[/dim]")
+    result = _prompt(console, "Scale", default=str(state.scale))
+    if isinstance(result, _BackSentinel):
+        return False
+    try:
+        state.scale = int(result)
+    except ValueError:
+        console.print("  [red]Must be an integer[/red]")
+        return True  # Re-prompt same step
+    return True
+
+
 STEPS_ADVANCED = [step_identity, step_recipe, step_storage, step_workload, step_review]
-STEPS_QUICK = [step_storage, step_review]
+STEPS_QUICK = [step_storage, step_quick_scale, step_review]
 
 # Backward compat alias
 STEPS = STEPS_ADVANCED
