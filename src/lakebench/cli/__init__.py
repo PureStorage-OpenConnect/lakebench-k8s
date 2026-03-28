@@ -55,8 +55,13 @@ app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
     context_settings={"help_option_names": ["-h", "--help"]},
-    epilog="[dim]Workflow: init -> validate -> deploy -> generate -> run -> report -> destroy[/dim]",
+    epilog="[dim]Workflow: init -> run -> results -> destroy[/dim]",
 )
+
+# Config subcommand group
+from lakebench.cli._config import config_app  # noqa: E402
+
+app.add_typer(config_app)
 
 console = Console()
 
@@ -661,7 +666,7 @@ def init(
     print_info("Run 'lakebench recommend' to find the optimal scale for your cluster")
 
 
-@app.command()
+@app.command(hidden=True, deprecated=True)
 def validate(
     config_file: Annotated[
         Path | None,
@@ -3092,7 +3097,7 @@ def stop(
     _journal_safe(j.end_command, success=True)
 
 
-@app.command()
+@app.command(hidden=True, deprecated=True)
 def info(
     config_file: Annotated[
         Path | None,
@@ -4474,7 +4479,7 @@ def journal(
 # =============================================================================
 
 
-@app.command()
+@app.command(hidden=True, deprecated=True)
 def recommend(
     cluster_cores: Annotated[
         int | None,
