@@ -2921,23 +2921,68 @@ def run(
             },
         )
 
-        # Pre-benchmark maintenance (v1.1.0): compact + expire before
-        # measuring QpH so the benchmark reflects query engine performance,
-        # not Iceberg metadata overhead from accumulated writes.
-        if not skip_benchmark and not skip_maintenance and cfg.architecture.pipeline.pre_benchmark_maintenance:
+        # -- Maintenance cost measurement (v1.3) --
+        # Flow: pre-compaction benchmark -> maintenance -> post-compaction benchmark
+        # The pre/post delta quantifies the value of table maintenance.
+        pre_compaction_qph = 0.0
+        pre_file_count = 0
+        post_file_count = 0
+        maint_elapsed = 0.0
+
+        do_maintenance = (
+            not skip_benchmark
+            and not skip_maintenance
+            and cfg.architecture.pipeline.pre_benchmark_maintenance
+        )
+
+        if do_maintenance:
+            from lakebench.benchmark import BenchmarkRunner as _BR
+
             try:
+                # 1. Pre-compaction benchmark
                 console.print()
-                console.print("[bold]Pre-benchmark maintenance[/bold]")
+                console.print("[bold]Pre-compaction benchmark[/bold]")
+                print_info("Benchmarking before maintenance (uncompacted data)...")
+                _pre_runner = _BR(cfg)
+                _pre_result = _pre_runner.run_power(cache="hot")
+                pre_compaction_qph = _pre_result.qph
+                console.print(f"  Pre-compaction QpH: {pre_compaction_qph:.1f}")
+
+                # 2. Pre-compaction file count
+                try:
+                    _pre_health = _probe_table_health(cfg, k8s)
+                    pre_file_count = sum(
+                        v
+                        for k, v in _pre_health.items()
+                        if "file_count" in k and isinstance(v, int)
+                    )
+                except Exception:
+                    pass
+
+                # 3. Run maintenance
+                console.print()
+                console.print("[bold]Running maintenance[/bold]")
+                _maint_start = datetime.now()
                 _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold="0s")
                 _run_iceberg_compaction(cfg, k8s, console, j)
-                # Compaction (especially Delta OPTIMIZE) can OOM and restart
-                # Trino worker pods.  Wait for the query engine to be healthy
-                # before starting the benchmark so queries don't fail mid-run.
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
-            except Exception as e:
-                print_warning(f"Pre-benchmark maintenance failed (non-fatal): {e}")
+                maint_elapsed = (datetime.now() - _maint_start).total_seconds()
 
-        # Run Trino benchmark after pipeline completes
+                # 4. Post-compaction file count
+                try:
+                    _post_health = _probe_table_health(cfg, k8s)
+                    post_file_count = sum(
+                        v
+                        for k, v in _post_health.items()
+                        if "file_count" in k and isinstance(v, int)
+                    )
+                except Exception:
+                    pass
+
+            except Exception as e:
+                print_warning(f"Maintenance cost measurement failed (non-fatal): {e}")
+
+        # Run post-compaction benchmark (or the only benchmark if maintenance skipped)
         if not skip_benchmark:
             try:
                 from lakebench.benchmark import BenchmarkRunner
@@ -2945,7 +2990,8 @@ def run(
 
                 console.print()
                 console.print("[bold]Stage: benchmark[/bold]")
-                print_info("Running query benchmark (hot cache, power)...")
+                label = "post-compaction " if do_maintenance else ""
+                print_info(f"Running {label}query benchmark (hot cache, power)...")
 
                 _journal_safe(
                     j.record,
@@ -2969,6 +3015,18 @@ def run(
                 console.print(f"\n  Total: {bench_result.total_seconds:.2f}s")
                 console.print(f"  [bold]QpH:   {bench_result.qph:.1f}[/bold]")
                 benchmark_qph = bench_result.qph
+
+                # Maintenance cost summary (v1.3)
+                if pre_compaction_qph > 0 and benchmark_qph > 0:
+                    improvement = ((benchmark_qph - pre_compaction_qph) / pre_compaction_qph) * 100
+                    console.print(
+                        f"  [bold]Maintenance value: {improvement:+.1f}% QpH improvement[/bold]"
+                    )
+                    if pre_file_count > 0:
+                        console.print(
+                            f"  Files: {pre_file_count} -> {post_file_count} "
+                            f"({pre_file_count / max(post_file_count, 1):.1f}x compaction)"
+                        )
 
                 # Record in metrics
                 bench_metrics = BenchmarkMetrics(
@@ -3051,6 +3109,25 @@ def run(
                     datagen_output_rows=_datagen_output_rows,
                 )
                 run_metrics.pipeline_benchmark = pb
+
+                # Populate maintenance cost metrics (v1.3)
+                if maint_elapsed > 0:
+                    pb.maintenance_elapsed_seconds = maint_elapsed
+                    if pb.total_elapsed_seconds > 0:
+                        pb.maintenance_pct_of_pipeline = (
+                            maint_elapsed / pb.total_elapsed_seconds
+                        ) * 100
+                if pre_file_count > 0:
+                    pb.pre_compaction_file_count = pre_file_count
+                    pb.post_compaction_file_count = post_file_count
+                    pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
+                if pre_compaction_qph > 0:
+                    pb.pre_compaction_qph = pre_compaction_qph
+                    pb.post_compaction_qph = benchmark_qph
+                    if pre_compaction_qph > 0:
+                        pb.maintenance_value_pct = (
+                            (benchmark_qph - pre_compaction_qph) / pre_compaction_qph
+                        ) * 100
 
                 # Print full scorecard panel
                 if pipeline_success:
