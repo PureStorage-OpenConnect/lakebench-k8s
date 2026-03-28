@@ -406,7 +406,7 @@ class TestCollectPlatformMetricsHelper:
 
         with (
             patch(
-                "lakebench.cli._find_prometheus_svc",
+                "lakebench.cli._sustained._find_prometheus_svc",
                 return_value="prom-svc",
             ),
             patch("httpx.get") as mock_httpx_get,
@@ -443,7 +443,7 @@ class TestCollectPlatformMetricsHelper:
 
         with (
             patch(
-                "lakebench.cli._find_prometheus_svc",
+                "lakebench.cli._sustained._find_prometheus_svc",
                 return_value="prom-svc",
             ),
             patch("httpx.get") as mock_httpx_get,
