@@ -48,6 +48,17 @@ log(f"Target table: {table_name}")
 log(f"Checkpoint:   {checkpoint_location}")
 log(f"Trigger:      {trigger_interval}")
 
+# Set the default namespace location to S3 so Iceberg tables are created
+# in S3, not the Hive Metastore default warehouse (file:/stackable/warehouse/).
+# Silver and gold scripts do this for their namespaces; bronze uses "default".
+bronze_warehouse = bronze_uri + "warehouse/"
+log(f"Namespace location: {bronze_warehouse}")
+try:
+    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog_name}.default LOCATION '{bronze_warehouse}'")
+    log(f"Created namespace {catalog_name}.default")
+except Exception as e:
+    log(f"Namespace creation note: {str(e)}")
+
 
 # ---------------------------------------------------------------------------
 # Wait for Parquet files in the landing zone, then infer schema.
@@ -102,12 +113,17 @@ def write_bronze_batch(batch_df, batch_id):
             spark.table(table_name)
             _table_created = True
         except Exception:
-            log(f"Batch {batch_id}: creating bronze table {table_name}")
+            # Create the table with an explicit S3 LOCATION to avoid the
+            # Hive Metastore default warehouse (file:/stackable/warehouse/).
+            from common import _s3_table_path
+            table_location = _s3_table_path(bronze_uri, bronze_table_path)
+            log(f"Batch {batch_id}: creating bronze table {table_name} at {table_location}")
             (
                 batch_df.writeTo(table_name)
                 .tableProperty("write.format.default", "parquet")
                 .tableProperty("write.parquet.compression-codec", "snappy")
                 .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
+                .tableProperty("location", table_location)
                 .create()
             )
             _table_created = True
