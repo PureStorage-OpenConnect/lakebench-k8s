@@ -38,7 +38,7 @@ platform:
 | `path_style` | bool | `true` | Use path-style bucket addressing (`http://endpoint/bucket`) instead of virtual-hosted style (`http://bucket.endpoint`). Must be `true` for FlashBlade and MinIO. |
 | `access_key` | string | `""` | S3 access key provided inline. Mutually exclusive with `secret_ref`. |
 | `secret_key` | string | `""` | S3 secret key provided inline. Mutually exclusive with `secret_ref`. |
-| `secret_ref` | string | `""` | Name of an existing Kubernetes Secret containing `access-key` and `secret-key` data fields. Preferred for production deployments. |
+| `secret_ref` | string | `""` | Name of an existing Kubernetes Secret containing `accessKey` and `secretKey` data fields. Preferred for production deployments. |
 | `buckets.bronze` | string | `lakebench-bronze` | Bucket name for the bronze (raw) data layer. |
 | `buckets.silver` | string | `lakebench-silver` | Bucket name for the silver (enriched) data layer. |
 | `buckets.gold` | string | `lakebench-gold` | Bucket name for the gold (aggregated) data layer. |
@@ -52,7 +52,7 @@ Lakebench supports two credential strategies:
 
 1. **Inline credentials** -- Set `access_key` and `secret_key` directly in the YAML file. Convenient for development but exposes secrets in plaintext.
 
-2. **Kubernetes Secret reference** -- Set `secret_ref` to the name of a pre-existing Secret in the target namespace. The Secret must contain `access-key` and `secret-key` data fields. This is the recommended approach for production because credentials never appear in config files or version control.
+2. **Kubernetes Secret reference** -- Set `secret_ref` to the name of a pre-existing Secret in the target namespace. The Secret must contain `accessKey` and `secretKey` data fields (camelCase, matching the lakebench-managed Secret format). This is the recommended approach for production because credentials never appear in config files or version control.
 
 If neither inline credentials nor a `secret_ref` is provided, validation is deferred to runtime. The deployment will fail when the S3 client attempts to authenticate.
 

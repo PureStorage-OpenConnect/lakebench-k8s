@@ -60,7 +60,7 @@ in DuckDB.
 
 ### Health checks
 
-- **Startup**: exec probe verifying `import duckdb; c.load_extension('iceberg'); c.load_extension('httpfs')`
+- **Startup**: exec probe verifying `import duckdb; c=duckdb.connect(); c.load_extension('iceberg'); c.load_extension('httpfs')`
 - **Readiness/Liveness**: exec probe running `python -c "import duckdb; print('ok')"`
 
 ### Cache behavior

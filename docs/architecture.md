@@ -191,7 +191,7 @@ the scale factor using a linear formula:
 
 - At scale <= 10: uses a base count (4 for bronze, 8 for silver, 4 for gold)
 - Above scale 10: adds executors linearly (e.g., silver adds 12 per 100 scale units)
-- Each job has a maximum executor cap (20 for bronze/gold, 30 for silver)
+- Each job has a maximum executor cap (20 for bronze, 28 for silver/gold)
 
 Per-job executor count can be overridden in the config for manual tuning:
 

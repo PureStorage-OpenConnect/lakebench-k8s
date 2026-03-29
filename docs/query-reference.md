@@ -137,13 +137,13 @@ list with descriptions.
 ### From File
 
 ```bash
-lakebench query config.yaml --file my-query.sql
+lakebench query config.yaml --sql-file my-query.sql
 ```
 
 Or pipe from stdin:
 
 ```bash
-echo "SELECT count(*) FROM lakehouse.gold.customer_executive_dashboard" | lakebench query config.yaml --file -
+echo "SELECT count(*) FROM lakehouse.gold.customer_executive_dashboard" | lakebench query config.yaml --sql-file -
 ```
 
 ### Interactive Shell

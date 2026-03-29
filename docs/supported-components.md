@@ -12,7 +12,7 @@ for the full YAML schema.
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Apache Spark | 3.5.x / 4.0.x | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` | Pipeline processing (bronze, silver, gold stages) |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` | Pipeline processing (bronze, silver, gold stages) |
 | Spark Operator | 2.4.0 | Kubeflow Helm chart | Submits SparkApplication CRDs to Kubernetes |
 
 Spark runs all data pipeline jobs. The Spark Operator manages job lifecycle
