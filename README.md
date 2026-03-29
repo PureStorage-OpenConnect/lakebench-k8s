@@ -157,7 +157,7 @@ for flags and options.
 
 | Component | Version |
 |-----------|---------|
-| Apache Spark | 3.5.4, 4.0.2 |
+| Apache Spark | 3.5.4, 4.0.2, 4.1.1 |
 | Spark Operator | 2.4.0 (Kubeflow) |
 | Apache Iceberg | 1.10.1 |
 | Delta Lake | 4.0.0 |
