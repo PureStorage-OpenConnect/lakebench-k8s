@@ -234,8 +234,9 @@ class BenchmarkRunner:
             query_timeout=query_timeout,
         )
 
+        successful = [r for r in results if r.success]
         total_seconds = sum(r.elapsed_seconds for r in results)
-        qph = (len(results) / total_seconds) * 3600 if total_seconds > 0 else 0
+        qph = (len(successful) / total_seconds) * 3600 if total_seconds > 0 and successful else 0
 
         return BenchmarkResult(
             mode="power",
@@ -319,9 +320,11 @@ class BenchmarkRunner:
         # Sort by stream_id for deterministic output
         stream_results.sort(key=lambda s: s.stream_id)
 
-        # Throughput QpH: total queries across all streams / wall clock
-        total_queries = sum(len(s.queries) for s in stream_results)
-        throughput_qph = (total_queries / wall_seconds) * 3600 if wall_seconds > 0 else 0
+        # Throughput QpH: successful queries across all streams / wall clock
+        total_queries = sum(sum(1 for q in s.queries if q.success) for s in stream_results)
+        throughput_qph = (
+            (total_queries / wall_seconds) * 3600 if wall_seconds > 0 and total_queries else 0
+        )
 
         # Use stream 0's results as the representative query list
         representative_queries = stream_results[0].queries if stream_results else []
