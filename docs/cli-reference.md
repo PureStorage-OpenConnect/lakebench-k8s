@@ -86,7 +86,7 @@ Configuration management subcommands.
 lakebench config show CONFIG_FILE       # show resolved config with source annotations
 lakebench config validate CONFIG_FILE   # validate config + test connectivity
 lakebench config recommend CONFIG_FILE  # show cluster sizing guidance
-lakebench config upgrade CONFIG_FILE    # convert v1.2 nested config to v2 flat format
+lakebench config upgrade CONFIG_FILE    # convert v1.2 nested config to v1.3 flat format
 ```
 
 ### validate (deprecated)

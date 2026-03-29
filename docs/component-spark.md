@@ -46,7 +46,7 @@ images:
   # spark: "apache/spark:3.5.8-python3" # Spark 3.5.x (also supported)
 ```
 
-**Supported versions:** Spark 3.5.x and 4.0.x only. The image tag must end
+**Supported versions:** Spark 3.5.x, 4.0.x, and 4.1.x. The image tag must end
 with `-python3` (PySpark scripts require a Python-enabled image). Unsupported
 versions, non-Python images, and unparseable tags are rejected at config load
 time with a clear error.

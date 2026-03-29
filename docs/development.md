@@ -170,16 +170,22 @@ self-contained module with a specific responsibility:
 
 ```
 src/lakebench/
-  benchmark/    Trino query benchmark (8-query QpH suite)
+  benchmark/    Query engine benchmark (8-query QpH suite)
+  cli/          CLI package (Typer commands, helpers, sustained pipeline)
   config/       Pydantic config schema, YAML loader, cluster autosizer
-  deploy/       Deployment engine and per-component deployers
-                (PostgreSQL, Hive, Trino, Spark RBAC, Prometheus, Grafana)
+  deploy/       Deployment engine and re-export shims for deployers
+  engine/       PipelineEngine protocol and get_engine() factory
   journal/      Event logging (session-scoped JSONL provenance logs)
   k8s/          Kubernetes client wrapper and OpenShift security (SCC/RBAC)
   metrics/      Pipeline metrics collection, aggregation, and storage
+  modules/      Component implementations (v1.3 modular architecture):
+    catalogs/       hive/, polaris/, unity/ -- catalog deployers
+    query_engines/  trino/, spark_thrift/, duckdb/ -- deployers + executors
+    pipeline_engines/ spark/ -- job manager, monitor, operator, RBAC
+    table_formats/  iceberg/, delta/ -- maintenance SQL builders
   reports/      HTML report generation from benchmark results
   s3/           S3 client (boto3 wrapper with FlashBlade compatibility)
-  spark/        Spark job manager, operator integration, and PySpark scripts
+  spark/        Re-export shim (implementations in modules/pipeline_engines/spark/)
   templates/    Jinja2 templates for Kubernetes manifests
 ```
 
