@@ -2539,12 +2539,54 @@ def run(
             print_info("Generating data for pipeline benchmark...")
             datagen_start = datetime.now()
             try:
+                import time as _time
+
+                from rich.progress import (
+                    BarColumn,
+                    Progress,
+                    SpinnerColumn,
+                    TextColumn,
+                    TimeElapsedColumn,
+                    TimeRemainingColumn,
+                )
+
                 from lakebench.deploy import DatagenDeployer, DeploymentEngine
 
                 dg_engine = DeploymentEngine(cfg)
                 datagen_deployer = DatagenDeployer(dg_engine)
                 datagen_deployer.deploy()
-                datagen_deployer.wait_for_completion(timeout_seconds=timeout)
+
+                # Progress bar (same as standalone generate command)
+                _dg_start = _time.time()
+                _initial = datagen_deployer.get_progress()
+                _total_pods = _initial.get("completions", 1)
+
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    BarColumn(),
+                    TextColumn("{task.completed}/{task.total} pods"),
+                    TimeElapsedColumn(),
+                    TimeRemainingColumn(),
+                    console=console,
+                ) as _dg_bar:
+                    _dg_task = _dg_bar.add_task("Generating data", total=_total_pods)
+                    while _time.time() - _dg_start < timeout:
+                        _dg_prog = datagen_deployer.get_progress()
+                        if not _dg_prog.get("running", False):
+                            if _dg_prog.get("error"):
+                                _dg_bar.stop()
+                                print_error(_dg_prog["error"])
+                                raise typer.Exit(1)
+                            _dg_bar.update(_dg_task, completed=_total_pods)
+                            break
+                        if _dg_prog.get("oom_pods"):
+                            _dg_bar.stop()
+                            print_error(f"OOMKilled: {', '.join(_dg_prog['oom_pods'])}")
+                            raise typer.Exit(1)
+                        _dg_bar.update(_dg_task, completed=_dg_prog.get("succeeded", 0))
+                        _time.sleep(15)
+
                 datagen_end = datetime.now()
                 _datagen_elapsed = (datagen_end - datagen_start).total_seconds()
                 print_success(f"Datagen completed in {_datagen_elapsed:.0f}s")
@@ -2680,13 +2722,20 @@ def run(
                 _max_executors = 0
                 _last_reported_executors = -1
 
-                def on_progress(status):
+                _last_heartbeat_ts = job_start
+
+                def on_progress(status, _start=job_start, _hb=[job_start]):  # noqa: B006
                     nonlocal _max_executors, _last_reported_executors
                     if status.state == JobState.RUNNING:
                         _max_executors = max(_max_executors, status.executor_count)
+                        elapsed = (datetime.now() - _start).total_seconds()
                         if status.executor_count != _last_reported_executors:
                             console.print(f"  Running... (executors: {status.executor_count})")
                             _last_reported_executors = status.executor_count
+                            _hb[0] = datetime.now()
+                        elif (datetime.now() - _hb[0]).total_seconds() >= 60:
+                            console.print(f"  Running... ({int(elapsed)}s elapsed)")
+                            _hb[0] = datetime.now()
 
                 result = monitor.wait_for_completion(
                     f"lakebench-{stage_name}",
@@ -2893,17 +2942,21 @@ def run(
         if do_maintenance:
             from lakebench.benchmark import BenchmarkRunner as _BR
 
-            try:
-                # 1. Pre-compaction benchmark
-                console.print()
-                console.print("[bold]Pre-compaction benchmark[/bold]")
-                print_info("Benchmarking before maintenance (uncompacted data)...")
-                _pre_runner = _BR(cfg)
-                _pre_result = _pre_runner.run_power(cache="hot")
-                pre_compaction_qph = _pre_result.qph
-                console.print(f"  Pre-compaction QpH: {pre_compaction_qph:.1f}")
+            def _bench_progress(idx, total, name, phase, **kwargs):
+                if phase == "start":
+                    console.print(f"  [{idx}/{total}] {name}...", end=" ")
+                elif phase == "done":
+                    elapsed = kwargs.get("elapsed", 0)
+                    success = kwargs.get("success", False)
+                    error = kwargs.get("error", "")
+                    if success:
+                        console.print(f"[green]{elapsed:.1f}s OK[/green]")
+                    else:
+                        short_err = (error[:60] + "...") if len(error) > 60 else error
+                        console.print(f"[red]FAIL[/red] ({short_err})")
 
-                # 2. Pre-compaction file count
+            try:
+                # 1. Pre-compaction file count (probe first to decide if benchmark is feasible)
                 try:
                     _pre_health = _probe_table_health(cfg, k8s)
                     pre_file_count = sum(
@@ -2913,6 +2966,29 @@ def run(
                     )
                 except Exception:
                     pass
+
+                # 2. Pre-compaction benchmark (skip if too many files)
+                console.print()
+                console.print("[bold]Pre-compaction benchmark[/bold]")
+                if pre_file_count > 200_000:
+                    print_warning(
+                        f"Skipping pre-compaction benchmark ({pre_file_count:,} uncompacted files) "
+                        "-- too many files for reliable measurement"
+                    )
+                else:
+                    print_info("Benchmarking before maintenance (uncompacted data)...")
+                    _pre_runner = _BR(cfg)
+                    _pre_result = _pre_runner.run_power(
+                        cache="hot",
+                        progress_callback=_bench_progress,
+                        query_timeout=60,
+                    )
+                    pre_compaction_qph = _pre_result.qph
+                    _succeeded = sum(1 for q in _pre_result.queries if q.success)
+                    console.print(
+                        f"  Pre-compaction QpH: {pre_compaction_qph:.1f} "
+                        f"({_succeeded}/{len(_pre_result.queries)} queries succeeded)"
+                    )
 
                 # 3. Run maintenance
                 console.print()
@@ -2958,17 +3034,24 @@ def run(
                     details={"mode": "power", "cache": "hot"},
                 )
 
-                bench_runner = BenchmarkRunner(cfg)
-                bench_result = bench_runner.run_power(cache="hot")
+                def _post_bench_progress(idx, total, name, phase, **kwargs):
+                    if phase == "start":
+                        console.print(f"  [{idx}/{total}] {name}...", end=" ")
+                    elif phase == "done":
+                        elapsed = kwargs.get("elapsed", 0)
+                        success = kwargs.get("success", False)
+                        error = kwargs.get("error", "")
+                        if success:
+                            console.print(f"[green]{elapsed:.1f}s OK[/green]")
+                        else:
+                            short_err = (error[:60] + "...") if len(error) > 60 else error
+                            console.print(f"[red]FAIL[/red] ({short_err})")
 
-                # Display per-query results
-                for qr in bench_result.queries:
-                    status_str = "[green]PASS[/green]" if qr.success else "[red]FAIL[/red]"
-                    console.print(
-                        f"  {qr.query.name[:4]}  {qr.query.display_name:<34} "
-                        f"{qr.elapsed_seconds:>7.2f}s   "
-                        f"{qr.rows_returned:>6} rows   {status_str}"
-                    )
+                bench_runner = BenchmarkRunner(cfg)
+                bench_result = bench_runner.run_power(
+                    cache="hot",
+                    progress_callback=_post_bench_progress,
+                )
 
                 console.print(f"\n  Total: {bench_result.total_seconds:.2f}s")
                 console.print(f"  [bold]QpH:   {bench_result.qph:.1f}[/bold]")

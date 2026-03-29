@@ -183,7 +183,7 @@ class TestAutoSizingScaleOnly:
         assert config.platform.compute.spark.executor.instances >= 8
         assert config.platform.compute.spark.executor.memory == "32g"
         assert config.architecture.query_engine.trino.worker.replicas == 4
-        assert config.architecture.query_engine.trino.worker.memory == "32Gi"
+        assert config.architecture.query_engine.trino.worker.memory == "48Gi"
         assert config.architecture.workload.datagen.parallelism >= 8
         # Continuous mode: fixed 8 CPU, 24Gi, 8 generators (MVP sizing)
         assert config.architecture.workload.datagen.cpu == "8"
