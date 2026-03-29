@@ -214,13 +214,13 @@ def _preflight_check(cfg) -> None:
 
     Prints warnings for non-critical issues; exits on blockers.
     """
-    print_info("Tip: run 'lakebench validate' for a full prerequisite check")
+    print_info("Tip: run 'lakebench config validate' for a full prerequisite check")
 
     # 1. S3 endpoint must be set
     s3 = cfg.platform.storage.s3
     if not s3.endpoint:
         print_error("S3 endpoint not configured (platform.storage.s3.endpoint)")
-        print_info("Run 'lakebench validate' for detailed diagnostics")
+        print_info("Run 'lakebench config validate' for detailed diagnostics")
         raise typer.Exit(1)
 
     # 2. S3 credentials must be present (inline or secret_ref)
@@ -569,7 +569,7 @@ def init(
         console.print()
         print_success(f"Created configuration file: {output}")
         print_info("Next steps:")
-        print_info("  1. lakebench validate       -- check config for errors")
+        print_info("  1. lakebench config validate -- check config for errors")
         print_info("  2. lakebench deploy          -- deploy infrastructure")
         print_info("  3. lakebench generate --wait -- generate test data")
         print_info("  4. lakebench run             -- run pipeline + benchmark")
@@ -600,8 +600,8 @@ def init(
     print_info(f"Scale: {scale}")
     if not endpoint:
         print_info("Edit the file to configure your S3 endpoint and credentials")
-    print_info("Then run: lakebench validate")
-    print_info("Run 'lakebench recommend' to find the optimal scale for your cluster")
+    print_info("Then run: lakebench config validate")
+    print_info("Run 'lakebench config recommend' to find the optimal scale for your cluster")
 
 
 @app.command(hidden=True, deprecated=True)
