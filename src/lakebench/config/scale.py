@@ -343,9 +343,9 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
             uploaders=2,
         )
         trino = TrinoGuidance(
-            worker_replicas=max(4, scale // 50),
+            worker_replicas=max(4, scale // 25),
             worker_cpu="8",
-            worker_memory="32Gi",
+            worker_memory="48Gi",
             coordinator_cpu="4",
             coordinator_memory="16Gi",
         )
@@ -360,7 +360,7 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
             uploaders=2,
         )
         trino = TrinoGuidance(
-            worker_replicas=max(8, scale // 100),
+            worker_replicas=max(10, scale // 50),
             worker_cpu="8",
             worker_memory="64Gi",
             coordinator_cpu="4",
