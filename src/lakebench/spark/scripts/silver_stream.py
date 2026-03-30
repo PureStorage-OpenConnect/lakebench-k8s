@@ -53,7 +53,7 @@ log(f"Trigger:      {trigger_interval}")
 # ---------------------------------------------------------------------------
 log("Creating Iceberg namespace...")
 try:
-    silver_warehouse = silver_uri + "warehouse/"
+    silver_warehouse = silver_uri + "warehouse/silver.db/"
     spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.silver LOCATION '{silver_warehouse}'")
     log(f"Created namespace {catalog}.silver")
 except Exception as e:
