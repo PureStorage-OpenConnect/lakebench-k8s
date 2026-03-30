@@ -11,7 +11,6 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
-from lakebench._constants import POLARIS_CLIENT_SECRET
 from lakebench.config import LakebenchConfig
 from lakebench.k8s import K8sClient
 
@@ -334,7 +333,7 @@ class DeploymentEngine:
             "polaris_port": cfg.architecture.catalog.polaris.port,
             "polaris_cpu": cfg.architecture.catalog.polaris.resources.cpu,
             "polaris_memory": cfg.architecture.catalog.polaris.resources.memory,
-            "polaris_client_secret": POLARIS_CLIENT_SECRET,
+            "polaris_client_secret": cfg.architecture.catalog.polaris.client_secret,
             # Unity
             "unity_image": cfg.images.unity,
             "unity_port": cfg.architecture.catalog.unity.port,
@@ -391,12 +390,15 @@ class DeploymentEngine:
     def deploy_all(
         self,
         progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
+        timeout: int = 3600,
     ) -> list[DeploymentResult]:
         """Deploy all components in order.
 
         Args:
             progress_callback: Optional callback for progress updates
                                (component, status, message)
+            timeout: Global deployment timeout in seconds (0 = no timeout).
+                     Checked between steps -- does not interrupt a step in progress.
 
         Returns:
             List of deployment results
@@ -442,34 +444,72 @@ class DeploymentEngine:
             ("observability", "Deploying Observability Stack", observability.deploy),
         ]
 
+        import time
+
+        deadline = time.monotonic() + timeout if timeout > 0 else float("inf")
+
         for component, description, deploy_fn in steps:
-            if progress_callback:
-                progress_callback(component, DeploymentStatus.IN_PROGRESS, description)
-
-            try:
-                result = deploy_fn()
-                self.results.append(result)
-
-                if progress_callback:
-                    progress_callback(component, result.status, result.message)
-
-                # Stop on failure (unless it's a non-critical component)
-                if result.status == DeploymentStatus.FAILED:
-                    break
-
-            except Exception as e:
+            # Global timeout check (between steps, never interrupts mid-step)
+            if time.monotonic() > deadline:
                 result = DeploymentResult(
                     component=component,
                     status=DeploymentStatus.FAILED,
-                    message=str(e),
+                    message=f"Global deployment timeout ({timeout}s) exceeded",
                 )
                 self.results.append(result)
-
                 if progress_callback:
-                    progress_callback(component, DeploymentStatus.FAILED, str(e))
+                    progress_callback(component, DeploymentStatus.FAILED, result.message)
+                break
+
+            if progress_callback:
+                progress_callback(component, DeploymentStatus.IN_PROGRESS, description)
+
+            result = None
+            for attempt in range(2):  # 0 = first try, 1 = retry
+                try:
+                    result = deploy_fn()
+                    break
+                except Exception as e:
+                    if attempt == 0 and self._is_transient_error(e):
+                        logger.warning(
+                            "Deployment step '%s' hit transient error, retrying in 5s: %s",
+                            component,
+                            e,
+                        )
+                        time.sleep(5)
+                        continue
+                    # Non-transient or second attempt: fail
+                    result = DeploymentResult(
+                        component=component,
+                        status=DeploymentStatus.FAILED,
+                        message=str(e),
+                    )
+                    break
+
+            self.results.append(result)
+
+            if progress_callback:
+                progress_callback(component, result.status, result.message)
+
+            # Stop on failure
+            if result.status == DeploymentStatus.FAILED:
                 break
 
         return self.results
+
+    @staticmethod
+    def _is_transient_error(exc: Exception) -> bool:
+        """Return True if the exception is likely transient (worth retrying)."""
+        from kubernetes.client.rest import ApiException
+
+        if isinstance(exc, ApiException) and exc.status in (429, 500, 502, 503, 504):
+            return True
+        if isinstance(exc, (ConnectionError, TimeoutError)):
+            return True
+        exc_name = type(exc).__name__
+        if "MaxRetryError" in exc_name or "NewConnectionError" in exc_name:
+            return True
+        return False
 
     def _deploy_namespace(self) -> DeploymentResult:
         """Deploy namespace."""

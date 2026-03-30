@@ -582,12 +582,12 @@ def destroy_all(
                     raise
             try:
                 apps_v1.delete_namespaced_deployment("lakebench-hive-metastore", namespace)
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Hive metastore deployment delete skipped: %s", e.reason)
             try:
                 core_v1.delete_namespaced_service("lakebench-hive-metastore", namespace)
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Hive metastore service delete skipped: %s", e.reason)
             results.append(
                 DeploymentResult(
                     component="hive",
@@ -627,20 +627,20 @@ def destroy_all(
                     raise
             try:
                 core_v1.delete_namespaced_service("lakebench-polaris", namespace)
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Polaris service delete skipped: %s", e.reason)
             try:
                 batch_v1.delete_namespaced_job(
                     "lakebench-polaris-bootstrap",
                     namespace,
                     propagation_policy="Background",
                 )
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Polaris bootstrap job delete skipped: %s", e.reason)
             try:
                 core_v1.delete_namespaced_config_map("lakebench-polaris-config", namespace)
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Polaris configmap delete skipped: %s", e.reason)
             results.append(
                 DeploymentResult(
                     component="polaris",
@@ -680,20 +680,20 @@ def destroy_all(
                     raise
             try:
                 core_v1.delete_namespaced_service("lakebench-unity", namespace)
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Unity service delete skipped: %s", e.reason)
             try:
                 batch_v1.delete_namespaced_job(
                     "lakebench-unity-bootstrap",
                     namespace,
                     propagation_policy="Background",
                 )
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Unity bootstrap job delete skipped: %s", e.reason)
             try:
                 core_v1.delete_namespaced_config_map("lakebench-unity", namespace)
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Unity configmap delete skipped: %s", e.reason)
             results.append(
                 DeploymentResult(
                     component="unity",
@@ -731,8 +731,8 @@ def destroy_all(
                 raise
         try:
             core_v1.delete_namespaced_service("lakebench-postgres", namespace)
-        except ApiException:
-            pass
+        except ApiException as e:
+            logger.debug("Postgres service delete skipped: %s", e.reason)
         # Delete PVCs
         pvcs = core_v1.list_namespaced_persistent_volume_claim(
             namespace,
@@ -767,21 +767,21 @@ def destroy_all(
 
         try:
             rbac_v1.delete_namespaced_role_binding(SPARK_SERVICE_ACCOUNT, namespace)
-        except ApiException:
-            pass
+        except ApiException as e:
+            logger.debug("RoleBinding delete skipped: %s", e.reason)
         try:
             rbac_v1.delete_namespaced_role(SPARK_SERVICE_ACCOUNT, namespace)
-        except ApiException:
-            pass
+        except ApiException as e:
+            logger.debug("Role delete skipped: %s", e.reason)
         try:
             core_v1.delete_namespaced_service_account(SPARK_SERVICE_ACCOUNT, namespace)
-        except ApiException:
-            pass
+        except ApiException as e:
+            logger.debug("ServiceAccount delete skipped: %s", e.reason)
         for secret in ["lakebench-s3-credentials", "lakebench-postgres-secret"]:
             try:
                 core_v1.delete_namespaced_secret(secret, namespace)
-            except ApiException:
-                pass
+            except ApiException as e:
+                logger.debug("Secret %s delete skipped: %s", secret, e.reason)
         # Delete SecretClass (cluster-scoped)
         try:
             custom_api.delete_cluster_custom_object(
@@ -790,8 +790,8 @@ def destroy_all(
                 plural="secretclasses",
                 name="lakebench-s3-credentials-class",
             )
-        except ApiException:
-            pass
+        except ApiException as e:
+            logger.debug("SecretClass delete skipped: %s", e.reason)
         results.append(
             DeploymentResult(
                 component="rbac",
@@ -824,7 +824,8 @@ def destroy_all(
                 )
             )
             report("scratch-sc", DeploymentStatus.SUCCESS, "Scratch StorageClass removed")
-        except Exception:
+        except Exception as e:
+            logger.debug("Scratch StorageClass cleanup skipped: %s", e)
             results.append(
                 DeploymentResult(
                     component="scratch-sc",
