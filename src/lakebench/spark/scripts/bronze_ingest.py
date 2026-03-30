@@ -51,7 +51,7 @@ log(f"Trigger:      {trigger_interval}")
 # Set the default namespace location to S3 so Iceberg tables are created
 # in S3, not the Hive Metastore default warehouse (file:/stackable/warehouse/).
 # Silver and gold scripts do this for their namespaces; bronze uses "default".
-bronze_warehouse = bronze_uri + "warehouse/"
+bronze_warehouse = bronze_uri + "warehouse/default.db/"
 log(f"Namespace location: {bronze_warehouse}")
 try:
     spark.sql(
