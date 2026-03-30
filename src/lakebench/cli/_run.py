@@ -384,19 +384,20 @@ def run(
 
     # deploy_only: deploy infrastructure and exit
     if deploy_only:
-        from lakebench.cli import deploy
+        from lakebench.cli._deploy import deploy as _deploy_cmd
 
         print_info("--deploy-only: deploying infrastructure...")
-        deploy(config_file=config_file, yes=yes)
+        _deploy_cmd(config_file=config_file, yes=yes)
         return
 
     # generate_only: deploy + generate and exit
     if generate_only:
-        from lakebench.cli import deploy, generate
+        from lakebench.cli._deploy import deploy as _deploy_cmd
+        from lakebench.cli._generate import generate as _generate_cmd
 
         print_info("--generate-only: deploying and generating data...")
-        deploy(config_file=config_file, yes=yes)
-        generate(config_file=config_file, wait=True, timeout=timeout or 14400, yes=yes)
+        _deploy_cmd(config_file=config_file, yes=yes)
+        _generate_cmd(config_file=config_file, wait=True, timeout=timeout or 14400, yes=yes)
         return
 
     # -- Phase 1/7: Prerequisites ------------------------------------------------
@@ -431,10 +432,10 @@ def run(
             )
             if not _k8s_check.namespace_exists(ns):
                 if yes:
-                    from lakebench.cli import deploy
+                    from lakebench.cli._deploy import deploy as _deploy_cmd
 
                     print_info(f"Namespace '{ns}' not found -- auto-deploying...")
-                    deploy(config_file=config_file, yes=True)
+                    _deploy_cmd(config_file=config_file, yes=True)
                 else:
                     print_error(f"Namespace '{ns}' does not exist")
                     print_info("Run 'lakebench deploy' first, or use --yes to auto-deploy")
