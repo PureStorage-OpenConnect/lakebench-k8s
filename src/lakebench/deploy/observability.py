@@ -92,6 +92,7 @@ PODMONITOR_TEMPLATES = [
     "prometheus/podmonitor-trino.yaml.j2",
     "prometheus/podmonitor-spark.yaml.j2",
     "prometheus/configmap.yaml.j2",
+    "grafana/dashboard-configmap.yaml.j2",
 ]
 
 
