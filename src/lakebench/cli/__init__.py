@@ -2939,6 +2939,12 @@ def run(
             and cfg.architecture.pipeline.pre_benchmark_maintenance
         )
 
+        if not do_maintenance:
+            if skip_benchmark:
+                print_info("Skipped (no query engine)")
+            elif skip_maintenance:
+                print_info("Skipped (--skip-maintenance)")
+
         if do_maintenance:
             from lakebench.benchmark import BenchmarkRunner as _BR
 
@@ -3017,6 +3023,8 @@ def run(
         console.print()
         console.print("[bold dim]Phase 6/7: Benchmark[/bold dim]")
         # Run post-compaction benchmark (or the only benchmark if maintenance skipped)
+        if skip_benchmark:
+            print_info("Skipped (no query engine)")
         if not skip_benchmark:
             try:
                 from lakebench.benchmark import BenchmarkRunner
@@ -3058,7 +3066,8 @@ def run(
                 benchmark_qph = bench_result.qph
 
                 # Maintenance cost summary (v1.3)
-                if pre_compaction_qph > 0 and benchmark_qph > 0:
+                # Only show when maintenance actually ran (maint_elapsed > 0)
+                if pre_compaction_qph > 0 and benchmark_qph > 0 and maint_elapsed > 0:
                     improvement = ((benchmark_qph - pre_compaction_qph) / pre_compaction_qph) * 100
                     console.print(
                         f"  [bold]Maintenance value: {improvement:+.1f}% QpH improvement[/bold]"
