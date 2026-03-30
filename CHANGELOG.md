@@ -27,8 +27,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **7-phase run output.** Progress headers (Phase 1/7 through 7/7) for
   Prerequisites, Infrastructure, Generate, Pipeline, Maintenance, Benchmark,
   Results.
-- **Run command flags.** `--skip-deploy`, `--skip-generate`,
-  `--skip-maintenance`, `--deploy-only`, `--generate-only`, `--yes/-y`.
+- **Run command flags.** `--skip-preflight` (skip prerequisite checks),
+  `--skip-generate`, `--skip-maintenance`, `--deploy-only`, `--generate-only`,
+  `--yes/-y`. With `--yes`, `run` auto-deploys if infrastructure is missing.
 - **Init quick mode.** Default 2-step wizard (endpoint/keys + review).
   `--advanced` for full 5-step wizard with recipe and mode selection.
 
@@ -48,6 +49,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 - `config/scale.py`: `compute_guidance()` mode field changed from
   `"continuous"` to `"sustained"` (advisory only, not Docker image mode).
+- **Sustained mode (LB-044).** `bronze_ingest.py` created Iceberg tables
+  using Hive Metastore default warehouse (`file:/stackable/warehouse/`)
+  instead of S3, causing crash-loops. Fixed with explicit S3 table location.
+  Sustained streaming now fully functional across all Iceberg recipes.
+- **QpH calculation (LB-042).** Power and throughput QpH counted failed
+  queries as successful. 8 failed queries in 14s reported QpH 1,950.
+  Now only counts `result.success == True`.
+- **Pre-compaction benchmark at scale (LB-041).** Added per-query progress
+  (`[1/8] Query name... 12.3s OK`), file count check (skips pre-compaction
+  at >200K files), and 60s timeout for pre-compaction queries.
+- **Delta+Thrift maintenance (LB-043).** VACUUM OOMs Spark Thrift at 4Gi.
+  Maintenance now skipped for Delta+Spark Thrift combinations.
+- **DuckDB deploy timeout (LB-033).** Increased from 600s to 900s for
+  parallel deployments.
+- **`lakebench results` (LB-039).** Now accepts optional config file argument.
+- **`query --file` duplicate (LB-027).** SQL file input renamed to `--sql-file`.
+- **`config recommend` crash (LB-022).** Passed config Path as int parameter.
+- **Iceberg compat matrix (LB-026).** Removed Iceberg 1.7.1-1.9.1 for Spark
+  4.0/4.1 (Maven artifacts only exist for 1.10.0+).
+- **Deploy timeouts (LB-023).** Hive/Polaris increased from 300s to 600s.
+- **SecretClass race (LB-024).** Parallel deploys race on cluster-scoped
+  resource creation; now catches 409 AlreadyExists.
+- **`--generate-only` (LB-025).** Missing `yes=yes` passthrough.
+- `run --generate` now shows Rich progress bar with pod count (ENH-001).
+- `run` auto-deploys when namespace missing and `--yes` set (ENH-002).
+- `--skip-deploy` renamed to `--skip-preflight` (alias kept) (ENH-003).
+- Deploy tip updated from deprecated `lakebench validate` to
+  `lakebench config validate` (ENH-004).
+- DuckDB no longer shows misleading maintenance value (ENH-005).
+- Empty Phase 5/7 and 6/7 headers now say "Skipped" for `--skip-benchmark`
+  and `--skip-maintenance` (ENH-006).
+- Trino worker memory: performance tier (scale 51-500) bumped from 32Gi to
+  48Gi per worker.
+- Pipeline stage heartbeat: elapsed time printed every 60s during long jobs.
 
 ## [1.2.0] - 2026-03-26
 
