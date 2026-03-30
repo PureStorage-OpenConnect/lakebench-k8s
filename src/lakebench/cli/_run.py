@@ -932,8 +932,9 @@ def run(
         # -- Phase 5/7: Maintenance ------------------------------------------------
         console.print()
         console.print("[bold dim]Phase 5/7: Maintenance[/bold dim]")
-        # Flow: pre-compaction benchmark -> maintenance -> post-compaction benchmark
-        # The pre/post delta quantifies the value of table maintenance.
+        # Flow: [pre-compaction benchmark] -> maintenance -> [post-compaction benchmark]
+        # Pre-compaction benchmark only runs at scale < 50 (OOMs at higher scales
+        # due to 200K+ uncompacted files overwhelming Trino memory).
         pre_compaction_qph = 0.0
         pre_file_count = 0
         post_file_count = 0
@@ -969,8 +970,10 @@ def run(
                         short_err = (error[:60] + "...") if len(error) > 60 else error
                         console.print(f"[red]FAIL[/red] ({short_err})")
 
+            _scale = cfg.architecture.workload.datagen.get_effective_scale()
+
             try:
-                # 1. Pre-compaction file count (probe first to decide if benchmark is feasible)
+                # 1. Pre-maintenance file count
                 try:
                     _pre_health = _probe_table_health(cfg, k8s)
                     pre_file_count = sum(
@@ -981,15 +984,10 @@ def run(
                 except Exception:
                     pass
 
-                # 2. Pre-compaction benchmark (skip if too many files)
-                console.print()
-                console.print("[bold]Pre-compaction benchmark[/bold]")
-                if pre_file_count > 200_000:
-                    print_warning(
-                        f"Skipping pre-compaction benchmark ({pre_file_count:,} uncompacted files) "
-                        "-- too many files for reliable measurement"
-                    )
-                else:
+                # 2. Pre-compaction benchmark (scale < 50 only)
+                if _scale < 50:
+                    console.print()
+                    console.print("[bold]Pre-compaction benchmark[/bold]")
                     print_info("Benchmarking before maintenance (uncompacted data)...")
                     _pre_runner = _BR(cfg)
                     _pre_result = _pre_runner.run_power(
@@ -1003,8 +1001,14 @@ def run(
                         f"  Pre-compaction QpH: {pre_compaction_qph:.1f} "
                         f"({_succeeded}/{len(_pre_result.queries)} queries succeeded)"
                     )
+                else:
+                    console.print()
+                    print_info(
+                        f"Pre-compaction benchmark skipped at scale {_scale} "
+                        f"({pre_file_count:,} files) -- runs at scale < 50"
+                    )
 
-                # 3. Run maintenance
+                # 3. Run maintenance (expire snapshots + compaction)
                 console.print()
                 console.print("[bold]Running maintenance[/bold]")
                 _maint_start = datetime.now()
@@ -1013,7 +1017,7 @@ def run(
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
                 maint_elapsed = (datetime.now() - _maint_start).total_seconds()
 
-                # 4. Post-compaction file count
+                # 4. Post-maintenance file count
                 try:
                     _post_health = _probe_table_health(cfg, k8s)
                     post_file_count = sum(
@@ -1025,7 +1029,7 @@ def run(
                     pass
 
             except Exception as e:
-                print_warning(f"Maintenance cost measurement failed (non-fatal): {e}")
+                print_warning(f"Maintenance failed (non-fatal): {e}")
 
         # -- Phase 6/7: Benchmark --------------------------------------------------
         console.print()
@@ -1076,18 +1080,18 @@ def run(
                 console.print(f"  [bold]QpH:   {bench_result.qph:.1f}[/bold]")
                 benchmark_qph = bench_result.qph
 
-                # Maintenance cost summary (v1.3)
-                # Only show when maintenance actually ran (maint_elapsed > 0)
+                # Maintenance summary
                 if pre_compaction_qph > 0 and benchmark_qph > 0 and maint_elapsed > 0:
                     improvement = ((benchmark_qph - pre_compaction_qph) / pre_compaction_qph) * 100
                     console.print(
                         f"  [bold]Maintenance value: {improvement:+.1f}% QpH improvement[/bold]"
                     )
-                    if pre_file_count > 0:
-                        console.print(
-                            f"  Files: {pre_file_count} -> {post_file_count} "
-                            f"({pre_file_count / max(post_file_count, 1):.1f}x compaction)"
-                        )
+                if maint_elapsed > 0 and pre_file_count > 0:
+                    ratio = pre_file_count / max(post_file_count, 1)
+                    console.print(
+                        f"  Files: {pre_file_count:,} -> {post_file_count:,} "
+                        f"({ratio:.1f}x compaction in {maint_elapsed:.0f}s)"
+                    )
 
                 # Record in metrics
                 bench_metrics = BenchmarkMetrics(
