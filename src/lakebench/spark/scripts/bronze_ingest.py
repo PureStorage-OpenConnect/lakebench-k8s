@@ -115,11 +115,22 @@ def write_bronze_batch(batch_df, batch_id):
             spark.table(table_name)
             _table_created = True
         except Exception:
-            # Create the table with an explicit S3 LOCATION to avoid the
-            # Hive Metastore default warehouse (file:/stackable/warehouse/).
-            from common import _s3_table_path
+            # Create the table with an explicit S3 LOCATION.
+            # Hive: s3a://bucket/warehouse/default.db/bronze_raw
+            # Polaris: s3://bucket/default/bronze_raw (must match namespace
+            #   allowed location set during bootstrap)
+            import os
 
-            table_location = _s3_table_path(bronze_uri, bronze_table_path)
+            catalog_type = os.getenv("LB_CATALOG_TYPE", "hive")
+            if catalog_type == "polaris":
+                # Polaris namespace 'default' has location s3://BUCKET/default
+                # Table must be within that path, using s3:// scheme
+                bucket = bronze_uri.replace("s3a://", "").replace("s3://", "").rstrip("/")
+                table_location = f"s3://{bucket}/default/bronze_raw"
+            else:
+                from common import _s3_table_path
+                table_location = _s3_table_path(bronze_uri, bronze_table_path)
+
             log(f"Batch {batch_id}: creating bronze table {table_name} at {table_location}")
             (
                 batch_df.writeTo(table_name)
