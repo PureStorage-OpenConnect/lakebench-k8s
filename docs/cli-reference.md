@@ -159,7 +159,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
 | `--timeout` | `-t` | auto | Timeout per job in seconds (`max(3600, scale * 120)` when omitted) |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
-| `--skip-deploy` | | `false` | Skip infrastructure prerequisite checks |
+| `--skip-preflight` | `--skip-deploy` | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
 | `--deploy-only` | | `false` | Deploy infrastructure and exit |
