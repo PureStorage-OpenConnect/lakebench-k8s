@@ -54,7 +54,9 @@ log(f"Trigger:      {trigger_interval}")
 bronze_warehouse = bronze_uri + "warehouse/"
 log(f"Namespace location: {bronze_warehouse}")
 try:
-    spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog_name}.default LOCATION '{bronze_warehouse}'")
+    spark.sql(
+        f"CREATE NAMESPACE IF NOT EXISTS {catalog_name}.default LOCATION '{bronze_warehouse}'"
+    )
     log(f"Created namespace {catalog_name}.default")
 except Exception as e:
     log(f"Namespace creation note: {str(e)}")
@@ -116,6 +118,7 @@ def write_bronze_batch(batch_df, batch_id):
             # Create the table with an explicit S3 LOCATION to avoid the
             # Hive Metastore default warehouse (file:/stackable/warehouse/).
             from common import _s3_table_path
+
             table_location = _s3_table_path(bronze_uri, bronze_table_path)
             log(f"Batch {batch_id}: creating bronze table {table_name} at {table_location}")
             (

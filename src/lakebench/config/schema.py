@@ -407,6 +407,7 @@ class PolarisConfig(BaseModel):
 
     version: str = "1.3.0-incubating"
     port: int = 8181
+    client_secret: str = "lakebench-polaris-secret-2024"
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
 

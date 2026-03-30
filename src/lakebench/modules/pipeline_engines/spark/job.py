@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from lakebench._constants import POLARIS_CLIENT_ID, POLARIS_CLIENT_SECRET, SPARK_SERVICE_ACCOUNT
+from lakebench._constants import POLARIS_CLIENT_ID, SPARK_SERVICE_ACCOUNT
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
@@ -958,7 +958,7 @@ class SparkJobManager:
                     s3.path_style
                 ).lower(),
                 # OAuth2 credential (client_id:client_secret)
-                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{POLARIS_CLIENT_SECRET}",
+                f"spark.sql.catalog.{catalog_name}.credential": f"{POLARIS_CLIENT_ID}:{cfg.architecture.catalog.polaris.client_secret}",
                 f"spark.sql.catalog.{catalog_name}.scope": "PRINCIPAL_ROLE:ALL",
                 f"spark.sql.catalog.{catalog_name}.token-refresh-enabled": "true",
                 # FlashBlade: static S3 credentials on catalog (no STS vending)
