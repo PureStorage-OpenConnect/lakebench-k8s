@@ -241,6 +241,10 @@ def _run_iceberg_maintenance(
         )
         return
 
+    if table_format == "delta" and engine_type == "spark-thrift":
+        console.print("  [dim]Delta maintenance skipped (VACUUM OOMs Spark Thrift at 4Gi)[/dim]")
+        return
+
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
     if engine is None or pod_name is None or catalog is None:
         console.print(
