@@ -1,0 +1,177 @@
+{# Grafana dashboard provisioned via sidecar ConfigMap #}
+{# The kube-prometheus-stack Grafana sidecar watches for ConfigMaps with #}
+{# the label grafana_dashboard: "1" and auto-imports them as dashboards. #}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakebench-grafana-dashboard
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: grafana-dashboard
+    grafana_dashboard: "1"
+data:
+  lakebench-overview.json: |
+    {
+      "annotations": {"list": []},
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 1,
+      "links": [],
+      "panels": [
+        {
+          "title": "Trino: Running Queries",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [
+            {
+              "expr": "trino_execution_querymanager_RunningQueries",
+              "legendFormat": "Running Queries",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
+          }
+        },
+        {
+          "title": "Trino: Query Throughput (queries/min)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [
+            {
+              "expr": "rate(trino_execution_querymanager_CompletedQueries_TotalCount[5m]) * 60",
+              "legendFormat": "Completed/min",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(trino_execution_querymanager_FailedQueries_TotalCount[5m]) * 60",
+              "legendFormat": "Failed/min",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
+          }
+        },
+        {
+          "title": "Trino: Query Wall Time (p50/p95/p99)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "targets": [
+            {
+              "expr": "trino_execution_querymanager_WallTime_P50",
+              "legendFormat": "p50",
+              "refId": "A"
+            },
+            {
+              "expr": "trino_execution_querymanager_WallTime_P95",
+              "legendFormat": "p95",
+              "refId": "B"
+            },
+            {
+              "expr": "trino_execution_querymanager_WallTime_P99",
+              "legendFormat": "p99",
+              "refId": "C"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "ms"}
+          }
+        },
+        {
+          "title": "Trino: Worker Memory Usage",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [
+            {
+              "expr": "trino_memory_ClusterTotalMemoryReservation",
+              "legendFormat": "Total Reserved",
+              "refId": "A"
+            },
+            {
+              "expr": "trino_memory_ClusterMemoryPoolFreeBytes",
+              "legendFormat": "Free",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "bytes"}
+          }
+        },
+        {
+          "title": "Spark: Active Executors",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "targets": [
+            {
+              "expr": "spark_app_executor_count",
+              "legendFormat": "{{ "{{" }}app_name{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
+          }
+        },
+        {
+          "title": "Spark: Task Throughput (tasks/sec)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "targets": [
+            {
+              "expr": "rate(spark_app_completed_tasks_total[1m])",
+              "legendFormat": "{{ "{{" }}app_name{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "ops"}
+          }
+        },
+        {
+          "title": "Spark: JVM Heap Memory",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+          "targets": [
+            {
+              "expr": "spark_driver_jvm_heap_used",
+              "legendFormat": "Driver Heap Used",
+              "refId": "A"
+            },
+            {
+              "expr": "spark_driver_jvm_heap_max",
+              "legendFormat": "Driver Heap Max",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "bytes"}
+          }
+        },
+        {
+          "title": "Node CPU Usage",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+          "targets": [
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"{{ namespace }}\"}[5m])) by (pod)",
+              "legendFormat": "{{ "{{" }}pod{{ "}}" }}",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
+          }
+        }
+      ],
+      "schemaVersion": 39,
+      "tags": ["lakebench"],
+      "templating": {"list": []},
+      "time": {"from": "now-1h", "to": "now"},
+      "timepicker": {},
+      "timezone": "browser",
+      "title": "Lakebench Overview",
+      "uid": "lakebench-overview",
+      "version": 1
+    }
