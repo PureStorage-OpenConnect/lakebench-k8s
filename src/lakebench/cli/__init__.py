@@ -2295,8 +2295,9 @@ def run(
     skip_deploy: Annotated[
         bool,
         typer.Option(
+            "--skip-preflight",
             "--skip-deploy",
-            help="Assume infrastructure is already deployed (skip deploy phase)",
+            help="Skip prerequisite checks and infrastructure validation",
         ),
     ] = False,
     skip_generate: Annotated[
@@ -2443,9 +2444,27 @@ def run(
         print_success("All prerequisites passed")
 
         # Also run infrastructure readiness check
+        # If namespace doesn't exist and --yes is set, auto-deploy first
+        ns = cfg.get_namespace()
+        try:
+            _k8s_check = get_k8s_client(
+                context=cfg.platform.kubernetes.context,
+                namespace=ns,
+            )
+            if not _k8s_check.namespace_exists(ns):
+                if yes:
+                    print_info(f"Namespace '{ns}' not found -- auto-deploying...")
+                    deploy(config_file=config_file, yes=True)
+                else:
+                    print_error(f"Namespace '{ns}' does not exist")
+                    print_info("Run 'lakebench deploy' first, or use --yes to auto-deploy")
+                    raise typer.Exit(1)
+        except K8sConnectionError:
+            pass  # preflight will catch this
+
         _run_preflight_infra_check(cfg)
     else:
-        print_info("Skipping prerequisites (--skip-deploy)")
+        print_info("Skipping prerequisites (--skip-preflight)")
 
     # Branch: sustained streaming pipeline (CLI flag overrides config)
     use_sustained = sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
@@ -4318,6 +4337,12 @@ def report(
 
 @app.command()
 def results(
+    config_file: Annotated[
+        Path | None,
+        typer.Argument(
+            help="Path to configuration YAML file (used for deployment name; optional)",
+        ),
+    ] = None,
     metrics_dir: Annotated[
         Path,
         typer.Option(
@@ -4348,6 +4373,9 @@ def results(
     Shows the stage-matrix view of pipeline performance -- each stage
     as a column with consistent metrics as rows. Use --format json or
     --format csv for machine-readable output.
+
+    Accepts an optional config file argument (ignored, for command-line
+    consistency with other lakebench commands).
     """
     import json as _json
 
