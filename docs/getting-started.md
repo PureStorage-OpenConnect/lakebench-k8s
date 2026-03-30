@@ -245,39 +245,26 @@ lakebench validate lakebench.yaml
 This checks YAML syntax, Pydantic schema validation, Kubernetes connectivity,
 and S3 reachability. Fix any errors before continuing.
 
-### 4. Deploy infrastructure
+### 4. Run everything (single command)
 
 ```bash
-lakebench deploy lakebench.yaml
+lakebench run lakebench.yaml --generate --yes
 ```
 
-You will be asked to confirm before deploying. Add `--yes` to skip the prompt.
+This deploys infrastructure (if not already deployed), generates test data,
+runs the pipeline, and benchmarks -- all in one command. The `--yes` flag
+skips confirmation prompts and enables auto-deploy.
 
-Lakebench creates (in order): the Kubernetes namespace, S3 secrets, scratch
-StorageClass, PostgreSQL (metadata backend), Hive Metastore or Polaris
-(depending on your catalog choice), the query engine, and the Spark RBAC
-service account. Wait for the command to finish -- it reports the status of
-each component as it deploys.
-
-Check that everything is healthy:
+Alternatively, run each step separately for more control:
 
 ```bash
-lakebench status lakebench.yaml
+lakebench deploy lakebench.yaml --yes     # deploy infrastructure
+lakebench status lakebench.yaml           # verify deployment
+lakebench generate lakebench.yaml --wait  # generate test data (~5 min at scale 1)
+lakebench run lakebench.yaml --skip-preflight  # run pipeline + benchmark
 ```
 
-### 5. Generate test data
-
-```bash
-lakebench generate lakebench.yaml --wait
-```
-
-You will be asked to confirm before generating. Add `--yes` to skip the prompt.
-
-This launches Kubernetes Jobs that write synthetic Customer360 Parquet files
-into the bronze S3 bucket. The `--wait` flag blocks until generation is
-complete. At scale 1 this typically finishes in under 5 minutes.
-
-### 6. Run the pipeline
+### What happens during `run`
 
 ```bash
 lakebench run lakebench.yaml
