@@ -528,6 +528,15 @@ class MetricsStorage:
                 benchmark_rounds=_deserialize_benchmark_rounds(pb_data.get("benchmark_rounds", [])),
                 cycles=_deserialize_cycles(pb_data.get("cycles", [])),
                 qph_degradation_pct=scores.get("qph_degradation_pct"),
+                # Maintenance metrics (v1.3)
+                maintenance_elapsed_seconds=scores.get("maintenance_elapsed_seconds", 0.0),
+                maintenance_pct_of_pipeline=scores.get("maintenance_pct_of_pipeline", 0.0),
+                pre_compaction_file_count=scores.get("pre_compaction_file_count", 0),
+                post_compaction_file_count=scores.get("post_compaction_file_count", 0),
+                compaction_ratio=scores.get("compaction_ratio", 0.0),
+                pre_compaction_qph=scores.get("pre_compaction_qph", 0.0),
+                post_compaction_qph=scores.get("post_compaction_qph", 0.0),
+                maintenance_value_pct=scores.get("maintenance_value_pct", 0.0),
             )
             if pb_data.get("end_time"):
                 metrics.pipeline_benchmark.end_time = datetime.fromisoformat(pb_data["end_time"])
