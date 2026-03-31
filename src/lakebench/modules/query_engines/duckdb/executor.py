@@ -30,10 +30,12 @@ class DuckDBExecutor:
         s3_buckets: dict[str, str] | None = None,
         table_names: dict[str, str] | None = None,
         table_format: str = "iceberg",
+        catalog_type: str = "hive",
     ):
         self.namespace = namespace
         self.catalog_name = catalog_name
         self.table_format = table_format
+        self.catalog_type = catalog_type
         self.s3_endpoint = s3_endpoint
         self.s3_region = s3_region
         self.s3_path_style = s3_path_style
@@ -175,7 +177,12 @@ class DuckDBExecutor:
                 continue
             namespace, table = parts
             catalog_ref = f"{self.catalog_name}.{fq_name}"
-            warehouse_path = f"s3://{bucket}/warehouse/{namespace}.db/{table}"
+            # Hive: tables at s3://bucket/warehouse/namespace.db/table
+            # Polaris: tables at s3://bucket/namespace/table
+            if self.catalog_type == "polaris":
+                warehouse_path = f"s3://{bucket}/{namespace}/{table}"
+            else:
+                warehouse_path = f"s3://{bucket}/warehouse/{namespace}.db/{table}"
             if self.table_format == "delta":
                 scan_expr = f"delta_scan('{warehouse_path}')"
             else:
