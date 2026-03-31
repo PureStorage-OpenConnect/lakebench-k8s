@@ -5,7 +5,6 @@ import pytest
 from lakebench.config import (
     CatalogType,
     ConfigFileNotFoundError,
-    ConfigValidationError,
     LakebenchConfig,
     generate_default_config,
     generate_example_config_yaml,

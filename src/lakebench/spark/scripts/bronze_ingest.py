@@ -129,6 +129,7 @@ def write_bronze_batch(batch_df, batch_id):
                 table_location = f"s3://{bucket}/default/bronze_raw"
             else:
                 from common import _s3_table_path
+
                 table_location = _s3_table_path(bronze_uri, bronze_table_path)
 
             log(f"Batch {batch_id}: creating bronze table {table_name} at {table_location}")

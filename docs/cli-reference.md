@@ -434,7 +434,7 @@ lakebench run                         # re-run pipeline
 lakebench run --stage silver-build --timeout 3600
 ```
 
-### Continuous Streaming Pipeline
+### Sustained Streaming Pipeline
 
 ```bash
 lakebench run --sustained --duration 3600

@@ -5,9 +5,7 @@ Phase 7 of v1.3 modularization.
 
 from __future__ import annotations
 
-import os
 import textwrap
-from pathlib import Path
 
 import pytest
 
@@ -17,7 +15,6 @@ from lakebench.config.loader import (
     _substitute_env_vars,
     load_config,
 )
-
 
 # ===========================================================================
 # Env var substitution
