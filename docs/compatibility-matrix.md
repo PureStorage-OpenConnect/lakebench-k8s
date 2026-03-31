@@ -23,7 +23,7 @@ All 11 recipes support all three pipeline modes:
 | Mode | Description | Tested With |
 |------|-------------|-------------|
 | `batch` | Single-pass: bronze-verify -> silver-build -> gold-finalize -> benchmark | All recipes |
-| `sustained` | Continuous streaming with periodic benchmarks | hive-delta-spark-trino |
+| `sustained` | Sustained streaming with periodic benchmarks | hive-delta-spark-trino |
 | `iterative` | Repeated batch cycles with accumulating data | All recipes (v1.1) |
 
 ## Excluded Combinations

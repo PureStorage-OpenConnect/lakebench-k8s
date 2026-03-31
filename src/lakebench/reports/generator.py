@@ -433,7 +433,7 @@ class ReportGenerator:
         if value_pct != 0 and pre_qph > 0:
             color = "var(--success)" if value_pct > 0 else "var(--danger)"
             rows.append(
-                f'<tr><td>QpH improvement</td>'
+                f"<tr><td>QpH improvement</td>"
                 f'<td style="color: {color}; font-weight: 600">{value_pct:+.1f}%</td></tr>'
             )
 

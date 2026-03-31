@@ -6,7 +6,7 @@ on Kubernetes. Spark runs PySpark scripts that move data through three layers:
 
 - **Batch mode:** `bronze-verify`, `silver-build`, `gold-finalize` -- run sequentially,
   each job starts after the previous one completes.
-- **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
+- **Sustained mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
   concurrently as structured streaming jobs with configurable trigger intervals.
 
 All scripts are deployed as a ConfigMap (`lakebench-spark-scripts`) and mounted

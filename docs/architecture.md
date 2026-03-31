@@ -77,7 +77,7 @@ table growth. Cycle 1 creates tables; cycles 2+ append incrementally.
 Iceberg compaction and table health tracking run between cycles. See
 [Configuration -- Multi-Cycle Batch](configuration.md#multi-cycle-batch).
 
-### Continuous Mode
+### Sustained Mode
 
 In addition to batch processing, Lakebench supports a sustained streaming
 pipeline using Spark Structured Streaming:

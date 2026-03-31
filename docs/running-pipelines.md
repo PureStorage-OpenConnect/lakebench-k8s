@@ -151,9 +151,9 @@ Full end-to-end run including data generation:
 lakebench run my-config.yaml --generate --timeout 7200
 ```
 
-## Continuous Mode
+## Sustained Mode
 
-Continuous mode runs a streaming pipeline instead of batch. Set it in the
+Sustained mode runs a streaming pipeline instead of batch. Set it in the
 config file or activate it with the `--sustained` CLI flag:
 
 ```yaml
@@ -194,7 +194,7 @@ minutes). During this window, Lakebench runs periodic Trino benchmark rounds
 to measure query performance while streaming is active. After the window ends,
 streaming jobs are stopped and the in-stream results are aggregated.
 
-### How Continuous Mode Works
+### How Sustained Mode Works
 
 The three streaming jobs behave differently:
 
@@ -217,7 +217,7 @@ gold table while it's being rewritten, the query fails. Lakebench handles
 this with automatic retries (30s/60s backoff). The scorecard records
 contention events per round.
 
-### Continuous Mode Configuration
+### Sustained Mode Configuration
 
 ```yaml
 architecture:
@@ -302,9 +302,9 @@ score is produced.
 For round count planning and the adaptive end-of-window guard, see
 [Scoring and Benchmarking](benchmarking.md).
 
-### Continuous Mode Scoring
+### Sustained Mode Scoring
 
-Continuous mode produces a different set of scores than batch:
+Sustained mode produces a different set of scores than batch:
 
 | Score | Description |
 |---|---|
