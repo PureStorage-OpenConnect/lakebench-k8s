@@ -71,6 +71,7 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
     elif engine_type == "duckdb":
         s3 = config.platform.storage.s3
         catalog = config.architecture.query_engine.duckdb.catalog_name
+        catalog_type = config.architecture.catalog.type.value
         tables = config.architecture.tables
         return DuckDBExecutor(
             namespace=ns,
@@ -87,6 +88,7 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
                 "gold": tables.gold,
             },
             table_format=table_format,
+            catalog_type=catalog_type,
         )
     elif engine_type == "none":
         raise ValueError("Cannot run queries without a query engine (type=none)")
