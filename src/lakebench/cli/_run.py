@@ -1179,23 +1179,25 @@ def run(
                 run_metrics.pipeline_benchmark = pb
 
                 # Populate maintenance cost metrics (v1.3)
-                if maint_elapsed > 0:
-                    pb.maintenance_elapsed_seconds = maint_elapsed
-                    if pb.total_elapsed_seconds > 0:
-                        pb.maintenance_pct_of_pipeline = (
-                            maint_elapsed / pb.total_elapsed_seconds
-                        ) * 100
-                if pre_file_count > 0:
-                    pb.pre_compaction_file_count = pre_file_count
-                    pb.post_compaction_file_count = post_file_count
-                    pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
-                if pre_compaction_qph > 0:
-                    pb.pre_compaction_qph = pre_compaction_qph
-                    pb.post_compaction_qph = benchmark_qph
-                    if pre_compaction_qph > 0:
+                try:
+                    if maint_elapsed > 0:
+                        pb.maintenance_elapsed_seconds = maint_elapsed
+                        if pb.total_elapsed_seconds > 0:
+                            pb.maintenance_pct_of_pipeline = (
+                                maint_elapsed / pb.total_elapsed_seconds
+                            ) * 100
+                    if pre_file_count > 0:
+                        pb.pre_compaction_file_count = pre_file_count
+                        pb.post_compaction_file_count = post_file_count
+                        pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
+                    if pre_compaction_qph > 0 and benchmark_qph:
+                        pb.pre_compaction_qph = pre_compaction_qph
+                        pb.post_compaction_qph = benchmark_qph
                         pb.maintenance_value_pct = (
                             (benchmark_qph - pre_compaction_qph) / pre_compaction_qph
                         ) * 100
+                except Exception:
+                    pass  # Maintenance metrics are best-effort
 
                 # Print full scorecard panel
                 if pipeline_success:
