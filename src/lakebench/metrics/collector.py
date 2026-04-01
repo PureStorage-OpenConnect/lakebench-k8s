@@ -488,6 +488,18 @@ class PipelineBenchmark:
         "time_to_value_seconds": "Wall-clock seconds from first input to queryable gold (lower is better)",
         "scale_ratio": "Actual data volume / expected volume for the scale factor (1.0 = complete)",
         "cycle_progression": "Per-cycle elapsed time, QpH, and table health for multi-cycle batch runs",
+        # Maintenance (v1.3)
+        "maintenance_elapsed_seconds": "Total seconds spent on expire_snapshots + remove_orphan_files + compaction",
+        "maintenance_pct_of_pipeline": "Maintenance time as percentage of total pipeline time",
+        "pre_compaction_file_count": "Iceberg data files before rewrite_data_files / OPTIMIZE",
+        "post_compaction_file_count": "Iceberg data files after rewrite_data_files / OPTIMIZE",
+        "compaction_ratio": "pre/post file count ratio (higher = more compaction benefit)",
+        "snapshots_expired": "Number of snapshots removed by expire_snapshots",
+        "orphan_files_removed": "Number of orphan files cleaned up by remove_orphan_files",
+        "storage_reclaimed_mb": "MB of storage freed by maintenance operations",
+        "pre_compaction_qph": "QpH measured before maintenance (on uncompacted data)",
+        "post_compaction_qph": "QpH measured after maintenance (on compacted data) -- the primary QpH score",
+        "maintenance_value_pct": "QpH improvement from maintenance: (post - pre) / pre * 100",
     }
 
     run_id: str
@@ -538,6 +550,19 @@ class PipelineBenchmark:
     # Percent drop from first-half median to second-half median QpH.
     # Positive = degradation, negative = improvement, None = insufficient data.
     qph_degradation_pct: float | None = None
+
+    # Maintenance cost metrics (v1.3)
+    maintenance_elapsed_seconds: float = 0.0
+    maintenance_pct_of_pipeline: float = 0.0
+    pre_compaction_file_count: int = 0
+    post_compaction_file_count: int = 0
+    compaction_ratio: float = 0.0
+    snapshots_expired: int = 0
+    orphan_files_removed: int = 0
+    storage_reclaimed_mb: float = 0.0
+    pre_compaction_qph: float = 0.0
+    post_compaction_qph: float = 0.0
+    maintenance_value_pct: float = 0.0
 
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     success: bool = False
@@ -754,6 +779,20 @@ class PipelineBenchmark:
                 scores["benchmark_rounds_count"] = len(self.benchmark_rounds)
             if self.qph_degradation_pct is not None:
                 scores["qph_degradation_pct"] = self.qph_degradation_pct
+            # Maintenance metrics (v1.3) -- same fields for sustained
+            if self.maintenance_elapsed_seconds > 0:
+                scores["maintenance_elapsed_seconds"] = round(self.maintenance_elapsed_seconds, 2)
+                scores["maintenance_pct_of_pipeline"] = round(self.maintenance_pct_of_pipeline, 2)
+            if self.pre_compaction_file_count > 0:
+                scores["pre_compaction_file_count"] = self.pre_compaction_file_count
+                scores["post_compaction_file_count"] = self.post_compaction_file_count
+                scores["compaction_ratio"] = round(self.compaction_ratio, 2)
+            if self.snapshots_expired > 0:
+                scores["snapshots_expired"] = self.snapshots_expired
+            if self.orphan_files_removed > 0:
+                scores["orphan_files_removed"] = self.orphan_files_removed
+            if self.storage_reclaimed_mb > 0:
+                scores["storage_reclaimed_mb"] = round(self.storage_reclaimed_mb, 1)
             return scores
 
         # Batch scores
@@ -779,6 +818,24 @@ class PipelineBenchmark:
                 }
                 for c in self.cycles
             ]
+        # Maintenance metrics (v1.3) -- included in both batch and sustained scores
+        if self.maintenance_elapsed_seconds > 0:
+            batch_scores["maintenance_elapsed_seconds"] = round(self.maintenance_elapsed_seconds, 2)
+            batch_scores["maintenance_pct_of_pipeline"] = round(self.maintenance_pct_of_pipeline, 2)
+        if self.pre_compaction_file_count > 0:
+            batch_scores["pre_compaction_file_count"] = self.pre_compaction_file_count
+            batch_scores["post_compaction_file_count"] = self.post_compaction_file_count
+            batch_scores["compaction_ratio"] = round(self.compaction_ratio, 2)
+        if self.pre_compaction_qph > 0:
+            batch_scores["pre_compaction_qph"] = round(self.pre_compaction_qph, 1)
+            batch_scores["post_compaction_qph"] = round(self.post_compaction_qph, 1)
+            batch_scores["maintenance_value_pct"] = round(self.maintenance_value_pct, 1)
+        if self.snapshots_expired > 0:
+            batch_scores["snapshots_expired"] = self.snapshots_expired
+        if self.orphan_files_removed > 0:
+            batch_scores["orphan_files_removed"] = self.orphan_files_removed
+        if self.storage_reclaimed_mb > 0:
+            batch_scores["storage_reclaimed_mb"] = round(self.storage_reclaimed_mb, 1)
         return batch_scores
 
     def to_matrix(self) -> dict[str, dict[str, Any]]:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,83 @@ import yaml
 from pydantic import ValidationError
 
 from .schema import LakebenchConfig
+
+# -- Env var substitution ----------------------------------------------------
+
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
+
+
+def _substitute_env_vars(text: str) -> str:
+    """Replace ``${VAR}`` and ``${VAR:-default}`` with environment values.
+
+    Unresolved variables without defaults raise ``ConfigError``.
+    """
+    unresolved: list[str] = []
+
+    def _replace(m: re.Match) -> str:
+        var_name = m.group(1)
+        default = m.group(2)
+        value = os.environ.get(var_name)
+        if value is not None:
+            return value
+        if default is not None:
+            return default
+        unresolved.append(var_name)
+        return m.group(0)
+
+    result = _ENV_PATTERN.sub(_replace, text)
+    if unresolved:
+        raise ConfigError(
+            f"Unresolved environment variables: {', '.join(unresolved)}. "
+            f"Set them or provide defaults with ${{VAR:-default}} syntax."
+        )
+    return result
+
+
+# -- Flat field mapping (v2 config) ------------------------------------------
+
+_FLAT_FIELD_MAP: dict[str, tuple[str, ...]] = {
+    "endpoint": ("platform", "storage", "s3", "endpoint"),
+    "access_key": ("platform", "storage", "s3", "access_key"),
+    "secret_key": ("platform", "storage", "s3", "secret_key"),
+    "secret_ref": ("platform", "storage", "s3", "secret_ref"),
+    "scale": ("architecture", "workload", "datagen", "scale"),
+    "namespace": ("platform", "kubernetes", "namespace"),
+    "mode": ("architecture", "pipeline", "mode"),
+    "cycles": ("architecture", "pipeline", "cycles"),
+    "spark_image": ("images", "spark"),
+}
+
+
+def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
+    """Promote flat top-level fields to their nested locations.
+
+    If both flat and nested are present, flat wins and a warning is logged.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    for flat_key, nested_path in _FLAT_FIELD_MAP.items():
+        if flat_key not in data:
+            continue
+        value = data.pop(flat_key)
+
+        # Walk the nested path, creating intermediate dicts as needed
+        target = data
+        for key in nested_path[:-1]:
+            target = target.setdefault(key, {})
+
+        final_key = nested_path[-1]
+        if final_key in target:
+            logger.warning(
+                "Both flat '%s' and nested '%s' are set -- flat value takes precedence",
+                flat_key,
+                ".".join(nested_path),
+            )
+        target[final_key] = value
+
+    return data
 
 
 class ConfigError(Exception):
@@ -37,8 +116,61 @@ class ConfigValidationError(ConfigError):
         self.errors = errors or []
 
 
+# -- Auto-generated name with state persistence ------------------------------
+
+
+def _resolve_auto_name(config_dir: Path) -> str:
+    """Generate or retrieve a stable deployment name.
+
+    Checks ``.lakebench/state.json`` in *config_dir* for an existing name.
+    If found, reuses it (stability across runs). Otherwise generates
+    ``lb-YYYYMMDD-HHMMSS`` and persists it.
+    """
+    import json
+    import logging
+    from datetime import datetime
+
+    logger = logging.getLogger(__name__)
+
+    state_dir = config_dir / ".lakebench"
+    state_file = state_dir / "state.json"
+
+    # Try to load existing name from state file
+    if state_file.exists():
+        try:
+            with open(state_file) as f:
+                state = json.load(f)
+            name = state.get("name", "")
+            if name:
+                logger.debug("Reusing auto-generated name from %s: %s", state_file, name)
+                return name
+        except (json.JSONDecodeError, OSError):
+            pass  # Corrupt state file -- regenerate
+
+    # Generate new name
+    name = f"lb-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    # Persist to state file
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        with open(state_file, "w") as f:
+            json.dump(
+                {"name": name, "created": datetime.now().isoformat()},
+                f,
+                indent=2,
+            )
+        logger.debug("Persisted auto-generated name to %s: %s", state_file, name)
+    except OSError as e:
+        logger.warning("Could not persist auto-generated name: %s", e)
+
+    return name
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load YAML file and return as dictionary.
+
+    Performs ``${VAR}`` / ``${VAR:-default}`` env-var substitution on
+    the raw YAML text before parsing.
 
     Args:
         path: Path to YAML file
@@ -49,20 +181,28 @@ def load_yaml(path: Path) -> dict[str, Any]:
     Raises:
         ConfigFileNotFoundError: If file doesn't exist
         ConfigParseError: If YAML parsing fails
+        ConfigError: If env vars are unresolved
     """
     if not path.exists():
         raise ConfigFileNotFoundError(f"Configuration file not found: {path}")
 
     try:
         with open(path) as f:
-            content = yaml.safe_load(f)
-            return content if content else {}
+            raw = f.read()
+        text = _substitute_env_vars(raw)
+        content = yaml.safe_load(text)
+        return content if content else {}
     except yaml.YAMLError as e:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
 
 
 def load_config(path: str | Path) -> LakebenchConfig:
     """Load and validate Lakebench configuration from file.
+
+    Processing order:
+    1. Read YAML with ``${VAR}`` env-var substitution
+    2. Promote flat top-level fields (v2 config) to nested locations
+    3. Validate with Pydantic
 
     Args:
         path: Path to configuration YAML file
@@ -77,6 +217,11 @@ def load_config(path: str | Path) -> LakebenchConfig:
     """
     path = Path(path)
     data = load_yaml(path)
+    data = _apply_flat_fields(data)
+
+    # Auto-generate name if not provided (v1.3)
+    if not data.get("name"):
+        data["name"] = _resolve_auto_name(path.parent)
 
     try:
         return LakebenchConfig.model_validate(data)

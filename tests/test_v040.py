@@ -141,7 +141,7 @@ class TestFormatVersionResolution:
     def test_explicit_iceberg_old_version_accepted(self):
         from lakebench.spark.job import resolve_format_version
 
-        assert resolve_format_version("apache/spark:4.0.2-python3", "iceberg", "1.9.1") == "1.9.1"
+        assert resolve_format_version("apache/spark:4.0.2-python3", "iceberg", "1.10.0") == "1.10.0"
 
     def test_explicit_iceberg_incompatible_rejected(self):
         from lakebench.spark.job import resolve_format_version

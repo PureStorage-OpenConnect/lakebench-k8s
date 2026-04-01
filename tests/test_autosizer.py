@@ -50,10 +50,10 @@ class TestFullComputeGuidance:
         assert g.datagen.mode == "batch"
         assert g.datagen.generators == 1
 
-    def test_datagen_mode_continuous_above_boundary(self):
-        """scale > 10 should get continuous mode."""
+    def test_datagen_mode_sustained_above_boundary(self):
+        """scale > 10 should get sustained mode."""
         g = full_compute_guidance(20)
-        assert g.datagen.mode == "continuous"
+        assert g.datagen.mode == "sustained"
         assert g.datagen.generators == 8
         assert g.datagen.uploaders == 2
 
@@ -183,7 +183,7 @@ class TestAutoSizingScaleOnly:
         assert config.platform.compute.spark.executor.instances >= 8
         assert config.platform.compute.spark.executor.memory == "32g"
         assert config.architecture.query_engine.trino.worker.replicas == 4
-        assert config.architecture.query_engine.trino.worker.memory == "32Gi"
+        assert config.architecture.query_engine.trino.worker.memory == "48Gi"
         assert config.architecture.workload.datagen.parallelism >= 8
         # Continuous mode: fixed 8 CPU, 24Gi, 8 generators (MVP sizing)
         assert config.architecture.workload.datagen.cpu == "8"

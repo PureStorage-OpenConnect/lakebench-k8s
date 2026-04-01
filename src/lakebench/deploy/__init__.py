@@ -1,14 +1,32 @@
-"""Deployment module for Lakebench."""
+"""Deployment module for Lakebench.
 
-from .datagen import DatagenDeployer
-from .duckdb import DuckDBDeployer
+Deployer classes are lazy-imported to avoid circular imports with the
+module system (modules/catalogs/*/deployer.py imports deploy.engine,
+which would trigger this __init__.py to re-import the shim files).
+"""
+
 from .engine import DeploymentEngine, DeploymentResult, DeploymentStatus
-from .hive import HiveDeployer
-from .observability import ObservabilityDeployer
-from .polaris import PolarisDeployer
-from .postgres import PostgresDeployer
-from .rbac import RBACDeployer
-from .trino import TrinoDeployer
+
+
+def __getattr__(name: str):
+    """Lazy import deployers on first access."""
+    _lazy = {
+        "DatagenDeployer": ".datagen",
+        "DuckDBDeployer": ".duckdb",
+        "HiveDeployer": ".hive",
+        "ObservabilityDeployer": ".observability",
+        "PolarisDeployer": ".polaris",
+        "PostgresDeployer": ".postgres",
+        "RBACDeployer": ".rbac",
+        "TrinoDeployer": ".trino",
+    }
+    if name in _lazy:
+        import importlib
+
+        mod = importlib.import_module(_lazy[name], __package__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "DeploymentEngine",

@@ -431,33 +431,66 @@ def _build_config_yaml(state: WizardState) -> str:
 # ---------------------------------------------------------------------------
 
 
-STEPS = [step_identity, step_recipe, step_storage, step_workload, step_review]
+def step_quick_scale(console: Console, state: WizardState) -> bool:
+    """Quick mode: ask for scale only (skip mode/cycles)."""
+    console.print()
+    console.print("  [dim]Scale factor: 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB[/dim]")
+    result = _prompt(console, "Scale", default=str(state.scale))
+    if isinstance(result, _BackSentinel):
+        return False
+    try:
+        state.scale = int(result)
+    except ValueError:
+        console.print("  [red]Must be an integer[/red]")
+        return True  # Re-prompt same step
+    return True
 
 
-def run_wizard(console: Console) -> WizardState | None:
+STEPS_ADVANCED = [step_identity, step_recipe, step_storage, step_workload, step_review]
+STEPS_QUICK = [step_storage, step_quick_scale, step_review]
+
+# Backward compat alias
+STEPS = STEPS_ADVANCED
+
+
+def run_wizard(console: Console, advanced: bool = False) -> WizardState | None:
     """Run the multi-step init wizard.
+
+    Args:
+        console: Rich console for output.
+        advanced: If True, run full 5-step wizard (identity, recipe,
+            storage, workload, review). If False (default), run quick
+            mode (storage + review only -- 4 questions).
 
     Returns the completed WizardState, or None if the user aborts (Ctrl+C).
     """
     state = WizardState()
+    steps = STEPS_ADVANCED if advanced else STEPS_QUICK
 
+    mode_label = "Advanced" if advanced else "Quick"
     console.print()
     console.print(
         Panel(
             Text.from_markup(
-                "[bold cyan]Lakebench Configuration Wizard[/bold cyan]\n\n"
-                "This wizard will guide you through creating a lakebench.yaml file.\n"
-                "Type [bold]'back'[/bold] at any prompt to return to the previous step.\n"
-                "Press [bold]Ctrl+C[/bold] to cancel."
+                f"[bold cyan]Lakebench Configuration Wizard ({mode_label})[/bold cyan]\n\n"
+                + (
+                    "This wizard will guide you through creating a lakebench.yaml file.\n"
+                    "Type [bold]'back'[/bold] at any prompt to return to the previous step.\n"
+                    "Press [bold]Ctrl+C[/bold] to cancel."
+                    if advanced
+                    else "Quick setup: enter your S3 credentials and scale.\n"
+                    "Use [bold]--advanced[/bold] for full configuration options.\n"
+                    "Press [bold]Ctrl+C[/bold] to cancel."
+                ),
             ),
             expand=False,
         )
     )
 
     step_idx = 0
-    while step_idx < len(STEPS):
+    while step_idx < len(steps):
         try:
-            ok = STEPS[step_idx](console, state)
+            ok = steps[step_idx](console, state)
         except (KeyboardInterrupt, EOFError):
             console.print("\n[yellow]Cancelled.[/yellow]")
             return None

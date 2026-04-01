@@ -245,39 +245,26 @@ lakebench validate lakebench.yaml
 This checks YAML syntax, Pydantic schema validation, Kubernetes connectivity,
 and S3 reachability. Fix any errors before continuing.
 
-### 4. Deploy infrastructure
+### 4. Run everything (single command)
 
 ```bash
-lakebench deploy lakebench.yaml
+lakebench run lakebench.yaml --generate --yes
 ```
 
-You will be asked to confirm before deploying. Add `--yes` to skip the prompt.
+This deploys infrastructure (if not already deployed), generates test data,
+runs the pipeline, and benchmarks -- all in one command. The `--yes` flag
+skips confirmation prompts and enables auto-deploy.
 
-Lakebench creates (in order): the Kubernetes namespace, S3 secrets, scratch
-StorageClass, PostgreSQL (metadata backend), Hive Metastore or Polaris
-(depending on your catalog choice), the query engine, and the Spark RBAC
-service account. Wait for the command to finish -- it reports the status of
-each component as it deploys.
-
-Check that everything is healthy:
+Alternatively, run each step separately for more control:
 
 ```bash
-lakebench status lakebench.yaml
+lakebench deploy lakebench.yaml --yes     # deploy infrastructure
+lakebench status lakebench.yaml           # verify deployment
+lakebench generate lakebench.yaml --wait  # generate test data (~5 min at scale 1)
+lakebench run lakebench.yaml --skip-preflight  # run pipeline + benchmark
 ```
 
-### 5. Generate test data
-
-```bash
-lakebench generate lakebench.yaml --wait
-```
-
-You will be asked to confirm before generating. Add `--yes` to skip the prompt.
-
-This launches Kubernetes Jobs that write synthetic Customer360 Parquet files
-into the bronze S3 bucket. The `--wait` flag blocks until generation is
-complete. At scale 1 this typically finishes in under 5 minutes.
-
-### 6. Run the pipeline
+### What happens during `run`
 
 ```bash
 lakebench run lakebench.yaml
@@ -473,7 +460,7 @@ in the `images` section of your YAML.
 
 | Component | Default version | Image |
 |-----------|----------------|-------|
-| Apache Spark | 3.5.x / 4.0.x | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` |
 | Spark Operator | 2.4.0 | Kubeflow Helm chart |
 | Apache Iceberg | 1.10.1 | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |

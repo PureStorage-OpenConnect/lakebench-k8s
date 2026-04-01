@@ -595,12 +595,19 @@ class K8sClient:
                 )
             except ApiException as e:
                 if e.status == 404:
-                    custom_api.create_cluster_custom_object(
-                        group=group,
-                        version=version,
-                        plural=plural,
-                        body=manifest,
-                    )
+                    try:
+                        custom_api.create_cluster_custom_object(
+                            group=group,
+                            version=version,
+                            plural=plural,
+                            body=manifest,
+                        )
+                    except ApiException as create_err:
+                        if create_err.status == 409:
+                            # Race condition: another deploy created it first
+                            pass
+                        else:
+                            raise
                 else:
                     raise
         else:

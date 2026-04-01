@@ -20,7 +20,7 @@ deliberate.
 
 ### init
 
-Generate a starter configuration file with sensible defaults.
+Generate a starter configuration file.
 
 ```
 lakebench init [OPTIONS]
@@ -35,18 +35,63 @@ lakebench init [OPTIONS]
 | `--access-key` | | `""` | S3 access key |
 | `--secret-key` | | `""` | S3 secret key |
 | `--namespace` | | `""` | Kubernetes namespace |
-| `--interactive` | `-i` | `false` | Guided setup with prompts |
+| `--recipe` | `-r` | `""` | Architecture recipe |
+| `--interactive/--no-interactive` | `-i` | `true` | Guided setup with prompts |
+| `--advanced` | | `false` | Full 5-step wizard (recipe, mode, scale) |
 | `--force` | `-f` | `false` | Overwrite existing file |
 
-```bash
-# Quick start with flags
-lakebench init --endpoint http://my-s3:80 --access-key AAA --secret-key BBB
+Quick mode (default) asks 4 questions: endpoint, access key, secret key, scale.
+Advanced mode (`--advanced`) runs the full 5-step wizard with recipe selection,
+pipeline mode, and detailed review.
 
-# Interactive guided setup
-lakebench init --interactive
+```bash
+# Quick setup (4 questions)
+lakebench init
+
+# Full wizard with recipe selection
+lakebench init --advanced
+
+# Non-interactive with flags
+lakebench init --no-interactive --endpoint http://my-s3:80 --access-key AAA --secret-key BBB
 ```
 
-### validate
+### compare
+
+Compare two configurations side-by-side.
+
+```
+lakebench compare CONFIG_A CONFIG_B [OPTIONS]
+```
+
+| Flag | Short | Default | Description |
+|---|---|---|---|
+| `--keep` | | `false` | Keep deployments after (do not destroy) |
+| `--scale` | | (from config) | Override scale for both configs |
+| `--output` | `-o` | (none) | Write comparison report to file |
+| `--format` | | `table` | Output format: table, json, csv |
+| `--skip-benchmark` | | `false` | Skip benchmark phase |
+| `--timeout` | | `7200` | Per-run timeout in seconds |
+| `--yes` | `-y` | `false` | Skip confirmation prompt |
+
+```bash
+lakebench compare hive-config.yaml polaris-config.yaml
+lakebench compare a.yaml b.yaml --format json --output comparison.json
+```
+
+### config
+
+Configuration management subcommands.
+
+```
+lakebench config show CONFIG_FILE       # show resolved config with source annotations
+lakebench config validate CONFIG_FILE   # validate config + test connectivity
+lakebench config recommend CONFIG_FILE  # show cluster sizing guidance
+lakebench config upgrade CONFIG_FILE    # convert v1.2 nested config to v1.3 flat format
+```
+
+### validate (deprecated)
+
+> Use `lakebench config validate` instead.
 
 Validate configuration and test connectivity to S3 and Kubernetes.
 
@@ -112,18 +157,30 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--stage` | `-s` | all | Run a specific stage only (`bronze-verify`, `silver-build`, `gold-finalize`) |
-| `--timeout` | `-t` | auto | Timeout per job in seconds (`max(3600, scale * 60)` when omitted) |
-| `--skip-benchmark` | | `false` | Skip the Trino query benchmark after pipeline |
+| `--timeout` | `-t` | auto | Timeout per job in seconds (`max(3600, scale * 120)` when omitted) |
+| `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline |
+| `--skip-preflight` | `--skip-deploy` | `false` | Skip prerequisite checks and infrastructure validation |
+| `--skip-generate` | | `false` | Skip datagen even with `--generate` |
+| `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
+| `--deploy-only` | | `false` | Deploy infrastructure and exit |
+| `--generate-only` | | `false` | Deploy + generate data and exit |
 | `--sustained` | | `false` | Run streaming pipeline instead of batch |
 | `--duration` | | config value | Streaming run duration in seconds |
-| `--generate` | | `false` | Run datagen before pipeline (batch mode only; sustained always runs datagen) |
+| `--generate` | | `false` | Run datagen before pipeline (batch mode only) |
+| `--yes` | `-y` | `false` | Skip confirmation prompts |
 
-In batch mode, runs `bronze-verify`, `silver-build`, and `gold-finalize`
-sequentially as Spark jobs, then executes the query benchmark.
+The run command executes 7 phases:
 
-In sustained mode (`--sustained`), launches `bronze-ingest`, `silver-stream`,
-and `gold-refresh` as concurrent Spark Structured Streaming jobs, monitors
-for the configured duration, then stops streaming and runs the benchmark.
+1. **Prerequisites** -- check kubectl, helm, K8s cluster, S3, Spark Operator
+2. **Infrastructure** -- verify deployed components are ready
+3. **Generate** -- optional datagen (with `--generate`)
+4. **Pipeline** -- bronze-verify, silver-build, gold-finalize
+5. **Maintenance** -- pre-benchmark compaction + snapshot expiry (measures cost)
+6. **Benchmark** -- query benchmark with pre/post compaction QpH comparison
+7. **Results** -- scorecard with maintenance value metrics
+
+In sustained mode (`--sustained`), launches concurrent streaming jobs and
+monitors for the configured duration before benchmarking.
 
 ### stop
 
@@ -377,7 +434,7 @@ lakebench run                         # re-run pipeline
 lakebench run --stage silver-build --timeout 3600
 ```
 
-### Continuous Streaming Pipeline
+### Sustained Streaming Pipeline
 
 ```bash
 lakebench run --sustained --duration 3600

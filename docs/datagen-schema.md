@@ -11,7 +11,7 @@ seeded per file. Each file contains approximately 122,000 rows at the default
 
 ## Column Reference
 
-The schema contains 38 columns spanning customer identity, interaction events,
+The schema contains 41 columns spanning customer identity, interaction events,
 product activity, marketing attribution, loyalty programs, and data quality
 metadata.
 

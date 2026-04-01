@@ -1088,7 +1088,7 @@ class TestSparkOperatorNamespaceWatching:
         assert status.watching_namespace is None
         assert status.watched_namespaces is None
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_get_watched_namespaces_returns_list(self, mock_run):
         """When helm returns explicit namespaces, returns them as a list."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1101,7 +1101,7 @@ class TestSparkOperatorNamespaceWatching:
         result = mgr._get_watched_namespaces()
         assert result == ["default", "lakebench-test"]
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_get_watched_namespaces_empty_means_all(self, mock_run):
         """When jobNamespaces is empty list, returns None (watches all)."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1114,7 +1114,7 @@ class TestSparkOperatorNamespaceWatching:
         result = mgr._get_watched_namespaces()
         assert result is None
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_get_watched_namespaces_not_set_means_all(self, mock_run):
         """When spark.jobNamespaces key is missing, returns None (watches all)."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1127,7 +1127,7 @@ class TestSparkOperatorNamespaceWatching:
         result = mgr._get_watched_namespaces()
         assert result is None
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_get_watched_namespaces_empty_string_means_all(self, mock_run):
         """When jobNamespaces is empty string, returns None (watches all)."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1140,7 +1140,7 @@ class TestSparkOperatorNamespaceWatching:
         result = mgr._get_watched_namespaces()
         assert result is None
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_get_watched_namespaces_helm_failure(self, mock_run):
         """When helm fails, returns empty list (unknown)."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1154,7 +1154,7 @@ class TestSparkOperatorNamespaceWatching:
         result = mgr._get_watched_namespaces()
         assert result == []
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_check_status_watching_namespace_true(self, mock_run):
         """check_status sets watching_namespace=True when namespace is in list."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1185,7 +1185,7 @@ class TestSparkOperatorNamespaceWatching:
         assert status.ready is True
         assert status.watching_namespace is True
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_check_status_watching_namespace_false(self, mock_run):
         """check_status sets watching_namespace=False when namespace is NOT in list."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1213,7 +1213,7 @@ class TestSparkOperatorNamespaceWatching:
         assert status.watching_namespace is False
         assert "does NOT watch" in status.message
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_check_status_watches_all_namespaces(self, mock_run):
         """check_status sets watching_namespace=True when operator watches all."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1240,7 +1240,7 @@ class TestSparkOperatorNamespaceWatching:
         assert status.ready is True
         assert status.watching_namespace is True
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_check_status_falls_back_to_helm_values(self, mock_run):
         """check_status falls back to Helm values when deployment spec unreadable."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1269,7 +1269,7 @@ class TestSparkOperatorNamespaceWatching:
         assert status.ready is True
         assert status.watching_namespace is True
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_ensure_namespace_watched_provides_fix_command(self, mock_run):
         """When can_heal=False, message contains the exact helm fix command."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1303,7 +1303,7 @@ class TestSparkOperatorNamespaceWatching:
         "lakebench.spark.operator.SparkOperatorManager._filter_existing_namespaces",
         side_effect=lambda ns: ns,
     )
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter):
         """When can_heal=True, adds namespace via helm upgrade + restart + verify."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1369,7 +1369,7 @@ class TestSparkOperatorNamespaceWatching:
         status = mgr.ensure_namespace_watched(can_heal=True)
         assert status.watching_namespace is True
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_install_handles_helm_not_found(self, mock_run):
         """install() returns False when helm binary is not on PATH."""
         from lakebench.spark.operator import SparkOperatorManager
@@ -1384,7 +1384,7 @@ class TestSparkOperatorNamespaceWatching:
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
         assert mgr.install() is False
 
-    @patch("lakebench.spark.operator.subprocess.run")
+    @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_add_namespace_handles_helm_not_found(self, mock_run):
         """_add_namespace_to_watch returns False when helm is not on PATH."""
         from lakebench.spark.operator import SparkOperatorManager

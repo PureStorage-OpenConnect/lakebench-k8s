@@ -30,32 +30,49 @@ pip install lakebench-k8s
 > [GitHub Releases](https://github.com/PureStorage-OpenConnect/lakebench-k8s/releases).
 
 ```bash
-lakebench init --interactive             # generate config with S3 prompts
-lakebench validate lakebench.yaml        # check config + cluster connectivity
-lakebench deploy lakebench.yaml          # deploy the stack
-lakebench run lakebench.yaml --generate  # generate data + run pipeline + benchmark
-lakebench report                         # view HTML scorecard
+pip install lakebench-k8s
+lakebench init                           # quick setup (4 questions)
+lakebench run lakebench.yaml --generate  # deploy + generate + pipeline + benchmark
+lakebench results                        # view scorecard
 lakebench destroy lakebench.yaml         # tear down everything
 ```
 
-The `recipe` field selects your architecture in one line. The `scale` field
-controls data volume.
+Minimum config -- 4 lines:
 
 ```yaml
-# lakebench.yaml (minimal)
-deployment_name: my-test
-recipe: hive-iceberg-spark-trino   # or polaris-iceberg-spark-duckdb, etc.
+# lakebench.yaml
+endpoint: http://s3.example.com:80
+access_key: YOUR_KEY
+secret_key: YOUR_SECRET
 scale: 10                          # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
-s3:
-  endpoint: http://s3.example.com:80
-  access_key: ...
-  secret_key: ...
+```
+
+Name is auto-generated. Recipe defaults to `hive-iceberg-spark-trino`.
+Override anything with flat fields or nested YAML:
+
+```yaml
+# lakebench.yaml (with overrides)
+name: flashblade-polaris
+recipe: polaris-iceberg-spark-trino
+endpoint: http://10.21.227.93:80
+access_key: ${S3_ACCESS_KEY}       # env var substitution
+secret_key: ${S3_SECRET_KEY}
+scale: 50
+mode: batch
+spark_image: apache/spark:4.1.1-python3
 ```
 
 Eleven recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
-for the full list. v1.2 adds Delta Lake support via three new Hive+Delta recipes.
+for the full list.
 
-For all recipes, see [`examples/`](examples/) or run `lakebench init --interactive`.
+Compare two configurations side-by-side:
+
+```bash
+lakebench compare config-hive.yaml config-polaris.yaml
+```
+
+For all recipes, see [`examples/`](examples/) or run `lakebench init --advanced`
+for the full interactive wizard.
 
 ## What You Get
 
@@ -140,7 +157,7 @@ for flags and options.
 
 | Component | Version |
 |-----------|---------|
-| Apache Spark | 3.5.4, 4.0.2 |
+| Apache Spark | 3.5.4, 4.0.2, 4.1.1 |
 | Spark Operator | 2.4.0 (Kubeflow) |
 | Apache Iceberg | 1.10.1 |
 | Delta Lake | 4.0.0 |
