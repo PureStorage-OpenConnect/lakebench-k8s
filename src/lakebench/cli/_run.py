@@ -677,9 +677,9 @@ def run(
                         print_info(f"Datagen: {ts_start} to {ts_end}")
 
                         # Wait for datagen completion
-                        _dg_start = datetime.now()
+                        _dg_start = _time.time()
                         dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
-                        _cycle_dg_elapsed = (datetime.now() - _dg_start).total_seconds()
+                        _cycle_dg_elapsed = _time.time() - _dg_start
                         if dg_wait.status != DeploymentStatus.SUCCESS:
                             print_warning(f"Datagen did not complete: {dg_wait.message}")
                 except Exception as e:

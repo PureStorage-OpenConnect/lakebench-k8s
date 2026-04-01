@@ -259,7 +259,7 @@ def destroy_all(
                         build_delta_maintenance_sql,
                     )
 
-                    maint_sqls = build_delta_maintenance_sql(engine, catalog, table, 0.0)
+                    maint_sqls = build_delta_maintenance_sql(maint_engine, catalog, table, 0.0)
                 else:
                     from lakebench.deploy.iceberg import build_maintenance_sql
 
