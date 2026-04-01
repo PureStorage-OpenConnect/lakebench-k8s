@@ -1,4 +1,4 @@
-# Lakebench v1.2 Compatibility Matrix
+# Lakebench v1.3 Compatibility Matrix
 
 ## Supported Recipe Combinations
 
@@ -23,7 +23,7 @@ All 11 recipes support all three pipeline modes:
 | Mode | Description | Tested With |
 |------|-------------|-------------|
 | `batch` | Single-pass: bronze-verify -> silver-build -> gold-finalize -> benchmark | All recipes |
-| `sustained` | Continuous streaming with periodic benchmarks | hive-delta-spark-trino |
+| `sustained` | Sustained streaming with periodic benchmarks | hive-delta-spark-trino |
 | `iterative` | Repeated batch cycles with accumulating data | All recipes (v1.1) |
 
 ## Excluded Combinations
@@ -55,13 +55,16 @@ All 11 recipes support all three pipeline modes:
 Format versions are **auto-selected** based on the Spark image version. Users can override
 with an explicit version -- incompatible combinations are rejected at config load time.
 
-| Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.10.1 | Iceberg 1.9.1 | Iceberg 1.8.1 |
-|-------|-------------|-------------|----------------|---------------|---------------|
-| 3.5.x | -- | -- | **Default** | OK | OK |
-| 4.0.x (default) | **Default** | -- | **Default** | OK | OK |
-| 4.1.x | OK | **Default** | **Default** | OK | OK |
+| Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.10.1 | Iceberg 1.10.0 |
+|-------|-------------|-------------|----------------|----------------|
+| 3.5.x | -- | -- | **Default** | OK |
+| 4.0.x (default) | **Default** | -- | **Default** | OK |
+| 4.1.x | -- | **Default** | **Default** | OK |
 
 **Default** = auto-selected when no version specified. **OK** = accepted if user overrides. **--** = rejected.
+
+Spark 4.0/4.1 runtime artifacts only exist for Iceberg 1.10.0+. Older Iceberg
+versions (1.5.x--1.9.x) are compatible with Spark 3.5.x only.
 
 Example:
 ```yaml

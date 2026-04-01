@@ -595,7 +595,7 @@ class TestTrinoExecutorFormatAwareness:
         executor = TrinoExecutor(
             namespace="test-ns", catalog_name="lakehouse", table_format="delta"
         )
-        with patch("lakebench.benchmark.executor.subprocess") as mock_sub:
+        with patch("lakebench.modules.query_engines.trino.executor.subprocess") as mock_sub:
             executor.flush_cache()
             mock_sub.run.assert_not_called()
 
@@ -609,7 +609,7 @@ class TestTrinoExecutorFormatAwareness:
             namespace="test-ns", catalog_name="lakehouse", table_format="iceberg"
         )
         executor._pod = "trino-coordinator-0"  # skip pod discovery
-        with patch("lakebench.benchmark.executor.subprocess") as mock_sub:
+        with patch("lakebench.modules.query_engines.trino.executor.subprocess") as mock_sub:
             mock_sub.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             mock_sub.TimeoutExpired = TimeoutError
             mock_sub.SubprocessError = Exception

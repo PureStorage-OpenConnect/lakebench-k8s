@@ -14,14 +14,59 @@ lakebench deploy my-config.yaml
 lakebench run my-config.yaml
 ```
 
-## Minimum Viable Config
+## Minimum Viable Config (v1.3)
 
-> **Starting out?** Use a [quick-recipe](recipes.md#quick-recipes) for one-line
-> setup, then come back here to customize individual settings as needed.
+The smallest working config is 4 lines:
 
-The smallest working config requires only a name, an S3 endpoint, and S3
-credentials. Everything else has working defaults (Hive + Iceberg + Trino,
-scale 1, Spark operator auto-installed).
+```yaml
+endpoint: http://your-s3-endpoint:80
+access_key: YOUR_KEY
+secret_key: YOUR_SECRET
+scale: 10
+```
+
+Name is auto-generated (`lb-YYYYMMDD-HHMMSS`) and persisted to
+`.lakebench/state.json` for stability across runs. Recipe defaults to
+`hive-iceberg-spark-trino`.
+
+### Flat Fields
+
+v1.3 supports flat top-level fields that map to nested locations. These
+are easier to write and read than the full nested structure:
+
+| Field | Maps to | Default |
+|-------|---------|---------|
+| `endpoint` | `platform.storage.s3.endpoint` | (required) |
+| `access_key` | `platform.storage.s3.access_key` | (required) |
+| `secret_key` | `platform.storage.s3.secret_key` | (required) |
+| `secret_ref` | `platform.storage.s3.secret_ref` | (none) |
+| `scale` | `architecture.workload.datagen.scale` | 10 |
+| `name` | root `name` | auto-generated |
+| `recipe` | root `recipe` | default (hive-iceberg-spark-trino) |
+| `namespace` | `platform.kubernetes.namespace` | same as name |
+| `mode` | `architecture.pipeline.mode` | batch |
+| `cycles` | `architecture.pipeline.cycles` | 1 |
+| `spark_image` | `images.spark` | from recipe |
+
+If both flat and nested are present for the same setting, flat takes
+precedence and a warning is printed.
+
+### Environment Variable Substitution
+
+Use `${VAR}` or `${VAR:-default}` in any YAML value:
+
+```yaml
+endpoint: ${S3_ENDPOINT}
+access_key: ${S3_ACCESS_KEY}
+secret_key: ${S3_SECRET_KEY}
+scale: ${LAKEBENCH_SCALE:-10}
+```
+
+Unresolved variables without defaults produce a clear error.
+
+### Nested Config (v1.2 Compatible)
+
+The full nested structure still works unchanged:
 
 ```yaml
 name: my-lakehouse

@@ -399,6 +399,62 @@ class ReportGenerator:
         </section>
         """
 
+    def _generate_maintenance_section(self, metrics: PipelineMetrics) -> str:
+        """Generate table maintenance scoring section."""
+        pb = metrics.pipeline_benchmark
+        if not pb:
+            return ""
+
+        maint_elapsed = pb.maintenance_elapsed_seconds
+        pre_files = pb.pre_compaction_file_count
+        post_files = pb.post_compaction_file_count
+        pre_qph = pb.pre_compaction_qph
+        post_qph = pb.post_compaction_qph
+        value_pct = pb.maintenance_value_pct
+
+        # Nothing to show if maintenance didn't run
+        if maint_elapsed == 0 and pre_files == 0:
+            return ""
+
+        rows = []
+        if pre_files > 0:
+            rows.append(f"<tr><td>Files before</td><td>{pre_files:,}</td></tr>")
+        if post_files > 0:
+            rows.append(f"<tr><td>Files after</td><td>{post_files:,}</td></tr>")
+        if pre_files > 0 and post_files > 0:
+            ratio = pre_files / max(post_files, 1)
+            rows.append(f"<tr><td>Compaction ratio</td><td>{ratio:.1f}x</td></tr>")
+        if maint_elapsed > 0:
+            rows.append(f"<tr><td>Maintenance time</td><td>{maint_elapsed:.0f}s</td></tr>")
+        if pre_qph > 0:
+            rows.append(f"<tr><td>Pre-compaction QpH</td><td>{pre_qph:.1f}</td></tr>")
+        if post_qph > 0:
+            rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
+        if value_pct != 0 and pre_qph > 0:
+            color = "var(--success)" if value_pct > 0 else "var(--danger)"
+            rows.append(
+                f"<tr><td>QpH improvement</td>"
+                f'<td style="color: {color}; font-weight: 600">{value_pct:+.1f}%</td></tr>'
+            )
+
+        if not rows:
+            return ""
+
+        table_rows = "\n                    ".join(rows)
+        return f"""
+        <section>
+            <h2>Table Maintenance</h2>
+            <table>
+                <thead>
+                    <tr><th>Metric</th><th>Value</th></tr>
+                </thead>
+                <tbody>
+                    {table_rows}
+                </tbody>
+            </table>
+        </section>
+        """
+
     def _generate_data_validity_section(self, metrics: PipelineMetrics) -> str:
         """Generate data validity panel (Layer 2).
 
@@ -843,6 +899,7 @@ class ReportGenerator:
         platform_html = self._generate_platform_section(platform_metrics)
         # Layer 2: Diagnosis
         bottleneck_html = self._generate_bottleneck_section(metrics)
+        maintenance_html = self._generate_maintenance_section(metrics)
         validity_html = self._generate_data_validity_section(metrics)
         stability_html = self._generate_stability_section(metrics)
         qt_freshness_html = self._generate_query_time_freshness_section(metrics)
@@ -1083,6 +1140,8 @@ class ReportGenerator:
         {bottleneck_html}
 
         {validity_html}
+
+        {maintenance_html}
 
         {pipeline_bench_html}
 

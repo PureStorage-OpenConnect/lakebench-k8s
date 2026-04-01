@@ -199,6 +199,8 @@ class BenchmarkRunner:
         cache: str = "hot",
         iterations: int = 1,
         query_class: str | None = None,
+        progress_callback: Any = None,
+        query_timeout: int = 300,
     ) -> BenchmarkResult:
         """Run power benchmark (single sequential stream).
 
@@ -206,6 +208,9 @@ class BenchmarkRunner:
             cache: "hot" or "cold"
             iterations: Per-query iterations (>1 uses median)
             query_class: Filter to specific class
+            progress_callback: Called with (index, total, name, phase, **kwargs)
+                before ("start") and after ("done") each query. Optional.
+            query_timeout: Per-query timeout in seconds (default 300).
 
         Returns:
             BenchmarkResult with mode="power"
@@ -221,10 +226,17 @@ class BenchmarkRunner:
                 scale=self.config.architecture.workload.datagen.get_effective_scale(),
             )
 
-        results = self._run_query_stream(queries, cache, iterations)
+        results = self._run_query_stream(
+            queries,
+            cache,
+            iterations,
+            progress_callback=progress_callback,
+            query_timeout=query_timeout,
+        )
 
+        successful = [r for r in results if r.success]
         total_seconds = sum(r.elapsed_seconds for r in results)
-        qph = (len(results) / total_seconds) * 3600 if total_seconds > 0 else 0
+        qph = (len(successful) / total_seconds) * 3600 if total_seconds > 0 and successful else 0
 
         return BenchmarkResult(
             mode="power",
@@ -308,9 +320,11 @@ class BenchmarkRunner:
         # Sort by stream_id for deterministic output
         stream_results.sort(key=lambda s: s.stream_id)
 
-        # Throughput QpH: total queries across all streams / wall clock
-        total_queries = sum(len(s.queries) for s in stream_results)
-        throughput_qph = (total_queries / wall_seconds) * 3600 if wall_seconds > 0 else 0
+        # Throughput QpH: successful queries across all streams / wall clock
+        total_queries = sum(sum(1 for q in s.queries if q.success) for s in stream_results)
+        throughput_qph = (
+            (total_queries / wall_seconds) * 3600 if wall_seconds > 0 and total_queries else 0
+        )
 
         # Use stream 0's results as the representative query list
         representative_queries = stream_results[0].queries if stream_results else []
@@ -380,6 +394,8 @@ class BenchmarkRunner:
         queries: list[BenchmarkQuery],
         cache: str,
         iterations: int,
+        progress_callback: Any = None,
+        query_timeout: int = 300,
     ) -> list[QueryResult]:
         """Run a sequence of queries, optionally with multiple iterations.
 
@@ -387,13 +403,19 @@ class BenchmarkRunner:
             queries: Ordered list of queries to execute
             cache: "hot" or "cold" (cold flushes before each query)
             iterations: Per-query iterations (>1 uses median)
+            progress_callback: Called before/after each query (optional)
+            query_timeout: Per-query timeout in seconds
 
         Returns:
             List of QueryResult, one per query
         """
         results: list[QueryResult] = []
+        total = len(queries)
 
-        for query in queries:
+        for i, query in enumerate(queries):
+            if progress_callback:
+                progress_callback(i + 1, total, query.display_name, "start")
+
             if cache == "cold":
                 self.executor.flush_cache()
 
@@ -403,32 +425,48 @@ class BenchmarkRunner:
                 for _ in range(iterations):
                     if cache == "cold":
                         self.executor.flush_cache()
-                    result = self._execute_single_query(query)
+                    result = self._execute_single_query(query, timeout=query_timeout)
                     times.append(result.elapsed_seconds)
                     last_result = result
 
                 median_time = statistics.median(times)
                 assert last_result is not None
-                results.append(
-                    QueryResult(
-                        query=query,
-                        elapsed_seconds=median_time,
-                        rows_returned=last_result.rows_returned,
-                        success=last_result.success,
-                        error_message=last_result.error_message,
-                    )
+                final = QueryResult(
+                    query=query,
+                    elapsed_seconds=median_time,
+                    rows_returned=last_result.rows_returned,
+                    success=last_result.success,
+                    error_message=last_result.error_message,
                 )
+                results.append(final)
             else:
-                result = self._execute_single_query(query)
+                result = self._execute_single_query(query, timeout=query_timeout)
                 results.append(result)
+                final = result
+
+            if progress_callback:
+                progress_callback(
+                    i + 1,
+                    total,
+                    query.display_name,
+                    "done",
+                    elapsed=final.elapsed_seconds,
+                    success=final.success,
+                    error=final.error_message,
+                )
 
         return results
 
-    def _execute_single_query(self, query: BenchmarkQuery) -> QueryResult:
+    def _execute_single_query(
+        self,
+        query: BenchmarkQuery,
+        timeout: int = 300,
+    ) -> QueryResult:
         """Execute a single query via the configured executor.
 
         Args:
             query: Query to execute
+            timeout: Per-query timeout in seconds
 
         Returns:
             QueryResult with timing and row count
@@ -442,7 +480,7 @@ class BenchmarkRunner:
         # Adapt SQL for engine-specific dialect (e.g. DuckDB Iceberg syntax)
         sql = self.executor.adapt_query(sql)
 
-        exec_result = self.executor.execute_query(sql, timeout=300)
+        exec_result = self.executor.execute_query(sql, timeout=timeout)
 
         return QueryResult(
             query=query,

@@ -117,6 +117,36 @@ These come from the job profiles in `spark/job.py` and the scale-derived
 executor count. They do not change between runs at the same scale unless you
 override executor counts in your config.
 
+### Maintenance Scoring
+
+When `pre_benchmark_maintenance: true` (the default), lakebench measures the
+cost and value of table maintenance by running the benchmark twice:
+
+1. **Pre-compaction benchmark** -- runs the 8-query power benchmark on
+   uncompacted data (many small files from the pipeline).
+2. **Maintenance** -- runs Iceberg `expire_snapshots` + `remove_orphan_files`
+   + `rewrite_data_files` (compaction), or Delta `VACUUM`.
+3. **Post-compaction benchmark** -- runs the same 8 queries on compacted data.
+
+The scorecard then reports:
+
+| Field | Description |
+|-------|-------------|
+| `pre_compaction_qph` | QpH before maintenance |
+| `post_compaction_qph` | QpH after maintenance (the final reported QpH) |
+| `maintenance_value_pct` | Percentage QpH improvement from maintenance |
+| `maintenance_elapsed_seconds` | Wall-clock time spent on maintenance |
+| `maintenance_pct_of_pipeline` | Maintenance time as a fraction of total pipeline time |
+| `pre_compaction_file_count` | Data files before compaction |
+| `post_compaction_file_count` | Data files after compaction |
+| `compaction_ratio` | `pre / post` file count (higher = more compaction benefit) |
+
+To skip maintenance and run only the post-pipeline benchmark:
+
+```bash
+lakebench run --skip-maintenance config.yaml
+```
+
 ---
 
 ## Query Engine Benchmark

@@ -82,7 +82,7 @@ class DatagenGuidance:
     parallelism: int
     cpu: str
     memory: str
-    mode: str = "batch"  # "batch" or "continuous"
+    mode: str = "batch"  # "batch" or "sustained"
     generators: int = 1  # per-pod generator processes
     uploaders: int = 1  # per-pod uploader threads
 
@@ -95,6 +95,29 @@ class FullComputeGuidance:
     trino: TrinoGuidance
     datagen: DatagenGuidance
 
+
+# ---------------------------------------------------------------------------
+# Scale tier thresholds
+# ---------------------------------------------------------------------------
+
+# Upper bounds for each compute tier (inclusive).
+# "minimal" = scale 1..5, "balanced" = 6..50, "performance" = 51..500, "extreme" = 501+
+SCALE_TIER_MINIMAL = 5
+SCALE_TIER_BALANCED = 50
+SCALE_TIER_PERFORMANCE = 500
+
+# Datagen mode crossover: scales above this threshold use sustained/continuous mode.
+SCALE_DATAGEN_BATCH_MAX = 10
+
+# Per-tier Spark memory recommendations (recommended / minimum).
+SPARK_MEM_MINIMAL = "4g"
+SPARK_MEM_MINIMAL_MIN = "2g"
+SPARK_MEM_BALANCED = "16g"
+SPARK_MEM_BALANCED_MIN = "8g"
+SPARK_MEM_PERFORMANCE = "32g"
+SPARK_MEM_PERFORMANCE_MIN = "16g"
+SPARK_MEM_EXTREME = "48g"
+SPARK_MEM_EXTREME_MIN = "32g"
 
 # ---------------------------------------------------------------------------
 # Schema dimension functions
@@ -215,35 +238,35 @@ def compute_guidance(scale: int) -> ComputeGuidance:
     Returns:
         ComputeGuidance with tier name, minimum and recommended resources
     """
-    if scale <= 5:
+    if scale <= SCALE_TIER_MINIMAL:
         return ComputeGuidance(
             min_executors=2,
             recommended_executors=2,
-            recommended_memory="4g",
+            recommended_memory=SPARK_MEM_MINIMAL,
             recommended_cores=2,
-            min_memory="2g",
+            min_memory=SPARK_MEM_MINIMAL_MIN,
             min_cores=1,
             tier_name="minimal",
         )
-    elif scale <= 50:
+    elif scale <= SCALE_TIER_BALANCED:
         rec_exec = max(4, min(8, scale // 6))
         return ComputeGuidance(
             min_executors=4,
             recommended_executors=rec_exec,
-            recommended_memory="16g",
+            recommended_memory=SPARK_MEM_BALANCED,
             recommended_cores=4,
-            min_memory="8g",
+            min_memory=SPARK_MEM_BALANCED_MIN,
             min_cores=2,
             tier_name="balanced",
         )
-    elif scale <= 500:
+    elif scale <= SCALE_TIER_PERFORMANCE:
         rec_exec = max(8, min(16, scale // 30))
         return ComputeGuidance(
             min_executors=8,
             recommended_executors=rec_exec,
-            recommended_memory="32g",
+            recommended_memory=SPARK_MEM_PERFORMANCE,
             recommended_cores=8,
-            min_memory="16g",
+            min_memory=SPARK_MEM_PERFORMANCE_MIN,
             min_cores=4,
             tier_name="performance",
         )
@@ -252,14 +275,14 @@ def compute_guidance(scale: int) -> ComputeGuidance:
         return ComputeGuidance(
             min_executors=16,
             recommended_executors=rec_exec,
-            recommended_memory="48g",
+            recommended_memory=SPARK_MEM_EXTREME,
             recommended_cores=8,
-            min_memory="32g",
+            min_memory=SPARK_MEM_EXTREME_MIN,
             min_cores=4,
             tier_name="extreme",
             warning=(
                 f"Scale {scale} requires significant compute resources. "
-                f"Recommend 48g+ memory and 16+ executors."
+                f"Recommend {SPARK_MEM_EXTREME}+ memory and 16+ executors."
             ),
         )
 
@@ -287,7 +310,7 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
     # 24Gi provides ~30% headroom above steady-state peak.
     # Scaling is done by parallelism (number of pods), not per-pod resources.
 
-    if scale <= 5:
+    if scale <= SCALE_TIER_MINIMAL:
         # Minimal: ~10-50 GB, batch mode
         trino = TrinoGuidance(
             worker_replicas=1,
@@ -304,10 +327,10 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
             generators=1,
             uploaders=1,
         )
-    elif scale <= 50:
+    elif scale <= SCALE_TIER_BALANCED:
         # Balanced: ~60-500 GB
-        # scale <= 10 stays batch, scale > 10 switches to continuous
-        if scale <= 10:
+        # scale <= SCALE_DATAGEN_BATCH_MAX stays batch, above switches to continuous
+        if scale <= SCALE_DATAGEN_BATCH_MAX:
             datagen = DatagenGuidance(
                 parallelism=4,
                 cpu="4",
@@ -321,7 +344,7 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
                 parallelism=max(4, scale // 5),
                 cpu="8",
                 memory="24Gi",
-                mode="continuous",
+                mode="sustained",
                 generators=8,
                 uploaders=2,
             )
@@ -332,35 +355,35 @@ def full_compute_guidance(scale: int) -> FullComputeGuidance:
             coordinator_cpu="2",
             coordinator_memory="8Gi",
         )
-    elif scale <= 500:
-        # Performance: ~510 GB - 5 TB, continuous mode
+    elif scale <= SCALE_TIER_PERFORMANCE:
+        # Performance: ~510 GB - 5 TB, sustained mode
         datagen = DatagenGuidance(
             parallelism=max(8, scale // 10),
             cpu="8",
             memory="24Gi",
-            mode="continuous",
+            mode="sustained",
             generators=8,
             uploaders=2,
         )
         trino = TrinoGuidance(
-            worker_replicas=max(4, scale // 50),
+            worker_replicas=max(4, scale // 25),
             worker_cpu="8",
-            worker_memory="32Gi",
+            worker_memory="48Gi",
             coordinator_cpu="4",
             coordinator_memory="16Gi",
         )
     else:
-        # Extreme: > 5 TB, continuous mode
+        # Extreme: > 5 TB, sustained mode
         datagen = DatagenGuidance(
             parallelism=max(16, scale // 30),
             cpu="8",
             memory="24Gi",
-            mode="continuous",
+            mode="sustained",
             generators=8,
             uploaders=2,
         )
         trino = TrinoGuidance(
-            worker_replicas=max(8, scale // 100),
+            worker_replicas=max(10, scale // 50),
             worker_cpu="8",
             worker_memory="64Gi",
             coordinator_cpu="4",
