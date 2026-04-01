@@ -464,7 +464,7 @@ class DeploymentEngine:
             if progress_callback:
                 progress_callback(component, DeploymentStatus.IN_PROGRESS, description)
 
-            result = None
+            result: DeploymentResult | None = None
             for attempt in range(2):  # 0 = first try, 1 = retry
                 try:
                     result = deploy_fn()
