@@ -409,7 +409,7 @@ def run(
 
         prereq_report = run_prerequisites(cfg)
         for check in prereq_report.checks:
-            icon = "[green]\u2713[/green]" if check.passed else "[red]\u2717[/red]"
+            icon = "[green]+[/green]" if check.passed else "[red]x[/red]"
             console.print(f"  {icon} {check.name}: {check.message}")
             if not check.passed and check.hint:
                 for line in check.hint.split("\n"):
