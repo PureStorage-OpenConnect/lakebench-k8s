@@ -4,6 +4,29 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.3.1] - 2026-04-05
+
+### Fixed
+- **LB-049: silver-build at scale 100 never completed.** Two compounding root
+  causes. First, the STREAMING strategy wrote with
+  `write.distribution-mode=none`, producing `tasks x partitions` files (2286 x
+  365 = 836K at scale 100). The Hive Metastore commit of 836K files timed out
+  before returning. Second, Spark 4.0.2's `AppStatusListener` does an
+  `O(liveTasks)` flush on every executor heartbeat, which stalled the driver
+  at 5000+ tasks and starved the task scheduler. Fix: changed STREAMING
+  default from `distribution-mode=none` to `hash` (Iceberg now clusters rows
+  by `interaction_date` before writing, producing ~9K files and committing in
+  340ms). Added `spark.lb.silver.distribution_mode` conf override for 5TB+
+  scale testing. Also reduced `target_tasks` from 5000 to 2000, added
+  `spark.ui.liveUpdate.minFlushPeriod=30s` and retained state caps, and
+  disabled the Spark UI (prevents Jetty overhead -- listener still runs but
+  the flush is throttled). Tested A/B/C/D on the live cluster at scale 100:
+  hash distribution passed in 466s; `none` with fanout still produced 800K+
+  files and OOMed; narrowed date range (30 days) passed but is a workaround,
+  not a fix.
+- **Prerequisite tick rendering.** `_run.py` replaced unicode tick/cross
+  (`\u2713`/`\u2717`) with ASCII `+`/`x` to match the `check` command style.
+
 ## [1.3.0] - 2026-03-27
 
 ### Added
