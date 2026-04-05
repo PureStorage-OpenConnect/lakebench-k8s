@@ -3,7 +3,7 @@ Adaptive Silver Build - Scale-aware transformation pipeline
 
 Automatically selects the optimal processing strategy based on data size:
 - SIMPLE: < 100GB, standard processing
-- STREAMING: >= 100GB, direct write, no shuffle (column transforms only)
+- STREAMING: >= 100GB, single pass, hash distribution (Iceberg clusters by partition)
 - SALTED: High skew (>100x) on small datasets, salt hot keys
 """
 
@@ -203,12 +203,13 @@ def select_silver_strategy(profile: DataProfile) -> SilverStrategy:
     full shuffle of each chunk's data. At scale 500 (5 TB, 90 date chunks),
     each chunk re-scans the entire 5 TB bronze dataset to filter down to one
     day (~55 GB), then shuffles that 55 GB. This resulted in 30+ hour runtimes.
-    STREAMING (single pass, no shuffle) handles 5 TB+ correctly -- column
-    transforms don't require data redistribution, and Iceberg's
-    write.distribution-mode=hash handles file layout.
+    STREAMING (single pass, hash distribution) handles 1 TB+ correctly --
+    column transforms don't require data redistribution, and Iceberg's
+    write.distribution-mode=hash clusters rows by partition before writing,
+    producing ~9K files at scale 100 instead of 836K with mode=none.
     """
-    # STREAMING for all datasets >= 100 GB -- single pass, no shuffle.
-    # Column transforms are row-independent; Iceberg handles file distribution.
+    # STREAMING for all datasets >= 100 GB -- single pass, hash distribution.
+    # Column transforms are row-independent; Iceberg handles file clustering.
     if profile.total_size_gb >= 100:
         return SilverStrategy.STREAMING
 
@@ -315,18 +316,24 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
 
 
 def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incremental=False):
-    """STREAMING strategy: Direct write, no shuffle, single pass. For >= 100GB.
+    """STREAMING strategy: Direct write, single pass. For >= 100GB.
 
     Key insight: Column transformations don't require data redistribution.
-    - No repartition() - avoid shuffle that caused OOM at 1TB+
-    - No intermediate count() - avoid extra data passes
-    - distribution-mode=none: avoids Iceberg's ClusteredDistribution shuffle
-      that fills scratch PVCs at 5TB+ (BUG-003). Partitioning still works
-      because Iceberg routes rows to partition files by column value regardless
-      of distribution mode.
-    - Let AQE handle partition coalescing, Iceberg handle file sizing
+    - No repartition() -- avoid explicit shuffle that caused OOM at 1TB+
+    - No intermediate count() -- avoid extra data passes
+    - distribution-mode=hash: Iceberg clusters rows by partition column
+      before writing, so each task writes to one partition. Produces ~N
+      files (N = partition count) instead of tasks x partitions files.
+      At scale 100 (1TB, 365 date partitions): ~9K files vs 836K with
+      mode=none. The Hive Metastore commit drops from timeout to 340ms.
+
+    BUG-003 history: mode was changed from hash to none in v1.0 because
+    hash shuffle filled 150Gi scratch PVCs at 5TB+. Testing at 1TB with
+    28 executors x 150Gi scratch shows no PVC pressure. The none->hash
+    revert is safe up to at least 1TB. For 5TB+ scales, override via
+    spark.lb.silver.distribution_mode=none in spark.conf.
     """
-    log("Executing STREAMING strategy (no shuffle, single pass)...")
+    log("Executing STREAMING strategy (single pass)...")
     log(
         f"Input size: {profile.total_size_gb:.1f} GB (estimated {profile.transaction_count:,} rows)"
     )
@@ -336,20 +343,27 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
     # Apply transformations - all column operations, no joins
     silver_df = apply_silver_transformations(df_bronze)
 
-    log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
+    # LB-049: distribution-mode is overridable via Spark conf for scale
+    # testing. Default changed from "none" to "hash" -- see docstring.
+    dist_mode = spark.conf.get("spark.lb.silver.distribution_mode", "hash")
+    fanout = spark.conf.get("spark.lb.silver.fanout_enabled", "false")
+    log(f"Writing to {silver_tbl} (single pass, distribution-mode={dist_mode}, fanout={fanout})...")
+
     if incremental and _table_exists(spark, silver_tbl):
         log("Appending to existing table (incremental mode)")
         silver_df.writeTo(silver_tbl).append()
     else:
-        (
+        writer = (
             silver_df.writeTo(silver_tbl)
             .tableProperty("write.format.default", "parquet")
             .tableProperty("write.parquet.compression-codec", "snappy")
             .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-            .tableProperty("write.distribution-mode", "none")
+            .tableProperty("write.distribution-mode", dist_mode)
             .partitionedBy("interaction_date")
-            .createOrReplace()
         )
+        if fanout.lower() == "true":
+            writer = writer.tableProperty("write.spark.fanout.enabled", "true")
+        writer.createOrReplace()
 
     silver_count = spark.table(silver_tbl).count()
     log(f"Wrote {silver_count:,} records")

@@ -1070,13 +1070,15 @@ class SparkJobManager:
 
         # Parquet tuning
         # BUG-006: Fixed 256MB partitions caused 26k tasks at scale 500,
-        # overwhelming driver with Iceberg commit metadata. Scale-aware sizing:
-        # - Target ~5000 tasks max to keep driver responsive
-        # - Floor at 256MB to maintain parallelism at small scales
-        # - Ceiling at 1GB (diminishing returns beyond that)
-        target_tasks = 5000
+        # overwhelming driver with Iceberg commit metadata. Scale-aware sizing.
+        # LB-049: 5000 tasks overwhelms AppStatusListener at scale 100+ with
+        # Spark 4.0.2 (O(liveTasks) flush per heartbeat). Target 2000 tasks
+        # and allow up to 2GB partitions to keep the driver responsive.
+        # At scale 100 (1TB): 1024MB partitions = ~1000 tasks.
+        # At scale 10 (100GB): 256MB partitions = ~400 tasks (floor applies).
+        target_tasks = 2000
         approx_bronze_gb = scale * 10
-        partition_mb = max(256, min(1024, (approx_bronze_gb * 1024) // target_tasks))
+        partition_mb = max(256, min(2048, (approx_bronze_gb * 1024) // target_tasks))
         partition_bytes = partition_mb * 1024 * 1024
         spark_conf.update(
             {
@@ -1086,14 +1088,40 @@ class SparkJobManager:
             }
         )
 
-        # Spark 4 AppStatusListener regression: processing
-        # SparkListenerExecutorMetricsUpdate events takes 25+ seconds each,
-        # causing the driver's task scheduler to starve and executors to time
-        # out.  Disable appStatusSource to prevent the listener from being
-        # registered.  The UI stays enabled for prometheus scraping, but the
-        # expensive per-event processing in AppStatusListener is eliminated.
-        if spark_major >= 4:
-            spark_conf["spark.metrics.appStatusSource.enabled"] = "false"
+        # LB-049: AppStatusListener + SQLAppStatusListener driver OOM at
+        # scale 100+.  Each onExecutorMetricsUpdate triggers a full flush of
+        # ALL live entities (O(liveTasks)).  With 5000+ tasks and 18+
+        # executors, flush takes 15-135s per event, starving the task
+        # scheduler and eventually OOMing the driver.
+        #
+        # Attempted mitigations that are insufficient alone:
+        # - appStatusSource.enabled=false: no-op, only controls Dropwizard
+        #   metrics counters (SPARK-25594)
+        # - liveUpdate.minFlushPeriod=30s: reduces average flush frequency
+        #   but outlier flushes still take 100s+ and kill executors
+        #
+        # spark.ui.enabled=false does NOT prevent AppStatusListener
+        # registration (SPARK-25594), but it prevents SparkUI's Jetty
+        # server and reduces overall driver heap pressure enough to avoid
+        # OOM.  Combined with flush throttling and retained state caps,
+        # this keeps the driver responsive at scale 100+.
+        #
+        # Tradeoff: disables Spark UI and PrometheusServlet (they share
+        # the same Jetty server).  Prometheus scraping of Spark metrics
+        # is lost.  Observability layer still collects Trino/PodMonitor
+        # metrics.  Re-enable when SPARK-43523 is fixed upstream.
+        spark_conf.update(
+            {
+                "spark.ui.enabled": "false",
+                "spark.ui.liveUpdate.minFlushPeriod": "30s",
+                "spark.ui.liveUpdate.period": "5s",
+                "spark.ui.retainedTasks": "1000",
+                "spark.ui.retainedStages": "100",
+                "spark.ui.retainedJobs": "100",
+                "spark.ui.retainedDeadExecutors": "10",
+                "spark.scheduler.listenerbus.eventqueue.appStatus.capacity": "2000",
+            }
+        )
 
         # Prometheus metrics (for observability layer)
         if cfg.observability.enabled:
