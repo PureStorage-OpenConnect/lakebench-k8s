@@ -70,7 +70,7 @@ class TestApplyCommandConstruction:
         return [c.args[0] for c in run.call_args_list if "run" in c.args[0]]
 
     def test_mount_options_are_comma_separated(self):
-        """podman rejects 'src:dst:ro:Z'; options must be 'ro,Z'."""
+        """podman rejects 'src:dst:ro:z'; options must be 'ro,z'."""
         spec = ComponentSpec(
             name="g",
             image="img",
@@ -78,8 +78,8 @@ class TestApplyCommandConstruction:
         )
         cmd = self._capture(spec)[0]
         arg = cmd[cmd.index("-v") + 1]
-        assert arg == "/h/f:/c/f:ro,Z"
-        assert ":ro:Z" not in arg
+        assert arg == "/h/f:/c/f:ro,z"
+        assert ":ro:z" not in arg
 
     def test_docker_omits_selinux_relabel(self):
         spec = ComponentSpec(
@@ -91,7 +91,20 @@ class TestApplyCommandConstruction:
     def test_read_write_mount_on_podman_still_relabels(self):
         spec = ComponentSpec(name="g", image="img", mounts=[Mount(source="/h", target="/c")])
         cmd = self._capture(spec)[0]
-        assert cmd[cmd.index("-v") + 1] == "/h:/c:Z"
+        assert cmd[cmd.index("-v") + 1] == "/h:/c:z"
+
+    def test_relabel_is_shared_not_private(self):
+        """LB-054: uppercase 'Z' breaks any host tree two containers share.
+
+        Garage and Spark both mount the local workdir. A private relabel means
+        whichever starts second revokes the other's access, and Garage fails
+        reading its own config long after deploy reported success.
+        """
+        spec = ComponentSpec(name="g", image="img", mounts=[Mount(source="/h", target="/c")])
+        cmd = self._capture(spec)[0]
+        arg = cmd[cmd.index("-v") + 1]
+        assert arg.endswith(":z")
+        assert "Z" not in arg
 
     def test_ports_env_and_labels(self):
         spec = ComponentSpec(

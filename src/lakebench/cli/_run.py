@@ -187,6 +187,85 @@ def _run_preflight_infra_check(cfg) -> None:
     print_success("Infrastructure check passed")
 
 
+def _run_local_mode(
+    cfg,
+    config_file: Path,
+    workdir: Path | None,
+    timeout: int | None,
+    stage: str | None,
+    yes: bool,
+) -> None:
+    """Run the pipeline locally. Raises typer.Exit on failure."""
+    from lakebench.cli._local import (
+        LOCAL_JOB_ORDER,
+        LocalModeError,
+        check_local_supported,
+        default_workdir,
+        deploy_local,
+        print_local_summary,
+        run_local,
+        scale_advisory,
+    )
+
+    try:
+        check_local_supported(cfg)
+    except LocalModeError as e:
+        print_error(str(e))
+        raise typer.Exit(1)  # noqa: B904
+
+    if stage and stage not in LOCAL_JOB_ORDER:
+        print_error(f"Unknown stage {stage!r}. Expected one of: {', '.join(LOCAL_JOB_ORDER)}")
+        raise typer.Exit(1)
+    stages = (stage,) if stage else LOCAL_JOB_ORDER
+
+    advisory = scale_advisory(cfg)
+    if advisory:
+        console.print(f"[yellow]{advisory}[/yellow]")
+        if not yes:
+            typer.confirm("Continue anyway?", abort=True)
+
+    resolved_workdir = workdir or default_workdir(cfg.name)
+
+    j = journal_open(config_file, config_name=cfg.name)
+    j.begin_command(CommandName.RUN, {"local": True, "stages": list(stages)})
+
+    # Reconnect to the running stack. Garage keeps metadata on the host, so
+    # this reuses the existing key and buckets rather than minting new ones.
+    try:
+        deployment = deploy_local(cfg, workdir=resolved_workdir, timeout=180)
+    except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
+        print_error(f"Could not reach the local stack: {e}")
+        print_info(f"Run 'lakebench deploy {config_file} --local' first")
+        _journal_safe(j.end_command, success=False, message=str(e))
+        raise typer.Exit(1)  # noqa: B904
+
+    console.print()
+    result = run_local(
+        cfg,
+        deployment,
+        workdir=resolved_workdir,
+        timeout=timeout or 3600,
+        stages=stages,
+    )
+    print_local_summary(result)
+
+    _journal_safe(
+        j.record,
+        EventType.PIPELINE_COMPLETE,
+        message=("Local pipeline completed" if result.success else "Local pipeline failed"),
+        success=result.success,
+        details={
+            "local": True,
+            "elapsed_seconds": result.elapsed_seconds,
+            "stages": [{"stage": n, "success": ok, "elapsed": e} for n, ok, e in result.stages],
+        },
+    )
+    _journal_safe(j.end_command, success=result.success)
+
+    if not result.success:
+        raise typer.Exit(1)
+
+
 def run(
     config_file: Annotated[
         Path | None,
@@ -298,6 +377,20 @@ def run(
             help="Skip all confirmation prompts",
         ),
     ] = False,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Run locally with podman/docker instead of Kubernetes",
+        ),
+    ] = False,
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir",
+            help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
+        ),
+    ] = None,
 ) -> None:
     """Execute the data pipeline.
 
@@ -354,6 +447,12 @@ def run(
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
 
+    # Local mode runs before auto-sizing: there is no cluster to size against,
+    # and the local profiles are fixed rather than derived from capacity.
+    if local:
+        _run_local_mode(cfg, config_file, workdir, timeout, stage, yes)
+        return
+
     # Auto-size resources based on scale + cluster capacity
     from lakebench.config.autosizer import resolve_auto_sizing
 
@@ -373,7 +472,9 @@ def run(
     # Auto-scale timeout if not explicitly set
     if timeout is None:
         scale = cfg.architecture.workload.datagen.get_effective_scale()
-        timeout = max(3600, scale * 120)
+        # int() because scale is a float: a float timeout would propagate into
+        # manifests and log lines that expect a whole number of seconds.
+        timeout = max(3600, int(scale * 120))
         if scale >= 50:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 

@@ -104,13 +104,24 @@ class ContainerRuntime:
             cmd += ["-p", f"{host}:{port.container_port}"]
         for mount in spec.mounts:
             # Mount options are comma-separated, not colon-separated:
-            # "src:dst:ro,Z" is valid, "src:dst:ro:Z" is not.
+            # "src:dst:ro,z" is valid, "src:dst:ro:z" is not.
             options = []
             if mount.read_only:
                 options.append("ro")
             if self.cli == "podman":
-                # SELinux relabel, required on RHEL hosts.
-                options.append("Z")
+                # SELinux relabel, required on RHEL hosts. Lowercase "z" is a
+                # shared label; uppercase "Z" is private and exclusive.
+                #
+                # It must be "z" (LB-054). Local mode points more than one
+                # container at the same host tree -- Garage at its config and
+                # data, Spark at the Ivy cache beside them. With "Z", the
+                # second container to start relabels the tree with its own MCS
+                # categories and silently revokes the first container's access
+                # to files it is already using. Garage then fails with
+                # "Unable to read configuration file /etc/garage.toml:
+                # Permission denied", long after the deploy that created it
+                # reported success.
+                options.append("z")
             suffix = f":{','.join(options)}" if options else ""
             cmd += ["-v", f"{mount.source}:{mount.target}{suffix}"]
         if spec.command:

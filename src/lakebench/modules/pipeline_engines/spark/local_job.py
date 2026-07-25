@@ -150,6 +150,29 @@ class LocalSparkRunner:
             "LB_GOLD_TABLE": "gold.customer_executive_dashboard",
         }
 
+    def _prepare_ivy(self) -> None:
+        """Create the Ivy directories spark-submit expects to already exist.
+
+        LB-053, second half. Pointing ``spark.jars.ivy`` at a writable path is
+        not sufficient: spark-submit writes its resolution descriptor straight
+        into ``<ivy>/cache`` without creating it, so a bare ivy directory still
+        fails with ``FileNotFoundException:
+        .../cache/resolved-org.apache.spark-spark-submit-parent-*.xml``. The
+        message names a file, not a directory, which makes it read like a
+        corrupt download rather than a missing parent.
+
+        The directories are made world-writable because the Spark image runs as
+        UID 185 (``spark``) while these are created by whoever runs the CLI.
+        Without it the same call fails one step later with ``Permission
+        denied`` on the same path. This is the local equivalent of the anyuid
+        SCC the Kubernetes path needs for the same UID.
+        """
+        ivy = self.workdir / "ivy"
+        for subdir in ("cache", "jars", "local"):
+            (ivy / subdir).mkdir(parents=True, exist_ok=True)
+        for path in (ivy, *(ivy / s for s in ("cache", "jars", "local"))):
+            path.chmod(0o777)
+
     def build_command(self, job_type: str) -> list[str]:
         """Build the container command for a job. Exposed for testing."""
         script = _SCRIPTS.get(job_type)
@@ -159,8 +182,11 @@ class LocalSparkRunner:
         cmd = [self.cli, "run", "--rm", "--network", "host"]
         for key, value in self._env().items():
             cmd += ["-e", f"{key}={value}"]
-        cmd += ["-v", f"{self.workdir}:/work:Z"]
-        cmd += ["-v", f"{self.scripts_dir}:/scripts:ro,Z"]
+        # LB-054: lowercase "z" (shared), never "Z". The workdir tree is also
+        # mounted by the Garage container; a private relabel here revokes
+        # Garage's access to its own config the moment a job starts.
+        cmd += ["-v", f"{self.workdir}:/work:z"]
+        cmd += ["-v", f"{self.scripts_dir}:/scripts:ro,z"]
         _, cores, _ = self._sizing(job_type)
         cmd += [self.config.image, "/opt/spark/bin/spark-submit"]
         cmd += ["--master", f"local[{cores}]"]
@@ -174,7 +200,7 @@ class LocalSparkRunner:
 
     def run_job(self, job_type: str, timeout: int = 3600) -> JobResult:
         """Run one pipeline job and return its result."""
-        (self.workdir / "ivy").mkdir(parents=True, exist_ok=True)
+        self._prepare_ivy()
         cmd = self.build_command(job_type)
 
         logger.debug("Submitting %s: %s", job_type, " ".join(cmd))

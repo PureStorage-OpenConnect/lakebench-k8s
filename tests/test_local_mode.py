@@ -273,6 +273,34 @@ class TestLocalSparkRun:
             runner.run_job("bronze-verify")
         assert (Path(tmp_path) / "ivy").is_dir()
 
+    def test_ivy_cache_subdirectory_exists(self, tmp_path):
+        """LB-053: spark-submit writes into <ivy>/cache without creating it.
+
+        A bare ivy directory fails with FileNotFoundException naming the
+        resolution xml, which reads like a corrupt download rather than a
+        missing parent directory.
+        """
+        runner = self._runner(tmp_path)
+        with mock.patch("subprocess.run", return_value=_completed()):
+            runner.run_job("bronze-verify")
+        for subdir in ("cache", "jars", "local"):
+            assert (Path(tmp_path) / "ivy" / subdir).is_dir(), f"ivy/{subdir} missing"
+
+    def test_ivy_directories_are_writable_by_uid_185(self, tmp_path):
+        """The Spark image runs as UID 185, not as whoever ran the CLI."""
+        runner = self._runner(tmp_path)
+        with mock.patch("subprocess.run", return_value=_completed()):
+            runner.run_job("bronze-verify")
+        mode = (Path(tmp_path) / "ivy" / "cache").stat().st_mode
+        assert mode & 0o002, "ivy/cache is not world-writable; UID 185 cannot write"
+
+    def test_workdir_mount_uses_shared_relabel(self, tmp_path):
+        """LB-054: a private relabel here revokes Garage's access to its config."""
+        cmd = self._runner(tmp_path).build_command("bronze-verify")
+        mounts = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+        assert any(m.endswith(":z") for m in mounts)
+        assert not any(m.endswith(":Z") or m.endswith(",Z") for m in mounts)
+
     def test_failure_surfaces_the_useful_line(self, tmp_path):
         runner = self._runner(tmp_path)
         noise = "\n".join(["INFO starting"] * 50)
