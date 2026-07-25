@@ -169,6 +169,144 @@ def get_executor_count(job_type: str, scale: int) -> int:
     return _scale_executor_count(profile, scale)
 
 
+# Batch pipeline job order.  These run sequentially, so the cluster only ever
+# needs to satisfy the single largest job, not the sum of all three.
+BATCH_JOB_TYPES: tuple[str, ...] = ("bronze-verify", "silver-build", "gold-finalize")
+
+# Streaming pipeline jobs.  Unlike batch, these run *concurrently* in
+# sustained mode, so their requirements add up.
+STREAMING_JOB_TYPES: tuple[str, ...] = ("bronze-ingest", "silver-stream", "gold-refresh")
+
+
+@dataclass(frozen=True)
+class JobRequirement:
+    """Resources a single Spark job requests from Kubernetes."""
+
+    job_type: str
+    executors: int
+    cpu_cores: int
+    memory_gb: int
+    scratch_gb: int
+    # Largest single pod, which must fit on one node.
+    max_pod_cpu_cores: int
+    max_pod_memory_gb: int
+
+
+@dataclass(frozen=True)
+class PeakRequirement:
+    """Peak resources the pipeline requests at a given scale.
+
+    For batch mode this is the largest single job, because the three
+    medallion jobs run sequentially.  For sustained mode the streaming
+    jobs run concurrently, so their requirements are summed.
+    """
+
+    scale: int
+    mode: str
+    cpu_cores: int
+    memory_gb: int
+    scratch_gb: int
+    max_pod_cpu_cores: int
+    max_pod_memory_gb: int
+    driving_job: str
+    per_job: tuple[JobRequirement, ...]
+
+
+def _job_requirement(job_type: str, scale: int) -> JobRequirement | None:
+    """Compute the resource request for one job at a given scale."""
+    profile = _JOB_PROFILES.get(job_type)
+    if not profile:
+        return None
+
+    # Local import: config.schema imports from this module, so a top-level
+    # import here would be circular.
+    from lakebench.config.schema import parse_spark_memory
+
+    executors = _scale_executor_count(profile, scale)
+
+    exec_mem = parse_spark_memory(profile["executor_memory"])
+    exec_overhead = parse_spark_memory(profile["executor_memory_overhead"])
+    driver_mem = parse_spark_memory(profile["driver_memory"])
+    exec_total_bytes = exec_mem + exec_overhead
+
+    gib = 1024**3
+    memory_bytes = executors * exec_total_bytes + driver_mem
+    scratch_gb = executors * int(str(profile["scratch_size"]).rstrip("Gi") or 0)
+
+    return JobRequirement(
+        job_type=job_type,
+        executors=executors,
+        cpu_cores=executors * profile["executor_cores"] + profile["driver_cores"],
+        memory_gb=memory_bytes // gib,
+        scratch_gb=scratch_gb,
+        max_pod_cpu_cores=max(profile["executor_cores"], profile["driver_cores"]),
+        max_pod_memory_gb=max(exec_total_bytes, driver_mem) // gib,
+    )
+
+
+def compute_peak_requirements(scale: int, mode: str = "batch") -> PeakRequirement:
+    """Compute the peak resources the pipeline requests at a given scale.
+
+    This is the single source of truth for "how big a cluster do I need".
+    Both the capacity preflight check and the documented minimums derive
+    from it, so the published numbers cannot drift from ``_JOB_PROFILES``.
+
+    Batch jobs run sequentially, so the peak is the largest single job.
+    Sustained-mode streaming jobs run concurrently, so they are summed.
+
+    Args:
+        scale: Scale factor from config.
+        mode: Pipeline mode, ``"batch"`` or ``"sustained"``.
+
+    Returns:
+        PeakRequirement describing the peak CPU, memory, and scratch request.
+    """
+    streaming = str(mode).lower() == "sustained"
+    job_types = STREAMING_JOB_TYPES if streaming else BATCH_JOB_TYPES
+
+    reqs = tuple(r for jt in job_types if (r := _job_requirement(jt, scale)) is not None)
+    if not reqs:
+        return PeakRequirement(
+            scale=scale,
+            mode=mode,
+            cpu_cores=0,
+            memory_gb=0,
+            scratch_gb=0,
+            max_pod_cpu_cores=0,
+            max_pod_memory_gb=0,
+            driving_job="",
+            per_job=(),
+        )
+
+    if streaming:
+        # Concurrent: the cluster must hold every streaming job at once.
+        return PeakRequirement(
+            scale=scale,
+            mode=mode,
+            cpu_cores=sum(r.cpu_cores for r in reqs),
+            memory_gb=sum(r.memory_gb for r in reqs),
+            scratch_gb=sum(r.scratch_gb for r in reqs),
+            max_pod_cpu_cores=max(r.max_pod_cpu_cores for r in reqs),
+            max_pod_memory_gb=max(r.max_pod_memory_gb for r in reqs),
+            driving_job="all streaming jobs (concurrent)",
+            per_job=reqs,
+        )
+
+    # Sequential: the peak is whichever single job is largest.
+    driving = max(reqs, key=lambda r: r.memory_gb)
+    return PeakRequirement(
+        scale=scale,
+        mode=mode,
+        cpu_cores=max(r.cpu_cores for r in reqs),
+        memory_gb=max(r.memory_gb for r in reqs),
+        scratch_gb=max(r.scratch_gb for r in reqs),
+        max_pod_cpu_cores=max(r.max_pod_cpu_cores for r in reqs),
+        max_pod_memory_gb=max(r.max_pod_memory_gb for r in reqs),
+        driving_job=driving.job_type,
+        per_job=reqs,
+    )
+
+
 def _streaming_concurrent_budget(
     config: LakebenchConfig,
     cluster_cpu_millicores: int | None,

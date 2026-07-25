@@ -39,7 +39,7 @@ class PrereqReport:
 
 
 def run_prerequisites(cfg) -> PrereqReport:
-    """Run all 8 prerequisite checks.
+    """Run all 9 prerequisite checks.
 
     Returns a PrereqReport with results for each check. Does not exit
     on failure -- the caller decides how to handle failures.
@@ -70,6 +70,9 @@ def run_prerequisites(cfg) -> PrereqReport:
 
     # 8. Namespace writable
     report.checks.append(_check_namespace(cfg))
+
+    # 9. Cluster has capacity to schedule the pipeline
+    report.checks.append(_check_cluster_capacity(cfg))
 
     return report
 
@@ -332,4 +335,103 @@ def _check_namespace(cfg) -> PrereqResult:
             passed=False,
             message=f"Namespace check failed: {e}",
             hint="Check K8s connectivity",
+        )
+
+
+def _check_cluster_capacity(cfg) -> PrereqResult:
+    """Check that the cluster can schedule the pipeline's peak request.
+
+    Without this, an undersized cluster produces Pending pods and a job
+    timeout tens of minutes later with no explanation. Comparing the peak
+    request against allocatable capacity turns that into an immediate,
+    actionable error.
+
+    Checks two things:
+      1. Aggregate capacity across worker nodes covers the peak request.
+      2. The largest single pod fits on the largest single node. A cluster
+         can have 200 GB spread over 10 nodes and still never schedule a
+         60 GB executor.
+    """
+    try:
+        from lakebench.k8s import get_k8s_client
+        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+        scale = cfg.architecture.workload.datagen.scale
+        raw_mode = cfg.architecture.pipeline.mode
+        mode = getattr(raw_mode, "value", raw_mode)
+        peak = compute_peak_requirements(scale, mode)
+
+        k8s = get_k8s_client(
+            context=cfg.platform.kubernetes.context,
+            namespace=cfg.get_namespace(),
+        )
+        capacity = k8s.get_cluster_capacity()
+        if capacity is None:
+            return PrereqResult(
+                name="cluster-capacity",
+                passed=True,
+                message="Cluster capacity unknown (node list unavailable) -- skipping check",
+                hint="Requires permission to list nodes",
+            )
+
+        gib = 1024**3
+        avail_cores = capacity.total_cpu_millicores / 1000.0
+        avail_gb = capacity.total_memory_bytes / gib
+        node_cores = capacity.largest_node_cpu_millicores / 1000.0
+        node_gb = capacity.largest_node_memory_bytes / gib
+
+        shortfalls = []
+        if peak.cpu_cores > avail_cores:
+            shortfalls.append(
+                f"CPU: need {peak.cpu_cores} cores, cluster has {avail_cores:.1f} allocatable"
+            )
+        if peak.memory_gb > avail_gb:
+            shortfalls.append(
+                f"Memory: need {peak.memory_gb} GB, cluster has {avail_gb:.1f} GB allocatable"
+            )
+        if peak.max_pod_cpu_cores > node_cores:
+            shortfalls.append(
+                f"Largest pod needs {peak.max_pod_cpu_cores} cores, "
+                f"biggest node has {node_cores:.1f}"
+            )
+        if peak.max_pod_memory_gb > node_gb:
+            shortfalls.append(
+                f"Largest pod needs {peak.max_pod_memory_gb} GB, biggest node has {node_gb:.1f} GB"
+            )
+
+        summary = (
+            f"scale {scale} ({mode}) needs ~{peak.cpu_cores} cores / "
+            f"{peak.memory_gb} GB, driven by {peak.driving_job}"
+        )
+
+        if shortfalls:
+            return PrereqResult(
+                name="cluster-capacity",
+                passed=False,
+                message=f"Insufficient cluster capacity -- {summary}",
+                hint=(
+                    "\n".join(f"  {s}" for s in shortfalls)
+                    + f"\nCluster: {capacity.node_count} worker node(s), "
+                    + f"{avail_cores:.1f} cores / {avail_gb:.1f} GB allocatable."
+                    + "\nReduce 'scale', lower per-job executor counts "
+                    + "(silver_executors, gold_executors), or use a larger cluster."
+                ),
+            )
+
+        return PrereqResult(
+            name="cluster-capacity",
+            passed=True,
+            message=(
+                f"Cluster capacity OK ({avail_cores:.0f} cores / "
+                f"{avail_gb:.0f} GB available, {summary})"
+            ),
+        )
+    except Exception as e:
+        # Never block a deploy because the capacity estimate itself failed.
+        logger.debug("Capacity check error: %s", e, exc_info=True)
+        return PrereqResult(
+            name="cluster-capacity",
+            passed=True,
+            message=f"Capacity check skipped: {e}",
+            hint="Could not determine cluster capacity",
         )

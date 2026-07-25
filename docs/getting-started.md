@@ -22,13 +22,35 @@ You need admin-level access to the target namespace (or permission to create
 one). On OpenShift, Lakebench automatically handles Security Context
 Constraints for the Spark service account.
 
-Minimum cluster size depends on the scale factor. As a rough guide:
+Minimum cluster size depends on the scale factor. These figures are the peak
+resources Lakebench actually requests from Kubernetes, derived from the Spark
+job profiles:
 
-| Scale | Minimum CPU | Minimum RAM | Bronze data |
-|------:|------------:|------------:|------------:|
-| 1 | 8 cores | 32 GB | ~10 GB |
-| 10 | 16 cores | 64 GB | ~100 GB |
-| 100 | 64 cores | 256 GB | ~1 TB |
+| Scale | Bronze data | Minimum CPU | Minimum RAM | Scratch PVC |
+|------:|------------:|------------:|------------:|------------:|
+| 1 | ~10 GB | 36 cores | 512 GB | 1,200 Gi |
+| 10 | ~100 GB | 36 cores | 512 GB | 1,200 Gi |
+| 50 | ~500 GB | 52 cores | 752 GB | 1,800 Gi |
+| 100 | ~1 TB | 76 cores | 1,112 GB | 2,700 Gi |
+
+Three things surprise people about this table:
+
+- **Scale 1 and scale 10 request the same resources.** Executor counts are
+  fixed for every scale at or below 10, so the smallest run is no cheaper
+  than a 100 GB run. Below scale 10 you are choosing how much data to
+  process, not how much cluster to use.
+- **The `silver-build` job sets the peak.** It requests 8 executors at 4
+  cores and 60 GB each (48 GB heap plus 12 GB overhead). The medallion jobs
+  run sequentially, so the cluster only needs to satisfy the largest one,
+  not the sum of all three.
+- **Individual pods must fit on a single node.** A `silver-build` executor
+  needs 60 GB on one node. A cluster with 512 GB spread across sixteen 32 GB
+  nodes has enough total memory on paper and still cannot schedule the job.
+
+Lakebench checks this for you. The prerequisite phase of `lakebench run`
+compares the peak request against your cluster's allocatable capacity and
+fails immediately with the specific shortfall, rather than leaving pods
+`Pending` until the job times out. Skipped when you pass `--skip-preflight`.
 
 Run `lakebench recommend` after install to check your cluster's maximum
 supported scale.
