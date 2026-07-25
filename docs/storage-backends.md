@@ -158,6 +158,40 @@ performance, durability, or suitability judgement:
 Treat a pass as "lakebench will run here," not as an endorsement of the store for
 benchmarking.
 
+## Local mode: bundled Garage
+
+When no cluster or external object store is available, lakebench can deploy
+Garage as a container via podman or docker. This is the object store half of
+local mode.
+
+```python
+from lakebench.runtime.container import ContainerRuntime
+from lakebench.deploy.garage import GarageDeployer
+
+runtime = ContainerRuntime(namespace="lakebench")
+creds = GarageDeployer(runtime, config_dir="~/.lakebench/garage").deploy()
+# creds.endpoint, creds.access_key, creds.secret_key, creds.region
+```
+
+Deploy takes roughly two seconds and creates the three medallion buckets.
+Podman is preferred when both CLIs are present.
+
+**Two behaviours worth knowing**, both of which caused real bugs during
+development:
+
+- **`garage key create` is not idempotent.** It succeeds every time and creates
+  a duplicate key with the same name. After two runs, `garage key info <name>`
+  fails with "2 matching keys". The deployer checks `key list` first and
+  addresses keys by ID rather than name.
+- **Garage state must outlive the container.** Metadata (including access keys)
+  and data are bind-mounted to the host config directory. Without that, a
+  container recreate silently mints new credentials and orphans every existing
+  bucket. `ContainerRuntime.apply()` also reuses a running container with a
+  matching image rather than recreating it.
+
+Redeploying returns the same credentials, and they survive a full container
+delete and redeploy.
+
 ## Adding a backend
 
 1. Run `lakebench config storage` against it and confirm no required check fails.
