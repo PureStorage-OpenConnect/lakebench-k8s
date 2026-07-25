@@ -1,16 +1,23 @@
 """Scale factor definitions and schema-specific mappings.
 
-Each schema maps an abstract scale factor (integer >= 1) to concrete
-domain dimensions. The invariant is: scale 1 ≈ 10 GB on-disk bronze.
+Each schema maps an abstract scale factor to concrete domain dimensions. The
+invariant is: scale 1 ~ 10 GB on-disk bronze.
 
 Scale replaces the old target_size configuration. Instead of specifying
 raw data sizes, users specify a scale factor like HammerDB warehouses
 or TPC-H SF. Each schema maps scale to its own domain dimensions.
 
+Scale is a float so local mode can ask for datasets smaller than 10 GB, which
+is the smallest a cluster run would ever want. Scale 0.01 is ~100 MB and
+completes on a laptop in seconds. Every derived count is rounded to an int at
+the point of derivation, so no fractional row or customer count reaches
+datagen.
+
 Example YAML::
 
     datagen:
-      scale: 10   # ~100 GB bronze, 1M customers for Customer360
+      scale: 10     # ~100 GB bronze, 1M customers for Customer360
+      scale: 0.1    # ~1 GB bronze, 10K customers -- local mode
 """
 
 from __future__ import annotations
@@ -28,7 +35,7 @@ class ScaleDimensions:
     usage is measured from S3 after generation.
     """
 
-    scale: int
+    scale: float
     customers: int
     events_per_customer: int
     date_range_days: int
@@ -123,10 +130,26 @@ SPARK_MEM_EXTREME_MIN = "32g"
 # Schema dimension functions
 # ---------------------------------------------------------------------------
 
+# Smallest scale that still produces a dataset. Below 10 GB the numbers stop
+# being a benchmark and start being a smoke test, which is exactly what local
+# mode wants.
+MIN_SCALE = 0.01
 
-def customer360_dimensions(scale: int) -> ScaleDimensions:
+
+def _entity_count(scale: float, per_unit: int) -> int:
+    """Scale an entity count, keeping it a whole number of at least one.
+
+    Datagen cannot generate a fraction of a customer, and a scale small enough
+    to round to zero would produce an empty dataset that fails much later with
+    a confusing error.
+    """
+    return max(1, round(scale * per_unit))
+
+
+def customer360_dimensions(scale: float) -> ScaleDimensions:
     """Map scale factor to Customer360 domain dimensions.
 
+    Scale 0.01 -> 1K customers,   ~24 events/customer, 365 days, ~100 MB
     Scale 1  -> 100K customers,   ~24 events/customer, 365 days, ~10 GB
     Scale 10 -> 1M customers,     ~24 events/customer, 365 days, ~100 GB
     Scale 100 -> 10M customers,   ~24 events/customer, 365 days, ~1 TB
@@ -135,7 +158,7 @@ def customer360_dimensions(scale: int) -> ScaleDimensions:
     Scales linearly: customers = scale * 100,000.
     Events per customer is fixed to keep distribution realistic.
     """
-    customers = scale * 100_000
+    customers = _entity_count(scale, 100_000)
     events_per_customer = 24
     date_range_days = 365
     approx_rows = customers * events_per_customer
@@ -150,12 +173,12 @@ def customer360_dimensions(scale: int) -> ScaleDimensions:
     )
 
 
-def iot_dimensions(scale: int) -> ScaleDimensions:
+def iot_dimensions(scale: float) -> ScaleDimensions:
     """Map scale factor to IoT telemetry domain dimensions (future).
 
     Scale 1 -> 1K sensors x 30 days @ 1 reading/min, ~10 GB
     """
-    sensors = scale * 1_000
+    sensors = _entity_count(scale, 1_000)
     readings_per_sensor_per_day = 1440  # 1 per minute
     date_range_days = 30
     approx_rows = sensors * readings_per_sensor_per_day * date_range_days
@@ -170,12 +193,12 @@ def iot_dimensions(scale: int) -> ScaleDimensions:
     )
 
 
-def financial_dimensions(scale: int) -> ScaleDimensions:
+def financial_dimensions(scale: float) -> ScaleDimensions:
     """Map scale factor to Financial transactions domain dimensions (future).
 
     Scale 1 -> 500K accounts x 12 months @ 4 txns/account/month, ~10 GB
     """
-    accounts = scale * 500_000
+    accounts = _entity_count(scale, 500_000)
     txns_per_account_per_month = 4
     months = 12
     approx_rows = accounts * txns_per_account_per_month * months
@@ -198,21 +221,21 @@ SCHEMA_DIMENSION_MAP: dict[str, Callable[..., ScaleDimensions]] = {
 }
 
 
-def get_dimensions(schema_type: str, scale: int) -> ScaleDimensions:
+def get_dimensions(schema_type: str, scale: float) -> ScaleDimensions:
     """Get dimensions for any schema type.
 
     Args:
         schema_type: One of "customer360", "iot", "financial"
-        scale: Scale factor (integer >= 1)
+        scale: Scale factor (>= MIN_SCALE)
 
     Returns:
         ScaleDimensions with all derived values
 
     Raises:
-        ValueError: If schema_type is unknown or scale < 1
+        ValueError: If schema_type is unknown or scale < MIN_SCALE
     """
-    if scale < 1:
-        raise ValueError(f"Scale must be >= 1, got {scale}")
+    if scale < MIN_SCALE:
+        raise ValueError(f"Scale must be >= {MIN_SCALE}, got {scale}")
     func = SCHEMA_DIMENSION_MAP.get(schema_type)
     if func is None:
         raise ValueError(
@@ -226,7 +249,7 @@ def get_dimensions(schema_type: str, scale: int) -> ScaleDimensions:
 # ---------------------------------------------------------------------------
 
 
-def compute_guidance(scale: int) -> ComputeGuidance:
+def compute_guidance(scale: float) -> ComputeGuidance:
     """Get compute resource guidance for a given scale.
 
     These recommendations are schema-independent since scale always
@@ -287,7 +310,7 @@ def compute_guidance(scale: int) -> ComputeGuidance:
         )
 
 
-def full_compute_guidance(scale: int) -> FullComputeGuidance:
+def full_compute_guidance(scale: float) -> FullComputeGuidance:
     """Get combined resource guidance for Spark, Trino, and Datagen.
 
     Derives recommended resources from scale factor using four tiers.

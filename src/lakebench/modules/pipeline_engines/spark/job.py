@@ -127,7 +127,58 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def _scale_executor_count(profile: dict[str, Any], scale: int) -> int:
+# ---------------------------------------------------------------------------
+# Local mode job profiles
+# ---------------------------------------------------------------------------
+# Spark runs as ``local[N]``: one JVM is driver and executor at once, so there
+# is no executor count, no overhead allotment, and no scratch PVC. Sizing is
+# therefore a single memory figure and a core count.
+#
+# These are deliberately not derived from _JOB_PROFILES. A laptop cannot host a
+# 48g executor, and scaling the cluster numbers down by a fudge factor would
+# produce values nobody has run. The numbers below come from the POC, which
+# completed a full bronze/silver/gold pipeline in a 16 second warm run.
+#
+# Silver gets more memory than the others because it is the shuffle-heavy join,
+# which is the same reason it dominates the cluster profile.
+_LOCAL_JOB_PROFILES: dict[str, dict[str, Any]] = {
+    "bronze-verify": {"driver_memory": "2g", "cores": 2, "partitions": 8},
+    "silver-build": {"driver_memory": "4g", "cores": 4, "partitions": 16},
+    "gold-finalize": {"driver_memory": "3g", "cores": 2, "partitions": 8},
+}
+
+# Above this scale a laptop is the wrong tool. Local mode still runs, but the
+# CLI warns: at scale 1 the bronze dataset alone is ~10 GB, and a single JVM
+# shuffling that on consumer hardware takes long enough that users assume it
+# has hung.
+LOCAL_SCALE_ADVISORY_MAX = 1.0
+
+
+def get_local_job_profile(job_type: str) -> dict[str, Any] | None:
+    """Return the local[*] resource profile for a job type.
+
+    Args:
+        job_type: Job type string (e.g. "bronze-verify").
+
+    Returns:
+        Profile dict copy, or None if the job has no local equivalent. The
+        streaming jobs return None: sustained mode is not supported locally.
+    """
+    profile = _LOCAL_JOB_PROFILES.get(job_type)
+    return dict(profile) if profile else None
+
+
+def local_peak_memory_gb() -> int:
+    """Peak host memory local mode needs, in GB.
+
+    The batch jobs run sequentially, so the peak is the largest single job
+    rather than the sum -- the same property that makes silver-build define the
+    cluster peak.
+    """
+    return max(int(p["driver_memory"].rstrip("g")) for p in _LOCAL_JOB_PROFILES.values())
+
+
+def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     """Derive executor count from scale factor and job profile.
 
     Uses base counts for small scales and adds more executors
@@ -136,7 +187,10 @@ def _scale_executor_count(profile: dict[str, Any], scale: int) -> int:
     base = profile["base_executors"]
     if scale <= 10:
         return base
-    extra = ((scale - 10) * profile["executors_per_100_scale"]) // 100
+    # int() rather than // because scale is a float: floor division on floats
+    # yields a float, which would put a non-integer executor count in the
+    # manifest.
+    extra = int((scale - 10) * profile["executors_per_100_scale"] // 100)
     return min(base + extra, profile["max_executors"])
 
 
@@ -153,7 +207,7 @@ def get_job_profile(job_type: str) -> dict[str, Any] | None:
     return dict(profile) if profile else None
 
 
-def get_executor_count(job_type: str, scale: int) -> int:
+def get_executor_count(job_type: str, scale: float) -> int:
     """Compute the deterministic executor count for a job at a given scale.
 
     Args:
@@ -201,7 +255,7 @@ class PeakRequirement:
     jobs run concurrently, so their requirements are summed.
     """
 
-    scale: int
+    scale: float
     mode: str
     cpu_cores: int
     memory_gb: int
@@ -212,7 +266,7 @@ class PeakRequirement:
     per_job: tuple[JobRequirement, ...]
 
 
-def _job_requirement(job_type: str, scale: int) -> JobRequirement | None:
+def _job_requirement(job_type: str, scale: float) -> JobRequirement | None:
     """Compute the resource request for one job at a given scale."""
     profile = _JOB_PROFILES.get(job_type)
     if not profile:
@@ -244,7 +298,7 @@ def _job_requirement(job_type: str, scale: int) -> JobRequirement | None:
     )
 
 
-def compute_peak_requirements(scale: int, mode: str = "batch") -> PeakRequirement:
+def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirement:
     """Compute the peak resources the pipeline requests at a given scale.
 
     This is the single source of truth for "how big a cluster do I need".
@@ -368,7 +422,9 @@ def _streaming_concurrent_budget(
     return caps
 
 
-def _scale_partitions(profile: dict[str, Any], scale: int, executor_count: int, cores: int) -> str:
+def _scale_partitions(
+    profile: dict[str, Any], scale: float, executor_count: int, cores: int
+) -> str:
     """Derive shuffle partition count from executor count and cores.
 
     Target: 2x total cores.

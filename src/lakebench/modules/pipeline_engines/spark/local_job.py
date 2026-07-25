@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lakebench.engine.protocol import JobResult
+from lakebench.modules.pipeline_engines.spark.job import get_local_job_profile
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,12 @@ _HADOOP_AWS = "org.apache.hadoop:hadoop-aws:3.4.1"
 
 @dataclass
 class LocalSparkConfig:
-    """Everything a local Spark submission needs."""
+    """Everything a local Spark submission needs.
+
+    Sizing comes from ``_LOCAL_JOB_PROFILES`` per job. ``driver_memory`` and
+    ``cores`` override it for every job when set, which is what the CLI uses to
+    honour an explicit user request.
+    """
 
     endpoint: str
     access_key: str
@@ -54,8 +60,8 @@ class LocalSparkConfig:
     silver_bucket: str = "lb-silver"
     gold_bucket: str = "lb-gold"
     image: str = DEFAULT_SPARK_IMAGE
-    driver_memory: str = "3g"
-    cores: int = 2
+    driver_memory: str = ""
+    cores: int = 0
     catalog: str = "lb"
 
 
@@ -89,11 +95,27 @@ class LocalSparkRunner:
 
     # -- submission ---------------------------------------------------------
 
-    def _spark_conf(self) -> dict[str, str]:
+    def _sizing(self, job_type: str) -> tuple[str, int, int]:
+        """Resolve (driver_memory, cores, partitions) for a job.
+
+        Explicit config wins over the profile, so a user who asks for a
+        specific size gets it.
+        """
+        profile = get_local_job_profile(job_type) or {}
+        memory = self.config.driver_memory or profile.get("driver_memory", "3g")
+        cores = self.config.cores or profile.get("cores", 2)
+        partitions = profile.get("partitions", cores * 2)
+        return memory, cores, partitions
+
+    def _spark_conf(self, job_type: str) -> dict[str, str]:
         cfg = self.config
+        memory, _, partitions = self._sizing(job_type)
         warehouse = f"s3a://{cfg.bronze_bucket}/warehouse"
         return {
-            "spark.driver.memory": cfg.driver_memory,
+            "spark.driver.memory": memory,
+            # Cluster defaults (200) are far too many for a single JVM over a
+            # laptop-sized dataset; the scheduling overhead dominates the work.
+            "spark.sql.shuffle.partitions": str(partitions),
             # LB-053: the image user has no home, so Ivy cannot write its cache.
             "spark.jars.ivy": "/work/ivy",
             f"spark.sql.catalog.{cfg.catalog}": "org.apache.iceberg.spark.SparkCatalog",
@@ -139,12 +161,13 @@ class LocalSparkRunner:
             cmd += ["-e", f"{key}={value}"]
         cmd += ["-v", f"{self.workdir}:/work:Z"]
         cmd += ["-v", f"{self.scripts_dir}:/scripts:ro,Z"]
+        _, cores, _ = self._sizing(job_type)
         cmd += [self.config.image, "/opt/spark/bin/spark-submit"]
-        cmd += ["--master", f"local[{self.config.cores}]"]
+        cmd += ["--master", f"local[{cores}]"]
         cmd += ["--packages", f"{_ICEBERG_RUNTIME},{_HADOOP_AWS}"]
         # common.py sits beside the job scripts and is imported by them.
         cmd += ["--py-files", "/scripts/common.py"]
-        for key, value in self._spark_conf().items():
+        for key, value in self._spark_conf(job_type).items():
             cmd += ["--conf", f"{key}={value}"]
         cmd.append(f"/scripts/{script}")
         return cmd

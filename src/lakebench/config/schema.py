@@ -795,13 +795,14 @@ class DatagenConfig(BaseModel):
           scale: 10   # ~100 GB bronze, 1M customers for Customer360
     """
 
-    scale: int = Field(
+    scale: float = Field(
         default=10,
-        ge=1,
+        ge=0.01,
         le=10000,
         description=(
             "Abstract scale factor. 1 unit ~ 10 GB on-disk bronze. "
-            "Scale 10 = ~100 GB, Scale 100 = ~1 TB."
+            "Scale 10 = ~100 GB, Scale 100 = ~1 TB. "
+            "Values below 1 are intended for local mode: 0.1 = ~1 GB."
         ),
     )
 

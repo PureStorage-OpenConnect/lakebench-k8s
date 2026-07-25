@@ -13,6 +13,11 @@ import pytest
 
 from lakebench.deploy.garage import GarageCredentials
 from lakebench.deploy.local import SKIPPED_COMPONENTS, LocalDeployer, LocalDeployment
+from lakebench.modules.pipeline_engines.spark.job import (
+    _LOCAL_JOB_PROFILES,
+    get_local_job_profile,
+    local_peak_memory_gb,
+)
 from lakebench.modules.pipeline_engines.spark.local_job import (
     LocalSparkConfig,
     LocalSparkRunner,
@@ -177,6 +182,70 @@ class TestLocalSparkCommand:
         joined = " ".join(self._runner(tmp_path).build_command("silver-build"))
         assert "silver.customer_interactions_enriched" in joined
         assert "gold.customer_executive_dashboard" in joined
+
+
+class TestLocalSizing:
+    """Sizing comes from the local profile, not from the cluster profile."""
+
+    def _runner(self, tmp_path, **overrides):
+        settings = {
+            "endpoint": "http://localhost:3900",
+            "access_key": "GK123",
+            "secret_key": "secret",
+        }
+        settings.update(overrides)
+        return LocalSparkRunner(LocalSparkConfig(**settings), workdir=tmp_path, cli="podman")
+
+    @pytest.mark.parametrize(
+        "job_type,memory,cores",
+        [
+            ("bronze-verify", "2g", 2),
+            ("silver-build", "4g", 4),
+            ("gold-finalize", "3g", 2),
+        ],
+    )
+    def test_each_job_gets_its_profile(self, tmp_path, job_type, memory, cores):
+        cmd = self._runner(tmp_path).build_command(job_type)
+        joined = " ".join(cmd)
+        assert f"spark.driver.memory={memory}" in joined
+        assert cmd[cmd.index("--master") + 1] == f"local[{cores}]"
+
+    def test_silver_gets_the_most_memory(self, tmp_path):
+        """Silver is the shuffle-heavy join, locally as well as on the cluster."""
+        runner = self._runner(tmp_path)
+        sizes = {j: int(runner._sizing(j)[0].rstrip("g")) for j in _LOCAL_JOB_PROFILES}
+        assert sizes["silver-build"] == max(sizes.values())
+
+    def test_nothing_local_requests_cluster_sized_memory(self, tmp_path):
+        """A laptop cannot host the 48g executors the cluster profile asks for."""
+        runner = self._runner(tmp_path)
+        for job_type in _LOCAL_JOB_PROFILES:
+            memory_gb = int(runner._sizing(job_type)[0].rstrip("g"))
+            assert memory_gb <= 8, f"{job_type} asks for {memory_gb}g locally"
+
+    def test_explicit_config_overrides_the_profile(self, tmp_path):
+        cmd = self._runner(tmp_path, driver_memory="9g", cores=6).build_command("silver-build")
+        joined = " ".join(cmd)
+        assert "spark.driver.memory=9g" in joined
+        assert cmd[cmd.index("--master") + 1] == "local[6]"
+
+    def test_shuffle_partitions_are_not_the_cluster_default(self, tmp_path):
+        """200 partitions over a laptop dataset is all scheduling overhead."""
+        joined = " ".join(self._runner(tmp_path).build_command("silver-build"))
+        assert "spark.sql.shuffle.partitions=16" in joined
+
+    def test_streaming_jobs_have_no_local_profile(self):
+        """Sustained mode is not supported locally."""
+        assert get_local_job_profile("silver-stream") is None
+
+    def test_profile_accessor_returns_a_copy(self):
+        profile = get_local_job_profile("silver-build")
+        profile["driver_memory"] = "99g"
+        assert get_local_job_profile("silver-build")["driver_memory"] == "4g"
+
+    def test_peak_memory_is_the_largest_job_not_the_sum(self):
+        """Batch jobs run sequentially, so the peak is the max, not the total."""
+        assert local_peak_memory_gb() == 4
 
 
 class TestLocalSparkRun:
