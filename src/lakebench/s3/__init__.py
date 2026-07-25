@@ -11,8 +11,24 @@ from .client import (
     S3Error,
     test_s3_connectivity,
 )
+from .conformance import (
+    KNOWN_BACKENDS,
+    CheckResult,
+    CheckStatus,
+    ConformanceReport,
+    Severity,
+    detect_backend,
+    run_conformance,
+)
 
 __all__ = [
+    "KNOWN_BACKENDS",
+    "CheckResult",
+    "CheckStatus",
+    "ConformanceReport",
+    "Severity",
+    "detect_backend",
+    "run_conformance",
     "S3Client",
     "S3Credentials",
     "S3ConnectionInfo",

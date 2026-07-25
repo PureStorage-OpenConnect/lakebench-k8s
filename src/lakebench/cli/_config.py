@@ -132,6 +132,112 @@ def config_validate(
     _validate(config_file)
 
 
+@config_app.command("storage")
+def config_storage(
+    config_file: Annotated[
+        Path,
+        typer.Argument(help="Configuration file path", exists=True),
+    ] = Path("lakebench.yaml"),
+    full: Annotated[
+        bool,
+        typer.Option(
+            "--full/--no-full",
+            help=(
+                "Create a temporary bucket for write and multipart checks. "
+                "Use --no-full when the account cannot create buckets; those "
+                "checks are then skipped rather than failed."
+            ),
+        ),
+    ] = True,
+) -> None:
+    """Validate that the S3 backend supports the operations lakebench needs.
+
+    Runs a set of graded checks against the configured endpoint and reports
+    what the backend does. This command never blocks a deployment: it tells
+    you whether the store will work and what to expect if it will not.
+    """
+    from lakebench.config import load_config
+    from lakebench.s3 import KNOWN_BACKENDS, CheckStatus, Severity, run_conformance
+
+    try:
+        cfg = load_config(config_file)
+    except Exception as e:
+        console.print(f"[red]Could not load config: {e}[/red]")
+        raise typer.Exit(1) from e
+
+    s3 = cfg.platform.storage.s3
+    if not s3.endpoint:
+        console.print("[red]No S3 endpoint configured.[/red]")
+        raise typer.Exit(1)
+
+    console.print(
+        Panel(
+            f"[bold]Storage conformance[/bold]\nEndpoint: {s3.endpoint}",
+            border_style="blue",
+        )
+    )
+
+    # A bucket to fall back to when create-bucket is not permitted.
+    fallback = ""
+    try:
+        fallback = s3.buckets.bronze or ""
+    except Exception:
+        pass
+
+    report = run_conformance(
+        endpoint=s3.endpoint,
+        access_key=s3.access_key,
+        secret_key=s3.secret_key,
+        region=s3.region,
+        path_style=s3.path_style,
+        existing_bucket=fallback,
+        allow_create_bucket=full,
+    )
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Check")
+    table.add_column("Result")
+    table.add_column("Detail")
+    marks = {
+        CheckStatus.PASS: "[green]pass[/green]",
+        CheckStatus.FAIL: "[red]FAIL[/red]",
+        CheckStatus.SKIP: "[yellow]skip[/yellow]",
+    }
+    for check in report.checks:
+        label = check.name
+        if check.severity is Severity.ADVISORY and check.status is CheckStatus.PASS:
+            label = f"{check.name} [dim](advisory)[/dim]"
+        table.add_row(label, marks[check.status], check.message)
+    console.print(table)
+
+    if report.degraded:
+        console.print(f"\n[yellow]Degraded run:[/yellow] {report.degraded_reason}")
+
+    for check in report.blocking_failures:
+        if check.impact:
+            console.print(f"\n[red]Impact:[/red] {check.impact}")
+
+    for check in report.checks:
+        if check.status is CheckStatus.PASS and check.severity is Severity.ADVISORY:
+            if check.impact:
+                console.print(f"\n[yellow]Note:[/yellow] {check.impact}")
+
+    known = KNOWN_BACKENDS.get(report.backend)
+    if known and known.get("notes"):
+        console.print(f"\n[dim]{known['label']}: {known['notes']}[/dim]")
+
+    console.print()
+    if report.passed and not report.degraded:
+        console.print(f"[green]Backend supported.[/green] {report.summary()}")
+    elif report.passed and report.degraded:
+        console.print(
+            f"[yellow]No blocking failures, but coverage was partial.[/yellow] {report.summary()}"
+        )
+    else:
+        console.print(f"[red]Backend not usable by lakebench.[/red] {report.summary()}")
+        raise typer.Exit(1)
+
+
 @config_app.command("recommend")
 def config_recommend(
     config_file: Annotated[

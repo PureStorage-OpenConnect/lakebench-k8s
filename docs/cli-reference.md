@@ -85,9 +85,35 @@ Configuration management subcommands.
 ```
 lakebench config show CONFIG_FILE       # show resolved config with source annotations
 lakebench config validate CONFIG_FILE   # validate config + test connectivity
+lakebench config storage CONFIG_FILE    # check the S3 backend supports what lakebench needs
 lakebench config recommend CONFIG_FILE  # show cluster sizing guidance
 lakebench config upgrade CONFIG_FILE    # convert v1.2 nested config to v1.3 flat format
 ```
+
+#### config storage
+
+Runs graded conformance checks against the configured S3 endpoint and reports
+what the backend does. Diagnostic only: it never gates `deploy` or `run`, so a
+store lakebench has not seen before is checked rather than refused.
+
+```
+lakebench config storage [CONFIG_FILE] [OPTIONS]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--full` / `--no-full` | `--full` | Create a temporary bucket for write and multipart checks. Use `--no-full` when the account cannot create buckets; write checks are then reported as skipped, not failed. |
+
+Exit code 0 means no required check failed. Exit code 1 means a required check
+failed or the config could not be loaded.
+
+Checks are graded. **Required** failures (connectivity, bucket enumeration,
+object operations, multipart abort) mean lakebench cannot run against the store.
+**Advisory** results (sigv4 region strictness) are recorded because they change
+how lakebench configures Spark, not because they are defects.
+
+See [Storage Backends](storage-backends.md) for validated backends, what each
+check covers, and what it deliberately does not.
 
 ### validate (deprecated)
 
