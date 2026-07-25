@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from lakebench.benchmark.executor import QueryExecutor
     from lakebench.config.schema import LakebenchConfig
     from lakebench.k8s import K8sClient
+    from lakebench.runtime import Runtime
 
 
 # -- Deployer result (shared across all module types) -----------------------
@@ -40,7 +41,7 @@ class DeployResult:
 
 
 class Deployer(Protocol):
-    """Deploys or destroys a single component on Kubernetes."""
+    """Deploys or destroys a single component onto a Runtime."""
 
     def deploy(self) -> DeployResult: ...
     def destroy(self) -> DeployResult: ...
@@ -68,7 +69,7 @@ class CatalogModule(Protocol):
     @property
     def requires_operators(self) -> list[str]: ...
 
-    def create_deployer(self, config: LakebenchConfig, k8s: K8sClient) -> Deployer: ...
+    def create_deployer(self, config: LakebenchConfig, k8s: Runtime | K8sClient) -> Deployer: ...
 
     def get_spark_catalog_conf(self, config: LakebenchConfig) -> dict[str, str]:
         """Spark properties for this catalog (e.g. catalog type, URI, auth)."""
@@ -78,7 +79,7 @@ class CatalogModule(Protocol):
         """Template variables contributed by this catalog."""
         ...
 
-    def check_prerequisites(self, k8s: K8sClient) -> list[str]:
+    def check_prerequisites(self, k8s: Runtime | K8sClient) -> list[str]:
         """Return list of unmet prerequisites (empty = ready)."""
         ...
 
@@ -102,9 +103,9 @@ class QueryEngineModule(Protocol):
     @property
     def templates_dir(self) -> Path: ...
 
-    def create_deployer(self, config: LakebenchConfig, k8s: K8sClient) -> Deployer: ...
+    def create_deployer(self, config: LakebenchConfig, k8s: Runtime | K8sClient) -> Deployer: ...
 
-    def create_executor(self, config: LakebenchConfig, k8s: K8sClient) -> QueryExecutor:
+    def create_executor(self, config: LakebenchConfig, k8s: Runtime | K8sClient) -> QueryExecutor:
         """Create a query executor for benchmarking."""
         ...
 
@@ -136,9 +137,9 @@ class PipelineEngineModule(Protocol):
     @property
     def templates_dir(self) -> Path: ...
 
-    def create_deployer(self, config: LakebenchConfig, k8s: K8sClient) -> Deployer: ...
+    def create_deployer(self, config: LakebenchConfig, k8s: Runtime | K8sClient) -> Deployer: ...
 
-    def create_job_manager(self, config: LakebenchConfig, k8s: K8sClient) -> Any:
+    def create_job_manager(self, config: LakebenchConfig, k8s: Runtime | K8sClient) -> Any:
         """Create a job manager (e.g. SparkJobManager)."""
         ...
 
