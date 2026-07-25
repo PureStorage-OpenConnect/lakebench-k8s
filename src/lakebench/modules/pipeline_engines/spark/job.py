@@ -1036,6 +1036,11 @@ class SparkJobManager:
         spark_conf.update(
             {
                 "spark.hadoop.fs.s3a.endpoint": s3.endpoint,
+                # LB-052: without an explicit region, S3A signs with a default
+                # (observed us-east-2). FlashBlade ignores the region, but
+                # backends that validate the sigv4 scope reject the signature
+                # with an opaque 400 and a null message.
+                "spark.hadoop.fs.s3a.endpoint.region": s3.region,
                 "spark.hadoop.fs.s3a.path.style.access": str(s3.path_style).lower(),
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
