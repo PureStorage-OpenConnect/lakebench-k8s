@@ -70,13 +70,41 @@ lakebench compare CONFIG_A CONFIG_B [OPTIONS]
 | `--output` | `-o` | (none) | Write comparison report to file |
 | `--format` | | `table` | Output format: table, json, csv |
 | `--skip-benchmark` | | `false` | Skip benchmark phase |
+| `--local` | | `false` | Run both configs on this host with podman/docker |
+| `--generate` | | `false` | Generate data before each run |
 | `--timeout` | | `7200` | Per-run timeout in seconds |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
 ```bash
 lakebench compare hive-config.yaml polaris-config.yaml
 lakebench compare a.yaml b.yaml --format json --output comparison.json
+lakebench compare a.yaml b.yaml --local --generate
 ```
+
+The two configs run one after the other, not side by side. Running them
+concurrently on one host would measure the contention between them rather than
+the configs themselves.
+
+With `--local`, the two configs must have different `name:` values. The name
+keys the workdir, the Garage container, and the bucket names, so identical
+names would mean the second config ran against the first one's data.
+
+**Reading the delta column.** Delta is B relative to A, and it is coloured by
+whether the change is an improvement -- higher is better for QpH, throughput,
+and efficiency; lower is better for times and sizes. Descriptive scores
+(`scale_ratio`, `total_data_processed_gb`, `total_s3_objects`) are never
+coloured, because a change in them is information rather than a win or a loss.
+
+Differences under 2% are printed without colour. Repeated local benchmarks on
+unchanged data measured 0.9% run-to-run spread (n=5, stdev 1.8 QpH on a mean of
+472.9), so a smaller difference is not something a single pair of runs can
+resolve. The figure is recorded as `noise_floor_pct` in the saved comparison.
+
+One caveat on local timings: `bronze-verify` is the first stage to touch S3 and
+runs about 9s slower on a freshly deployed stack than on a warm one (30.4s vs
+21.4s measured). The heavier stages do not show this -- `silver-build` and
+`gold-finalize` were stable within a second across runs. Since `compare`
+deploys each config fresh, both sides pay this cost equally.
 
 ### config
 
