@@ -460,34 +460,91 @@ _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
 
 _FORMAT_VERSION_COMPAT: dict[tuple[int, int], dict[str, list[str]]] = {
     (3, 5): {
-        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1"],
+        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1", "1.11.0"],
         "delta": [],  # Delta 4.x requires Spark 4.x
     },
     (4, 0): {
-        "iceberg": ["1.10.0", "1.10.1"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
         "delta": ["4.0.0"],
     },
     (4, 1): {
-        "iceberg": ["1.10.0", "1.10.1"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
         "delta": ["4.1.0"],
     },
 }
 
 # Default format version per Spark version (auto-selected when user doesn't override).
 _FORMAT_VERSION_DEFAULTS: dict[tuple[int, int], dict[str, str]] = {
-    (3, 5): {"iceberg": "1.10.1", "delta": ""},
-    (4, 0): {"iceberg": "1.10.1", "delta": "4.0.0"},
-    (4, 1): {"iceberg": "1.10.1", "delta": "4.1.0"},
+    (3, 5): {"iceberg": "1.11.0", "delta": ""},
+    (4, 0): {"iceberg": "1.11.0", "delta": "4.0.0"},
+    (4, 1): {"iceberg": "1.11.0", "delta": "4.1.0"},
 }
 
-# Iceberg runtime artifact suffix per Spark version.  Iceberg publishes
-# one runtime jar per Spark major release (3.5, 4.0) -- Spark 4.1 reuses
-# the 4.0 runtime because Iceberg hasn't published a 4.1-specific artifact.
+# Iceberg 1.11.0 is the first release compiled for Java 17 -- its jars carry
+# bytecode major 61, where 1.10.x carried 55 (Java 11).  Spark images that ship
+# a Java 11 runtime therefore fail with UnsupportedClassVersionError at class
+# load, not at submit, so the error surfaces inside the driver rather than in
+# lakebench.  Verified by reading the class headers out of both jars.
+_ICEBERG_MIN_JAVA17_VERSION = (1, 11)
+
+# Iceberg runtime artifact suffix per (Spark version, Iceberg version).
+#
+# Iceberg publishes one runtime jar per Spark minor it supports, but not every
+# Iceberg release publishes the same set.  1.11.0 added a native 4.1 runtime;
+# 1.10.x has none, so Spark 4.1 must keep borrowing the 4.0 jar there.  A flat
+# (major, minor) -> suffix mapping cannot express that and would send 1.10.x
+# users to an artifact that does not exist.
 _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
     (3, 5): "3.5",
     (4, 0): "4.0",
-    (4, 1): "4.0",  # Iceberg 1.10.1 has no 4.1 runtime; 4.0 is compatible
+    (4, 1): "4.0",  # default for Iceberg releases with no 4.1 runtime
 }
+
+# Spark version -> the first Iceberg version publishing a native runtime for it.
+# Below this, the fallback in _ICEBERG_RUNTIME_SUFFIX applies.
+_ICEBERG_NATIVE_RUNTIME_FROM: dict[tuple[int, int], tuple[int, int, int]] = {
+    (4, 1): (1, 11, 0),
+}
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted version into comparable integers, ignoring any suffix."""
+    parts: list[int] = []
+    for chunk in version.split("."):
+        digits = ""
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def iceberg_runtime_suffix_for(spark_key: tuple[int, int], iceberg_version: str) -> str:
+    """Which Iceberg Spark runtime artifact to request.
+
+    Depends on both versions, not just Spark. Iceberg 1.11.0 publishes a native
+    Spark 4.1 runtime; 1.10.x does not, so a Spark 4.1 job on 1.10.x has to keep
+    borrowing the 4.0 jar. Choosing on Spark version alone would send those
+    users to ``iceberg-spark-runtime-4.1_2.13:1.10.1``, which does not exist,
+    and the failure would arrive as a Maven resolution error inside the driver.
+    """
+    native_from = _ICEBERG_NATIVE_RUNTIME_FROM.get(spark_key)
+    if native_from and _version_tuple(iceberg_version) >= native_from:
+        return f"{spark_key[0]}.{spark_key[1]}"
+    return _ICEBERG_RUNTIME_SUFFIX.get(spark_key, f"{spark_key[0]}.{spark_key[1]}")
+
+
+def iceberg_requires_java17(iceberg_version: str) -> bool:
+    """Whether this Iceberg release needs a Java 17 Spark image.
+
+    1.11.0 ships bytecode major 61; 1.10.x shipped 55. On a Java 11 image the
+    mismatch surfaces as UnsupportedClassVersionError at class load inside the
+    driver, well after lakebench has reported a successful submit.
+    """
+    return _version_tuple(iceberg_version)[:2] >= _ICEBERG_MIN_JAVA17_VERSION
 
 
 def _parse_spark_major(image: str) -> int:
@@ -625,7 +682,40 @@ def validate_format_version(spark_image: str, format_type: str, version: str) ->
 
     Raises ValueError if incompatible.
     """
-    resolve_format_version(spark_image, format_type, version)
+    resolved = resolve_format_version(spark_image, format_type, version)
+    if format_type == "iceberg":
+        validate_iceberg_java_runtime(spark_image, resolved)
+
+
+def validate_iceberg_java_runtime(spark_image: str, iceberg_version: str) -> None:
+    """Refuse Iceberg 1.11+ on a Spark image that ships Java 11.
+
+    Iceberg 1.11.0 is compiled to bytecode major 61 (Java 17); 1.10.x was 55
+    (Java 11). The mismatch is not caught at submit -- it surfaces as
+    UnsupportedClassVersionError when the driver loads the class, long after
+    lakebench has reported success, so the user sees a Spark stack trace with
+    no obvious connection to their Iceberg version.
+
+    Only Spark 3.5 images are affected: the tag encodes the JDK, and the
+    default 3.5.x image ships Java 11 while 4.x images ship 17.
+    """
+    if not iceberg_requires_java17(iceberg_version):
+        return
+
+    key = _parse_spark_major_minor(spark_image)
+    if key != (3, 5):
+        return
+
+    tag = spark_image.split(":")[-1]
+    if "java17" in tag or "java21" in tag:
+        return
+
+    raise ValueError(
+        f"Iceberg {iceberg_version} requires Java 17, but the Spark image "
+        f"'{spark_image}' ships Java 11. Use a java17 image tag "
+        f"(for example apache/spark:3.5.9-java17-python3), or pin Iceberg to "
+        f"1.10.1 for this Spark version."
+    )
 
 
 class JobType(Enum):
@@ -1037,9 +1127,10 @@ class SparkJobManager:
         spark_image_tag = cfg.images.spark.split(":")[-1]
         major_minor_key = _parse_spark_major_minor(cfg.images.spark)
         scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-        # Iceberg runtime artifact suffix (Spark 4.1 reuses the 4.0 runtime)
-        iceberg_runtime_suffix = _ICEBERG_RUNTIME_SUFFIX.get(
-            major_minor_key, f"{major_minor_key[0]}.{major_minor_key[1]}"
+        # Iceberg runtime artifact suffix. Depends on the Iceberg version too:
+        # only 1.11.0+ publishes a native Spark 4.1 runtime.
+        iceberg_runtime_suffix = iceberg_runtime_suffix_for(
+            major_minor_key, cfg.architecture.table_format.iceberg.version
         )
 
         # Catalog type needed for packages and catalog config

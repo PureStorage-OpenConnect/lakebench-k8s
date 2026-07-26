@@ -116,9 +116,11 @@ class TestFormatVersionResolution:
     def test_iceberg_auto_resolves_for_all_spark(self):
         from lakebench.spark.job import resolve_format_version
 
-        assert resolve_format_version("apache/spark:3.5.4-python3", "iceberg", "") == "1.10.1"
-        assert resolve_format_version("apache/spark:4.0.2-python3", "iceberg", "") == "1.10.1"
-        assert resolve_format_version("apache/spark:4.1.1-python3", "iceberg", "") == "1.10.1"
+        # Spark 3.5 resolves the same version, but pairing it with a Java 11
+        # image is refused separately by validate_iceberg_java_runtime.
+        assert resolve_format_version("apache/spark:3.5.4-python3", "iceberg", "") == "1.11.0"
+        assert resolve_format_version("apache/spark:4.0.2-python3", "iceberg", "") == "1.11.0"
+        assert resolve_format_version("apache/spark:4.1.1-python3", "iceberg", "") == "1.11.0"
 
     def test_delta_not_supported_on_spark_35(self):
         from lakebench.spark.job import resolve_format_version
@@ -556,14 +558,14 @@ class TestConfigAutoResolve:
     """Tests for format version auto-resolution at config load time."""
 
     def test_iceberg_default_unchanged_spark40(self):
-        """Spark 4.0.2 + Iceberg default 1.10.1 stays 1.10.1."""
+        """Spark 4.0.2 keeps the schema default rather than downgrading it."""
         cfg = _make_config(images={"spark": "apache/spark:4.0.2-python3"})
-        assert cfg.architecture.table_format.iceberg.version == "1.10.1"
+        assert cfg.architecture.table_format.iceberg.version == "1.11.0"
 
     def test_iceberg_default_unchanged_spark41(self):
-        """Spark 4.1.1 + Iceberg default 1.10.1 stays 1.10.1."""
+        """Spark 4.1.1 keeps the schema default rather than downgrading it."""
         cfg = _make_config(images={"spark": "apache/spark:4.1.1-python3"})
-        assert cfg.architecture.table_format.iceberg.version == "1.10.1"
+        assert cfg.architecture.table_format.iceberg.version == "1.11.0"
 
     def test_delta_default_spark41_auto_resolves(self):
         """Spark 4.1.1 + Delta auto-resolves to 4.1.0 (Delta 4.0 is incompatible with Spark 4.1)."""

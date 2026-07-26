@@ -436,7 +436,11 @@ class CatalogConfig(BaseModel):
 class IcebergConfig(BaseModel):
     """Apache Iceberg table format configuration."""
 
-    version: str = "1.10.1"
+    # 1.11.0 is the first release compiled for Java 17 and the first to publish
+    # a native Spark 4.1 runtime. Spark 3.5 images must use a java17 tag with
+    # this version; validate_iceberg_java_runtime() refuses the combination
+    # rather than letting it fail inside the driver.
+    version: str = "1.11.0"
     file_format: FileFormatType = FileFormatType.PARQUET
     properties: dict[str, Any] = Field(default_factory=dict)
 

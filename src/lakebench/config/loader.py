@@ -496,7 +496,7 @@ architecture:
   # table_format:
   #   type: iceberg                  # iceberg (only fully supported format)
   #   iceberg:
-  #     version: "1.10.1"
+  #     version: "1.11.0"
   #     file_format: parquet         # parquet | orc | avro
   #     properties: {}               # Additional Iceberg table properties
 

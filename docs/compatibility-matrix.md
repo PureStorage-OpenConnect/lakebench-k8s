@@ -42,7 +42,7 @@ All 11 recipes support all three pipeline modes:
 |-----------|----------------|--------------|-------|
 | Apache Spark | 3.5.4, 4.0.2, 4.1.1 | 4.0.2 or 4.1.1 | Delta requires Spark 4.x |
 | Spark Operator | 2.4.0 | 2.4.0 | Kubeflow Spark Operator |
-| Apache Iceberg | 1.10.1 (auto) | -- | Auto-selected based on Spark version |
+| Apache Iceberg | 1.11.0 (auto) | -- | Auto-selected based on Spark version. 1.11.0 requires Java 17 -- see below. |
 | Delta Lake | -- | 4.0.0 or 4.1.0 (auto) | Auto-selected based on Spark version |
 | Hive Metastore | 3.1.3 | 3.1.3 | Stackable 25.7.0 |
 | Apache Polaris | 1.3.0-incubating | -- | Iceberg-only |
@@ -55,16 +55,56 @@ All 11 recipes support all three pipeline modes:
 Format versions are **auto-selected** based on the Spark image version. Users can override
 with an explicit version -- incompatible combinations are rejected at config load time.
 
-| Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.10.1 | Iceberg 1.10.0 |
-|-------|-------------|-------------|----------------|----------------|
-| 3.5.x | -- | -- | **Default** | OK |
-| 4.0.x (default) | **Default** | -- | **Default** | OK |
-| 4.1.x | -- | **Default** | **Default** | OK |
+| Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.11.0 | Iceberg 1.10.1 | Iceberg 1.10.0 |
+|-------|-------------|-------------|----------------|----------------|----------------|
+| 3.5.x | -- | -- | **Default** (needs java17 image) | OK | OK |
+| 4.0.x (default) | **Default** | -- | **Default** | OK | OK |
+| 4.1.x | -- | **Default** | **Default** | OK | OK |
 
 **Default** = auto-selected when no version specified. **OK** = accepted if user overrides. **--** = rejected.
 
 Spark 4.0/4.1 runtime artifacts only exist for Iceberg 1.10.0+. Older Iceberg
 versions (1.5.x--1.9.x) are compatible with Spark 3.5.x only.
+
+### Iceberg 1.11.0 requires Java 17
+
+Iceberg 1.11.0 is compiled to Java 17 bytecode; 1.10.x was Java 11. Every
+Spark 4.x image already ships Java 17, so only Spark 3.5 is affected --
+`apache/spark:3.5.4-python3` ships Java 11 and will fail at class load with
+`UnsupportedClassVersionError`.
+
+On Spark 3.5, either use a java17 image tag:
+
+```yaml
+images:
+  spark: apache/spark:3.5.9-java17-python3
+```
+
+or pin Iceberg to the last Java 11 release:
+
+```yaml
+architecture:
+  table_format:
+    iceberg:
+      version: "1.10.1"
+```
+
+Lakebench rejects the bad pairing at config load rather than letting it fail
+inside the Spark driver.
+
+### Which runtime jar gets requested
+
+Iceberg does not publish the same set of Spark runtimes in every release, so
+the artifact depends on both versions:
+
+| Spark | Iceberg 1.10.x | Iceberg 1.11.0 |
+|-------|----------------|----------------|
+| 3.5.x | `3.5_2.12` | `3.5_2.12` |
+| 4.0.x | `4.0_2.13` | `4.0_2.13` |
+| 4.1.x | `4.0_2.13` (borrowed) | `4.1_2.13` (native) |
+
+Spark 4.1 borrows the 4.0 runtime on Iceberg 1.10.x because no 4.1 artifact
+exists there. 1.11.0 publishes one, so 4.1 uses it directly.
 
 Example:
 ```yaml

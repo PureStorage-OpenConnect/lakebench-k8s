@@ -25,7 +25,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "trino"},
         },
     },
@@ -33,7 +33,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "spark-thrift"},
         },
     },
@@ -41,7 +41,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "none"},
         },
     },
@@ -49,7 +49,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "trino"},
         },
     },
@@ -57,7 +57,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "spark-thrift"},
         },
     },
@@ -65,7 +65,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "none"},
         },
     },
@@ -73,7 +73,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "duckdb", "duckdb": {"cores": 2, "memory": "4g"}},
         },
     },
@@ -81,7 +81,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "polaris"},
-            "table_format": {"type": "iceberg", "iceberg": {"version": "1.10.1"}},
+            "table_format": {"type": "iceberg", "iceberg": {"version": "1.11.0"}},
             "query_engine": {"type": "duckdb", "duckdb": {"cores": 2, "memory": "4g"}},
         },
     },
