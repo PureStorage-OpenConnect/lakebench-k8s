@@ -504,6 +504,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.query_engine.duckdb.cores` | int | `2` | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | DuckDB memory. |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | Iceberg catalog name for DuckDB. |
+| `architecture.query_engine.duckdb.version` | string | `1.5.5` | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines while `compare` reports the difference as a result. |
 
 ### Architecture -- Pipeline
 

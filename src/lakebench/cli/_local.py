@@ -435,6 +435,7 @@ def benchmark_local(
         },
         cli=deployment.runtime_cli,
         workdir=str(duckdb_dir),
+        duckdb_version=cfg.architecture.query_engine.duckdb.version,
     )
 
     print_info("Warming DuckDB (first query installs extensions)")

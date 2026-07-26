@@ -393,3 +393,89 @@ class TestBenchmarkLocal:
 
         assert results == []
         assert qph == 0.0
+
+
+class TestDuckDBVersionPin:
+    """An unpinned engine turns `compare` into a comparison of two engines.
+
+    Both install sites ran a bare `pip install duckdb`, so a run in July and a
+    run in August could query with different versions while the tool reported
+    the difference as a benchmark result. Measured local spread is 0.9%, far
+    below what an engine change would move, so the drift was invisible.
+    """
+
+    def test_local_executor_pins_the_version(self):
+        from lakebench.modules.query_engines.duckdb.local_executor import LocalDuckDBExecutor
+
+        executor = LocalDuckDBExecutor(
+            endpoint="http://localhost:3900",
+            access_key="a",
+            secret_key="b",
+            warehouse_bucket="w",
+            duckdb_version="1.5.5",
+            workdir="/tmp/duckdb",
+        )
+        assert executor.duckdb_version == "1.5.5"
+
+    def test_config_version_reaches_the_executor(self, cfg, tmp_path):
+        """A pin nobody threads through the config is not a pin."""
+        from lakebench.cli._local import benchmark_local
+
+        cfg.architecture.query_engine.duckdb.version = "1.5.4"
+        captured = {}
+
+        class RecordingExecutor:
+            catalog_name = "lb"
+
+            def __init__(self, *a, **k):
+                captured.update(k)
+
+            def health_check(self):
+                return False
+
+        with mock.patch(
+            "lakebench.modules.query_engines.duckdb.local_executor.LocalDuckDBExecutor",
+            RecordingExecutor,
+        ):
+            benchmark_local(cfg, _deployment(tmp_path), workdir=tmp_path)
+
+        assert captured.get("duckdb_version") == "1.5.4"
+
+    def test_schema_default_is_pinned_not_floating(self):
+        from lakebench.config.schema import DuckDBConfig
+
+        version = DuckDBConfig().version
+        assert version and version[0].isdigit(), "version must be concrete, not 'latest'"
+
+    def test_running_version_comes_from_the_engine_not_config(self):
+        """Config states an intention; only the engine can confirm it."""
+        from lakebench.modules.query_engines.duckdb.local_executor import LocalDuckDBExecutor
+
+        executor = LocalDuckDBExecutor(
+            endpoint="http://localhost:3900",
+            access_key="a",
+            secret_key="b",
+            warehouse_bucket="w",
+            duckdb_version="1.5.5",
+            workdir="/tmp/duckdb",
+        )
+        # Engine reports something different from what was requested -- exactly
+        # the drift the pin exists to catch.
+        executor._reported_version = "1.5.4"
+        with mock.patch.object(executor, "execute_query", return_value=mock.Mock(success=True)):
+            assert executor.running_version() == "1.5.4"
+
+    def test_running_version_is_empty_when_the_query_fails(self):
+        """Distinguish "could not ask" from a mismatch."""
+        from lakebench.modules.query_engines.duckdb.local_executor import LocalDuckDBExecutor
+
+        executor = LocalDuckDBExecutor(
+            endpoint="http://localhost:3900",
+            access_key="a",
+            secret_key="b",
+            warehouse_bucket="w",
+            workdir="/tmp/duckdb",
+        )
+        executor._reported_version = "1.5.5"
+        with mock.patch.object(executor, "execute_query", return_value=mock.Mock(success=False)):
+            assert executor.running_version() == ""

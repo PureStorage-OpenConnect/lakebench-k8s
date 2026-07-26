@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # use into a mounted directory that persists between queries.
 DEFAULT_DUCKDB_IMAGE = "docker.io/python:3.11-slim"
 
+# Kept in step with DuckDBConfig.version. A floating install means two runs
+# weeks apart can query with different engines, which `compare` would report
+# as a result rather than as drift.
+DEFAULT_DUCKDB_VERSION = "1.5.5"
+
 
 class LocalDuckDBExecutor(DuckDBExecutor):
     """Runs benchmark queries against local Iceberg tables via DuckDB."""
@@ -45,6 +50,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         cli: str = "podman",
         image: str = DEFAULT_DUCKDB_IMAGE,
         workdir: str = "",
+        duckdb_version: str = DEFAULT_DUCKDB_VERSION,
     ) -> None:
         super().__init__(
             namespace="",
@@ -63,6 +69,10 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         self.cli = cli
         self.image = image
         self.workdir = workdir
+        self.duckdb_version = duckdb_version
+        # Filled in from the query payload: what the container actually loaded,
+        # as opposed to what was asked for.
+        self._reported_version = ""
 
     def engine_name(self) -> str:
         return "duckdb"
@@ -70,6 +80,22 @@ class LocalDuckDBExecutor(DuckDBExecutor):
     def health_check(self) -> bool:
         result = self.execute_query("SELECT 1")
         return result.success
+
+    def running_version(self) -> str:
+        """The DuckDB version the container actually loaded.
+
+        Asked of the engine rather than read from config: the pin is a request,
+        and only the running process can confirm it was honoured. This is the
+        check that would have caught the engine drifting under an unpinned
+        install.
+
+        Returns an empty string if the query failed, so callers can distinguish
+        "could not ask" from a version mismatch.
+        """
+        result = self.execute_query("SELECT 1")
+        if not result.success:
+            return ""
+        return self._reported_version
 
     def adapt_query(self, sql: str) -> str:
         """Rewrite catalog-qualified names to iceberg_scan over the local paths.
@@ -116,7 +142,11 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 f"conn.execute(\"SET s3_secret_access_key='{self.secret_key}'\")",
                 "conn.execute('SET unsafe_enable_version_guessing = true')",
                 "rows = conn.execute(sql).fetchall()",
-                "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))",
+                # Report the engine version alongside every result. The pin is
+                # only a request; this is what proves the container honoured it.
+                "ver = conn.execute('SELECT version()').fetchone()[0]",
+                "print(json.dumps({'rows': len(rows), 'version': ver, "
+                "'data': [str(r) for r in rows[:100]]}))",
             ]
         )
 
@@ -149,7 +179,8 @@ class LocalDuckDBExecutor(DuckDBExecutor):
             self.image,
             "sh",
             "-c",
-            "pip install --quiet --user duckdb 2>/dev/null; python /duckdb/run.py",
+            f"pip install --quiet --user duckdb=={self.duckdb_version} 2>/dev/null; "
+            "python /duckdb/run.py",
         ]
 
         start = time.monotonic()
@@ -201,6 +232,8 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 raw_output=output,
                 error="Query produced no result (it did not run)",
             )
+
+        self._reported_version = str(payload.get("version", "")).lstrip("v")
 
         return QueryExecutorResult(
             sql=sql,

@@ -383,6 +383,7 @@ class DeploymentEngine:
                 cfg.architecture.query_engine.duckdb.memory
             ),
             "duckdb_catalog_name": cfg.architecture.query_engine.duckdb.catalog_name,
+            "duckdb_version": cfg.architecture.query_engine.duckdb.version,
             # Observability
             "observability_enabled": cfg.observability.enabled,
         }

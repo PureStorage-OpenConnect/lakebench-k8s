@@ -497,6 +497,12 @@ class DuckDBConfig(BaseModel):
     cores: int = 2
     memory: str = "4g"
     catalog_name: str = "lakehouse"
+    # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
+    # so every deploy took whatever was current and two runs weeks apart could
+    # compare different query engines while reporting the difference as a
+    # result. Measured local run-to-run spread is 0.9%, well below what an
+    # engine change would move, so the drift was invisible to the noise floor.
+    version: str = "1.5.5"
 
 
 class QueryEngineConfig(BaseModel):
