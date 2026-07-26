@@ -177,6 +177,90 @@ class TestRunLocal:
         assert spark_config.endpoint == "http://localhost:3900"
 
 
+class TestLocalDriverLogsAreKept:
+    """Input sizes and row counts exist only in the driver's own output.
+
+    Local mode has no driver pod to fetch logs from after the fact, so if
+    run_local drops the output the numbers are gone for good and every
+    per-stage throughput in metrics.json silently reports zero.
+    """
+
+    def _runner_with_output(self, output):
+        runner = mock.Mock()
+        runner.run_job.side_effect = [
+            JobResult(
+                job_id=name,
+                job_type=name,
+                success=True,
+                elapsed_seconds=1.0,
+                details={"output": output},
+            )
+            for name in LOCAL_JOB_ORDER
+        ]
+        return runner
+
+    def test_driver_output_is_carried_per_stage(self, iceberg_config, tmp_path):
+        runner = self._runner_with_output("some driver output")
+        with mock.patch("lakebench.cli._local.LocalSparkRunner", return_value=runner):
+            result = run_local(iceberg_config, _deployment(tmp_path), workdir=tmp_path)
+
+        assert set(result.logs) == set(LOCAL_JOB_ORDER)
+        assert result.logs["silver-build"] == "some driver output"
+
+    def test_metrics_come_from_the_job_metrics_block(self, iceberg_config, tmp_path):
+        """The Spark scripts print sizes and rows; local mode must parse them."""
+        from lakebench.cli._run import _record_local_jobs
+        from lakebench.metrics import MetricsCollector
+
+        stamp = "[lb] 2026-07-25T21:46:00.123456 - "
+        output = "\n".join(
+            [
+                f"{stamp}=== JOB METRICS: bronze-verify ===",
+                f"{stamp}input_size_gb: 1.034",
+                f"{stamp}estimated_rows: 12500000",
+                f"{stamp}output_rows: 12500000",
+                "=" * 60,
+            ]
+        )
+        result = LocalRunResult(
+            success=True,
+            elapsed_seconds=2.0,
+            stages=[("bronze-verify", True, 2.0)],
+            logs={"bronze-verify": output},
+        )
+
+        collector = MetricsCollector()
+        collector.start_run("run-1", "test", iceberg_config.model_dump(mode="json"))
+        _record_local_jobs(collector, iceberg_config, result)
+
+        job = collector.current_run.jobs[0]
+        assert job.input_size_gb == pytest.approx(1.034)
+        assert job.input_rows == 12500000
+        # Wall-clock from the runner wins: it includes JVM start and jar
+        # resolution, which the script never sees.
+        assert job.elapsed_seconds == pytest.approx(2.0)
+        assert job.throughput_gb_per_second == pytest.approx(0.517)
+
+    def test_missing_output_does_not_break_recording(self, iceberg_config, tmp_path):
+        """A job that dies before printing metrics must still be recorded."""
+        from lakebench.cli._run import _record_local_jobs
+        from lakebench.metrics import MetricsCollector
+
+        result = LocalRunResult(
+            success=False,
+            elapsed_seconds=1.0,
+            stages=[("bronze-verify", False, 1.0)],
+            logs={},
+        )
+        collector = MetricsCollector()
+        collector.start_run("run-1", "test", iceberg_config.model_dump(mode="json"))
+        _record_local_jobs(collector, iceberg_config, result)
+
+        job = collector.current_run.jobs[0]
+        assert job.success is False
+        assert job.input_size_gb == 0.0
+
+
 class TestLocalRunResult:
     def test_failed_stage_is_empty_when_everything_passed(self):
         result = LocalRunResult(

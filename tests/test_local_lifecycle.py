@@ -323,7 +323,7 @@ class TestBenchmarkLocal:
 
             def execute_query(self, sql, timeout=300):
                 executed.append(sql)
-                return mock.Mock(success=True, duration_seconds=1.0, error=None)
+                return mock.Mock(success=True, duration_seconds=1.0, error=None, rows_returned=42)
 
         with mock.patch(
             "lakebench.modules.query_engines.duckdb.local_executor.LocalDuckDBExecutor",
@@ -337,6 +337,18 @@ class TestBenchmarkLocal:
             assert "{catalog}" not in sql
             assert "{silver_table}" not in sql
             assert "{gold_table}" not in sql
+
+    def test_rows_returned_reaches_the_recorded_queries(self, cfg, tmp_path):
+        """A query that returns no rows read nothing; the report must show that."""
+        from lakebench.cli._run import _record_local_queries
+        from lakebench.metrics import MetricsCollector
+
+        collector = MetricsCollector()
+        collector.start_run("run-1", "test", cfg.model_dump(mode="json"))
+        _record_local_queries(collector, cfg, [("Q1", True, 2.0, 1234)], qph=100.0)
+
+        recorded = collector.current_run.benchmark.queries[0]
+        assert recorded["rows_returned"] == 1234
 
     def test_qph_is_zero_when_everything_fails(self, cfg, tmp_path):
         class FailingExecutor:
@@ -352,7 +364,7 @@ class TestBenchmarkLocal:
                 return sql
 
             def execute_query(self, sql, timeout=300):
-                return mock.Mock(success=False, duration_seconds=1.0, error="nope")
+                return mock.Mock(success=False, duration_seconds=1.0, error="nope", rows_returned=0)
 
         with mock.patch(
             "lakebench.modules.query_engines.duckdb.local_executor.LocalDuckDBExecutor",
@@ -361,7 +373,7 @@ class TestBenchmarkLocal:
             results, qph = benchmark_local(cfg, _deployment(tmp_path), workdir=tmp_path)
 
         assert qph == 0.0
-        assert all(not ok for _, ok, _ in results)
+        assert all(not ok for _, ok, _, _ in results)
 
     def test_unhealthy_engine_skips_rather_than_reporting_zeros(self, cfg, tmp_path):
         class DeadExecutor:

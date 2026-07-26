@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from rich.panel import Panel
@@ -56,6 +56,11 @@ class LocalRunResult:
     success: bool
     elapsed_seconds: float
     stages: list[tuple[str, bool, float]]
+    # Driver output per stage, keyed by stage name. The Spark scripts print a
+    # "=== JOB METRICS ===" block that carries input sizes and row counts, and
+    # it is the only place those numbers exist -- local mode has no driver pod
+    # to fetch logs from afterwards, so the output must be kept here or lost.
+    logs: dict[str, str] = field(default_factory=dict)
 
     @property
     def failed_stage(self) -> str:
@@ -399,12 +404,14 @@ def benchmark_local(
     deployment: LocalDeployment,
     workdir: Path | None = None,
     timeout: int = 300,
-) -> tuple[list[tuple[str, bool, float]], float]:
+) -> tuple[list[tuple[str, bool, float, int]], float]:
     """Run the query benchmark locally with DuckDB.
 
-    Returns (per-query results, queries per hour). QpH uses the same definition
-    as the cluster path -- 3600 / mean successful query time * query count --
-    so a local number is comparable in kind, though obviously not in magnitude.
+    Returns (per-query results, queries per hour). Each result is
+    (name, success, elapsed_seconds, rows_returned). QpH uses the same
+    definition as the cluster path -- successful queries / total seconds *
+    3600 -- so a local number is comparable in kind, though obviously not in
+    magnitude.
     """
     from lakebench.benchmark import BENCHMARK_QUERIES
     from lakebench.modules.pipeline_engines.spark.local_job import LOCAL_WAREHOUSE_LAYER
@@ -438,7 +445,7 @@ def benchmark_local(
     silver_table = "silver.customer_interactions_enriched"
     gold_table = "gold.customer_executive_dashboard"
 
-    results: list[tuple[str, bool, float]] = []
+    results: list[tuple[str, bool, float, int]] = []
     durations: list[float] = []
     for query in BENCHMARK_QUERIES:
         # Queries are templates: substitute the table names first, then let the
@@ -450,7 +457,9 @@ def benchmark_local(
             gold_table=gold_table,
         )
         outcome = executor.execute_query(executor.adapt_query(sql), timeout=timeout)
-        results.append((query.name, outcome.success, outcome.duration_seconds))
+        results.append(
+            (query.name, outcome.success, outcome.duration_seconds, outcome.rows_returned)
+        )
         if outcome.success:
             durations.append(outcome.duration_seconds)
             print_success(f"{query.name} ({outcome.duration_seconds:.2f}s)")
@@ -463,7 +472,7 @@ def benchmark_local(
     return results, qph
 
 
-def print_local_benchmark(results: list[tuple[str, bool, float]], qph: float) -> None:
+def print_local_benchmark(results: list[tuple[str, bool, float, int]], qph: float) -> None:
     """Render the local benchmark results."""
     if not results:
         return
@@ -472,11 +481,12 @@ def print_local_benchmark(results: list[tuple[str, bool, float]], qph: float) ->
     table.add_column("Query", style="cyan")
     table.add_column("Result")
     table.add_column("Elapsed", justify="right")
-    for name, ok, elapsed in results:
+    table.add_column("Rows", justify="right")
+    for name, ok, elapsed, rows in results:
         marker = "[green]ok[/green]" if ok else "[red]failed[/red]"
-        table.add_row(name, marker, f"{elapsed:.2f}s")
+        table.add_row(name, marker, f"{elapsed:.2f}s", f"{rows:,}" if rows else "-")
 
-    passed = sum(1 for _, ok, _ in results if ok)
+    passed = sum(1 for _, ok, _, _ in results if ok)
     console.print()
     console.print(table)
     console.print()
@@ -551,12 +561,14 @@ def run_local(
     runner = LocalSparkRunner(spark_config, workdir=workdir, cli=deployment.runtime_cli)
 
     results: list[tuple[str, bool, float]] = []
+    logs: dict[str, str] = {}
     started = time.time()
 
     for stage in stages:
         console.print(f"[bold]Stage: {stage}[/bold]")
         outcome = runner.run_job(stage, timeout=timeout)
         results.append((stage, outcome.success, outcome.elapsed_seconds))
+        logs[stage] = (outcome.details or {}).get("output", "")
 
         if outcome.success:
             print_success(f"{stage} completed in {outcome.elapsed_seconds:.1f}s")
@@ -571,6 +583,7 @@ def run_local(
         success=all(ok for _, ok, _ in results) and len(results) == len(stages),
         elapsed_seconds=time.time() - started,
         stages=results,
+        logs=logs,
     )
 
 

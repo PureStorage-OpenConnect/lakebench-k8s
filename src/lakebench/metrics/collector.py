@@ -1450,6 +1450,56 @@ class MetricsCollector:
 
         return total_objects
 
+    def record_actual_sizes_local(
+        self,
+        s3_client: Any,
+        buckets: dict[str, str],
+    ) -> int:
+        """Measure per-layer sizes for a local run.
+
+        Local mode keeps one Iceberg warehouse root, so bucket names alone do
+        not identify a layer: sizing the gold bucket returns zero and sizing
+        silver returns silver plus gold. ``local_layer_prefix()`` supplies the
+        (bucket, prefix) pair that separates them, which is what keeps a local
+        scorecard comparable with a cluster one.
+
+        Args:
+            s3_client: :class:`~lakebench.s3.S3Client` instance.
+            buckets: Layer name to bucket name, for bronze, silver, and gold.
+
+        Returns:
+            Total object count across all layers (0 if unmeasurable).
+        """
+        from lakebench.modules.pipeline_engines.spark.local_job import local_layer_prefix
+
+        total_objects = 0
+        if not self.current_run:
+            return total_objects
+
+        for layer in ("bronze", "silver", "gold"):
+            bucket_layer, prefix = local_layer_prefix(layer)
+            bucket = buckets.get(bucket_layer, "")
+            if not bucket:
+                continue
+            try:
+                info = s3_client.get_bucket_size(bucket, prefix=prefix)
+                if info.size_bytes is None:
+                    continue
+                setattr(self.current_run, f"{layer}_size_gb", info.size_bytes / (1024**3))
+                total_objects += info.object_count or 0
+                logger.info(
+                    "Measured %s: %s objects, %.3f GB (%s/%s)",
+                    layer,
+                    f"{info.object_count or 0:,}",
+                    info.size_bytes / (1024**3),
+                    bucket,
+                    prefix or "",
+                )
+            except Exception as e:
+                logger.warning("Could not measure %s: %s", layer, e)
+
+        return total_objects
+
     def parse_driver_logs(self, logs: str, job_type: str) -> JobMetrics:
         """Parse Spark driver logs to extract metrics.
 
