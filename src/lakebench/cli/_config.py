@@ -124,12 +124,90 @@ def config_validate(
         Path,
         typer.Argument(help="Configuration file path", exists=True),
     ] = Path("lakebench.yaml"),
+    local: Annotated[
+        bool,
+        typer.Option("--local", help="Validate for local mode instead of Kubernetes"),
+    ] = False,
 ) -> None:
     """Validate configuration and test connectivity."""
+    if local:
+        _validate_local(config_file)
+        return
+
     # Delegate to the existing validate command
     from lakebench.cli import validate as _validate
 
     _validate(config_file)
+
+
+def _validate_local(config_file: Path) -> None:
+    """Validate a config for local mode.
+
+    The Kubernetes checks are actively misleading here: they report missing S3
+    credentials that Garage mints itself, missing Stackable operators local
+    mode never uses, and a missing Spark Operator it does not need. A user
+    following that advice would go looking for a cluster.
+    """
+    from lakebench.cli._local import LocalModeError, check_local_supported, scale_advisory
+    from lakebench.config import load_config
+    from lakebench.runtime.container import ContainerRuntimeError, detect_container_cli
+
+    console.print()
+    console.print(Panel(f"Validating for local mode:\n{config_file}", expand=False))
+    console.print()
+
+    passed, failed = 0, 0
+
+    try:
+        cfg = load_config(config_file)
+        console.print("  [green]+[/green] Config syntax valid")
+        passed += 1
+    except Exception as e:
+        console.print(f"  [red]x[/red] Config invalid: {e}")
+        raise typer.Exit(1)  # noqa: B904
+
+    try:
+        check_local_supported(cfg)
+        console.print("  [green]+[/green] Table format supported locally (Iceberg)")
+        passed += 1
+    except LocalModeError as e:
+        console.print(f"  [red]x[/red] {e}")
+        failed += 1
+
+    try:
+        cli = detect_container_cli()
+        console.print(f"  [green]+[/green] Container runtime available ({cli})")
+        passed += 1
+    except ContainerRuntimeError as e:
+        console.print(f"  [red]x[/red] {e}")
+        failed += 1
+
+    advisory = scale_advisory(cfg)
+    if advisory:
+        console.print(f"  [yellow]![/yellow] {advisory}")
+    else:
+        scale = cfg.architecture.workload.datagen.scale
+        console.print(f"  [green]+[/green] Scale {scale} is sized for one host")
+        passed += 1
+
+    console.print()
+    if failed:
+        console.print(
+            Panel(
+                f"[red]{passed} passed, {failed} failed[/red]",
+                title="Validation Failed",
+                expand=False,
+            )
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        Panel(
+            f"[green]{passed} passed[/green]\n\nRun: lakebench deploy {config_file} --local",
+            title="Ready",
+            expand=False,
+        )
+    )
 
 
 @config_app.command("storage")
@@ -257,6 +335,99 @@ def config_recommend(
         mode = None
 
     _recommend(mode=mode)
+
+
+@config_app.command("recipes")
+def config_recipes(
+    local: Annotated[
+        bool,
+        typer.Option("--local", help="Show only recipes that run in local mode"),
+    ] = False,
+    name: Annotated[
+        str | None,
+        typer.Argument(help="Show full detail for one recipe"),
+    ] = None,
+) -> None:
+    """List architecture recipes and what each one trades off.
+
+    A recipe name says which components are used. This adds what the choice
+    costs and what it cannot do, so an architecture can be picked without
+    first running it and finding out.
+    """
+    from lakebench.config.recipes import (
+        RECIPE_DESCRIPTIONS,
+        RECIPES,
+        get_recipe_note,
+        local_recipes,
+    )
+
+    names = [n for n in sorted(RECIPES) if n != "default"]
+    if local:
+        names = [n for n in names if n in local_recipes()]
+
+    if name:
+        if name not in RECIPES:
+            available = ", ".join(sorted(n for n in RECIPES if n != "default"))
+            console.print(f"[red]Unknown recipe:[/red] {name}")
+            console.print(f"  Available: {available}")
+            raise typer.Exit(1)
+        _print_recipe_detail(name)
+        return
+
+    if not names:
+        console.print("[yellow]No recipes match.[/yellow]")
+        return
+
+    table = Table(show_header=True, header_style="bold", box=None)
+    table.add_column("Recipe", style="cyan", no_wrap=True)
+    table.add_column("Choose when")
+    table.add_column("Local", justify="center")
+
+    for recipe_name in names:
+        note = get_recipe_note(recipe_name)
+        table.add_row(
+            recipe_name,
+            note.when if note else RECIPE_DESCRIPTIONS.get(recipe_name, ""),
+            "[green]yes[/green]" if note and note.runs_locally else "[dim]no[/dim]",
+        )
+
+    console.print()
+    console.print(table)
+    console.print()
+    console.print("[dim]lakebench config recipes <name> for caveats and detail.[/dim]")
+    if not local:
+        console.print("[dim]lakebench config recipes --local for what runs on a laptop.[/dim]")
+
+
+def _print_recipe_detail(name: str) -> None:
+    """Print one recipe's components and caveats."""
+    from lakebench.config.recipes import RECIPES, get_recipe_note
+
+    recipe = RECIPES[name]
+    arch = recipe.get("architecture", {})
+    note = get_recipe_note(name)
+
+    lines = [
+        f"[bold]{name}[/bold]",
+        "",
+        f"  Catalog:      {arch.get('catalog', {}).get('type', '-')}",
+        f"  Table format: {arch.get('table_format', {}).get('type', '-')}",
+        f"  Query engine: {arch.get('query_engine', {}).get('type', '-')}",
+    ]
+    if note:
+        lines += ["", f"  {note.when}"]
+        if note.runs_locally:
+            lines.append("  Runs locally with --local.")
+
+    console.print()
+    console.print(Panel("\n".join(lines), expand=False))
+
+    if note and note.caveats:
+        console.print()
+        console.print("[bold]Caveats[/bold]")
+        for caveat in note.caveats:
+            console.print(f"  [yellow]*[/yellow] {caveat}")
+    console.print()
 
 
 @config_app.command("upgrade")

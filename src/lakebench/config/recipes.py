@@ -11,6 +11,7 @@ One alias exists: ``default`` = ``hive-iceberg-spark-trino``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -129,6 +130,115 @@ RECIPE_DESCRIPTIONS: dict[str, str] = {
     "hive-delta-spark-thrift": "Hive + Delta + Spark + Spark Thrift",
     "hive-delta-spark-none": "Hive + Delta + Spark, no query engine",
 }
+
+
+@dataclass(frozen=True)
+class RecipeNote:
+    """What choosing a recipe costs and what it cannot do.
+
+    A recipe name says what the components are; it says nothing about the
+    trade-off. Someone comparing architectures needs both, and these are the
+    facts that otherwise only surface after a failed run. ``caveats`` entries
+    cite the CLAUDE.md gotcha number where one applies.
+    """
+
+    when: str
+    caveats: tuple[str, ...] = ()
+    runs_locally: bool = False
+
+
+# Keep an entry per recipe. A recipe with no note is a recipe whose trade-offs
+# nobody has written down, which is what this table exists to prevent.
+RECIPE_NOTES: dict[str, RecipeNote] = {
+    "hive-iceberg-spark-trino": RecipeNote(
+        when="The baseline. Start here unless you have a reason not to.",
+        caveats=("Deploys PostgreSQL, Hive Metastore, and Trino: the heaviest footprint.",),
+    ),
+    "hive-iceberg-spark-thrift": RecipeNote(
+        when="Query through Spark itself rather than a separate engine.",
+        caveats=(
+            "Spark Thrift shares the Spark runtime, so query and pipeline resources compete.",
+        ),
+    ),
+    "hive-iceberg-spark-duckdb": RecipeNote(
+        when="Single-node querying with the smallest possible query tier.",
+        caveats=(
+            "DuckDB reads Iceberg but cannot run maintenance: no "
+            "expire_snapshots or remove_orphan_files, so sustained runs "
+            "accumulate metadata.",
+            "Needs HOME=/tmp on OpenShift; the non-root UID cannot write ~/.local.",
+        ),
+        runs_locally=True,
+    ),
+    "hive-iceberg-spark-none": RecipeNote(
+        when="Measure the pipeline alone, with no query benchmark.",
+        caveats=("No query engine, so QpH is not produced and --skip-benchmark is implied.",),
+    ),
+    "polaris-iceberg-spark-trino": RecipeNote(
+        when="A REST catalog instead of Thrift, closer to a managed lakehouse.",
+        caveats=(
+            "Bootstrap is not idempotent and adds roughly 300s to deploy, "
+            "against ~150s for Hive. (gotcha 12)",
+            "Requires Polaris 1.3.0+; earlier versions fail on object stores "
+            "without STS. (gotcha 9)",
+            "Trino needs oauth2.scope=PRINCIPAL_ROLE:ALL, which exists only in "
+            "Trino 454+. (gotcha 14)",
+        ),
+    ),
+    "polaris-iceberg-spark-thrift": RecipeNote(
+        when="REST catalog with Spark-native querying.",
+        caveats=("Polaris bootstrap adds roughly 300s to deploy. (gotcha 12)",),
+    ),
+    "polaris-iceberg-spark-duckdb": RecipeNote(
+        when="REST catalog with the lightest query tier.",
+        caveats=(
+            "Polaris bootstrap adds roughly 300s to deploy. (gotcha 12)",
+            "DuckDB cannot run Iceberg maintenance.",
+        ),
+    ),
+    "polaris-iceberg-spark-none": RecipeNote(
+        when="Exercise the REST catalog path without a query engine.",
+        caveats=("Polaris bootstrap adds roughly 300s to deploy. (gotcha 12)",),
+    ),
+    "hive-delta-spark-trino": RecipeNote(
+        when="Compare Delta against Iceberg on the same pipeline.",
+        caveats=(
+            "Pre-benchmark OPTIMIZE is skipped: it rewrites the whole table in "
+            "one pass and exhausts Trino worker memory. (gotcha 21)",
+            "Delta version must match the Spark minor -- 4.0 for Spark 4.0, "
+            "4.1 for Spark 4.1. Leave version at auto. (gotcha 31)",
+        ),
+    ),
+    "hive-delta-spark-thrift": RecipeNote(
+        when="Delta queried through Spark rather than Trino.",
+        caveats=(
+            "Q2 of the benchmark is a known failure: delta-spark 4.0 throws "
+            "ClassCastException on MIN/MAX over a date partition column. "
+            "(gotcha 22)",
+            "Pre-benchmark OPTIMIZE is skipped; it exhausts Thrift memory. (gotcha 21)",
+        ),
+    ),
+    "hive-delta-spark-none": RecipeNote(
+        when="Measure the Delta pipeline with no query engine.",
+        caveats=("No query engine, so QpH is not produced.",),
+    ),
+}
+
+
+def get_recipe_note(name: str) -> RecipeNote | None:
+    """Return the trade-off note for a recipe, resolving the 'default' alias."""
+    if name == "default":
+        name = "hive-iceberg-spark-trino"
+    return RECIPE_NOTES.get(name)
+
+
+def local_recipes() -> tuple[str, ...]:
+    """Recipes that run under ``--local``.
+
+    Local mode is Iceberg-only (DuckDB cannot read Delta on non-AWS S3) and
+    uses a hadoop catalog, so nothing that needs a catalog service qualifies.
+    """
+    return tuple(sorted(n for n, note in RECIPE_NOTES.items() if note.runs_locally))
 
 
 def _deep_setdefault(target: dict, defaults: dict) -> None:

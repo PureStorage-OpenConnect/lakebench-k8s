@@ -941,6 +941,84 @@ _SUPPORTED_COMBINATIONS = [
 ]
 
 
+# Why a combination is unsupported, keyed by the pair that causes it.
+#
+# A rejection that only prints the valid list makes the user diff their request
+# against it to work out what they did wrong, and teaches them nothing. Every
+# entry here is a real limitation that cost someone a debugging session; the
+# gotcha numbers refer to the list in CLAUDE.md.
+#
+# Keys are checked most-specific first: a full 4-tuple, then (table_format,
+# query_engine), then (catalog, table_format).
+_COMBINATION_NOTES: dict[tuple[str, ...], str] = {
+    ("delta", "duckdb"): (
+        "DuckDB cannot read Delta on non-AWS S3. Its delta extension uses "
+        "delta-kernel-rs, which ignores DuckDB's httpfs S3 settings and tries "
+        "AWS IMDS (169.254.169.254) for credentials -- that hangs indefinitely "
+        "against a non-AWS endpoint. There is no way to pass a custom endpoint "
+        "to the delta kernel. The iceberg extension has no such limitation. "
+        "(gotcha 18)"
+    ),
+    ("polaris", "delta"): (
+        "Polaris is an Iceberg-native REST catalog and has no Delta Lake "
+        "support. Use Hive as the catalog for Delta tables."
+    ),
+    ("unity", "iceberg"): (
+        "OSS Unity Catalog's Iceberg REST API is read-only (GET only), and "
+        "UCSingleCatalog 0.4.0 cannot write Iceberg from Spark 4.0. "
+        "(gotcha 19)"
+    ),
+    ("unity", "delta", "spark", "trino"): (
+        "Trino's Delta Lake connector requires a Hive Metastore "
+        "(hive.metastore.uri), and Unity deployments do not include one. "
+        "Trino has no native OSS Unity integration for Delta. (gotcha 25)"
+    ),
+}
+
+
+def explain_combination(
+    catalog: str, table_format: str, pipeline_engine: str, query_engine: str
+) -> str:
+    """Return why a component combination is unsupported, or '' if unknown.
+
+    Not every rejected combination has a recorded reason -- some are simply
+    untested rather than known-broken -- so callers must handle an empty
+    string.
+    """
+    for key in (
+        (catalog, table_format, pipeline_engine, query_engine),
+        (table_format, query_engine),
+        (catalog, table_format),
+    ):
+        note = _COMBINATION_NOTES.get(key)
+        if note:
+            return note
+    return ""
+
+
+def nearest_supported(
+    catalog: str, table_format: str, pipeline_engine: str, query_engine: str
+) -> tuple[str, ...] | None:
+    """Return the supported combination closest to the one requested.
+
+    "Closest" is the fewest component swaps. Ties break toward changing the
+    query engine before the catalog or format, since the query engine is
+    usually the least consequential choice and the one a user is most willing
+    to change.
+    """
+    requested = (catalog, table_format, pipeline_engine, query_engine)
+    # Later positions are cheaper to change, so weight earlier ones higher.
+    weights = (8, 4, 2, 1)
+
+    best: tuple[str, ...] | None = None
+    best_cost = 99
+    for candidate in _SUPPORTED_COMBINATIONS:
+        cost = sum(w for w, r, c in zip(weights, requested, candidate, strict=True) if r != c)
+        if cost < best_cost:
+            best, best_cost = candidate, cost
+    return best
+
+
 class TableNamesConfig(BaseModel):
     """Fully-qualified Iceberg table names (namespace.table).
 
@@ -1044,16 +1122,32 @@ class ArchitectureConfig(BaseModel):
             self.query_engine.type.value,
         )
         if combo not in _SUPPORTED_COMBINATIONS:
+            parts = [
+                f"Unsupported component combination: catalog={combo[0]}, "
+                f"table_format={combo[1]}, engine={combo[2]}, "
+                f"query_engine={combo[3]}."
+            ]
+
+            # Lead with why, not with the list. The reason is what stops the
+            # user retrying a variation that fails for the same cause.
+            reason = explain_combination(*combo)
+            if reason:
+                parts.append(f"\nWhy: {reason}")
+
+            nearest = nearest_supported(*combo)
+            if nearest:
+                parts.append(
+                    f"\nClosest supported: catalog={nearest[0]}, "
+                    f"table_format={nearest[1]}, engine={nearest[2]}, "
+                    f"query_engine={nearest[3]}"
+                )
+
             supported = "\n".join(
                 f"  - catalog={c}, table_format={t}, engine={e}, query_engine={q}"
                 for c, t, e, q in _SUPPORTED_COMBINATIONS
             )
-            raise ValueError(
-                f"Unsupported component combination: catalog={combo[0]}, "
-                f"table_format={combo[1]}, engine={combo[2]}, "
-                f"query_engine={combo[3]}.\n"
-                f"Supported combinations:\n{supported}"
-            )
+            parts.append(f"\nAll supported combinations:\n{supported}")
+            raise ValueError("\n".join(parts))
         return self
 
 
