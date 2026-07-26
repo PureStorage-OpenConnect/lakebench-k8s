@@ -59,6 +59,16 @@ class LocalDeployment:
     def endpoint(self) -> str:
         return self.credentials.endpoint
 
+    @property
+    def port(self) -> int:
+        """Host port Garage actually published on.
+
+        Not necessarily the configured default: a second stack on the same host
+        is allocated the next free port.
+        """
+        _, _, tail = self.credentials.endpoint.rpartition(":")
+        return int(tail) if tail.isdigit() else 0
+
 
 class LocalDeployer:
     """Deploys and tears down the local stack.

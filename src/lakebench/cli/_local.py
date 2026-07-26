@@ -197,10 +197,14 @@ def status_local(
     if not info["running"]:
         return info
 
-    info["endpoint"] = f"http://localhost:{_DEFAULT_S3_PORT}"
+    # Read the port off the running container rather than assuming the
+    # default: a second stack on this host is published somewhere else.
     creds = _running_credentials(cfg, workdir, cli)
     if creds:
+        info["endpoint"] = creds.endpoint
         info["buckets"] = _measure_layers(cfg, creds)
+    else:
+        info["endpoint"] = f"http://localhost:{_DEFAULT_S3_PORT}"
     return info
 
 
@@ -210,7 +214,7 @@ def _running_credentials(cfg: LakebenchConfig, workdir: Path, cli: str) -> Garag
     ``deploy_local`` would also return them, but calling it from ``status``
     would start containers as a side effect of asking a question.
     """
-    from lakebench.deploy.garage import GarageDeployer
+    from lakebench.deploy.garage import COMPONENT, GarageDeployer
     from lakebench.runtime.container import ContainerRuntime, detect_container_cli
 
     try:
@@ -220,6 +224,11 @@ def _running_credentials(cfg: LakebenchConfig, workdir: Path, cli: str) -> Garag
             config_dir=str(workdir / "garage"),
             region=cfg.platform.storage.s3.region,
         )
+        # Take the port from the running container: the deployer's default is
+        # only a starting point, and a second stack lands elsewhere.
+        published = runtime.published_ports(COMPONENT)
+        if published:
+            deployer.port = published[0]
         return deployer.read_credentials()
     except Exception as e:  # noqa: BLE001
         logger.debug("Could not read local credentials: %s", e)

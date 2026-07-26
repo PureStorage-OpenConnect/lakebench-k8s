@@ -204,6 +204,32 @@ class ContainerRuntime:
         prefix = f"{self.namespace}-"
         return [n[len(prefix) :] if n.startswith(prefix) else n for n in self._managed_names()]
 
+    def published_ports(self, name: str) -> list[int]:
+        """Return every host port this container publishes.
+
+        Unlike ``host_port``, this does not require knowing the container port
+        in advance. Callers that publish a container on the same number they
+        bound it to cannot use ``host_port`` to find a running instance,
+        because doing so needs the answer they are looking for.
+        """
+        result = subprocess.run(  # noqa: S603
+            [self.cli, "inspect", self._qualified(name), "--format", "{{json .NetworkSettings}}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return []
+        try:
+            ports = (json.loads(result.stdout) or {}).get("Ports") or {}
+            found = []
+            for bindings in ports.values():
+                for binding in bindings or []:
+                    found.append(int(binding["HostPort"]))
+            return sorted(set(found))
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            return []
+
     def host_port(self, name: str, container_port: int) -> int | None:
         """Return the host port mapped to a container port, if any."""
         result = subprocess.run(  # noqa: S603

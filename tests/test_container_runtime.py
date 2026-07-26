@@ -229,13 +229,26 @@ class TestGarageDeployer:
         assert (tmp_path / "meta").is_dir(), "bind-mount target must exist on the host"
         assert (tmp_path / "data").is_dir()
 
-    def test_config_carries_region_and_port(self, tmp_path):
+    def test_config_carries_region(self, tmp_path):
         rt = self._runtime()
         rt.exec.return_value = (0, "Key ID: GKabc\nSecret key: s3cret\n")
         GarageDeployer(rt, config_dir=str(tmp_path), region="eu-west-1", port=4000).deploy()
+        assert 's3_region = "eu-west-1"' in (tmp_path / "garage.toml").read_text()
+
+    def test_config_binds_the_container_port_not_the_host_port(self, tmp_path):
+        """LB-059: only the host side moves.
+
+        Writing the host port here would make Garage listen on a port podman is
+        not forwarding to. Worse, a host port of 3901 collides with Garage's own
+        RPC port inside the container, and the bootstrap hangs with
+        "not_configured: true, bad_peers: true" rather than failing.
+        """
+        rt = self._runtime()
+        rt.exec.return_value = (0, "Key ID: GKabc\nSecret key: s3cret\n")
+        GarageDeployer(rt, config_dir=str(tmp_path), port=4000).deploy()
         toml = (tmp_path / "garage.toml").read_text()
-        assert 's3_region = "eu-west-1"' in toml
-        assert 'api_bind_addr = "[::]:4000"' in toml
+        assert 'api_bind_addr = "[::]:3900"' in toml
+        assert "4000" not in toml
 
     def test_reuses_existing_key_instead_of_creating_duplicate(self, tmp_path):
         """garage key create is NOT idempotent: it silently makes duplicates."""

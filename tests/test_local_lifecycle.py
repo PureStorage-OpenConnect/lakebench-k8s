@@ -18,7 +18,13 @@ from lakebench.cli._local import (
     status_local,
 )
 from lakebench.config import load_config
-from lakebench.deploy.garage import GarageCredentials
+from lakebench.deploy.garage import (
+    _CONTAINER_S3_PORT,
+    GarageCredentials,
+    GarageDeployer,
+    GarageDeployError,
+    find_free_port,
+)
 from lakebench.deploy.local import LocalDeployment
 from lakebench.modules.query_engines.duckdb.local_executor import (
     LocalDuckDBExecutor,
@@ -135,6 +141,88 @@ class TestGenerateLocal:
         with mock.patch("lakebench.cli._local._empty_bronze", return_value=True):
             with mock.patch("subprocess.run", return_value=_completed(returncode=1, stderr="boom")):
                 assert generate_local(cfg, _deployment(tmp_path)) is False
+
+
+class TestPortAllocation:
+    """LB-059: two local stacks on one host must not collide."""
+
+    def test_preferred_port_wins_when_free(self):
+        with mock.patch("lakebench.deploy.garage.port_is_free", return_value=True):
+            assert find_free_port(3900) == 3900
+
+    def test_falls_through_to_the_next_free_port(self):
+        taken = {3900, 3901}
+        with mock.patch(
+            "lakebench.deploy.garage.port_is_free", side_effect=lambda p: p not in taken
+        ):
+            assert find_free_port(3900) == 3902
+
+    def test_exhausted_range_names_the_remedy(self):
+        with mock.patch("lakebench.deploy.garage.port_is_free", return_value=False):
+            with pytest.raises(GarageDeployError) as exc:
+                find_free_port(3900, attempts=3)
+        assert "3900" in str(exc.value)
+
+    def test_running_instance_keeps_its_port(self):
+        """Reallocating would hand callers an endpoint nothing listens on."""
+        runtime = mock.Mock()
+        runtime.published_ports.return_value = [3907]
+        deployer = GarageDeployer(runtime, config_dir="/tmp/x")
+
+        with mock.patch("lakebench.deploy.garage.find_free_port") as find:
+            assert deployer._resolve_port() == 3907
+        find.assert_not_called()
+
+    def test_fresh_deploy_searches_for_a_port(self):
+        runtime = mock.Mock()
+        runtime.published_ports.return_value = []
+        deployer = GarageDeployer(runtime, config_dir="/tmp/x")
+
+        with mock.patch("lakebench.deploy.garage.find_free_port", return_value=3903) as find:
+            assert deployer._resolve_port() == 3903
+        find.assert_called_once()
+
+    def test_container_port_never_moves(self):
+        """3901 is Garage's RPC port; moving S3 onto it hangs the bootstrap."""
+        assert _CONTAINER_S3_PORT == 3900
+
+    def test_credentials_carry_the_resolved_port(self):
+        deployment = LocalDeployment(
+            credentials=GarageCredentials(
+                access_key="k",
+                secret_key="s",
+                endpoint="http://localhost:3907",
+                region="us-east-1",
+            ),
+            runtime_cli="podman",
+            workdir=Path("/tmp"),
+            buckets=(),
+        )
+        assert deployment.port == 3907
+
+
+class TestPublishedPorts:
+    def test_returns_every_published_port(self):
+        from lakebench.runtime.container import ContainerRuntime
+
+        runtime = ContainerRuntime(cli="podman", namespace="ns")
+        payload = '{"Ports": {"3900/tcp": [{"HostPort": "3901"}]}}'
+        with mock.patch("subprocess.run", return_value=_completed(stdout=payload)):
+            assert runtime.published_ports("garage") == [3901]
+
+    def test_missing_container_returns_empty(self):
+        from lakebench.runtime.container import ContainerRuntime
+
+        runtime = ContainerRuntime(cli="podman", namespace="ns")
+        with mock.patch("subprocess.run", return_value=_completed(returncode=1)):
+            assert runtime.published_ports("garage") == []
+
+    def test_malformed_output_returns_empty(self):
+        from lakebench.runtime.container import ContainerRuntime
+
+        runtime = ContainerRuntime(cli="podman", namespace="ns")
+        with mock.patch("subprocess.run", return_value=_completed(stdout="not json")):
+            assert runtime.published_ports("garage") == []
 
 
 class TestDuckDBExecutor:

@@ -33,6 +33,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_IMAGE = "docker.io/dxflrs/garage:v1.0.1"
 DEFAULT_S3_PORT = 3900
+
+# The port Garage binds *inside* the container. Fixed, never varied: 3901 is
+# its RPC port, so letting the S3 API move onto it makes the node unable to
+# reach itself and bootstrap hangs with "not_configured: true, bad_peers:
+# true". Only the host-side publish port varies.
+_CONTAINER_S3_PORT = 3900
+
+# Host ports tried when the preferred one is taken, so two local stacks can
+# coexist. Starts above the RPC port to avoid confusion, though the container
+# side no longer moves.
+_PORT_SEARCH_RANGE = 20
 COMPONENT = "garage"
 
 # Garage refuses to start without an rpc_secret. For a single-node local
@@ -56,6 +67,43 @@ root_domain = ".s3.garage"
 """
 
 
+class GarageDeployError(RuntimeError):
+    """Garage could not be deployed or bootstrapped."""
+
+
+def port_is_free(port: int) -> bool:
+    """Whether a TCP port can be bound on the host.
+
+    Binds rather than connects: a connect probe cannot distinguish "nothing is
+    listening" from "something is listening but refusing", and the question
+    here is only whether the container can publish here.
+    """
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("", port))
+        except OSError:
+            return False
+    return True
+
+
+def find_free_port(preferred: int = DEFAULT_S3_PORT, attempts: int = _PORT_SEARCH_RANGE) -> int:
+    """Return ``preferred`` if free, else the next free port above it.
+
+    Raises:
+        GarageDeployError: if nothing in the range is available.
+    """
+    for candidate in range(preferred, preferred + attempts):
+        if port_is_free(candidate):
+            return candidate
+    raise GarageDeployError(
+        f"No free port between {preferred} and {preferred + attempts - 1}. "
+        "Stop an existing local stack, or pass an explicit port."
+    )
+
+
 @dataclass
 class GarageCredentials:
     """Credentials minted during bootstrap."""
@@ -64,10 +112,6 @@ class GarageCredentials:
     secret_key: str
     endpoint: str
     region: str
-
-
-class GarageDeployError(RuntimeError):
-    """Garage could not be deployed or bootstrapped."""
 
 
 class GarageDeployer:
@@ -112,16 +156,23 @@ class GarageDeployer:
     def deploy(self, timeout: int = 180) -> GarageCredentials:
         """Start Garage, bootstrap it, and return usable credentials.
 
+        Idempotent with respect to the port: an already-running instance keeps
+        the port it was published on. Reallocating would hand callers an
+        endpoint nothing is listening on, and ``run --local`` reconnects
+        through this method on every invocation.
+
         Raises:
             GarageDeployError: if the container does not become ready or the
                 bootstrap sequence fails.
         """
+        self.port = self._resolve_port()
         self._write_config()
 
         spec = ComponentSpec(
             name=COMPONENT,
             image=self.image,
-            ports=[ContainerPort(container_port=self.port, host_port=self.port)],
+            # Container side is fixed; only the host side moves.
+            ports=[ContainerPort(container_port=_CONTAINER_S3_PORT, host_port=self.port)],
             mounts=[
                 Mount(
                     source=f"{self.config_dir}/garage.toml",
@@ -148,6 +199,29 @@ class GarageDeployer:
         creds = self._create_key()
         self._create_buckets(creds)
         return creds
+
+    def _resolve_port(self) -> int:
+        """Pick the port to publish on.
+
+        Order matters. A running instance's own port wins, so reconnecting
+        never moves the endpoint. Otherwise the configured port is used if it
+        is free, and only then does the search start -- so a single stack on a
+        clean host always lands on 3900 and stays predictable.
+        """
+        # published_ports rather than host_port: Garage binds and publishes on
+        # the same number, so looking it up by container port would require
+        # already knowing the answer.
+        published = self.runtime.published_ports(COMPONENT)
+        if published:
+            existing = published[0]
+            if existing != self.port:
+                logger.info("Reusing running Garage on port %s", existing)
+            return existing
+
+        resolved = find_free_port(self.port)
+        if resolved != self.port:
+            logger.info("Port %s is in use; publishing Garage on %s", self.port, resolved)
+        return resolved
 
     def destroy(self) -> None:
         """Remove the Garage container. Data in the container is discarded."""
@@ -176,7 +250,12 @@ class GarageDeployer:
         (path / "meta").mkdir(exist_ok=True)
         (path / "data").mkdir(exist_ok=True)
         (path / "garage.toml").write_text(
-            CONFIG_TEMPLATE.format(rpc_secret=_LOCAL_RPC_SECRET, region=self.region, port=self.port)
+            # The config binds the container port, which never moves. Writing
+            # the host port here would make Garage listen somewhere podman is
+            # not forwarding to.
+            CONFIG_TEMPLATE.format(
+                rpc_secret=_LOCAL_RPC_SECRET, region=self.region, port=_CONTAINER_S3_PORT
+            )
         )
 
     def _garage(self, *args: str, check: bool = True) -> str:
