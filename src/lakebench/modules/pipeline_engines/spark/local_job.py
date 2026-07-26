@@ -42,6 +42,20 @@ _SCRIPTS = {
 _ICEBERG_RUNTIME = "org.apache.iceberg:iceberg-spark-runtime-4.0_2.13:1.10.1"
 _HADOOP_AWS = "org.apache.hadoop:hadoop-aws:3.4.1"
 
+# Which bucket holds the Iceberg warehouse locally. A hadoop catalog has one
+# root, so all three medallion layers live under it as namespaces rather than
+# one bucket per layer.
+#
+# Silver, not bronze: bronze holds the raw Parquet that datagen writes and that
+# bronze-verify reads, so keeping the warehouse out of it leaves the bronze
+# bucket measuring exactly the ingested data, as it does on the cluster. Silver
+# is also where the cluster puts the default warehouse for non-gold jobs.
+#
+# The consequence is that locally the silver bucket holds silver *and* gold,
+# and the gold bucket stays empty. Anything reading per-layer bucket sizes has
+# to account for that -- see local_layer_prefix().
+LOCAL_WAREHOUSE_LAYER = "silver"
+
 
 @dataclass
 class LocalSparkConfig:
@@ -110,17 +124,14 @@ class LocalSparkRunner:
     def _spark_conf(self, job_type: str) -> dict[str, str]:
         cfg = self.config
         memory, _, partitions = self._sizing(job_type)
-        warehouse = f"s3a://{cfg.bronze_bucket}/warehouse"
-        return {
+
+        conf = {
             "spark.driver.memory": memory,
             # Cluster defaults (200) are far too many for a single JVM over a
             # laptop-sized dataset; the scheduling overhead dominates the work.
             "spark.sql.shuffle.partitions": str(partitions),
             # LB-053: the image user has no home, so Ivy cannot write its cache.
             "spark.jars.ivy": "/work/ivy",
-            f"spark.sql.catalog.{cfg.catalog}": "org.apache.iceberg.spark.SparkCatalog",
-            f"spark.sql.catalog.{cfg.catalog}.type": "hadoop",
-            f"spark.sql.catalog.{cfg.catalog}.warehouse": warehouse,
             "spark.sql.extensions": (
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
             ),
@@ -135,8 +146,44 @@ class LocalSparkRunner:
             ).lower(),
             "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
         }
+        conf.update(self._catalog_conf())
+        return conf
 
-    def _env(self) -> dict[str, str]:
+    def _catalog_conf(self) -> dict[str, str]:
+        """Register the hadoop catalog.
+
+        The hadoop catalog has no metadata service: the warehouse root *is* the
+        namespace, and table metadata sits in the object store beside the data.
+        That is what removes PostgreSQL, Hive, and Polaris locally.
+
+        It also constrains the layout. Hive and Polaris store an absolute
+        location per table, so the cluster points every job at one catalog name
+        while silver and gold live in different buckets. A hadoop catalog
+        resolves ``catalog.namespace.table`` purely by path under its single
+        root, so one catalog cannot span two buckets.
+
+        The pipeline scripts build every table as ``{catalog}.{table}`` with a
+        single ``LB_ICEBERG_CATALOG``, and gold reads silver in the same
+        session. Splitting the layers into separate catalogs therefore cannot
+        work without changing that contract in 10+ scripts shared with the
+        cluster path, which is not worth it for local mode alone.
+
+        So local mode keeps one warehouse root and separates layers by
+        namespace within it: ``silver.customer_interactions_enriched`` and
+        ``gold.customer_executive_dashboard`` sit side by side under one
+        bucket. See ``LOCAL_WAREHOUSE_LAYER`` for which bucket that is and why
+        the metrics layer has to know.
+        """
+        cfg = self.config
+        name = cfg.catalog
+        warehouse_bucket = getattr(cfg, f"{LOCAL_WAREHOUSE_LAYER}_bucket")
+        return {
+            f"spark.sql.catalog.{name}": "org.apache.iceberg.spark.SparkCatalog",
+            f"spark.sql.catalog.{name}.type": "hadoop",
+            f"spark.sql.catalog.{name}.warehouse": f"s3a://{warehouse_bucket}/warehouse",
+        }
+
+    def _env(self, job_type: str) -> dict[str, str]:
         cfg = self.config
         return {
             "HOME": "/work",  # LB-053
@@ -180,7 +227,7 @@ class LocalSparkRunner:
             raise ValueError(f"Unknown job type {job_type!r}. Expected one of {sorted(_SCRIPTS)}.")
 
         cmd = [self.cli, "run", "--rm", "--network", "host"]
-        for key, value in self._env().items():
+        for key, value in self._env(job_type).items():
             cmd += ["-e", f"{key}={value}"]
         # LB-054: lowercase "z" (shared), never "Z". The workdir tree is also
         # mounted by the Garage container; a private relabel here revokes
@@ -237,6 +284,28 @@ class LocalSparkRunner:
             elapsed_seconds=elapsed,
             details={"output": output},
         )
+
+
+def local_layer_prefix(layer: str) -> tuple[str, str]:
+    """Where a medallion layer's data lives locally: (bucket layer, key prefix).
+
+    Local mode puts every Iceberg table under one warehouse root, so bucket
+    names alone do not identify a layer the way they do on the cluster.
+    Measuring ``gold_size_gb`` by sizing the gold bucket returns zero, and
+    sizing the silver bucket returns silver plus gold together.
+
+    Callers that measure per-layer sizes should use this to get the bucket and
+    prefix to page over:
+
+        bucket_layer, prefix = local_layer_prefix("gold")
+        info = s3.get_bucket_size(buckets[bucket_layer], prefix=prefix)
+
+    Bronze is the exception: it holds raw Parquet outside the warehouse, so it
+    is measured whole, exactly as on the cluster.
+    """
+    if layer == "bronze":
+        return "bronze", ""
+    return LOCAL_WAREHOUSE_LAYER, f"warehouse/{layer}/"
 
 
 def _summarise_failure(output: str) -> str:

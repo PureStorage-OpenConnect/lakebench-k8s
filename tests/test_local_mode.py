@@ -19,8 +19,10 @@ from lakebench.modules.pipeline_engines.spark.job import (
     local_peak_memory_gb,
 )
 from lakebench.modules.pipeline_engines.spark.local_job import (
+    LOCAL_WAREHOUSE_LAYER,
     LocalSparkConfig,
     LocalSparkRunner,
+    local_layer_prefix,
 )
 
 
@@ -167,7 +169,31 @@ class TestLocalSparkCommand:
     def test_hadoop_catalog_needs_no_catalog_service(self, tmp_path):
         joined = " ".join(self._runner(tmp_path).build_command("silver-build"))
         assert "spark.sql.catalog.lb.type=hadoop" in joined
-        assert "spark.sql.catalog.lb.warehouse=s3a://lb-bronze/warehouse" in joined
+
+    def test_warehouse_is_not_in_the_bronze_bucket(self, tmp_path):
+        """Bronze must measure exactly the ingested data, as on the cluster.
+
+        Putting the warehouse in bronze makes bronze_size_gb include silver and
+        gold, which silently corrupts every derived throughput score.
+        """
+        joined = " ".join(self._runner(tmp_path).build_command("silver-build"))
+        assert "spark.sql.catalog.lb.warehouse=s3a://lb-silver/warehouse" in joined
+        assert "warehouse=s3a://lb-bronze" not in joined
+
+    def test_one_catalog_serves_every_layer(self, tmp_path):
+        """gold-finalize reads silver and writes gold in one session.
+
+        A hadoop catalog has a single warehouse root, and the scripts build
+        every table as "{catalog}.{table}" from one LB_ICEBERG_CATALOG, so the
+        layers must share a catalog and separate by namespace.
+        """
+        for job in ("bronze-verify", "silver-build", "gold-finalize"):
+            cmd = self._runner(tmp_path).build_command(job)
+            catalogs = {
+                a.split("=")[0].split(".")[3] for a in cmd if a.startswith("spark.sql.catalog.")
+            }
+            assert catalogs == {"lb"}, f"{job} registered {catalogs}"
+            assert "LB_ICEBERG_CATALOG=lb" in " ".join(cmd)
 
     def test_common_module_is_shipped_to_the_driver(self, tmp_path):
         cmd = self._runner(tmp_path).build_command("gold-finalize")
@@ -246,6 +272,31 @@ class TestLocalSizing:
     def test_peak_memory_is_the_largest_job_not_the_sum(self):
         """Batch jobs run sequentially, so the peak is the max, not the total."""
         assert local_peak_memory_gb() == 4
+
+
+class TestLocalLayerPrefix:
+    """Per-layer measurement, which bucket names alone cannot give locally."""
+
+    def test_bronze_is_measured_whole(self):
+        """Bronze holds raw Parquet outside the warehouse, as on the cluster."""
+        assert local_layer_prefix("bronze") == ("bronze", "")
+
+    def test_silver_and_gold_share_a_bucket_but_not_a_prefix(self):
+        silver_bucket, silver_prefix = local_layer_prefix("silver")
+        gold_bucket, gold_prefix = local_layer_prefix("gold")
+        assert silver_bucket == gold_bucket == LOCAL_WAREHOUSE_LAYER
+        assert silver_prefix != gold_prefix
+
+    def test_prefixes_are_disjoint(self):
+        """Otherwise gold would be counted inside silver's total."""
+        _, silver_prefix = local_layer_prefix("silver")
+        _, gold_prefix = local_layer_prefix("gold")
+        assert not silver_prefix.startswith(gold_prefix)
+        assert not gold_prefix.startswith(silver_prefix)
+
+    def test_warehouse_layer_is_not_bronze(self):
+        """Bronze must stay a clean measurement of ingested data."""
+        assert LOCAL_WAREHOUSE_LAYER != "bronze"
 
 
 class TestLocalSparkRun:
