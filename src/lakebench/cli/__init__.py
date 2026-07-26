@@ -1014,14 +1014,29 @@ def status(
             help="Kubernetes namespace to check",
         ),
     ] = None,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Show local mode status instead of Kubernetes",
+        ),
+    ] = False,
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir",
+            help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
+        ),
+    ] = None,
 ) -> None:
     """Show deployment status.
 
     Shows the current status of Lakebench components in the cluster.
     """
     # Determine namespace
+    cfg = None
     ns = namespace
-    if not ns:
+    if not ns or local:
         config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
@@ -1030,6 +1045,15 @@ def status(
         except ConfigError as e:
             print_error(f"Config error: {e}")
             raise typer.Exit(1)  # noqa: B904
+
+    if local:
+        from lakebench.cli._local import print_local_status, status_local
+
+        if cfg is None:
+            print_error("Local status needs a config file")
+            raise typer.Exit(1)
+        print_local_status(status_local(cfg, workdir=workdir))
+        return
 
     if not ns:
         print_error("Specify --namespace or provide a config file")

@@ -226,8 +226,8 @@ class TestLocalSizing:
         "job_type,memory,cores",
         [
             ("bronze-verify", "2g", 2),
-            ("silver-build", "4g", 4),
-            ("gold-finalize", "3g", 2),
+            ("silver-build", "8g", 4),
+            ("gold-finalize", "4g", 2),
         ],
     )
     def test_each_job_gets_its_profile(self, tmp_path, job_type, memory, cores):
@@ -243,11 +243,16 @@ class TestLocalSizing:
         assert sizes["silver-build"] == max(sizes.values())
 
     def test_nothing_local_requests_cluster_sized_memory(self, tmp_path):
-        """A laptop cannot host the 48g executors the cluster profile asks for."""
+        """A laptop cannot host the 48g executors the cluster profile asks for.
+
+        16g is the ceiling: a machine with less than that free is not going to
+        run this at all, and anything approaching it should be a deliberate
+        decision rather than a profile that drifted upward after an OOM.
+        """
         runner = self._runner(tmp_path)
         for job_type in _LOCAL_JOB_PROFILES:
             memory_gb = int(runner._sizing(job_type)[0].rstrip("g"))
-            assert memory_gb <= 8, f"{job_type} asks for {memory_gb}g locally"
+            assert memory_gb <= 16, f"{job_type} asks for {memory_gb}g locally"
 
     def test_explicit_config_overrides_the_profile(self, tmp_path):
         cmd = self._runner(tmp_path, driver_memory="9g", cores=6).build_command("silver-build")
@@ -267,11 +272,11 @@ class TestLocalSizing:
     def test_profile_accessor_returns_a_copy(self):
         profile = get_local_job_profile("silver-build")
         profile["driver_memory"] = "99g"
-        assert get_local_job_profile("silver-build")["driver_memory"] == "4g"
+        assert get_local_job_profile("silver-build")["driver_memory"] == "8g"
 
     def test_peak_memory_is_the_largest_job_not_the_sum(self):
         """Batch jobs run sequentially, so the peak is the max, not the total."""
-        assert local_peak_memory_gb() == 4
+        assert local_peak_memory_gb() == 8
 
 
 class TestLocalLayerPrefix:

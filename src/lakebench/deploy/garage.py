@@ -153,6 +153,18 @@ class GarageDeployer:
         """Remove the Garage container. Data in the container is discarded."""
         self.runtime.delete(COMPONENT)
 
+    def read_credentials(self) -> GarageCredentials:
+        """Return the credentials of a running Garage without deploying it.
+
+        ``deploy()`` would also return them, but it starts containers and runs
+        bootstrap. Callers that are only asking a question -- ``status``, for
+        instance -- must not have that side effect.
+
+        Raises:
+            GarageDeployError: if Garage is not running or has no key yet.
+        """
+        return self._create_key()
+
     # -- bootstrap ----------------------------------------------------------
 
     def _write_config(self) -> None:

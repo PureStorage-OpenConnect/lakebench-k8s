@@ -136,15 +136,23 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 #
 # These are deliberately not derived from _JOB_PROFILES. A laptop cannot host a
 # 48g executor, and scaling the cluster numbers down by a fudge factor would
-# produce values nobody has run. The numbers below come from the POC, which
-# completed a full bronze/silver/gold pipeline in a 16 second warm run.
+# produce values nobody has run.
 #
-# Silver gets more memory than the others because it is the shuffle-heavy join,
-# which is the same reason it dominates the cluster profile.
+# Silver gets the most because it is the shuffle-heavy join, the same reason it
+# dominates the cluster profile.
+#
+# Sized against a full scale 0.1 run (~1 GB bronze, 51,922 rows, 13 files),
+# which is the default `init --local` produces. Silver at 4g reproducibly threw
+# OutOfMemoryError on exactly that input: local[4] runs driver and executors in
+# one heap, so the join's build side, the shuffle buffers, and the Parquet write
+# buffers all compete for it. 8g clears it with headroom. Do not lower these
+# without running a full scale 0.1 pipeline -- an undersized local run fails
+# late, in silver, with a stack trace that points at memory rather than at the
+# profile.
 _LOCAL_JOB_PROFILES: dict[str, dict[str, Any]] = {
     "bronze-verify": {"driver_memory": "2g", "cores": 2, "partitions": 8},
-    "silver-build": {"driver_memory": "4g", "cores": 4, "partitions": 16},
-    "gold-finalize": {"driver_memory": "3g", "cores": 2, "partitions": 8},
+    "silver-build": {"driver_memory": "8g", "cores": 4, "partitions": 16},
+    "gold-finalize": {"driver_memory": "4g", "cores": 2, "partitions": 8},
 }
 
 # Above this scale a laptop is the wrong tool. Local mode still runs, but the

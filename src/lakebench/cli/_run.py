@@ -194,14 +194,20 @@ def _run_local_mode(
     timeout: int | None,
     stage: str | None,
     yes: bool,
+    include_datagen: bool = False,
+    skip_generate: bool = False,
+    skip_benchmark: bool = False,
 ) -> None:
     """Run the pipeline locally. Raises typer.Exit on failure."""
     from lakebench.cli._local import (
         LOCAL_JOB_ORDER,
         LocalModeError,
+        benchmark_local,
         check_local_supported,
         default_workdir,
         deploy_local,
+        generate_local,
+        print_local_benchmark,
         print_local_summary,
         run_local,
         scale_advisory,
@@ -239,6 +245,12 @@ def _run_local_mode(
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
 
+    if include_datagen and not skip_generate:
+        console.print()
+        if not generate_local(cfg, deployment, timeout=timeout or 3600):
+            _journal_safe(j.end_command, success=False, message="Datagen failed")
+            raise typer.Exit(1)
+
     console.print()
     result = run_local(
         cfg,
@@ -264,6 +276,25 @@ def _run_local_mode(
 
     if not result.success:
         raise typer.Exit(1)
+
+    # Benchmark only after a clean pipeline: querying a half-built gold table
+    # produces a number that looks real and means nothing.
+    if not skip_benchmark and not stage:
+        console.print()
+        console.print("[bold dim]Benchmark[/bold dim]")
+        bench_results, qph = benchmark_local(cfg, deployment, workdir=resolved_workdir)
+        print_local_benchmark(bench_results, qph)
+        _journal_safe(
+            j.record,
+            EventType.BENCHMARK_COMPLETE,
+            message=f"Local benchmark: {qph:,.0f} QpH",
+            success=bool(bench_results),
+            details={
+                "local": True,
+                "queries_per_hour": qph,
+                "queries": [{"name": n, "success": ok, "elapsed": e} for n, ok, e in bench_results],
+            },
+        )
 
 
 def run(
@@ -450,7 +481,17 @@ def run(
     # Local mode runs before auto-sizing: there is no cluster to size against,
     # and the local profiles are fixed rather than derived from capacity.
     if local:
-        _run_local_mode(cfg, config_file, workdir, timeout, stage, yes)
+        _run_local_mode(
+            cfg,
+            config_file,
+            workdir,
+            timeout,
+            stage,
+            yes,
+            include_datagen=include_datagen,
+            skip_generate=skip_generate,
+            skip_benchmark=skip_benchmark,
+        )
         return
 
     # Auto-size resources based on scale + cluster capacity

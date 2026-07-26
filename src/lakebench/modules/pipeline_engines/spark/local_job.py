@@ -308,10 +308,49 @@ def local_layer_prefix(layer: str) -> tuple[str, str]:
     return LOCAL_WAREHOUSE_LAYER, f"warehouse/{layer}/"
 
 
+# Failures worth naming before anything else in the trace. The first matching
+# line in a Spark stack trace is usually a wrapper -- Py4JJavaError says only
+# that a JVM call failed, while the OutOfMemoryError twenty lines below is the
+# thing the user has to act on.
+_ROOT_CAUSES: tuple[tuple[str, str], ...] = (
+    (
+        "OutOfMemoryError",
+        "Out of memory. Either the dataset is larger than the configured scale "
+        "(regenerate with --generate, which clears bronze first) or this job "
+        "needs more than its local profile allows.",
+    ),
+    (
+        "No space left on device",
+        "Ran out of disk in the container. Free space in the workdir or lower the scale.",
+    ),
+    (
+        "UNRESOLVED_COLUMN",
+        "Input schema does not match what the pipeline expects. Regenerate "
+        "bronze with --generate rather than hand-written data.",
+    ),
+    (
+        "PATH_NOT_FOUND",
+        "Input path does not exist. Generate data first: run --local --generate.",
+    ),
+)
+
+# Wrappers that appear above the real cause and explain nothing on their own.
+_UNHELPFUL = ("Py4JJavaError", "SparkException: Job aborted", "Self-suppression")
+
+
 def _summarise_failure(output: str) -> str:
-    """Pull the useful line out of Spark's very long stack traces."""
+    """Pull the useful line out of Spark's very long stack traces.
+
+    Spark reports the outermost wrapper first, so taking the first matching
+    line gives the least informative one. Known root causes win over the
+    ordering, and known wrappers are skipped.
+    """
+    for needle, explanation in _ROOT_CAUSES:
+        if needle in output:
+            return explanation
+
     markers = ("Exception:", "Error:", "ERROR", "Caused by:")
     for line in output.splitlines():
-        if any(m in line for m in markers):
+        if any(m in line for m in markers) and not any(u in line for u in _UNHELPFUL):
             return line.strip()[:300]
     return output.strip()[-300:] if output.strip() else "Job failed with no output"
