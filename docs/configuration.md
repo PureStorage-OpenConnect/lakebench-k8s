@@ -129,7 +129,7 @@ images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
-  polaris: apache/polaris:1.3.0-incubating
+  polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   prometheus: prom/prometheus:v2.48.0
   grafana: grafana/grafana:10.2.0
@@ -381,7 +381,7 @@ registries or custom builds.
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
-| `images.polaris` | string | `apache/polaris:1.3.0-incubating` | Apache Polaris REST catalog image. |
+| `images.polaris` | string | `apache/polaris:1.6.0` | Apache Polaris REST catalog image. |
 | `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
 | `images.prometheus` | string | `prom/prometheus:v2.48.0` | Prometheus image. |
 | `images.grafana` | string | `grafana/grafana:10.2.0` | Grafana image. |
@@ -469,7 +469,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.catalog.hive.resources.cpu_min` | string | `500m` | Hive Metastore minimum CPU request. |
 | `architecture.catalog.hive.resources.cpu_max` | string | `2` | Hive Metastore CPU limit. |
 | `architecture.catalog.hive.resources.memory` | string | `4Gi` | Hive Metastore memory. |
-| `architecture.catalog.polaris.version` | string | `1.3.0-incubating` | Polaris version. Minimum 1.3.0-incubating. |
+| `architecture.catalog.polaris.version` | string | `1.6.0` | Polaris version. Minimum supported 1.3.0-incubating. |
 | `architecture.catalog.polaris.port` | int | `8181` | Polaris REST API port. |
 | `architecture.catalog.polaris.resources.cpu` | string | `1` | Polaris CPU request/limit. |
 | `architecture.catalog.polaris.resources.memory` | string | `2Gi` | Polaris memory. |

@@ -27,7 +27,7 @@ tuning, executor profiles, and version compatibility.
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 | Thrift-based catalog for Iceberg tables |
-| Apache Polaris | 1.3.0-incubating | `apache/polaris:1.3.0-incubating` | REST-based Iceberg catalog with OAuth2 |
+| Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` | REST-based Iceberg catalog with OAuth2 |
 
 Each recipe uses exactly one catalog. Both Hive and Polaris support Iceberg
 tables. See
@@ -149,7 +149,7 @@ images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
-  polaris: apache/polaris:1.3.0-incubating
+  polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   duckdb: python:3.11-slim
   prometheus: prom/prometheus:v2.48.0

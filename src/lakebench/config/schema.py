@@ -151,8 +151,8 @@ class ImagesConfig(BaseModel):
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
-    polaris: str = "apache/polaris:1.3.0-incubating"
-    polaris_admin_tool: str = "apache/polaris-admin-tool:1.3.0-incubating"
+    polaris: str = "apache/polaris:1.6.0"
+    polaris_admin_tool: str = "apache/polaris-admin-tool:1.6.0"
     unity: str = (
         "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
     )
@@ -405,7 +405,7 @@ class PolarisConfig(BaseModel):
     On FlashBlade: stsUnavailable=true, pathStyleAccess=true.
     """
 
-    version: str = "1.3.0-incubating"
+    version: str = "1.6.0"
     port: int = 8181
     client_secret: str = "lakebench-polaris-secret-2024"
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)

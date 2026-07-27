@@ -219,15 +219,19 @@ related to credential subscoping.
 is silently ignored by `TaskFileIOSupplier`, causing the server to attempt
 STS credential vending. FlashBlade has no STS endpoint, so this always fails.
 
-**Fix:** Use Polaris 1.3.0-incubating or later. The Docker tag includes the
-`-incubating` suffix:
+**Fix:** Use Polaris 1.3.0-incubating or later. Lakebench now defaults to
+1.6.0, which is well past this floor and needs no action. The 1.3.0 tag
+specifically includes the `-incubating` suffix:
 
 ```
 apache/polaris:1.3.0-incubating
 apache/polaris-admin-tool:1.3.0-incubating
 ```
 
-Note: `apache/polaris:1.3.0` (without the suffix) does not exist. The
+Note: `apache/polaris:1.3.0` (without the suffix) does not exist -- that
+release was only ever published with `-incubating`. Polaris graduated from
+the Apache incubator at 1.4.0, so 1.4.0 and later (including the 1.6.0
+default) drop the suffix entirely; there is no `1.6.0-incubating` tag. The
 Quarkus/SmallRye Config environment variable also requires a double underscore:
 
 ```

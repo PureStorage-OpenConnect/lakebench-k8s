@@ -14,14 +14,15 @@ workflow -- deploy, generate, run, destroy -- stays exactly the same.
 
 | Component | Minimum version | Default in Lakebench |
 |-----------|----------------|---------------------|
-| Apache Polaris | **1.3.0-incubating** | 1.3.0-incubating |
+| Apache Polaris | **1.3.0-incubating** | 1.6.0 |
 | Trino | **454** | 483 |
 
-**Why 1.3.0?** Polaris versions 1.1.0 and 1.2.0 have a credential vending
+**Why 1.3.0 minimum?** Polaris versions 1.1.0 and 1.2.0 have a credential vending
 bug ([apache/polaris#379](https://github.com/apache/polaris/issues/379))
 where the `TaskFileIOSupplier` class ignores the `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION`
 flag, causing server-side S3 operations to fail on non-AWS storage. The fix
 ([PR #400](https://github.com/apache/polaris/pull/400)) shipped in 1.3.0.
+Lakebench now defaults to 1.6.0, well past this floor.
 
 **Why Trino 454+?** The `iceberg.rest-catalog.oauth2.scope` property was
 added in Trino 454
@@ -43,7 +44,7 @@ architecture:
     type: polaris
 ```
 
-That is it. Lakebench uses the default Polaris version (1.3.0-incubating) and
+That is it. Lakebench uses the default Polaris version (1.6.0) and
 Trino version (483), both of which satisfy the minimum requirements above.
 
 ### What changes under the hood
@@ -170,13 +171,15 @@ If you see this error, the most likely cause is running a Polaris version
 older than 1.3.0-incubating. Versions 1.1.0 and 1.2.0 have a bug where the
 credential subscoping flag is ignored in `TaskFileIOSupplier`.
 
-**Fix:** Use Polaris 1.3.0-incubating or later (the default):
+**Fix:** Use Polaris 1.3.0-incubating or later. Lakebench now defaults to
+1.6.0, which satisfies this, but if you have pinned an older version,
+update it:
 
 ```yaml
 architecture:
   catalog:
     polaris:
-      version: "1.3.0-incubating"
+      version: "1.6.0"
 ```
 
 ### Bootstrap job fails with "already been bootstrapped"
@@ -195,15 +198,18 @@ kubectl delete job lakebench-polaris-bootstrap -n <namespace>
 Lakebench's deploy engine automatically deletes stale bootstrap jobs before
 recreating them.
 
-### Docker image tags require `-incubating` suffix
+### Docker image tags for 1.3.0 require the `-incubating` suffix
 
-Polaris Docker images on Docker Hub use the full incubating tag. Using
-`apache/polaris:1.3.0` (without `-incubating`) results in
-`ImagePullBackOff` with `manifest unknown`.
+Polaris graduated from the Apache incubator at the 1.4.0 release, so 1.4.0
+and later (including the current default, 1.6.0) have no `-incubating`
+suffix at all. This only matters if you pin back to 1.3.0 specifically:
+`apache/polaris:1.3.0` (without `-incubating`) was never published and
+results in `ImagePullBackOff` with `manifest unknown`; the correct tag for
+that release is `apache/polaris:1.3.0-incubating`.
 
-**Fix:** Always include the `-incubating` suffix in the version string.
-Lakebench defaults to `1.3.0-incubating` so this only affects manual
-overrides.
+**Fix:** If pinning to 1.3.0, use the `-incubating` suffix. Lakebench
+defaults to `1.6.0`, which needs no suffix, so this only affects manual
+overrides pinned to 1.3.0.
 
 ---
 

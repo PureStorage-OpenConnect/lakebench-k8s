@@ -364,7 +364,7 @@ name: my-lakehouse
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
 #   trino: trinodb/trino:483
-#   polaris: apache/polaris:1.3.0-incubating
+#   polaris: apache/polaris:1.6.0
 #   duckdb: python:3.11-slim
 #   jmx_exporter: bitnami/jmx-exporter:latest
 #   prometheus: prom/prometheus:v2.48.0
@@ -487,7 +487,7 @@ architecture:
     #     memory: 4Gi
     ## Polaris REST catalog settings (used when type: polaris)
     # polaris:
-    #   version: 1.3.0-incubating    # Min 1.3.0 for FlashBlade/MinIO
+    #   version: 1.6.0                # Min 1.3.0 for FlashBlade/MinIO
     #   port: 8181
     #   resources:
     #     cpu: "1"

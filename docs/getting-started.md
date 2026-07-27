@@ -486,7 +486,7 @@ in the `images` section of your YAML.
 | Spark Operator | 2.4.0 | Kubeflow Helm chart |
 | Apache Iceberg | 1.10.1 | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |
-| Apache Polaris | 1.3.0-incubating | `apache/polaris:1.3.0-incubating` |
+| Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` |
 | Trino | 483 | `trinodb/trino:483` |
 | PostgreSQL | 17 | `postgres:17` |
 
