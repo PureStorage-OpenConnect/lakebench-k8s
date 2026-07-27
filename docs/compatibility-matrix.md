@@ -46,7 +46,7 @@ All 11 recipes support all three pipeline modes:
 | Delta Lake | -- | 4.0.0 or 4.1.0 (auto) | Auto-selected based on Spark version |
 | Hive Metastore | 3.1.3 | 3.1.3 | Stackable 25.7.0 |
 | Apache Polaris | 1.3.0-incubating | -- | Iceberg-only |
-| Trino | 479 | 479 | Iceberg or Delta connector |
+| Trino | 483 | 483 | Iceberg or Delta connector |
 | DuckDB | 1.5.0 | -- | Delta not supported (see above) |
 | PostgreSQL | 16, 17, 18 | 16, 17, 18 | Metadata backend |
 

@@ -35,7 +35,7 @@ All Trino settings live under `architecture.query_engine` in the Lakebench confi
 ```yaml
 # Image override
 images:
-  trino: "trinodb/trino:479"          # Default: trinodb/trino:479
+  trino: "trinodb/trino:483"          # Default: trinodb/trino:483
 
 # Query engine selection and tuning
 architecture:
@@ -60,7 +60,7 @@ architecture:
 
 | Field | Default | Description |
 |---|---|---|
-| `images.trino` | `trinodb/trino:479` | Container image for coordinator and workers. |
+| `images.trino` | `trinodb/trino:483` | Container image for coordinator and workers. |
 | `query_engine.type` | `trino` | Set to `trino` to deploy Trino. Other values skip Trino deployment. |
 | `trino.coordinator.cpu` | `"2"` | CPU request and limit for the coordinator pod. |
 | `trino.coordinator.memory` | `"8Gi"` | Memory request and limit for the coordinator pod. Also sets JVM `-Xmx`. |
@@ -75,10 +75,10 @@ architecture:
 
 ## Version Flexibility
 
-The default image is **Trino 479**. You can override it via `images.trino` to use a newer or older release, with these constraints:
+The default image is **Trino 483**. You can override it via `images.trino` to use a newer or older release, with these constraints:
 
 - **Minimum version for Polaris**: Trino 454. Earlier versions lack the `oauth2.scope` property needed for Polaris REST catalog authentication (added in Trino PR #22961).
-- **Native S3 filesystem**: Trino 479 uses `fs.native-s3.enabled=true` with `s3.*` properties. The legacy `hive.s3.*` properties were removed in this release. If you pin an older image, verify that its S3 configuration syntax matches what Lakebench generates.
+- **Native S3 filesystem**: Trino 483 uses `fs.native-s3.enabled=true` with `s3.*` properties. The legacy `hive.s3.*` properties were removed in this release. If you pin an older image, verify that its S3 configuration syntax matches what Lakebench generates.
 
 ## Catalog Integration
 

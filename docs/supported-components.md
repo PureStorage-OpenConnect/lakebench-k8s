@@ -60,7 +60,7 @@ Iceberg is the supported table format and works with both catalogs (Hive and Pol
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Trino | 479 | `trinodb/trino:479` | Distributed SQL engine for interactive analytics |
+| Trino | 483 | `trinodb/trino:483` | Distributed SQL engine for interactive analytics |
 | Spark Thrift Server | 3.5.x / 4.0.x (same as Spark) | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` | Spark-native SQL via HiveServer2 JDBC |
 | DuckDB | Bundled in Python 3.11 | `python:3.11-slim` | Lightweight single-pod analytics engine |
 
@@ -150,7 +150,7 @@ images:
   postgres: postgres:17
   hive: apache/hive:3.1.3
   polaris: apache/polaris:1.3.0-incubating
-  trino: trinodb/trino:479
+  trino: trinodb/trino:483
   duckdb: python:3.11-slim
   prometheus: prom/prometheus:v2.48.0
   grafana: grafana/grafana:10.2.0

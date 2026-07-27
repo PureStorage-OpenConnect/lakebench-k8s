@@ -130,7 +130,7 @@ images:
   postgres: postgres:17
   hive: apache/hive:3.1.3
   polaris: apache/polaris:1.3.0-incubating
-  trino: trinodb/trino:479
+  trino: trinodb/trino:483
   prometheus: prom/prometheus:v2.48.0
   grafana: grafana/grafana:10.2.0
   pull_policy: Always                 # Always | IfNotPresent | Never
@@ -382,7 +382,7 @@ registries or custom builds.
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
 | `images.polaris` | string | `apache/polaris:1.3.0-incubating` | Apache Polaris REST catalog image. |
-| `images.trino` | string | `trinodb/trino:479` | Trino query engine image. |
+| `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
 | `images.prometheus` | string | `prom/prometheus:v2.48.0` | Prometheus image. |
 | `images.grafana` | string | `grafana/grafana:10.2.0` | Grafana image. |
 | `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
@@ -877,7 +877,7 @@ useful for air-gapped environments or when running custom builds:
 images:
   datagen: my-registry.internal/lakebench/datagen:v2
   spark: my-registry.internal/apache/spark:4.0.2-python3
-  trino: my-registry.internal/trinodb/trino:479
+  trino: my-registry.internal/trinodb/trino:483
   pull_policy: Always
   pull_secrets:
     - my-registry-pull-secret

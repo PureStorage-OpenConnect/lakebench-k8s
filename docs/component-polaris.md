@@ -92,7 +92,7 @@ architecture:
 - **Minimum Polaris version**: 1.3.0-incubating. Versions 1.1.0 and 1.2.0
   have a credential vending bug where `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION`
   is ignored, causing S3 failures on non-AWS storage.
-- **Minimum Trino version**: 454 (for `oauth2.scope` support). Default is 479.
+- **Minimum Trino version**: 454 (for `oauth2.scope` support). Default is 483.
 - **Image tag suffix**: all Polaris Docker tags carry `-incubating`. Omitting
   it causes an image pull failure.
 

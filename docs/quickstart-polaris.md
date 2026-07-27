@@ -15,7 +15,7 @@ workflow -- deploy, generate, run, destroy -- stays exactly the same.
 | Component | Minimum version | Default in Lakebench |
 |-----------|----------------|---------------------|
 | Apache Polaris | **1.3.0-incubating** | 1.3.0-incubating |
-| Trino | **454** | 479 |
+| Trino | **454** | 483 |
 
 **Why 1.3.0?** Polaris versions 1.1.0 and 1.2.0 have a credential vending
 bug ([apache/polaris#379](https://github.com/apache/polaris/issues/379))
@@ -27,7 +27,7 @@ flag, causing server-side S3 operations to fail on non-AWS storage. The fix
 added in Trino 454
 ([PR #22961](https://github.com/trinodb/trino/pull/22961)). Without it,
 Trino sends `scope=catalog` which Polaris rejects as `invalid_scope`.
-Lakebench defaults to Trino 479, which includes this property plus the
+Lakebench defaults to Trino 483, which includes this property plus the
 native S3 file system required for current Trino releases.
 
 ---
@@ -44,7 +44,7 @@ architecture:
 ```
 
 That is it. Lakebench uses the default Polaris version (1.3.0-incubating) and
-Trino version (479), both of which satisfy the minimum requirements above.
+Trino version (483), both of which satisfy the minimum requirements above.
 
 ### What changes under the hood
 
@@ -150,11 +150,11 @@ Trino is older than 454 or the `oauth2.scope` property is missing from the
 Trino catalog configuration.
 
 **Fix:** Ensure your Trino image is version 454 or later. Lakebench defaults
-to 479, so this only happens if you have overridden the Trino image:
+to 483, so this only happens if you have overridden the Trino image:
 
 ```yaml
 images:
-  trino: trinodb/trino:479    # Must be 454+
+  trino: trinodb/trino:483    # Must be 454+
 ```
 
 The required property `iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL`

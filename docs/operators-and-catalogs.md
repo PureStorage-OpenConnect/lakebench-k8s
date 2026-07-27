@@ -159,7 +159,7 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Hive Metastore | 3.1.3 | Managed by Stackable |
 | Hadoop AWS | 3.3.4 | spark.jars.packages |
 | PostgreSQL | 17 | postgres:17 |
-| Trino | 479 | trinodb/trino image |
+| Trino | 483 | trinodb/trino image |
 
 ## Stackable Installation
 

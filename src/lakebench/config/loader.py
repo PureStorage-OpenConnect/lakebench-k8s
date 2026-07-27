@@ -363,7 +363,7 @@ name: my-lakehouse
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
-#   trino: trinodb/trino:479
+#   trino: trinodb/trino:483
 #   polaris: apache/polaris:1.3.0-incubating
 #   duckdb: python:3.11-slim
 #   jmx_exporter: bitnami/jmx-exporter:latest

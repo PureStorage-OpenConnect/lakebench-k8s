@@ -256,7 +256,7 @@ configuration.
 This property was introduced in Trino 454
 ([PR #22961](https://github.com/trinodb/trino/pull/22961)). Trino versions
 prior to 454 do not support it and cannot work with Polaris. Upgrade to Trino
-454 or later (Lakebench uses 479).
+454 or later (Lakebench uses 483).
 
 ---
 

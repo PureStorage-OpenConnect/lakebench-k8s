@@ -156,7 +156,7 @@ class ImagesConfig(BaseModel):
     unity: str = (
         "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
     )
-    trino: str = "trinodb/trino:479"
+    trino: str = "trinodb/trino:483"
     duckdb: str = "python:3.11-slim"
     prometheus: str = "prom/prometheus:v2.48.0"
     grafana: str = "grafana/grafana:10.2.0"
