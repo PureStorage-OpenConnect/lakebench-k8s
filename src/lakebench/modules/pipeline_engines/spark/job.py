@@ -743,14 +743,50 @@ _STREAMING_JOB_TYPES = frozenset(
 
 
 class JobState(Enum):
-    """State of a Spark job."""
+    """State of a Spark job.
 
+    Mirrors ``ApplicationStateType`` in the Spark Operator's
+    ``api/v1beta2/sparkapplication_types.go``. The operator defines thirteen
+    states; anything absent here degrades to ``UNKNOWN``, and ``UNKNOWN`` is
+    not terminal, so a missing state means the monitor polls a finished job
+    until it times out. ``SUCCEEDING`` and ``FAILING`` matter most: the
+    operator sets them the moment the driver finishes and only later settles
+    on ``COMPLETED``/``FAILED``, so treating them as non-terminal turns a
+    successful job into a timeout.
+    """
+
+    NEW = ""
     PENDING = "PENDING"
     SUBMITTED = "SUBMITTED"
     RUNNING = "RUNNING"
+    SUCCEEDING = "SUCCEEDING"
     COMPLETED = "COMPLETED"
+    FAILING = "FAILING"
     FAILED = "FAILED"
+    SUBMISSION_FAILED = "SUBMISSION_FAILED"
+    PENDING_RERUN = "PENDING_RERUN"
+    INVALIDATING = "INVALIDATING"
+    SUSPENDING = "SUSPENDING"
+    SUSPENDED = "SUSPENDED"
+    RESUMING = "RESUMING"
     UNKNOWN = "UNKNOWN"
+
+
+#: States meaning the driver finished successfully. ``SUCCEEDING`` is the
+#: operator's own transitional state on the way to ``COMPLETED``.
+SUCCESS_STATES = frozenset({JobState.SUCCEEDING, JobState.COMPLETED})
+
+#: States meaning the job will not produce a result.
+FAILURE_STATES = frozenset({JobState.FAILING, JobState.FAILED, JobState.SUBMISSION_FAILED})
+
+
+def is_terminal(state: JobState) -> bool:
+    """Whether a state means the job has stopped producing work.
+
+    ``UNKNOWN`` is deliberately excluded: an unrecognised state should keep
+    the caller waiting rather than be reported as a result either way.
+    """
+    return state in SUCCESS_STATES or state in FAILURE_STATES
 
 
 @dataclass
@@ -932,6 +968,17 @@ class SparkJobManager:
             try:
                 state = JobState(state_str)
             except ValueError:
+                # A state this client does not model is not terminal, so the
+                # caller will wait out its whole timeout on a job that may
+                # already be finished. Say so rather than absorbing it.
+                logger.warning(
+                    "Spark Operator reported unrecognised state %r for %s. "
+                    "Treating as UNKNOWN (non-terminal) -- this job will be "
+                    "polled until timeout. JobState may need updating for "
+                    "this operator version.",
+                    state_str,
+                    job_name,
+                )
                 state = JobState.UNKNOWN
 
             driver_info = status.get("driverInfo", {})
