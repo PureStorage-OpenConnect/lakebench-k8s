@@ -1209,6 +1209,12 @@ class ObservabilityConfig(BaseModel):
     retention: str = "7d"
     storage: str = "10Gi"
     storage_class: str = ""
+    # kube-prometheus-stack chart version (bundles Prometheus + Grafana +
+    # node-exporter + kube-state-metrics as one unit). Pinned as of 2026-07-27
+    # -- the deploy previously carried no --version flag at all, so it
+    # silently tracked whatever the Helm repo served at install time. That
+    # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
+    chart_version: str = "87.19.2"
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
 
 

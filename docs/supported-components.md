@@ -95,16 +95,15 @@ storage sizing and backup.
 
 ## Observability (optional)
 
-| Component | Default Version | Image | Role |
-|-----------|----------------|-------|------|
-| Prometheus | v2.48.0 | `prom/prometheus:v2.48.0` | Metrics collection and time-series storage |
-| Grafana | 10.2.0 | `grafana/grafana:10.2.0` | Dashboards and visualization |
-
 Deployed together via the `kube-prometheus-stack` Helm chart when
-`observability.enabled: true`. Includes node-exporter and kube-state-metrics.
-Three built-in Grafana dashboards: Pipeline Overview, Spark Detail,
-Storage I/O. See [Observability Reference](component-observability.md) for
-dashboard configuration and metric details.
+`observability.enabled: true`. The chart is pinned via
+`observability.chart_version` (default `87.19.2`), which bundles Prometheus
+v3.13.1 and Grafana v13.1.x -- Prometheus and Grafana versions are not
+independently configurable; they come from whatever the pinned chart version
+bundles. Includes node-exporter and kube-state-metrics. Three built-in
+Grafana dashboards: Pipeline Overview, Spark Detail, Storage I/O. See
+[Observability Reference](component-observability.md) for dashboard
+configuration and metric details.
 
 ---
 
@@ -152,8 +151,6 @@ images:
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   duckdb: python:3.11-slim
-  prometheus: prom/prometheus:v2.48.0
-  grafana: grafana/grafana:10.2.0
 
 architecture:
   table_format:

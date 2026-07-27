@@ -131,8 +131,6 @@ images:
   hive: apache/hive:3.1.3
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
-  prometheus: prom/prometheus:v2.48.0
-  grafana: grafana/grafana:10.2.0
   pull_policy: Always                 # Always | IfNotPresent | Never
   pull_secrets: []                    # List of imagePullSecret names
 
@@ -383,8 +381,6 @@ registries or custom builds.
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
 | `images.polaris` | string | `apache/polaris:1.6.0` | Apache Polaris REST catalog image. |
 | `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
-| `images.prometheus` | string | `prom/prometheus:v2.48.0` | Prometheus image. |
-| `images.grafana` | string | `grafana/grafana:10.2.0` | Grafana image. |
 | `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
 | `images.pull_secrets` | list | `[]` | List of Kubernetes `imagePullSecret` names. |
 
@@ -599,6 +595,7 @@ added at runtime.
 | `observability.retention` | string | `7d` | Prometheus data retention period. |
 | `observability.storage` | string | `10Gi` | Prometheus PVC size. |
 | `observability.storage_class` | string | `""` | Prometheus PVC StorageClass. Empty = cluster default. |
+| `observability.chart_version` | string | `87.19.2` | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. Pinned as of 2026-07-27; the deploy previously carried no `--version` flag and silently tracked whatever the Helm repo served at install time. |
 
 ### Observability -- Reports
 

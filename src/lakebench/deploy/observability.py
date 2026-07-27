@@ -137,13 +137,18 @@ class ObservabilityDeployer:
             # Build Helm values
             values = self._build_helm_values(namespace)
 
-            # Install/upgrade kube-prometheus-stack
+            # Install/upgrade kube-prometheus-stack. No --reuse-values here --
+            # _build_helm_values() rebuilds the full value set on every call,
+            # so this isn't exposed to the --reuse-values-doesn't-backfill-
+            # new-chart-keys trap that hit the Spark Operator upgrade (LB-070).
             cmd = [
                 "helm",
                 "upgrade",
                 "--install",
                 HELM_RELEASE_NAME,
                 HELM_CHART,
+                "--version",
+                self.config.observability.chart_version,
                 "--namespace",
                 namespace,
                 "--create-namespace",
