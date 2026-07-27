@@ -449,8 +449,16 @@ def _scale_partitions(
 _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
     (3, 5): "3.5.x (Scala 2.12, Hadoop AWS 3.3.4)",
     (4, 0): "4.0.x (Scala 2.13, Hadoop AWS 3.4.1)",
-    (4, 1): "4.1.x (Scala 2.13, Hadoop AWS 3.4.1)",
+    (4, 1): "4.1.x (Scala 2.13, Hadoop AWS 3.4.2)",
 }
+# Spark 4.2 is deliberately NOT in this dict. Live-verified 2026-07-26: the
+# borrowed Iceberg 4.1 runtime jar (Iceberg has no native 4.2 runtime) throws
+# java.lang.IncompatibleClassChangeError loading org.apache.iceberg.spark.
+# source.SparkView -- Spark 4.2 changed org.apache.spark.sql.connector.
+# catalog.View from an interface to something else, breaking every Iceberg
+# release that implements it. This is a real binary incompatibility, not a
+# lakebench config gap, and blocks table writes entirely (silver-build fails
+# on the first createOrReplace). See LB-069.
 
 # ---------------------------------------------------------------------------
 # Table format version compatibility matrix
@@ -499,6 +507,8 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
     (4, 0): "4.0",
     (4, 1): "4.0",  # default for Iceberg releases with no 4.1 runtime
 }
+# No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
+# the 4.1 jar there throws IncompatibleClassChangeError -- see LB-069.
 
 # Spark version -> the first Iceberg version publishing a native runtime for it.
 # Below this, the fallback in _ICEBERG_RUNTIME_SUFFIX applies.
@@ -574,7 +584,7 @@ def _parse_spark_major(image: str) -> int:
         )
 
     # Strip known suffixes so "3.5.4-python3" becomes "3.5.4"
-    for suffix in ("-python3", "-java17", "-java11", "-scala2.12", "-scala2.13"):
+    for suffix in ("-python3", "-java21", "-java17", "-java11", "-scala2.12", "-scala2.13"):
         tag = tag.replace(suffix, "")
 
     parts = tag.split(".")
@@ -603,7 +613,7 @@ def _parse_spark_major_minor(image: str) -> tuple[int, int]:
     Returns (major, minor) tuple, e.g. (4, 1) for ``apache/spark:4.1.1-python3``.
     """
     tag = image.split(":")[-1]
-    for suffix in ("-python3", "-java17", "-java11", "-scala2.12", "-scala2.13"):
+    for suffix in ("-python3", "-java21", "-java17", "-java11", "-scala2.12", "-scala2.13"):
         tag = tag.replace(suffix, "")
     parts = tag.split(".")
     try:
@@ -612,18 +622,38 @@ def _parse_spark_major_minor(image: str) -> tuple[int, int]:
         return 0, 0
 
 
+# (spark_major, spark_minor) -> (hadoop_aws_version, aws_sdk_version).
+#
+# hadoop_aws_version must match the Spark image's own bundled ``hadoop.version``
+# (fetched from each Spark release's parent POM at repo1.maven.org, not
+# assumed): 3.5.x -> 3.3.4, 4.0.2 -> 3.4.1, 4.1.1 -> 3.4.2.
+# aws_sdk_version is hadoop-project's own ``aws-java-sdk.version`` pin for
+# that Hadoop release -- 1.12.720 for every 3.4.x line checked, so the prior
+# flat "1.12.367 for all Spark 4.x" was already behind what Hadoop itself
+# declares, independent of and prior to any Spark 4.2 work. See LB-068.
+_HADOOP_AWS_COMPAT: dict[tuple[int, int], tuple[str, str]] = {
+    (3, 5): ("3.3.4", "1.12.262"),
+    (4, 0): ("3.4.1", "1.12.720"),
+    (4, 1): ("3.4.2", "1.12.720"),
+}
+
+
 def _spark_compat(image: str) -> tuple[str, str, str]:
     """Derive Scala suffix, Hadoop AWS version, and AWS SDK version from Spark image tag.
 
     Returns:
-        Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version).
-        Spark 3.x -> (``"_2.12"``, ``"3.3.4"``, ``"1.12.262"``),
-        Spark 4.x -> (``"_2.13"``, ``"3.4.1"``, ``"1.12.367"``).
+        Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version), keyed on
+        the Spark image's own major.minor -- Hadoop AWS versions differ across
+        Spark 4.0/4.1 (3.4.1/3.4.2), not just across the 3.x/4.x Scala
+        boundary. See ``_HADOOP_AWS_COMPAT``.
     """
     major = _parse_spark_major(image)
-    if major >= 4:
-        return "_2.13", "3.4.1", "1.12.367"
-    return "_2.12", "3.3.4", "1.12.262"
+    key = _parse_spark_major_minor(image)
+    scala_suffix = "_2.13" if major >= 4 else "_2.12"
+    hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT.get(
+        key, ("3.4.1", "1.12.720") if major >= 4 else ("3.3.4", "1.12.262")
+    )
+    return scala_suffix, hadoop_aws_version, aws_sdk_version
 
 
 def _delta_spark_artifact(scala_suffix: str, delta_version: str) -> str:

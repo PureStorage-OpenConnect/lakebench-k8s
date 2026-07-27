@@ -92,8 +92,8 @@ class TestSpark4xCompat:
         """Untested minor versions within a supported major are rejected."""
         with pytest.raises(ValueError, match="Unsupported Spark version 3.4"):
             _parse_spark_major("apache/spark:3.4.0-python3")
-        with pytest.raises(ValueError, match="Unsupported Spark version 4.2"):
-            _parse_spark_major("apache/spark:4.2.0-python3")
+        with pytest.raises(ValueError, match="Unsupported Spark version 4.3"):
+            _parse_spark_major("apache/spark:4.3.0-python3")
 
     def test_parse_spark_41_accepted(self):
         """Spark 4.1.x is a supported version."""
@@ -121,6 +121,13 @@ class TestFormatVersionResolution:
         assert resolve_format_version("apache/spark:3.5.4-python3", "iceberg", "") == "1.11.0"
         assert resolve_format_version("apache/spark:4.0.2-python3", "iceberg", "") == "1.11.0"
         assert resolve_format_version("apache/spark:4.1.1-python3", "iceberg", "") == "1.11.0"
+
+    def test_spark_42_rejected(self):
+        """Spark 4.2 is deliberately unsupported: live-verified 2026-07-26 that
+        the borrowed Iceberg 4.1 runtime throws IncompatibleClassChangeError
+        loading SparkView against Spark 4.2's changed catalog API (LB-069)."""
+        with pytest.raises(ValueError, match="Unsupported Spark version 4.2"):
+            _parse_spark_major("apache/spark:4.2.0-python3")
 
     def test_delta_not_supported_on_spark_35(self):
         from lakebench.spark.job import resolve_format_version
@@ -171,7 +178,13 @@ class TestFormatVersionResolution:
         scala_suffix, hadoop_version, aws_sdk = _spark_compat("apache/spark:4.0.0-python3")
         assert scala_suffix == "_2.13"
         assert hadoop_version == "3.4.1"
-        assert aws_sdk == "1.12.367"
+        assert aws_sdk == "1.12.720"
+
+    def test_spark_compat_41(self):
+        scala_suffix, hadoop_version, aws_sdk = _spark_compat("apache/spark:4.1.1-python3")
+        assert scala_suffix == "_2.13"
+        assert hadoop_version == "3.4.2"
+        assert aws_sdk == "1.12.720"
 
 
 class TestVersionConditionalResources:
