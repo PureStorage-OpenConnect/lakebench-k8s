@@ -239,7 +239,7 @@ def _check_spark_operator(cfg) -> PrereqResult:
             message="Spark Operator not installed",
             hint=(
                 "Install: helm install spark-operator oci://ghcr.io/kubeflow/helm-charts/spark-operator "
-                "--version 2.4.0 --namespace spark-operator --create-namespace\n"
+                "--version 2.5.1 --namespace spark-operator --create-namespace\n"
                 "Or set platform.compute.spark.operator.install: true"
             ),
         )

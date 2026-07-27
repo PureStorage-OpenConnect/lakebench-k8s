@@ -105,7 +105,7 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator 2.4.0+** must be installed cluster-wide.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide.
 Lakebench assumes the operator is pre-installed (the default is
 `platform.compute.spark.operator.install: false`). Set it to `true` if you
 want `lakebench deploy` to install it automatically via Helm.
@@ -483,7 +483,7 @@ in the `images` section of your YAML.
 | Component | Default version | Image |
 |-----------|----------------|-------|
 | Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` |
-| Spark Operator | 2.4.0 | Kubeflow Helm chart |
+| Spark Operator | 2.5.1 | Kubeflow Helm chart |
 | Apache Iceberg | 1.10.1 | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |
 | Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` |

@@ -278,7 +278,7 @@ class SparkOperatorConfig(BaseModel):
 
     install: bool = False
     namespace: str = "spark-operator"
-    version: str = "2.4.0"  # v2.x properly injects volumes via webhook
+    version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
 
 
 class SparkComputeConfig(BaseModel):

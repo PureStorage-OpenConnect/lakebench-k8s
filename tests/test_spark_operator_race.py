@@ -102,6 +102,66 @@ class TestChartVersionPinnedOnUpgrade:
         assert "--version" not in _helm_cmds(mock_run)[0]
 
 
+class TestJobSubmitLatencyBucketsBackfill:
+    """A version-pinned ``--reuse-values`` upgrade must backfill
+    ``prometheus.metrics.jobSubmitLatencyBuckets``, or a release whose stored
+    values predate the 2.5.0 chart (which added this key) renders it empty
+    against the 2.5.1+ template. The controller's own flag parser then
+    rejects the empty string at startup and crash-loops -- confirmed live
+    2026-07-26 upgrading an existing 2.4.0 release to 2.5.1.
+    """
+
+    @patch.object(SparkOperatorManager, "_verify_namespace_watched", return_value=True)
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(SparkOperatorManager, "_filter_existing_namespaces", side_effect=lambda ns: ns)
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01"])
+    @patch(_RUN)
+    def test_add_namespace_backfills_when_version_pinned(self, mock_run, *_):
+        mock_run.return_value = _ok()
+        mgr = SparkOperatorManager(version="2.5.1", job_namespace="u02")
+
+        assert mgr._add_namespace_to_watch("u02") is True
+
+        cmd = _helm_cmds(mock_run)[0]
+        sets = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--set"]
+        assert any("jobSubmitLatencyBuckets=" in s for s in sets), (
+            f"pinned-version upgrade must backfill jobSubmitLatencyBuckets, got {cmd}"
+        )
+
+    @patch.object(SparkOperatorManager, "_verify_namespace_watched", return_value=True)
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(SparkOperatorManager, "_filter_existing_namespaces", side_effect=lambda ns: ns)
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01"])
+    @patch(_RUN)
+    def test_add_namespace_no_backfill_when_unpinned(self, mock_run, *_):
+        """No version pin -- Helm resolves the same chart it already has, so
+        there is no --reuse-values/new-key gap to backfill for."""
+        mock_run.return_value = _ok()
+        mgr = SparkOperatorManager(job_namespace="u02")
+
+        assert mgr._add_namespace_to_watch("u02") is True
+
+        cmd = _helm_cmds(mock_run)[0]
+        sets = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--set"]
+        assert not any("jobSubmitLatencyBuckets=" in s for s in sets)
+
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01", "u02"])
+    @patch(_RUN)
+    def test_remove_namespace_backfills_when_version_pinned(self, mock_run, *_):
+        mock_run.return_value = _ok()
+        mgr = SparkOperatorManager(version="2.5.1", job_namespace="u02")
+
+        assert mgr.remove_namespace_from_watch("u02") is True
+
+        cmd = _helm_cmds(mock_run)[0]
+        sets = [cmd[i + 1] for i, arg in enumerate(cmd) if arg == "--set"]
+        assert any("jobSubmitLatencyBuckets=" in s for s in sets)
+
+
 class TestLostUpdateRace:
     """LB-063: concurrent deploys must not drop each other's namespaces."""
 

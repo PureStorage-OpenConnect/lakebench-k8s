@@ -183,7 +183,7 @@ platform:
       operator:
         install: true
         namespace: spark-operator
-        version: "2.4.0"
+        version: "2.5.1"
 
       driver:
         cores: 4
@@ -432,7 +432,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 |---|---|---|---|
 | `platform.compute.spark.operator.install` | bool | `false` | Install the Kubeflow Spark Operator via Helm. Requires cluster-admin. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | Namespace for the Spark Operator. |
-| `platform.compute.spark.operator.version` | string | `2.4.0` | Spark Operator chart version. v2.x required. |
+| `platform.compute.spark.operator.version` | string | `2.5.1` | Spark Operator chart version. v2.x required. |
 | `platform.compute.spark.driver.cores` | int | `4` | Spark driver CPU cores. |
 | `platform.compute.spark.driver.memory` | string | `8g` | Spark driver memory. |
 | `platform.compute.spark.executor.instances` | int | `8` | Default executor count (overridden by per-job settings). |

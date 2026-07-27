@@ -59,6 +59,43 @@ class SparkOperatorManager:
         "the object has been modified",
     )
 
+    # ``helm upgrade --reuse-values`` carries forward only the keys already
+    # present in the *stored release values* -- it does not merge in a newer
+    # chart's values.yaml defaults for keys that key never had. The 2.4.0
+    # chart has no ``prometheus.metrics.jobSubmitLatencyBuckets`` key at all
+    # (only ``jobStartLatencyBuckets``); 2.5.1 added it and templates it
+    # straight into ``--metrics-job-submit-latency-buckets``. Reusing a
+    # pre-2.5.0 release's values therefore renders that flag empty, which the
+    # controller's own flag parser rejects at startup: `invalid argument ""
+    # for "--metrics-job-submit-latency-buckets" flag: strconv.ParseFloat:
+    # parsing "": invalid syntax` -- a crash loop, not a webhook/RBAC issue.
+    # Verified live 2026-07-26 upgrading an existing 2.4.0 release to 2.5.1.
+    # Backfilling this explicitly on every version-pinned upgrade closes the
+    # gap regardless of what the stored release happens to already have.
+    #
+    # Helm's own --set parser splits on unescaped commas to separate keys
+    # (`--set` docs: "key1=val1,key2=val2") -- this is Helm's parser, not
+    # shell word-splitting, so passing the raw value through subprocess.run's
+    # argv list does NOT avoid it. A first attempt at this fix passed the
+    # bare comma-separated bucket list and failed live with `Error: failed
+    # parsing --set data: key "1" has no value (cannot end with ,)` --
+    # every comma must be backslash-escaped.
+    _JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT = r"0.5\,1\,2\,4\,8\,16\,32\,64\,128\,256"
+
+    def _reuse_values_backfill(self) -> list[str]:
+        """``--set`` args to append whenever an upgrade also pins a version.
+
+        Only needed when ``target_version`` is set -- an unpinned upgrade
+        tracks whatever chart is already installed, so there is no version
+        jump for ``--reuse-values`` to be caught out by.
+        """
+        if not self.target_version:
+            return []
+        return [
+            "--set",
+            f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+        ]
+
     def __init__(
         self,
         namespace: str | None = None,
@@ -405,21 +442,30 @@ class SparkOperatorManager:
         # Step 1: Remove the namespace so Helm deletes the Role/RoleBinding
         without_ns = [ns for ns in watched if ns != namespace]
         ns_set_without = ",".join(without_ns) if without_ns else "default"
-        result = subprocess.run(
+        cmd = [
+            "helm",
+            "upgrade",
+            self.HELM_RELEASE_NAME,
+            self.HELM_CHART_NAME,
+            "-n",
+            self.namespace,
+            "--reuse-values",
+            "--set",
+            f"spark.jobNamespaces={{{ns_set_without}}}",
+        ]
+        # No --version here, so Helm resolves whatever chart the repo now
+        # serves while --reuse-values still only carries forward the
+        # release's *stored* values -- the same gap _reuse_values_backfill()
+        # exists for, just without a target_version to gate on. Always
+        # backfill here since there is no unversioned-and-safe case.
+        cmd.extend(
             [
-                "helm",
-                "upgrade",
-                self.HELM_RELEASE_NAME,
-                self.HELM_CHART_NAME,
-                "-n",
-                self.namespace,
-                "--reuse-values",
                 "--set",
-                f"spark.jobNamespaces={{{ns_set_without}}}",
-            ],
-            capture_output=True,
-            text=True,
+                f"prometheus.metrics.jobSubmitLatencyBuckets="
+                f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+            ]
         )
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(
                 "helm upgrade (remove namespace) failed: %s",
@@ -483,6 +529,7 @@ class SparkOperatorManager:
             ]
             if self.target_version:
                 cmd.extend(["--version", self.target_version])
+                cmd.extend(self._reuse_values_backfill())
 
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True)
@@ -594,6 +641,7 @@ class SparkOperatorManager:
             # operator out from under a pinned config.
             if self.target_version:
                 cmd.extend(["--version", self.target_version])
+                cmd.extend(self._reuse_values_backfill())
 
             try:
                 result = subprocess.run(cmd, capture_output=True, text=True)
@@ -1052,7 +1100,9 @@ class SparkOperatorManager:
         fix_cmd = (
             f"helm upgrade {self.HELM_RELEASE_NAME} {self.HELM_CHART_NAME} "
             f"-n {self.namespace} --reuse-values "
-            f"--set 'spark.jobNamespaces={{{new_list}}}'"
+            f"--set 'spark.jobNamespaces={{{new_list}}}' "
+            f"--set 'prometheus.metrics.jobSubmitLatencyBuckets="
+            f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}'"
         )
         status.message = (
             f"Spark Operator does not watch namespace '{self.job_namespace}'. "

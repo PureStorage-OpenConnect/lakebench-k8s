@@ -430,7 +430,7 @@ platform:
   #                                  # Default is false -- install the operator
   #                                  # manually or set true for auto-install.
   #       namespace: spark-operator
-  #       version: "2.4.0"           # v2.x uses webhook for volume injection
+  #       version: "2.5.1"           # v2.x uses webhook for volume injection
   #
   #     driver:
   #       cores: 4

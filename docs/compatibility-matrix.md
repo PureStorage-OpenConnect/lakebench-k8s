@@ -41,7 +41,7 @@ All 11 recipes support all three pipeline modes:
 | Component | Iceberg Recipes | Delta Recipes | Notes |
 |-----------|----------------|--------------|-------|
 | Apache Spark | 3.5.4, 4.0.2, 4.1.1 | 4.0.2 or 4.1.1 | Delta requires Spark 4.x |
-| Spark Operator | 2.4.0 | 2.4.0 | Kubeflow Spark Operator |
+| Spark Operator | 2.5.1 | 2.5.1 | Kubeflow Spark Operator |
 | Apache Iceberg | 1.11.0 (auto) | -- | Auto-selected based on Spark version. 1.11.0 requires Java 17 -- see below. |
 | Delta Lake | -- | 4.0.0 or 4.1.0 (auto) | Auto-selected based on Spark version |
 | Hive Metastore | 3.1.3 | 3.1.3 | Stackable 25.7.0 |
