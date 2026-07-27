@@ -435,6 +435,95 @@ class SparkOperatorManager:
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
         return self._add_namespace_to_watch(namespace)
 
+    def remove_namespace_from_watch(self, namespace: str) -> bool:
+        """Drop a namespace from the operator's watch list before deleting it.
+
+        A watched namespace that does not exist is not a harmless leftover:
+        the controller cannot establish a Pod watch on it, so its cache never
+        syncs and it crash-loops with ``failed to wait for
+        spark-application-controller caches to sync``. That takes down
+        SparkApplication reconciliation for *every* namespace on the cluster,
+        not just the one being destroyed, and the symptom appears later and
+        elsewhere.
+
+        Safe to call when the operator is absent or watches all namespaces --
+        both are reported as success, since there is nothing to remove.
+
+        Args:
+            namespace: The namespace about to be deleted.
+
+        Returns:
+            True if the watch list no longer contains the namespace.
+        """
+        for attempt in range(self._HELM_CONFLICT_RETRIES):
+            watched = self._get_watched_namespaces()
+            if watched is None:
+                # Watches all namespaces -- nothing namespace-specific to drop.
+                return True
+            if namespace not in watched:
+                return True
+
+            remaining = [ns for ns in watched if ns != namespace]
+            # The chart rejects an empty list, and an empty jobNamespaces means
+            # "watch all" rather than "watch none". Fall back to the chart's
+            # own default so removing the last namespace does not silently
+            # widen the operator's scope to the whole cluster.
+            ns_set = ",".join(remaining) if remaining else "default"
+
+            cmd = [
+                "helm",
+                "upgrade",
+                self.HELM_RELEASE_NAME,
+                self.HELM_CHART_NAME,
+                "-n",
+                self.namespace,
+                "--reuse-values",
+                "--set",
+                f"spark.jobNamespaces={{{ns_set}}}",
+            ]
+            if self.target_version:
+                cmd.extend(["--version", self.target_version])
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+            except FileNotFoundError:
+                logger.warning("helm not found on PATH -- cannot remove namespace from watch")
+                return False
+
+            if result.returncode == 0:
+                logger.info(
+                    "Removed namespace '%s' from spark.jobNamespaces (now: %s)",
+                    namespace,
+                    remaining or ["default"],
+                )
+                if self._is_openshift():
+                    self._assign_openshift_scc()
+                    self._patch_openshift_deployments()
+                self._restart_operator()
+                return True
+
+            if self._is_helm_conflict(result.stderr) and attempt + 1 < self._HELM_CONFLICT_RETRIES:
+                delay = self._HELM_CONFLICT_BACKOFF * (attempt + 1)
+                logger.warning(
+                    "helm upgrade conflicted removing namespace '%s' "
+                    "(attempt %d/%d), retrying in %.1fs",
+                    namespace,
+                    attempt + 1,
+                    self._HELM_CONFLICT_RETRIES,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+
+            logger.warning(
+                "helm upgrade failed to remove namespace '%s': %s",
+                namespace,
+                result.stderr,
+            )
+            return False
+
+        return False
+
     @classmethod
     def _is_helm_conflict(cls, stderr: str) -> bool:
         """Return True when Helm stderr indicates contention, not misconfig.

@@ -215,3 +215,104 @@ class TestLostUpdateRace:
         mgr = SparkOperatorManager(job_namespace="u02")
         assert mgr._add_namespace_to_watch("u02") is True
         assert _helm_cmds(mock_run) == []
+
+
+class TestRemoveNamespaceFromWatch:
+    """LB-066: a watched namespace that no longer exists crash-loops the operator.
+
+    The controller cannot establish a Pod watch on a missing namespace, so its
+    cache never syncs and SparkApplication reconciliation stops for the whole
+    cluster -- not just the namespace that was destroyed.
+    """
+
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(
+        SparkOperatorManager,
+        "_get_watched_namespaces",
+        return_value=["u01", "u02", "u03"],
+    )
+    @patch(_RUN)
+    def test_removes_only_the_target(self, mock_run, *_):
+        mock_run.return_value = _ok()
+        mgr = SparkOperatorManager(job_namespace="u02")
+
+        assert mgr.remove_namespace_from_watch("u02") is True
+
+        cmd = _helm_cmds(mock_run)[0]
+        assert cmd[cmd.index("--set") + 1] == "spark.jobNamespaces={u01,u03}"
+
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01"])
+    @patch(_RUN)
+    def test_removing_the_last_namespace_does_not_widen_scope(self, mock_run, *_):
+        """An empty jobNamespaces means "watch all", not "watch none"."""
+        mock_run.return_value = _ok()
+        mgr = SparkOperatorManager(job_namespace="u01")
+
+        assert mgr.remove_namespace_from_watch("u01") is True
+
+        cmd = _helm_cmds(mock_run)[0]
+        assert cmd[cmd.index("--set") + 1] == "spark.jobNamespaces={default}"
+
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01", "u02"])
+    @patch(_RUN)
+    def test_removal_keeps_the_chart_version_pinned(self, mock_run, *_):
+        mock_run.return_value = _ok()
+        mgr = SparkOperatorManager(version="2.4.0", job_namespace="u02")
+
+        assert mgr.remove_namespace_from_watch("u02") is True
+
+        cmd = _helm_cmds(mock_run)[0]
+        assert cmd[cmd.index("--version") + 1] == "2.4.0"
+
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=None)
+    @patch(_RUN)
+    def test_watch_all_needs_no_removal(self, mock_run, _watched):
+        mgr = SparkOperatorManager(job_namespace="u02")
+        assert mgr.remove_namespace_from_watch("u02") is True
+        assert _helm_cmds(mock_run) == []
+
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01"])
+    @patch(_RUN)
+    def test_absent_namespace_needs_no_removal(self, mock_run, _watched):
+        mgr = SparkOperatorManager(job_namespace="u02")
+        assert mgr.remove_namespace_from_watch("u02") is True
+        assert _helm_cmds(mock_run) == []
+
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01", "u02"])
+    @patch("lakebench.modules.pipeline_engines.spark.operator.time.sleep")
+    @patch(_RUN)
+    def test_retries_on_conflict(self, mock_run, _sleep, *_):
+        """Removal contends for the same shared state as the add path."""
+        mock_run.side_effect = [_conflict(), _ok()]
+        mgr = SparkOperatorManager(job_namespace="u02")
+
+        assert mgr.remove_namespace_from_watch("u02") is True
+        assert len(_helm_cmds(mock_run)) == 2
+
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01", "u02"])
+    @patch(_RUN)
+    def test_missing_helm_reports_failure_without_raising(self, mock_run, _watched):
+        """Destroy must not abort because a shared operator is unreachable."""
+        mock_run.side_effect = FileNotFoundError("helm")
+        mgr = SparkOperatorManager(job_namespace="u02")
+
+        assert mgr.remove_namespace_from_watch("u02") is False
+
+    @patch.object(SparkOperatorManager, "_restart_operator", return_value=True)
+    @patch.object(SparkOperatorManager, "_is_openshift", return_value=False)
+    @patch.object(SparkOperatorManager, "_get_watched_namespaces", return_value=["u01", "u02"])
+    @patch(_RUN)
+    def test_restarts_so_the_change_takes_effect(self, mock_run, _watched, _os, restart):
+        """The operator reads jobNamespaces at startup only."""
+        mock_run.return_value = _ok()
+        mgr = SparkOperatorManager(job_namespace="u02")
+
+        mgr.remove_namespace_from_watch("u02")
+        restart.assert_called_once()
