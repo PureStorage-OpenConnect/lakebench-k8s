@@ -41,6 +41,24 @@ class SparkOperatorManager:
     HELM_RELEASE_NAME = "spark-operator"
     DEFAULT_NAMESPACE = "spark-operator"
 
+    # ``spark.jobNamespaces`` is shared cluster state, so concurrent deploys
+    # contend for it.  Helm rejects an upgrade while another is in flight;
+    # retrying with a fresh read is what makes the add safe under parallelism.
+    _HELM_CONFLICT_RETRIES = 5
+    _HELM_CONFLICT_BACKOFF = 3.0
+
+    # Substrings Helm uses when an upgrade loses a race against another
+    # writer.  These are contention, not misconfiguration, so they are worth
+    # retrying; anything else is a real failure and is surfaced immediately.
+    _HELM_CONFLICT_MARKERS = (
+        "already exists",
+        "another operation",
+        "in progress",
+        "is in a pending state",
+        "operation cannot be fulfilled",
+        "the object has been modified",
+    )
+
     def __init__(
         self,
         namespace: str | None = None,
@@ -417,54 +435,111 @@ class SparkOperatorManager:
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
         return self._add_namespace_to_watch(namespace)
 
-    def _add_namespace_to_watch(self, namespace: str) -> bool:
+    @classmethod
+    def _is_helm_conflict(cls, stderr: str) -> bool:
+        """Return True when Helm stderr indicates contention, not misconfig.
+
+        Only contention is worth retrying.  A genuine error (bad chart, no
+        such release, RBAC denial) should fail fast rather than repeat five
+        times and then report the same thing several seconds later.
+        """
+        lowered = (stderr or "").lower()
+        return any(marker in lowered for marker in cls._HELM_CONFLICT_MARKERS)
+
+    def _add_namespace_to_watch(self, namespace: str, _retry_on_eviction: bool = True) -> bool:
         """Add a namespace to the Spark Operator's watched namespaces.
 
         Uses ``helm upgrade --reuse-values`` to preserve existing config.
 
+        ``spark.jobNamespaces`` is cluster-scoped state shared by every
+        lakebench deployment, and adding to it is a read-modify-write.  Two
+        deploys running at once will each read the list before the other
+        writes, so the second upgrade silently drops the first one's
+        namespace -- a deploy that reported success ends up unwatched and its
+        SparkApplications are never reconciled.  Helm serialises upgrades
+        against a release, so the conflict surfaces either as an outright
+        failure or as a lost update.  Both are handled by re-reading the list
+        and retrying rather than by assuming the first read is still valid.
+
         Args:
             namespace: The namespace to add.
+            _retry_on_eviction: Internal. Allows exactly one re-add when a
+                concurrent writer drops this namespace after a successful
+                upgrade. Bounded to one to avoid two deploys ping-ponging.
 
         Returns:
             True if helm upgrade succeeded.
         """
-        watched = self._get_watched_namespaces()
-        if watched is None:
-            # Already watches all namespaces
-            return True
-        if namespace in watched:
-            return True
+        new_list: list[str] = []
 
-        # Filter out stale namespaces that no longer exist on the cluster
-        live_namespaces = self._filter_existing_namespaces(watched)
-        new_list = live_namespaces + [namespace]
-        ns_set = ",".join(new_list)
+        for attempt in range(self._HELM_CONFLICT_RETRIES):
+            # Re-read on every attempt.  A retry exists precisely because
+            # another writer may have changed the list since the last read,
+            # so reusing the earlier value would re-introduce the lost update.
+            watched = self._get_watched_namespaces()
+            if watched is None:
+                # Already watches all namespaces
+                return True
+            if namespace in watched:
+                return True
 
-        try:
-            result = subprocess.run(
-                [
-                    "helm",
-                    "upgrade",
-                    self.HELM_RELEASE_NAME,
-                    self.HELM_CHART_NAME,
-                    "-n",
-                    self.namespace,
-                    "--reuse-values",
-                    "--set",
-                    f"spark.jobNamespaces={{{ns_set}}}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            logger.error("helm not found on PATH -- cannot add namespace")
-            return False
+            # Filter out stale namespaces that no longer exist on the cluster
+            live_namespaces = self._filter_existing_namespaces(watched)
+            new_list = live_namespaces + [namespace]
+            ns_set = ",".join(new_list)
 
-        if result.returncode != 0:
+            cmd = [
+                "helm",
+                "upgrade",
+                self.HELM_RELEASE_NAME,
+                self.HELM_CHART_NAME,
+                "-n",
+                self.namespace,
+                "--reuse-values",
+                "--set",
+                f"spark.jobNamespaces={{{ns_set}}}",
+            ]
+            # --reuse-values carries values forward but NOT the chart version,
+            # so omitting this lets Helm re-resolve to whatever the repo now
+            # serves.  A namespace add would then silently upgrade the
+            # operator out from under a pinned config.
+            if self.target_version:
+                cmd.extend(["--version", self.target_version])
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+            except FileNotFoundError:
+                logger.error("helm not found on PATH -- cannot add namespace")
+                return False
+
+            if result.returncode == 0:
+                break
+
+            if self._is_helm_conflict(result.stderr) and attempt + 1 < self._HELM_CONFLICT_RETRIES:
+                delay = self._HELM_CONFLICT_BACKOFF * (attempt + 1)
+                logger.warning(
+                    "helm upgrade conflicted adding namespace '%s' "
+                    "(attempt %d/%d), retrying in %.1fs: %s",
+                    namespace,
+                    attempt + 1,
+                    self._HELM_CONFLICT_RETRIES,
+                    delay,
+                    result.stderr.strip(),
+                )
+                time.sleep(delay)
+                continue
+
             logger.error(
                 "helm upgrade failed to add namespace '%s': %s",
                 namespace,
                 result.stderr,
+            )
+            return False
+        else:
+            logger.error(
+                "helm upgrade still conflicting after %d attempts for namespace '%s'",
+                self._HELM_CONFLICT_RETRIES,
+                namespace,
             )
             return False
 
@@ -488,8 +563,21 @@ class SparkOperatorManager:
             logger.error("Operator restart failed after helm upgrade")
             return False
 
-        # Verify the deployment spec includes the new namespace.
+        # Verify the deployment spec includes the new namespace.  A successful
+        # upgrade is not proof of a durable result: a concurrent deploy that
+        # read the list before this write can land afterwards and drop this
+        # namespace again.  That eviction is silent -- the operator simply
+        # never reconciles this namespace's SparkApplications -- so treat a
+        # missing namespace here as contention to be retried, not as a
+        # terminal error.
         if not self._verify_namespace_watched(namespace, timeout=15):
+            if _retry_on_eviction:
+                logger.warning(
+                    "Namespace '%s' was dropped from spark.jobNamespaces after a "
+                    "successful upgrade -- a concurrent deploy overwrote it. Re-adding.",
+                    namespace,
+                )
+                return self._add_namespace_to_watch(namespace, _retry_on_eviction=False)
             logger.error(
                 "Operator restarted but deployment spec does not include namespace '%s'",
                 namespace,
