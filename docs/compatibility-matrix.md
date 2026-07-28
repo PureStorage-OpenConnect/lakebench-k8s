@@ -1,20 +1,20 @@
-# Lakebench v1.3 Compatibility Matrix
+# Lakebench Compatibility Matrix
 
 ## Supported Recipe Combinations
 
-| Catalog | Table Format | Pipeline Engine | Query Engine | Recipe Name | Status |
-|---------|-------------|----------------|-------------|-------------|--------|
-| Hive | Iceberg | Spark | Trino | `hive-iceberg-spark-trino` | Stable (v1.0) |
-| Hive | Iceberg | Spark | Spark Thrift | `hive-iceberg-spark-thrift` | Stable (v1.0) |
-| Hive | Iceberg | Spark | DuckDB | `hive-iceberg-spark-duckdb` | Stable (v1.0) |
-| Hive | Iceberg | Spark | None | `hive-iceberg-spark-none` | Stable (v1.0) |
-| Polaris | Iceberg | Spark | Trino | `polaris-iceberg-spark-trino` | Stable (v1.1) |
-| Polaris | Iceberg | Spark | Spark Thrift | `polaris-iceberg-spark-thrift` | Stable (v1.1) |
-| Polaris | Iceberg | Spark | DuckDB | `polaris-iceberg-spark-duckdb` | Stable (v1.1) |
-| Polaris | Iceberg | Spark | None | `polaris-iceberg-spark-none` | Stable (v1.1) |
-| Hive | Delta | Spark | Trino | `hive-delta-spark-trino` | **New (v1.2)** |
-| Hive | Delta | Spark | Spark Thrift | `hive-delta-spark-thrift` | **New (v1.2)** |
-| Hive | Delta | Spark | None | `hive-delta-spark-none` | **New (v1.2)** |
+| Catalog | Table Format | Pipeline Engine | Query Engine | Recipe Name |
+|---------|-------------|----------------|-------------|-------------|
+| Hive | Iceberg | Spark | Trino | `hive-iceberg-spark-trino` |
+| Hive | Iceberg | Spark | Spark Thrift | `hive-iceberg-spark-thrift` |
+| Hive | Iceberg | Spark | DuckDB | `hive-iceberg-spark-duckdb` |
+| Hive | Iceberg | Spark | None | `hive-iceberg-spark-none` |
+| Polaris | Iceberg | Spark | Trino | `polaris-iceberg-spark-trino` |
+| Polaris | Iceberg | Spark | Spark Thrift | `polaris-iceberg-spark-thrift` |
+| Polaris | Iceberg | Spark | DuckDB | `polaris-iceberg-spark-duckdb` |
+| Polaris | Iceberg | Spark | None | `polaris-iceberg-spark-none` |
+| Hive | Delta | Spark | Trino | `hive-delta-spark-trino` |
+| Hive | Delta | Spark | Spark Thrift | `hive-delta-spark-thrift` |
+| Hive | Delta | Spark | None | `hive-delta-spark-none` |
 
 ## Pipeline Mode Support
 
@@ -24,7 +24,7 @@ All 11 recipes support all three pipeline modes:
 |------|-------------|-------------|
 | `batch` | Single-pass: bronze-verify -> silver-build -> gold-finalize -> benchmark | All recipes |
 | `sustained` | Sustained streaming with periodic benchmarks | hive-delta-spark-trino |
-| `iterative` | Repeated batch cycles with accumulating data | All recipes (v1.1) |
+| `iterative` | Repeated batch cycles with accumulating data | All recipes |
 
 ## Excluded Combinations
 
@@ -33,8 +33,8 @@ All 11 recipes support all three pipeline modes:
 | **Polaris + Delta** | Polaris is an Iceberg-native REST catalog. Delta requires Hive or Unity. | No |
 | **Unity + Iceberg** | OSS Unity Catalog v0.4.0 Iceberg REST API is read-only (GET only). `UCSingleCatalog` v0.4.0 incompatible with Spark 4.0 for Iceberg writes (`ClassCastException`). | Pending Unity release |
 | **Delta + DuckDB** | DuckDB's `delta` extension uses `delta-kernel-rs` which bypasses `httpfs` S3 settings and tries AWS IMDS (169.254.169.254) for credentials. Hangs on non-AWS Kubernetes. Only works on AWS with IAM instance profiles. | No (upstream) |
-| **Unity + Delta (all engines)** | UCSingleCatalog 0.4.0 always calls `generateTemporaryTableCredentials` (STS) even for EXTERNAL tables (`CREATE TABLE ... LOCATION`). FlashBlade has no STS. Requires upstream UCSingleCatalog fix or direct REST API table registration. | v1.3 |
-| **Unity + Delta + Trino** | Even with EXTERNAL tables, Trino 479 Delta connector requires Hive Metastore. Unity doesn't deploy one. | Pending Trino release |
+| **Unity + Delta (all engines)** | UCSingleCatalog 0.4.0 always calls `generateTemporaryTableCredentials` (STS) even for EXTERNAL tables (`CREATE TABLE ... LOCATION`). FlashBlade has no STS. Requires upstream UCSingleCatalog fix or direct REST API table registration. | Pending upstream fix |
+| **Unity + Delta + Trino** | Even with EXTERNAL tables, Trino's Delta connector requires a Hive Metastore. Unity doesn't deploy one. | No |
 
 ## Component Version Matrix
 
@@ -117,7 +117,7 @@ architecture:
     # Or set explicitly: delta: { version: "4.0.0" }  -- backward compat OK
 ```
 
-## Known Limitations (v1.2)
+## Known Limitations
 
 ### Delta + Trino
 

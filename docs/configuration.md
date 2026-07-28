@@ -475,7 +475,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `architecture.table_format.type` | enum | `iceberg` | Table format. Only `iceberg` is currently supported. |
-| `architecture.table_format.iceberg.version` | string | `1.10.1` | Apache Iceberg runtime JAR version. |
+| `architecture.table_format.iceberg.version` | string | `1.11.0` | Apache Iceberg runtime JAR version. |
 | `architecture.table_format.iceberg.file_format` | enum | `parquet` | Underlying file format: `parquet`, `orc`, or `avro`. |
 | `architecture.table_format.iceberg.properties` | dict | `{}` | Additional Iceberg table properties (key-value pairs). |
 

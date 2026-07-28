@@ -115,6 +115,7 @@ Install manually with Helm if you prefer:
 ```bash
 helm repo add spark-operator https://kubeflow.github.io/spark-operator
 helm install spark-operator spark-operator/spark-operator \
+  --version 2.5.1 \
   --namespace spark-operator \
   --create-namespace \
   --set spark.jobNamespaces="" \
@@ -484,7 +485,7 @@ in the `images` section of your YAML.
 |-----------|----------------|-------|
 | Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` |
 | Spark Operator | 2.5.1 | Kubeflow Helm chart |
-| Apache Iceberg | 1.10.1 | Spark runtime JAR |
+| Apache Iceberg | 1.11.0 | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |
 | Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` |
 | Trino | 483 | `trinodb/trino:483` |

@@ -134,7 +134,7 @@ pod).
 - S3-compatible object storage. FlashBlade and Garage are validated; others are
   expected to work. Run `lakebench config storage` to check yours. See
   [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md).
-- [Kubeflow Spark Operator 2.4.0+](https://github.com/kubeflow/spark-operator)
+- [Kubeflow Spark Operator 2.5.1+](https://github.com/kubeflow/spark-operator)
   (or set `spark.operator.install: true`)
 - [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) for
   Hive recipes (not needed for Polaris)
@@ -165,12 +165,12 @@ for flags and options.
 | Component | Version |
 |-----------|---------|
 | Apache Spark | 3.5.4, 4.0.2, 4.1.1 |
-| Spark Operator | 2.4.0 (Kubeflow) |
-| Apache Iceberg | 1.10.1 |
-| Delta Lake | 4.0.0 |
+| Spark Operator | 2.5.1 (Kubeflow) |
+| Apache Iceberg | 1.11.0 |
+| Delta Lake | 4.0.0 / 4.1.0 (auto, by Spark version) |
 | Hive Metastore | 3.1.3 (Stackable 25.7.0) |
-| Apache Polaris | 1.3.0-incubating |
-| Trino | 479 |
+| Apache Polaris | 1.6.0 |
+| Trino | 483 |
 | DuckDB | bundled (Python 3.11) |
 | PostgreSQL | 16, 17, 18 |
 

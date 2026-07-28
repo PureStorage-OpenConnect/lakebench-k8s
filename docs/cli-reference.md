@@ -115,8 +115,13 @@ lakebench config show CONFIG_FILE       # show resolved config with source annot
 lakebench config validate CONFIG_FILE   # validate config + test connectivity
 lakebench config storage CONFIG_FILE    # check the S3 backend supports what lakebench needs
 lakebench config recommend CONFIG_FILE  # show cluster sizing guidance
+lakebench config recipes [NAME]         # list recipes and what each one trades off
 lakebench config upgrade CONFIG_FILE    # convert v1.2 nested config to v1.3 flat format
 ```
+
+`config validate` and `config recipes` both take `--local`: for `validate`,
+it validates for local (podman/docker) mode instead of Kubernetes; for
+`recipes`, it filters the list down to recipes that can run in local mode.
 
 #### config storage
 
@@ -175,10 +180,17 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 | `--dry-run` | | `false` | Show what would be deployed without making changes |
 | `--include-observability` | | `false` | Deploy Prometheus and Grafana |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
+| `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout) |
+| `--local` | | `false` | Deploy locally with podman/docker instead of Kubernetes |
+| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 
 Deploys components in order: namespace, secrets, scratch StorageClass,
 PostgreSQL, catalog (Hive or Polaris), Trino, Spark RBAC, and optionally
 Prometheus and Grafana.
+
+With `--local`, lakebench runs the same pipeline against podman/docker
+containers on the local machine instead of a Kubernetes cluster, useful for
+testing a recipe without a cluster available.
 
 ### generate
 
@@ -222,6 +234,8 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--duration` | | config value | Streaming run duration in seconds |
 | `--generate` | | `false` | Run datagen before pipeline (batch mode only) |
 | `--yes` | `-y` | `false` | Skip confirmation prompts |
+| `--local` | | `false` | Run locally with podman/docker instead of Kubernetes |
+| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 
 The run command executes 7 phases:
 
@@ -380,6 +394,9 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--force` | `-f` | `false` | Skip confirmation prompt |
+| `--local` | | `false` | Tear down the local stack instead of Kubernetes |
+| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
+| `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
 
 Removes everything in the correct order: Spark jobs, orphaned pods, datagen
 jobs, Iceberg table maintenance, DROP TABLEs, S3 bucket contents, Grafana,

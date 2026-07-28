@@ -102,9 +102,9 @@ injection is broken. Volumes declared in the SparkApplication CR are silently
 dropped.
 
 **Fix:** Use Kubeflow Spark Operator v2.x (2.5.1 is the current default). Do
-not downgrade to v1.x. Note that even on v2.x, ConfigMap volumes specifically
-are routed through pod templates rather than native webhook injection --
-see the Spark Operator gotcha in CLAUDE.md if you're adding a new volume type.
+not downgrade to v1.x. Even on v2.x, ConfigMap volumes specifically are
+routed through pod templates rather than native webhook injection -- see the
+Spark Operator gotcha in CLAUDE.md if you're adding a new volume type.
 
 ```bash
 # Verify your Spark Operator version

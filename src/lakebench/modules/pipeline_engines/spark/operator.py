@@ -57,6 +57,20 @@ class SparkOperatorManager:
         "is in a pending state",
         "operation cannot be fulfilled",
         "the object has been modified",
+        # A concurrent writer can advance the release's Secret-backed history
+        # past the revision this upgrade's --reuse-values read expected,
+        # between the read and the write. Helm reports this as a missing
+        # release Secret rather than a generic conflict, e.g. `secrets
+        # "sh.helm.release.v1.spark-operator.v32" not found`. Live-verified
+        # 2026-07-27 under concurrent UAT: two deploys adding different
+        # namespaces to the shared spark-operator release both raced this
+        # error, and a same-revision retry on each succeeded on the next
+        # attempt. The Secret name itself is transient by design (`v32` was
+        # gone from `kubectl get secrets` minutes later, well within normal
+        # Helm history churn), so matching on the literal release name would
+        # be wrong -- `sh.helm.release.v1.` is the stable, chart-agnostic
+        # substring that identifies this failure class.
+        'secrets "sh.helm.release.v1.',
     )
 
     # ``helm upgrade --reuse-values`` carries forward only the keys already

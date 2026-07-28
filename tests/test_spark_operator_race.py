@@ -67,6 +67,11 @@ class TestHelmConflictDetection:
     def test_empty_stderr_is_not_a_conflict(self):
         assert not SparkOperatorManager._is_helm_conflict("")
 
+    def test_missing_release_secret_is_a_conflict(self):
+        assert SparkOperatorManager._is_helm_conflict(
+            'Error: UPGRADE FAILED: secrets "sh.helm.release.v1.spark-operator.v32" not found'
+        )
+
 
 class TestChartVersionPinnedOnUpgrade:
     """LB-064: --reuse-values carries values forward but not chart version."""

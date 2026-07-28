@@ -32,6 +32,7 @@ Pipeline successfully tested with 1GB data:
 ```bash
 # Install on OpenShift with all-namespace watching
 helm install spark-operator spark-operator/spark-operator \
+  --version 2.5.1 \
   --namespace spark-operator \
   --create-namespace \
   --set spark.jobNamespaces="" \
@@ -137,8 +138,13 @@ platform:
 ```
 
 ### Spark Conf Essentials
+
+Example for the Spark 3.5 image. The Iceberg runtime suffix and Hadoop AWS
+version both depend on the Spark minor version -- see the Version Matrix
+below.
+
 ```yaml
-spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1,org.apache.hadoop:hadoop-aws:3.3.4
+spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0,org.apache.hadoop:hadoop-aws:3.3.4
 spark.sql.catalog.lakehouse: org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.lakehouse.type: hive
 spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
@@ -151,14 +157,14 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Component | Version | Source |
 |-----------|---------|--------|
 | Spark Operator | 2.5.1 | Kubeflow helm chart |
-| Apache Spark | 3.5.4 / 4.0.0 | apache/spark image |
-| Iceberg | 1.10.1 | spark.jars.packages |
+| Apache Spark | 3.5.4 / 4.0.2 / 4.1.1 | apache/spark image |
+| Iceberg | 1.11.0 | spark.jars.packages |
 | Stackable Hive Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Commons Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Secret Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Listener Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Hive Metastore | 3.1.3 | Managed by Stackable |
-| Hadoop AWS | 3.3.4 | spark.jars.packages |
+| Hadoop AWS | 3.3.4 / 3.4.1 / 3.4.2 (by Spark minor) | spark.jars.packages |
 | PostgreSQL | 17 | postgres:17 |
 | Trino | 483 | trinodb/trino image |
 

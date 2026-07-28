@@ -50,7 +50,7 @@ and troubleshooting.
 
 | Component | Default Version | Delivery | Role |
 |-----------|----------------|----------|------|
-| Apache Iceberg | 1.10.1 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12` or `4.0_2.13`) | Open table format with ACID transactions |
+| Apache Iceberg | 1.11.0 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12`, `4.0_2.13`, or `4.1_2.13`) | Open table format with ACID transactions |
 
 Iceberg is the supported table format and works with both catalogs (Hive and Polaris).
 
@@ -155,7 +155,7 @@ images:
 architecture:
   table_format:
     iceberg:
-      version: "1.10.1"
+      version: "1.11.0"
 ```
 
 See [Configuration](configuration.md) for the full YAML reference.
