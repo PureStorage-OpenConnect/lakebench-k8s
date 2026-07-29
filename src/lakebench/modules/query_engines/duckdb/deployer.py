@@ -88,7 +88,16 @@ class DuckDBDeployer:
             )
 
     def _wait_for_ready(self, namespace: str, timeout_seconds: int = 300) -> None:
-        """Wait for the DuckDB Deployment to have ready replicas."""
+        """Wait for the DuckDB Deployment to have ready replicas.
+
+        Readiness alone cannot say *why* a pod is not ready. A slow pip
+        install, a crash-looping container, an unschedulable pod, and a
+        Deployment that was never created all present as ``ready_replicas: 0``
+        for the full timeout and then raise the same bare message. DuckDB
+        installs itself at startup, so the wait is long enough that a bad
+        failure hides in it for 15 minutes. The pod state is collected so the
+        error names the actual problem.
+        """
         from kubernetes import client as k8s_client
 
         apps_api = k8s_client.AppsV1Api()
@@ -109,4 +118,61 @@ class DuckDBDeployer:
                     raise
             time.sleep(5)
 
-        raise RuntimeError(f"DuckDB did not become ready within {timeout_seconds}s")
+        raise RuntimeError(
+            f"DuckDB did not become ready within {timeout_seconds}s. "
+            f"{self._describe_not_ready(namespace)}"
+        )
+
+    def _describe_not_ready(self, namespace: str) -> str:
+        """Best-effort explanation of why the DuckDB pod is not ready.
+
+        Diagnostics must never mask the original timeout, so every failure
+        here degrades to a note rather than an exception.
+        """
+        from kubernetes import client as k8s_client
+
+        try:
+            core_api = k8s_client.CoreV1Api()
+            pods = core_api.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=(
+                    "app.kubernetes.io/name=lakebench,app.kubernetes.io/component=duckdb"
+                ),
+            ).items
+        except Exception as e:  # noqa: BLE001 - diagnostics only
+            return f"Could not inspect pods to explain the failure: {e}"
+
+        if not pods:
+            return (
+                "No DuckDB pod was created. Check the Deployment's events -- "
+                "this usually means the pod could not be scheduled or was "
+                "rejected by a security context constraint."
+            )
+
+        notes: list[str] = []
+        for pod in pods:
+            name = pod.metadata.name
+            phase = pod.status.phase
+            for cs in pod.status.container_statuses or []:
+                waiting = cs.state.waiting
+                terminated = cs.state.terminated
+                if waiting and waiting.reason:
+                    notes.append(
+                        f"{name}: waiting ({waiting.reason}: {waiting.message or 'no detail'})"
+                    )
+                elif terminated:
+                    notes.append(
+                        f"{name}: terminated ({terminated.reason}, exit {terminated.exit_code})"
+                    )
+                elif not cs.ready:
+                    # Running but failing its probe. Restarts distinguish a
+                    # slow start from the probe repeatedly killing it.
+                    notes.append(
+                        f"{name}: running but not ready after "
+                        f"{cs.restart_count} restart(s) -- the startup probe "
+                        f"is likely still failing"
+                    )
+            if not notes:
+                notes.append(f"{name}: phase {phase}")
+
+        return " | ".join(notes)

@@ -75,7 +75,7 @@ class BenchmarkResult:
 
     mode: str  # "power", "throughput", or "composite"
     cache: str  # "hot" or "cold"
-    scale: int
+    scale: float
     queries: list[QueryResult] = field(default_factory=list)
     total_seconds: float = 0.0
     qph: float = 0.0

@@ -22,8 +22,8 @@ def image_tag(image: str) -> str:
 
     >>> image_tag("postgres:17")
     '17'
-    >>> image_tag("apache/polaris:1.3.0-incubating")
-    '1.3.0-incubating'
+    >>> image_tag("apache/polaris:1.6.0")
+    '1.6.0'
     >>> image_tag("myregistry.io/org/app")
     'latest'
     """
@@ -383,6 +383,7 @@ class DeploymentEngine:
                 cfg.architecture.query_engine.duckdb.memory
             ),
             "duckdb_catalog_name": cfg.architecture.query_engine.duckdb.catalog_name,
+            "duckdb_version": cfg.architecture.query_engine.duckdb.version,
             # Observability
             "observability_enabled": cfg.observability.enabled,
         }

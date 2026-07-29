@@ -70,13 +70,41 @@ lakebench compare CONFIG_A CONFIG_B [OPTIONS]
 | `--output` | `-o` | (none) | Write comparison report to file |
 | `--format` | | `table` | Output format: table, json, csv |
 | `--skip-benchmark` | | `false` | Skip benchmark phase |
+| `--local` | | `false` | Run both configs on this host with podman/docker |
+| `--generate` | | `false` | Generate data before each run |
 | `--timeout` | | `7200` | Per-run timeout in seconds |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
 
 ```bash
 lakebench compare hive-config.yaml polaris-config.yaml
 lakebench compare a.yaml b.yaml --format json --output comparison.json
+lakebench compare a.yaml b.yaml --local --generate
 ```
+
+The two configs run one after the other, not side by side. Running them
+concurrently on one host would measure the contention between them rather than
+the configs themselves.
+
+With `--local`, the two configs must have different `name:` values. The name
+keys the workdir, the Garage container, and the bucket names, so identical
+names would mean the second config ran against the first one's data.
+
+**Reading the delta column.** Delta is B relative to A, and it is coloured by
+whether the change is an improvement -- higher is better for QpH, throughput,
+and efficiency; lower is better for times and sizes. Descriptive scores
+(`scale_ratio`, `total_data_processed_gb`, `total_s3_objects`) are never
+coloured, because a change in them is information rather than a win or a loss.
+
+Differences under 2% are printed without colour. Repeated local benchmarks on
+unchanged data measured 0.9% run-to-run spread (n=5, stdev 1.8 QpH on a mean of
+472.9), so a smaller difference is not something a single pair of runs can
+resolve. The figure is recorded as `noise_floor_pct` in the saved comparison.
+
+One caveat on local timings: `bronze-verify` is the first stage to touch S3 and
+runs about 9s slower on a freshly deployed stack than on a warm one (30.4s vs
+21.4s measured). The heavier stages do not show this -- `silver-build` and
+`gold-finalize` were stable within a second across runs. Since `compare`
+deploys each config fresh, both sides pay this cost equally.
 
 ### config
 
@@ -85,9 +113,40 @@ Configuration management subcommands.
 ```
 lakebench config show CONFIG_FILE       # show resolved config with source annotations
 lakebench config validate CONFIG_FILE   # validate config + test connectivity
+lakebench config storage CONFIG_FILE    # check the S3 backend supports what lakebench needs
 lakebench config recommend CONFIG_FILE  # show cluster sizing guidance
+lakebench config recipes [NAME]         # list recipes and what each one trades off
 lakebench config upgrade CONFIG_FILE    # convert v1.2 nested config to v1.3 flat format
 ```
+
+`config validate` and `config recipes` both take `--local`: for `validate`,
+it validates for local (podman/docker) mode instead of Kubernetes; for
+`recipes`, it filters the list down to recipes that can run in local mode.
+
+#### config storage
+
+Runs graded conformance checks against the configured S3 endpoint and reports
+what the backend does. Diagnostic only: it never gates `deploy` or `run`, so a
+store lakebench has not seen before is checked rather than refused.
+
+```
+lakebench config storage [CONFIG_FILE] [OPTIONS]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--full` / `--no-full` | `--full` | Create a temporary bucket for write and multipart checks. Use `--no-full` when the account cannot create buckets; write checks are then reported as skipped, not failed. |
+
+Exit code 0 means no required check failed. Exit code 1 means a required check
+failed or the config could not be loaded.
+
+Checks are graded. **Required** failures (connectivity, bucket enumeration,
+object operations, multipart abort) mean lakebench cannot run against the store.
+**Advisory** results (sigv4 region strictness) are recorded because they change
+how lakebench configures Spark, not because they are defects.
+
+See [Storage Backends](storage-backends.md) for validated backends, what each
+check covers, and what it deliberately does not.
 
 ### validate (deprecated)
 
@@ -121,10 +180,17 @@ lakebench deploy [CONFIG_FILE] [OPTIONS]
 | `--dry-run` | | `false` | Show what would be deployed without making changes |
 | `--include-observability` | | `false` | Deploy Prometheus and Grafana |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
+| `--timeout` | `-t` | `3600` | Global deployment timeout in seconds (`0` = no timeout) |
+| `--local` | | `false` | Deploy locally with podman/docker instead of Kubernetes |
+| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 
 Deploys components in order: namespace, secrets, scratch StorageClass,
 PostgreSQL, catalog (Hive or Polaris), Trino, Spark RBAC, and optionally
 Prometheus and Grafana.
+
+With `--local`, lakebench runs the same pipeline against podman/docker
+containers on the local machine instead of a Kubernetes cluster, useful for
+testing a recipe without a cluster available.
 
 ### generate
 
@@ -168,6 +234,8 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--duration` | | config value | Streaming run duration in seconds |
 | `--generate` | | `false` | Run datagen before pipeline (batch mode only) |
 | `--yes` | `-y` | `false` | Skip confirmation prompts |
+| `--local` | | `false` | Run locally with podman/docker instead of Kubernetes |
+| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 
 The run command executes 7 phases:
 
@@ -326,6 +394,9 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | Flag | Short | Default | Description |
 |---|---|---|---|
 | `--force` | `-f` | `false` | Skip confirmation prompt |
+| `--local` | | `false` | Tear down the local stack instead of Kubernetes |
+| `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
+| `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
 
 Removes everything in the correct order: Spark jobs, orphaned pods, datagen
 jobs, Iceberg table maintenance, DROP TABLEs, S3 bucket contents, Grafana,

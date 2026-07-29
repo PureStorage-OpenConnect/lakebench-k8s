@@ -363,8 +363,8 @@ name: my-lakehouse
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
-#   trino: trinodb/trino:479
-#   polaris: apache/polaris:1.3.0-incubating
+#   trino: trinodb/trino:483
+#   polaris: apache/polaris:1.6.0
 #   duckdb: python:3.11-slim
 #   jmx_exporter: bitnami/jmx-exporter:latest
 #   prometheus: prom/prometheus:v2.48.0
@@ -430,7 +430,7 @@ platform:
   #                                  # Default is false -- install the operator
   #                                  # manually or set true for auto-install.
   #       namespace: spark-operator
-  #       version: "2.4.0"           # v2.x uses webhook for volume injection
+  #       version: "2.5.1"           # v2.x uses webhook for volume injection
   #
   #     driver:
   #       cores: 4
@@ -487,7 +487,7 @@ architecture:
     #     memory: 4Gi
     ## Polaris REST catalog settings (used when type: polaris)
     # polaris:
-    #   version: 1.3.0-incubating    # Min 1.3.0 for FlashBlade/MinIO
+    #   version: 1.6.0                # Min 1.3.0 for FlashBlade/MinIO
     #   port: 8181
     #   resources:
     #     cpu: "1"
@@ -496,7 +496,7 @@ architecture:
   # table_format:
   #   type: iceberg                  # iceberg (only fully supported format)
   #   iceberg:
-  #     version: "1.10.1"
+  #     version: "1.11.0"
   #     file_format: parquet         # parquet | orc | avro
   #     properties: {}               # Additional Iceberg table properties
 

@@ -142,8 +142,10 @@ class TestConfigResolution:
         assert cfg.architecture.query_engine.type.value == engine_name
 
     def test_iceberg_version_default(self):
+        """Recipes carry their own Iceberg version and override the schema
+        default, so this is the value real configs actually get."""
         cfg = _make_config(recipe="hive-iceberg-spark-trino")
-        assert cfg.architecture.table_format.iceberg.version == "1.10.1"
+        assert cfg.architecture.table_format.iceberg.version == "1.11.0"
 
     def test_delta_version_default(self):
         cfg = _make_config(recipe="hive-delta-spark-trino")

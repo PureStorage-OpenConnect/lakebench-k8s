@@ -3,6 +3,7 @@
 import pytest
 
 from lakebench.config.scale import (
+    MIN_SCALE,
     compute_guidance,
     customer360_dimensions,
     financial_dimensions,
@@ -108,12 +109,48 @@ class TestGetDimensions:
             get_dimensions("unknown_schema", 1)
 
     def test_scale_zero_raises(self):
-        with pytest.raises(ValueError, match="Scale must be >= 1"):
+        with pytest.raises(ValueError, match="Scale must be >="):
             get_dimensions("customer360", 0)
 
     def test_scale_negative_raises(self):
-        with pytest.raises(ValueError, match="Scale must be >= 1"):
+        with pytest.raises(ValueError, match="Scale must be >="):
             get_dimensions("customer360", -5)
+
+    def test_scale_below_minimum_raises(self):
+        with pytest.raises(ValueError, match="Scale must be >="):
+            get_dimensions("customer360", MIN_SCALE / 2)
+
+
+class TestFractionalScale:
+    """Sub-1 scales exist so local mode can run on a laptop."""
+
+    def test_minimum_scale_is_accepted(self):
+        dims = get_dimensions("customer360", MIN_SCALE)
+        assert dims.customers == 1_000
+        assert dims.approx_bronze_gb == pytest.approx(0.1)
+
+    def test_tenth_scale_is_a_tenth_of_the_data(self):
+        dims = get_dimensions("customer360", 0.1)
+        assert dims.customers == 10_000
+        assert dims.approx_rows == 10_000 * 24
+        assert dims.approx_bronze_gb == pytest.approx(1.0)
+
+    def test_derived_counts_stay_whole_numbers(self):
+        """Datagen cannot generate a fraction of a customer."""
+        dims = get_dimensions("customer360", 0.015)
+        assert isinstance(dims.customers, int)
+        assert isinstance(dims.approx_rows, int)
+
+    def test_tiny_scale_still_produces_at_least_one_entity(self):
+        """Rounding to zero would fail later with a confusing empty dataset."""
+        dims = get_dimensions("iot", MIN_SCALE)
+        assert dims.customers >= 1
+
+    def test_integer_scales_are_unchanged(self):
+        """The cluster path must behave exactly as before."""
+        dims = get_dimensions("customer360", 10)
+        assert dims.customers == 1_000_000
+        assert dims.approx_bronze_gb == pytest.approx(100.0)
 
 
 class TestComputeGuidance:

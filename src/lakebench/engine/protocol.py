@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from lakebench.config.schema import LakebenchConfig
     from lakebench.k8s import K8sClient
+    from lakebench.runtime import Runtime
 
 
 @dataclass
@@ -51,18 +52,23 @@ class PipelineEngine(Protocol):
         ...
 
 
-def get_engine(cfg: LakebenchConfig, k8s: K8sClient) -> PipelineEngine:
+def get_engine(cfg: LakebenchConfig, k8s: Runtime | K8sClient) -> PipelineEngine:
     """Factory that returns the configured pipeline engine.
 
     Reads ``cfg.architecture.pipeline_engine`` and returns the matching
     engine instance.  Today only ``spark`` is implemented; future engines
     (Beam, Flink) plug in here.
+
+    Accepts either a ``Runtime`` or a bare ``K8sClient``.  A ``K8sRuntime``
+    is unwrapped to the client it holds, so existing callers are unaffected.
     """
+    from lakebench.runtime.protocol import as_k8s_client
+
     engine_type = cfg.architecture.pipeline_engine.value
 
     if engine_type == "spark":
         from lakebench.spark.job import SparkJobManager
 
-        return SparkJobManager(cfg, k8s)  # type: ignore[return-value]
+        return SparkJobManager(cfg, as_k8s_client(k8s))  # type: ignore[return-value]
 
     raise ValueError(f"Unsupported pipeline engine: {engine_type!r}. Currently supported: spark.")

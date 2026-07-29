@@ -151,7 +151,7 @@ architecture:
 
 **Does not deploy:** Hive Metastore.
 
-**Requirements:** Polaris 1.3.0-incubating+ (default), Trino 454+.
+**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0), Trino 454+.
 
 **Caveats:** On FlashBlade, Polaris runs with `stsUnavailable=true` and `pathStyleAccess=true`. Each client (Spark, Trino) maintains its own static S3 credentials rather than using credential vending.
 
@@ -197,7 +197,7 @@ architecture:
 
 **Does not deploy:** Hive Metastore, Trino.
 
-**Caveats:** Polaris 1.3.0-incubating+ required. Spark Thrift Server connects to Polaris via the REST catalog API.
+**Caveats:** Polaris 1.3.0-incubating+ required (lakebench defaults to 1.6.0). Spark Thrift Server connects to Polaris via the REST catalog API.
 
 ---
 
@@ -219,7 +219,7 @@ architecture:
 
 **Does not deploy:** Hive Metastore, Trino.
 
-**Caveats:** Polaris 1.3.0-incubating+ required. DuckDB uses 2 cores and 4g memory by default.
+**Caveats:** Polaris 1.3.0-incubating+ required (lakebench defaults to 1.6.0). DuckDB uses 2 cores and 4g memory by default.
 
 ---
 

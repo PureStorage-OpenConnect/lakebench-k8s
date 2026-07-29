@@ -101,9 +101,10 @@ scripts not being found at the expected path inside the container.
 injection is broken. Volumes declared in the SparkApplication CR are silently
 dropped.
 
-**Fix:** Use Kubeflow Spark Operator v2.4.0 or later. The v2.x line uses
-webhook-based pod mutation for volume injection and works correctly. Do not
-downgrade to v1.x.
+**Fix:** Use Kubeflow Spark Operator v2.x (2.5.1 is the current default). Do
+not downgrade to v1.x. Even on v2.x, ConfigMap volumes specifically are
+routed through pod templates rather than native webhook injection -- see the
+Spark Operator gotcha in CLAUDE.md if you're adding a new volume type.
 
 ```bash
 # Verify your Spark Operator version
@@ -219,15 +220,19 @@ related to credential subscoping.
 is silently ignored by `TaskFileIOSupplier`, causing the server to attempt
 STS credential vending. FlashBlade has no STS endpoint, so this always fails.
 
-**Fix:** Use Polaris 1.3.0-incubating or later. The Docker tag includes the
-`-incubating` suffix:
+**Fix:** Use Polaris 1.3.0-incubating or later. Lakebench now defaults to
+1.6.0, which is well past this floor and needs no action. The 1.3.0 tag
+specifically includes the `-incubating` suffix:
 
 ```
 apache/polaris:1.3.0-incubating
 apache/polaris-admin-tool:1.3.0-incubating
 ```
 
-Note: `apache/polaris:1.3.0` (without the suffix) does not exist. The
+Note: `apache/polaris:1.3.0` (without the suffix) does not exist -- that
+release was only ever published with `-incubating`. Polaris graduated from
+the Apache incubator at 1.4.0, so 1.4.0 and later (including the 1.6.0
+default) drop the suffix entirely; there is no `1.6.0-incubating` tag. The
 Quarkus/SmallRye Config environment variable also requires a double underscore:
 
 ```
@@ -256,7 +261,7 @@ configuration.
 This property was introduced in Trino 454
 ([PR #22961](https://github.com/trinodb/trino/pull/22961)). Trino versions
 prior to 454 do not support it and cannot work with Polaris. Upgrade to Trino
-454 or later (Lakebench uses 479).
+454 or later (Lakebench uses 483).
 
 ---
 

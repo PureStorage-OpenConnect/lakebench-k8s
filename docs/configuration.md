@@ -129,10 +129,8 @@ images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
-  polaris: apache/polaris:1.3.0-incubating
-  trino: trinodb/trino:479
-  prometheus: prom/prometheus:v2.48.0
-  grafana: grafana/grafana:10.2.0
+  polaris: apache/polaris:1.6.0
+  trino: trinodb/trino:483
   pull_policy: Always                 # Always | IfNotPresent | Never
   pull_secrets: []                    # List of imagePullSecret names
 
@@ -183,7 +181,7 @@ platform:
       operator:
         install: true
         namespace: spark-operator
-        version: "2.4.0"
+        version: "2.5.1"
 
       driver:
         cores: 4
@@ -381,10 +379,8 @@ registries or custom builds.
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
-| `images.polaris` | string | `apache/polaris:1.3.0-incubating` | Apache Polaris REST catalog image. |
-| `images.trino` | string | `trinodb/trino:479` | Trino query engine image. |
-| `images.prometheus` | string | `prom/prometheus:v2.48.0` | Prometheus image. |
-| `images.grafana` | string | `grafana/grafana:10.2.0` | Grafana image. |
+| `images.polaris` | string | `apache/polaris:1.6.0` | Apache Polaris REST catalog image. |
+| `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
 | `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
 | `images.pull_secrets` | list | `[]` | List of Kubernetes `imagePullSecret` names. |
 
@@ -432,7 +428,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 |---|---|---|---|
 | `platform.compute.spark.operator.install` | bool | `false` | Install the Kubeflow Spark Operator via Helm. Requires cluster-admin. |
 | `platform.compute.spark.operator.namespace` | string | `spark-operator` | Namespace for the Spark Operator. |
-| `platform.compute.spark.operator.version` | string | `2.4.0` | Spark Operator chart version. v2.x required. |
+| `platform.compute.spark.operator.version` | string | `2.5.1` | Spark Operator chart version. v2.x required. |
 | `platform.compute.spark.driver.cores` | int | `4` | Spark driver CPU cores. |
 | `platform.compute.spark.driver.memory` | string | `8g` | Spark driver memory. |
 | `platform.compute.spark.executor.instances` | int | `8` | Default executor count (overridden by per-job settings). |
@@ -469,7 +465,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.catalog.hive.resources.cpu_min` | string | `500m` | Hive Metastore minimum CPU request. |
 | `architecture.catalog.hive.resources.cpu_max` | string | `2` | Hive Metastore CPU limit. |
 | `architecture.catalog.hive.resources.memory` | string | `4Gi` | Hive Metastore memory. |
-| `architecture.catalog.polaris.version` | string | `1.3.0-incubating` | Polaris version. Minimum 1.3.0-incubating. |
+| `architecture.catalog.polaris.version` | string | `1.6.0` | Polaris version. Minimum supported 1.3.0-incubating. |
 | `architecture.catalog.polaris.port` | int | `8181` | Polaris REST API port. |
 | `architecture.catalog.polaris.resources.cpu` | string | `1` | Polaris CPU request/limit. |
 | `architecture.catalog.polaris.resources.memory` | string | `2Gi` | Polaris memory. |
@@ -479,7 +475,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `architecture.table_format.type` | enum | `iceberg` | Table format. Only `iceberg` is currently supported. |
-| `architecture.table_format.iceberg.version` | string | `1.10.1` | Apache Iceberg runtime JAR version. |
+| `architecture.table_format.iceberg.version` | string | `1.11.0` | Apache Iceberg runtime JAR version. |
 | `architecture.table_format.iceberg.file_format` | enum | `parquet` | Underlying file format: `parquet`, `orc`, or `avro`. |
 | `architecture.table_format.iceberg.properties` | dict | `{}` | Additional Iceberg table properties (key-value pairs). |
 
@@ -504,6 +500,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.query_engine.duckdb.cores` | int | `2` | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | DuckDB memory. |
 | `architecture.query_engine.duckdb.catalog_name` | string | `lakehouse` | Iceberg catalog name for DuckDB. |
+| `architecture.query_engine.duckdb.version` | string | `1.5.5` | DuckDB version installed at deploy time. Pinned deliberately: an unpinned install takes whatever is current, so two runs weeks apart can query with different engines while `compare` reports the difference as a result. |
 
 ### Architecture -- Pipeline
 
@@ -598,6 +595,7 @@ added at runtime.
 | `observability.retention` | string | `7d` | Prometheus data retention period. |
 | `observability.storage` | string | `10Gi` | Prometheus PVC size. |
 | `observability.storage_class` | string | `""` | Prometheus PVC StorageClass. Empty = cluster default. |
+| `observability.chart_version` | string | `87.19.2` | `kube-prometheus-stack` Helm chart version. Bundles Prometheus and Grafana as one unit -- there is no separate Prometheus/Grafana version field. Pinned as of 2026-07-27; the deploy previously carried no `--version` flag and silently tracked whatever the Helm repo served at install time. |
 
 ### Observability -- Reports
 
@@ -876,7 +874,7 @@ useful for air-gapped environments or when running custom builds:
 images:
   datagen: my-registry.internal/lakebench/datagen:v2
   spark: my-registry.internal/apache/spark:4.0.2-python3
-  trino: my-registry.internal/trinodb/trino:479
+  trino: my-registry.internal/trinodb/trino:483
   pull_policy: Always
   pull_secrets:
     - my-registry-pull-secret

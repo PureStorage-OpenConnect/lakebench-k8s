@@ -131,6 +131,83 @@ def _build_component_list(cfg) -> str:
     return ", ".join(parts)
 
 
+def _deploy_local_mode(
+    cfg,
+    config_file: Path,
+    workdir: Path | None,
+    dry_run: bool,
+    yes: bool,
+    timeout: int,
+) -> None:
+    """Deploy the local stack. Raises typer.Exit on failure."""
+    from lakebench.cli._local import (
+        LocalModeError,
+        check_local_supported,
+        default_workdir,
+        deploy_local,
+        print_local_plan,
+        scale_advisory,
+    )
+
+    try:
+        check_local_supported(cfg)
+    except LocalModeError as e:
+        print_error(str(e))
+        raise typer.Exit(1)  # noqa: B904
+
+    resolved_workdir = workdir or default_workdir(cfg.name)
+    print_local_plan(cfg, resolved_workdir)
+
+    advisory = scale_advisory(cfg)
+    if advisory:
+        console.print(f"[yellow]{advisory}[/yellow]")
+        console.print()
+
+    if dry_run:
+        console.print("[yellow]DRY RUN[/yellow] -- nothing was started.")
+        return
+
+    if not yes:
+        typer.confirm("Proceed with local deployment?", abort=True)
+
+    j = journal_open(config_file, config_name=cfg.name)
+    j.begin_command(CommandName.DEPLOY, {"local": True})
+    started = time.time()
+
+    try:
+        deployment = deploy_local(cfg, workdir=resolved_workdir, timeout=timeout)
+    except LocalModeError as e:
+        print_error(str(e))
+        _journal_safe(j.end_command, success=False, message=str(e))
+        raise typer.Exit(1)  # noqa: B904
+    except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
+        print_error(f"Local deploy failed: {e}")
+        _journal_safe(j.end_command, success=False, message=str(e))
+        raise typer.Exit(1)  # noqa: B904
+
+    elapsed = int(time.time() - started)
+    _journal_safe(
+        j.record,
+        EventType.DEPLOY_COMPLETE,
+        message=f"Local stack ready in {elapsed}s",
+        success=True,
+        details={"local": True, "endpoint": deployment.endpoint},
+    )
+    _journal_safe(j.end_command, success=True)
+
+    console.print()
+    console.print(
+        Panel(
+            f"[green]Local stack ready in {elapsed}s[/green]\n\n"
+            f"Endpoint: {deployment.endpoint}\n"
+            f"Workdir:  {deployment.workdir}\n\n"
+            f"Next: [bold]lakebench run {config_file} --local[/bold]",
+            title="Deploy complete",
+            expand=False,
+        )
+    )
+
+
 def deploy(
     config_file: Annotated[
         Path | None,
@@ -176,6 +253,20 @@ def deploy(
             help="Global deployment timeout in seconds (0 = no timeout)",
         ),
     ] = 3600,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Deploy locally with podman/docker instead of Kubernetes",
+        ),
+    ] = False,
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir",
+            help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
+        ),
+    ] = None,
 ) -> None:
     """Deploy lakehouse infrastructure.
 
@@ -211,6 +302,12 @@ def deploy(
     # Enable observability if flag is set
     if include_observability:
         cfg.observability.enabled = True
+
+    # Local mode has its own path: no namespace, no operator, no preflight
+    # against a cluster that is not there.
+    if local:
+        _deploy_local_mode(cfg, config_file, workdir, dry_run, yes, timeout)
+        return
 
     namespace = cfg.get_namespace()
 

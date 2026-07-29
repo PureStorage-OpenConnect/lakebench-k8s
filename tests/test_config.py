@@ -723,7 +723,7 @@ class TestComponentValidation:
             },
         )
         assert config.architecture.catalog.polaris.port == 8181
-        assert config.architecture.catalog.polaris.version == "1.3.0-incubating"
+        assert config.architecture.catalog.polaris.version == "1.6.0"
         assert config.architecture.catalog.polaris.resources.cpu == "1"
         assert config.architecture.catalog.polaris.resources.memory == "2Gi"
 

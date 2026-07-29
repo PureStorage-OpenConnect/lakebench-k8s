@@ -27,6 +27,7 @@ from ._helpers import (
     journal_open,
     print_error,
     print_info,
+    print_success,
     resolve_config_path,
 )
 
@@ -52,6 +53,48 @@ def _build_destroy_list(cfg) -> str:
     return "\n".join(f"  - {item}" for item in items)
 
 
+def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
+    """Tear down the local stack. Raises typer.Exit on failure."""
+    import sys
+
+    from lakebench.cli._local import default_workdir, destroy_local, status_local
+
+    resolved = workdir or default_workdir(cfg.name)
+    running = status_local(cfg, workdir=resolved)["running"]
+
+    if not force and sys.stdin.isatty():
+        detail = (
+            f"Containers: {', '.join(str(r) for r in running)}" if running else "Nothing is running"
+        )
+        data_line = (
+            "[red]Generated data and the Ivy cache will be deleted.[/red]"
+            if remove_data
+            else f"Data is kept in {resolved}. Use --remove-data to delete it."
+        )
+        console.print(
+            Panel(
+                f"Tearing down the local stack.\n\n{detail}\n{data_line}",
+                title="Confirm Destruction",
+                expand=False,
+            )
+        )
+        if not typer.confirm("Proceed?"):
+            print_info("Destruction cancelled")
+            raise typer.Exit(0)
+
+    try:
+        removed, used_workdir = destroy_local(cfg, workdir=resolved, remove_data=remove_data)
+    except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
+        print_error(f"Local destroy failed: {e}")
+        raise typer.Exit(1)  # noqa: B904
+
+    print_success(f"Removed {removed} container(s)")
+    if remove_data:
+        print_info(f"Deleted {used_workdir}")
+    else:
+        print_info(f"Data kept in {used_workdir} (--remove-data to delete)")
+
+
 def destroy(
     config_file: Annotated[
         Path | None,
@@ -72,6 +115,27 @@ def destroy(
             "--force",
             "-f",
             help="Skip confirmation prompt",
+        ),
+    ] = False,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Tear down the local stack instead of Kubernetes",
+        ),
+    ] = False,
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir",
+            help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
+        ),
+    ] = None,
+    remove_data: Annotated[
+        bool,
+        typer.Option(
+            "--remove-data",
+            help="Local mode: also delete generated data and the Ivy cache",
         ),
     ] = False,
 ) -> None:
@@ -98,6 +162,10 @@ def destroy(
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
+
+    if local:
+        _destroy_local_mode(cfg, workdir, remove_data, force)
+        return
 
     namespace = cfg.get_namespace()
 

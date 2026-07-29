@@ -3,7 +3,7 @@
 from pathlib import Path
 
 import pytest
-from click.exceptions import Exit as ClickExit
+import typer
 
 from lakebench.cli import DEFAULT_CONFIG, resolve_config_path
 
@@ -27,7 +27,7 @@ class TestResolveConfigPath:
     def test_none_exits_when_missing(self, tmp_path, monkeypatch):
         """None raises typer.Exit when ./lakebench.yaml is absent."""
         monkeypatch.chdir(tmp_path)
-        with pytest.raises(ClickExit):
+        with pytest.raises(typer.Exit):
             resolve_config_path(None)
 
     def test_default_config_constant(self):
@@ -131,7 +131,7 @@ class TestPreflightCheck:
 
         with (
             patch("kubernetes.client.ApiextensionsV1Api") as mock_api,
-            pytest.raises(ClickExit),
+            pytest.raises(typer.Exit),
         ):
             mock_api.return_value.list_custom_resource_definition.return_value = mock_crd_list
             _preflight_check(cfg)
@@ -221,7 +221,7 @@ class TestRunPreflightInfraCheck:
         cfg = self._make_cfg()
         with (
             patch("lakebench.cli.get_k8s_client") as mock_get,
-            pytest.raises(ClickExit),
+            pytest.raises(typer.Exit),
         ):
             mock_get.return_value.namespace_exists.return_value = False
             _run_preflight_infra_check(cfg)
@@ -253,7 +253,7 @@ class TestRunPreflightInfraCheck:
         with (
             patch("lakebench.cli.get_k8s_client") as mock_get,
             patch("kubernetes.client.AppsV1Api") as mock_apps,
-            pytest.raises(ClickExit),
+            pytest.raises(typer.Exit),
         ):
             mock_get.return_value.namespace_exists.return_value = True
             mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts
@@ -287,7 +287,7 @@ class TestRunPreflightInfraCheck:
         with (
             patch("lakebench.cli.get_k8s_client") as mock_get,
             patch("kubernetes.client.AppsV1Api") as mock_apps,
-            pytest.raises(ClickExit),
+            pytest.raises(typer.Exit),
         ):
             mock_get.return_value.namespace_exists.return_value = True
             mock_apps.return_value.read_namespaced_stateful_set.side_effect = fake_read_sts

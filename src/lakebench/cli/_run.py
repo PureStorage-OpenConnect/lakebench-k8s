@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -187,6 +188,292 @@ def _run_preflight_infra_check(cfg) -> None:
     print_success("Infrastructure check passed")
 
 
+def _record_local_jobs(collector, cfg, result) -> None:
+    """Record one JobMetrics per stage from a local run.
+
+    Resources come from the local profile rather than the cluster one. A
+    ``local[N]`` job has no executors, so executor_count is 1 and the memory
+    figure is the single JVM heap -- reporting the cluster's 8 x 48g here would
+    make compute_efficiency_gb_per_core_hour meaningless.
+    """
+    from datetime import timedelta
+
+    from lakebench.metrics import JobMetrics
+    from lakebench.modules.pipeline_engines.spark.job import get_local_job_profile
+
+    now = datetime.now()
+    for stage_name, ok, elapsed in result.stages:
+        profile = get_local_job_profile(stage_name) or {}
+        cores = int(profile.get("cores", 2))
+        memory_gb = float(str(profile.get("driver_memory", "2g")).rstrip("g"))
+
+        # Input sizes and row counts only exist in the driver's own output.
+        # Reuse the cluster parser so both paths read the same log block; fall
+        # back to a bare record if the job died before printing it.
+        driver_output = result.logs.get(stage_name, "")
+        metrics = (
+            collector.parse_driver_logs(driver_output, stage_name)
+            if driver_output
+            else JobMetrics(job_name=f"lakebench-{stage_name}", job_type=stage_name)
+        )
+
+        # Wall-clock from the runner wins over the script's self-reported
+        # figure: it includes JVM start and jar resolution, which the user
+        # waits through and the script never sees.
+        metrics.elapsed_seconds = elapsed
+        metrics.start_time = now - timedelta(seconds=elapsed)
+        metrics.end_time = now
+        metrics.success = ok
+        metrics.executor_count = 1
+        metrics.executor_cores = cores
+        metrics.executor_memory_gb = memory_gb
+        metrics.cpu_seconds_requested = cores * elapsed
+        metrics.memory_gb_requested = memory_gb
+        if elapsed > 0:
+            metrics.throughput_gb_per_second = metrics.input_size_gb / elapsed
+            metrics.throughput_rows_per_second = metrics.input_rows / elapsed
+
+        collector.record_job(metrics)
+
+
+def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
+    """Record benchmark queries so `results` and `compare` can read them.
+
+    Shaped exactly like the cluster path's record: queries are dicts, not
+    QueryMetrics, and the single-round case goes through record_benchmark.
+    """
+    from lakebench.metrics import BenchmarkMetrics
+
+    if not bench_results:
+        return
+
+    collector.record_benchmark(
+        BenchmarkMetrics(
+            mode="local",
+            cache="cold",
+            # This field is int and display-only. A sub-1 local scale would
+            # truncate to 0 and read as "no data", so floor at 1; the exact
+            # value stays in the config snapshot, which is what compare reads.
+            scale=max(1, int(cfg.architecture.workload.datagen.scale)),
+            qph=qph,
+            total_seconds=sum(elapsed for _, _, elapsed, _ in bench_results),
+            queries=[
+                {
+                    "query_name": name,
+                    "elapsed_seconds": elapsed,
+                    "success": ok,
+                    "rows_returned": rows,
+                }
+                for name, ok, elapsed, rows in bench_results
+            ],
+            iterations=1,
+        )
+    )
+
+
+def _save_local_metrics(
+    collector,
+    metrics_storage,
+    cfg,
+    deployment,
+    success: bool,
+    datagen_elapsed: float,
+):
+    """Measure layer sizes, build the scorecard, and persist. Returns the path."""
+    from lakebench.s3 import S3Client
+
+    run_metrics = collector.end_run(success=success)
+    if not run_metrics:
+        return None
+
+    buckets = {
+        "bronze": cfg.platform.storage.s3.buckets.bronze,
+        "silver": cfg.platform.storage.s3.buckets.silver,
+        "gold": cfg.platform.storage.s3.buckets.gold,
+    }
+    try:
+        client = S3Client(
+            endpoint=deployment.endpoint,
+            access_key=deployment.credentials.access_key,
+            secret_key=deployment.credentials.secret_key,
+            region=deployment.credentials.region,
+            path_style=True,
+        )
+        collector.current_run = run_metrics
+        collector.record_actual_sizes_local(client, buckets)
+    except Exception as e:  # noqa: BLE001 -- sizes are best-effort
+        logger.warning("Could not measure local bucket sizes: %s", e)
+
+    try:
+        from lakebench.metrics import build_pipeline_benchmark
+
+        run_metrics.pipeline_benchmark = build_pipeline_benchmark(
+            run_metrics,
+            datagen_elapsed=datagen_elapsed,
+            datagen_output_gb=run_metrics.bronze_size_gb,
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
+
+    try:
+        return metrics_storage.save_run(run_metrics)
+    except Exception as e:  # noqa: BLE001
+        console.print(f"  [yellow]Could not save metrics: {e}[/yellow]")
+        return None
+
+
+def _run_local_mode(
+    cfg,
+    config_file: Path,
+    workdir: Path | None,
+    timeout: int | None,
+    stage: str | None,
+    yes: bool,
+    include_datagen: bool = False,
+    skip_generate: bool = False,
+    skip_benchmark: bool = False,
+) -> None:
+    """Run the pipeline locally. Raises typer.Exit on failure."""
+    from lakebench.cli._local import (
+        LOCAL_JOB_ORDER,
+        LocalModeError,
+        benchmark_local,
+        check_local_supported,
+        default_workdir,
+        deploy_local,
+        generate_local,
+        print_local_benchmark,
+        print_local_summary,
+        run_local,
+        scale_advisory,
+    )
+
+    try:
+        check_local_supported(cfg)
+    except LocalModeError as e:
+        print_error(str(e))
+        raise typer.Exit(1)  # noqa: B904
+
+    if stage and stage not in LOCAL_JOB_ORDER:
+        print_error(f"Unknown stage {stage!r}. Expected one of: {', '.join(LOCAL_JOB_ORDER)}")
+        raise typer.Exit(1)
+    stages = (stage,) if stage else LOCAL_JOB_ORDER
+
+    advisory = scale_advisory(cfg)
+    if advisory:
+        console.print(f"[yellow]{advisory}[/yellow]")
+        if not yes:
+            typer.confirm("Continue anyway?", abort=True)
+
+    resolved_workdir = workdir or default_workdir(cfg.name)
+
+    j = journal_open(config_file, config_name=cfg.name)
+    j.begin_command(CommandName.RUN, {"local": True, "stages": list(stages)})
+
+    # Same collector and storage the cluster path uses, so `results`,
+    # `report`, and `compare` read local runs without special-casing them.
+    import uuid as _uuid
+
+    from lakebench.metrics import MetricsCollector, MetricsStorage, build_config_snapshot
+
+    collector = MetricsCollector()
+    metrics_storage = MetricsStorage()
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
+    snapshot = build_config_snapshot(cfg)
+    snapshot["local"] = True
+    collector.start_run(run_id, cfg.name, snapshot)
+
+    # Reconnect to the running stack. Garage keeps metadata on the host, so
+    # this reuses the existing key and buckets rather than minting new ones.
+    try:
+        deployment = deploy_local(cfg, workdir=resolved_workdir, timeout=180)
+    except Exception as e:  # noqa: BLE001 -- container CLI failures vary widely
+        print_error(f"Could not reach the local stack: {e}")
+        print_info(f"Run 'lakebench deploy {config_file} --local' first")
+        _journal_safe(j.end_command, success=False, message=str(e))
+        raise typer.Exit(1)  # noqa: B904
+
+    datagen_elapsed = 0.0
+    if include_datagen and not skip_generate:
+        console.print()
+        datagen_start = time.time()
+        if not generate_local(cfg, deployment, timeout=timeout or 3600):
+            _journal_safe(j.end_command, success=False, message="Datagen failed")
+            raise typer.Exit(1)
+        datagen_elapsed = time.time() - datagen_start
+
+    console.print()
+    result = run_local(
+        cfg,
+        deployment,
+        workdir=resolved_workdir,
+        timeout=timeout or 3600,
+        stages=stages,
+    )
+    print_local_summary(result)
+    _record_local_jobs(collector, cfg, result)
+
+    _journal_safe(
+        j.record,
+        EventType.PIPELINE_COMPLETE,
+        message=("Local pipeline completed" if result.success else "Local pipeline failed"),
+        success=result.success,
+        details={
+            "local": True,
+            "elapsed_seconds": result.elapsed_seconds,
+            "stages": [{"stage": n, "success": ok, "elapsed": e} for n, ok, e in result.stages],
+        },
+    )
+    # Benchmark only after a clean pipeline: querying a half-built gold table
+    # produces a number that looks real and means nothing.
+    qph = 0.0
+    if result.success and not skip_benchmark and not stage:
+        console.print()
+        console.print("[bold dim]Benchmark[/bold dim]")
+        bench_results, qph = benchmark_local(cfg, deployment, workdir=resolved_workdir)
+        print_local_benchmark(bench_results, qph)
+        _record_local_queries(collector, cfg, bench_results, qph)
+        _journal_safe(
+            j.record,
+            EventType.BENCHMARK_COMPLETE,
+            message=f"Local benchmark: {qph:,.0f} QpH",
+            success=bool(bench_results),
+            details={
+                "local": True,
+                "queries_per_hour": qph,
+                "queries": [
+                    {"name": n, "success": ok, "elapsed": e, "rows": r}
+                    for n, ok, e, r in bench_results
+                ],
+            },
+        )
+
+    # Persist on failure too: a partial run is still evidence, and `results`
+    # showing nothing after a failed pipeline hides what did complete.
+    metrics_path = _save_local_metrics(
+        collector,
+        metrics_storage,
+        cfg,
+        deployment,
+        success=result.success,
+        datagen_elapsed=datagen_elapsed,
+    )
+    if metrics_path:
+        print_info(f"Metrics saved to {metrics_path}")
+        print_info(f"Run ID: {run_id}")
+        _journal_safe(
+            j.record,
+            EventType.METRICS_SAVED,
+            message=f"Metrics saved for run {run_id}",
+            details={"run_id": run_id, "metrics_path": str(metrics_path), "local": True},
+        )
+
+    _journal_safe(j.end_command, success=result.success)
+
+    if not result.success:
+        raise typer.Exit(1)
+
+
 def run(
     config_file: Annotated[
         Path | None,
@@ -298,6 +585,20 @@ def run(
             help="Skip all confirmation prompts",
         ),
     ] = False,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Run locally with podman/docker instead of Kubernetes",
+        ),
+    ] = False,
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir",
+            help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
+        ),
+    ] = None,
 ) -> None:
     """Execute the data pipeline.
 
@@ -354,6 +655,22 @@ def run(
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
 
+    # Local mode runs before auto-sizing: there is no cluster to size against,
+    # and the local profiles are fixed rather than derived from capacity.
+    if local:
+        _run_local_mode(
+            cfg,
+            config_file,
+            workdir,
+            timeout,
+            stage,
+            yes,
+            include_datagen=include_datagen,
+            skip_generate=skip_generate,
+            skip_benchmark=skip_benchmark,
+        )
+        return
+
     # Auto-size resources based on scale + cluster capacity
     from lakebench.config.autosizer import resolve_auto_sizing
 
@@ -373,7 +690,9 @@ def run(
     # Auto-scale timeout if not explicitly set
     if timeout is None:
         scale = cfg.architecture.workload.datagen.get_effective_scale()
-        timeout = max(3600, scale * 120)
+        # int() because scale is a float: a float timeout would propagate into
+        # manifests and log lines that expect a whole number of seconds.
+        timeout = max(3600, int(scale * 120))
         if scale >= 50:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
@@ -610,7 +929,9 @@ def run(
                         _datagen_output_gb = dg_info.size_bytes / (1024**3)
                     if dg_info.object_count:
                         # Estimate rows from scale factor (1.5M rows per scale unit)
-                        _datagen_output_rows = cfg.architecture.workload.datagen.scale * 1_500_000
+                        _datagen_output_rows = int(
+                            cfg.architecture.workload.datagen.scale * 1_500_000
+                        )
                 except Exception as e:
                     logger.warning("Could not measure bronze bucket size: %s", e)
             except Exception as e:

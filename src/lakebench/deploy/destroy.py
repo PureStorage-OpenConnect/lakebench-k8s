@@ -836,6 +836,30 @@ def destroy_all(
 
     # Finally, delete namespace if we created it
     if engine.config.platform.kubernetes.create_namespace:
+        # Drop the namespace from the Spark Operator's watch list FIRST. The
+        # operator crash-loops on a watched namespace that does not exist
+        # ("failed to wait for ... caches to sync"), which breaks
+        # SparkApplication reconciliation for every other namespace on the
+        # cluster. Doing this after the delete would leave exactly that
+        # window open. Best-effort: a shared operator we cannot reconfigure
+        # must not block a destroy the user asked for.
+        try:
+            from lakebench.spark import SparkOperatorManager
+
+            spark_op_cfg = engine.config.platform.compute.spark.operator
+            SparkOperatorManager(
+                namespace=spark_op_cfg.namespace,
+                version=spark_op_cfg.version,
+                job_namespace=namespace,
+            ).remove_namespace_from_watch(namespace)
+        except Exception as e:  # noqa: BLE001 - never block the destroy
+            logger.warning(
+                "Could not remove '%s' from spark.jobNamespaces: %s. "
+                "The operator may crash-loop until it is pruned.",
+                namespace,
+                e,
+            )
+
         report("namespace", DeploymentStatus.IN_PROGRESS, f"Deleting namespace {namespace}...")
         try:
             engine.k8s.delete_namespace(namespace)

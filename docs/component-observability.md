@@ -1,6 +1,6 @@
 # Observability
 
-Lakebench deploys observability via the `kube-prometheus-stack` Helm chart, which bundles Prometheus, Grafana, node-exporter, and kube-state-metrics in a single install.
+Lakebench deploys observability via the `kube-prometheus-stack` Helm chart, which bundles Prometheus, Grafana, node-exporter, and kube-state-metrics in a single install. Prometheus and Grafana versions are not independently configurable -- they come from whatever `observability.chart_version` (default `87.19.2`, currently bundling Prometheus v3.13.1 and Grafana v13.1.x) resolves to.
 
 HTML reports are generated from local metrics and do not require Prometheus or Grafana.
 
@@ -18,6 +18,7 @@ observability:
   retention: "7d"                    # Prometheus data retention period
   storage: "10Gi"                    # Prometheus PVC size
   storage_class: ""                  # StorageClass (empty = cluster default)
+  chart_version: "87.19.2"           # kube-prometheus-stack chart version (pins Prometheus + Grafana)
 
   reports:
     enabled: true                    # Enable HTML report generation

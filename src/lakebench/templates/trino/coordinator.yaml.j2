@@ -50,7 +50,7 @@ spec:
         {% endif %}
         {% if s3_ca_cert_pem %}
         - name: import-ca-cert
-          image: {{ trino_image | default('trinodb/trino:479') }}
+          image: {{ trino_image | default('trinodb/trino:483') }}
           command: ['bash', '-c', 'keytool -import -trustcacerts -alias custom-ca -file /etc/ssl/certs/custom-ca/ca.crt -keystore /truststore/truststore.jks -storepass changeit -noprompt 2>/dev/null || true']
           volumeMounts:
             - name: ca-cert
@@ -61,7 +61,7 @@ spec:
         {% endif %}
       containers:
         - name: trino
-          image: {{ trino_image | default('trinodb/trino:479') }}
+          image: {{ trino_image | default('trinodb/trino:483') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           ports:
             - containerPort: 8080

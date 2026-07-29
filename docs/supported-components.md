@@ -13,7 +13,7 @@ for the full YAML schema.
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
 | Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` | Pipeline processing (bronze, silver, gold stages) |
-| Spark Operator | 2.4.0 | Kubeflow Helm chart | Submits SparkApplication CRDs to Kubernetes |
+| Spark Operator | 2.5.1 | Kubeflow Helm chart | Submits SparkApplication CRDs to Kubernetes |
 
 Spark runs all data pipeline jobs. The Spark Operator manages job lifecycle
 via Kubernetes CRDs. Operator v2.x is required (v1.x has issues with
@@ -27,7 +27,7 @@ tuning, executor profiles, and version compatibility.
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 | Thrift-based catalog for Iceberg tables |
-| Apache Polaris | 1.3.0-incubating | `apache/polaris:1.3.0-incubating` | REST-based Iceberg catalog with OAuth2 |
+| Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` | REST-based Iceberg catalog with OAuth2 |
 
 Each recipe uses exactly one catalog. Both Hive and Polaris support Iceberg
 tables. See
@@ -50,7 +50,7 @@ and troubleshooting.
 
 | Component | Default Version | Delivery | Role |
 |-----------|----------------|----------|------|
-| Apache Iceberg | 1.10.1 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12` or `4.0_2.13`) | Open table format with ACID transactions |
+| Apache Iceberg | 1.11.0 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12`, `4.0_2.13`, or `4.1_2.13`) | Open table format with ACID transactions |
 
 Iceberg is the supported table format and works with both catalogs (Hive and Polaris).
 
@@ -60,7 +60,7 @@ Iceberg is the supported table format and works with both catalogs (Hive and Pol
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Trino | 479 | `trinodb/trino:479` | Distributed SQL engine for interactive analytics |
+| Trino | 483 | `trinodb/trino:483` | Distributed SQL engine for interactive analytics |
 | Spark Thrift Server | 3.5.x / 4.0.x (same as Spark) | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` | Spark-native SQL via HiveServer2 JDBC |
 | DuckDB | Bundled in Python 3.11 | `python:3.11-slim` | Lightweight single-pod analytics engine |
 
@@ -95,16 +95,15 @@ storage sizing and backup.
 
 ## Observability (optional)
 
-| Component | Default Version | Image | Role |
-|-----------|----------------|-------|------|
-| Prometheus | v2.48.0 | `prom/prometheus:v2.48.0` | Metrics collection and time-series storage |
-| Grafana | 10.2.0 | `grafana/grafana:10.2.0` | Dashboards and visualization |
-
 Deployed together via the `kube-prometheus-stack` Helm chart when
-`observability.enabled: true`. Includes node-exporter and kube-state-metrics.
-Three built-in Grafana dashboards: Pipeline Overview, Spark Detail,
-Storage I/O. See [Observability Reference](component-observability.md) for
-dashboard configuration and metric details.
+`observability.enabled: true`. The chart is pinned via
+`observability.chart_version` (default `87.19.2`), which bundles Prometheus
+v3.13.1 and Grafana v13.1.x -- Prometheus and Grafana versions are not
+independently configurable; they come from whatever the pinned chart version
+bundles. Includes node-exporter and kube-state-metrics. Three built-in
+Grafana dashboards: Pipeline Overview, Spark Detail, Storage I/O. See
+[Observability Reference](component-observability.md) for dashboard
+configuration and metric details.
 
 ---
 
@@ -149,16 +148,14 @@ images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
-  polaris: apache/polaris:1.3.0-incubating
-  trino: trinodb/trino:479
+  polaris: apache/polaris:1.6.0
+  trino: trinodb/trino:483
   duckdb: python:3.11-slim
-  prometheus: prom/prometheus:v2.48.0
-  grafana: grafana/grafana:10.2.0
 
 architecture:
   table_format:
     iceberg:
-      version: "1.10.1"
+      version: "1.11.0"
 ```
 
 See [Configuration](configuration.md) for the full YAML reference.

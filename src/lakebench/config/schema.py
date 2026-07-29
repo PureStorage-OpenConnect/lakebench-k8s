@@ -151,12 +151,12 @@ class ImagesConfig(BaseModel):
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
-    polaris: str = "apache/polaris:1.3.0-incubating"
-    polaris_admin_tool: str = "apache/polaris-admin-tool:1.3.0-incubating"
+    polaris: str = "apache/polaris:1.6.0"
+    polaris_admin_tool: str = "apache/polaris-admin-tool:1.6.0"
     unity: str = (
         "unitycatalog/unitycatalog:main"  # OSS Unity has no version tags; :main tracks 0.4.x
     )
-    trino: str = "trinodb/trino:479"
+    trino: str = "trinodb/trino:483"
     duckdb: str = "python:3.11-slim"
     prometheus: str = "prom/prometheus:v2.48.0"
     grafana: str = "grafana/grafana:10.2.0"
@@ -278,7 +278,7 @@ class SparkOperatorConfig(BaseModel):
 
     install: bool = False
     namespace: str = "spark-operator"
-    version: str = "2.4.0"  # v2.x properly injects volumes via webhook
+    version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
 
 
 class SparkComputeConfig(BaseModel):
@@ -405,7 +405,7 @@ class PolarisConfig(BaseModel):
     On FlashBlade: stsUnavailable=true, pathStyleAccess=true.
     """
 
-    version: str = "1.3.0-incubating"
+    version: str = "1.6.0"
     port: int = 8181
     client_secret: str = "lakebench-polaris-secret-2024"
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
@@ -436,7 +436,11 @@ class CatalogConfig(BaseModel):
 class IcebergConfig(BaseModel):
     """Apache Iceberg table format configuration."""
 
-    version: str = "1.10.1"
+    # 1.11.0 is the first release compiled for Java 17 and the first to publish
+    # a native Spark 4.1 runtime. Spark 3.5 images must use a java17 tag with
+    # this version; validate_iceberg_java_runtime() refuses the combination
+    # rather than letting it fail inside the driver.
+    version: str = "1.11.0"
     file_format: FileFormatType = FileFormatType.PARQUET
     properties: dict[str, Any] = Field(default_factory=dict)
 
@@ -497,6 +501,12 @@ class DuckDBConfig(BaseModel):
     cores: int = 2
     memory: str = "4g"
     catalog_name: str = "lakehouse"
+    # Pinned, not floating. Both install sites used a bare `pip install duckdb`,
+    # so every deploy took whatever was current and two runs weeks apart could
+    # compare different query engines while reporting the difference as a
+    # result. Measured local run-to-run spread is 0.9%, well below what an
+    # engine change would move, so the drift was invisible to the noise floor.
+    version: str = "1.5.5"
 
 
 class QueryEngineConfig(BaseModel):
@@ -795,13 +805,14 @@ class DatagenConfig(BaseModel):
           scale: 10   # ~100 GB bronze, 1M customers for Customer360
     """
 
-    scale: int = Field(
+    scale: float = Field(
         default=10,
-        ge=1,
+        ge=0.01,
         le=10000,
         description=(
             "Abstract scale factor. 1 unit ~ 10 GB on-disk bronze. "
-            "Scale 10 = ~100 GB, Scale 100 = ~1 TB."
+            "Scale 10 = ~100 GB, Scale 100 = ~1 TB. "
+            "Values below 1 are intended for local mode: 0.1 = ~1 GB."
         ),
     )
 
@@ -855,7 +866,7 @@ class DatagenConfig(BaseModel):
             object.__setattr__(self, "scale", derived_scale)
         return self
 
-    def get_effective_scale(self) -> int:
+    def get_effective_scale(self) -> float:
         """Get the effective scale value."""
         return self.scale
 
@@ -938,6 +949,84 @@ _SUPPORTED_COMBINATIONS = [
     # or direct REST API table registration. Planned for v1.3.
     # Note: Polaris + Delta is excluded -- Polaris is Iceberg-native.
 ]
+
+
+# Why a combination is unsupported, keyed by the pair that causes it.
+#
+# A rejection that only prints the valid list makes the user diff their request
+# against it to work out what they did wrong, and teaches them nothing. Every
+# entry here is a real limitation that cost someone a debugging session; the
+# gotcha numbers refer to the list in CLAUDE.md.
+#
+# Keys are checked most-specific first: a full 4-tuple, then (table_format,
+# query_engine), then (catalog, table_format).
+_COMBINATION_NOTES: dict[tuple[str, ...], str] = {
+    ("delta", "duckdb"): (
+        "DuckDB cannot read Delta on non-AWS S3. Its delta extension uses "
+        "delta-kernel-rs, which ignores DuckDB's httpfs S3 settings and tries "
+        "AWS IMDS (169.254.169.254) for credentials -- that hangs indefinitely "
+        "against a non-AWS endpoint. There is no way to pass a custom endpoint "
+        "to the delta kernel. The iceberg extension has no such limitation. "
+        "(gotcha 18)"
+    ),
+    ("polaris", "delta"): (
+        "Polaris is an Iceberg-native REST catalog and has no Delta Lake "
+        "support. Use Hive as the catalog for Delta tables."
+    ),
+    ("unity", "iceberg"): (
+        "OSS Unity Catalog's Iceberg REST API is read-only (GET only), and "
+        "UCSingleCatalog 0.4.0 cannot write Iceberg from Spark 4.0. "
+        "(gotcha 19)"
+    ),
+    ("unity", "delta", "spark", "trino"): (
+        "Trino's Delta Lake connector requires a Hive Metastore "
+        "(hive.metastore.uri), and Unity deployments do not include one. "
+        "Trino has no native OSS Unity integration for Delta. (gotcha 25)"
+    ),
+}
+
+
+def explain_combination(
+    catalog: str, table_format: str, pipeline_engine: str, query_engine: str
+) -> str:
+    """Return why a component combination is unsupported, or '' if unknown.
+
+    Not every rejected combination has a recorded reason -- some are simply
+    untested rather than known-broken -- so callers must handle an empty
+    string.
+    """
+    for key in (
+        (catalog, table_format, pipeline_engine, query_engine),
+        (table_format, query_engine),
+        (catalog, table_format),
+    ):
+        note = _COMBINATION_NOTES.get(key)
+        if note:
+            return note
+    return ""
+
+
+def nearest_supported(
+    catalog: str, table_format: str, pipeline_engine: str, query_engine: str
+) -> tuple[str, ...] | None:
+    """Return the supported combination closest to the one requested.
+
+    "Closest" is the fewest component swaps. Ties break toward changing the
+    query engine before the catalog or format, since the query engine is
+    usually the least consequential choice and the one a user is most willing
+    to change.
+    """
+    requested = (catalog, table_format, pipeline_engine, query_engine)
+    # Later positions are cheaper to change, so weight earlier ones higher.
+    weights = (8, 4, 2, 1)
+
+    best: tuple[str, ...] | None = None
+    best_cost = 99
+    for candidate in _SUPPORTED_COMBINATIONS:
+        cost = sum(w for w, r, c in zip(weights, requested, candidate, strict=True) if r != c)
+        if cost < best_cost:
+            best, best_cost = candidate, cost
+    return best
 
 
 class TableNamesConfig(BaseModel):
@@ -1043,16 +1132,32 @@ class ArchitectureConfig(BaseModel):
             self.query_engine.type.value,
         )
         if combo not in _SUPPORTED_COMBINATIONS:
+            parts = [
+                f"Unsupported component combination: catalog={combo[0]}, "
+                f"table_format={combo[1]}, engine={combo[2]}, "
+                f"query_engine={combo[3]}."
+            ]
+
+            # Lead with why, not with the list. The reason is what stops the
+            # user retrying a variation that fails for the same cause.
+            reason = explain_combination(*combo)
+            if reason:
+                parts.append(f"\nWhy: {reason}")
+
+            nearest = nearest_supported(*combo)
+            if nearest:
+                parts.append(
+                    f"\nClosest supported: catalog={nearest[0]}, "
+                    f"table_format={nearest[1]}, engine={nearest[2]}, "
+                    f"query_engine={nearest[3]}"
+                )
+
             supported = "\n".join(
                 f"  - catalog={c}, table_format={t}, engine={e}, query_engine={q}"
                 for c, t, e, q in _SUPPORTED_COMBINATIONS
             )
-            raise ValueError(
-                f"Unsupported component combination: catalog={combo[0]}, "
-                f"table_format={combo[1]}, engine={combo[2]}, "
-                f"query_engine={combo[3]}.\n"
-                f"Supported combinations:\n{supported}"
-            )
+            parts.append(f"\nAll supported combinations:\n{supported}")
+            raise ValueError("\n".join(parts))
         return self
 
 
@@ -1104,6 +1209,12 @@ class ObservabilityConfig(BaseModel):
     retention: str = "7d"
     storage: str = "10Gi"
     storage_class: str = ""
+    # kube-prometheus-stack chart version (bundles Prometheus + Grafana +
+    # node-exporter + kube-state-metrics as one unit). Pinned as of 2026-07-27
+    # -- the deploy previously carried no --version flag at all, so it
+    # silently tracked whatever the Helm repo served at install time. That
+    # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
+    chart_version: str = "87.19.2"
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
 
 

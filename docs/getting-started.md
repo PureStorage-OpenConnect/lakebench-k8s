@@ -22,13 +22,35 @@ You need admin-level access to the target namespace (or permission to create
 one). On OpenShift, Lakebench automatically handles Security Context
 Constraints for the Spark service account.
 
-Minimum cluster size depends on the scale factor. As a rough guide:
+Minimum cluster size depends on the scale factor. These figures are the peak
+resources Lakebench actually requests from Kubernetes, derived from the Spark
+job profiles:
 
-| Scale | Minimum CPU | Minimum RAM | Bronze data |
-|------:|------------:|------------:|------------:|
-| 1 | 8 cores | 32 GB | ~10 GB |
-| 10 | 16 cores | 64 GB | ~100 GB |
-| 100 | 64 cores | 256 GB | ~1 TB |
+| Scale | Bronze data | Minimum CPU | Minimum RAM | Scratch PVC |
+|------:|------------:|------------:|------------:|------------:|
+| 1 | ~10 GB | 36 cores | 512 GB | 1,200 Gi |
+| 10 | ~100 GB | 36 cores | 512 GB | 1,200 Gi |
+| 50 | ~500 GB | 52 cores | 752 GB | 1,800 Gi |
+| 100 | ~1 TB | 76 cores | 1,112 GB | 2,700 Gi |
+
+Three things surprise people about this table:
+
+- **Scale 1 and scale 10 request the same resources.** Executor counts are
+  fixed for every scale at or below 10, so the smallest run is no cheaper
+  than a 100 GB run. Below scale 10 you are choosing how much data to
+  process, not how much cluster to use.
+- **The `silver-build` job sets the peak.** It requests 8 executors at 4
+  cores and 60 GB each (48 GB heap plus 12 GB overhead). The medallion jobs
+  run sequentially, so the cluster only needs to satisfy the largest one,
+  not the sum of all three.
+- **Individual pods must fit on a single node.** A `silver-build` executor
+  needs 60 GB on one node. A cluster with 512 GB spread across sixteen 32 GB
+  nodes has enough total memory on paper and still cannot schedule the job.
+
+Lakebench checks this for you. The prerequisite phase of `lakebench run`
+compares the peak request against your cluster's allocatable capacity and
+fails immediately with the specific shortfall, rather than leaving pods
+`Pending` until the job times out. Skipped when you pass `--skip-preflight`.
 
 Run `lakebench recommend` after install to check your cluster's maximum
 supported scale.
@@ -83,7 +105,7 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator 2.4.0+** must be installed cluster-wide.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide.
 Lakebench assumes the operator is pre-installed (the default is
 `platform.compute.spark.operator.install: false`). Set it to `true` if you
 want `lakebench deploy` to install it automatically via Helm.
@@ -93,6 +115,7 @@ Install manually with Helm if you prefer:
 ```bash
 helm repo add spark-operator https://kubeflow.github.io/spark-operator
 helm install spark-operator spark-operator/spark-operator \
+  --version 2.5.1 \
   --namespace spark-operator \
   --create-namespace \
   --set spark.jobNamespaces="" \
@@ -461,11 +484,11 @@ in the `images` section of your YAML.
 | Component | Default version | Image |
 |-----------|----------------|-------|
 | Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` |
-| Spark Operator | 2.4.0 | Kubeflow Helm chart |
-| Apache Iceberg | 1.10.1 | Spark runtime JAR |
+| Spark Operator | 2.5.1 | Kubeflow Helm chart |
+| Apache Iceberg | 1.11.0 | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |
-| Apache Polaris | 1.3.0-incubating | `apache/polaris:1.3.0-incubating` |
-| Trino | 479 | `trinodb/trino:479` |
+| Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` |
+| Trino | 483 | `trinodb/trino:483` |
 | PostgreSQL | 17 | `postgres:17` |
 
 ---

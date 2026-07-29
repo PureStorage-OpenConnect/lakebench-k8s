@@ -11,7 +11,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from lakebench.modules.pipeline_engines.spark.job import JobState, JobStatus, SparkJobManager
+from lakebench.modules.pipeline_engines.spark.job import (
+    FAILURE_STATES,
+    SUCCESS_STATES,
+    JobState,
+    JobStatus,
+    SparkJobManager,
+)
 
 if TYPE_CHECKING:
     from lakebench.config import LakebenchConfig
@@ -71,10 +77,18 @@ class SparkJobMonitor:
             elapsed = time.time() - start
 
             if elapsed > timeout_seconds:
+                # Name the state we gave up in. A job stuck in UNKNOWN means
+                # the operator reported something this client does not model,
+                # which is a very different problem from a job that is
+                # genuinely still working.
+                stuck_in = last_state.value if last_state else "no state observed"
                 return JobResult(
                     job_name=job_name,
                     success=False,
-                    message=f"Job timed out after {timeout_seconds}s",
+                    message=(
+                        f"Job timed out after {timeout_seconds}s "
+                        f"(last observed state: {stuck_in!r})"
+                    ),
                     elapsed_seconds=elapsed,
                     driver_logs=self._get_driver_logs(job_name),
                 )
@@ -87,8 +101,12 @@ class SparkJobMonitor:
                     progress_callback(status)
                 last_state = status.state
 
-            # Check terminal states
-            if status.state == JobState.COMPLETED:
+            # Check terminal states. SUCCEEDING and FAILING are terminal for
+            # our purposes: the operator sets them as soon as the driver
+            # finishes and only settles on COMPLETED/FAILED afterwards.
+            # Waiting for the settled state alone risks reporting a finished
+            # job as a timeout.
+            if status.state in SUCCESS_STATES:
                 return JobResult(
                     job_name=job_name,
                     success=True,
@@ -97,7 +115,7 @@ class SparkJobMonitor:
                     driver_logs=self._get_driver_logs(job_name, tail_lines=None),
                 )
 
-            if status.state == JobState.FAILED:
+            if status.state in FAILURE_STATES:
                 return JobResult(
                     job_name=job_name,
                     success=False,
