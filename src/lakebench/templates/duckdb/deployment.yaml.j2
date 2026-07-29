@@ -31,7 +31,7 @@ spec:
             - "sh"
             - "-c"
             - |
-              pip install --no-cache-dir --quiet duckdb &&
+              pip install --no-cache-dir --quiet duckdb=={{ duckdb_version | default('1.5.5') }} &&
               python -c "import duckdb; c=duckdb.connect(); c.execute('INSTALL iceberg'); c.execute('INSTALL httpfs'); print('DuckDB extensions installed')" &&
               sleep infinity
           env:

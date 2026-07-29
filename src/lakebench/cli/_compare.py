@@ -33,7 +33,7 @@ def compare(
         typer.Option("--keep", help="Keep deployments after comparison (do not destroy)"),
     ] = False,
     scale: Annotated[
-        int | None,
+        float | None,
         typer.Option("--scale", help="Override scale for both configs"),
     ] = None,
     output: Annotated[
@@ -52,6 +52,14 @@ def compare(
         int,
         typer.Option("--timeout", help="Per-run timeout in seconds"),
     ] = 7200,
+    local: Annotated[
+        bool,
+        typer.Option("--local", help="Run both configs locally with podman/docker"),
+    ] = False,
+    generate: Annotated[
+        bool,
+        typer.Option("--generate", help="Generate data before each run"),
+    ] = False,
     yes: Annotated[
         bool,
         typer.Option("--yes", "-y", help="Skip confirmations"),
@@ -61,6 +69,11 @@ def compare(
 
     Runs each configuration through the full pipeline sequentially,
     then displays a comparison of their benchmark results.
+
+    With --local, both configs run on this host via podman/docker. Each is
+    deployed, run, and torn down in turn rather than side by side, so the two
+    do not contend for cores -- a comparison where one config ran against the
+    other's load would measure the contention, not the configs.
     """
     from lakebench.config import ConfigError
 
@@ -78,6 +91,7 @@ def compare(
         cfg_b.architecture.workload.datagen.scale = scale
 
     # Show comparison plan
+    where = "local (podman/docker)" if local else "Kubernetes"
     console.print(
         Panel(
             f"[bold]Comparing two configurations:[/bold]\n\n"
@@ -86,7 +100,8 @@ def compare(
             f"     Scale: {cfg_a.architecture.workload.datagen.scale}\n\n"
             f"  B: [cyan]{cfg_b.name}[/cyan] ({config_b})\n"
             f"     Recipe: {_recipe_summary(cfg_b)}\n"
-            f"     Scale: {cfg_b.architecture.workload.datagen.scale}\n",
+            f"     Scale: {cfg_b.architecture.workload.datagen.scale}\n\n"
+            f"  Target: {where}, run one after the other\n",
             title="lakebench compare",
             border_style="blue",
         )
@@ -97,15 +112,26 @@ def compare(
         if not confirm:
             raise typer.Exit(0)
 
+    if local and cfg_a.name == cfg_b.name:
+        # Local stacks are keyed by config name: same name means the same
+        # workdir, the same Garage container, and the same buckets, so B would
+        # run against A's data and the comparison would be meaningless.
+        console.print(
+            f"[red]Both configs are named '{cfg_a.name}'.[/red] "
+            "Local comparison needs distinct names -- they key the workdir, "
+            "the container, and the buckets."
+        )
+        raise typer.Exit(1)
+
     # Run A
     console.print()
     console.print(f"[bold]== Running configuration A: {cfg_a.name} ==[/bold]")
-    metrics_a = _run_single(config_a, timeout, skip_benchmark, keep)
+    metrics_a = _run_single(config_a, timeout, skip_benchmark, keep, local, generate)
 
     # Run B
     console.print()
     console.print(f"[bold]== Running configuration B: {cfg_b.name} ==[/bold]")
-    metrics_b = _run_single(config_b, timeout, skip_benchmark, keep)
+    metrics_b = _run_single(config_b, timeout, skip_benchmark, keep, local, generate)
 
     # Build comparison
     comparison = _build_comparison(cfg_a.name, metrics_a, cfg_b.name, metrics_b)
@@ -127,6 +153,42 @@ def compare(
     console.print(f"\n[dim]Comparison saved to {compare_dir}[/dim]")
 
 
+# Repeated local benchmarks on unchanged data measured 0.9% spread (n=5,
+# stdev 1.8 QpH on a mean of 472.9), with every query under 1% coefficient of
+# variation. 2% leaves headroom over that without hiding real differences.
+_NOISE_FLOOR_PCT = 2.0
+
+# Scores where a bigger number is the better result. Everything else -- times,
+# sizes, staleness -- is better when smaller.
+_HIGHER_IS_BETTER = (
+    "qph",
+    "throughput",
+    "efficiency",
+    "rows_processed",
+    "ingest_ratio",
+)
+
+# Scores that describe the run rather than rate it. A difference here is
+# information, not a win or a loss: scale_ratio is best at 1.0 in either
+# direction, and the data volume is an input, not a result.
+_NEUTRAL = ("scale_ratio", "total_data_processed_gb", "total_s3_objects")
+
+
+def _higher_is_better(metric: str) -> bool:
+    """Whether an increase in this score is an improvement.
+
+    Getting this backwards paints a faster engine red, so the default is the
+    conservative one: unknown metrics are treated as lower-is-better, matching
+    the times and sizes that make up most of the scorecard.
+    """
+    return any(token in metric.lower() for token in _HIGHER_IS_BETTER)
+
+
+def _is_neutral(metric: str) -> bool:
+    """Whether a change in this score is neither better nor worse."""
+    return metric.lower() in _NEUTRAL
+
+
 def _recipe_summary(cfg) -> str:
     """Build a short recipe description string."""
     arch = cfg.architecture
@@ -141,6 +203,8 @@ def _run_single(
     timeout: int,
     skip_benchmark: bool,
     keep: bool,
+    local: bool = False,
+    generate: bool = False,
 ) -> dict[str, Any]:
     """Run a single configuration through deploy -> generate -> run -> destroy.
 
@@ -149,9 +213,24 @@ def _run_single(
     import subprocess
     import sys
 
+    # Local mode refuses to run without an existing stack, so deploy first.
+    # The cluster path does its own deploy inside `run`.
+    if local:
+        deploy = subprocess.run(
+            [sys.executable, "-m", "lakebench", "deploy", str(config_path), "--local", "--yes"],
+            capture_output=False,
+            timeout=900,
+        )
+        if deploy.returncode != 0:
+            return {"error": f"Local deploy failed with exit code {deploy.returncode}"}
+
     cmd = [sys.executable, "-m", "lakebench", "run", str(config_path), "--timeout", str(timeout)]
     if skip_benchmark:
         cmd.append("--skip-benchmark")
+    if local:
+        cmd.append("--local")
+    if generate:
+        cmd.append("--generate")
 
     try:
         result = subprocess.run(cmd, capture_output=False, timeout=timeout + 300)
@@ -160,13 +239,19 @@ def _run_single(
     except subprocess.TimeoutExpired:
         return {"error": f"Run timed out after {timeout + 300}s"}
 
-    # Load the latest metrics
+    # Load metrics before destroying: the local teardown removes the workdir,
+    # and reading after that would race the deletion.
     metrics = _load_latest_metrics(config_path)
 
     # Destroy unless --keep
     if not keep:
+        destroy_cmd = [sys.executable, "-m", "lakebench", "destroy", str(config_path), "--force"]
+        if local:
+            # Without --remove-data the buckets survive, and the next run of a
+            # config with the same bucket names would read stale data.
+            destroy_cmd += ["--local", "--remove-data"]
         subprocess.run(
-            [sys.executable, "-m", "lakebench", "destroy", str(config_path), "--force"],
+            destroy_cmd,
             capture_output=True,
             timeout=600,
         )
@@ -182,9 +267,11 @@ def _load_latest_metrics(config_path: Path) -> dict[str, Any]:
     try:
         cfg = load_config(config_path)
         storage = MetricsStorage()
+        # list_runs() is already newest-first. Iterating it in reverse would
+        # return the config's *first ever* run rather than the one just
+        # executed, which is a silent wrong answer rather than an error.
         runs = storage.list_runs()
-        # Find runs matching this deployment name
-        for run_info in reversed(runs):
+        for run_info in runs:
             run_dir = storage.run_dir(run_info["run_id"])
             metrics_file = run_dir / "metrics.json"
             if metrics_file.exists():
@@ -226,8 +313,17 @@ def _build_comparison(
 
     return {
         "timestamp": datetime.now().isoformat(),
-        "config_a": {"name": name_a, "error": metrics_a.get("error")},
-        "config_b": {"name": name_b, "error": metrics_b.get("error")},
+        "config_a": {
+            "name": name_a,
+            "error": metrics_a.get("error"),
+            "run_id": metrics_a.get("run_id"),
+        },
+        "config_b": {
+            "name": name_b,
+            "error": metrics_b.get("error"),
+            "run_id": metrics_b.get("run_id"),
+        },
+        "noise_floor_pct": _NOISE_FLOOR_PCT,
         "metrics": rows,
     }
 
@@ -252,10 +348,22 @@ def _print_comparison_table(comparison: dict) -> None:
         val_a = row["config_a"]
         val_b = row["config_b"]
         delta = ""
-        if isinstance(val_a, (int, float)) and isinstance(val_b, (int, float)) and val_a != 0:
+        if (
+            isinstance(val_a, (int, float))
+            and isinstance(val_b, (int, float))
+            and not isinstance(val_a, bool)
+            and not isinstance(val_b, bool)
+            and val_a != 0
+        ):
             pct = ((val_b - val_a) / abs(val_a)) * 100
-            color = "green" if pct < 0 else "red" if pct > 0 else "white"
-            delta = f"[{color}]{pct:+.1f}%[/{color}]"
+            if abs(pct) < _NOISE_FLOOR_PCT or _is_neutral(row["metric"]):
+                # Measured spread on an idle host is ~1%. Colouring a smaller
+                # difference green or red claims a result the run cannot
+                # support, and neutral scores have no better direction.
+                delta = f"[dim]{pct:+.1f}%[/dim]"
+            else:
+                better = "green" if _higher_is_better(row["metric"]) == (pct > 0) else "red"
+                delta = f"[{better}]{pct:+.1f}%[/{better}]"
 
         table.add_row(
             row["metric"],
@@ -265,6 +373,10 @@ def _print_comparison_table(comparison: dict) -> None:
         )
 
     console.print(table)
+    console.print(
+        f"[dim]Delta is B relative to A. Differences under {_NOISE_FLOOR_PCT:g}% are within "
+        "measured run-to-run spread and are not coloured.[/dim]"
+    )
 
 
 def _fmt(val: Any) -> str:

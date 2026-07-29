@@ -20,10 +20,11 @@ Pipeline successfully tested with 1GB data:
 | Version | Status | Notes |
 |---------|--------|-------|
 | v1.1.27 | Broken | Does NOT inject volumes from `spec.volumes` into pods. Webhook mutation doesn't work. |
-| 2.4.0 | Working | Latest version. Properly injects ConfigMap volumes via webhook. Requires privileged SCC on OpenShift. |
+| 2.4.0 | Working with workaround | Webhook mutation works for pod labels, but ConfigMap volumes are not injected through Spark's `spark.kubernetes.*.volumes.*` conf-property path (`KubernetesVolumeUtils` has no `configMap` case). Lakebench routes ConfigMap volumes through `driver.template`/`executor.template` pod templates instead. Requires privileged SCC on OpenShift. |
+| 2.5.1 | Working with workaround | Current default. Verified against the operator's own source: the volume-injection code paths relevant to this gap are unchanged from 2.4.0, so the same pod-template workaround is still required. See CLAUDE.md gotcha 3 for the current, precise mechanism. |
 
 ### Current Default
-- **Version:** 2.4.0
+- **Version:** 2.5.1
 - **Helm Chart:** `spark-operator/spark-operator`
 - **Namespace:** `spark-operator`
 
@@ -31,6 +32,7 @@ Pipeline successfully tested with 1GB data:
 ```bash
 # Install on OpenShift with all-namespace watching
 helm install spark-operator spark-operator/spark-operator \
+  --version 2.5.1 \
   --namespace spark-operator \
   --create-namespace \
   --set spark.jobNamespaces="" \
@@ -42,9 +44,9 @@ oc adm policy add-scc-to-user privileged -z spark-operator-webhook -n spark-oper
 ```
 
 ### Learnings
-- Spark Operator version (2.4.0) is different from Apache Spark runtime version (3.5.4 / 4.0.0)
+- Spark Operator version (2.5.1) is different from Apache Spark runtime version (3.5.4 / 4.0.0 / 4.1.1)
 - `local://` URIs required for `mainApplicationFile` - scripts must be in container filesystem
-- ConfigMap volumes work correctly with v2.4.0 webhook
+- ConfigMap volumes need the pod-template workaround, not the webhook's local-dir conf-property injection -- see CLAUDE.md gotcha 3
 
 ---
 
@@ -136,8 +138,13 @@ platform:
 ```
 
 ### Spark Conf Essentials
+
+Example for the Spark 3.5 image. The Iceberg runtime suffix and Hadoop AWS
+version both depend on the Spark minor version -- see the Version Matrix
+below.
+
 ```yaml
-spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1,org.apache.hadoop:hadoop-aws:3.3.4
+spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0,org.apache.hadoop:hadoop-aws:3.3.4
 spark.sql.catalog.lakehouse: org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.lakehouse.type: hive
 spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
@@ -149,17 +156,17 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 
 | Component | Version | Source |
 |-----------|---------|--------|
-| Spark Operator | 2.4.0 | Kubeflow helm chart |
-| Apache Spark | 3.5.4 / 4.0.0 | apache/spark image |
-| Iceberg | 1.10.1 | spark.jars.packages |
+| Spark Operator | 2.5.1 | Kubeflow helm chart |
+| Apache Spark | 3.5.4 / 4.0.2 / 4.1.1 | apache/spark image |
+| Iceberg | 1.11.0 | spark.jars.packages |
 | Stackable Hive Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Commons Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Secret Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Listener Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Hive Metastore | 3.1.3 | Managed by Stackable |
-| Hadoop AWS | 3.3.4 | spark.jars.packages |
+| Hadoop AWS | 3.3.4 / 3.4.1 / 3.4.2 (by Spark minor) | spark.jars.packages |
 | PostgreSQL | 17 | postgres:17 |
-| Trino | 479 | trinodb/trino image |
+| Trino | 483 | trinodb/trino image |
 
 ## Stackable Installation
 
@@ -229,7 +236,7 @@ lakebench validate test-config.yaml --verbose
 
 ### Volume not mounted in Spark pods
 - **Cause:** Old Spark operator (v1.1.x) doesn't inject volumes
-- **Fix:** Upgrade to Spark operator 2.4.0
+- **Fix:** Upgrade to Spark operator v2.x (2.5.1 is the current default). Note: even on v2.x, ConfigMap volumes specifically still need the pod-template workaround, not raw `.spec.volumes` -- see CLAUDE.md gotcha 3.
 
 ### S3AFileSystem not found in Hive
 - **Cause:** Raw Hive image lacks hadoop-aws JARs

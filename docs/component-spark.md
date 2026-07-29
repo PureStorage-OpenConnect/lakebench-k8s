@@ -14,10 +14,15 @@ at `/opt/spark/scripts` in both driver and executor pods.
 
 ## Spark Operator
 
-Lakebench requires **Kubeflow Spark Operator v2.4.0** (or any v2.x release).
-The v2.x line uses webhook-based pod mutation for volume injection, which is
-required for ConfigMap and PVC mounts to work correctly. The v1.x line has
-broken ConfigMap volume injection and is not supported.
+Lakebench requires **Kubeflow Spark Operator v2.x** (2.5.1 is the current
+default). The v2.x line's webhook does mutate pod specs, but ConfigMap
+volumes specifically are not injected through Spark's native
+`spark.kubernetes.*.volumes.*` conf-property path -- lakebench routes those
+through `driver.template`/`executor.template` pod templates instead (see
+CLAUDE.md gotcha 3 for the exact mechanism, verified against the operator's
+own source through 2.5.1). PVC and emptyDir mounts use the native conf-property
+path and do not need the workaround. The v1.x line has broken volume
+injection entirely and is not supported.
 
 Lakebench can auto-install the operator into its own namespace, or skip
 installation if the operator is already present on the cluster:
@@ -29,7 +34,7 @@ platform:
       operator:
         install: false              # Set true to auto-install (requires cluster-admin)
         namespace: "spark-operator"  # Where the operator runs
-        version: "2.4.0"            # Must be v2.x
+        version: "2.5.1"            # Must be v2.x
 ```
 
 ## YAML Configuration
@@ -57,7 +62,8 @@ dependency coordinates and driver resource profiles:
 | Spark | Scala | Hadoop AWS | AWS SDK | Iceberg runtime | Driver memory (silver/gold) |
 |-------|-------|-----------|---------|------------------------|---|
 | 3.5.x | 2.12 | 3.3.4 | 1.12.262 | `iceberg-spark-runtime-3.5_2.12` | 24g |
-| 4.0.x | 2.13 | 3.4.1 | 1.12.367 | `iceberg-spark-runtime-4.0_2.13` | 32g |
+| 4.0.x | 2.13 | 3.4.1 | 1.12.720 | `iceberg-spark-runtime-4.0_2.13` | 32g |
+| 4.1.x | 2.13 | 3.4.2 | 1.12.720 | `iceberg-spark-runtime-4.1_2.13` (1.11.0+) or `-4.0_2.13` (1.10.x) | 32g |
 
 Spark 4.0.x needs more driver memory because `hadoop-aws:3.4.1` pulls a
 558MB AWS SDK v2 bundle (vs 280MB SDK v1 on Spark 3.5.x). The extra heap
@@ -74,7 +80,7 @@ platform:
       operator:
         install: false               # Set true to auto-install via Helm (requires cluster-admin)
         namespace: "spark-operator"  # Operator namespace
-        version: "2.4.0"            # Operator chart version (v2.x required)
+        version: "2.5.1"            # Operator chart version (v2.x required)
 ```
 
 ### Driver Resources

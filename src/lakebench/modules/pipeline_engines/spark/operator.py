@@ -41,6 +41,75 @@ class SparkOperatorManager:
     HELM_RELEASE_NAME = "spark-operator"
     DEFAULT_NAMESPACE = "spark-operator"
 
+    # ``spark.jobNamespaces`` is shared cluster state, so concurrent deploys
+    # contend for it.  Helm rejects an upgrade while another is in flight;
+    # retrying with a fresh read is what makes the add safe under parallelism.
+    _HELM_CONFLICT_RETRIES = 5
+    _HELM_CONFLICT_BACKOFF = 3.0
+
+    # Substrings Helm uses when an upgrade loses a race against another
+    # writer.  These are contention, not misconfiguration, so they are worth
+    # retrying; anything else is a real failure and is surfaced immediately.
+    _HELM_CONFLICT_MARKERS = (
+        "already exists",
+        "another operation",
+        "in progress",
+        "is in a pending state",
+        "operation cannot be fulfilled",
+        "the object has been modified",
+        # A concurrent writer can advance the release's Secret-backed history
+        # past the revision this upgrade's --reuse-values read expected,
+        # between the read and the write. Helm reports this as a missing
+        # release Secret rather than a generic conflict, e.g. `secrets
+        # "sh.helm.release.v1.spark-operator.v32" not found`. Live-verified
+        # 2026-07-27 under concurrent UAT: two deploys adding different
+        # namespaces to the shared spark-operator release both raced this
+        # error, and a same-revision retry on each succeeded on the next
+        # attempt. The Secret name itself is transient by design (`v32` was
+        # gone from `kubectl get secrets` minutes later, well within normal
+        # Helm history churn), so matching on the literal release name would
+        # be wrong -- `sh.helm.release.v1.` is the stable, chart-agnostic
+        # substring that identifies this failure class.
+        'secrets "sh.helm.release.v1.',
+    )
+
+    # ``helm upgrade --reuse-values`` carries forward only the keys already
+    # present in the *stored release values* -- it does not merge in a newer
+    # chart's values.yaml defaults for keys that key never had. The 2.4.0
+    # chart has no ``prometheus.metrics.jobSubmitLatencyBuckets`` key at all
+    # (only ``jobStartLatencyBuckets``); 2.5.1 added it and templates it
+    # straight into ``--metrics-job-submit-latency-buckets``. Reusing a
+    # pre-2.5.0 release's values therefore renders that flag empty, which the
+    # controller's own flag parser rejects at startup: `invalid argument ""
+    # for "--metrics-job-submit-latency-buckets" flag: strconv.ParseFloat:
+    # parsing "": invalid syntax` -- a crash loop, not a webhook/RBAC issue.
+    # Verified live 2026-07-26 upgrading an existing 2.4.0 release to 2.5.1.
+    # Backfilling this explicitly on every version-pinned upgrade closes the
+    # gap regardless of what the stored release happens to already have.
+    #
+    # Helm's own --set parser splits on unescaped commas to separate keys
+    # (`--set` docs: "key1=val1,key2=val2") -- this is Helm's parser, not
+    # shell word-splitting, so passing the raw value through subprocess.run's
+    # argv list does NOT avoid it. A first attempt at this fix passed the
+    # bare comma-separated bucket list and failed live with `Error: failed
+    # parsing --set data: key "1" has no value (cannot end with ,)` --
+    # every comma must be backslash-escaped.
+    _JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT = r"0.5\,1\,2\,4\,8\,16\,32\,64\,128\,256"
+
+    def _reuse_values_backfill(self) -> list[str]:
+        """``--set`` args to append whenever an upgrade also pins a version.
+
+        Only needed when ``target_version`` is set -- an unpinned upgrade
+        tracks whatever chart is already installed, so there is no version
+        jump for ``--reuse-values`` to be caught out by.
+        """
+        if not self.target_version:
+            return []
+        return [
+            "--set",
+            f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+        ]
+
     def __init__(
         self,
         namespace: str | None = None,
@@ -387,21 +456,30 @@ class SparkOperatorManager:
         # Step 1: Remove the namespace so Helm deletes the Role/RoleBinding
         without_ns = [ns for ns in watched if ns != namespace]
         ns_set_without = ",".join(without_ns) if without_ns else "default"
-        result = subprocess.run(
+        cmd = [
+            "helm",
+            "upgrade",
+            self.HELM_RELEASE_NAME,
+            self.HELM_CHART_NAME,
+            "-n",
+            self.namespace,
+            "--reuse-values",
+            "--set",
+            f"spark.jobNamespaces={{{ns_set_without}}}",
+        ]
+        # No --version here, so Helm resolves whatever chart the repo now
+        # serves while --reuse-values still only carries forward the
+        # release's *stored* values -- the same gap _reuse_values_backfill()
+        # exists for, just without a target_version to gate on. Always
+        # backfill here since there is no unversioned-and-safe case.
+        cmd.extend(
             [
-                "helm",
-                "upgrade",
-                self.HELM_RELEASE_NAME,
-                self.HELM_CHART_NAME,
-                "-n",
-                self.namespace,
-                "--reuse-values",
                 "--set",
-                f"spark.jobNamespaces={{{ns_set_without}}}",
-            ],
-            capture_output=True,
-            text=True,
+                f"prometheus.metrics.jobSubmitLatencyBuckets="
+                f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+            ]
         )
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(
                 "helm upgrade (remove namespace) failed: %s",
@@ -417,54 +495,202 @@ class SparkOperatorManager:
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
         return self._add_namespace_to_watch(namespace)
 
-    def _add_namespace_to_watch(self, namespace: str) -> bool:
+    def remove_namespace_from_watch(self, namespace: str) -> bool:
+        """Drop a namespace from the operator's watch list before deleting it.
+
+        A watched namespace that does not exist is not a harmless leftover:
+        the controller cannot establish a Pod watch on it, so its cache never
+        syncs and it crash-loops with ``failed to wait for
+        spark-application-controller caches to sync``. That takes down
+        SparkApplication reconciliation for *every* namespace on the cluster,
+        not just the one being destroyed, and the symptom appears later and
+        elsewhere.
+
+        Safe to call when the operator is absent or watches all namespaces --
+        both are reported as success, since there is nothing to remove.
+
+        Args:
+            namespace: The namespace about to be deleted.
+
+        Returns:
+            True if the watch list no longer contains the namespace.
+        """
+        for attempt in range(self._HELM_CONFLICT_RETRIES):
+            watched = self._get_watched_namespaces()
+            if watched is None:
+                # Watches all namespaces -- nothing namespace-specific to drop.
+                return True
+            if namespace not in watched:
+                return True
+
+            remaining = [ns for ns in watched if ns != namespace]
+            # The chart rejects an empty list, and an empty jobNamespaces means
+            # "watch all" rather than "watch none". Fall back to the chart's
+            # own default so removing the last namespace does not silently
+            # widen the operator's scope to the whole cluster.
+            ns_set = ",".join(remaining) if remaining else "default"
+
+            cmd = [
+                "helm",
+                "upgrade",
+                self.HELM_RELEASE_NAME,
+                self.HELM_CHART_NAME,
+                "-n",
+                self.namespace,
+                "--reuse-values",
+                "--set",
+                f"spark.jobNamespaces={{{ns_set}}}",
+            ]
+            if self.target_version:
+                cmd.extend(["--version", self.target_version])
+                cmd.extend(self._reuse_values_backfill())
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+            except FileNotFoundError:
+                logger.warning("helm not found on PATH -- cannot remove namespace from watch")
+                return False
+
+            if result.returncode == 0:
+                logger.info(
+                    "Removed namespace '%s' from spark.jobNamespaces (now: %s)",
+                    namespace,
+                    remaining or ["default"],
+                )
+                if self._is_openshift():
+                    self._assign_openshift_scc()
+                    self._patch_openshift_deployments()
+                self._restart_operator()
+                return True
+
+            if self._is_helm_conflict(result.stderr) and attempt + 1 < self._HELM_CONFLICT_RETRIES:
+                delay = self._HELM_CONFLICT_BACKOFF * (attempt + 1)
+                logger.warning(
+                    "helm upgrade conflicted removing namespace '%s' "
+                    "(attempt %d/%d), retrying in %.1fs",
+                    namespace,
+                    attempt + 1,
+                    self._HELM_CONFLICT_RETRIES,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
+
+            logger.warning(
+                "helm upgrade failed to remove namespace '%s': %s",
+                namespace,
+                result.stderr,
+            )
+            return False
+
+        return False
+
+    @classmethod
+    def _is_helm_conflict(cls, stderr: str) -> bool:
+        """Return True when Helm stderr indicates contention, not misconfig.
+
+        Only contention is worth retrying.  A genuine error (bad chart, no
+        such release, RBAC denial) should fail fast rather than repeat five
+        times and then report the same thing several seconds later.
+        """
+        lowered = (stderr or "").lower()
+        return any(marker in lowered for marker in cls._HELM_CONFLICT_MARKERS)
+
+    def _add_namespace_to_watch(self, namespace: str, _retry_on_eviction: bool = True) -> bool:
         """Add a namespace to the Spark Operator's watched namespaces.
 
         Uses ``helm upgrade --reuse-values`` to preserve existing config.
 
+        ``spark.jobNamespaces`` is cluster-scoped state shared by every
+        lakebench deployment, and adding to it is a read-modify-write.  Two
+        deploys running at once will each read the list before the other
+        writes, so the second upgrade silently drops the first one's
+        namespace -- a deploy that reported success ends up unwatched and its
+        SparkApplications are never reconciled.  Helm serialises upgrades
+        against a release, so the conflict surfaces either as an outright
+        failure or as a lost update.  Both are handled by re-reading the list
+        and retrying rather than by assuming the first read is still valid.
+
         Args:
             namespace: The namespace to add.
+            _retry_on_eviction: Internal. Allows exactly one re-add when a
+                concurrent writer drops this namespace after a successful
+                upgrade. Bounded to one to avoid two deploys ping-ponging.
 
         Returns:
             True if helm upgrade succeeded.
         """
-        watched = self._get_watched_namespaces()
-        if watched is None:
-            # Already watches all namespaces
-            return True
-        if namespace in watched:
-            return True
+        new_list: list[str] = []
 
-        # Filter out stale namespaces that no longer exist on the cluster
-        live_namespaces = self._filter_existing_namespaces(watched)
-        new_list = live_namespaces + [namespace]
-        ns_set = ",".join(new_list)
+        for attempt in range(self._HELM_CONFLICT_RETRIES):
+            # Re-read on every attempt.  A retry exists precisely because
+            # another writer may have changed the list since the last read,
+            # so reusing the earlier value would re-introduce the lost update.
+            watched = self._get_watched_namespaces()
+            if watched is None:
+                # Already watches all namespaces
+                return True
+            if namespace in watched:
+                return True
 
-        try:
-            result = subprocess.run(
-                [
-                    "helm",
-                    "upgrade",
-                    self.HELM_RELEASE_NAME,
-                    self.HELM_CHART_NAME,
-                    "-n",
-                    self.namespace,
-                    "--reuse-values",
-                    "--set",
-                    f"spark.jobNamespaces={{{ns_set}}}",
-                ],
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError:
-            logger.error("helm not found on PATH -- cannot add namespace")
-            return False
+            # Filter out stale namespaces that no longer exist on the cluster
+            live_namespaces = self._filter_existing_namespaces(watched)
+            new_list = live_namespaces + [namespace]
+            ns_set = ",".join(new_list)
 
-        if result.returncode != 0:
+            cmd = [
+                "helm",
+                "upgrade",
+                self.HELM_RELEASE_NAME,
+                self.HELM_CHART_NAME,
+                "-n",
+                self.namespace,
+                "--reuse-values",
+                "--set",
+                f"spark.jobNamespaces={{{ns_set}}}",
+            ]
+            # --reuse-values carries values forward but NOT the chart version,
+            # so omitting this lets Helm re-resolve to whatever the repo now
+            # serves.  A namespace add would then silently upgrade the
+            # operator out from under a pinned config.
+            if self.target_version:
+                cmd.extend(["--version", self.target_version])
+                cmd.extend(self._reuse_values_backfill())
+
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+            except FileNotFoundError:
+                logger.error("helm not found on PATH -- cannot add namespace")
+                return False
+
+            if result.returncode == 0:
+                break
+
+            if self._is_helm_conflict(result.stderr) and attempt + 1 < self._HELM_CONFLICT_RETRIES:
+                delay = self._HELM_CONFLICT_BACKOFF * (attempt + 1)
+                logger.warning(
+                    "helm upgrade conflicted adding namespace '%s' "
+                    "(attempt %d/%d), retrying in %.1fs: %s",
+                    namespace,
+                    attempt + 1,
+                    self._HELM_CONFLICT_RETRIES,
+                    delay,
+                    result.stderr.strip(),
+                )
+                time.sleep(delay)
+                continue
+
             logger.error(
                 "helm upgrade failed to add namespace '%s': %s",
                 namespace,
                 result.stderr,
+            )
+            return False
+        else:
+            logger.error(
+                "helm upgrade still conflicting after %d attempts for namespace '%s'",
+                self._HELM_CONFLICT_RETRIES,
+                namespace,
             )
             return False
 
@@ -488,8 +714,21 @@ class SparkOperatorManager:
             logger.error("Operator restart failed after helm upgrade")
             return False
 
-        # Verify the deployment spec includes the new namespace.
+        # Verify the deployment spec includes the new namespace.  A successful
+        # upgrade is not proof of a durable result: a concurrent deploy that
+        # read the list before this write can land afterwards and drop this
+        # namespace again.  That eviction is silent -- the operator simply
+        # never reconciles this namespace's SparkApplications -- so treat a
+        # missing namespace here as contention to be retried, not as a
+        # terminal error.
         if not self._verify_namespace_watched(namespace, timeout=15):
+            if _retry_on_eviction:
+                logger.warning(
+                    "Namespace '%s' was dropped from spark.jobNamespaces after a "
+                    "successful upgrade -- a concurrent deploy overwrote it. Re-adding.",
+                    namespace,
+                )
+                return self._add_namespace_to_watch(namespace, _retry_on_eviction=False)
             logger.error(
                 "Operator restarted but deployment spec does not include namespace '%s'",
                 namespace,
@@ -875,7 +1114,9 @@ class SparkOperatorManager:
         fix_cmd = (
             f"helm upgrade {self.HELM_RELEASE_NAME} {self.HELM_CHART_NAME} "
             f"-n {self.namespace} --reuse-values "
-            f"--set 'spark.jobNamespaces={{{new_list}}}'"
+            f"--set 'spark.jobNamespaces={{{new_list}}}' "
+            f"--set 'prometheus.metrics.jobSubmitLatencyBuckets="
+            f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}'"
         )
         status.message = (
             f"Spark Operator does not watch namespace '{self.job_namespace}'. "

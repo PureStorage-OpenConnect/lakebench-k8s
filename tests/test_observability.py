@@ -671,6 +671,35 @@ class TestObservabilityDeployerDeployDestroy:
         assert result.status == DeploymentStatus.SUCCESS
         assert "Would deploy" in result.message
 
+    def test_deploy_pins_chart_version(self):
+        """The install/upgrade command must pin --version -- previously it
+        carried no version flag at all and silently tracked whatever the
+        Helm repo served at install time (unpinned equivalent of LB-070's
+        --reuse-values gap, just with no pin to even reuse)."""
+        from lakebench.deploy.observability import HELM_CHART, ObservabilityDeployer
+
+        cfg = make_config(observability={"enabled": True})
+        engine = MagicMock()
+        engine.config = cfg
+        engine.dry_run = False
+        deployer = ObservabilityDeployer(engine)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.side_effect = [
+                MagicMock(returncode=0),  # helm repo add
+                MagicMock(returncode=0),  # helm repo update
+                MagicMock(returncode=1, stderr="stop after capturing the install call"),
+            ]
+            deployer.deploy()
+
+            install_call = mock_run.call_args_list[2][0][0]
+            assert HELM_CHART in install_call
+            assert "--version" in install_call, (
+                f"install command must pin a chart version, got {install_call}"
+            )
+            idx = install_call.index("--version")
+            assert install_call[idx + 1] == cfg.observability.chart_version
+
     def test_deploy_helm_failure(self):
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer

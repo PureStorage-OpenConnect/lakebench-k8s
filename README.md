@@ -126,9 +126,15 @@ pod).
 ## Prerequisites
 
 - `kubectl` and `helm` on PATH
-- Kubernetes 1.26+ (minimum 8 CPU / 32 GB RAM for scale 1)
-- S3-compatible object storage (FlashBlade, MinIO, AWS S3, etc.)
-- [Kubeflow Spark Operator 2.4.0+](https://github.com/kubeflow/spark-operator)
+- Kubernetes 1.26+ with capacity for the Spark job profiles. Scale 1 requests
+  a peak of **36 cores and 512 GB RAM** (driven by `silver-build`), and a
+  single executor pod needs 60 GB on one node. See
+  [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
+  for the full table. Lakebench fails fast if the cluster is too small.
+- S3-compatible object storage. FlashBlade and Garage are validated; others are
+  expected to work. Run `lakebench config storage` to check yours. See
+  [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md).
+- [Kubeflow Spark Operator 2.5.1+](https://github.com/kubeflow/spark-operator)
   (or set `spark.operator.install: true`)
 - [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) for
   Hive recipes (not needed for Polaris)
@@ -139,6 +145,7 @@ pod).
 |---------|-------------|
 | `init` | Generate a starter config file |
 | `validate` | Check config and cluster connectivity |
+| `config storage` | Check the S3 backend supports what lakebench needs |
 | `info` | Show deployment configuration summary |
 | `deploy` | Deploy all infrastructure components |
 | `generate` | Generate synthetic data at the configured scale |
@@ -158,12 +165,12 @@ for flags and options.
 | Component | Version |
 |-----------|---------|
 | Apache Spark | 3.5.4, 4.0.2, 4.1.1 |
-| Spark Operator | 2.4.0 (Kubeflow) |
-| Apache Iceberg | 1.10.1 |
-| Delta Lake | 4.0.0 |
+| Spark Operator | 2.5.1 (Kubeflow) |
+| Apache Iceberg | 1.11.0 |
+| Delta Lake | 4.0.0 / 4.1.0 (auto, by Spark version) |
 | Hive Metastore | 3.1.3 (Stackable 25.7.0) |
-| Apache Polaris | 1.3.0-incubating |
-| Trino | 479 |
+| Apache Polaris | 1.6.0 |
+| Trino | 483 |
 | DuckDB | bundled (Python 3.11) |
 | PostgreSQL | 16, 17, 18 |
 
@@ -179,6 +186,7 @@ All versions are overridable in the YAML config. See
 - [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and sustained modes
 - [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- scorecard and query benchmark
 - [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design
+- [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md) -- validated S3 backends and conformance checks
 - [Troubleshooting](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/troubleshooting.md) -- common errors and fixes
 
 ## License

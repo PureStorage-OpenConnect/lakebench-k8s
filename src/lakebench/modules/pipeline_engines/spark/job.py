@@ -127,7 +127,66 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 }
 
 
-def _scale_executor_count(profile: dict[str, Any], scale: int) -> int:
+# ---------------------------------------------------------------------------
+# Local mode job profiles
+# ---------------------------------------------------------------------------
+# Spark runs as ``local[N]``: one JVM is driver and executor at once, so there
+# is no executor count, no overhead allotment, and no scratch PVC. Sizing is
+# therefore a single memory figure and a core count.
+#
+# These are deliberately not derived from _JOB_PROFILES. A laptop cannot host a
+# 48g executor, and scaling the cluster numbers down by a fudge factor would
+# produce values nobody has run.
+#
+# Silver gets the most because it is the shuffle-heavy join, the same reason it
+# dominates the cluster profile.
+#
+# Sized against a full scale 0.1 run (~1 GB bronze, 51,922 rows, 13 files),
+# which is the default `init --local` produces. Silver at 4g reproducibly threw
+# OutOfMemoryError on exactly that input: local[4] runs driver and executors in
+# one heap, so the join's build side, the shuffle buffers, and the Parquet write
+# buffers all compete for it. 8g clears it with headroom. Do not lower these
+# without running a full scale 0.1 pipeline -- an undersized local run fails
+# late, in silver, with a stack trace that points at memory rather than at the
+# profile.
+_LOCAL_JOB_PROFILES: dict[str, dict[str, Any]] = {
+    "bronze-verify": {"driver_memory": "2g", "cores": 2, "partitions": 8},
+    "silver-build": {"driver_memory": "8g", "cores": 4, "partitions": 16},
+    "gold-finalize": {"driver_memory": "4g", "cores": 2, "partitions": 8},
+}
+
+# Above this scale a laptop is the wrong tool. Local mode still runs, but the
+# CLI warns: at scale 1 the bronze dataset alone is ~10 GB, and a single JVM
+# shuffling that on consumer hardware takes long enough that users assume it
+# has hung.
+LOCAL_SCALE_ADVISORY_MAX = 1.0
+
+
+def get_local_job_profile(job_type: str) -> dict[str, Any] | None:
+    """Return the local[*] resource profile for a job type.
+
+    Args:
+        job_type: Job type string (e.g. "bronze-verify").
+
+    Returns:
+        Profile dict copy, or None if the job has no local equivalent. The
+        streaming jobs return None: sustained mode is not supported locally.
+    """
+    profile = _LOCAL_JOB_PROFILES.get(job_type)
+    return dict(profile) if profile else None
+
+
+def local_peak_memory_gb() -> int:
+    """Peak host memory local mode needs, in GB.
+
+    The batch jobs run sequentially, so the peak is the largest single job
+    rather than the sum -- the same property that makes silver-build define the
+    cluster peak.
+    """
+    return max(int(p["driver_memory"].rstrip("g")) for p in _LOCAL_JOB_PROFILES.values())
+
+
+def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     """Derive executor count from scale factor and job profile.
 
     Uses base counts for small scales and adds more executors
@@ -136,7 +195,10 @@ def _scale_executor_count(profile: dict[str, Any], scale: int) -> int:
     base = profile["base_executors"]
     if scale <= 10:
         return base
-    extra = ((scale - 10) * profile["executors_per_100_scale"]) // 100
+    # int() rather than // because scale is a float: floor division on floats
+    # yields a float, which would put a non-integer executor count in the
+    # manifest.
+    extra = int((scale - 10) * profile["executors_per_100_scale"] // 100)
     return min(base + extra, profile["max_executors"])
 
 
@@ -153,7 +215,7 @@ def get_job_profile(job_type: str) -> dict[str, Any] | None:
     return dict(profile) if profile else None
 
 
-def get_executor_count(job_type: str, scale: int) -> int:
+def get_executor_count(job_type: str, scale: float) -> int:
     """Compute the deterministic executor count for a job at a given scale.
 
     Args:
@@ -167,6 +229,144 @@ def get_executor_count(job_type: str, scale: int) -> int:
     if not profile:
         return 0
     return _scale_executor_count(profile, scale)
+
+
+# Batch pipeline job order.  These run sequentially, so the cluster only ever
+# needs to satisfy the single largest job, not the sum of all three.
+BATCH_JOB_TYPES: tuple[str, ...] = ("bronze-verify", "silver-build", "gold-finalize")
+
+# Streaming pipeline jobs.  Unlike batch, these run *concurrently* in
+# sustained mode, so their requirements add up.
+STREAMING_JOB_TYPES: tuple[str, ...] = ("bronze-ingest", "silver-stream", "gold-refresh")
+
+
+@dataclass(frozen=True)
+class JobRequirement:
+    """Resources a single Spark job requests from Kubernetes."""
+
+    job_type: str
+    executors: int
+    cpu_cores: int
+    memory_gb: int
+    scratch_gb: int
+    # Largest single pod, which must fit on one node.
+    max_pod_cpu_cores: int
+    max_pod_memory_gb: int
+
+
+@dataclass(frozen=True)
+class PeakRequirement:
+    """Peak resources the pipeline requests at a given scale.
+
+    For batch mode this is the largest single job, because the three
+    medallion jobs run sequentially.  For sustained mode the streaming
+    jobs run concurrently, so their requirements are summed.
+    """
+
+    scale: float
+    mode: str
+    cpu_cores: int
+    memory_gb: int
+    scratch_gb: int
+    max_pod_cpu_cores: int
+    max_pod_memory_gb: int
+    driving_job: str
+    per_job: tuple[JobRequirement, ...]
+
+
+def _job_requirement(job_type: str, scale: float) -> JobRequirement | None:
+    """Compute the resource request for one job at a given scale."""
+    profile = _JOB_PROFILES.get(job_type)
+    if not profile:
+        return None
+
+    # Local import: config.schema imports from this module, so a top-level
+    # import here would be circular.
+    from lakebench.config.schema import parse_spark_memory
+
+    executors = _scale_executor_count(profile, scale)
+
+    exec_mem = parse_spark_memory(profile["executor_memory"])
+    exec_overhead = parse_spark_memory(profile["executor_memory_overhead"])
+    driver_mem = parse_spark_memory(profile["driver_memory"])
+    exec_total_bytes = exec_mem + exec_overhead
+
+    gib = 1024**3
+    memory_bytes = executors * exec_total_bytes + driver_mem
+    scratch_gb = executors * int(str(profile["scratch_size"]).rstrip("Gi") or 0)
+
+    return JobRequirement(
+        job_type=job_type,
+        executors=executors,
+        cpu_cores=executors * profile["executor_cores"] + profile["driver_cores"],
+        memory_gb=memory_bytes // gib,
+        scratch_gb=scratch_gb,
+        max_pod_cpu_cores=max(profile["executor_cores"], profile["driver_cores"]),
+        max_pod_memory_gb=max(exec_total_bytes, driver_mem) // gib,
+    )
+
+
+def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirement:
+    """Compute the peak resources the pipeline requests at a given scale.
+
+    This is the single source of truth for "how big a cluster do I need".
+    Both the capacity preflight check and the documented minimums derive
+    from it, so the published numbers cannot drift from ``_JOB_PROFILES``.
+
+    Batch jobs run sequentially, so the peak is the largest single job.
+    Sustained-mode streaming jobs run concurrently, so they are summed.
+
+    Args:
+        scale: Scale factor from config.
+        mode: Pipeline mode, ``"batch"`` or ``"sustained"``.
+
+    Returns:
+        PeakRequirement describing the peak CPU, memory, and scratch request.
+    """
+    streaming = str(mode).lower() == "sustained"
+    job_types = STREAMING_JOB_TYPES if streaming else BATCH_JOB_TYPES
+
+    reqs = tuple(r for jt in job_types if (r := _job_requirement(jt, scale)) is not None)
+    if not reqs:
+        return PeakRequirement(
+            scale=scale,
+            mode=mode,
+            cpu_cores=0,
+            memory_gb=0,
+            scratch_gb=0,
+            max_pod_cpu_cores=0,
+            max_pod_memory_gb=0,
+            driving_job="",
+            per_job=(),
+        )
+
+    if streaming:
+        # Concurrent: the cluster must hold every streaming job at once.
+        return PeakRequirement(
+            scale=scale,
+            mode=mode,
+            cpu_cores=sum(r.cpu_cores for r in reqs),
+            memory_gb=sum(r.memory_gb for r in reqs),
+            scratch_gb=sum(r.scratch_gb for r in reqs),
+            max_pod_cpu_cores=max(r.max_pod_cpu_cores for r in reqs),
+            max_pod_memory_gb=max(r.max_pod_memory_gb for r in reqs),
+            driving_job="all streaming jobs (concurrent)",
+            per_job=reqs,
+        )
+
+    # Sequential: the peak is whichever single job is largest.
+    driving = max(reqs, key=lambda r: r.memory_gb)
+    return PeakRequirement(
+        scale=scale,
+        mode=mode,
+        cpu_cores=max(r.cpu_cores for r in reqs),
+        memory_gb=max(r.memory_gb for r in reqs),
+        scratch_gb=max(r.scratch_gb for r in reqs),
+        max_pod_cpu_cores=max(r.max_pod_cpu_cores for r in reqs),
+        max_pod_memory_gb=max(r.max_pod_memory_gb for r in reqs),
+        driving_job=driving.job_type,
+        per_job=reqs,
+    )
 
 
 def _streaming_concurrent_budget(
@@ -230,7 +430,9 @@ def _streaming_concurrent_budget(
     return caps
 
 
-def _scale_partitions(profile: dict[str, Any], scale: int, executor_count: int, cores: int) -> str:
+def _scale_partitions(
+    profile: dict[str, Any], scale: float, executor_count: int, cores: int
+) -> str:
     """Derive shuffle partition count from executor count and cores.
 
     Target: 2x total cores.
@@ -247,8 +449,16 @@ def _scale_partitions(profile: dict[str, Any], scale: int, executor_count: int, 
 _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
     (3, 5): "3.5.x (Scala 2.12, Hadoop AWS 3.3.4)",
     (4, 0): "4.0.x (Scala 2.13, Hadoop AWS 3.4.1)",
-    (4, 1): "4.1.x (Scala 2.13, Hadoop AWS 3.4.1)",
+    (4, 1): "4.1.x (Scala 2.13, Hadoop AWS 3.4.2)",
 }
+# Spark 4.2 is deliberately NOT in this dict. Live-verified 2026-07-26: the
+# borrowed Iceberg 4.1 runtime jar (Iceberg has no native 4.2 runtime) throws
+# java.lang.IncompatibleClassChangeError loading org.apache.iceberg.spark.
+# source.SparkView -- Spark 4.2 changed org.apache.spark.sql.connector.
+# catalog.View from an interface to something else, breaking every Iceberg
+# release that implements it. This is a real binary incompatibility, not a
+# lakebench config gap, and blocks table writes entirely (silver-build fails
+# on the first createOrReplace). See LB-069.
 
 # ---------------------------------------------------------------------------
 # Table format version compatibility matrix
@@ -258,34 +468,93 @@ _SUPPORTED_SPARK_VERSIONS: dict[tuple[int, int], str] = {
 
 _FORMAT_VERSION_COMPAT: dict[tuple[int, int], dict[str, list[str]]] = {
     (3, 5): {
-        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1"],
+        "iceberg": ["1.5.2", "1.6.1", "1.7.1", "1.8.1", "1.9.1", "1.10.1", "1.11.0"],
         "delta": [],  # Delta 4.x requires Spark 4.x
     },
     (4, 0): {
-        "iceberg": ["1.10.0", "1.10.1"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
         "delta": ["4.0.0"],
     },
     (4, 1): {
-        "iceberg": ["1.10.0", "1.10.1"],
+        "iceberg": ["1.10.0", "1.10.1", "1.11.0"],
         "delta": ["4.1.0"],
     },
 }
 
 # Default format version per Spark version (auto-selected when user doesn't override).
 _FORMAT_VERSION_DEFAULTS: dict[tuple[int, int], dict[str, str]] = {
-    (3, 5): {"iceberg": "1.10.1", "delta": ""},
-    (4, 0): {"iceberg": "1.10.1", "delta": "4.0.0"},
-    (4, 1): {"iceberg": "1.10.1", "delta": "4.1.0"},
+    (3, 5): {"iceberg": "1.11.0", "delta": ""},
+    (4, 0): {"iceberg": "1.11.0", "delta": "4.0.0"},
+    (4, 1): {"iceberg": "1.11.0", "delta": "4.1.0"},
 }
 
-# Iceberg runtime artifact suffix per Spark version.  Iceberg publishes
-# one runtime jar per Spark major release (3.5, 4.0) -- Spark 4.1 reuses
-# the 4.0 runtime because Iceberg hasn't published a 4.1-specific artifact.
+# Iceberg 1.11.0 is the first release compiled for Java 17 -- its jars carry
+# bytecode major 61, where 1.10.x carried 55 (Java 11).  Spark images that ship
+# a Java 11 runtime therefore fail with UnsupportedClassVersionError at class
+# load, not at submit, so the error surfaces inside the driver rather than in
+# lakebench.  Verified by reading the class headers out of both jars.
+_ICEBERG_MIN_JAVA17_VERSION = (1, 11)
+
+# Iceberg runtime artifact suffix per (Spark version, Iceberg version).
+#
+# Iceberg publishes one runtime jar per Spark minor it supports, but not every
+# Iceberg release publishes the same set.  1.11.0 added a native 4.1 runtime;
+# 1.10.x has none, so Spark 4.1 must keep borrowing the 4.0 jar there.  A flat
+# (major, minor) -> suffix mapping cannot express that and would send 1.10.x
+# users to an artifact that does not exist.
 _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
     (3, 5): "3.5",
     (4, 0): "4.0",
-    (4, 1): "4.0",  # Iceberg 1.10.1 has no 4.1 runtime; 4.0 is compatible
+    (4, 1): "4.0",  # default for Iceberg releases with no 4.1 runtime
 }
+# No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
+# the 4.1 jar there throws IncompatibleClassChangeError -- see LB-069.
+
+# Spark version -> the first Iceberg version publishing a native runtime for it.
+# Below this, the fallback in _ICEBERG_RUNTIME_SUFFIX applies.
+_ICEBERG_NATIVE_RUNTIME_FROM: dict[tuple[int, int], tuple[int, int, int]] = {
+    (4, 1): (1, 11, 0),
+}
+
+
+def _version_tuple(version: str) -> tuple[int, ...]:
+    """Parse a dotted version into comparable integers, ignoring any suffix."""
+    parts: list[int] = []
+    for chunk in version.split("."):
+        digits = ""
+        for ch in chunk:
+            if not ch.isdigit():
+                break
+            digits += ch
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def iceberg_runtime_suffix_for(spark_key: tuple[int, int], iceberg_version: str) -> str:
+    """Which Iceberg Spark runtime artifact to request.
+
+    Depends on both versions, not just Spark. Iceberg 1.11.0 publishes a native
+    Spark 4.1 runtime; 1.10.x does not, so a Spark 4.1 job on 1.10.x has to keep
+    borrowing the 4.0 jar. Choosing on Spark version alone would send those
+    users to ``iceberg-spark-runtime-4.1_2.13:1.10.1``, which does not exist,
+    and the failure would arrive as a Maven resolution error inside the driver.
+    """
+    native_from = _ICEBERG_NATIVE_RUNTIME_FROM.get(spark_key)
+    if native_from and _version_tuple(iceberg_version) >= native_from:
+        return f"{spark_key[0]}.{spark_key[1]}"
+    return _ICEBERG_RUNTIME_SUFFIX.get(spark_key, f"{spark_key[0]}.{spark_key[1]}")
+
+
+def iceberg_requires_java17(iceberg_version: str) -> bool:
+    """Whether this Iceberg release needs a Java 17 Spark image.
+
+    1.11.0 ships bytecode major 61; 1.10.x shipped 55. On a Java 11 image the
+    mismatch surfaces as UnsupportedClassVersionError at class load inside the
+    driver, well after lakebench has reported a successful submit.
+    """
+    return _version_tuple(iceberg_version)[:2] >= _ICEBERG_MIN_JAVA17_VERSION
 
 
 def _parse_spark_major(image: str) -> int:
@@ -315,7 +584,7 @@ def _parse_spark_major(image: str) -> int:
         )
 
     # Strip known suffixes so "3.5.4-python3" becomes "3.5.4"
-    for suffix in ("-python3", "-java17", "-java11", "-scala2.12", "-scala2.13"):
+    for suffix in ("-python3", "-java21", "-java17", "-java11", "-scala2.12", "-scala2.13"):
         tag = tag.replace(suffix, "")
 
     parts = tag.split(".")
@@ -344,7 +613,7 @@ def _parse_spark_major_minor(image: str) -> tuple[int, int]:
     Returns (major, minor) tuple, e.g. (4, 1) for ``apache/spark:4.1.1-python3``.
     """
     tag = image.split(":")[-1]
-    for suffix in ("-python3", "-java17", "-java11", "-scala2.12", "-scala2.13"):
+    for suffix in ("-python3", "-java21", "-java17", "-java11", "-scala2.12", "-scala2.13"):
         tag = tag.replace(suffix, "")
     parts = tag.split(".")
     try:
@@ -353,18 +622,38 @@ def _parse_spark_major_minor(image: str) -> tuple[int, int]:
         return 0, 0
 
 
+# (spark_major, spark_minor) -> (hadoop_aws_version, aws_sdk_version).
+#
+# hadoop_aws_version must match the Spark image's own bundled ``hadoop.version``
+# (fetched from each Spark release's parent POM at repo1.maven.org, not
+# assumed): 3.5.x -> 3.3.4, 4.0.2 -> 3.4.1, 4.1.1 -> 3.4.2.
+# aws_sdk_version is hadoop-project's own ``aws-java-sdk.version`` pin for
+# that Hadoop release -- 1.12.720 for every 3.4.x line checked, so the prior
+# flat "1.12.367 for all Spark 4.x" was already behind what Hadoop itself
+# declares, independent of and prior to any Spark 4.2 work. See LB-068.
+_HADOOP_AWS_COMPAT: dict[tuple[int, int], tuple[str, str]] = {
+    (3, 5): ("3.3.4", "1.12.262"),
+    (4, 0): ("3.4.1", "1.12.720"),
+    (4, 1): ("3.4.2", "1.12.720"),
+}
+
+
 def _spark_compat(image: str) -> tuple[str, str, str]:
     """Derive Scala suffix, Hadoop AWS version, and AWS SDK version from Spark image tag.
 
     Returns:
-        Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version).
-        Spark 3.x -> (``"_2.12"``, ``"3.3.4"``, ``"1.12.262"``),
-        Spark 4.x -> (``"_2.13"``, ``"3.4.1"``, ``"1.12.367"``).
+        Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version), keyed on
+        the Spark image's own major.minor -- Hadoop AWS versions differ across
+        Spark 4.0/4.1 (3.4.1/3.4.2), not just across the 3.x/4.x Scala
+        boundary. See ``_HADOOP_AWS_COMPAT``.
     """
     major = _parse_spark_major(image)
-    if major >= 4:
-        return "_2.13", "3.4.1", "1.12.367"
-    return "_2.12", "3.3.4", "1.12.262"
+    key = _parse_spark_major_minor(image)
+    scala_suffix = "_2.13" if major >= 4 else "_2.12"
+    hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT.get(
+        key, ("3.4.1", "1.12.720") if major >= 4 else ("3.3.4", "1.12.262")
+    )
+    return scala_suffix, hadoop_aws_version, aws_sdk_version
 
 
 def _delta_spark_artifact(scala_suffix: str, delta_version: str) -> str:
@@ -423,7 +712,40 @@ def validate_format_version(spark_image: str, format_type: str, version: str) ->
 
     Raises ValueError if incompatible.
     """
-    resolve_format_version(spark_image, format_type, version)
+    resolved = resolve_format_version(spark_image, format_type, version)
+    if format_type == "iceberg":
+        validate_iceberg_java_runtime(spark_image, resolved)
+
+
+def validate_iceberg_java_runtime(spark_image: str, iceberg_version: str) -> None:
+    """Refuse Iceberg 1.11+ on a Spark image that ships Java 11.
+
+    Iceberg 1.11.0 is compiled to bytecode major 61 (Java 17); 1.10.x was 55
+    (Java 11). The mismatch is not caught at submit -- it surfaces as
+    UnsupportedClassVersionError when the driver loads the class, long after
+    lakebench has reported success, so the user sees a Spark stack trace with
+    no obvious connection to their Iceberg version.
+
+    Only Spark 3.5 images are affected: the tag encodes the JDK, and the
+    default 3.5.x image ships Java 11 while 4.x images ship 17.
+    """
+    if not iceberg_requires_java17(iceberg_version):
+        return
+
+    key = _parse_spark_major_minor(spark_image)
+    if key != (3, 5):
+        return
+
+    tag = spark_image.split(":")[-1]
+    if "java17" in tag or "java21" in tag:
+        return
+
+    raise ValueError(
+        f"Iceberg {iceberg_version} requires Java 17, but the Spark image "
+        f"'{spark_image}' ships Java 11. Use a java17 image tag "
+        f"(for example apache/spark:3.5.9-java17-python3), or pin Iceberg to "
+        f"1.10.1 for this Spark version."
+    )
 
 
 class JobType(Enum):
@@ -451,14 +773,50 @@ _STREAMING_JOB_TYPES = frozenset(
 
 
 class JobState(Enum):
-    """State of a Spark job."""
+    """State of a Spark job.
 
+    Mirrors ``ApplicationStateType`` in the Spark Operator's
+    ``api/v1beta2/sparkapplication_types.go``. The operator defines thirteen
+    states; anything absent here degrades to ``UNKNOWN``, and ``UNKNOWN`` is
+    not terminal, so a missing state means the monitor polls a finished job
+    until it times out. ``SUCCEEDING`` and ``FAILING`` matter most: the
+    operator sets them the moment the driver finishes and only later settles
+    on ``COMPLETED``/``FAILED``, so treating them as non-terminal turns a
+    successful job into a timeout.
+    """
+
+    NEW = ""
     PENDING = "PENDING"
     SUBMITTED = "SUBMITTED"
     RUNNING = "RUNNING"
+    SUCCEEDING = "SUCCEEDING"
     COMPLETED = "COMPLETED"
+    FAILING = "FAILING"
     FAILED = "FAILED"
+    SUBMISSION_FAILED = "SUBMISSION_FAILED"
+    PENDING_RERUN = "PENDING_RERUN"
+    INVALIDATING = "INVALIDATING"
+    SUSPENDING = "SUSPENDING"
+    SUSPENDED = "SUSPENDED"
+    RESUMING = "RESUMING"
     UNKNOWN = "UNKNOWN"
+
+
+#: States meaning the driver finished successfully. ``SUCCEEDING`` is the
+#: operator's own transitional state on the way to ``COMPLETED``.
+SUCCESS_STATES = frozenset({JobState.SUCCEEDING, JobState.COMPLETED})
+
+#: States meaning the job will not produce a result.
+FAILURE_STATES = frozenset({JobState.FAILING, JobState.FAILED, JobState.SUBMISSION_FAILED})
+
+
+def is_terminal(state: JobState) -> bool:
+    """Whether a state means the job has stopped producing work.
+
+    ``UNKNOWN`` is deliberately excluded: an unrecognised state should keep
+    the caller waiting rather than be reported as a result either way.
+    """
+    return state in SUCCESS_STATES or state in FAILURE_STATES
 
 
 @dataclass
@@ -640,6 +998,17 @@ class SparkJobManager:
             try:
                 state = JobState(state_str)
             except ValueError:
+                # A state this client does not model is not terminal, so the
+                # caller will wait out its whole timeout on a job that may
+                # already be finished. Say so rather than absorbing it.
+                logger.warning(
+                    "Spark Operator reported unrecognised state %r for %s. "
+                    "Treating as UNKNOWN (non-terminal) -- this job will be "
+                    "polled until timeout. JobState may need updating for "
+                    "this operator version.",
+                    state_str,
+                    job_name,
+                )
                 state = JobState.UNKNOWN
 
             driver_info = status.get("driverInfo", {})
@@ -835,9 +1204,10 @@ class SparkJobManager:
         spark_image_tag = cfg.images.spark.split(":")[-1]
         major_minor_key = _parse_spark_major_minor(cfg.images.spark)
         scala_suffix, hadoop_version, aws_sdk_version = _spark_compat(cfg.images.spark)
-        # Iceberg runtime artifact suffix (Spark 4.1 reuses the 4.0 runtime)
-        iceberg_runtime_suffix = _ICEBERG_RUNTIME_SUFFIX.get(
-            major_minor_key, f"{major_minor_key[0]}.{major_minor_key[1]}"
+        # Iceberg runtime artifact suffix. Depends on the Iceberg version too:
+        # only 1.11.0+ publishes a native Spark 4.1 runtime.
+        iceberg_runtime_suffix = iceberg_runtime_suffix_for(
+            major_minor_key, cfg.architecture.table_format.iceberg.version
         )
 
         # Catalog type needed for packages and catalog config
@@ -898,6 +1268,11 @@ class SparkJobManager:
         spark_conf.update(
             {
                 "spark.hadoop.fs.s3a.endpoint": s3.endpoint,
+                # LB-052: without an explicit region, S3A signs with a default
+                # (observed us-east-2). FlashBlade ignores the region, but
+                # backends that validate the sigv4 scope reject the signature
+                # with an opaque 400 and a null message.
+                "spark.hadoop.fs.s3a.endpoint.region": s3.region,
                 "spark.hadoop.fs.s3a.path.style.access": str(s3.path_style).lower(),
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",

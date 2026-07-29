@@ -214,11 +214,11 @@ def init(
         ),
     ] = "my-lakehouse",
     scale: Annotated[
-        int,
+        float,
         typer.Option(
             "--scale",
             "-s",
-            help="Scale factor (1 = ~10 GB, 100 = ~1 TB, 1000 = ~10 TB)",
+            help="Scale factor (0.1 = ~1 GB, 1 = ~10 GB, 100 = ~1 TB)",
         ),
     ] = 10,
     endpoint: Annotated[
@@ -280,6 +280,13 @@ def init(
             help="Full 5-step wizard (recipe, scale, mode). Default is quick mode (4 fields).",
         ),
     ] = False,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Generate a config for local mode (podman/docker, no Kubernetes)",
+        ),
+    ] = False,
 ) -> None:
     """Generate a starter configuration file.
 
@@ -298,6 +305,16 @@ def init(
         print_error(f"File already exists: {output}")
         print_info("Use --force to overwrite")
         raise typer.Exit(1)
+
+    # Local mode short-circuits the wizard: there are no S3 credentials to
+    # collect (Garage mints its own), no namespace, and only one supported
+    # recipe. Asking those questions would be asking about a cluster that is
+    # not there.
+    if local:
+        # 10 is the cluster default and would ask a laptop for ~100 GB. Only
+        # override it when the user did not pick a scale themselves.
+        _write_local_config(output, name, 0.1 if scale == 10 else scale)
+        return
 
     # Detect whether user passed substantive flags -- if so, skip wizard
     # even if --interactive wasn't explicitly set to false.
@@ -370,6 +387,68 @@ def init(
         print_info("Edit the file to configure your S3 endpoint and credentials")
     print_info("Then run: lakebench config validate")
     print_info("Run 'lakebench config recommend' to find the optimal scale for your cluster")
+
+
+_LOCAL_CONFIG_TEMPLATE = """\
+# Lakebench local mode -- runs on one host with podman or docker.
+#
+# No Kubernetes, no object store to provision, no credentials to fill in:
+# `deploy --local` starts a Garage container and mints its own keys.
+#
+#   lakebench deploy {output} --local
+#   lakebench run {output} --local
+#
+# Local mode is Iceberg-only. DuckDB cannot read Delta on a non-AWS S3
+# endpoint, so a Delta config here would fail at query time.
+# See: lakebench config recipes --local
+
+name: {name}
+recipe: hive-iceberg-spark-duckdb
+
+architecture:
+  workload:
+    datagen:
+      # 1 unit is roughly 10 GB of bronze, so {scale} is about {approx_gb:.1f} GB.
+      # Local mode is sized for 1 and below; larger scales still run but a
+      # single JVM shuffling that much on one host takes a long time.
+      scale: {scale}
+
+platform:
+  storage:
+    s3:
+      # Filled in by `deploy --local`. Garage runs on localhost:3900 and
+      # generates its own access key on first deploy.
+      endpoint: "http://localhost:3900"
+      region: us-east-1
+      path_style: true
+      buckets:
+        bronze: {prefix}-bronze
+        silver: {prefix}-silver
+        gold: {prefix}-gold
+"""
+
+
+def _write_local_config(output: Path, name: str, scale: float) -> None:
+    """Write a ready-to-run local mode config."""
+    if name == "my-lakehouse":
+        name = "local-lakehouse"
+
+    prefix = "".join(c if c.isalnum() or c == "-" else "-" for c in name).strip("-").lower()
+    content = _LOCAL_CONFIG_TEMPLATE.format(
+        output=output,
+        name=name,
+        scale=scale,
+        approx_gb=scale * 10.0,
+        prefix=prefix or "lakebench",
+    )
+    output.write_text(content)
+
+    print_success(f"Created local configuration: {output}")
+    print_info(f"Scale: {scale} (~{scale * 10.0:.1f} GB bronze)")
+    console.print()
+    console.print("  Next:")
+    console.print(f"    [bold]lakebench deploy {output} --local[/bold]")
+    console.print(f"    [bold]lakebench run {output} --local[/bold]")
 
 
 @app.command(hidden=True, deprecated=True)
@@ -935,14 +1014,29 @@ def status(
             help="Kubernetes namespace to check",
         ),
     ] = None,
+    local: Annotated[
+        bool,
+        typer.Option(
+            "--local",
+            help="Show local mode status instead of Kubernetes",
+        ),
+    ] = False,
+    workdir: Annotated[
+        Path | None,
+        typer.Option(
+            "--workdir",
+            help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
+        ),
+    ] = None,
 ) -> None:
     """Show deployment status.
 
     Shows the current status of Lakebench components in the cluster.
     """
     # Determine namespace
+    cfg = None
     ns = namespace
-    if not ns:
+    if not ns or local:
         config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
@@ -951,6 +1045,15 @@ def status(
         except ConfigError as e:
             print_error(f"Config error: {e}")
             raise typer.Exit(1)  # noqa: B904
+
+    if local:
+        from lakebench.cli._local import print_local_status, status_local
+
+        if cfg is None:
+            print_error("Local status needs a config file")
+            raise typer.Exit(1)
+        print_local_status(status_local(cfg, workdir=workdir))
+        return
 
     if not ns:
         print_error("Specify --namespace or provide a config file")
@@ -979,7 +1082,7 @@ def status(
         table.add_column("Ready", justify="center")
 
         # Build component list -- config-aware when a config file was loaded
-        if config_file:
+        if cfg is not None:
             components: list[tuple[str, str]] = [("lakebench-postgres", "StatefulSet")]
             cat = cfg.architecture.catalog.type.value
             if cat == "hive":

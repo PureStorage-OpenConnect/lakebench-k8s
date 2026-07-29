@@ -618,7 +618,7 @@ class TestPolarisDeployer:
         ctx = engine.context
         assert ctx["catalog_type"] == "polaris"
         assert ctx["polaris_port"] == 8181
-        assert ctx["polaris_version"] == "1.3.0-incubating"
+        assert ctx["polaris_version"] == "1.6.0"
         assert ctx["polaris_cpu"] == "1"
         assert ctx["polaris_memory"] == "2Gi"
 

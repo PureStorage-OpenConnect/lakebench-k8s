@@ -38,7 +38,7 @@ class WizardState:
     access_key: str = ""
     secret_key: str = ""
     region: str = "us-east-1"
-    scale: int = 10
+    scale: float = 10
     mode: str = "batch"
     cycles: int = 1
     # Filled during review
@@ -306,7 +306,9 @@ def step_workload(console: Console, state: WizardState) -> bool:
     console.print(scale_table)
     console.print()
 
-    result = _prompt_int(console, "Scale factor", default=state.scale, min_val=1, max_val=10000)
+    result = _prompt_int(
+        console, "Scale factor", default=int(state.scale), min_val=1, max_val=10000
+    )
     if isinstance(result, _BackSentinel):
         return False
     state.scale = result
@@ -395,7 +397,7 @@ def _build_config_yaml(state: WizardState) -> str:
 
     content = generate_example_config_yaml()
     content = content.replace("name: my-lakehouse", f"name: {state.name}")
-    content = re.sub(r"scale:\s*\d+", f"scale: {state.scale}", content)
+    content = re.sub(r"scale:\s*[\d.]+", f"scale: {state.scale}", content)
 
     if state.recipe and state.recipe != "default":
         content = content.replace(
