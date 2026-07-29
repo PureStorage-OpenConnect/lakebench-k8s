@@ -272,7 +272,7 @@ def compute_guidance(scale: float) -> ComputeGuidance:
             tier_name="minimal",
         )
     elif scale <= SCALE_TIER_BALANCED:
-        rec_exec = max(4, min(8, scale // 6))
+        rec_exec = max(4, min(8, int(scale // 6)))
         return ComputeGuidance(
             min_executors=4,
             recommended_executors=rec_exec,
@@ -283,7 +283,7 @@ def compute_guidance(scale: float) -> ComputeGuidance:
             tier_name="balanced",
         )
     elif scale <= SCALE_TIER_PERFORMANCE:
-        rec_exec = max(8, min(16, scale // 30))
+        rec_exec = max(8, min(16, int(scale // 30)))
         return ComputeGuidance(
             min_executors=8,
             recommended_executors=rec_exec,
@@ -294,7 +294,7 @@ def compute_guidance(scale: float) -> ComputeGuidance:
             tier_name="performance",
         )
     else:
-        rec_exec = max(16, min(32, scale // 50))
+        rec_exec = max(16, min(32, int(scale // 50)))
         return ComputeGuidance(
             min_executors=16,
             recommended_executors=rec_exec,
@@ -364,7 +364,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             )
         else:
             datagen = DatagenGuidance(
-                parallelism=max(4, scale // 5),
+                parallelism=max(4, int(scale // 5)),
                 cpu="8",
                 memory="24Gi",
                 mode="sustained",
@@ -381,7 +381,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     elif scale <= SCALE_TIER_PERFORMANCE:
         # Performance: ~510 GB - 5 TB, sustained mode
         datagen = DatagenGuidance(
-            parallelism=max(8, scale // 10),
+            parallelism=max(8, int(scale // 10)),
             cpu="8",
             memory="24Gi",
             mode="sustained",
@@ -389,7 +389,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             uploaders=2,
         )
         trino = TrinoGuidance(
-            worker_replicas=max(4, scale // 25),
+            worker_replicas=max(4, int(scale // 25)),
             worker_cpu="8",
             worker_memory="48Gi",
             coordinator_cpu="4",
@@ -398,7 +398,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     else:
         # Extreme: > 5 TB, sustained mode
         datagen = DatagenGuidance(
-            parallelism=max(16, scale // 30),
+            parallelism=max(16, int(scale // 30)),
             cpu="8",
             memory="24Gi",
             mode="sustained",
@@ -406,7 +406,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             uploaders=2,
         )
         trino = TrinoGuidance(
-            worker_replicas=max(10, scale // 50),
+            worker_replicas=max(10, int(scale // 50)),
             worker_cpu="8",
             worker_memory="64Gi",
             coordinator_cpu="4",

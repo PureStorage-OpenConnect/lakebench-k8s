@@ -866,7 +866,7 @@ class DatagenConfig(BaseModel):
             object.__setattr__(self, "scale", derived_scale)
         return self
 
-    def get_effective_scale(self) -> int:
+    def get_effective_scale(self) -> float:
         """Get the effective scale value."""
         return self.scale
 

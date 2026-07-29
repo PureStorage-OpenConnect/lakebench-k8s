@@ -18,6 +18,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from rich.panel import Panel
 from rich.table import Table
@@ -170,7 +171,7 @@ def status_local(
     cfg: LakebenchConfig,
     workdir: Path | None = None,
     cli: str = "",
-) -> dict[str, object]:
+) -> dict[str, Any]:
     """Report what is running locally and what data exists.
 
     Never raises for a stack that is simply not deployed -- "nothing running"
@@ -178,7 +179,7 @@ def status_local(
     """
     workdir = workdir or default_workdir(cfg.name)
     s3 = cfg.platform.storage.s3
-    info: dict[str, object] = {
+    info: dict[str, Any] = {
         "workdir": workdir,
         "workdir_exists": workdir.exists(),
         "running": [],
@@ -273,7 +274,7 @@ def _measure_layers(cfg: LakebenchConfig, creds: GarageCredentials) -> dict[str,
     return measured
 
 
-def print_local_status(info: dict[str, object]) -> None:
+def print_local_status(info: dict[str, Any]) -> None:
     """Render what status_local() found."""
     if info["error"]:
         print_error(str(info["error"]))

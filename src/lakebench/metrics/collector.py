@@ -258,7 +258,7 @@ class BenchmarkMetrics:
 
     mode: str  # "power", "throughput", or "composite"
     cache: str  # "hot" or "cold"
-    scale: int
+    scale: float
     qph: float
     total_seconds: float
     queries: list[dict[str, Any]] = field(default_factory=list)

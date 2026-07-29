@@ -929,7 +929,9 @@ def run(
                         _datagen_output_gb = dg_info.size_bytes / (1024**3)
                     if dg_info.object_count:
                         # Estimate rows from scale factor (1.5M rows per scale unit)
-                        _datagen_output_rows = cfg.architecture.workload.datagen.scale * 1_500_000
+                        _datagen_output_rows = int(
+                            cfg.architecture.workload.datagen.scale * 1_500_000
+                        )
                 except Exception as e:
                     logger.warning("Could not measure bronze bucket size: %s", e)
             except Exception as e:

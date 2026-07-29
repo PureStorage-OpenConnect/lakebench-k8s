@@ -1082,7 +1082,7 @@ def status(
         table.add_column("Ready", justify="center")
 
         # Build component list -- config-aware when a config file was loaded
-        if config_file:
+        if cfg is not None:
             components: list[tuple[str, str]] = [("lakebench-postgres", "StatefulSet")]
             cat = cfg.architecture.catalog.type.value
             if cat == "hive":
