@@ -246,19 +246,6 @@ def build_loyalty_lookup(seed: int, customer_id_max: int):
     return member_mask, tier_lookup
 
 
-# Global loyalty lookup (built once, shared across files)
-_LOYALTY_MEMBER = None
-_LOYALTY_TIER = None
-
-
-def get_loyalty_lookup(seed: int, customer_id_max: int):
-    """Get or build the global loyalty lookup."""
-    global _LOYALTY_MEMBER, _LOYALTY_TIER
-    if _LOYALTY_MEMBER is None:
-        _LOYALTY_MEMBER, _LOYALTY_TIER = build_loyalty_lookup(seed, customer_id_max)
-    return _LOYALTY_MEMBER, _LOYALTY_TIER
-
-
 # =============================================================================
 # Data Generation Functions
 # =============================================================================
@@ -429,11 +416,61 @@ def corrupt_states(states: list, rng: np.random.Generator, dirty_ratio: float) -
 
 
 # =============================================================================
+# Customer 360 Generator
+# =============================================================================
+
+
+class Customer360Generator:
+    """Generator for the Customer 360 synthetic schema.
+
+    Encapsulates the loyalty-lookup cache and file generation for one
+    schema. Extracted from module-level state as sub-PR (a) of the
+    ENG-2C.2 datagen refactor; sub-PR (b) introduces a Generator
+    protocol, sub-PR (c) adds dispatch by workload schema.
+
+    Byte-identical to the previous module-level implementation: the
+    file-generation body is unchanged and lives in
+    ``_build_customer360_table``; only the loyalty-lookup call site
+    was rewired to receive the cache callable from this class.
+    """
+
+    def __init__(self, config: "Config"):
+        self.config = config
+        self._loyalty_member = None
+        self._loyalty_tier = None
+
+    def _get_loyalty_lookup(self):
+        if self._loyalty_member is None:
+            self._loyalty_member, self._loyalty_tier = build_loyalty_lookup(
+                self.config.seed, self.config.customer_id_max
+            )
+        return self._loyalty_member, self._loyalty_tier
+
+    def ensure_loyalty(self) -> None:
+        """Build the loyalty lookup if it has not been built yet.
+
+        Called before fork or pickle so worker processes inherit the
+        pre-built numpy arrays via copy-on-write rather than each
+        rebuilding from the seed. Idempotent.
+        """
+        self._get_loyalty_lookup()
+
+    def generate_file_data(self, file_id: int) -> pa.Table:
+        """Generate one Parquet-ready Arrow table for ``file_id``.
+
+        Deterministic in ``(config.seed, file_id)``; suitable for both
+        batch (ProcessPoolExecutor) and continuous (multiprocessing
+        Process) workers.
+        """
+        return _build_customer360_table(file_id, self.config, self._get_loyalty_lookup)
+
+
+# =============================================================================
 # File Generation
 # =============================================================================
 
 
-def generate_file_data(file_id: int, config: Config) -> pa.Table:
+def _build_customer360_table(file_id: int, config: Config, get_loyalty_fn) -> pa.Table:
     """Generate data for a single Parquet file matching Bronze schema.
 
     Applies all 7 v2 realism features:
@@ -529,9 +566,7 @@ def generate_file_data(file_id: int, config: Config) -> pa.Table:
     customer_ids = (raw_zipf % (config.customer_id_max + 1)).astype(np.int64)
 
     # v2 feature #7: Customer-consistent loyalty
-    loyalty_member_lookup, loyalty_tier_lookup = get_loyalty_lookup(
-        config.seed, config.customer_id_max
-    )
+    loyalty_member_lookup, loyalty_tier_lookup = get_loyalty_fn()
     loyalty_members = loyalty_member_lookup[customer_ids]
     tier_indices = loyalty_tier_lookup[customer_ids]
 
@@ -686,10 +721,10 @@ def generate_file_data(file_id: int, config: Config) -> pa.Table:
     return pa.Table.from_pydict(data, schema=schema)
 
 
-def write_file_to_s3(file_id: int, config: Config) -> dict:
+def write_file_to_s3(file_id: int, config: Config, generator: Customer360Generator) -> dict:
     """Generate and write a single Parquet file to S3."""
     try:
-        table = generate_file_data(file_id, config)
+        table = generator.generate_file_data(file_id)
 
         buffer = io.BytesIO()
         pq.write_table(table, buffer, compression="snappy")
@@ -732,8 +767,10 @@ def _continuous_generator_worker(
     config = Config(**config_dict)
     has_duration = bool(config.duration_seconds)
 
-    # Rebuild loyalty lookup in child process
-    get_loyalty_lookup(config.seed, config.customer_id_max)
+    # Build a per-process generator; loyalty lookup is warmed here so each
+    # subsequent file_id only pays the cache-hit cost.
+    generator = Customer360Generator(config)
+    generator.ensure_loyalty()
 
     while True:
         try:
@@ -753,7 +790,7 @@ def _continuous_generator_worker(
             break
 
         try:
-            table = generate_file_data(file_id, config)
+            table = generator.generate_file_data(file_id)
             rows = table.num_rows
 
             buffer = io.BytesIO()
@@ -1210,8 +1247,11 @@ Endpoint: {config.s3_endpoint or "AWS default"}
         print(f"Error connecting to S3: {e}")
         sys.exit(1)
 
-    # Build loyalty lookup before forking child processes
-    get_loyalty_lookup(config.seed, config.customer_id_max)
+    # Build the schema-specific generator and warm the loyalty lookup
+    # before forking child processes so workers inherit the cache via
+    # copy-on-write.
+    generator = Customer360Generator(config)
+    generator.ensure_loyalty()
 
     # Generate files
     total_rows = 0
@@ -1237,7 +1277,8 @@ Endpoint: {config.s3_endpoint or "AWS default"}
     else:
         with ProcessPoolExecutor(max_workers=config.workers) as executor:
             futures = {
-                executor.submit(write_file_to_s3, file_id, config): file_id for file_id in remaining
+                executor.submit(write_file_to_s3, file_id, config, generator): file_id
+                for file_id in remaining
             }
 
             with tqdm(total=len(remaining), unit="files") as pbar:
