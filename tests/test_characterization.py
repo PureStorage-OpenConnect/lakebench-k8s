@@ -162,6 +162,17 @@ class TestConfigResolution:
         )
         assert cfg.architecture.table_format.delta.version == "4.1.0"
 
+    def test_delta_recipe_survives_spark41_override_without_explicit_version(self):
+        """Regression: hive-delta recipes used to pin delta.version=4.0.0,
+        which crashed validation when a user overrode to a Spark 4.1 image.
+        The pin was removed; auto-resolution now handles the cross-version
+        case even without an explicit `delta.version: auto`."""
+        cfg = _make_config(
+            recipe="hive-delta-spark-trino",
+            images={"spark": "apache/spark:4.1.1-python3"},
+        )
+        assert cfg.architecture.table_format.delta.version == "4.1.0"
+
 
 # ===========================================================================
 # 4. Module registry (new infrastructure, verify importable)

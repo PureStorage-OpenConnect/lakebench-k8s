@@ -151,12 +151,14 @@ class TestObservabilityConfigPropagation:
         assert cfg.observability.dashboards_enabled is False
 
     def test_s3_metrics_default(self):
+        # Dead field: default is None (sentinel). See ObservabilityConfig
+        # comment in schema.py -- nothing wires this to PodMonitor deploy.
         cfg = make_config(observability={"enabled": True})
-        assert cfg.observability.s3_metrics_enabled is True
+        assert cfg.observability.s3_metrics_enabled is None
 
     def test_spark_metrics_default(self):
         cfg = make_config(observability={"enabled": True})
-        assert cfg.observability.spark_metrics_enabled is True
+        assert cfg.observability.spark_metrics_enabled is None
 
 
 # ===========================================================================
