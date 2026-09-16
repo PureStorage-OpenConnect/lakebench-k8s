@@ -1,9 +1,72 @@
 """Tests for auto-sizing of compute resources."""
 
+import pytest
+
 from lakebench.config import LakebenchConfig
-from lakebench.config.autosizer import _resolve_datagen_mode, resolve_auto_sizing
+from lakebench.config.autosizer import (
+    _parse_cpu_millicores,
+    _resolve_datagen_mode,
+    resolve_auto_sizing,
+)
 from lakebench.config.scale import full_compute_guidance
 from lakebench.k8s.client import ClusterCapacity
+
+
+class TestParseCpuMillicores:
+    """The parser must accept every Kubernetes-idiomatic CPU form."""
+
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("500m", 500),
+            ("1500m", 1500),
+            ("1", 1000),
+            ("2", 2000),
+            ("1.5", 1500),
+            ("0.5", 500),
+            (1, 1000),
+            (2, 2000),
+            (1.5, 1500),
+        ],
+    )
+    def test_accepts_kubernetes_forms(self, value, expected):
+        assert _parse_cpu_millicores(value) == expected
+
+    def test_rejects_empty(self):
+        with pytest.raises(ValueError):
+            _parse_cpu_millicores("")
+
+    def test_rejects_garbage(self):
+        with pytest.raises(ValueError):
+            _parse_cpu_millicores("half-a-core")
+
+
+class TestAutosizerAcceptsMillicoreCpu:
+    """Regression: LB-072 -- deploy crashed on any x.cpu with a Kubernetes-idiomatic suffix."""
+
+    def test_millicore_trino_cpu_does_not_crash(self):
+        cfg = LakebenchConfig(
+            name="test",
+            architecture={
+                "query_engine": {
+                    "trino": {
+                        "coordinator": {"cpu": "1500m"},
+                        "worker": {"cpu": "500m", "replicas": 2},
+                    }
+                },
+                "workload": {"datagen": {"scale": 1, "cpu": "500m"}},
+            },
+        )
+        cap = ClusterCapacity(
+            total_cpu_millicores=64_000,
+            total_memory_bytes=256 * 1024**3,
+            node_count=4,
+            largest_node_memory_bytes=64 * 1024**3,
+            largest_node_cpu_millicores=16_000,
+        )
+        # Would have raised ValueError before the fix.
+        resolve_auto_sizing(cfg, cap)
+
 
 # ---------------------------------------------------------------------------
 # full_compute_guidance()
