@@ -6,7 +6,9 @@ appropriate security requirements are met before deployment.
 
 from __future__ import annotations
 
+import logging
 import subprocess
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -15,6 +17,8 @@ from lakebench._constants import SPARK_SERVICE_ACCOUNT
 
 if TYPE_CHECKING:
     from lakebench.k8s import K8sClient
+
+logger = logging.getLogger(__name__)
 
 
 class PlatformType(Enum):
@@ -396,34 +400,127 @@ class SecurityVerifier:
 
         return success
 
+    # `oc adm policy add-scc-to-user` on OpenShift 4.10+ creates a
+    # namespaced RoleBinding named `system:openshift:scc:<scc>` that binds
+    # the SA to a ClusterRole -- NOT a mutation of the SCC's cluster-scoped
+    # `.users` array (that legacy field stays empty on modern OCP). The
+    # binding is per-namespace, so the cross-namespace race the original
+    # LB-088 finding assumed does not apply here. The retry-with-verify
+    # still buys us two useful things: (1) within a single namespace,
+    # sequential adds for postgres + spark-runner are read-modify-write on
+    # the same RoleBinding and can race between phases; (2) surface a real
+    # `oc` failure loud instead of returning False silently. Verification
+    # reads the namespaced RoleBinding, not the (always-empty) SCC users.
+    _SCC_ADD_MAX_ATTEMPTS = 4
+    _SCC_ADD_BACKOFF_SECONDS = 1.5
+
     def _add_scc(self, scc_name: str, sa_name: str, namespace: str) -> bool:
-        """Add SCC to service account.
+        """Add SCC to service account with post-write verification.
 
-        Args:
-            scc_name: SCC name
-            sa_name: Service account name
-            namespace: Namespace
+        Retries `oc adm policy add-scc-to-user` up to _SCC_ADD_MAX_ATTEMPTS
+        times, verifying after each attempt that the SA appears as a
+        subject of the namespaced `system:openshift:scc:<scc>` RoleBinding.
+        Returns True only when the subject is confirmed present. Returns
+        False (with a warning log) if no attempt succeeds -- the caller
+        should treat this as a real RBAC failure.
+        """
+        last_stderr = ""
 
-        Returns:
-            True if successful
+        for attempt in range(1, self._SCC_ADD_MAX_ATTEMPTS + 1):
+            try:
+                result = subprocess.run(
+                    [
+                        "oc",
+                        "adm",
+                        "policy",
+                        "add-scc-to-user",
+                        scc_name,
+                        "-z",
+                        sa_name,
+                        "-n",
+                        namespace,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                last_stderr = result.stderr
+            except Exception as e:
+                last_stderr = str(e)
+                result = None
+
+            if self._scc_binding_has_subject(scc_name, sa_name, namespace):
+                return True
+
+            if attempt < self._SCC_ADD_MAX_ATTEMPTS:
+                time.sleep(self._SCC_ADD_BACKOFF_SECONDS * attempt)
+
+        logger.warning(
+            "SCC %s add for serviceaccount %s/%s failed to land after %d attempts "
+            "(last stderr: %s). This deploy's pods may be admission-rejected -- "
+            "fix RBAC before running.",
+            scc_name,
+            namespace,
+            sa_name,
+            self._SCC_ADD_MAX_ATTEMPTS,
+            last_stderr.strip()[:200],
+        )
+        return False
+
+    def _scc_binding_has_subject(self, scc_name: str, sa_name: str, namespace: str) -> bool:
+        """Return True iff the namespaced `system:openshift:scc:<scc>`
+        RoleBinding lists `sa_name` as a ServiceAccount subject.
+
+        This is how `oc adm policy add-scc-to-user` records the grant on
+        OpenShift 4.10+. Best-effort read via `oc get rolebinding`; on any
+        read failure returns False so the caller retries.
         """
         try:
             result = subprocess.run(
                 [
                     "oc",
-                    "adm",
-                    "policy",
-                    "add-scc-to-user",
-                    scc_name,
-                    "-z",
-                    sa_name,
+                    "get",
+                    "rolebinding",
+                    f"system:openshift:scc:{scc_name}",
                     "-n",
                     namespace,
+                    "-o",
+                    "jsonpath={range .subjects[?(@.kind=='ServiceAccount')]}"
+                    "{.namespace}/{.name} {end}",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=15,
             )
-            return result.returncode == 0
+            if result.returncode != 0:
+                return False
+            return f"{namespace}/{sa_name}" in result.stdout.split()
+        except Exception:
+            return False
+
+    def _scc_has_user(self, scc_name: str, user: str) -> bool:
+        """Legacy pre-4.10 helper: returns True iff `user` appears in the
+        SCC's cluster-scoped `.users` array. Retained for the `oc get scc`
+        path in older cluster paths / tests; new call sites should use
+        `_scc_binding_has_subject`.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "oc",
+                    "get",
+                    "scc",
+                    scc_name,
+                    "-o",
+                    "jsonpath={.users}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode != 0:
+                return False
+            # jsonpath returns something like: [system:sa:ns:foo system:sa:ns:bar]
+            return user in result.stdout
         except Exception:
             return False
