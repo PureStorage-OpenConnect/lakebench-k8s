@@ -530,8 +530,11 @@ class PipelineBenchmark:
     sustained_throughput_rps: float = 0.0
     stage_latency_profile: list[float] = field(default_factory=list)
     total_rows_processed: int = 0
-    ingest_ratio: float = 0.0
-    pipeline_saturated: bool = False
+    # None = denominator (datagen_output_rows) was not measured -- cannot
+    # compute ratio. 0.0 would be a lie (says "no data ingested"), so the
+    # unmeasurable case must be explicit.
+    ingest_ratio: float | None = None
+    pipeline_saturated: bool | None = None
 
     # Trino detail (preserved for drill-down)
     query_benchmark: BenchmarkMetrics | None = None
@@ -601,11 +604,20 @@ class PipelineBenchmark:
         """Compute batch pipeline scores from stage metrics."""
         self.total_data_processed_gb = sum(s.input_size_gb for s in self.stages)
 
-        # time_to_value: wall clock from first stage start to last stage end
+        # time_to_value: wall clock from first stage start to last stage end.
+        # If any stage started but did not finish (crashed before writing
+        # end_time), that stage's start_time is used as its notional end --
+        # otherwise dropping it would silently understate wall-clock and
+        # inflate pipeline_throughput_gb_per_second. Whole-pipeline failure
+        # is reflected separately via `success = False`.
         starts = [s.start_time for s in self.stages if s.start_time]
-        ends = [s.end_time for s in self.stages if s.end_time]
-        if starts and ends:
-            self.time_to_value_seconds = (max(ends) - min(starts)).total_seconds()
+        latest_end = None
+        for s in self.stages:
+            candidate = s.end_time or s.start_time
+            if candidate and (latest_end is None or candidate > latest_end):
+                latest_end = candidate
+        if starts and latest_end:
+            self.time_to_value_seconds = (latest_end - min(starts)).total_seconds()
         elif self.total_elapsed_seconds > 0:
             self.time_to_value_seconds = self.total_elapsed_seconds
 
@@ -677,11 +689,17 @@ class PipelineBenchmark:
         # Total rows processed across all streaming stages
         self.total_rows_processed = sum(s.input_rows for s in streaming)
 
-        # Ingestion completeness: bronze rows / datagen rows
+        # Ingestion completeness: bronze rows / datagen rows.
+        # Both scores stay None when the denominator is unknown -- reporting
+        # "saturated" against a missing measurement is worse than reporting
+        # "unmeasurable". See LB-044-shape regression.
         datagen_rows = self.config_snapshot.get("datagen_output_rows", 0)
         if datagen_rows > 0:
             self.ingest_ratio = total_bronze_rows / datagen_rows
-        self.pipeline_saturated = self.ingest_ratio < 0.95
+            self.pipeline_saturated = self.ingest_ratio < 0.95
+        else:
+            self.ingest_ratio = None
+            self.pipeline_saturated = None
 
         # Override total_elapsed_seconds for sustained mode.
         # Streaming stages run concurrently -- use wall-clock, not sum.
@@ -761,7 +779,9 @@ class PipelineBenchmark:
                     self.pipeline_throughput_gb_per_second, 4
                 ),
                 "total_core_hours": round(self.total_core_hours, 2),
-                "ingest_ratio": round(self.ingest_ratio, 4),
+                "ingest_ratio": (
+                    round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+                ),
                 "compute_efficiency_gb_per_core_hour": round(
                     self.compute_efficiency_gb_per_core_hour, 4
                 ),
@@ -885,7 +905,9 @@ class PipelineBenchmark:
         if self.pipeline_mode == "batch":
             d["scale_ratio"] = round(self.scale_ratio, 3)
         else:
-            d["ingest_ratio"] = round(self.ingest_ratio, 4)
+            d["ingest_ratio"] = (
+                round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
+            )
             d["pipeline_saturated"] = self.pipeline_saturated
         if self.query_benchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
@@ -900,18 +922,24 @@ class PipelineBenchmark:
         return d
 
     def _bucket_sizes(self) -> dict[str, float]:
-        """Extract measured S3 bucket sizes from stages or config snapshot."""
+        """Extract measured S3 bucket sizes from stages or config snapshot.
+
+        Silver/gold sizes come from output_size_gb only. Falling back to
+        input_size_gb would silently substitute the previous layer's read
+        size for this layer's write size (silver ends up reporting bronze's
+        GB, indistinguishably from a real silver measurement). If output
+        is not measured, the config-snapshot S3 measurement is the next
+        fallback, and 0.0 means "unmeasured", not "empty".
+        """
         sizes: dict[str, float] = {"bronze_gb": 0.0, "silver_gb": 0.0, "gold_gb": 0.0}
         for stage in self.stages:
             if stage.stage_name == "bronze":
                 sizes["bronze_gb"] = round(stage.input_size_gb, 3)
             elif stage.stage_name == "silver":
-                val = stage.output_size_gb if stage.output_size_gb > 0 else stage.input_size_gb
-                sizes["silver_gb"] = round(val, 3)
+                sizes["silver_gb"] = round(stage.output_size_gb, 3)
             elif stage.stage_name == "gold":
-                val = stage.output_size_gb if stage.output_size_gb > 0 else stage.input_size_gb
-                sizes["gold_gb"] = round(val, 3)
-        # Fallback to config snapshot if stages didn't have sizes
+                sizes["gold_gb"] = round(stage.output_size_gb, 3)
+        # Fallback to config snapshot's directly-measured S3 sizes.
         if sizes["bronze_gb"] == 0.0:
             sizes["bronze_gb"] = round(self.config_snapshot.get("bronze_size_gb", 0.0), 3)
         if sizes["silver_gb"] == 0.0:
