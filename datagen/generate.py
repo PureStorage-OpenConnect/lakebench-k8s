@@ -163,6 +163,7 @@ class Config:
         duplicate_email_pct: float = 0.10,
         dirty_ratio: float = 0.08,
         duration_seconds: int | None = None,
+        schema_name: str = "customer360",
     ):
         self.target_tb = target_tb
         self.workers = workers
@@ -181,6 +182,7 @@ class Config:
         self.duplicate_email_pct = duplicate_email_pct
         self.dirty_ratio = dirty_ratio
         self.duration_seconds = duration_seconds
+        self.schema_name = schema_name
 
         # Calculated values
         self.target_bytes = int(target_tb * 1024 * 1024 * 1024 * 1024)
@@ -496,6 +498,42 @@ class Customer360Generator:
 
 
 # =============================================================================
+# Generator Registry and Dispatch
+# =============================================================================
+
+
+_GENERATOR_REGISTRY: dict[str, type] = {
+    "customer360": Customer360Generator,
+}
+
+
+def register_generator(schema_name: str, generator_cls: type) -> None:
+    """Register a Generator implementation for ``schema_name``.
+
+    New schemas (e.g. ``financial``) call this at module import time
+    to make themselves discoverable to ``create_generator``.
+    """
+    _GENERATOR_REGISTRY[schema_name] = generator_cls
+
+
+def create_generator(schema_name: str, config: Config) -> Generator:
+    """Build a Generator for the requested schema.
+
+    Raises ``ValueError`` with the list of registered schemas when
+    ``schema_name`` is unknown, so misconfigured deployments fail loudly
+    at startup rather than silently generating the wrong shape.
+    """
+    try:
+        cls = _GENERATOR_REGISTRY[schema_name]
+    except KeyError as exc:
+        known = ", ".join(sorted(_GENERATOR_REGISTRY)) or "(none)"
+        raise ValueError(
+            f"Unknown datagen schema {schema_name!r}. Registered schemas: {known}."
+        ) from exc
+    return cls(config)
+
+
+# =============================================================================
 # File Generation
 # =============================================================================
 
@@ -797,9 +835,9 @@ def _continuous_generator_worker(
     config = Config(**config_dict)
     has_duration = bool(config.duration_seconds)
 
-    # Build a per-process generator; loyalty lookup is warmed here so each
-    # subsequent file_id only pays the cache-hit cost.
-    generator = Customer360Generator(config)
+    # Build a per-process generator; warm any per-schema caches here so
+    # each subsequent file_id only pays the cache-hit cost.
+    generator = create_generator(config.schema_name, config)
     generator.ensure_loyalty()
 
     while True:
@@ -951,6 +989,7 @@ def run_continuous(
         "duplicate_email_pct": config.duplicate_email_pct,
         "dirty_ratio": config.dirty_ratio,
         "duration_seconds": config.duration_seconds,
+        "schema_name": config.schema_name,
     }
 
     results = []
@@ -1202,6 +1241,13 @@ def main():
         "new files until the timer expires. Use with --mode continuous "
         "for sustained pipeline feeding.",
     )
+    parser.add_argument(
+        "--schema",
+        type=str,
+        default="customer360",
+        help="Workload schema to generate (default: customer360). "
+        "Must match a registered Generator.",
+    )
 
     args = parser.parse_args()
 
@@ -1226,6 +1272,7 @@ def main():
         timestamp_start=args.timestamp_start,
         timestamp_end=args.timestamp_end,
         duration_seconds=args.duration,
+        schema_name=args.schema,
     )
 
     # Validate S3 credentials
@@ -1277,10 +1324,10 @@ Endpoint: {config.s3_endpoint or "AWS default"}
         print(f"Error connecting to S3: {e}")
         sys.exit(1)
 
-    # Build the schema-specific generator and warm the loyalty lookup
-    # before forking child processes so workers inherit the cache via
-    # copy-on-write.
-    generator = Customer360Generator(config)
+    # Build the schema-specific generator via dispatch and warm any
+    # per-schema caches before forking child processes so workers inherit
+    # them via copy-on-write.
+    generator = create_generator(config.schema_name, config)
     generator.ensure_loyalty()
 
     # Generate files
