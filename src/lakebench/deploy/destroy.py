@@ -19,6 +19,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Cluster-scoped resources shared by every lakebench deployment (Stackable
+# SecretClass, the scratch StorageClass, etc.) must not be deleted while
+# another lakebench namespace still uses them. Deleting them out from under
+# a running parallel deploy has crashed other users' Hive Metastore pods
+# and killed other users' Spark PVC provisioning. See findings in the
+# deploy/destroy adversarial review.
+LAKEBENCH_NAMESPACE_LABEL = "app.kubernetes.io/managed-by=lakebench"
+
+
+def _is_last_lakebench_namespace(namespace_names: list[str], current: str) -> bool:
+    """Return True iff `current` is the only lakebench-labeled namespace left.
+
+    Extracted as a pure function so refcount behavior can be unit-tested
+    without a live cluster.
+    """
+    others = [n for n in namespace_names if n != current]
+    return not others
+
+
+def _other_lakebench_namespaces_exist(core_v1, current_namespace: str) -> bool:
+    """Return True if any lakebench-labeled namespace exists BESIDES the one
+    being destroyed. Fail-safe: on any listing error, return True (assume
+    others exist) so we don't delete a shared resource on flaky read.
+    """
+    try:
+        ns_list = core_v1.list_namespace(label_selector=LAKEBENCH_NAMESPACE_LABEL)
+        names = [ns.metadata.name for ns in ns_list.items]
+    except Exception as e:
+        logger.warning(
+            "Could not list lakebench namespaces (%s); assuming others exist "
+            "to avoid deleting a shared cluster-scoped resource.",
+            e,
+        )
+        return True
+    return not _is_last_lakebench_namespace(names, current_namespace)
+
+
 def destroy_all(
     engine: DeploymentEngine,
     progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
@@ -330,6 +367,8 @@ def destroy_all(
                 secret_key=s3_cfg.secret_key,
                 region=s3_cfg.region,
                 path_style=s3_cfg.path_style,
+                ca_cert=s3_cfg.ca_cert,
+                verify_ssl=s3_cfg.verify_ssl,
             )
             if s3._init_error:
                 bucket_names = (
@@ -782,16 +821,25 @@ def destroy_all(
                 core_v1.delete_namespaced_secret(secret, namespace)
             except ApiException as e:
                 logger.debug("Secret %s delete skipped: %s", secret, e.reason)
-        # Delete SecretClass (cluster-scoped)
-        try:
-            custom_api.delete_cluster_custom_object(
-                group="secrets.stackable.tech",
-                version="v1alpha1",
-                plural="secretclasses",
-                name="lakebench-s3-credentials-class",
+        # Delete SecretClass (cluster-scoped). Only when we're the last
+        # lakebench namespace using it -- otherwise this deletes the
+        # credential-vending resource out from under other parallel
+        # deploys' Hive Metastore pods.
+        if _other_lakebench_namespaces_exist(core_v1, namespace):
+            logger.info(
+                "Keeping SecretClass lakebench-s3-credentials-class -- "
+                "other lakebench namespaces still reference it."
             )
-        except ApiException as e:
-            logger.debug("SecretClass delete skipped: %s", e.reason)
+        else:
+            try:
+                custom_api.delete_cluster_custom_object(
+                    group="secrets.stackable.tech",
+                    version="v1alpha1",
+                    plural="secretclasses",
+                    name="lakebench-s3-credentials-class",
+                )
+            except ApiException as e:
+                logger.debug("SecretClass delete skipped: %s", e.reason)
         results.append(
             DeploymentResult(
                 component="rbac",
@@ -813,26 +861,77 @@ def destroy_all(
     scratch_cfg = engine.config.platform.storage.scratch
     if scratch_cfg.enabled and scratch_cfg.create_storage_class:
         report("scratch-sc", DeploymentStatus.IN_PROGRESS, "Removing scratch StorageClass...")
-        try:
-            storage_v1 = k8s_client.StorageV1Api()
-            storage_v1.delete_storage_class(scratch_cfg.storage_class)
+        # Same shared-cluster-resource refcount as SecretClass: the scratch
+        # StorageClass is cluster-scoped and deleting it under another
+        # parallel deploy kills that deploy's PVC provisioning silently.
+        _core_v1_for_ns = k8s_client.CoreV1Api()
+        if _other_lakebench_namespaces_exist(_core_v1_for_ns, namespace):
+            logger.info(
+                "Keeping scratch StorageClass %s -- other lakebench namespaces still reference it.",
+                scratch_cfg.storage_class,
+            )
             results.append(
                 DeploymentResult(
                     component="scratch-sc",
                     status=DeploymentStatus.SUCCESS,
-                    message=f"Removed StorageClass: {scratch_cfg.storage_class}",
+                    message=(
+                        f"Kept StorageClass {scratch_cfg.storage_class} "
+                        f"(other lakebench namespaces still use it)"
+                    ),
                 )
             )
-            report("scratch-sc", DeploymentStatus.SUCCESS, "Scratch StorageClass removed")
-        except Exception as e:
-            logger.debug("Scratch StorageClass cleanup skipped: %s", e)
-            results.append(
-                DeploymentResult(
-                    component="scratch-sc",
-                    status=DeploymentStatus.SUCCESS,
-                    message="Scratch StorageClass cleanup skipped",
-                )
+            report(
+                "scratch-sc",
+                DeploymentStatus.SUCCESS,
+                "Scratch StorageClass kept (shared)",
             )
+        else:
+            try:
+                storage_v1 = k8s_client.StorageV1Api()
+                storage_v1.delete_storage_class(scratch_cfg.storage_class)
+                results.append(
+                    DeploymentResult(
+                        component="scratch-sc",
+                        status=DeploymentStatus.SUCCESS,
+                        message=f"Removed StorageClass: {scratch_cfg.storage_class}",
+                    )
+                )
+                report("scratch-sc", DeploymentStatus.SUCCESS, "Scratch StorageClass removed")
+            except Exception as e:
+                # A 404 (already gone) is a real skip; anything else is a real
+                # failure the operator should surface, not a silent SUCCESS.
+                # Silent-success on delete previously let cluster state drift
+                # (SC still bound to PVCs elsewhere, refused delete, ignored).
+                from kubernetes.client.rest import ApiException
+
+                is_not_found = isinstance(e, ApiException) and e.status == 404
+                if is_not_found:
+                    results.append(
+                        DeploymentResult(
+                            component="scratch-sc",
+                            status=DeploymentStatus.SUCCESS,
+                            message="Scratch StorageClass already absent",
+                        )
+                    )
+                    report(
+                        "scratch-sc",
+                        DeploymentStatus.SUCCESS,
+                        "Scratch StorageClass absent",
+                    )
+                else:
+                    logger.warning("Scratch StorageClass delete failed: %s", e)
+                    results.append(
+                        DeploymentResult(
+                            component="scratch-sc",
+                            status=DeploymentStatus.FAILED,
+                            message=f"Scratch StorageClass delete failed: {e}",
+                        )
+                    )
+                    report(
+                        "scratch-sc",
+                        DeploymentStatus.FAILED,
+                        f"Scratch StorageClass delete failed: {e}",
+                    )
 
     # Finally, delete namespace if we created it
     if engine.config.platform.kubernetes.create_namespace:

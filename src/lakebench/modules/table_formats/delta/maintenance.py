@@ -101,9 +101,28 @@ def build_delta_maintenance_sql(
         )
         return stmts
     if engine == "spark-thrift":
-        return [
-            f"VACUUM {table} RETAIN {retention_hours} HOURS",
-        ]
+        # DEFENSIVE: an adversarial review anticipated that Spark refuses
+        # VACUUM below the default 7-day retention without
+        # `spark.databricks.delta.retentionDurationCheck.enabled=false`, and
+        # that the destroy caller silently swallows the resulting warning
+        # while DROP TABLE proceeds on top of the failed VACUUM. Live UAT
+        # on Delta 4.0.0 + Spark 4.0.2 + Spark Thrift Server on OCP 4.19
+        # did NOT reproduce that failure (VACUUM RETAIN 0 succeeded silently
+        # both with and without the SET, on a table with no tombstones
+        # older than the just-completed pipeline). The SET is kept as a
+        # defensive precaution -- it is harmless in the observed case, and
+        # protects future Delta versions or destroys on tables with real
+        # tombstone history. Note: because `exec_sql` runs each statement
+        # in a separate beeline invocation, this SET is session-scoped
+        # only to its own connection, not to the following VACUUM.
+        # Combining them into one -e submission would be needed for the
+        # SET to actually gate the VACUUM if a future Delta enforces the
+        # check -- update this + `exec_sql` together if that surfaces.
+        stmts: list[str] = []
+        if retention_hours < 168.0:
+            stmts.append("SET spark.databricks.delta.retentionDurationCheck.enabled=false")
+        stmts.append(f"VACUUM {table} RETAIN {retention_hours} HOURS")
+        return stmts
     return []
 
 

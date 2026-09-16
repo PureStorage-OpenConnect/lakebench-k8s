@@ -270,6 +270,8 @@ def config_storage(
         path_style=s3.path_style,
         existing_bucket=fallback,
         allow_create_bucket=full,
+        ca_cert=s3.ca_cert,
+        verify_ssl=s3.verify_ssl,
     )
 
     table = Table(show_header=True, header_style="bold")
