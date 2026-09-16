@@ -141,8 +141,12 @@ class TestObservabilityConfig:
         obs = cfg.observability
         assert obs.enabled is False
         assert obs.prometheus_stack_enabled is True
-        assert obs.s3_metrics_enabled is True
-        assert obs.spark_metrics_enabled is True
+        # s3_metrics_enabled and spark_metrics_enabled default to None
+        # (sentinel for "user did not set") since both fields are dead --
+        # nothing wires them to actual PodMonitor deployment. Setting them
+        # emits a DeprecationWarning.
+        assert obs.s3_metrics_enabled is None
+        assert obs.spark_metrics_enabled is None
         assert obs.dashboards_enabled is True
 
     def test_observability_reports_preserved(self):

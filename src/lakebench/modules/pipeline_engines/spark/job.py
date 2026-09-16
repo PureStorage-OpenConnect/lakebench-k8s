@@ -388,17 +388,20 @@ def _streaming_concurrent_budget(
 
     scale = config.architecture.workload.datagen.scale
 
-    # Co-resident pods (Trino + Hive + Postgres)
+    # Co-resident pods (Trino + Hive + Postgres). Use the shared parser so
+    # Kubernetes-idiomatic CPU strings ("500m", "1.5") don't crash mid-run.
+    from lakebench.config.autosizer import _parse_cpu_millicores
+
     trino = config.architecture.query_engine.trino
     co_resident_m = (
-        int(trino.coordinator.cpu) * 1000
-        + trino.worker.replicas * int(trino.worker.cpu) * 1000
+        _parse_cpu_millicores(trino.coordinator.cpu)
+        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
         + 1000  # Hive + Postgres
     )
 
     # Datagen runs concurrently with streaming
     datagen = config.architecture.workload.datagen
-    datagen_m = datagen.parallelism * int(datagen.cpu) * 1000
+    datagen_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
 
     # Budget for all streaming jobs combined (90% of remaining after co-resident + datagen)
     remaining_m = max(0, cluster_cpu_millicores - co_resident_m - datagen_m)
@@ -436,8 +439,16 @@ def _scale_partitions(
     """Derive shuffle partition count from executor count and cores.
 
     Target: 2x total cores.
+
+    At small scales (<=10), the default is the profile's ``base_partitions``,
+    but only when the executor count is still the profile default. If a user
+    override boosts executors beyond the profile default (e.g.
+    ``silver_executors: 28`` at scale 5), 2x-total-cores wins so shuffle
+    parallelism scales with the cluster commitment rather than idling ~40%
+    of the requested cores.
     """
-    if scale <= 10:
+    default_executors = profile.get("base_executors", executor_count)
+    if scale <= 10 and executor_count <= default_executors:
         return str(profile["base_partitions"])
     return str(executor_count * cores * 2)
 
@@ -638,21 +649,43 @@ _HADOOP_AWS_COMPAT: dict[tuple[int, int], tuple[str, str]] = {
 }
 
 
+# Completeness gate: every supported Spark minor must have an explicit
+# hadoop-aws + AWS SDK pin. A silent fallback here previously reproduced
+# LB-069 (Spark 4.2 borrowed the (4,0) pair, driver started clean, S3
+# signing diverged at runtime). Adding a Spark minor to
+# ``_SUPPORTED_SPARK_VERSIONS`` without touching this table now fails
+# at import instead of at S3 request time.
+_missing_hadoop_aws = set(_SUPPORTED_SPARK_VERSIONS) - set(_HADOOP_AWS_COMPAT)
+if _missing_hadoop_aws:
+    raise RuntimeError(
+        "Spark minors present in _SUPPORTED_SPARK_VERSIONS but missing from "
+        f"_HADOOP_AWS_COMPAT: {sorted(_missing_hadoop_aws)}. Add explicit "
+        "hadoop-aws and AWS SDK versions before shipping."
+    )
+del _missing_hadoop_aws
+
+
 def _spark_compat(image: str) -> tuple[str, str, str]:
     """Derive Scala suffix, Hadoop AWS version, and AWS SDK version from Spark image tag.
 
     Returns:
         Tuple of (scala_suffix, hadoop_aws_version, aws_sdk_version), keyed on
-        the Spark image's own major.minor -- Hadoop AWS versions differ across
-        Spark 4.0/4.1 (3.4.1/3.4.2), not just across the 3.x/4.x Scala
-        boundary. See ``_HADOOP_AWS_COMPAT``.
+        the Spark image's own major.minor. Every supported Spark minor is
+        required to have an explicit ``_HADOOP_AWS_COMPAT`` entry -- the
+        import-time gate above enforces this. Unknown Spark minors (which
+        should have failed earlier at ``_validate_spark_image``) raise a
+        loud KeyError rather than falling back to a wrong pair.
     """
     major = _parse_spark_major(image)
     key = _parse_spark_major_minor(image)
     scala_suffix = "_2.13" if major >= 4 else "_2.12"
-    hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT.get(
-        key, ("3.4.1", "1.12.720") if major >= 4 else ("3.3.4", "1.12.262")
-    )
+    if key not in _HADOOP_AWS_COMPAT:
+        raise KeyError(
+            f"No hadoop-aws / AWS SDK pin for Spark {key[0]}.{key[1]} in "
+            "_HADOOP_AWS_COMPAT. This must be resolved before submitting the "
+            "job -- a fallback would silently produce a wrong S3 signing pair."
+        )
+    hadoop_aws_version, aws_sdk_version = _HADOOP_AWS_COMPAT[key]
     return scala_suffix, hadoop_aws_version, aws_sdk_version
 
 

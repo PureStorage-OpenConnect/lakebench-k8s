@@ -74,6 +74,26 @@ def _parse_memory_gi(mem: str) -> float:
     return float(mem) / (1024**3)
 
 
+def _parse_cpu_millicores(cpu: str | int | float) -> int:
+    """Parse a Kubernetes-style CPU string to integer millicores.
+
+    Accepts:
+      - "500m", "1500m"        -> 500, 1500
+      - "1", "2", "1.5"        -> 1000, 2000, 1500
+      - int/float (whole cores) -> value * 1000
+
+    Raises ValueError on unparseable input.
+    """
+    if isinstance(cpu, (int, float)):
+        return int(cpu * 1000)
+    s = cpu.strip()
+    if not s:
+        raise ValueError(f"empty CPU value: {cpu!r}")
+    if s.endswith("m"):
+        return int(float(s[:-1]))
+    return int(float(s) * 1000)
+
+
 def _resolve_datagen_mode(config: LakebenchConfig) -> str:
     """Resolve the effective datagen mode from config.
 
@@ -235,8 +255,8 @@ def _co_resident_cpu_m(config: LakebenchConfig) -> int:
     if engine_type == "trino":
         coord = config.architecture.query_engine.trino.coordinator
         worker = config.architecture.query_engine.trino.worker
-        trino_coord_m = int(coord.cpu) * 1000
-        trino_workers_m = worker.replicas * int(worker.cpu) * 1000
+        trino_coord_m = _parse_cpu_millicores(coord.cpu)
+        trino_workers_m = worker.replicas * _parse_cpu_millicores(worker.cpu)
         return trino_coord_m + trino_workers_m + infra_m
     elif engine_type == "spark-thrift":
         thrift = config.architecture.query_engine.spark_thrift
@@ -302,9 +322,9 @@ def _apply_cluster_scaling(
         # Trino is always running.  Subtract coordinator + infra overhead
         # from the cluster, then compute how many workers fit.
         coord = config.architecture.query_engine.trino.coordinator
-        coord_and_infra_m = int(coord.cpu) * 1000 + 1000  # coordinator + Hive/Postgres
+        coord_and_infra_m = _parse_cpu_millicores(coord.cpu) + 1000  # coordinator + Hive/Postgres
         trino_worker_budget_m = max(0, cap.total_cpu_millicores - coord_and_infra_m)
-        worker_cpu_m = int(worker.cpu) * 1000
+        worker_cpu_m = _parse_cpu_millicores(worker.cpu)
         cluster_max_workers = max(1, trino_worker_budget_m // worker_cpu_m)
 
         if worker.replicas > cluster_max_workers:
@@ -353,7 +373,7 @@ def _apply_cluster_scaling(
 
     # --- Datagen parallelism: cap or scale up ---
     if datagen.parallelism > 0:
-        datagen_cpu_m = int(datagen.cpu) * 1000
+        datagen_cpu_m = _parse_cpu_millicores(datagen.cpu)
         cluster_max_datagen = _round_down_even(datagen_budget_m // datagen_cpu_m)
 
         if "parallelism" not in datagen.model_fields_set:

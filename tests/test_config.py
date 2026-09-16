@@ -178,25 +178,6 @@ class TestLakebenchConfig:
         )
         assert config.platform.storage.s3.verify_ssl is False
 
-    def test_quality_distribution_validation(self):
-        """Test that quality distribution must sum to 1.0."""
-        with pytest.raises(ValueError, match="must sum to 1.0"):
-            LakebenchConfig(
-                name="test",
-                architecture={
-                    "workload": {
-                        "customer360": {
-                            "quality_distribution": {
-                                "clean": 0.5,
-                                "duplicate_suspected": 0.1,
-                                "incomplete": 0.1,
-                                "format_inconsistent": 0.1,
-                            }
-                        }
-                    }
-                },
-            )
-
     def test_dirty_data_ratio_validation(self):
         """Test dirty data ratio must be 0-1."""
         with pytest.raises(ValueError, match="between 0 and 1"):

@@ -86,11 +86,12 @@ RECIPES: dict[str, dict[str, Any]] = {
         },
     },
     # -- Hive + Delta Lake (v1.2) --
+    # delta.version omitted so DeltaConfig.version="auto" resolves per Spark image.
     "hive-delta-spark-trino": {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
-            "table_format": {"type": "delta", "delta": {"version": "4.0.0"}},
+            "table_format": {"type": "delta"},
             "query_engine": {"type": "trino"},
         },
     },
@@ -98,7 +99,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
-            "table_format": {"type": "delta", "delta": {"version": "4.0.0"}},
+            "table_format": {"type": "delta"},
             "query_engine": {"type": "spark-thrift"},
         },
     },
@@ -106,7 +107,7 @@ RECIPES: dict[str, dict[str, Any]] = {
         "images": {"spark": "apache/spark:4.0.2-python3", "postgres": "postgres:17"},
         "architecture": {
             "catalog": {"type": "hive"},
-            "table_format": {"type": "delta", "delta": {"version": "4.0.0"}},
+            "table_format": {"type": "delta"},
             "query_engine": {"type": "none"},
         },
     },

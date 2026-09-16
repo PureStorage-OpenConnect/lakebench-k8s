@@ -163,7 +163,6 @@ class ImagesConfig(BaseModel):
     jmx_exporter: str = "bitnami/jmx-exporter:latest"
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
-    pull_secrets: list[str] = Field(default_factory=list)
 
     @field_validator("spark")
     @classmethod
@@ -525,14 +524,6 @@ class BronzeLayerConfig(BaseModel):
     path_template: str = "customer/interactions"
 
 
-class SilverStrategyConfig(BaseModel):
-    """Silver layer adaptive strategy configuration."""
-
-    simple_threshold: str = "100gb"
-    streaming_threshold: str = "5tb"
-    enable_salting: bool = True
-
-
 class SilverLayerConfig(BaseModel):
     """Silver layer configuration."""
 
@@ -548,7 +539,6 @@ class SilverLayerConfig(BaseModel):
             "quality_flags",
         ]
     )
-    strategy: SilverStrategyConfig = Field(default_factory=SilverStrategyConfig)
 
 
 class GoldTableConfig(BaseModel):
@@ -823,7 +813,7 @@ class DatagenConfig(BaseModel):
     )
 
     mode: DatagenMode = DatagenMode.AUTO
-    parallelism: int = 4
+    parallelism: int = Field(default=4, ge=1)
     file_size: str = "512mb"
     dirty_data_ratio: float = 0.08
     cpu: str = "2"
@@ -871,23 +861,6 @@ class DatagenConfig(BaseModel):
         return self.scale
 
 
-class QualityDistributionConfig(BaseModel):
-    """Data quality distribution configuration."""
-
-    clean: float = 0.92
-    duplicate_suspected: float = 0.02
-    incomplete: float = 0.03
-    format_inconsistent: float = 0.03
-
-    @model_validator(mode="after")
-    def validate_sum(self) -> QualityDistributionConfig:
-        """Ensure distribution sums to 1.0."""
-        total = self.clean + self.duplicate_suspected + self.incomplete + self.format_inconsistent
-        if abs(total - 1.0) > 0.001:
-            raise ValueError(f"Quality distribution must sum to 1.0, got {total}")
-        return self
-
-
 class Customer360Config(BaseModel):
     """Customer360 workload schema configuration.
 
@@ -903,15 +876,6 @@ class Customer360Config(BaseModel):
     date_range_days: int | None = Field(
         default=None,
         description="Override: date range in days. If None, defaults to 365.",
-    )
-    channels: list[str] = Field(
-        default_factory=lambda: ["web", "mobile", "store", "call_center", "social_media"]
-    )
-    event_types: list[str] = Field(
-        default_factory=lambda: ["purchase", "browse", "support", "login", "abandoned_cart"]
-    )
-    quality_distribution: QualityDistributionConfig = Field(
-        default_factory=QualityDistributionConfig
     )
 
 
@@ -1203,8 +1167,13 @@ class ObservabilityConfig(BaseModel):
 
     enabled: bool = False
     prometheus_stack_enabled: bool = True
-    s3_metrics_enabled: bool = True
-    spark_metrics_enabled: bool = True
+    # DEPRECATED: no consumer wires these to PodMonitor deployment.
+    # Default is None (not True) so a dump/load roundtrip does not carry
+    # a value that trips the deprecation warning below -- the warning
+    # is intended to fire only when a user explicitly writes the field
+    # in their YAML.
+    s3_metrics_enabled: bool | None = None
+    spark_metrics_enabled: bool | None = None
     dashboards_enabled: bool = True
     retention: str = "7d"
     storage: str = "10Gi"
@@ -1216,6 +1185,23 @@ class ObservabilityConfig(BaseModel):
     # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
     chart_version: str = "87.19.2"
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
+
+    @model_validator(mode="after")
+    def _warn_dead_metric_flags(self) -> ObservabilityConfig:
+        # Only warn when the user gave the field a real value. None is the
+        # sentinel default; a dump/load roundtrip that carries None back
+        # in must not re-trigger the warning.
+        for field in ("s3_metrics_enabled", "spark_metrics_enabled"):
+            if getattr(self, field) is not None:
+                import warnings
+
+                warnings.warn(
+                    f"observability.{field} is unwired -- setting it has no effect. "
+                    "PodMonitor deployment is not gated on this flag today.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+        return self
 
 
 # =============================================================================
