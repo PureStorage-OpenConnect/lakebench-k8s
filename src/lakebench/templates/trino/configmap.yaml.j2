@@ -101,7 +101,7 @@ data:
     iceberg.rest-catalog.uri=http://lakebench-polaris.{{ namespace }}.svc.cluster.local:{{ polaris_port | default(8181) }}/api/catalog
     iceberg.rest-catalog.warehouse={{ trino_catalog_name | default('lakehouse') }}
     iceberg.rest-catalog.security=OAUTH2
-    iceberg.rest-catalog.oauth2.credential=lakebench:{{ polaris_client_secret | default('lakebench-polaris-secret-2024') }}
+    iceberg.rest-catalog.oauth2.credential=lakebench:{{ polaris_client_secret }}
     iceberg.rest-catalog.oauth2.scope=PRINCIPAL_ROLE:ALL
     {% elif catalog_type == "unity" %}
     iceberg.catalog.type=rest

@@ -256,63 +256,49 @@ class SecurityVerifier:
     def _check_scc_assignment(self, scc_name: str, sa_name: str, namespace: str) -> SCCStatus:
         """Check if SCC is assigned to a service account.
 
-        Uses `oc` command to verify SCC assignment.
+        Checks the namespaced RoleBinding first
+        (``system:openshift:scc:<scc>``): that is where
+        ``oc adm policy add-scc-to-user`` records the grant on OCP 4.10+.
+        Falls back to the legacy cluster-scoped ``.users`` array only when
+        the RoleBinding does not exist, so pre-4.10 clusters still verify
+        correctly.
 
-        Args:
-            scc_name: Name of the SCC (e.g., "anyuid")
-            sa_name: Service account name
-            namespace: Namespace
-
-        Returns:
-            SCCStatus with assignment details
+        Reading ``.users`` alone (as this method did before) always reports
+        "not assigned" on modern OCP because that field stays empty --
+        exactly the LB-088 mistake the ``_add_scc`` retry loop was already
+        fixed for.
         """
         try:
-            # Check SCC users/groups
-            result = subprocess.run(
-                ["oc", "get", "scc", scc_name, "-o", "jsonpath={.users}"],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-            if result.returncode != 0:
-                return SCCStatus(
-                    name=scc_name,
-                    assigned=False,
-                    service_account=sa_name,
-                    namespace=namespace,
-                    message=f"Failed to check SCC: {result.stderr}",
-                )
-
-            # Parse users list - format is ["system:serviceaccount:ns:sa", ...]
-            users = result.stdout.strip()
-            expected_user = f"system:serviceaccount:{namespace}:{sa_name}"
-
-            if expected_user in users:
+            if self._scc_binding_has_subject(scc_name, sa_name, namespace):
                 return SCCStatus(
                     name=scc_name,
                     assigned=True,
                     service_account=sa_name,
                     namespace=namespace,
-                    message=f"SCC '{scc_name}' assigned to {sa_name}",
-                )
-            else:
-                return SCCStatus(
-                    name=scc_name,
-                    assigned=False,
-                    service_account=sa_name,
-                    namespace=namespace,
-                    message=f"SCC '{scc_name}' not assigned to {sa_name}",
+                    message=f"SCC '{scc_name}' assigned to {sa_name} via RoleBinding",
                 )
 
-        except subprocess.TimeoutExpired:
+            legacy_user = f"system:serviceaccount:{namespace}:{sa_name}"
+            if self._scc_users_field_has(scc_name, legacy_user):
+                return SCCStatus(
+                    name=scc_name,
+                    assigned=True,
+                    service_account=sa_name,
+                    namespace=namespace,
+                    message=(
+                        f"SCC '{scc_name}' assigned to {sa_name} via legacy "
+                        "cluster-scoped .users (pre-OCP 4.10 mechanism)"
+                    ),
+                )
+
             return SCCStatus(
                 name=scc_name,
                 assigned=False,
                 service_account=sa_name,
                 namespace=namespace,
-                message="Timeout checking SCC",
+                message=f"SCC '{scc_name}' not assigned to {sa_name}",
             )
+
         except FileNotFoundError:
             return SCCStatus(
                 name=scc_name,
@@ -329,6 +315,37 @@ class SecurityVerifier:
                 namespace=namespace,
                 message=f"Error checking SCC: {e}",
             )
+
+    def _scc_users_field_has(self, scc_name: str, user: str) -> bool:
+        """Read the SCC's cluster-scoped ``.users`` array (legacy pre-4.10
+        mechanism). Best-effort; returns False on any read failure.
+
+        Uses per-item jsonpath and exact token match rather than substring
+        match: `user in stdout` would false-positive if the SCC lists a
+        related SA like ``lakebench-spark-runner-v2`` when we search for
+        ``lakebench-spark-runner``. That is the same LB-088 pattern the
+        RoleBinding fix was written to avoid. Uses a space separator to
+        stay parallel with ``_scc_binding_has_subject``.
+        """
+        try:
+            result = subprocess.run(
+                [
+                    "oc",
+                    "get",
+                    "scc",
+                    scc_name,
+                    "-o",
+                    "jsonpath={range .users[*]}{@}{' '}{end}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode != 0:
+                return False
+            return user in result.stdout.split()
+        except Exception:
+            return False
 
     def _check_psa_labels(self, namespace: str) -> bool | None:
         """Check Pod Security Admission labels on namespace.
@@ -449,8 +466,19 @@ class SecurityVerifier:
                 last_stderr = str(e)
                 result = None
 
-            if self._scc_binding_has_subject(scc_name, sa_name, namespace):
-                return True
+            try:
+                if self._scc_binding_has_subject(scc_name, sa_name, namespace):
+                    return True
+            except FileNotFoundError:
+                # oc missing entirely; retrying will not help. Bail with a
+                # clear message rather than re-raising from a retry loop.
+                logger.warning(
+                    "SCC %s add for serviceaccount %s/%s cannot be verified: oc command not found",
+                    scc_name,
+                    namespace,
+                    sa_name,
+                )
+                return False
 
             if attempt < self._SCC_ADD_MAX_ATTEMPTS:
                 time.sleep(self._SCC_ADD_BACKOFF_SECONDS * attempt)
@@ -473,7 +501,11 @@ class SecurityVerifier:
 
         This is how `oc adm policy add-scc-to-user` records the grant on
         OpenShift 4.10+. Best-effort read via `oc get rolebinding`; on any
-        read failure returns False so the caller retries.
+        transient read failure returns False so the caller retries.
+        FileNotFoundError (oc missing entirely) is re-raised so the caller
+        can distinguish "grant is not present" from "cannot check" -- the
+        former is unassigned, the latter is unknown and needs a real
+        error surface.
         """
         try:
             result = subprocess.run(
@@ -495,32 +527,7 @@ class SecurityVerifier:
             if result.returncode != 0:
                 return False
             return f"{namespace}/{sa_name}" in result.stdout.split()
-        except Exception:
-            return False
-
-    def _scc_has_user(self, scc_name: str, user: str) -> bool:
-        """Legacy pre-4.10 helper: returns True iff `user` appears in the
-        SCC's cluster-scoped `.users` array. Retained for the `oc get scc`
-        path in older cluster paths / tests; new call sites should use
-        `_scc_binding_has_subject`.
-        """
-        try:
-            result = subprocess.run(
-                [
-                    "oc",
-                    "get",
-                    "scc",
-                    scc_name,
-                    "-o",
-                    "jsonpath={.users}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=15,
-            )
-            if result.returncode != 0:
-                return False
-            # jsonpath returns something like: [system:sa:ns:foo system:sa:ns:bar]
-            return user in result.stdout
+        except FileNotFoundError:
+            raise
         except Exception:
             return False
