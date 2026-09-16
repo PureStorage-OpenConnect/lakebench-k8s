@@ -242,7 +242,10 @@ class TestSparkJobManager:
         """Spark conf should use REST catalog when Polaris is configured."""
         config = _make_config(
             architecture={
-                "catalog": {"type": "polaris"},
+                "catalog": {
+                    "type": "polaris",
+                    "polaris": {"client_secret": "test-only-secret"},
+                },
                 "table_format": {"type": "iceberg"},
                 "query_engine": {"type": "trino"},
             }
@@ -1408,7 +1411,7 @@ class TestSparkOperatorNamespaceWatching:
 
 
 _POLARIS_ARCH = {
-    "catalog": {"type": "polaris"},
+    "catalog": {"type": "polaris", "polaris": {"client_secret": "test-only-secret"}},
     "table_format": {"type": "iceberg"},
     "query_engine": {"type": "trino"},
 }

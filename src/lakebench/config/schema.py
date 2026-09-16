@@ -402,11 +402,21 @@ class PolarisConfig(BaseModel):
     Polaris is an open-source Iceberg REST catalog (port 8181).
     Uses relational-jdbc persistence backed by the shared PostgreSQL.
     On FlashBlade: stsUnavailable=true, pathStyleAccess=true.
+
+    ``client_secret`` MUST be supplied by the user when catalog type is
+    polaris. Auto-generation across CLI calls does not work: `deploy`,
+    `run`, and `destroy` each load the config independently, so an
+    auto-generated secret would differ between invocations and Spark
+    jobs submitted by `run` would fail OAuth2 against the Polaris
+    instance bootstrapped by `deploy`. A hardcoded default (the
+    pre-LB-090 behaviour) would share one OAuth2 client secret across
+    every install. ``CatalogConfig`` validates and rejects the empty
+    value with a message that includes a generator command.
     """
 
     version: str = "1.6.0"
     port: int = 8181
-    client_secret: str = "lakebench-polaris-secret-2024"
+    client_secret: str = ""
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
 
@@ -430,6 +440,39 @@ class CatalogConfig(BaseModel):
     hive: HiveConfig = Field(default_factory=HiveConfig)
     polaris: PolarisConfig = Field(default_factory=PolarisConfig)
     unity: UnityConfig = Field(default_factory=UnityConfig)
+
+
+class PolarisClientSecretMissing(ValueError):
+    """Raised at deploy/run time when a Polaris config has no client secret.
+
+    Kept as a distinct exception type so ``lakebench validate`` and
+    ``lakebench info`` (which do not deploy) can load Polaris configs
+    without a secret -- the check runs where the secret is actually used
+    (deploy, spark-job submission), not at config load. See LB-090 for
+    why load-time auto-generation is unsafe: independent CLI invocations
+    would each generate a different value.
+    """
+
+
+def require_polaris_client_secret(cfg: Any) -> str:
+    """Return the Polaris client secret, or raise if missing.
+
+    ``cfg`` is the root ``LakebenchConfig``. Call this from every code
+    path that actually needs the secret to talk to Polaris (bootstrap
+    job template render, Spark job manifest build, Trino configmap
+    render), not from validators.
+    """
+    secret = cfg.architecture.catalog.polaris.client_secret
+    if not secret:
+        raise PolarisClientSecretMissing(
+            "architecture.catalog.polaris.client_secret is required "
+            "when catalog.type is 'polaris'. Generate one with:\n"
+            "  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'\n"
+            "and set it in the config file (or via the "
+            "LAKEBENCH_POLARIS_CLIENT_SECRET environment variable if "
+            "you use the ${VAR} substitution)."
+        )
+    return secret
 
 
 class IcebergConfig(BaseModel):

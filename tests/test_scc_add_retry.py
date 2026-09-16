@@ -85,22 +85,23 @@ class TestSccAddRetry:
         v = self._make_verifier()
         with patch("lakebench.k8s.security.subprocess.run") as run:
             run.return_value = _mock_completed(1, stderr="not found")
-            assert v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False
+            assert (
+                v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False
+            )
 
     def test_verify_returns_false_on_exception(self):
         v = self._make_verifier()
         with patch("lakebench.k8s.security.subprocess.run", side_effect=RuntimeError("boom")):
-            assert v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False
+            assert (
+                v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False
+            )
 
     def test_verify_matches_correct_namespace_only(self):
         """`v12-t01/spark` must not match when the binding only lists
         `v12-t02/spark`. jsonpath output is space-separated ns/name tokens."""
         v = self._make_verifier()
         with patch("lakebench.k8s.security.subprocess.run") as run:
-            run.return_value = _mock_completed(
-                0, stdout="v12-t02/lakebench-spark-runner other/sa "
-            )
+            run.return_value = _mock_completed(0, stdout="v12-t02/lakebench-spark-runner other/sa ")
             assert (
-                v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01")
-                is False
+                v._scc_binding_has_subject("anyuid", "lakebench-spark-runner", "v12-t01") is False
             )
