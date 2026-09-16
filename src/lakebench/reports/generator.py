@@ -122,9 +122,11 @@ class ReportGenerator:
 
         # Data completeness
         if pb:
-            if is_sustained and pb.ingest_ratio < 0.95:
+            if is_sustained and pb.ingest_ratio is None:
+                warnings.append("Ingest ratio unmeasurable (datagen row count unknown)")
+            elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
                 reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 (pipeline saturated)")
-            elif is_sustained and pb.ingest_ratio > 1.05:
+            elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio > 1.05:
                 warnings.append(
                     f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
                 )
@@ -203,9 +205,14 @@ class ReportGenerator:
         Shows Ingest Ratio below the stage table.  Compute Efficiency and
         Total CPU-hours are now in the Layer 1 summary cards.
         """
-        # Ingest ratio badge
-        if pb.ingest_ratio < 0.95:
+        # Ingest ratio badge -- None means the denominator (datagen row count)
+        # was not measured. Report as N/A rather than fabricating a status.
+        if pb.ingest_ratio is None:
+            ratio_badge = '<span style="color: var(--text-muted);">N/A</span>'
+            ratio_value = "N/A"
+        elif pb.ingest_ratio < 0.95:
             ratio_badge = '<span style="color: var(--danger);">SATURATED</span>'
+            ratio_value = f"{pb.ingest_ratio:.2f}"
         elif pb.ingest_ratio > 1.05:
             ratio_badge = (
                 f'<span style="color: var(--warning);"'
@@ -214,14 +221,16 @@ class ReportGenerator:
                 f' re-reading the full silver table each cycle.">'
                 f"{pb.ingest_ratio:.2f} (gold re-reads exceed input)</span>"
             )
+            ratio_value = f"{pb.ingest_ratio:.2f}"
         else:
             ratio_badge = '<span style="color: var(--success);">Healthy</span>'
+            ratio_value = f"{pb.ingest_ratio:.2f}"
 
         return f"""
         <div class="cards" style="margin-top: 1.5rem;">
             <div class="card">
                 <div class="card-label">Ingest Ratio</div>
-                <div class="card-value">{pb.ingest_ratio:.2f}</div>
+                <div class="card-value">{ratio_value}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     {ratio_badge}
                 </div>
@@ -469,7 +478,9 @@ class ReportGenerator:
         # Scale Ratio / Ingest Ratio
         if is_sustained and pb:
             ratio = pb.ingest_ratio
-            if ratio < 0.95:
+            if ratio is None:
+                indicators.append(("Ingest Ratio", "status-warning", "N/A unmeasured"))
+            elif ratio < 0.95:
                 indicators.append(("Ingest Ratio", "status-failed", f"{ratio:.2f} SATURATED"))
             elif ratio > 1.05:
                 indicators.append(
