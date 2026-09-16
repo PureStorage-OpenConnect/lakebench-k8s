@@ -14,7 +14,16 @@ def make_config(**overrides) -> LakebenchConfig:
 
     This is the canonical config factory for tests. Prefer this over
     hand-building dicts so that new required fields are handled in one place.
+
+    LB-090: when the resulting config selects Polaris and no explicit
+    ``client_secret`` was supplied, fill in a test-only value so the
+    deploy-time ``require_polaris_client_secret`` gate does not fire
+    inside unrelated tests. Real production configs must set the secret
+    themselves; the loader's ${VAR} substitution is the recommended
+    channel.
     """
+    from lakebench.config.schema import CatalogType
+
     base: dict = {
         "name": "test-fixture",
         "platform": {
@@ -28,7 +37,13 @@ def make_config(**overrides) -> LakebenchConfig:
         },
     }
     base.update(overrides)
-    return LakebenchConfig(**base)
+    cfg = LakebenchConfig(**base)
+    if (
+        cfg.architecture.catalog.type == CatalogType.POLARIS
+        and not cfg.architecture.catalog.polaris.client_secret
+    ):
+        cfg.architecture.catalog.polaris.client_secret = "test-only-secret"
+    return cfg
 
 
 @pytest.fixture

@@ -45,7 +45,7 @@ spec:
             - |
               OUTPUT=$(java -jar /deployments/polaris-admin-tool.jar bootstrap \
                 -r POLARIS \
-                -c "POLARIS,lakebench,{{ polaris_client_secret | default('lakebench-polaris-secret-2024') }}" 2>&1)
+                -c "POLARIS,lakebench,{{ polaris_client_secret }}" 2>&1)
               RC=$?
               echo "$OUTPUT"
               if [ $RC -ne 0 ]; then
@@ -65,7 +65,7 @@ spec:
             - name: CLIENT_ID
               value: "lakebench"
             - name: CLIENT_SECRET
-              value: "{{ polaris_client_secret | default('lakebench-polaris-secret-2024') }}"
+              value: "{{ polaris_client_secret }}"
             - name: S3_ENDPOINT
               value: "{{ s3_endpoint }}"
             - name: S3_REGION
