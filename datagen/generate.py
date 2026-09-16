@@ -31,6 +31,7 @@ import uuid
 from datetime import datetime
 from multiprocessing import Process
 from multiprocessing import Queue as MPQueue
+from typing import Protocol, runtime_checkable
 
 import boto3
 import numpy as np
@@ -416,6 +417,40 @@ def corrupt_states(states: list, rng: np.random.Generator, dirty_ratio: float) -
 
 
 # =============================================================================
+# Generator Protocol
+# =============================================================================
+
+
+@runtime_checkable
+class Generator(Protocol):
+    """Common shape for per-schema data generators.
+
+    Each schema (Customer 360, Financial, future workloads) implements
+    this protocol so ``main`` and the multiprocessing workers can stay
+    schema-agnostic. Instances must be picklable so ``ProcessPoolExecutor``
+    can ship them to workers.
+
+    Determinism: ``generate_file_data(file_id)`` must produce a
+    byte-identical Arrow table for a given ``(config.seed, file_id)``.
+    """
+
+    schema_name: str
+
+    def ensure_loyalty(self) -> None:
+        """Warm any per-schema caches before fork or pickle.
+
+        Named for historical reasons (Customer 360's loyalty lookup);
+        implementations may treat as a no-op if they have no
+        precomputable state. Idempotent.
+        """
+        ...
+
+    def generate_file_data(self, file_id: int) -> pa.Table:
+        """Return one Parquet-ready Arrow table for ``file_id``."""
+        ...
+
+
+# =============================================================================
 # Customer 360 Generator
 # =============================================================================
 
@@ -424,15 +459,10 @@ class Customer360Generator:
     """Generator for the Customer 360 synthetic schema.
 
     Encapsulates the loyalty-lookup cache and file generation for one
-    schema. Extracted from module-level state as sub-PR (a) of the
-    ENG-2C.2 datagen refactor; sub-PR (b) introduces a Generator
-    protocol, sub-PR (c) adds dispatch by workload schema.
-
-    Byte-identical to the previous module-level implementation: the
-    file-generation body is unchanged and lives in
-    ``_build_customer360_table``; only the loyalty-lookup call site
-    was rewired to receive the cache callable from this class.
+    schema. Implements the ``Generator`` protocol.
     """
+
+    schema_name = "customer360"
 
     def __init__(self, config: "Config"):
         self.config = config
@@ -721,7 +751,7 @@ def _build_customer360_table(file_id: int, config: Config, get_loyalty_fn) -> pa
     return pa.Table.from_pydict(data, schema=schema)
 
 
-def write_file_to_s3(file_id: int, config: Config, generator: Customer360Generator) -> dict:
+def write_file_to_s3(file_id: int, config: Config, generator: Generator) -> dict:
     """Generate and write a single Parquet file to S3."""
     try:
         table = generator.generate_file_data(file_id)
