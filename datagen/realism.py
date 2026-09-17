@@ -125,11 +125,20 @@ def structuring_amount(rng: np.random.Generator, currency: str = "USD") -> Decim
 
 
 class PartySelector:
-    """Zipf-shaped party ID sampler.
+    """Power-law-shaped party ID sampler.
 
     Top ``hot_corp_count`` IDs get ~``hot_corp_share`` of transactions
     (corporate accounts with recurring beneficiaries). Rest are uniform
     retail. Deterministic in the caller-supplied ``rng``.
+
+    Cycle-3 fix (2026-09-17): prior version used ``rng.zipf(1.5)`` which
+    puts ~50% of hot-corporate mass on ID=1 -- entity_1 alone became a
+    supernode with ~4% self-loops and ~30% edge incidence, breaking any
+    graph-shaped detection (W1 CC, W3 motif finding). Real tier-1 bank
+    corporate distributions look more like Zipf(2.2-2.5). We use a
+    truncated Zipf drawn from a pre-computed CDF over IDs 1..hot_corp_count
+    so entity_1's share is bounded (~10-12%) and every top-500 ID has
+    non-trivial mass.
     """
 
     def __init__(
@@ -137,20 +146,33 @@ class PartySelector:
         customer_id_max: int,
         hot_corp_count: int = 500,
         hot_corp_share: float = 0.40,
+        zipf_shape: float = 2.3,
     ):
         self.customer_id_max = customer_id_max
         self.hot_corp_count = min(hot_corp_count, customer_id_max)
         self.hot_corp_share = hot_corp_share
-        # Reserve the low ID range for hot corporates. Zipf over that range
-        # gives the strong power-law shape practitioners see in the data.
-        # numpy zipf can return unbounded ints; we clip to hot_corp_count.
+        self.zipf_shape = zipf_shape
+        # Pre-compute truncated-Zipf CDF over the hot-corp range so
+        # bisect on rng.random() gives O(log N) sampling with a fixed
+        # (bounded) share for id=1. Weights: w_k = 1/k^shape for k in 1..N.
+        weights = np.array(
+            [1.0 / (k ** zipf_shape) for k in range(1, self.hot_corp_count + 1)],
+            dtype=np.float64,
+        )
+        weights = weights / weights.sum()
+        self._hot_cdf = np.cumsum(weights)
+        # Pre-check: what share of hot mass lands on id=1? Guard so future
+        # changes don't quietly re-introduce a supernode.
+        self._id1_share = float(weights[0]) if len(weights) > 0 else 0.0
 
     def sample(self, rng: np.random.Generator) -> int:
         """Return one party ID biased by the corporate-hot distribution."""
         if rng.random() < self.hot_corp_share and self.hot_corp_count > 0:
-            # Zipf shape parameter 1.5: heavy-tailed, top-500 concentrated.
-            raw = int(rng.zipf(1.5))
-            return min(raw, self.hot_corp_count)
+            u = float(rng.random())
+            idx = int(np.searchsorted(self._hot_cdf, u))
+            if idx >= self.hot_corp_count:
+                idx = self.hot_corp_count - 1
+            return idx + 1  # 1-indexed IDs
         # Retail: uniform over the non-hot range. When the retail range is
         # empty (customer_id_max <= hot_corp_count), fall back to the full
         # ID space so tiny populations don't hit numpy's low >= high error.
@@ -223,6 +245,31 @@ def sample_corridor(rng: np.random.Generator) -> tuple[str, str]:
     if idx >= len(_CORRIDOR_KEYS):
         idx = len(_CORRIDOR_KEYS) - 1
     return _CORRIDOR_KEYS[idx]
+
+
+# Approx FX rates to USD (2026-ish). Used by sample_regulatory_reporting to
+# FX-normalize amounts before comparing to the $10K USD threshold. Prior code
+# compared raw local-currency amounts to a USD threshold, so a JPY50,000 wire
+# (~$340 USD) triggered reporting while a EUR5,000 wire (~$5,500) did not.
+_FX_TO_USD = {
+    "USD": 1.0,
+    "GBP": 1.30,
+    "EUR": 1.10,
+    "CHF": 1.15,
+    "JPY": 0.0068,
+    "AED": 0.27,
+    "SGD": 0.74,
+    "CAD": 0.73,
+    "MXN": 0.055,
+    "CNY": 0.14,
+    "INR": 0.012,
+}
+
+
+def to_usd(amount: Decimal, currency: str) -> Decimal:
+    """FX-normalise an amount to USD-equivalent using cached rates."""
+    rate = _FX_TO_USD.get(currency, 1.0)
+    return (amount * Decimal(str(rate))).quantize(Decimal("0.01"))
 
 
 _CURRENCY_BY_COUNTRY = {
@@ -391,17 +438,20 @@ def _bic_to_agent(bic: str) -> dict:
 def sample_regulatory_reporting(
     dbtr_country: str,
     cdtr_country: str,
-    amount_usd: Decimal,
+    amount: Decimal,
+    currency: str = "USD",
 ) -> list[dict] | None:
     """FinCEN / EBA / MAS-style regulatory-reporting flags on the wire.
 
-    Populated for cross-border wires >= $10,000 USD-equivalent
-    (US FinCEN CTR threshold, EU 6AMLD 15,000 EUR ~= $16K USD).
-    Returns a list because pacs.008 allows multiple reporting
-    authorities per transaction (source country + destination country).
+    Populated for cross-border wires >= $10,000 USD-equivalent. Prior
+    signature took `amount_usd` but callers passed the wire-currency
+    amount directly, causing a JPY50,000 wire (~$340) to trigger reporting
+    and a EUR5,000 wire (~$5,500) to escape it. Now takes currency
+    explicitly and FX-normalises before comparing to the threshold.
     """
     if dbtr_country == cdtr_country:
         return None
+    amount_usd = to_usd(amount, currency)
     if amount_usd < Decimal("10000.00"):
         return None
     entries: list[dict] = []
@@ -410,7 +460,7 @@ def sample_regulatory_reporting(
             "dbt_cdt_rptg_ind": "DEBT",
             "authrty_nm": _regulator_for(dbtr_country),
             "authrty_ctry": dbtr_country,
-            "details": [f"amount:{amount_usd}", "cross-border"],
+            "details": [f"amount_usd:{amount_usd}", "cross-border"],
         }
     )
     entries.append(
@@ -418,7 +468,7 @@ def sample_regulatory_reporting(
             "dbt_cdt_rptg_ind": "CRED",
             "authrty_nm": _regulator_for(cdtr_country),
             "authrty_ctry": cdtr_country,
-            "details": [f"amount:{amount_usd}", "cross-border"],
+            "details": [f"amount_usd:{amount_usd}", "cross-border"],
         }
     )
     return entries

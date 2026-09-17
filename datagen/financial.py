@@ -411,6 +411,9 @@ class FinancialGenerator:
 
         rows_per_file = self.config.rows_per_file
         party_selector = self._party_selector
+        # Import home_country_for locally to keep the hot-loop import narrow.
+        from realism import home_country_for as _home
+
         rows: list[dict] = []
         for _ in range(rows_per_file):
             ts = sample_timestamp_shaped(rng, window_start, window_end)
@@ -418,7 +421,10 @@ class FinancialGenerator:
             beneficiary = party_selector.sample(rng)
             dbtr_c, cdtr_c = sample_corridor(rng)
             amount = log_normal_amount(rng)
-            currency = currency_for(cdtr_c)
+            # Currency follows the debtor's home country -- the payer owns
+            # the account and picks the settlement currency in most flows.
+            # Corridor just drives routing (chain / regulatory attribution).
+            currency = currency_for(_home(originator))
             rows.append(
                 _base_row(
                     rng,
