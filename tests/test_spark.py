@@ -1572,6 +1572,36 @@ class TestScriptsConfigMapDeltaScripts:
                     )
 
 
+class TestFinancialScriptDispatch:
+    """schema=financial routes JobType -> *_financial.py scripts (ENG-2C.3c+)."""
+
+    def _make_financial_config(self):
+        cfg = _make_config()
+        # Rebuild via schema to pick up the FINANCIAL enum path cleanly.
+        from lakebench.config import LakebenchConfig
+
+        blob = cfg.model_dump(by_alias=True)
+        blob["architecture"]["workload"]["schema"] = "financial"
+        return LakebenchConfig(**blob)
+
+    def test_bronze_verify_dispatches_to_financial_script(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_financial_config()
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert "bronze_verify_financial.py" in manifest["spec"]["mainApplicationFile"]
+
+    def test_customer360_bronze_verify_unchanged(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = _make_config()  # default schema is customer360
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert manifest["spec"]["mainApplicationFile"].endswith("bronze_verify.py")
+        assert "financial" not in manifest["spec"]["mainApplicationFile"]
+
+
 # ---------------------------------------------------------------------------
 # PipelineEngine protocol conformance
 # ---------------------------------------------------------------------------
