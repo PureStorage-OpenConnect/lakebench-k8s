@@ -194,9 +194,20 @@ def iot_dimensions(scale: float) -> ScaleDimensions:
 
 
 def financial_dimensions(scale: float) -> ScaleDimensions:
-    """Map scale factor to Financial transactions domain dimensions (future).
+    """Map scale factor to Financial (FinServ-Crime / AML) domain dimensions.
 
-    Scale 1 -> 500K accounts x 12 months @ 4 txns/account/month, ~10 GB
+    Scale 0.01 -> 5K accounts,     ~48 txns/account,  365 days, ~100 MB
+    Scale 1  -> 500K accounts,     ~48 txns/account,  365 days, ~10 GB
+    Scale 10 -> 5M accounts,       ~48 txns/account,  365 days, ~100 GB
+    Scale 100 -> 50M accounts,     ~48 txns/account,  365 days, ~1 TB
+    Scale 1000 -> 500M accounts,   ~48 txns/account,  365 days, ~10 TB
+    Scale 10000 -> 5B accounts,    ~48 txns/account,  365 days, ~100 TB
+      (tier-1 universal bank AML retention target, REQ-S-01)
+
+    Scales linearly per REQ-S-02: accounts = scale * 500,000.
+    Row-size estimate is provisional and will be recalibrated when the
+    ISO 20022 generator (ENG-2C.3) publishes measured bytes/row per
+    REQ-S-03.
     """
     accounts = _entity_count(scale, 500_000)
     txns_per_account_per_month = 4
