@@ -625,6 +625,7 @@ def run(
         _run_iceberg_maintenance,
         _run_sustained,
         _wait_for_query_engine_ready,
+        resolve_maintenance_retention,
     )
     from lakebench.engine import get_engine
     from lakebench.metrics import JobMetrics, MetricsCollector, MetricsStorage
@@ -1333,7 +1334,9 @@ def run(
                 console.print()
                 console.print("[bold]Running maintenance[/bold]")
                 _maint_start = datetime.now()
-                _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold="0s")
+                _run_iceberg_maintenance(
+                    cfg, k8s, console, j, retention_threshold=resolve_maintenance_retention(cfg)
+                )
                 _run_iceberg_compaction(cfg, k8s, console, j)
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
                 maint_elapsed = (datetime.now() - _maint_start).total_seconds()
