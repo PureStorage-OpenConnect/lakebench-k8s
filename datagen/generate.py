@@ -502,9 +502,17 @@ class Customer360Generator:
 # =============================================================================
 
 
+try:
+    from financial import FinancialGenerator
+except ImportError:  # pragma: no cover -- optional at import time
+    FinancialGenerator = None  # type: ignore[assignment,misc]
+
+
 _GENERATOR_REGISTRY: dict[str, type] = {
     "customer360": Customer360Generator,
 }
+if FinancialGenerator is not None:
+    _GENERATOR_REGISTRY["financial"] = FinancialGenerator
 
 
 def register_generator(schema_name: str, generator_cls: type) -> None:

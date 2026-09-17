@@ -19,7 +19,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy generation code
-COPY generate.py .
+# Copy generation code (Customer 360 in generate.py, Financial in
+# financial.py + typologies.py + manifest.py). All get baked in so
+# dispatch by --schema resolves at runtime.
+COPY *.py ./
 
 ENTRYPOINT ["python", "generate.py"]
