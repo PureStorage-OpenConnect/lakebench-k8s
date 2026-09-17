@@ -210,6 +210,29 @@ def _parse_spark_interval(interval_str: str) -> int:
     return 300
 
 
+_DAYS_PER_MONTH = 30.5
+_RETENTION_HEADROOM_MONTHS = 6
+
+
+def resolve_maintenance_retention(cfg) -> str:
+    """Resolve the pre-benchmark maintenance retention threshold.
+
+    Returns ``"0s"`` (expire every snapshot older than now) for standard
+    workloads. When ``workload.retention_workload`` is True, returns a
+    day-string long enough to cover ``retention_months + 6`` months of
+    headroom, so historical replay (W8) and time-travel reproduction
+    (W10) can still resolve their target snapshots after maintenance.
+    Expressed in days because the maintenance parser accepts only
+    s/m/h/d suffixes (V-23 in the FinServ-Crime spec).
+    """
+    workload = cfg.architecture.workload
+    if not workload.retention_workload:
+        return "0s"
+    total_months = workload.retention_months + _RETENTION_HEADROOM_MONTHS
+    days = int(total_months * _DAYS_PER_MONTH)
+    return f"{days}d"
+
+
 def _run_iceberg_maintenance(
     cfg,
     k8s,

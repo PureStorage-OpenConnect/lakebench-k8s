@@ -462,6 +462,55 @@ class TestBenchmarkSchedulingFloors:
         assert bench_interval == 600
 
 
+class TestResolveMaintenanceRetention:
+    """Tests for the schema-aware retention resolver (ENG-R-05)."""
+
+    def _cfg(self, retention_workload=False, retention_months=60):
+        from unittest.mock import MagicMock
+
+        cfg = MagicMock()
+        cfg.architecture.workload.retention_workload = retention_workload
+        cfg.architecture.workload.retention_months = retention_months
+        return cfg
+
+    def test_default_workload_returns_zero_seconds(self):
+        from lakebench.cli._sustained import resolve_maintenance_retention
+
+        assert resolve_maintenance_retention(self._cfg()) == "0s"
+
+    def test_retention_workload_preserves_60_months_plus_headroom(self):
+        from lakebench.cli._sustained import resolve_maintenance_retention
+
+        threshold = resolve_maintenance_retention(
+            self._cfg(retention_workload=True, retention_months=60)
+        )
+        # 66 months * 30.5 days = 2013 days
+        assert threshold == "2013d"
+
+    def test_retention_workload_scales_with_months(self):
+        from lakebench.cli._sustained import resolve_maintenance_retention
+
+        # 12 + 6 = 18 months * 30.5 = 549 days
+        threshold = resolve_maintenance_retention(
+            self._cfg(retention_workload=True, retention_months=12)
+        )
+        assert threshold == "549d"
+
+    def test_retention_workload_threshold_is_parseable_by_maintenance(self):
+        """Sanity check: the day-string must round-trip through the parser."""
+        from lakebench.cli._sustained import resolve_maintenance_retention
+        from lakebench.modules.table_formats.iceberg.maintenance import (
+            _parse_threshold_seconds,
+        )
+
+        threshold = resolve_maintenance_retention(
+            self._cfg(retention_workload=True, retention_months=60)
+        )
+        seconds = _parse_threshold_seconds(threshold)
+        # 2013 days in seconds
+        assert seconds == 2013 * 86400
+
+
 class TestRunIcebergMaintenance:
     """Tests for _run_iceberg_maintenance() engine-aware helper."""
 

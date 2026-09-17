@@ -923,6 +923,15 @@ class WorkloadConfig(BaseModel):
     datagen: DatagenConfig = Field(default_factory=DatagenConfig)
     customer360: Customer360Config = Field(default_factory=Customer360Config)
 
+    # Snapshot-retention policy. Set retention_workload=True on Financial
+    # recipes whose workload set includes historical replay (W8) or
+    # time-travel reproduction (W10): the pre-benchmark maintenance step
+    # then preserves snapshots covering retention_months + headroom, rather
+    # than expiring everything with the default "0s" threshold. See
+    # REQ-R-03/REQ-R-05 in the FinServ-Crime spec.
+    retention_workload: bool = False
+    retention_months: int = Field(default=60, ge=1, le=120)
+
     model_config = {"populate_by_name": True}
 
 
