@@ -1191,6 +1191,9 @@ class SparkJobManager:
                 JobType.BRONZE_VERIFY: "bronze_verify_financial.py",
                 JobType.SILVER_BUILD: "silver_build_financial.py",
                 JobType.GOLD_FINALIZE: "gold_finalize_financial.py",
+                JobType.BRONZE_INGEST: "bronze_ingest_financial.py",
+                JobType.SILVER_STREAM: "silver_stream_financial.py",
+                JobType.GOLD_REFRESH: "gold_refresh_financial.py",
             }
             script_map.update(_financial_scripts)
         elif table_format == "delta":
@@ -1910,6 +1913,9 @@ class SparkJobManager:
             "bronze_verify_financial.py",
             "silver_build_financial.py",
             "gold_finalize_financial.py",
+            "bronze_ingest_financial.py",
+            "silver_stream_financial.py",
+            "gold_refresh_financial.py",
         ]
 
         # Build ConfigMap data
