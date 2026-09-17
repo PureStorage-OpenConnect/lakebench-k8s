@@ -453,3 +453,64 @@ class TestDatagenDeployerDryRun:
         result = deployer.deploy()
         assert result.status == DeploymentStatus.SUCCESS
         assert "Would deploy" in result.message
+
+
+class TestDatagenDeployerSchemaWireThrough:
+    """Confirms the workload.schema value reaches the K8s Job's argv.
+
+    Regression: prior to this test, --schema was never wired through the
+    template, so financial deploys silently ran the Customer 360 generator
+    against financial S3 buckets. Caught in UAT.
+    """
+
+    def test_customer360_passes_customer360_schema(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        cfg = make_config()  # default schema = customer360
+        engine = MagicMock()
+        engine.config = cfg
+        engine.context = {}
+        deployer = DatagenDeployer(engine)
+        context = deployer._build_datagen_context()
+        assert context["datagen_schema"] == "customer360"
+        assert context["datagen_path_prefix"] == "customer/interactions"
+
+    def test_financial_passes_financial_schema_and_pacs008_prefix(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        cfg = make_config(
+            architecture={
+                "workload": {"schema": "financial"},
+            }
+        )
+        engine = MagicMock()
+        engine.config = cfg
+        engine.context = {}
+        deployer = DatagenDeployer(engine)
+        context = deployer._build_datagen_context()
+        assert context["datagen_schema"] == "financial"
+        # Default path_template is the C360 default; when schema=financial
+        # the deployer must substitute the pacs.008 prefix to match
+        # bronze_verify_financial's LB_FINANCIAL_BRONZE_PREFIX default.
+        assert context["datagen_path_prefix"] == "pacs008"
+
+    def test_financial_honours_explicit_path_template_override(self):
+        from lakebench.deploy.datagen import DatagenDeployer
+
+        cfg = make_config(
+            architecture={
+                "workload": {"schema": "financial"},
+                "pipeline": {
+                    "mode": "batch",
+                    "medallion": {
+                        "bronze": {"format": "parquet", "path_template": "custom/pacs"}
+                    },
+                },
+            }
+        )
+        engine = MagicMock()
+        engine.config = cfg
+        engine.context = {}
+        deployer = DatagenDeployer(engine)
+        context = deployer._build_datagen_context()
+        assert context["datagen_path_prefix"] == "custom/pacs"

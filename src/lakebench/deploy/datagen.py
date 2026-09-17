@@ -51,6 +51,16 @@ class DatagenDeployer:
 
         effective_mode = _resolve_datagen_mode(cfg)
 
+        # Route datagen to the right Generator + schema-appropriate S3 prefix.
+        # When path_template is still the C360 default and schema=financial,
+        # substitute the pacs.008 prefix the Financial Spark scripts read from
+        # (LB_FINANCIAL_BRONZE_PREFIX default). Keeps the datagen upload and
+        # bronze_verify_financial.py pointed at the same S3 location.
+        schema_value = workload.schema_type.value
+        path_prefix = medallion.bronze.path_template
+        if schema_value == "financial" and path_prefix == "customer/interactions":
+            path_prefix = "pacs008"
+
         context = dict(self.context)  # Copy base context
         context.update(
             {
@@ -58,7 +68,8 @@ class DatagenDeployer:
                 "datagen_target_tb": f"{target_tb:.6f}",
                 "datagen_file_size_mb": file_size_mb,
                 "datagen_payload_kb": self._PAYLOAD_SIZE_BYTES // 1024,
-                "datagen_path_prefix": medallion.bronze.path_template,
+                "datagen_path_prefix": path_prefix,
+                "datagen_schema": schema_value,
                 "datagen_seed": 42,  # Fixed seed for reproducibility
                 "datagen_resume": False,  # Can be overridden
                 "datagen_cpu": datagen.cpu,

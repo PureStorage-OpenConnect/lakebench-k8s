@@ -1844,6 +1844,26 @@ class SparkJobManager:
             {"name": "LB_GOLD_TABLE", "value": cfg.architecture.tables.gold},
         ]
 
+        # Financial workload: point bronze_verify_financial / silver_build_financial
+        # at the same S3 prefix the datagen K8s Job wrote to. Datagen picks
+        # `pacs008` when path_template is at its C360 default; mirror that here.
+        if cfg.architecture.workload.schema_type.value == "financial":
+            _bronze_prefix = cfg.architecture.pipeline.medallion.bronze.path_template
+            if _bronze_prefix == "customer/interactions":
+                _bronze_prefix = "pacs008"
+            env.append(
+                {
+                    "name": "LB_FINANCIAL_BRONZE_PREFIX",
+                    "value": _bronze_prefix.rstrip("/") + "/",
+                }
+            )
+            env.append(
+                {
+                    "name": "LB_FINANCIAL_BRONZE_TABLE",
+                    "value": cfg.architecture.tables.bronze,
+                }
+            )
+
         # Streaming-specific env vars
         if job_type is not None and job_type in _STREAMING_JOB_TYPES:
             sustained = cfg.architecture.pipeline.sustained
