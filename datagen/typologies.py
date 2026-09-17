@@ -156,7 +156,7 @@ def _base_row(
     cross_border = is_cross_border(dbtr_country, cdtr_country)
 
     intrmy1, intrmy2, intrmy3 = sample_correspondent_chain(rng, cross_border, BICS)
-    rgltry = sample_regulatory_reporting(dbtr_country, cdtr_country, amount)
+    rgltry = sample_regulatory_reporting(dbtr_country, cdtr_country, amount, currency)
 
     return {
         # message envelope

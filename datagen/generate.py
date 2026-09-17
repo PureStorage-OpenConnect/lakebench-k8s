@@ -189,8 +189,19 @@ class Config:
         self.file_size_bytes = file_size_mb * 1024 * 1024
         self.total_files = max(1, int(self.target_bytes / self.file_size_bytes))
 
-        # Estimate rows per file to achieve target compressed file size
-        compressed_bytes_per_row = 4200  # ~4.1KB per row after snappy compression
+        # Estimate rows per file to achieve target compressed file size.
+        # Schema-specific -- prior single value (4200 = C360 with 2KB payload)
+        # was 20-25x too high for the financial schema. Measured empirically
+        # on cluster runs 2026-09-17: financial pacs.008 compresses to ~205
+        # bytes/row after snappy. Miscalibration produced 3 MB files vs the
+        # 512 MB target -- textbook small-file problem at scale >= 100.
+        _BYTES_PER_ROW_BY_SCHEMA = {
+            "customer360": 4200,
+            "financial": 205,
+        }
+        compressed_bytes_per_row = _BYTES_PER_ROW_BY_SCHEMA.get(
+            self.schema_name, 4200
+        )
         self.rows_per_file = max(1000, self.file_size_bytes // compressed_bytes_per_row)
 
         # S3 configuration
