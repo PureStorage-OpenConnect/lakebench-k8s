@@ -1190,6 +1190,7 @@ class SparkJobManager:
             _financial_scripts = {
                 JobType.BRONZE_VERIFY: "bronze_verify_financial.py",
                 JobType.SILVER_BUILD: "silver_build_financial.py",
+                JobType.GOLD_FINALIZE: "gold_finalize_financial.py",
             }
             script_map.update(_financial_scripts)
         elif table_format == "delta":
@@ -1908,6 +1909,7 @@ class SparkJobManager:
             # Financial (FinServ-Crime, AML) pipeline scripts
             "bronze_verify_financial.py",
             "silver_build_financial.py",
+            "gold_finalize_financial.py",
         ]
 
         # Build ConfigMap data
