@@ -813,6 +813,25 @@ def write_file_to_s3(file_id: int, config: Config, generator: Generator) -> dict
 
         file_size = buffer.tell()
 
+        # Observability C1: emit a single JSON line per file. If the
+        # generator exposes `last_file_metrics` (FinancialGenerator does),
+        # merge it in. Kubernetes log aggregation captures the line;
+        # grep 'DATAGEN_FILE_METRICS' from pod logs post-run.
+        metrics = getattr(generator, "last_file_metrics", None)
+        emission = {
+            "event": "DATAGEN_FILE_METRICS",
+            "file_id": file_id,
+            "bytes": file_size,
+            "s3_key": s3_key,
+        }
+        if isinstance(metrics, dict):
+            emission.update(metrics)
+        try:
+            import json as _json
+            print(_json.dumps(emission), flush=True)
+        except Exception:
+            pass  # never let metrics emission fail a real upload
+
         return {
             "file_id": file_id,
             "success": True,
@@ -868,6 +887,17 @@ def _continuous_generator_worker(
         try:
             table = generator.generate_file_data(file_id)
             rows = table.num_rows
+
+            # Emit per-file metrics from the generator worker.
+            metrics = getattr(generator, "last_file_metrics", None)
+            if isinstance(metrics, dict):
+                try:
+                    import json as _json
+                    emission = {"event": "DATAGEN_FILE_METRICS", "worker": generator_id}
+                    emission.update(metrics)
+                    print(_json.dumps(emission), flush=True)
+                except Exception:
+                    pass
 
             buffer = io.BytesIO()
             pq.write_table(table, buffer, compression="snappy")

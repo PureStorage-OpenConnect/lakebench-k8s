@@ -104,8 +104,18 @@ class TestCorridorMix:
         rng = np.random.default_rng(seed=42)
         pairs = [sample_corridor(rng) for _ in range(10_000)]
         cross_border = sum(1 for a, b in pairs if a != b)
-        # Corridor table has ~55% cross-border weight; expect 45-70%
-        assert 0.40 <= cross_border / len(pairs) <= 0.75
+        # Real bank wire mix is 85-90% domestic. Corridor table post-A3
+        # rebalance targets ~80% domestic. R4 practitioner band [0.15, 0.25].
+        rate = cross_border / len(pairs)
+        assert 0.12 <= rate <= 0.28, f"cross-border rate = {rate:.3f}"
+
+    def test_distinct_corridor_count_meets_variety_gate(self):
+        from realism import sample_corridor
+
+        rng = np.random.default_rng(seed=42)
+        pairs = {sample_corridor(rng) for _ in range(2_000)}
+        # R6 practitioner query: >= 20 distinct corridors observable
+        assert len(pairs) >= 20, f"only {len(pairs)} distinct corridors"
 
 
 class TestSanctionsAndPep:
@@ -184,6 +194,67 @@ class TestRegulatoryReporting:
 
         entries = sample_regulatory_reporting("US", "US", Decimal("500000.00"))
         assert entries is None
+
+
+class TestHomeCountryStability:
+    """A1: home_country_for(entity_id) must be stable across every call."""
+
+    def test_same_id_yields_same_country(self):
+        from realism import home_country_for
+
+        # Sample 500 entity IDs, call 3 times each, results must match
+        for eid in range(1, 501):
+            first = home_country_for(eid)
+            for _ in range(3):
+                assert home_country_for(eid) == first
+
+    def test_distribution_matches_configured_weights(self):
+        from realism import home_country_for
+
+        counts: dict[str, int] = {}
+        n = 20_000
+        for eid in range(1, n + 1):
+            c = home_country_for(eid)
+            counts[c] = counts.get(c, 0) + 1
+        # US-headquartered global bank: ~85% US weight, expect 78-90%.
+        us_share = counts.get("US", 0) / n
+        assert 0.78 <= us_share <= 0.90, f"US share = {us_share:.3f}"
+        # >= 10 distinct countries appear (the long tail)
+        assert len(counts) >= 10
+
+
+class TestCurrencyAwareStructuring:
+    """A2: structuring bands per local reporting threshold."""
+
+    @pytest.mark.parametrize(
+        "currency,lo,hi",
+        [
+            ("USD", 9_500, 9_999),
+            ("GBP", 14_700, 14_995),
+            ("EUR", 14_700, 14_995),
+            ("JPY", 990_000, 999_999),
+            ("SGD", 19_500, 19_999),
+            ("CAD", 9_500, 9_999),
+        ],
+    )
+    def test_amount_within_local_threshold_band(self, currency, lo, hi):
+        from decimal import Decimal
+
+        from realism import structuring_amount
+
+        rng = np.random.default_rng(seed=42)
+        amts = [float(structuring_amount(rng, currency)) for _ in range(500)]
+        assert min(amts) >= lo
+        assert max(amts) <= hi
+        # No amount ever breaches the threshold
+        assert all(Decimal(str(a)) <= Decimal(str(hi)) for a in amts)
+
+    def test_unknown_currency_defaults_to_usd_band(self):
+        from realism import structuring_amount
+
+        rng = np.random.default_rng(seed=42)
+        amts = [float(structuring_amount(rng, "XYZ")) for _ in range(200)]
+        assert 9_500 <= min(amts) <= max(amts) <= 9_999
 
 
 class TestTimestampShape:

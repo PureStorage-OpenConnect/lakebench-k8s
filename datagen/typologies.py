@@ -37,6 +37,7 @@ from manifest import TypologyInstance
 from realism import (
     build_bic_pool,
     currency_for,
+    home_country_for,
     is_cross_border,
     log_normal_amount,
     sample_corridor,
@@ -124,9 +125,18 @@ def _base_row(
 ) -> dict:
     """Minimum-viable pacs.008 flat-row dict.
 
-    Populates the fields the workloads (W1-W11) read from silver.
-    Correspondent chain and regulatory reporting are populated
-    stochastically per realism.py rules; ~15% of wires end up multi-hop.
+    Country model (fixed 2026-09-16 per cycle-2 review):
+      - Party ``ctry_of_res`` is the *home country* of the entity, stable
+        across every transaction the entity appears in. Derived from
+        ``realism.home_country_for(entity_id)`` when not passed.
+      - Corridor args (``dbtr_country``, ``cdtr_country``) exist only to
+        drive routing decisions -- correspondent-chain population,
+        regulatory-reporting attribution. They may differ from the party
+        home country (e.g. a US corporate on a routing-corridor "US->PA"
+        still has ctry_of_res=US).
+
+    This means silver.entities.country stays stable per entity_id and
+    silver's hash(name, country) key does not fragment corporate reuse.
     """
     dbtr_agent = _agent(rng)
     cdtr_agent = _agent(rng)
@@ -134,10 +144,15 @@ def _base_row(
     uetr = _new_uetr(rng)
     txn_id = f"TXN-{originator_id}-{beneficiary_id}-{uetr[:8]}"
 
+    # Home country -- stable per entity_id, used for the party structs.
+    dbtr_home = home_country_for(originator_id)
+    cdtr_home = home_country_for(beneficiary_id)
+
+    # Routing corridor -- used for chain / reporting decisions only.
     if dbtr_country is None:
-        dbtr_country = COUNTRIES[originator_id % len(COUNTRIES)]
+        dbtr_country = dbtr_home
     if cdtr_country is None:
-        cdtr_country = COUNTRIES[beneficiary_id % len(COUNTRIES)]
+        cdtr_country = cdtr_home
     cross_border = is_cross_border(dbtr_country, cdtr_country)
 
     intrmy1, intrmy2, intrmy3 = sample_correspondent_chain(rng, cross_border, BICS)
@@ -183,11 +198,12 @@ def _base_row(
         # party chain
         "ultmt_dbtr": None,
         "initg_pty": None,
-        "dbtr": _party(originator_id, "D", dbtr_country),
+        # Parties carry the stable home country, not the routing corridor.
+        "dbtr": _party(originator_id, "D", dbtr_home),
         "dbtr_acct": {"iban": f"IBAN{originator_id:016d}", "othr": None, "ccy": currency},
         "dbtr_agt": dbtr_agent,
         "cdtr_agt": cdtr_agent,
-        "cdtr": _party(beneficiary_id, "C", cdtr_country),
+        "cdtr": _party(beneficiary_id, "C", cdtr_home),
         "cdtr_acct": {"iban": f"IBAN{beneficiary_id:016d}", "othr": None, "ccy": currency},
         "ultmt_cdtr": None,
         "purp_cd": purpose_code,
@@ -206,17 +222,30 @@ def _base_row(
 def _emit_fan_in(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
     """Many originators -> one beneficiary (W2 structuring, tight 24-72h burst).
 
-    All originators funnel to the same beneficiary and choose amounts just
-    under the US $10K CTR threshold -- the classic structuring signature.
+    Structuring targets the local CTR/STR threshold. Beneficiary's home
+    country determines the currency and threshold band so we emit e.g.
+    £14,800 to a GB beneficiary, ¥998,000 to a JP beneficiary --
+    currency-correct rather than $9,500-across-the-board.
     """
     *originators, beneficiary = inst.participant_entity_ids
-    dbtr_c, cdtr_c = sample_corridor(rng)
-    ccy = currency_for(cdtr_c)
+    # Structuring uses the beneficiary's home country / currency -- that's
+    # the jurisdiction whose CTR rule the launderer is dodging.
+    bene_home = home_country_for(beneficiary)
+    ccy = currency_for(bene_home)
     rows = []
     for orig in originators:
         ts = _timestamp_within(rng, inst.injection_ts_start, inst.injection_ts_end)
+        orig_home = home_country_for(orig)
         row = _base_row(
-            rng, ts, orig, beneficiary, structuring_amount(rng), ccy, "CASH", dbtr_c, cdtr_c
+            rng,
+            ts,
+            orig,
+            beneficiary,
+            structuring_amount(rng, ccy),
+            ccy,
+            "CASH",
+            orig_home,
+            bene_home,
         )
         rows.append(row)
     return rows
@@ -225,13 +254,24 @@ def _emit_fan_in(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]
 def _emit_fan_out(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
     """One originator -> many beneficiaries (money-mule payout structuring)."""
     originator, *beneficiaries = inst.participant_entity_ids
-    dbtr_c, cdtr_c = sample_corridor(rng)
-    ccy = currency_for(cdtr_c)
+    orig_home = home_country_for(originator)
+    # For fan_out the originator is doing the structuring so their local
+    # threshold rules.
+    ccy = currency_for(orig_home)
     rows = []
     for bene in beneficiaries:
         ts = _timestamp_within(rng, inst.injection_ts_start, inst.injection_ts_end)
+        bene_home = home_country_for(bene)
         row = _base_row(
-            rng, ts, originator, bene, structuring_amount(rng), ccy, "SALA", dbtr_c, cdtr_c
+            rng,
+            ts,
+            originator,
+            bene,
+            structuring_amount(rng, ccy),
+            ccy,
+            "SALA",
+            orig_home,
+            bene_home,
         )
         rows.append(row)
     return rows
@@ -408,6 +448,11 @@ def schedule_typologies(
     instances: list[TypologyInstance] = []
     total_span = window_end - window_start
     instances_per_typology = max(1, int(scale * 10))
+    # Guard against zero-width windows (edge case tests, degenerate configs).
+    # If the caller passes window_start == window_end, we can't sample offsets;
+    # schedule everything to start exactly at window_start with zero-width
+    # injection window. Emitters cope with zero-span injection ranges.
+    max_offset_s = max(1, int(total_span.total_seconds()))
 
     for i, (_name, spec) in enumerate(sorted(TYPOLOGIES.items())):
         for j in range(instances_per_typology):
@@ -417,7 +462,7 @@ def schedule_typologies(
                 int(inst_rng.integers(1, customer_id_max + 1))
                 for _ in range(spec.participant_count)
             ]
-            offset = timedelta(seconds=int(inst_rng.integers(0, int(total_span.total_seconds()))))
+            offset = timedelta(seconds=int(inst_rng.integers(0, max_offset_s)))
             # Structuring bursts (fan_in / fan_out) fire in a tight 24-72h window
             # per real-world CTR-evasion patterns. Layering typologies (cycle,
             # stack, gather_scatter) span days-to-a-week; bipartite and random

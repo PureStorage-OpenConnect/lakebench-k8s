@@ -192,6 +192,10 @@ class FinancialGenerator:
         # PartySelector is stateless w.r.t. the RNG the caller supplies, so we
         # build it once and reuse across every file window and worker fork.
         self._party_selector = PartySelector(customer_id_max=config.customer_id_max)
+        # Per-file observability metrics -- populated in generate_file_data,
+        # consumed by generate.py to emit a JSON line per file. Enables
+        # cluster-side validation without a Spark read-back.
+        self.last_file_metrics: dict | None = None
 
     # -- protocol methods --
 
@@ -206,14 +210,95 @@ class FinancialGenerator:
         self._ensure_schedule()
 
     def generate_file_data(self, file_id: int) -> pa.Table:
-        """Return a Parquet-ready Arrow table for one file window."""
+        """Return a Parquet-ready Arrow table for one file window.
+
+        Also populates ``self.last_file_metrics`` with per-file distribution
+        summary for observability. Cheap to compute (O(n) single pass) and
+        emitted by generate.py after each file upload.
+        """
+        import time as _time
+
         self._ensure_schedule()
+        t0 = _time.perf_counter()
         rng = np.random.default_rng(seed=self.config.seed + file_id)
         window_start, window_end = self._file_window(file_id)
         rows = self._emit_baseline_rows(rng, file_id, window_start, window_end)
+        typology_count = 0
         for instance in self._instances_by_window.get(file_id, []):
-            rows.extend(emit_instance_rows(instance))
-        return self._rows_to_table(rows)
+            typology_rows = emit_instance_rows(instance)
+            rows.extend(typology_rows)
+            typology_count += len(typology_rows)
+        table = self._rows_to_table(rows)
+        elapsed_ms = int((_time.perf_counter() - t0) * 1000)
+        self.last_file_metrics = self._compute_metrics(
+            file_id, rows, table, typology_count, elapsed_ms
+        )
+        return table
+
+    def _compute_metrics(
+        self,
+        file_id: int,
+        rows: list[dict],
+        table: pa.Table,
+        typology_count: int,
+        elapsed_ms: int,
+    ) -> dict:
+        """One-pass aggregate of practitioner-relevant distribution stats.
+
+        Emitted per-file so that a cluster run can be reconciled against
+        the theoretical bands without a separate Spark read-back pass.
+        """
+        n = len(rows)
+        if n == 0:
+            return {
+                "file_id": file_id,
+                "rows": 0,
+                "typology_rows": typology_count,
+                "elapsed_ms": elapsed_ms,
+            }
+        cross_border = 0
+        chain_populated = 0
+        rgltry_populated = 0
+        currencies: dict[str, int] = {}
+        corridors: dict[tuple[str, str], int] = {}
+        amounts: list[float] = []
+        for r in rows:
+            dbtr_c = r["dbtr"]["ctry_of_res"]
+            cdtr_c = r["cdtr"]["ctry_of_res"]
+            if dbtr_c != cdtr_c:
+                cross_border += 1
+            if r.get("intrmy_agt_1") is not None:
+                chain_populated += 1
+            if r.get("rgltry_rptg"):
+                rgltry_populated += 1
+            ccy = r["intr_bk_sttlm_ccy"]
+            currencies[ccy] = currencies.get(ccy, 0) + 1
+            corridors[(dbtr_c, cdtr_c)] = corridors.get((dbtr_c, cdtr_c), 0) + 1
+            amounts.append(float(r["intr_bk_sttlm_amt"]))
+        amounts.sort()
+
+        def _pct(p: float) -> float:
+            if not amounts:
+                return 0.0
+            idx = min(len(amounts) - 1, int(p * len(amounts)))
+            return round(amounts[idx], 2)
+
+        return {
+            "file_id": file_id,
+            "rows": n,
+            "typology_rows": typology_count,
+            "elapsed_ms": elapsed_ms,
+            "amount_p50": _pct(0.50),
+            "amount_p95": _pct(0.95),
+            "amount_p99": _pct(0.99),
+            "amount_max": round(amounts[-1], 2) if amounts else 0.0,
+            "cross_border_share": round(cross_border / n, 4),
+            "chain_populated_share": round(chain_populated / n, 4),
+            "rgltry_populated_share": round(rgltry_populated / n, 4),
+            "distinct_currencies": len(currencies),
+            "distinct_corridors": len(corridors),
+            "top_currency_share": round(max(currencies.values()) / n, 4),
+        }
 
     # -- manifest access (called from generate.py after all files done) --
 
@@ -242,19 +327,35 @@ class FinancialGenerator:
         # complete regardless of which file windows a worker process
         # actually generates. Emitters are seed-deterministic, so the
         # UETRs computed here match the ones later emitted into files.
-        # Needed because manifest writes happen in the parent process
-        # where per-worker file generation hasn't touched every instance.
         for instance in instances:
             emit_instance_rows(instance)
         self._instances = instances
-        # Map each instance to the file windows it overlaps.
+        # Assign each typology instance to exactly ONE owning file window
+        # (the one containing injection_ts_start). Prior code assigned to
+        # every overlapping window, which under K8s Indexed Job partitioning
+        # caused every worker owning an overlap window to emit the SAME
+        # UETRs (typology emitters are seed-deterministic). Caught by
+        # test_k8s_indexed_job_partitioning_no_collision_no_gap.
+        # An instance's timestamps can still fall into later windows via
+        # its emitter; those rows are just carried by the owning worker's
+        # output file. No collision, no gap.
         by_window: dict[int, list[TypologyInstance]] = {}
         for instance in instances:
-            for fid in self._file_ids_overlapping(
-                instance.injection_ts_start, instance.injection_ts_end
-            ):
-                by_window.setdefault(fid, []).append(instance)
+            fid = self._file_id_containing(instance.injection_ts_start)
+            by_window.setdefault(fid, []).append(instance)
         self._instances_by_window = by_window
+
+    def _file_id_containing(self, ts: datetime) -> int:
+        """File id whose window covers timestamp ``ts``; clamped to [0, total-1]."""
+        total_files = max(1, self.config.total_files)
+        step_s = self._span_seconds() / total_files
+        offset_s = (ts - self.config.timestamp_start).total_seconds()
+        fid = int(offset_s // step_s)
+        if fid < 0:
+            return 0
+        if fid >= total_files:
+            return total_files - 1
+        return fid
 
     def _span_seconds(self) -> float:
         return max(

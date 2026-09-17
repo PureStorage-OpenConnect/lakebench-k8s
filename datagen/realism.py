@@ -80,14 +80,43 @@ def _snap_to_round(x: float) -> float:
     return float(round(x / step) * step)
 
 
-def structuring_amount(rng: np.random.Generator) -> Decimal:
-    """Tight cluster $9,500 - $9,999 for W2 structuring under US $10K CTR.
+# Currency-specific CTR/STR thresholds. Values are the local-currency
+# reporting-threshold minus a small buffer for the "just under" band.
+# References:
+#   US   -- FinCEN CTR $10,000 (31 CFR 1010.311)
+#   GB   -- FCA £10,000 for cash SAR-adjacent; MLR £15,000 for occasional-txn CDD
+#   EU   -- 6AMLD Article 34 EUR 15,000
+#   CH   -- FINMA-CDB CHF 15,000
+#   JP   -- JFSA JPY 1,000,000
+#   AE   -- CB UAE AED 55,000 (~USD 15K)
+#   SG   -- MAS SGD 20,000
+#   CA   -- FINTRAC CAD 10,000
+#   MX   -- CNBV MXN 645,000 (~USD 30K); we use 100,000 as the "just under" tell
+#   IN   -- RBI INR 1,000,000
+_STRUCTURING_BANDS: dict[str, tuple[float, float]] = {
+    "USD": (9_500.0, 9_999.0),
+    "GBP": (14_700.0, 14_995.0),
+    "EUR": (14_700.0, 14_995.0),
+    "CHF": (14_700.0, 14_995.0),
+    "JPY": (990_000.0, 999_999.0),
+    "AED": (54_500.0, 54_999.0),
+    "SGD": (19_500.0, 19_999.0),
+    "CAD": (9_500.0, 9_999.0),
+    "MXN": (99_000.0, 99_999.0),
+    "INR": (990_000.0, 999_999.0),
+    "CNY": (49_500.0, 49_999.0),
+}
 
-    Real structuring targets the reporting threshold: $10,000 US, $15,000
-    EU (6AMLD Article 34). We use the US threshold since our currency
-    default is USD.
+
+def structuring_amount(rng: np.random.Generator, currency: str = "USD") -> Decimal:
+    """Tight cluster just under the local CTR/STR reporting threshold.
+
+    Currency-aware so a GBP wire lands under £15K, JPY under ¥1M, etc.
+    Detection rules must be threshold-aware per currency; a v0 that emits
+    9,500 CHF or 9,500 JPY looks unrealistic to any real AML operator.
     """
-    return Decimal(str(round(float(rng.uniform(9_500, 9_999)), 2)))
+    lo, hi = _STRUCTURING_BANDS.get(currency, _STRUCTURING_BANDS["USD"])
+    return Decimal(str(round(float(rng.uniform(lo, hi)), 2)))
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +151,11 @@ class PartySelector:
             # Zipf shape parameter 1.5: heavy-tailed, top-500 concentrated.
             raw = int(rng.zipf(1.5))
             return min(raw, self.hot_corp_count)
-        # Retail: uniform over the non-hot range.
+        # Retail: uniform over the non-hot range. When the retail range is
+        # empty (customer_id_max <= hot_corp_count), fall back to the full
+        # ID space so tiny populations don't hit numpy's low >= high error.
+        if self.hot_corp_count >= self.customer_id_max:
+            return int(rng.integers(1, self.customer_id_max + 1))
         return int(rng.integers(self.hot_corp_count + 1, self.customer_id_max + 1))
 
 
@@ -130,42 +163,49 @@ class PartySelector:
 # Country corridors
 # ---------------------------------------------------------------------------
 
-# Weighted (dbtr_country, cdtr_country) pairs. Weights sum to 1.0.
-# Corridor mix approximated from public SWIFT / CHIPS traffic reports.
+# Weighted (dbtr_country, cdtr_country) pairs. Real bank wire mix is
+# heavily domestic (85-90%); prior v0 shipped 45% cross-border which
+# fails smell test 4 in the practitioner review (2026-09-16). Rebalanced
+# so cross-border sits at ~18-22% -- inside R4 [0.15, 0.25] band.
 CORRIDORS: tuple[tuple[tuple[str, str], float], ...] = (
-    # Domestic (single-country) -- makes up the bulk of daily wire volume.
-    (("US", "US"), 0.28),
-    (("GB", "GB"), 0.05),
-    (("DE", "DE"), 0.04),
-    (("FR", "FR"), 0.03),
-    (("JP", "JP"), 0.02),
-    # Major cross-border corridors.
-    (("US", "GB"), 0.06),
-    (("US", "MX"), 0.05),
-    (("US", "CN"), 0.04),
-    (("US", "CA"), 0.03),
-    (("US", "IN"), 0.03),
-    (("GB", "US"), 0.03),
-    (("GB", "SG"), 0.02),
-    (("GB", "AE"), 0.02),
-    (("DE", "FR"), 0.03),
-    (("DE", "CH"), 0.02),
-    (("FR", "DE"), 0.02),
-    # Higher-risk corridors that money-laundering typologies over-index.
-    (("US", "PA"), 0.008),  # Panama
-    (("US", "KY"), 0.005),  # Cayman
-    (("US", "AE"), 0.010),  # UAE
-    (("GB", "CH"), 0.010),
-    (("GB", "KY"), 0.005),
-    # Tail: everything else uniformly-ish.
-    (("SG", "CN"), 0.015),
-    (("CH", "US"), 0.010),
-    (("JP", "US"), 0.010),
-    (("CA", "US"), 0.012),
-    (("MX", "US"), 0.008),
-    (("CN", "US"), 0.012),
-    (("AE", "GB"), 0.008),
-    (("SG", "GB"), 0.007),
+    # Domestic -- ~80% of volume (matches SWIFT/CHIPS/domestic-rail mix)
+    (("US", "US"), 0.42),
+    (("GB", "GB"), 0.09),
+    (("DE", "DE"), 0.07),
+    (("FR", "FR"), 0.05),
+    (("JP", "JP"), 0.04),
+    (("CA", "CA"), 0.03),
+    (("SG", "SG"), 0.02),
+    (("CH", "CH"), 0.02),
+    (("AU", "AU"), 0.02),
+    (("IN", "IN"), 0.02),
+    (("CN", "CN"), 0.02),
+    # Major cross-border corridors -- ~15% aggregate
+    (("US", "GB"), 0.015),
+    (("US", "MX"), 0.015),
+    (("US", "CN"), 0.012),
+    (("US", "CA"), 0.010),
+    (("US", "IN"), 0.008),
+    (("GB", "US"), 0.008),
+    (("GB", "SG"), 0.005),
+    (("GB", "AE"), 0.005),
+    (("DE", "FR"), 0.010),
+    (("DE", "CH"), 0.005),
+    (("FR", "DE"), 0.008),
+    (("CA", "US"), 0.008),
+    (("MX", "US"), 0.005),
+    (("CN", "US"), 0.006),
+    (("JP", "US"), 0.005),
+    (("SG", "CN"), 0.005),
+    (("CH", "US"), 0.004),
+    (("AE", "GB"), 0.004),
+    (("SG", "GB"), 0.003),
+    # Higher-risk corridors -- ~3% aggregate (lower than v0 but present)
+    (("US", "PA"), 0.004),  # Panama
+    (("US", "KY"), 0.003),  # Cayman
+    (("US", "AE"), 0.005),  # UAE
+    (("GB", "CH"), 0.005),
+    (("GB", "KY"), 0.003),
 )
 
 _CORRIDOR_KEYS = tuple(c for c, _ in CORRIDORS)
@@ -399,11 +439,78 @@ _REGULATORS = {
     "CA": "FINTRAC",
     "PA": "SBP",
     "KY": "CIMA",
+    "AU": "AUSTRAC",
 }
 
 
 def _regulator_for(country: str) -> str:
     return _REGULATORS.get(country, "UNKNOWN")
+
+
+# ---------------------------------------------------------------------------
+# Home country per entity (stable across corridors)
+# ---------------------------------------------------------------------------
+
+# Weighted distribution of entity home countries. Real bank customer bases
+# concentrate on the home market plus the top corporate/expat destinations.
+# Fixes cycle-2 finding 2: prior code stamped ctry_of_res from the transaction
+# corridor, so the same corporate transacting on US->PA and US->GB fragmented
+# into distinct entity_ids at silver (since silver.entity_id keys on
+# hash(name, country)).
+# US-headquartered global bank customer base: dominant home market plus a
+# spread of top corporate/expat destinations. US weight of 0.85 targets
+# ~72% P(both parties US) => ~28% home-country-cross-border, which after
+# accounting for weighted small-country reuse comes in near R4 band [0.15,
+# 0.25]. Silver derives cross_border from party ctry_of_res, so the home-
+# country distribution IS the cross-border distribution.
+_HOME_COUNTRIES: tuple[tuple[str, float], ...] = (
+    ("US", 0.85),
+    ("GB", 0.03),
+    ("DE", 0.02),
+    ("FR", 0.015),
+    ("CA", 0.015),
+    ("JP", 0.010),
+    ("SG", 0.010),
+    ("CH", 0.010),
+    ("CN", 0.010),
+    ("IN", 0.010),
+    ("MX", 0.010),
+    ("AE", 0.005),
+    ("AU", 0.005),
+    ("PA", 0.003),
+    ("KY", 0.002),
+)
+_HOME_COUNTRIES_LIST = tuple(c for c, _ in _HOME_COUNTRIES)
+_HOME_COUNTRIES_CDF: tuple[float, ...] = ()  # populated below
+
+
+def _init_home_countries_cdf() -> tuple[float, ...]:
+    total = sum(w for _, w in _HOME_COUNTRIES)
+    running = 0.0
+    out = []
+    for _, w in _HOME_COUNTRIES:
+        running += w / total
+        out.append(running)
+    return tuple(out)
+
+
+_HOME_COUNTRIES_CDF = _init_home_countries_cdf()
+
+
+def home_country_for(entity_id: int) -> str:
+    """Return the deterministic home country for an entity_id.
+
+    Stable across corridors, transactions, and worker forks -- the same
+    entity_id always yields the same country, so silver's `hash(name,
+    country)` entity_id derivation doesn't fragment reused corporates.
+    Uses a blake2b hash then a bisect against the pre-built CDF.
+    """
+    frac = _entity_hash_frac(entity_id, "home_country")
+    # searchsorted-equivalent linear scan (small array, negligible cost)
+    for idx, cum in enumerate(_HOME_COUNTRIES_CDF):
+        if frac < cum:
+            return _HOME_COUNTRIES_LIST[idx]
+    return _HOME_COUNTRIES_LIST[-1]
 
 
 # ---------------------------------------------------------------------------
