@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from lakebench.config.schema import WorkloadSchema
+
 
 @dataclass(frozen=True)
 class BenchmarkQuery:
@@ -227,10 +229,10 @@ LIMIT 30""",
 )
 
 # ---------------------------------------------------------------------------
-# Public query list
+# Public query lists (per workload schema)
 # ---------------------------------------------------------------------------
 
-BENCHMARK_QUERIES: list[BenchmarkQuery] = [
+_CUSTOMER360_QUERIES: list[BenchmarkQuery] = [
     _Q1,  # scan
     _Q2,
     _Q4,  # filter_prune
@@ -240,3 +242,32 @@ BENCHMARK_QUERIES: list[BenchmarkQuery] = [
     _Q6,  # analytics
     _Q9,  # operational
 ]
+
+
+# Financial (FinServ-Crime, AML) benchmark queries land with the ENG-2C.4.6-7
+# investigator-workload authoring. Empty list until then; callers should
+# treat an empty list as "no benchmark configured for this schema" and skip
+# the benchmark rather than fail.
+_FINANCIAL_QUERIES: list[BenchmarkQuery] = []
+
+
+BENCHMARK_QUERIES_BY_DOMAIN: dict[WorkloadSchema, list[BenchmarkQuery]] = {
+    WorkloadSchema.CUSTOMER360: _CUSTOMER360_QUERIES,
+    WorkloadSchema.FINANCIAL: _FINANCIAL_QUERIES,
+    WorkloadSchema.CUSTOM: _CUSTOMER360_QUERIES,
+}
+
+
+def get_benchmark_queries(schema: WorkloadSchema) -> list[BenchmarkQuery]:
+    """Return the benchmark query set for a workload schema.
+
+    Unknown schemas fall back to the Customer 360 set to preserve prior
+    behavior for CUSTOM and any other value pending its own query set.
+    """
+    return BENCHMARK_QUERIES_BY_DOMAIN.get(schema, _CUSTOMER360_QUERIES)
+
+
+# Backward-compatible alias. New code should call
+# ``get_benchmark_queries(schema)`` or read ``BENCHMARK_QUERIES_BY_DOMAIN``
+# directly so the benchmark set travels with the workload schema.
+BENCHMARK_QUERIES: list[BenchmarkQuery] = _CUSTOMER360_QUERIES

@@ -54,6 +54,34 @@ class TestBenchmarkQueries:
             q.name = "modified"
 
 
+class TestBenchmarkQueriesByDomain:
+    """Tests for the schema-keyed dispatch introduced in ENG-2C.4.6-7."""
+
+    def test_customer360_dispatch_matches_legacy_alias(self):
+        from lakebench.benchmark.queries import (
+            BENCHMARK_QUERIES,
+            get_benchmark_queries,
+        )
+        from lakebench.config.schema import WorkloadSchema
+
+        assert get_benchmark_queries(WorkloadSchema.CUSTOMER360) == BENCHMARK_QUERIES
+
+    def test_financial_dispatch_returns_empty_until_workloads_authored(self):
+        from lakebench.benchmark.queries import get_benchmark_queries
+        from lakebench.config.schema import WorkloadSchema
+
+        assert get_benchmark_queries(WorkloadSchema.FINANCIAL) == []
+
+    def test_custom_dispatch_falls_back_to_customer360(self):
+        from lakebench.benchmark.queries import (
+            BENCHMARK_QUERIES,
+            get_benchmark_queries,
+        )
+        from lakebench.config.schema import WorkloadSchema
+
+        assert get_benchmark_queries(WorkloadSchema.CUSTOM) == BENCHMARK_QUERIES
+
+
 # ---------------------------------------------------------------------------
 # QueryResult
 # ---------------------------------------------------------------------------
