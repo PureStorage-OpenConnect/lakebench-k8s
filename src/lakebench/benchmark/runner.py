@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .queries import BENCHMARK_QUERIES, BenchmarkQuery
+from .queries import BenchmarkQuery, get_benchmark_queries
 
 if TYPE_CHECKING:
     from lakebench.config.schema import LakebenchConfig
@@ -215,7 +215,7 @@ class BenchmarkRunner:
         Returns:
             BenchmarkResult with mode="power"
         """
-        queries = BENCHMARK_QUERIES
+        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
         if query_class:
             queries = [q for q in queries if q.query_class == query_class]
 
@@ -271,7 +271,7 @@ class BenchmarkRunner:
         Returns:
             BenchmarkResult with mode="throughput" and stream_results
         """
-        queries = BENCHMARK_QUERIES
+        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
         if query_class:
             queries = [q for q in queries if q.query_class == query_class]
 
