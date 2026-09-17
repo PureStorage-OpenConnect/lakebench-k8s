@@ -1268,6 +1268,7 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
         "table_format": cfg.architecture.table_format.type.value,
         "pipeline_engine": cfg.architecture.pipeline_engine.value,
         "query_engine": cfg.architecture.query_engine.type.value,
+        "workload_schema": cfg.architecture.workload.schema_type.value,
         "sustained": {
             "bronze_trigger_interval": pipeline.sustained.bronze_trigger_interval,
             "silver_trigger_interval": pipeline.sustained.silver_trigger_interval,

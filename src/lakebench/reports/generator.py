@@ -175,6 +175,8 @@ class ReportGenerator:
 
     def _generate_run_context(self, metrics: PipelineMetrics) -> str:
         """Generate a one-line run context banner below the header."""
+        from lakebench.reports.scorecard import get_scorecard_block
+
         cs = metrics.config_snapshot or {}
         mode = "Sustained" if self._is_sustained(metrics) else "Batch"
         scale = cs.get("scale", "-")
@@ -187,11 +189,12 @@ class ReportGenerator:
         duration_s = int(metrics.total_elapsed_seconds % 60)
 
         storage_segment = f" | {storage}" if storage else ""
+        domain_label = get_scorecard_block(cs.get("workload_schema")).domain_label
 
         return f"""
         <div style="margin-bottom: 1.5rem; color: var(--text-muted); font-size: 0.875rem;">
             <strong>{mode}</strong> pipeline |
-            Customer360 at scale {scale} |
+            {domain_label} at scale {scale} |
             {catalog}-{table_fmt}-{pipe_engine}-{engine}{storage_segment} |
             {duration_m}m {duration_s}s
         </div>
