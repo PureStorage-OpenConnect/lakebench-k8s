@@ -1072,6 +1072,39 @@ class TableNamesConfig(BaseModel):
         description="Gold table: namespace.table",
     )
 
+    # Financial (FinServ-Crime, AML) auxiliary tables. These are ignored by
+    # Customer 360 recipes but referenced by Financial pipeline scripts and
+    # workloads (W1-W11). Defaults match the DDL in
+    # ``src/lakebench/deploy/financial_ddl.py``.
+    silver_entities: str = Field(
+        default="silver.entities",
+        description="Silver entities table (Financial): namespace.table",
+    )
+    silver_accounts: str = Field(
+        default="silver.accounts",
+        description="Silver accounts table (Financial): namespace.table",
+    )
+    silver_counterparty_edges: str = Field(
+        default="silver.counterparty_edges",
+        description="Silver entity-to-entity edge table (Financial): namespace.table",
+    )
+    gold_alerts: str = Field(
+        default="gold.alerts",
+        description="Gold alerts table (Financial): namespace.table",
+    )
+    gold_risk_scores: str = Field(
+        default="gold.risk_scores",
+        description="Gold entity risk-score table (Financial): namespace.table",
+    )
+    gold_entity_clusters: str = Field(
+        default="gold.entity_clusters",
+        description="Gold synthetic-id / community-detection cluster table (Financial): namespace.table",
+    )
+    gold_daily_dashboards: str = Field(
+        default="gold.daily_dashboards",
+        description="Gold daily-aggregate dashboard table (Financial): namespace.table",
+    )
+
 
 class BenchmarkConfig(BaseModel):
     """Benchmark configuration.
