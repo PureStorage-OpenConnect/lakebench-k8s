@@ -774,6 +774,41 @@ class TestAutoSizingClusterAware:
                 f"co_resident={co_resident})"
             )
 
+    def test_financial_schema_bumps_scratch(self):
+        """schema=financial bumps scratch.size to 200Gi when unset (ENG-2C.10)."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+            },
+        )
+        resolve_auto_sizing(config)
+        assert config.platform.storage.scratch.size == "200Gi"
+
+    def test_customer360_scratch_untouched(self):
+        """schema=customer360 leaves scratch.size at its declared default."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "workload": {"schema": "customer360", "datagen": {"scale": 1}},
+            },
+        )
+        resolve_auto_sizing(config)
+        # ScratchStorageConfig default is 100Gi (from schema.py).
+        assert config.platform.storage.scratch.size == "100Gi"
+
+    def test_financial_user_scratch_preserved(self):
+        """Explicit user scratch.size wins over the financial schema default."""
+        config = LakebenchConfig(
+            name="test",
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+            },
+            platform={"storage": {"scratch": {"size": "500Gi"}}},
+        )
+        resolve_auto_sizing(config)
+        assert config.platform.storage.scratch.size == "500Gi"
+
     def test_batch_mode_unchanged(self):
         """MEDALLION mode should still give each phase the full budget."""
         cap = ClusterCapacity(
