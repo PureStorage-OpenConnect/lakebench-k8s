@@ -229,6 +229,14 @@ class FinancialGenerator:
             window_end=self.config.timestamp_end,
             customer_id_max=self.config.customer_id_max,
         )
+        # Pre-stamp participant_uetrs on every instance so the manifest is
+        # complete regardless of which file windows a worker process
+        # actually generates. Emitters are seed-deterministic, so the
+        # UETRs computed here match the ones later emitted into files.
+        # Needed because manifest writes happen in the parent process
+        # where per-worker file generation hasn't touched every instance.
+        for instance in instances:
+            emit_instance_rows(instance)
         self._instances = instances
         # Map each instance to the file windows it overlaps.
         by_window: dict[int, list[TypologyInstance]] = {}

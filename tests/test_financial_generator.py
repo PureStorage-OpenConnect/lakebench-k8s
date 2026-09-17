@@ -260,6 +260,31 @@ class TestFinancialGeneratorFileEmission:
                 f"{inst.typology_id} UETRs missing from any file window"
             )
 
+    def test_manifest_complete_before_any_file_generation(self):
+        """Manifest UETRs must be populated by ensure_loyalty(), not deferred to first generate_file_data.
+
+        Regression: prior to the fix, ensure_loyalty() only scheduled instances;
+        UETRs were stamped only when a file window intersected the instance.
+        Under multiprocessing where the parent writes the manifest and workers
+        emit files, the manifest shipped with mostly-empty participant_uetrs.
+        """
+        from financial import FinancialGenerator
+
+        gen = FinancialGenerator(_FakeConfig(total_files=4))
+        gen.ensure_loyalty()
+        # No generate_file_data() calls yet.
+        blob = gen.manifest_bytes()
+        import io
+
+        import pyarrow.parquet as pq_
+
+        table = pq_.read_table(io.BytesIO(blob))
+        uetr_lists = table.column("participant_uetrs").to_pylist()
+        assert all(len(u) > 0 for u in uetr_lists), (
+            "ensure_loyalty must stamp UETRs on every instance so the manifest "
+            "is complete before per-file generation runs"
+        )
+
 
 class TestFinancialGeneratorRegistration:
     def test_registered_under_financial_key(self):
