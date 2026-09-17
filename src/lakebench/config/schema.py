@@ -94,6 +94,7 @@ class WorkloadSchema(str, Enum):
     """Supported workload schemas for data generation."""
 
     CUSTOMER360 = "customer360"
+    FINANCIAL = "financial"
     CUSTOM = "custom"
 
 

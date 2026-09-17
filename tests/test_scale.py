@@ -104,6 +104,20 @@ class TestGetDimensions:
         dims = get_dimensions("financial", 1)
         assert dims.customers == 500_000
 
+    def test_financial_scales_linearly(self):
+        d1 = get_dimensions("financial", 1)
+        d10 = get_dimensions("financial", 10)
+        assert d10.customers == d1.customers * 10
+        assert d10.approx_rows == d1.approx_rows * 10
+        assert d10.approx_bronze_gb == d1.approx_bronze_gb * 10
+
+    def test_financial_via_workload_schema_enum(self):
+        from lakebench.config.schema import WorkloadSchema
+
+        assert WorkloadSchema.FINANCIAL.value == "financial"
+        dims = get_dimensions(WorkloadSchema.FINANCIAL.value, 1)
+        assert dims.customers == 500_000
+
     def test_unknown_schema_raises(self):
         with pytest.raises(ValueError, match="Unknown schema type"):
             get_dimensions("unknown_schema", 1)
