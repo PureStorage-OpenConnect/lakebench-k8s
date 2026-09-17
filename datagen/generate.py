@@ -804,6 +804,17 @@ def write_file_to_s3(file_id: int, config: Config, generator: Generator) -> dict
 
         buffer = io.BytesIO()
         pq.write_table(table, buffer, compression="snappy")
+        # Capture file size BEFORE upload -- boto3's upload_fileobj can close
+        # the fileobj under some transports (observed with S3 endpoints that
+        # trigger the multipart path). buffer.tell() after upload then raises
+        # "I/O operation on closed file", flipping every file to failure
+        # despite the S3 upload having completed. Read size up-front.
+        file_size = buffer.getbuffer().nbytes
+        num_rows = table.num_rows
+        # Snapshot metrics before upload for the same reason.
+        metrics_snapshot = getattr(generator, "last_file_metrics", None)
+        if isinstance(metrics_snapshot, dict):
+            metrics_snapshot = dict(metrics_snapshot)  # defensive copy
         buffer.seek(0)
 
         s3_client = get_s3_client(config)
@@ -811,31 +822,27 @@ def write_file_to_s3(file_id: int, config: Config, generator: Generator) -> dict
 
         s3_client.upload_fileobj(buffer, config.bucket, s3_key)
 
-        file_size = buffer.tell()
-
-        # Observability C1: emit a single JSON line per file. If the
-        # generator exposes `last_file_metrics` (FinancialGenerator does),
-        # merge it in. Kubernetes log aggregation captures the line;
-        # grep 'DATAGEN_FILE_METRICS' from pod logs post-run.
-        metrics = getattr(generator, "last_file_metrics", None)
-        emission = {
-            "event": "DATAGEN_FILE_METRICS",
-            "file_id": file_id,
-            "bytes": file_size,
-            "s3_key": s3_key,
-        }
-        if isinstance(metrics, dict):
-            emission.update(metrics)
+        # Observability C1: emit a single JSON line per file. Wrapped in
+        # its own try/except so a metrics-emission failure can't flip an
+        # otherwise-successful upload to failed.
         try:
             import json as _json
+            emission = {
+                "event": "DATAGEN_FILE_METRICS",
+                "file_id": file_id,
+                "bytes": file_size,
+                "s3_key": s3_key,
+            }
+            if isinstance(metrics_snapshot, dict):
+                emission.update(metrics_snapshot)
             print(_json.dumps(emission), flush=True)
         except Exception:
-            pass  # never let metrics emission fail a real upload
+            pass
 
         return {
             "file_id": file_id,
             "success": True,
-            "rows": table.num_rows,
+            "rows": num_rows,
             "size_bytes": file_size,
             "s3_key": s3_key,
         }
