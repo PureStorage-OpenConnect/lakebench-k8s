@@ -1,0 +1,89 @@
+# Recipe: polaris-iceberg-spark-thrift  (schema: financial)
+#
+# Full-cluster Financial (FinServ-Crime, AML) workload against Polaris +
+# Iceberg + Spark Thrift Server. Same reference cluster as Customer 360
+# recipes; only workload.schema and workload.retention_workload differ.
+#
+# The Financial pipeline (bronze_verify_financial -> silver_build_financial
+# -> gold_finalize_financial) reads pacs.008 payloads emitted by the
+# FinancialGenerator (dispatched via --schema financial in the datagen
+# CLI). Detection workloads W1-W11 run under `lakebench financial replay`
+# and `lakebench financial reproduce`.
+#
+# Scale advisory: this recipe supports scale >= 1. For developer sanity
+# testing at scale <= 1 without graph workloads, use
+# polaris-iceberg-spark-financial-local.yaml.
+
+name: polaris-iceberg-financial
+recipe: polaris-iceberg-spark-thrift
+
+images:
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
+  pull_policy: Always
+
+platform:
+  kubernetes:
+    namespace: polaris-iceberg-financial
+    create_namespace: true
+
+  storage:
+    s3:
+      endpoint: <YOUR_S3_ENDPOINT>
+      region: us-east-1
+      path_style: true
+      access_key: <YOUR_S3_ACCESS_KEY>
+      secret_key: <YOUR_S3_SECRET_KEY>
+      buckets:
+        bronze: polaris-iceberg-financial-bronze
+        silver: polaris-iceberg-financial-silver
+        gold: polaris-iceberg-financial-gold
+
+    scratch:
+      enabled: true
+      # ENG-2C.10 autosizer bumps this to 200Gi for financial silver_build.
+      storage_class: <YOUR_SCRATCH_STORAGE_CLASS>
+      create_storage_class: false
+
+  compute:
+    postgres:
+      storage: 10Gi
+      storage_class: <YOUR_DB_STORAGE_CLASS>
+
+architecture:
+  catalog:
+    type: polaris
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+      # Generate one with:
+      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+
+  pipeline:
+    mode: batch
+
+  workload:
+    schema: financial              # <-- routes datagen + pipeline scripts
+    retention_workload: true       # <-- preserves snapshots for W8/W10
+    retention_months: 60
+    datagen:
+      scale: 1                     # ~10 GB pacs.008 baseline
+      file_size: 64mb
+      timestamp_start: "2024-01-01"
+      timestamp_end: "2025-01-01"
+
+  tables:
+    bronze: default.pacs008_raw
+    silver: silver.transactions
+    silver_entities: silver.entities
+    silver_accounts: silver.accounts
+    silver_counterparty_edges: silver.counterparty_edges
+    gold: gold.daily_dashboards
+    gold_alerts: gold.alerts
+    gold_risk_scores: gold.risk_scores
+    gold_entity_clusters: gold.entity_clusters
+    gold_daily_dashboards: gold.daily_dashboards
+
+  query_engine:
+    type: spark-thrift
