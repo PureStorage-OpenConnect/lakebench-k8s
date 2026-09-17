@@ -1413,6 +1413,31 @@ Endpoint: {config.s3_endpoint or "AWS default"}
                         {"rows": f"{total_rows / 1e6:.1f}M", "size": f"{total_bytes / 1e9:.1f}GB"}
                     )
 
+    # Upload the typology manifest sidecar (financial schema only).
+    # Every pod's generator produces the same deterministic manifest bytes
+    # for a given (seed, config), so idempotent overwrite to a stable key
+    # is safe under K8s Indexed Job pod parallelism -- the last writer wins
+    # and every writer wrote the same bytes.
+    try:
+        manifest_bytes_fn = getattr(generator, "manifest_bytes", None)
+        if callable(manifest_bytes_fn):
+            blob = manifest_bytes_fn()
+            if blob:
+                s3_client = get_s3_client(config)
+                manifest_key = f"{config.prefix}/manifest/manifest.parquet"
+                s3_client.put_object(
+                    Bucket=config.bucket,
+                    Key=manifest_key,
+                    Body=blob,
+                )
+                print(
+                    f"Uploaded typology manifest ({len(blob)} bytes) "
+                    f"to s3://{config.bucket}/{manifest_key}"
+                )
+    except Exception as e:
+        # Manifest is a debug/verification aid; do not fail the whole run.
+        print(f"WARN: manifest upload failed: {e}")
+
     # Print summary
     print(f"""
 Complete!
