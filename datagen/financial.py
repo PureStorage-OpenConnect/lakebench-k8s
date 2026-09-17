@@ -16,12 +16,18 @@ upload once all files complete, so the manifest reflects the full run.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from decimal import Decimal
 from typing import Any
 
 import numpy as np
 import pyarrow as pa
 from manifest import TypologyInstance, serialise_manifest
+from realism import (
+    PartySelector,
+    currency_for,
+    log_normal_amount,
+    sample_corridor,
+    sample_timestamp_shaped,
+)
 from typologies import emit_instance_rows, schedule_typologies
 
 # ---------------------------------------------------------------------------
@@ -183,6 +189,9 @@ class FinancialGenerator:
         self.config = config
         self._instances: list[TypologyInstance] | None = None
         self._instances_by_window: dict[int, list[TypologyInstance]] | None = None
+        # PartySelector is stateless w.r.t. the RNG the caller supplies, so we
+        # build it once and reuse across every file window and worker fork.
+        self._party_selector = PartySelector(customer_id_max=config.customer_id_max)
 
     # -- protocol methods --
 
@@ -276,21 +285,44 @@ class FinancialGenerator:
         window_start: datetime,
         window_end: datetime,
     ) -> list[dict]:
-        """Baseline non-typology transactions for this file's window."""
+        """Baseline non-typology transactions for this file's window.
+
+        Applies the realism.py distributions to every row:
+          - amount:      log-normal (median 5K, p95 50K)
+          - party:       Zipf-shaped corporate reuse + retail uniform tail
+          - corridor:    weighted country-pair sample
+          - currency:    corridor's destination currency
+          - timestamp:   intraday + day-of-week + quarter-end shape
+
+        Correspondent chain and regulatory reporting are populated by
+        _base_row's realism hooks (~15% of wires multi-hop overall).
+        """
         # Import here to avoid a circular at module-load time.
         from typologies import _base_row
 
         rows_per_file = self.config.rows_per_file
-        window_span_s = max(1.0, (window_end - window_start).total_seconds())
+        party_selector = self._party_selector
         rows: list[dict] = []
         for _ in range(rows_per_file):
-            offset = float(rng.uniform(0, window_span_s))
-            ts = window_start + timedelta(seconds=offset)
-            originator = int(rng.integers(1, self.config.customer_id_max + 1))
-            beneficiary = int(rng.integers(1, self.config.customer_id_max + 1))
-            amount = Decimal(str(round(float(rng.uniform(50, 20_000)), 2)))
-            currency = "USD"
-            rows.append(_base_row(rng, ts, originator, beneficiary, amount, currency, "TRAD"))
+            ts = sample_timestamp_shaped(rng, window_start, window_end)
+            originator = party_selector.sample(rng)
+            beneficiary = party_selector.sample(rng)
+            dbtr_c, cdtr_c = sample_corridor(rng)
+            amount = log_normal_amount(rng)
+            currency = currency_for(cdtr_c)
+            rows.append(
+                _base_row(
+                    rng,
+                    ts,
+                    originator,
+                    beneficiary,
+                    amount,
+                    currency,
+                    "TRAD",
+                    dbtr_c,
+                    cdtr_c,
+                )
+            )
         return rows
 
     def _rows_to_table(self, rows: list[dict]) -> pa.Table:

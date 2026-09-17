@@ -34,10 +34,21 @@ from decimal import Decimal
 
 import numpy as np
 from manifest import TypologyInstance
+from realism import (
+    build_bic_pool,
+    currency_for,
+    is_cross_border,
+    log_normal_amount,
+    sample_corridor,
+    sample_correspondent_chain,
+    sample_regulatory_reporting,
+    structuring_amount,
+    structuring_burst_window,
+)
 
 CURRENCIES = ("USD", "EUR", "GBP", "CHF", "JPY")
 COUNTRIES = ("US", "GB", "DE", "FR", "CH", "SG", "AE", "PA", "KY")
-BICS = tuple(f"BANK{i:02d}XX" for i in range(20))
+BICS = build_bic_pool(40)
 
 
 @dataclass(frozen=True)
@@ -86,16 +97,17 @@ def _agent(rng: np.random.Generator) -> dict:
     }
 
 
-def _party(entity_id: int, name_prefix: str = "E") -> dict:
+def _party(entity_id: int, name_prefix: str = "E", country: str | None = None) -> dict:
+    ctry = country if country is not None else COUNTRIES[entity_id % len(COUNTRIES)]
     return {
         "nm": f"{name_prefix}-{entity_id}",
         "pstl_adr": {
             "strt_nm": f"{(entity_id * 17) % 999 + 1} Main St",
-            "twn_nm": COUNTRIES[entity_id % len(COUNTRIES)],
-            "ctry": COUNTRIES[entity_id % len(COUNTRIES)],
+            "twn_nm": ctry,
+            "ctry": ctry,
         },
         "id": {"any_bic": None, "lei": f"LEI{entity_id:018d}"},
-        "ctry_of_res": COUNTRIES[entity_id % len(COUNTRIES)],
+        "ctry_of_res": ctry,
     }
 
 
@@ -107,18 +119,30 @@ def _base_row(
     amount: Decimal,
     currency: str,
     purpose_code: str,
+    dbtr_country: str | None = None,
+    cdtr_country: str | None = None,
 ) -> dict:
     """Minimum-viable pacs.008 flat-row dict.
 
-    Populates the fields the workloads (W1-W11) read from silver. Fields
-    not needed at v1 (rgltry_rptg arrays, extended remittance) are left
-    None so the Arrow schema-cast in FinancialGenerator can null-fill.
+    Populates the fields the workloads (W1-W11) read from silver.
+    Correspondent chain and regulatory reporting are populated
+    stochastically per realism.py rules; ~15% of wires end up multi-hop.
     """
     dbtr_agent = _agent(rng)
     cdtr_agent = _agent(rng)
     settlement_date = ts.date()
     uetr = _new_uetr(rng)
     txn_id = f"TXN-{originator_id}-{beneficiary_id}-{uetr[:8]}"
+
+    if dbtr_country is None:
+        dbtr_country = COUNTRIES[originator_id % len(COUNTRIES)]
+    if cdtr_country is None:
+        cdtr_country = COUNTRIES[beneficiary_id % len(COUNTRIES)]
+    cross_border = is_cross_border(dbtr_country, cdtr_country)
+
+    intrmy1, intrmy2, intrmy3 = sample_correspondent_chain(rng, cross_border, BICS)
+    rgltry = sample_regulatory_reporting(dbtr_country, cdtr_country, amount)
+
     return {
         # message envelope
         "msg_id": f"MSG-{uetr[:12]}",
@@ -149,26 +173,26 @@ def _base_row(
         "instd_ccy": currency,
         "xchg_rate": Decimal("1.0"),
         "chrg_br": "SHAR",
-        # correspondent chain (intermediaries)
-        "intrmy_agt_1": None,
-        "intrmy_agt_2": None,
-        "intrmy_agt_3": None,
+        # correspondent chain (intermediaries) -- realism.sample_correspondent_chain
+        "intrmy_agt_1": intrmy1,
+        "intrmy_agt_2": intrmy2,
+        "intrmy_agt_3": intrmy3,
         "prvs_instg_agt_1": None,
         "prvs_instg_agt_2": None,
         "prvs_instg_agt_3": None,
         # party chain
         "ultmt_dbtr": None,
         "initg_pty": None,
-        "dbtr": _party(originator_id, "D"),
+        "dbtr": _party(originator_id, "D", dbtr_country),
         "dbtr_acct": {"iban": f"IBAN{originator_id:016d}", "othr": None, "ccy": currency},
         "dbtr_agt": dbtr_agent,
         "cdtr_agt": cdtr_agent,
-        "cdtr": _party(beneficiary_id, "C"),
+        "cdtr": _party(beneficiary_id, "C", cdtr_country),
         "cdtr_acct": {"iban": f"IBAN{beneficiary_id:016d}", "othr": None, "ccy": currency},
         "ultmt_cdtr": None,
         "purp_cd": purpose_code,
         "purp_prtry": None,
-        "rgltry_rptg": None,
+        "rgltry_rptg": rgltry,
         "rmt_inf_ustrd": None,
         "rmt_inf_strd": None,
     }
@@ -180,43 +204,64 @@ def _base_row(
 
 
 def _emit_fan_in(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
-    """Many originators -> one beneficiary within the injection window."""
+    """Many originators -> one beneficiary (W2 structuring, tight 24-72h burst).
+
+    All originators funnel to the same beneficiary and choose amounts just
+    under the US $10K CTR threshold -- the classic structuring signature.
+    """
     *originators, beneficiary = inst.participant_entity_ids
+    dbtr_c, cdtr_c = sample_corridor(rng)
+    ccy = currency_for(cdtr_c)
     rows = []
     for orig in originators:
         ts = _timestamp_within(rng, inst.injection_ts_start, inst.injection_ts_end)
-        row = _base_row(rng, ts, orig, beneficiary, _amount(rng, 8_000, 9_990), "USD", "CASH")
+        row = _base_row(
+            rng, ts, orig, beneficiary, structuring_amount(rng), ccy, "CASH", dbtr_c, cdtr_c
+        )
         rows.append(row)
     return rows
 
 
 def _emit_fan_out(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
-    """One originator -> many beneficiaries."""
+    """One originator -> many beneficiaries (money-mule payout structuring)."""
     originator, *beneficiaries = inst.participant_entity_ids
+    dbtr_c, cdtr_c = sample_corridor(rng)
+    ccy = currency_for(cdtr_c)
     rows = []
     for bene in beneficiaries:
         ts = _timestamp_within(rng, inst.injection_ts_start, inst.injection_ts_end)
-        row = _base_row(rng, ts, originator, bene, _amount(rng, 8_000, 9_990), "USD", "SALA")
+        row = _base_row(
+            rng, ts, originator, bene, structuring_amount(rng), ccy, "SALA", dbtr_c, cdtr_c
+        )
         rows.append(row)
     return rows
 
 
 def _emit_gather_scatter(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
-    """N originators -> 1 hub -> M beneficiaries."""
+    """N originators -> 1 hub -> M beneficiaries (layering)."""
     hub = inst.participant_entity_ids[0]
     third = max(1, (len(inst.participant_entity_ids) - 1) // 2)
     originators = inst.participant_entity_ids[1 : 1 + third]
     beneficiaries = inst.participant_entity_ids[1 + third :]
     window_third = (inst.injection_ts_end - inst.injection_ts_start) / 3
+    dbtr_c, hub_c = sample_corridor(rng)
+    _, cdtr_c = sample_corridor(rng)
+    ccy = currency_for(hub_c)
     rows = []
     for orig in originators:
         ts = _timestamp_within(rng, inst.injection_ts_start, inst.injection_ts_start + window_third)
-        rows.append(_base_row(rng, ts, orig, hub, _amount(rng, 5_000, 9_990), "USD", "CASH"))
+        rows.append(
+            _base_row(
+                rng, ts, orig, hub, log_normal_amount(rng), ccy, "CASH", dbtr_c, hub_c
+            )
+        )
     for bene in beneficiaries:
         ts = _timestamp_within(
             rng, inst.injection_ts_start + 2 * window_third, inst.injection_ts_end
         )
-        rows.append(_base_row(rng, ts, hub, bene, _amount(rng, 5_000, 9_990), "USD", "TRAD"))
+        rows.append(
+            _base_row(rng, ts, hub, bene, log_normal_amount(rng), ccy, "TRAD", hub_c, cdtr_c)
+        )
     return rows
 
 
@@ -226,27 +271,39 @@ def _emit_scatter_gather(rng: np.random.Generator, inst: TypologyInstance) -> li
     beneficiary = inst.participant_entity_ids[-1]
     intermediaries = inst.participant_entity_ids[1:-1]
     window_half = (inst.injection_ts_end - inst.injection_ts_start) / 2
+    dbtr_c, interm_c = sample_corridor(rng)
+    _, cdtr_c = sample_corridor(rng)
+    ccy_out = currency_for(interm_c)
+    ccy_in = currency_for(cdtr_c)
     rows = []
     for interm in intermediaries:
         ts_out = _timestamp_within(
             rng, inst.injection_ts_start, inst.injection_ts_start + window_half
         )
         rows.append(
-            _base_row(rng, ts_out, originator, interm, _amount(rng, 3_000, 6_000), "USD", "TRAD")
+            _base_row(
+                rng, ts_out, originator, interm, log_normal_amount(rng), ccy_out, "TRAD",
+                dbtr_c, interm_c,
+            )
         )
         ts_in = _timestamp_within(rng, inst.injection_ts_start + window_half, inst.injection_ts_end)
         rows.append(
-            _base_row(rng, ts_in, interm, beneficiary, _amount(rng, 3_000, 6_000), "USD", "TRAD")
+            _base_row(
+                rng, ts_in, interm, beneficiary, log_normal_amount(rng), ccy_in, "TRAD",
+                interm_c, cdtr_c,
+            )
         )
     return rows
 
 
 def _emit_cycle(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
-    """A -> B -> C -> D -> A. Round-tripping (W3 target)."""
+    """A -> B -> C -> D -> A. Round-tripping across jurisdictions (W3 target)."""
     n = len(inst.participant_entity_ids)
     span = inst.injection_ts_end - inst.injection_ts_start
     step = span / n
-    amount = _amount(rng, 10_000, 50_000)
+    amount = log_normal_amount(rng)
+    # Cycle rotates through 3 corridors to look more like layering across jurisdictions.
+    corridors = [sample_corridor(rng) for _ in range(n)]
     rows = []
     ids = inst.participant_entity_ids
     for i in range(n):
@@ -255,7 +312,9 @@ def _emit_cycle(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
         ts = inst.injection_ts_start + step * i + timedelta(seconds=int(rng.integers(0, 3600)))
         # Slight amount decay to simulate fees; final leg still >90% of original
         leg_amount = (amount * (Decimal("0.97") ** i)).quantize(Decimal("0.01"))
-        rows.append(_base_row(rng, ts, src, dst, leg_amount, "USD", "TRAD"))
+        c_out, c_in = corridors[i]
+        ccy = currency_for(c_in)
+        rows.append(_base_row(rng, ts, src, dst, leg_amount, ccy, "TRAD", c_out, c_in))
     return rows
 
 
@@ -264,12 +323,15 @@ def _emit_stack(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
     ids = inst.participant_entity_ids
     span = inst.injection_ts_end - inst.injection_ts_start
     step = span / max(1, len(ids) - 1)
-    amount = _amount(rng, 20_000, 80_000)
+    amount = log_normal_amount(rng)
+    corridors = [sample_corridor(rng) for _ in range(len(ids) - 1)]
     rows = []
     for i in range(len(ids) - 1):
         ts = inst.injection_ts_start + step * i + timedelta(seconds=int(rng.integers(0, 1800)))
         leg_amount = (amount * (Decimal("0.95") ** i)).quantize(Decimal("0.01"))
-        rows.append(_base_row(rng, ts, ids[i], ids[i + 1], leg_amount, "USD", "TRAD"))
+        c_out, c_in = corridors[i]
+        ccy = currency_for(c_in)
+        rows.append(_base_row(rng, ts, ids[i], ids[i + 1], leg_amount, ccy, "TRAD", c_out, c_in))
     return rows
 
 
@@ -277,20 +339,34 @@ def _emit_random(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]
     """Control/decoy: one plausible transaction between two of the participants."""
     a, b = inst.participant_entity_ids[0], inst.participant_entity_ids[1]
     ts = _timestamp_within(rng, inst.injection_ts_start, inst.injection_ts_end)
-    return [_base_row(rng, ts, a, b, _amount(rng, 100, 5_000), "USD", "TRAD")]
+    dbtr_c, cdtr_c = sample_corridor(rng)
+    ccy = currency_for(cdtr_c)
+    return [_base_row(rng, ts, a, b, log_normal_amount(rng), ccy, "TRAD", dbtr_c, cdtr_c)]
 
 
 def _emit_bipartite(rng: np.random.Generator, inst: TypologyInstance) -> list[dict]:
-    """Two clusters transacting across a boundary."""
+    """Two clusters transacting across a boundary (W1 synthetic-ID target).
+
+    The two clusters use different countries so the inter-cluster edges
+    look like cross-border activity; entities inside a cluster share the
+    same country, giving Connected Components something country-shaped
+    to find.
+    """
     ids = inst.participant_entity_ids
     half = max(1, len(ids) // 2)
     left = ids[:half]
     right = ids[half:]
+    dbtr_c, cdtr_c = sample_corridor(rng)
+    ccy = currency_for(cdtr_c)
     rows = []
     for src in left:
         for dst in right:
             ts = _timestamp_within(rng, inst.injection_ts_start, inst.injection_ts_end)
-            rows.append(_base_row(rng, ts, src, dst, _amount(rng, 1_000, 9_990), "USD", "TRAD"))
+            rows.append(
+                _base_row(
+                    rng, ts, src, dst, log_normal_amount(rng), ccy, "TRAD", dbtr_c, cdtr_c
+                )
+            )
     return rows
 
 
@@ -342,9 +418,19 @@ def schedule_typologies(
                 for _ in range(spec.participant_count)
             ]
             offset = timedelta(seconds=int(inst_rng.integers(0, int(total_span.total_seconds()))))
-            duration = timedelta(
-                hours=int(inst_rng.integers(1, 168))  # 1 hour to 7 days
-            )
+            # Structuring bursts (fan_in / fan_out) fire in a tight 24-72h window
+            # per real-world CTR-evasion patterns. Layering typologies (cycle,
+            # stack, gather_scatter) span days-to-a-week; bipartite and random
+            # spread across the widest window.
+            if spec.expected_workload == "W2_structuring" and spec.typology_type in (
+                "fan_in",
+                "fan_out",
+            ):
+                duration = structuring_burst_window(inst_rng)
+            elif spec.typology_type in ("cycle", "stack", "gather_scatter", "scatter_gather"):
+                duration = timedelta(hours=int(inst_rng.integers(48, 168)))  # 2-7 days
+            else:
+                duration = timedelta(hours=int(inst_rng.integers(1, 168)))
             start = window_start + offset
             end = min(window_end, start + duration)
             instances.append(
