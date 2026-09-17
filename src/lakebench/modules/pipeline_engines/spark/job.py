@@ -761,6 +761,11 @@ class JobType(Enum):
     SILVER_STREAM = "silver-stream"
     GOLD_REFRESH = "gold-refresh"
 
+    # Financial-only operator actions (W8 / W10 / recall scoring)
+    REPLAY_FINANCIAL = "replay-financial"
+    REPRODUCE_FINANCIAL = "reproduce-financial"
+    SCORE_FINANCIAL = "score-financial"
+
 
 # Streaming job types (for conditional manifest logic)
 _STREAMING_JOB_TYPES = frozenset(
@@ -1206,6 +1211,14 @@ class SparkJobManager:
                     JobType.GOLD_REFRESH: "gold_refresh_delta.py",
                 }
             )
+        # Financial-only operator actions (replay/reproduce/score) are
+        # schema-agnostic in the deploy path but only meaningful for
+        # Financial workloads. Registered unconditionally so
+        # `lakebench financial <verb>` works regardless of the elif
+        # branch above.
+        script_map.setdefault(JobType.REPLAY_FINANCIAL, "replay_financial.py")
+        script_map.setdefault(JobType.REPRODUCE_FINANCIAL, "reproduce_financial.py")
+        script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
         # Use local:// to reference scripts already in the container filesystem
         # (mounted from lakebench-spark-scripts ConfigMap)
         main_file = f"local:///opt/spark/scripts/{script_map[job_type]}"
@@ -1916,6 +1929,9 @@ class SparkJobManager:
             "bronze_ingest_financial.py",
             "silver_stream_financial.py",
             "gold_refresh_financial.py",
+            "replay_financial.py",
+            "reproduce_financial.py",
+            "score_financial.py",
         ]
 
         # Build ConfigMap data

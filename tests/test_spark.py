@@ -60,7 +60,8 @@ class TestJobType:
 
     def test_all_types_iterable(self):
         types = list(JobType)
-        assert len(types) == 6
+        # 6 medallion + 3 Financial-only operator actions (ENG-2C.3g/h/i)
+        assert len(types) == 9
 
 
 class TestJobState:

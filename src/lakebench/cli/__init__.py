@@ -61,8 +61,10 @@ app = typer.Typer(
 
 # Config subcommand group
 from lakebench.cli._config import config_app  # noqa: E402
+from lakebench.cli._financial import financial_app  # noqa: E402
 
 app.add_typer(config_app)
+app.add_typer(financial_app)
 
 # Compare command (registered from separate module)
 from lakebench.cli._compare import compare as _compare_fn  # noqa: E402
