@@ -1,0 +1,81 @@
+# Recipe: polaris-iceberg-spark-financial (local mode, scale <= 1)
+#
+# Developer-sanity Financial pipeline. Runs on a single host via podman
+# (ContainerRuntime) with Garage as the local S3 backend. Graph workloads
+# (W1 Connected Components, W2/W3 motifs, W4 Pregel) are EXCLUDED at
+# this scale -- they need GraphFrames + serious memory and belong on
+# cluster. Non-graph workloads (W6-W11) execute for basic recall coverage.
+#
+# Aligns with addendum A.5 (local-mode storage = Garage) and Q12 answer
+# (local scale <= 1, no graph workloads).
+
+name: polaris-iceberg-financial-local
+recipe: polaris-iceberg-spark-thrift
+
+images:
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
+  pull_policy: IfNotPresent
+
+platform:
+  local:
+    runtime: podman              # ContainerRuntime dispatch (addendum A.3)
+
+  storage:
+    s3:
+      endpoint: http://127.0.0.1:3900   # bundled Garage default
+      region: us-east-1
+      path_style: true
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+      buckets:
+        bronze: lb-financial-bronze
+        silver: lb-financial-silver
+        gold: lb-financial-gold
+
+  garage:
+    enabled: true                # local-mode S3 substrate
+
+architecture:
+  catalog:
+    type: polaris
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+
+  pipeline:
+    mode: batch
+
+  workload:
+    schema: financial
+    retention_workload: false    # W8/W10 not exercised in local recipe
+    datagen:
+      scale: 1                   # LOCAL_SCALE_ADVISORY_MAX = 1.0
+      file_size: 32mb
+      timestamp_start: "2024-01-01"
+      timestamp_end: "2024-04-01"    # narrower range for local disk budget
+
+  tables:
+    bronze: default.pacs008_raw
+    silver: silver.transactions
+    silver_entities: silver.entities
+    silver_accounts: silver.accounts
+    silver_counterparty_edges: silver.counterparty_edges
+    gold: gold.daily_dashboards
+    gold_alerts: gold.alerts
+    gold_risk_scores: gold.risk_scores
+    gold_entity_clusters: gold.entity_clusters
+    gold_daily_dashboards: gold.daily_dashboards
+
+  query_engine:
+    type: spark-thrift
+
+  # Explicit workload exclusions for local mode. The workload runner honours
+  # this list once ENG-2C.4.* lands the detection modules.
+  workloads:
+    excluded:
+      - W1_synthetic_id      # GraphFrames CC; heavy memory
+      - W2_structuring       # GraphFrames motif finding
+      - W3_round_tripping    # GraphFrames motif finding
+      - W4_risk_propagation  # GraphFrames Pregel
