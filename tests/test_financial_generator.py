@@ -34,6 +34,7 @@ class _FakeConfig:
         rows_per_file: int = 25,
         customer_id_max: int = 10_000,
         target_tb: float = 1.0,
+        scale: float | None = 1.0,
         timestamp_start: datetime = datetime(2026, 1, 1),
         timestamp_end: datetime = datetime(2026, 4, 1),
     ):
@@ -42,6 +43,10 @@ class _FakeConfig:
         self.rows_per_file = rows_per_file
         self.customer_id_max = customer_id_max
         self.target_tb = target_tb
+        # Default scale=1.0 keeps existing tests fast. Pass scale=None to
+        # exercise the target_tb-based fallback path.
+        if scale is not None:
+            self.scale = scale
         self.timestamp_start = timestamp_start
         self.timestamp_end = timestamp_end
 
@@ -402,18 +407,14 @@ class TestEdgeCases:
     def test_scale_zero_still_emits_baseline(self):
         from financial import FinancialGenerator
 
-        cfg = _FakeConfig(rows_per_file=10)
-        cfg.target_tb = 0.0  # scale surrogate
+        cfg = _FakeConfig(rows_per_file=10, scale=0.0, target_tb=0.0)
         gen = FinancialGenerator(cfg)
         gen.ensure_loyalty()
-        # No typology instances at scale=0
-        assert gen.instances() == [] or all(
-            not inst.participant_uetrs or len(inst.participant_uetrs) >= 0
-            for inst in gen.instances()
-        )
-        # But baseline rows still generate
+        # Baseline rows still generate. Even at scale=0 the scheduler emits
+        # at least 1 instance per typology (max(1, int(scale * 10))) so
+        # rows include typology piggyback -- assert >= 10 not == 10.
         t = gen.generate_file_data(0)
-        assert t.num_rows == 10
+        assert t.num_rows >= 10
 
     def test_customer_id_max_one(self):
         """Small customer population must not crash PartySelector."""
@@ -448,6 +449,44 @@ class TestEdgeCases:
         gen.ensure_loyalty()
         t = gen.generate_file_data(0)
         assert t.num_rows >= 5
+
+
+class TestScaleFactorReachesTypologyCount:
+    """Regression: earlier the FinancialGenerator passed target_tb as `scale`
+    to schedule_typologies. At target_tb=0.01 (scale=1) this floored to 1
+    instance per typology, so the manifest never grew with scale until
+    scale >= 100. Caught by cluster UAT s5-p8 / s10-p8 verify_run.
+    """
+
+    def test_explicit_scale_arg_produces_more_instances(self):
+        from financial import FinancialGenerator
+
+        gen_s1 = FinancialGenerator(_FakeConfig(scale=1.0, total_files=2, rows_per_file=10))
+        gen_s10 = FinancialGenerator(_FakeConfig(scale=10.0, total_files=2, rows_per_file=10))
+        gen_s1.ensure_loyalty()
+        gen_s10.ensure_loyalty()
+        assert len(gen_s10.instances()) == len(gen_s1.instances()) * 10
+
+    def test_scale_1_has_at_least_8_instances(self):
+        """One instance per typology per scale unit, 8 typologies."""
+        from financial import FinancialGenerator
+
+        gen = FinancialGenerator(_FakeConfig(scale=1.0, total_files=2, rows_per_file=10))
+        gen.ensure_loyalty()
+        # 10 instances per typology at scale 1, 8 typologies => 80
+        assert len(gen.instances()) >= 80
+
+    def test_fallback_when_scale_not_set(self):
+        """Backward compat: no explicit scale falls back to target_tb-derived."""
+        from financial import FinancialGenerator
+
+        # Small target_tb so the test is cheap; fallback scale = target_tb*102.4
+        cfg = _FakeConfig(target_tb=0.05, scale=None, total_files=2, rows_per_file=10)
+        gen = FinancialGenerator(cfg)
+        gen.ensure_loyalty()
+        # target_tb=0.05 => fallback scale ~ 5.12 => >= 5 instances per typology
+        # * 8 typologies => >= 40 instances
+        assert len(gen.instances()) >= 40
 
 
 class TestFinancialGeneratorRegistration:

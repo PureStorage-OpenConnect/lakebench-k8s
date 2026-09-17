@@ -66,6 +66,11 @@ class DatagenDeployer:
             {
                 "datagen_parallelism": datagen.parallelism,
                 "datagen_target_tb": f"{target_tb:.6f}",
+                # Explicit lakebench scale factor (1, 5, 10, ...) -- schema
+                # generators like FinancialGenerator use this directly for
+                # typology instance counts. Not derivable from target_tb
+                # inside the container without assuming ~10GB/scale.
+                "datagen_scale_factor": f"{datagen.get_effective_scale():.6f}",
                 "datagen_file_size_mb": file_size_mb,
                 "datagen_payload_kb": self._PAYLOAD_SIZE_BYTES // 1024,
                 "datagen_path_prefix": path_prefix,

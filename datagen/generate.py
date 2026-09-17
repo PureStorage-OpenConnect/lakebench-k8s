@@ -1220,6 +1220,16 @@ def main():
         "--target-tb", type=float, required=True, help="Target data size in terabytes"
     )
     parser.add_argument(
+        "--scale",
+        type=float,
+        default=None,
+        help=(
+            "Lakebench scale factor (1, 5, 10, 100...). Used by schema-specific "
+            "generators (financial: number of typology instances per typology). "
+            "If omitted, computed from --target-tb assuming ~10GB per scale unit."
+        ),
+    )
+    parser.add_argument(
         "--workers", type=int, default=4, help="Number of parallel workers (default: 4)"
     )
     parser.add_argument(
@@ -1302,6 +1312,11 @@ def main():
     else:
         node_id = int(os.environ.get("JOB_COMPLETION_INDEX", "0"))
 
+    # Scale factor: passed explicitly by lakebench (--scale), otherwise
+    # derived from target_tb assuming ~10 GB per scale unit. Used by
+    # schema-specific generators (e.g. FinancialGenerator.typology counts).
+    scale_factor = args.scale if args.scale is not None else max(1.0, args.target_tb * 102.4)
+
     config = Config(
         target_tb=args.target_tb,
         workers=args.workers,
@@ -1319,6 +1334,9 @@ def main():
         duration_seconds=args.duration,
         schema_name=args.schema,
     )
+    # Attach the resolved scale as a plain attribute so generators can read it
+    # via config.scale without further Config schema changes.
+    config.scale = scale_factor
 
     # Validate S3 credentials
     if not config.s3_access_key or not config.s3_secret_key:

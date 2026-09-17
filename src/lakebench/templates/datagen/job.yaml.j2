@@ -40,6 +40,10 @@ spec:
           args:
             - "--schema"
             - "{{ datagen_schema | default('customer360') }}"
+            {% if datagen_scale_factor is defined %}
+            - "--scale"
+            - "{{ datagen_scale_factor }}"
+            {% endif %}
             - "--target-tb"
             - "{{ datagen_target_tb }}"
             - "--mode"
