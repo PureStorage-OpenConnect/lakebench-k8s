@@ -1169,8 +1169,11 @@ class SparkJobManager:
         # Select script based on job type and table format.
         # Scripts are mounted from ConfigMap at /opt/spark/scripts.
         # Delta scripts use *_delta.py variants; format-agnostic scripts
-        # (bronze_verify) are shared.
+        # (bronze_verify) are shared. Financial (schema=financial) uses
+        # its own *_financial.py scripts because the pacs.008 shape and
+        # workload set differ from Customer 360's medallion pipeline.
         table_format = cfg.architecture.table_format.type.value
+        workload_schema = cfg.architecture.workload.schema_type.value
         script_map = {
             JobType.BRONZE_VERIFY: "bronze_verify.py",
             JobType.SILVER_BUILD: "silver_build.py",
@@ -1179,7 +1182,16 @@ class SparkJobManager:
             JobType.SILVER_STREAM: "silver_stream.py",
             JobType.GOLD_REFRESH: "gold_refresh.py",
         }
-        if table_format == "delta":
+        if workload_schema == "financial":
+            # Financial pipeline is authored end-to-end; each sub-PR of
+            # ENG-2C.3 fills in the corresponding entry. Scripts that have
+            # not shipped yet fall back to the Customer 360 file above so
+            # a partial-landing branch still boots.
+            _financial_scripts = {
+                JobType.BRONZE_VERIFY: "bronze_verify_financial.py",
+            }
+            script_map.update(_financial_scripts)
+        elif table_format == "delta":
             script_map.update(
                 {
                     JobType.SILVER_BUILD: "silver_build_delta.py",
@@ -1892,6 +1904,8 @@ class SparkJobManager:
             "gold_refresh_delta.py",
             "bronze_ingest_delta.py",
             "silver_stream_delta.py",
+            # Financial (FinServ-Crime, AML) pipeline scripts
+            "bronze_verify_financial.py",
         ]
 
         # Build ConfigMap data
