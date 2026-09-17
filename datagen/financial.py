@@ -316,9 +316,17 @@ class FinancialGenerator:
     def _ensure_schedule(self) -> None:
         if self._instances is not None:
             return
+        # Use the explicit scale factor when the datagen CLI provides it
+        # (post 2026-09-17 fix). Fall back to a computed value from
+        # target_tb for older callers -- 10 GB per scale unit assumption.
+        scale = getattr(
+            self.config,
+            "scale",
+            max(1.0, float(getattr(self.config, "target_tb", 0.01)) * 102.4),
+        )
         instances = schedule_typologies(
             seed=self.config.seed,
-            scale=self.config.target_tb,  # scale proxy: target_tb == v1 scale surrogate
+            scale=scale,
             window_start=self.config.timestamp_start,
             window_end=self.config.timestamp_end,
             customer_id_max=self.config.customer_id_max,
