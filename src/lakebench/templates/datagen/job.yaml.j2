@@ -38,6 +38,8 @@ spec:
           image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:latest') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
+            - "--schema"
+            - "{{ datagen_schema | default('customer360') }}"
             - "--target-tb"
             - "{{ datagen_target_tb }}"
             - "--mode"

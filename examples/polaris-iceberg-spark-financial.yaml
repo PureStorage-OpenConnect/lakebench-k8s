@@ -62,6 +62,10 @@ architecture:
 
   pipeline:
     mode: batch
+    medallion:
+      bronze:
+        format: parquet
+        path_template: pacs008     # <-- datagen + bronze_verify both read here
 
   workload:
     schema: financial              # <-- routes datagen + pipeline scripts
