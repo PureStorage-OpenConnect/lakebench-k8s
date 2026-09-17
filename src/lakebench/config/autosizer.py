@@ -197,6 +197,16 @@ def resolve_auto_sizing(
         datagen.uploaders = mode_uploaders
         changes.append(f"datagen.uploaders={mode_uploaders}")
 
+    # -- Schema-specific overrides (ENG-2C.10) --
+    # Workload schemas that differ from Customer360 on baseline resource shape
+    # override defaults here. Currently just the silver-build scratch PVC
+    # size for Financial (200Gi vs Customer360's 150Gi) per spec §2C.21;
+    # workload-specific stage profiles (W1-W7) are applied by ENG-2C.3
+    # at manifest-build time, not autosizer time.
+    schema_change = _apply_schema_overrides(config)
+    if schema_change:
+        changes.append(schema_change)
+
     # -- Cluster capacity: cap to fit --
     if cluster_capacity is not None:
         _apply_cluster_scaling(config, cluster_capacity, effective_mode, guidance, changes)
@@ -209,6 +219,26 @@ def resolve_auto_sizing(
             effective_mode,
             ", ".join(changes),
         )
+
+
+def _apply_schema_overrides(config: LakebenchConfig) -> str | None:
+    """Apply per-workload-schema default overrides.
+
+    Baseline (Customer360) leaves everything at scale-tier guidance.
+    Financial (FinServ-Crime, AML) bumps the shared scratch PVC to 200 Gi
+    for silver_build headroom on pacs.008 rows (spec §2C.21). Only fields
+    the user did not explicitly set are touched.
+    """
+    from lakebench.config.schema import WorkloadSchema
+
+    schema = config.architecture.workload.schema_type
+    if schema != WorkloadSchema.FINANCIAL:
+        return None
+
+    scratch = config.platform.storage.scratch
+    if _set_if_default(scratch, "size", "200Gi"):
+        return "storage.scratch.size=200Gi (schema=financial)"
+    return None
 
 
 def _round_down_even(n: int) -> int:
