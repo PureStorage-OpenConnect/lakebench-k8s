@@ -363,6 +363,147 @@ def test_customer360_event_timestamp_is_utc():
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# SIGTERM/SIGINT graceful shutdown -- new 2026-09-18
+# ---------------------------------------------------------------------------
+
+
+def test_shutdown_events_are_module_singletons():
+    """Both SHUTDOWN_REQUESTED (threading.Event) and MP_SHUTDOWN_EVENT
+    (multiprocessing.Event) must be module-level singletons created at
+    import. A prior design created MP_SHUTDOWN_EVENT lazily inside
+    run_continuous, which opened a race window where SIGTERM arriving
+    before the deferred create only set the threading flag; generator
+    children (spawned right after) never saw shutdown and drained the
+    whole Phase 1 pre-load past grace period."""
+    import threading
+    import generate
+
+    assert isinstance(generate.SHUTDOWN_REQUESTED, threading.Event)
+    # multiprocessing.Event is a factory returning a Semaphore-backed
+    # synchronization primitive; just check it has the interface.
+    assert hasattr(generate.MP_SHUTDOWN_EVENT, "is_set")
+    assert hasattr(generate.MP_SHUTDOWN_EVENT, "set")
+    assert hasattr(generate.MP_SHUTDOWN_EVENT, "clear")
+    # Same instance across imports.
+    import generate as generate_again
+    assert generate.SHUTDOWN_REQUESTED is generate_again.SHUTDOWN_REQUESTED
+    assert generate.MP_SHUTDOWN_EVENT is generate_again.MP_SHUTDOWN_EVENT
+
+
+def test_install_shutdown_handlers_registers_sigterm_and_sigint(monkeypatch):
+    """SIGTERM AND SIGINT must both flip BOTH events (threading and mp).
+    If the handler only flipped the threading event, generator child
+    processes would not see shutdown -- they only see MP_SHUTDOWN_EVENT.
+    If only SIGTERM were registered, Ctrl-C on an interactive run would
+    raise KeyboardInterrupt at an arbitrary point rather than trigger
+    graceful drain."""
+    import signal
+    import generate
+
+    installed = {}
+
+    def fake_signal(signum, handler):
+        installed[signum] = handler
+        return signal.SIG_DFL
+
+    monkeypatch.setattr(signal, "signal", fake_signal)
+    generate.SHUTDOWN_REQUESTED.clear()
+    generate.MP_SHUTDOWN_EVENT.clear()
+    generate._install_shutdown_handlers()
+    assert signal.SIGTERM in installed
+    assert signal.SIGINT in installed
+    # Firing either handler must set BOTH events.
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        generate.SHUTDOWN_REQUESTED.clear()
+        generate.MP_SHUTDOWN_EVENT.clear()
+        installed[sig](sig, None)
+        assert generate.SHUTDOWN_REQUESTED.is_set(), f"{sig!r} did not set threading event"
+        assert generate.MP_SHUTDOWN_EVENT.is_set(), f"{sig!r} did not set mp event"
+    generate.SHUTDOWN_REQUESTED.clear()
+    generate.MP_SHUTDOWN_EVENT.clear()
+
+
+def test_uploader_exits_on_generators_done_without_pills():
+    """Regression: previous design relayed pills through upload_queue via
+    put_nowait, which silently dropped them when the queue was full at
+    duration expiry. Uploaders spun forever waiting for a pill count that
+    never arrived; kubelet SIGKILLed after grace period. The new design
+    uses a generators_done_event that main sets after joining generators;
+    uploader exits on that event without needing any pills. This test
+    proves the exit path works when zero pills are ever sent."""
+    import queue as _queue
+    import threading
+    import generate
+
+    # Reset in case a previous test left it set.
+    generate.SHUTDOWN_REQUESTED.clear()
+
+    upload_queue = _queue.Queue()  # stand-in for MPQueue; same interface
+    generators_done = threading.Event()
+
+    # A fake config -- uploader will build an S3 client, which needs
+    # env-loaded config; monkeypatch get_s3_client to a no-op instead.
+    class _FakeS3:
+        def put_object(self, **kwargs):  # noqa: D401
+            pass
+
+    original_get = generate.get_s3_client
+    generate.get_s3_client = lambda cfg: _FakeS3()  # type: ignore[assignment]
+    try:
+        cfg = generate.Config(target_tb=0.001, bucket="b", prefix="p",
+                              checkpoint_file="/tmp/x")
+        results: list = []
+        results_lock = threading.Lock()
+
+        def cb(rows, size, ok): pass  # noqa
+
+        t = threading.Thread(
+            target=generate._continuous_uploader_worker,
+            args=(upload_queue, generators_done, cfg, results, results_lock, cb),
+            name="upload-test",
+        )
+        t.start()
+        # Give the thread a moment to enter its poll loop.
+        threading.Event().wait(0.5)
+        assert t.is_alive(), "uploader died prematurely"
+        # No pills ever sent. Flip the done event and expect exit.
+        generators_done.set()
+        t.join(timeout=3)
+        assert not t.is_alive(), "uploader did not exit on generators_done_event"
+    finally:
+        generate.get_s3_client = original_get
+
+
+def test_config_rejects_file_size_over_flashblade_cap():
+    """Regression: `put_object` uploads (no MPU) fail above the
+    single-PUT ceiling (~5 GiB on FlashBlade). Config load must refuse
+    ridiculous file sizes rather than silently emit `EntityTooLarge` on
+    every upload."""
+    from generate import Config
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="single-PUT cap"):
+        Config(target_tb=0.01, bucket="b", prefix="p",
+               checkpoint_file="/tmp/x", file_size_mb=8192)
+
+
+def test_install_shutdown_handlers_tolerates_non_main_thread(monkeypatch):
+    """Python raises ValueError when signal.signal is called from a
+    non-main thread. Import-time test collection or a pytest worker
+    thread that indirectly triggers this must not crash. Handler
+    install swallows the ValueError."""
+    import signal
+    import generate
+
+    def raises(_signum, _handler):
+        raise ValueError("signal only works in main thread")
+
+    monkeypatch.setattr(signal, "signal", raises)
+    # Should not raise.
+    generate._install_shutdown_handlers()
+
+
 def test_config_defaults_stable():
     """Pinning defaults so a silent change here (e.g. someone flips a
     default in the wrong direction) fails a test."""
