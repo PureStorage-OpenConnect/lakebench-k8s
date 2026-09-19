@@ -243,8 +243,17 @@ def generate(
 
                 time.sleep(30)
 
-        # Final result
-        completion_result = datagen.wait_for_completion(timeout_seconds=10)
+        # Final result. Give the finalizer whatever budget remains under
+        # the operator's --timeout so a job that was still running when
+        # the polling loop's outer timeout hit gets one more real check
+        # before being declared failed. Prior code hard-coded 10s here,
+        # which meant --timeout 3600 on a real UAT declared a still-
+        # running datagen a failure ~10s after the polling loop's own
+        # timeout expired -- exit code 0 but "Generation Failed" logged
+        # while the pods kept generating for another half hour.
+        elapsed = time.time() - start
+        final_budget = max(30, int(timeout - elapsed))
+        completion_result = datagen.wait_for_completion(timeout_seconds=final_budget)
 
         console.print()
         if completion_result.status == DeploymentStatus.SUCCESS:
