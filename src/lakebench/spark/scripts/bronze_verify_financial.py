@@ -19,11 +19,19 @@ from pyspark.sql.functions import col, expr
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 # datagen_rs writes pacs.008 files under `<uploader_prefix>/bronze/pacs008/*`
 # (see datagen_rs/src/bin/generate.rs: `bronze/pacs008/...`). The datagen_py
-# Financial generator writes under `pacs008/`. Default aligns with the Rust
-# datagen since that is the shipping code path for the fraud-aml workload;
-# operators using the Python generator can override via env.
-PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "bronze/pacs008/")
-REGISTER = env("LB_REGISTER_TABLE", "0") == "1"
+# Financial generator writes under `pacs008/`. Datagen_py is the shipping
+# batch-mode path (`lakebench generate` uses the Docker image), so default
+# to that layout; operators using the Rust datagen at scale >100 override
+# to `bronze/pacs008/`.
+PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
+# Default REGISTER=1: silver_build reads a real Iceberg table
+# (spark.table(CATALOG.pacs008_raw)), not the raw parquet, so without
+# registration the entire pipeline stalls at silver-build with
+# TableNotFoundException. The lakebench run path invokes bronze_verify
+# once per pipeline and expects registration as a side effect. Setting
+# LB_REGISTER_TABLE=0 turns off the register when the operator wants
+# a verify-only pass without CTAS/add_files side effects.
+REGISTER = env("LB_REGISTER_TABLE", "1") == "1"
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
