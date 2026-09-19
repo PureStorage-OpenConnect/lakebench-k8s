@@ -17,7 +17,12 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
+# datagen_rs writes pacs.008 files under `<uploader_prefix>/bronze/pacs008/*`
+# (see datagen_rs/src/bin/generate.rs: `bronze/pacs008/...`). The datagen_py
+# Financial generator writes under `pacs008/`. Default aligns with the Rust
+# datagen since that is the shipping code path for the fraud-aml workload;
+# operators using the Python generator can override via env.
+PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "bronze/pacs008/")
 REGISTER = env("LB_REGISTER_TABLE", "0") == "1"
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
@@ -71,39 +76,76 @@ def main() -> None:
         spark.stop()
         raise SystemExit(2)
 
-    # Basic non-null invariants -- catches datagen bugs at bronze-verify time.
+    # Non-null invariants. `intr_bk_sttlm_dt` is required (partition key of
+    # the target Iceberg table); one NULL row rejects the whole CTAS with
+    # a cryptic partition-transform error. Fail loud here rather than there.
     null_counts: dict[str, int] = {}
     for c in ("uetr", "txn_id", "msg_id"):
         n = df.filter(col(c).isNull()).count()
         null_counts[c] = n
         if n:
             log(f"WARNING: {n} rows have NULL {c}")
+    n_null_sttlm_dt = df.filter(col("intr_bk_sttlm_dt").isNull()).count()
+    if n_null_sttlm_dt:
+        log(
+            f"ERROR: {n_null_sttlm_dt} rows have NULL intr_bk_sttlm_dt; "
+            "bronze registration will fail on the days() partition transform."
+        )
+        spark.stop()
+        raise SystemExit(3)
 
     partition_days = df.select("intr_bk_sttlm_dt").distinct().count()
     log(f"Partition days present: {partition_days}")
 
     if REGISTER:
-        # Bronze is an external Iceberg table over the datagen Parquet files.
-        # The full column schema lives in src/lakebench/deploy/financial_ddl.py;
-        # here we register a lightweight external table that reads the flat
-        # Parquet directly. silver_build_financial.py owns the CREATE-TABLE
-        # for silver + gold. Idempotent via IF NOT EXISTS.
+        # Register the Iceberg table as EXTERNAL over the datagen Parquet
+        # files -- no data copy. The previous CTAS + INSERT pattern
+        # doubled S3 usage (a full silver-scale rewrite during "verify")
+        # and gave silver_build a third scan over the same bytes.
+        #
+        # Uses `add_files` procedure so the existing Parquet files become
+        # data files of the Iceberg table without any I/O against them
+        # (no rewrite, no manifest scan of file content). Iceberg's
+        # add_files supports partitioning by a transform; here we
+        # partition by days(intr_bk_sttlm_dt) to match silver's join key.
+        #
+        # If the Iceberg catalog doesn't support add_files (rare on
+        # Polaris/Hive; not on plain HadoopCatalog), the CREATE TABLE with
+        # LOCATION path works instead. add_files is preferred because it
+        # collects statistics and updates the manifest.
         spark.sql(f"""
-            CREATE TABLE IF NOT EXISTS {CATALOG}.{BRONZE_TABLE}
+            CREATE TABLE IF NOT EXISTS {CATALOG}.{BRONZE_TABLE} (
+                msg_id STRING, cre_dt_tm TIMESTAMP, intr_bk_sttlm_dt DATE,
+                txn_id STRING, uetr STRING
+            )
             USING iceberg
             PARTITIONED BY (days(intr_bk_sttlm_dt))
             TBLPROPERTIES (
                 'format-version' = '2',
                 'write.parquet.compression-codec' = 'snappy'
             )
-            AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}` LIMIT 0
         """)
-        # Populate by inserting the actual data.
-        spark.sql(f"""
-            INSERT INTO {CATALOG}.{BRONZE_TABLE}
-            SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
-        """)
-        log(f"Registered Iceberg table: {CATALOG}.{BRONZE_TABLE}")
+        try:
+            spark.sql(
+                f"CALL {CATALOG}.system.add_files("
+                f"  table => '{BRONZE_TABLE}', "
+                f"  source_table => 'parquet.`{BRONZE_URI}{PACS_PREFIX}`'"
+                f")"
+            )
+            log(f"Registered Iceberg table by reference: {CATALOG}.{BRONZE_TABLE}")
+        except Exception as e:  # noqa: BLE001
+            log(
+                f"add_files failed ({e}); falling back to CTAS. "
+                "This doubles S3 usage; investigate catalog support for add_files."
+            )
+            spark.sql(f"""
+                CREATE OR REPLACE TABLE {CATALOG}.{BRONZE_TABLE}
+                USING iceberg
+                PARTITIONED BY (days(intr_bk_sttlm_dt))
+                TBLPROPERTIES ('format-version' = '2')
+                AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
+            """)
+            log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
 
     elapsed = time.time() - start_time
     log("=" * 60)

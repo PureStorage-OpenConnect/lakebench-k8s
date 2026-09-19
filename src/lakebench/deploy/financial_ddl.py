@@ -185,7 +185,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     currency           STRING NOT NULL,
     opened_date        DATE   NOT NULL,
     closed_date        DATE,
-    current_balance    DECIMAL(18, 2)
+    current_balance    DECIMAL(38, 2)
 )
 USING iceberg
 TBLPROPERTIES (
@@ -193,6 +193,39 @@ TBLPROPERTIES (
     'write.parquet.compression-codec' = 'snappy'
 )
 """.strip()
+
+
+SILVER_ACCOUNT_STATEMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    account_id     BIGINT NOT NULL,
+    iban           STRING NOT NULL,
+    entry_seq      BIGINT NOT NULL,
+    book_ts        TIMESTAMP NOT NULL,
+    val_ts         TIMESTAMP NOT NULL,
+    cdt_dbt_ind    STRING NOT NULL,
+    amt            DECIMAL(18, 2) NOT NULL,
+    ccy            STRING NOT NULL,
+    bal_before     DECIMAL(38, 2) NOT NULL,
+    bal_after      DECIMAL(38, 2) NOT NULL,
+    txn_id         STRING NOT NULL,
+    uetr           STRING NOT NULL,
+    bk_tx_cd       STRING NOT NULL
+)
+USING iceberg
+PARTITIONED BY (days(book_ts), bucket(64, account_id))
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy'
+)
+""".strip()
+# bal_before / bal_after are DECIMAL(38,2), not (18,2). Spark widens
+# SUM(decimal(18,2)) OVER (..) to decimal(38,2); casting the running sum back
+# to (18,2) silently returns NULL on overflow (ANSI off by default), which
+# then violates the NOT NULL constraint and fails the Iceberg write partway
+# through a multi-hour job. Peak balance at scale 100 on a correspondent /
+# aggregator account can plausibly exceed 10^16, so the truncation was a
+# real hazard. Storing the wider type is cheap (a few extra bytes per row on
+# a table that already carries billions of rows).
 
 
 SILVER_COUNTERPARTY_EDGES_DDL = """
@@ -336,6 +369,7 @@ FINANCIAL_TABLE_DDLS: dict[str, str] = {
     "silver": SILVER_TRANSACTIONS_DDL,
     "silver_entities": SILVER_ENTITIES_DDL,
     "silver_accounts": SILVER_ACCOUNTS_DDL,
+    "silver_account_statements": SILVER_ACCOUNT_STATEMENTS_DDL,
     "silver_counterparty_edges": SILVER_COUNTERPARTY_EDGES_DDL,
     "gold_alerts": GOLD_ALERTS_DDL,
     "gold_risk_scores": GOLD_RISK_SCORES_DDL,

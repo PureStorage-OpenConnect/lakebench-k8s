@@ -20,9 +20,11 @@ import uuid
 from common import env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
+    array,
     col,
     countDistinct,
     current_timestamp,
+    explode,
     lit,
     to_date,
 )
@@ -114,14 +116,39 @@ TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snap
 """
 
 
-def build_baseline_dashboards(txns):
-    """Baseline: one row per settlement day, keyed rule_id='baseline'."""
+def build_baseline_dashboards(txns, run_id: str):
+    """Baseline: one row per settlement day, keyed rule_id='baseline'.
+
+    `alert_count` uses the raw txn count as a baseline volumetric aggregate
+    -- explicitly NOT an alert count. Consumers must filter `rule_id !=
+    'baseline'` when summing real alerts, or every raw txn becomes a
+    phantom alert (~10^9 at scale 100).
+
+    `entity_count` counts distinct entities across BOTH originator and
+    beneficiary sides. The prior implementation only counted originators,
+    which systematically undercounted unique entities by ~2x on the
+    executive dashboard.
+
+    `run_id` is passed in explicitly, not read from a module-level closure.
+    The prior design closed over `RUN_ID` at import time, so a refresh
+    loop's per-tick UUID from a caller module never reached the written
+    rows -- every refresh silently reused the finalize module's UUID.
+    """
+    # Stack originator + beneficiary into a single column so we can count
+    # distinct entities across both sides. pyspark can't call explode()
+    # inside an .agg() (explode is table-valued), so we explode BEFORE
+    # aggregating and count distinct on the resulting long-form column.
+    txn_dates = txns.select(
+        to_date(col("txn_timestamp")).alias("dashboard_date"),
+        col("txn_amount_usd"),
+        explode(array(col("originator_id"), col("beneficiary_id"))).alias("entity_id"),
+    )
     return (
-        txns.groupBy(to_date(col("txn_timestamp")).alias("dashboard_date"))
+        txn_dates.groupBy("dashboard_date")
         .agg(
-            count_(lit(1)).alias("alert_count"),
-            countDistinct(col("originator_id")).alias("entity_count"),
-            sum_(col("txn_amount_usd")).cast("decimal(20,2)").alias("total_alerted_amount_usd"),
+            (count_(lit(1)) / lit(2)).cast("bigint").alias("alert_count"),
+            countDistinct("entity_id").alias("entity_count"),
+            (sum_("txn_amount_usd") / lit(2)).cast("decimal(20,2)").alias("total_alerted_amount_usd"),
         )
         .select(
             col("dashboard_date"),
@@ -136,18 +163,24 @@ def build_baseline_dashboards(txns):
             lit(None).cast("double").alias("recall"),
             lit(None).cast("double").alias("precision_val"),
             current_timestamp().alias("computed_ts"),
-            lit(RUN_ID).alias("run_id"),
+            lit(run_id).alias("run_id"),
         )
     )
 
 
 def main() -> None:
     spark = SparkSession.builder.appName("lb-gold-finalize-financial").getOrCreate()
+    # UTC pin (same rationale as silver_build): to_date(txn_timestamp) uses
+    # session tz for the day boundary, so a non-UTC executor tz shifts
+    # dashboard_date by up to one day for late-night UTC txns and breaks the
+    # score_financial join to the manifest's UTC-based UETRs.
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
     start = time.time()
 
     log("=" * 60)
     log("Gold Finalize (Financial)")
     log(f"Run ID: {RUN_ID}")
+    log(f"Session TZ: {spark.conf.get('spark.sql.session.timeZone')}")
     log("=" * 60)
 
     for name, ddl in (
@@ -160,8 +193,16 @@ def main() -> None:
         log(f"Bootstrapped gold.{name}")
 
     txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
-    baseline = build_baseline_dashboards(txns)
-    baseline.writeTo(f"{CATALOG}.{GOLD_DASH}").createOrReplace()
+    baseline = build_baseline_dashboards(txns, RUN_ID)
+    # `.overwrite(lit(True))` replaces data rows while preserving the table's
+    # partition spec and schema, unlike `.createOrReplace()` which reverts
+    # partitioning on every write (see silver_build_financial for the same
+    # fix). More importantly for the refresh loop path: a partial-data
+    # refresh via createOrReplace would wipe rows written by concurrent
+    # detection workloads. `.overwrite(lit(True))` still wipes them, so
+    # gold_refresh must ONLY overwrite its own baseline rows -- see
+    # gold_refresh_financial.py for the partition-predicate refresh path.
+    baseline.writeTo(f"{CATALOG}.{GOLD_DASH}").overwrite(lit(True))
     log(f"Wrote {GOLD_DASH} baseline rows")
 
     log("=" * 60)

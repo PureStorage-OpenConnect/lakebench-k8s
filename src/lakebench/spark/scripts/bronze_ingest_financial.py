@@ -1,17 +1,31 @@
 """Bronze Ingest (Financial, sustained) -- Structured Streaming pacs.008 -> bronze.
 
-Reads new Parquet files from LB_BRONZE_URI/pacs008/ as they land and appends
+Reads new Parquet files from LB_BRONZE_URI/<prefix> as they land and appends
 to the bronze Iceberg table. maxFilesPerTrigger throttles per micro-batch to
 smooth downstream silver_stream load.
+
+Prerequisites:
+- bronze_verify_financial must have run first with LB_REGISTER_TABLE=1 to
+  create the target Iceberg table (schema inferred from the first parquet).
+  Structured Streaming's parquet source requires an explicit schema or a
+  pre-existing table to sink into; we take the second route.
+- SIGTERM triggers a graceful stopQuery so an in-flight micro-batch commits
+  (or aborts atomically) before the pod exits, avoiding an inconsistent
+  checkpoint state.
 """
 
 from __future__ import annotations
+
+import signal
+import sys
+import time
 
 from common import env, log
 from pyspark.sql import SparkSession
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
+# Match Rust datagen layout by default (bronze/pacs008/*); overridable.
+PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "bronze/pacs008/")
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 CHECKPOINT_URI = env(
@@ -23,16 +37,35 @@ TRIGGER_S = int(env("LB_FINANCIAL_BRONZE_TRIGGER_S", "10"))
 
 def main() -> None:
     spark = SparkSession.builder.appName("lb-bronze-ingest-financial").getOrCreate()
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
 
     log("=" * 60)
     log("Bronze Ingest (Financial, streaming)")
     log(f"Source: {BRONZE_URI}{PACS_PREFIX}")
     log(f"Target: {CATALOG}.{BRONZE_TABLE}")
+    log(f"Checkpoint: {CHECKPOINT_URI}")
     log(f"maxFilesPerTrigger={MAX_FILES} triggerSeconds={TRIGGER_S}")
     log("=" * 60)
 
+    # Require the target table to exist so we have a schema to attach to the
+    # readStream. Reading against `.format("parquet")` alone requires either
+    # spark.sql.streaming.schemaInference=true or an explicit .schema(...),
+    # which the previous implementation had neither of -- streaming source
+    # failed immediately with "Schema must be specified when creating a
+    # streaming source" and the pod restarted on backoffLimit until the pod
+    # was declared failed.
+    try:
+        target_schema = spark.table(f"{CATALOG}.{BRONZE_TABLE}").schema
+    except Exception as e:  # noqa: BLE001
+        log(
+            f"ERROR: {CATALOG}.{BRONZE_TABLE} does not exist; run "
+            "bronze_verify_financial with LB_REGISTER_TABLE=1 first. ({e})"
+        )
+        sys.exit(2)
+
     df = (
         spark.readStream.format("parquet")
+        .schema(target_schema)
         .option("maxFilesPerTrigger", MAX_FILES)
         .load(BRONZE_URI + PACS_PREFIX)
     )
@@ -45,7 +78,35 @@ def main() -> None:
         .toTable(f"{CATALOG}.{BRONZE_TABLE}")
     )
 
-    query.awaitTermination()
+    # SIGTERM/SIGINT: stop the streaming query cleanly, which lets the
+    # current micro-batch commit or abort atomically. Structured Streaming's
+    # StreamingQuery.stop() blocks until the in-flight batch finishes, so
+    # the checkpoint isn't left in a half-committed state.
+    def _shutdown_handler(signum, frame):  # noqa: ARG001
+        log(f"Signal {signum} received; stopping stream cleanly")
+        try:
+            query.stop()
+        except Exception as e:  # noqa: BLE001
+            log(f"query.stop failed (already stopped?): {e}")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _shutdown_handler)
+        except ValueError:
+            pass
+
+    # Poll instead of awaitTermination(): awaitTermination raises on any
+    # streaming exception and doesn't wake for signal.SIG* under some
+    # Python versions. Polling every second checks for graceful stop
+    # from the signal handler AND surfaces streaming exceptions promptly.
+    while query.isActive:
+        time.sleep(1)
+
+    log("Stream stopped; last batch progress:")
+    if query.lastProgress:
+        log(f"  batchId: {query.lastProgress.get('batchId')}")
+        log(f"  inputRowsPerSecond: {query.lastProgress.get('inputRowsPerSecond')}")
+        log(f"  processedRowsPerSecond: {query.lastProgress.get('processedRowsPerSecond')}")
     spark.stop()
 
 

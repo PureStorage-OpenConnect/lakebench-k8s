@@ -1084,6 +1084,10 @@ class TableNamesConfig(BaseModel):
         default="silver.accounts",
         description="Silver accounts table (Financial): namespace.table",
     )
+    silver_account_statements: str = Field(
+        default="silver.account_statements",
+        description="Silver camt.053-shaped statement-line table with running balance (Financial): namespace.table",
+    )
     silver_counterparty_edges: str = Field(
         default="silver.counterparty_edges",
         description="Silver entity-to-entity edge table (Financial): namespace.table",
