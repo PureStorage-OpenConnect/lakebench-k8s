@@ -808,13 +808,39 @@ def _build_customer360_table(file_id: int, config: Config, get_loyalty_fn) -> pa
     return pa.Table.from_pydict(data, schema=schema)
 
 
+def _parquet_compression() -> tuple[str, int | None]:
+    """Codec + optional level from DG_COMPRESSION env
+    (snappy|zstd1|zstd3|zstd6|lz4|none). Default zstd1: matches the Rust
+    financial datagen -- payment/customer-shaped columns dictionary-encode
+    well and ZSTD-1's larger match window is ~35% smaller than SNAPPY at
+    wall-neutral encode cost."""
+    v = os.environ.get("DG_COMPRESSION", "zstd1").lower()
+    if v == "snappy":
+        return "snappy", None
+    if v == "lz4":
+        return "lz4", None
+    if v in ("none", "uncompressed"):
+        return "none", None
+    if v.startswith("zstd"):
+        try:
+            lvl = int(v[4:]) if len(v) > 4 else 1
+        except ValueError:
+            lvl = 1
+        return "zstd", lvl
+    return "zstd", 1
+
+
 def write_file_to_s3(file_id: int, config: Config, generator: Generator) -> dict:
     """Generate and write a single Parquet file to S3."""
     try:
         table = generator.generate_file_data(file_id)
 
         buffer = io.BytesIO()
-        pq.write_table(table, buffer, compression="snappy")
+        codec, level = _parquet_compression()
+        if codec == "zstd":
+            pq.write_table(table, buffer, compression=codec, compression_level=level)
+        else:
+            pq.write_table(table, buffer, compression=codec)
         # Capture file size BEFORE upload -- boto3's upload_fileobj can close
         # the fileobj under some transports (observed with S3 endpoints that
         # trigger the multipart path). buffer.tell() after upload then raises
@@ -918,7 +944,11 @@ def _continuous_generator_worker(
                     pass
 
             buffer = io.BytesIO()
-            pq.write_table(table, buffer, compression="snappy")
+            codec, level = _parquet_compression()
+            if codec == "zstd":
+                pq.write_table(table, buffer, compression=codec, compression_level=level)
+            else:
+                pq.write_table(table, buffer, compression=codec)
             parquet_bytes = buffer.getvalue()
             size_bytes = len(parquet_bytes)
 
