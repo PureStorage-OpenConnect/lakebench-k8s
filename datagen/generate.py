@@ -28,7 +28,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from multiprocessing import Process
 from multiprocessing import Queue as MPQueue
 from typing import Protocol, runtime_checkable
@@ -192,15 +192,34 @@ class Config:
         # Estimate rows per file to achieve target compressed file size.
         # Schema-specific -- prior single value (4200 = C360 with 2KB payload)
         # was 20-25x too high for the financial schema. Measured empirically
-        # on cluster runs 2026-09-17: financial pacs.008 compresses to ~205
-        # bytes/row after snappy. Miscalibration produced 3 MB files vs the
-        # 512 MB target -- textbook small-file problem at scale >= 100.
-        _BYTES_PER_ROW_BY_SCHEMA = {
-            "customer360": 4200,
-            "financial": 205,
+        # Bytes/row depends on both schema AND codec. The row layout is fixed
+        # per schema but compression ratio is not: ZSTD-1 sees across the
+        # whole row group and cracks the hex payload (customer360) or the
+        # bounded-vocabulary pacs.008 columns (financial) much better than
+        # SNAPPY's 32 KB window. Measured on cluster runs:
+        #   customer360: snappy ~4200 -> zstd1 ~2200 bytes/row (2 KB hex
+        #     payload dominates; snappy has no entropy stage so hex stays
+        #     ~1 byte/char, zstd1 halves it).
+        #   financial pacs.008: snappy ~205 bytes/row; zstd1 ~130.
+        # Miscalibration (using the SNAPPY constant with the ZSTD default)
+        # produces files ~1/2 the target size -- the small-file problem this
+        # table exists to prevent, silently reintroduced. When
+        # DG_COMPRESSION defaults changed 2026-09-18, this table had to
+        # move with it.
+        codec, _ = _parquet_compression()
+        _BYTES_PER_ROW = {
+            ("customer360", "snappy"): 4200,
+            ("customer360", "zstd"): 2200,
+            ("customer360", "lz4"): 4000,
+            ("customer360", "none"): 6500,
+            ("financial", "snappy"): 205,
+            ("financial", "zstd"): 130,
+            ("financial", "lz4"): 200,
+            ("financial", "none"): 320,
         }
-        compressed_bytes_per_row = _BYTES_PER_ROW_BY_SCHEMA.get(
-            self.schema_name, 4200
+        compressed_bytes_per_row = _BYTES_PER_ROW.get(
+            (self.schema_name, codec),
+            _BYTES_PER_ROW.get((self.schema_name, "zstd"), 2200),
         )
         self.rows_per_file = max(1000, self.file_size_bytes // compressed_bytes_per_row)
 
@@ -271,11 +290,17 @@ def generate_uuids(rows: int, rng: np.random.Generator) -> list:
 
 
 def generate_timestamps(rows: int, rng: np.random.Generator, config: Config) -> list:
-    """Generate random timestamps within the configured range."""
+    """Generate random timestamps within the configured range.
+
+    Uses `tz=timezone.utc` so the returned datetimes are UTC on every host;
+    the naive `datetime.fromtimestamp(ts)` leaks the pod's local TZ setting
+    into the emitted data, silently breaking the (seed, file_id, scale)
+    -> same content contract when two pods (or the same pipeline re-run
+    after a base-image TZ change) happen to run under different TZs."""
     start_ts = config.timestamp_start.timestamp()
     end_ts = config.timestamp_end.timestamp()
     timestamps = rng.uniform(start_ts, end_ts, size=rows)
-    return [datetime.fromtimestamp(ts) for ts in timestamps]
+    return [datetime.fromtimestamp(ts, tz=timezone.utc) for ts in timestamps]
 
 
 def generate_emails(
@@ -978,26 +1003,44 @@ def _continuous_generator_worker(
 
 def _continuous_uploader_worker(
     upload_queue: MPQueue,
-    poison_pills_expected: int,
+    shutdown_counter: list,
+    shutdown_target: int,
+    shutdown_lock: threading.Lock,
     config: Config,
     results: list,
     results_lock: threading.Lock,
     progress_callback,
 ):
-    """
-    Uploader thread: pulls compressed data from upload_queue and uploads to S3.
-    """
-    s3_client = get_s3_client(config)
-    pills_received = 0
+    """Uploader thread: pulls compressed data from upload_queue and uploads to S3.
 
-    while pills_received < poison_pills_expected:
+    Shutdown protocol: generators put one `None` pill each when they exit
+    (total = NUM_GENERATORS). Uploaders share one queue and cannot
+    predict how the pills will distribute across them; the previous
+    per-thread `pills_received == pills_per_uploader` check hung whenever
+    one uploader consumed more than its share (a scheduling-dependent
+    race that surfaces as an indistinguishable pod timeout). Fix:
+    increment a SHARED counter on every pill and exit when it reaches
+    `shutdown_target = NUM_GENERATORS`, regardless of how the pills
+    landed across threads."""
+    s3_client = get_s3_client(config)
+
+    while True:
         try:
             item = upload_queue.get(timeout=1)
         except Exception:
+            # Poll: if the shared counter already hit the target while we
+            # were waiting on an empty queue, exit rather than spin.
+            with shutdown_lock:
+                if shutdown_counter[0] >= shutdown_target:
+                    return
             continue
 
         if item is None:
-            pills_received += 1
+            with shutdown_lock:
+                shutdown_counter[0] += 1
+                done = shutdown_counter[0] >= shutdown_target
+            if done:
+                return
             continue
 
         if len(item) == 5:
@@ -1119,14 +1162,20 @@ def run_continuous(
         p.start()
         generators.append(p)
 
-    pills_per_uploader = NUM_GENERATORS // NUM_UPLOADERS
+    # Shared pill-count across uploaders. Each generator puts exactly one
+    # `None` pill when it exits, so the total pill count is NUM_GENERATORS
+    # regardless of how they distribute across the uploader threads.
+    shutdown_counter = [0]
+    shutdown_lock = threading.Lock()
     uploaders = []
     for i in range(NUM_UPLOADERS):
         t = threading.Thread(
             target=_continuous_uploader_worker,
             args=(
                 upload_queue,
-                pills_per_uploader,
+                shutdown_counter,
+                NUM_GENERATORS,
+                shutdown_lock,
                 config,
                 results,
                 results_lock,
