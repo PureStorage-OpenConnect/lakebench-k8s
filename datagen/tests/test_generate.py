@@ -182,6 +182,51 @@ def test_bytes_per_row_codec_aware(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "codec,c360_min,c360_max,fin_min,fin_max",
+    [
+        # 512 MiB / bytes_per_row = expected rows/file. Bounds sit within
+        # ~9% of the measured value; measurements are reproducible to <1%,
+        # so any drift of a codec or a schema column that shifts rows/file
+        # by more than ~10% trips this test, while normal noise doesn't.
+        # Measured 2026-09-18 via scratchpad/measure_bpr.py:
+        #   customer360 snappy 4332 -> 124k; zstd 2233 -> 240k;
+        #                lz4    4356 -> 123k; none  4399 -> 122k.
+        #   financial   snappy  199 -> 2.7M; zstd  133 -> 4.0M;
+        #                lz4     207 -> 2.6M; none  292 -> 1.8M.
+        ("snappy", 114_000, 133_000, 2_484_000, 2_912_000),
+        ("zstd1",  221_000, 259_000, 3_720_000, 4_364_000),
+        ("lz4",    113_000, 132_000, 2_395_000, 2_809_000),
+        ("none",   112_000, 130_000, 1_697_000, 1_990_000),
+    ],
+)
+def test_bytes_per_row_all_codecs(monkeypatch, codec, c360_min, c360_max, fin_min, fin_max):
+    """Every codec entry in _BYTES_PER_ROW must produce plausible
+    rows_per_file. Regression guard: LZ4 and none values were previously
+    guesses (4000, 6500) rather than measurements; the "none" guess was
+    off by 47% and would have made files ~50% oversized under an operator
+    who explicitly picked uncompressed output."""
+    from generate import Config
+
+    monkeypatch.setenv("DG_COMPRESSION", codec)
+    c360 = Config(
+        target_tb=0.001, bucket="b", prefix="p",
+        checkpoint_file="/tmp/x", file_size_mb=512, schema_name="customer360",
+    )
+    fin = Config(
+        target_tb=0.001, bucket="b", prefix="p",
+        checkpoint_file="/tmp/x", file_size_mb=512, schema_name="financial",
+    )
+    assert c360_min <= c360.rows_per_file <= c360_max, (
+        f"customer360 {codec} rows_per_file={c360.rows_per_file} outside "
+        f"[{c360_min}, {c360_max}] -- codec table likely miscalibrated"
+    )
+    assert fin_min <= fin.rows_per_file <= fin_max, (
+        f"financial {codec} rows_per_file={fin.rows_per_file} outside "
+        f"[{fin_min}, {fin_max}] -- codec table likely miscalibrated"
+    )
+
+
 def test_bytes_per_row_financial_smaller_than_customer360(monkeypatch):
     """Sanity: financial's per-row size must stay much smaller than
     Customer 360's (financial has no 2KB payload column)."""

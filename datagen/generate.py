@@ -195,27 +195,28 @@ class Config:
         # Bytes/row depends on both schema AND codec. The row layout is fixed
         # per schema but compression ratio is not: ZSTD-1 sees across the
         # whole row group and cracks the hex payload (customer360) or the
-        # bounded-vocabulary pacs.008 columns (financial) much better than
-        # SNAPPY's 32 KB window. Measured on cluster runs:
-        #   customer360: snappy ~4200 -> zstd1 ~2200 bytes/row (2 KB hex
-        #     payload dominates; snappy has no entropy stage so hex stays
-        #     ~1 byte/char, zstd1 halves it).
-        #   financial pacs.008: snappy ~205 bytes/row; zstd1 ~130.
+        # bounded-vocabulary financial columns much better than SNAPPY's
+        # 32 KB window. LZ4 barely compresses either schema (payload for
+        # customer360 is random hex, financial columns are already dense),
+        # so its bytes/row lands within a few percent of uncompressed.
+        # Measured 2026-09-18 via generate_file_data(0) at 50k rows per
+        # codec, seed=42 (scratchpad/measure_bpr.py):
+        #   customer360: snappy 4332, zstd1 2233, lz4 4356, none 4399
+        #   financial:   snappy  199, zstd1  133, lz4  207, none  292
         # Miscalibration (using the SNAPPY constant with the ZSTD default)
         # produces files ~1/2 the target size -- the small-file problem this
-        # table exists to prevent, silently reintroduced. When
-        # DG_COMPRESSION defaults changed 2026-09-18, this table had to
-        # move with it.
+        # table exists to prevent, silently reintroduced. When DG_COMPRESSION
+        # defaults changed 2026-09-18, this table had to move with it.
         codec, _ = _parquet_compression()
         _BYTES_PER_ROW = {
-            ("customer360", "snappy"): 4200,
-            ("customer360", "zstd"): 2200,
-            ("customer360", "lz4"): 4000,
-            ("customer360", "none"): 6500,
-            ("financial", "snappy"): 205,
-            ("financial", "zstd"): 130,
-            ("financial", "lz4"): 200,
-            ("financial", "none"): 320,
+            ("customer360", "snappy"): 4332,
+            ("customer360", "zstd"): 2233,
+            ("customer360", "lz4"): 4356,
+            ("customer360", "none"): 4399,
+            ("financial", "snappy"): 199,
+            ("financial", "zstd"): 133,
+            ("financial", "lz4"): 207,
+            ("financial", "none"): 292,
         }
         compressed_bytes_per_row = _BYTES_PER_ROW.get(
             (self.schema_name, codec),

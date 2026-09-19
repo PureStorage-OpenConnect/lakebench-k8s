@@ -19,7 +19,7 @@ use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
 use datagen_rs::s3sink::{S3Cfg, S3Sink};
 use datagen_rs::timing::{sample_ts, shape_fixed_day, DayCal};
 use datagen_rs::world::ring_member;
-use datagen_rs::writer::writer_properties;
+use datagen_rs::writer::{bytes_per_row_default, writer_properties};
 
 /// Stable uid for a typology row, used to seed the row's UETR in the bronze
 /// emit AND recovered by the manifest builder to populate
@@ -103,7 +103,49 @@ fn main() {
     let scale: f64 = arg("--scale", 0.01);
     let corpus_months: i64 = arg("--corpus-months", 60);
     let file_size_mb: i64 = arg("--file-size-mb", 32);
-    let bytes_per_row: f64 = arg("--bytes-per-row", 246.0);
+    // Bytes/row is used only to size total_files from total_txns. If the flag
+    // is not passed we pick a codec-aware default from writer::bytes_per_row_default
+    // (a single scalar was wrong under any codec other than the one it was
+    // measured against -- see writer.rs for the measured table).
+    //
+    // The generic `arg()` helper silently falls back to the default on parse
+    // failure, which would let `--bytes-per-row abc` or `1e-999` (subnormal
+    // underflow -> 0.0) or `-0.0` (== 0.0) silently take the codec default.
+    // Distinguish "flag absent" from "flag present but unparseable"
+    // explicitly for this one arg: unparseable exits 2, positive-finite is
+    // the override, absent uses the codec default.
+    let bytes_per_row: f64 = {
+        let args: Vec<String> = std::env::args().collect();
+        let mut present: Option<&str> = None;
+        for i in 0..args.len() {
+            if args[i] == "--bytes-per-row" {
+                if let Some(v) = args.get(i + 1) {
+                    present = Some(v.as_str());
+                }
+            }
+        }
+        match present {
+            None => {
+                let d = bytes_per_row_default();
+                eprintln!("--bytes-per-row not set: using codec-aware default {}", d);
+                d
+            }
+            Some(raw) => match raw.parse::<f64>() {
+                Ok(v) if v.is_finite() && v > 0.0 && !v.is_subnormal() => v,
+                Ok(v) => {
+                    eprintln!(
+                        "--bytes-per-row must be a positive finite non-subnormal number; got {} ({})",
+                        raw, v
+                    );
+                    std::process::exit(2);
+                }
+                Err(e) => {
+                    eprintln!("--bytes-per-row could not parse {:?}: {}", raw, e);
+                    std::process::exit(2);
+                }
+            },
+        }
+    };
     let node_id: i64 = arg("--node-id", 0);
     let total_nodes: i64 = arg("--total-nodes", 1);
     // Work split: "all" (node 0 also writes the reference zones), "bronze"

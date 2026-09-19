@@ -45,6 +45,36 @@ pub fn compression_from_env() -> Compression {
     }
 }
 
+/// Bytes/row default for the Rust datagen's pacs.008 rows at the current
+/// DG_COMPRESSION. Used by the CLI when `--bytes-per-row` is not passed (or
+/// passed as 0) to derive file_count from total_txns; a scalar default was
+/// wrong under any codec other than the one it was measured against.
+/// Measured 2026-09-18 against pacs.008 output at scale=0.05, seed=42,
+/// corpus_months=12, file_size_mb=32 (bronze mode):
+///   zstd1  227, snappy 345, lz4 350, none 495
+/// A miscalibration here silently produces files 2x too big (none) or 1.4x
+/// (snappy/lz4), which drives up per-file S3 latency and blows past the
+/// pod's parquet-buffer cap.
+///
+/// NOTE: these numbers are for pacs.008 specifically, not for the Python
+/// datagen's `financial` schema. The Python datagen's `_BYTES_PER_ROW`
+/// table describes a different row layout, so `("financial", "zstd")=133`
+/// there is NOT the same measurement as `zstd1 -> 227` here. Do not
+/// reconcile the two tables against each other.
+pub fn bytes_per_row_default() -> f64 {
+    match compression_from_env() {
+        Compression::ZSTD(_) => 227.0,
+        Compression::SNAPPY => 345.0,
+        Compression::LZ4_RAW => 350.0,
+        Compression::UNCOMPRESSED => 495.0,
+        // Any codec compression_from_env() would return that isn't listed
+        // above didn't exist when this table was measured. Return the ZSTD
+        // value as a safe middle: a future codec is more likely to be a
+        // compressor than not.
+        _ => 227.0,
+    }
+}
+
 /// WriterProperties used across every parquet the datagen writes. Reads
 /// `DG_STATS`, `DG_DICT`, `DG_PAGESZ`, `DG_COMPRESSION` from env.
 pub fn writer_properties() -> WriterProperties {
