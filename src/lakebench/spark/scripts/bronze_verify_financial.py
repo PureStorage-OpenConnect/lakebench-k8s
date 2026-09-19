@@ -14,7 +14,7 @@ import time
 
 from common import env, log
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, expr
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 # datagen_rs writes pacs.008 files under `<uploader_prefix>/bronze/pacs008/*`
@@ -98,34 +98,41 @@ def main() -> None:
     log(f"Partition days present: {partition_days}")
 
     if REGISTER:
-        # Register the Iceberg table as EXTERNAL over the datagen Parquet
-        # files -- no data copy. The previous CTAS + INSERT pattern
-        # doubled S3 usage (a full silver-scale rewrite during "verify")
-        # and gave silver_build a third scan over the same bytes.
+        # Register the Iceberg table over the datagen Parquet files. Two
+        # implementations are attempted in order:
         #
-        # Uses `add_files` procedure so the existing Parquet files become
-        # data files of the Iceberg table without any I/O against them
-        # (no rewrite, no manifest scan of file content). Iceberg's
-        # add_files supports partitioning by a transform; here we
-        # partition by days(intr_bk_sttlm_dt) to match silver's join key.
+        # 1. add_files (preferred, no data copy): create the Iceberg table
+        #    with the FULL parquet schema first (via spark.read.parquet
+        #    inferred schema), then attach existing files. The previous
+        #    revision created the target table with only 5 hard-coded
+        #    columns before add_files; add_files resolves by column NAME
+        #    against the target schema, so the other 30+ pacs.008
+        #    fields (dbtr.*, cdtr.*, xchg_rate, rgltry_rptg, etc)
+        #    silently dropped and silver_build immediately blew up on
+        #    the missing struct columns.
         #
-        # If the Iceberg catalog doesn't support add_files (rare on
-        # Polaris/Hive; not on plain HadoopCatalog), the CREATE TABLE with
-        # LOCATION path works instead. add_files is preferred because it
-        # collects statistics and updates the manifest.
-        spark.sql(f"""
-            CREATE TABLE IF NOT EXISTS {CATALOG}.{BRONZE_TABLE} (
-                msg_id STRING, cre_dt_tm TIMESTAMP, intr_bk_sttlm_dt DATE,
-                txn_id STRING, uetr STRING
-            )
-            USING iceberg
-            PARTITIONED BY (days(intr_bk_sttlm_dt))
-            TBLPROPERTIES (
-                'format-version' = '2',
-                'write.parquet.compression-codec' = 'snappy'
-            )
-        """)
+        # 2. CTAS fallback: if add_files isn't supported by the catalog
+        #    (e.g. Nessie REST prior to a certain version), rewrite the
+        #    data into the Iceberg table. Doubles S3 usage.
         try:
+            # Full inferred schema for the CREATE, so add_files finds
+            # every column of the parquet source under its real name.
+            spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
+            src = spark.read.parquet(BRONZE_URI + PACS_PREFIX)
+            # Iceberg CREATE ... USING iceberg PARTITIONED BY (days(...))
+            # requires the partition column to be declared in the schema,
+            # which it already is (intr_bk_sttlm_dt DATE). Use writeTo
+            # with .create() to get schema-from-DataFrame + partition
+            # spec + tblproperties in a single atomic call.
+            (
+                src.limit(0)
+                .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
+                .using("iceberg")
+                .partitionedBy(expr("days(intr_bk_sttlm_dt)"))
+                .tableProperty("format-version", "2")
+                .tableProperty("write.parquet.compression-codec", "snappy")
+                .create()
+            )
             spark.sql(
                 f"CALL {CATALOG}.system.add_files("
                 f"  table => '{BRONZE_TABLE}', "

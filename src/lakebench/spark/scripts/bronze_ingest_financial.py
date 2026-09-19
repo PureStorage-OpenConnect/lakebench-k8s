@@ -102,6 +102,17 @@ def main() -> None:
     while query.isActive:
         time.sleep(1)
 
+    # Re-raise any streaming exception so a jar-download stall / schema
+    # mismatch / S3 auth failure surfaces as pod exit != 0. Without this,
+    # the query dies but the pod exits 0 and sustained mode reports PASS
+    # with zero rows -- the exact LB-044 shape this file is meant to
+    # avoid.
+    exc = query.exception()
+    if exc is not None:
+        log(f"Streaming query failed: {exc}")
+        spark.stop()
+        raise exc
+
     log("Stream stopped; last batch progress:")
     if query.lastProgress:
         log(f"  batchId: {query.lastProgress.get('batchId')}")

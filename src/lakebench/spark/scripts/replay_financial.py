@@ -124,23 +124,64 @@ def main() -> None:
     historical_count = historical.count()
     log(f"Historical silver rows: {historical_count:,}")
 
-    # Rule dispatch. Detection modules land under LB-108; until then the
-    # replay path exercises end-to-end retention/time-travel plumbing by
-    # writing an empty alerts frame with the correct FULL schema so caller
-    # assertions and score_financial's join don't blow up.
-    if args.rule not in ("W2_structuring", "W3_round_tripping", "W4_risk_propagation"):
-        log(f"Unknown rule: {args.rule}")
+    # Rule dispatch. Rule functions in detection_rules.py accept a silver
+    # DataFrame + params and return a gold.alerts-shaped DataFrame.
+    from detection_rules import get_rule, known_rules
+
+    rule_fn = get_rule(args.rule)
+    if rule_fn is None:
+        log(f"Unknown rule {args.rule!r}; known rules: {known_rules()}")
         sys.exit(2)
 
-    log("Rule module not yet packaged in this build; writing empty alert frame")
-    empty = _empty_alerts_df(spark)
-    # Fill run_id so downstream can at least distinguish which replay ran.
     replay_run_id = str(uuid.uuid4())
-    empty = empty.withColumn("run_id", lit(replay_run_id))
-    empty = empty.withColumn("alert_ts", current_timestamp())
-    empty.writeTo(args.output_alerts).createOrReplace()
+    log(f"Running {args.rule} with run_id={replay_run_id}")
 
-    log(f"Replay output: {args.output_alerts} (rows: {empty.count()})")
+    # Rule functions accept keyword args -- pass threshold when provided
+    # (rule signature varies but all accept run_id).
+    kwargs = {"run_id": replay_run_id}
+    if args.threshold is not None:
+        # w2_structuring interprets threshold as count. Others may ignore.
+        kwargs["threshold_count"] = int(args.threshold)
+    try:
+        alerts = rule_fn(historical, **{
+            k: v for k, v in kwargs.items()
+            if k in rule_fn.__code__.co_varnames
+        })
+    except Exception as e:  # noqa: BLE001
+        log(f"Rule execution failed: {e}")
+        sys.exit(4)
+
+    alert_count = alerts.count()
+    log(f"Rule produced {alert_count} alert rows")
+    # Bootstrap the replay target with the full alerts schema + partition
+    # spec (days(alert_ts)) via CREATE IF NOT EXISTS so the subsequent
+    # overwrite preserves partitioning. createOrReplace() on the writer
+    # would reset partitioning on every run (silent regression -- same
+    # defect class silver_build/gold_finalize fixed). Idempotent.
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {args.output_alerts} (
+            alert_id           STRING NOT NULL,
+            rule_id            STRING NOT NULL,
+            rule_version       STRING NOT NULL,
+            model_id           STRING NOT NULL,
+            model_version      STRING NOT NULL,
+            entity_id          BIGINT NOT NULL,
+            related_txn_ids    ARRAY<STRING>,
+            related_entity_ids ARRAY<BIGINT>,
+            alert_ts           TIMESTAMP NOT NULL,
+            alert_score        DOUBLE,
+            priority           STRING,
+            status             STRING,
+            disposition        STRING,
+            alert_type         STRING,
+            run_id             STRING NOT NULL,
+            narrative          STRING,
+            evidence           MAP<STRING, STRING>
+        ) USING iceberg PARTITIONED BY (days(alert_ts))
+        TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+    """)
+    alerts.writeTo(args.output_alerts).overwrite(lit(True))
+    log(f"Wrote {args.output_alerts}")
     spark.stop()
 
 
