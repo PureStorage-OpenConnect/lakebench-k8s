@@ -293,6 +293,27 @@ fn uetr_derivation_stable_and_seed_sensitive() {
 }
 
 #[test]
+fn bytes_per_row_default_is_codec_aware() {
+    // A scalar default was wildly wrong under any codec other than the one it
+    // was measured against. This test pins the codec-aware defaults so a
+    // regression trips a unit test rather than manifesting as 2x-too-big
+    // files at UAT scale.
+    use datagen_rs::writer::bytes_per_row_default;
+    // ZSTD-1 (default codec) -- ~227 bytes/row measured 2026-09-18.
+    let z = with_env("DG_COMPRESSION", Some("zstd1"), bytes_per_row_default);
+    let s = with_env("DG_COMPRESSION", Some("snappy"), bytes_per_row_default);
+    let l = with_env("DG_COMPRESSION", Some("lz4"), bytes_per_row_default);
+    let n = with_env("DG_COMPRESSION", Some("none"), bytes_per_row_default);
+    // Ratios more than the absolute values: SNAPPY/LZ4 should be within 5%
+    // of each other, and both should sit between ZSTD-1 and uncompressed.
+    assert!(z > 100.0 && z < 300.0, "zstd default sanity: {}", z);
+    assert!(n > 400.0 && n < 700.0, "none default sanity: {}", n);
+    assert!(s > z && s < n, "snappy {} should sit between zstd {} and none {}", s, z, n);
+    assert!(l > z && l < n, "lz4 {} should sit between zstd {} and none {}", l, z, n);
+    assert!((s - l).abs() / s.max(l) < 0.10, "snappy {} and lz4 {} should be within 10%", s, l);
+}
+
+#[test]
 fn compression_snappy_lz4_none() {
     use datagen_rs::writer::compression_from_env;
     use parquet::basic::Compression;
