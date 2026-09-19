@@ -182,54 +182,180 @@ def w2_structuring(
 
 def w3_round_tripping(
     silver_txns: DataFrame,
-    max_hops: int = 4,
     window_hours: int = 72,
     run_id: str = "unknown",
 ) -> DataFrame:
-    """Detect entities where money leaves and returns via 2-4 hops within
-    window_hours. Simplified 2-hop approximation: any edge A->B where
-    within window_hours there is also an edge B->A (a direct return).
+    """Detect 2-hop round-trips: entity A -> entity B -> entity A within
+    window_hours. This catches the `cycle` typology (at participants=4
+    the intermediate hops produce direct back-and-forth pairs as a side
+    effect) and `corridor_high_risk` / `cross_border_cycle` at their
+    simplest instances.
 
-    Real cycle detection requires GraphFrames / connected components which
-    isn't wired in this build. This 2-hop approximation catches simple
-    round-tripping which is the base case of the datagen's `cycle`
-    typology at participants=4 -- the 4-hop cycles produce back-and-forth
-    2-hop edges as a side effect at intermediate nodes.
+    Real N-hop cycle detection requires GraphFrames / iterative BFS which
+    isn't wired in this build; the 2-hop approximation is the minimum
+    that still fires on the datagen's cycle instances.
+
+    Emits one alert per (A, B) pair with related_txn_ids = UETRs of the
+    A->B and B->A transactions inside the window.
     """
-    return silver_txns.limit(0).selectExpr(
-        "uuid() as alert_id",
-        "'W3_round_tripping' as rule_id",
-        f"'{RULE_VERSION}' as rule_version",
-        f"'{MODEL_ID}' as model_id",
-        f"'{MODEL_VERSION}' as model_version",
-        "cast(0 as bigint) as entity_id",
-        "cast(null as array<string>) as related_txn_ids",
-        "cast(null as array<bigint>) as related_entity_ids",
-        "current_timestamp() as alert_ts",
-        "cast(0.0 as double) as alert_score",
-        "cast(null as string) as priority",
-        "'OPEN' as status",
-        "cast(null as string) as disposition",
-        "'round_tripping' as alert_type",
-        f"'{run_id}' as run_id",
-        "cast(null as string) as narrative",
-        "cast(null as map<string, string>) as evidence",
+    from pyspark.sql.functions import greatest, least, unix_timestamp
+
+    left = silver_txns.select(
+        col("uetr").alias("uetr_l"),
+        col("originator_id").alias("a"),
+        col("beneficiary_id").alias("b"),
+        col("txn_amount_usd").alias("amt_l"),
+        col("txn_timestamp").alias("ts_l"),
+    )
+    right = silver_txns.select(
+        col("uetr").alias("uetr_r"),
+        col("originator_id").alias("b_r"),
+        col("beneficiary_id").alias("a_r"),
+        col("txn_timestamp").alias("ts_r"),
+    )
+    # Round-trip: (a -> b) then (b -> a) within +/- window_hours,
+    # ts_r >= ts_l (b returns to a AFTER a sends to b). Filter
+    # a != b so degenerate self-loops don't count.
+    seconds = window_hours * 3600
+    pairs = (
+        left.join(
+            right,
+            (col("a") == col("a_r")) & (col("b") == col("b_r")) & (col("a") != col("b")),
+            "inner",
+        )
+        .filter(col("ts_r") >= col("ts_l"))
+        .filter(
+            (unix_timestamp(col("ts_r")) - unix_timestamp(col("ts_l"))) <= seconds
+        )
+    )
+    # Aggregate per (a, b): collect all round-trip UETRs and count them.
+    # Alerting once per direction (a<b canonicalized) so we don't double-
+    # emit for each direction of the same underlying cycle.
+    canon = pairs.select(
+        least(col("a"), col("b")).alias("e1"),
+        greatest(col("a"), col("b")).alias("e2"),
+        col("uetr_l"),
+        col("uetr_r"),
+        col("ts_l"),
+        col("ts_r"),
+    )
+    alerts = (
+        canon.groupBy("e1", "e2")
+        .agg(
+            count(lit(1)).alias("roundtrip_count"),
+            collect_list(col("uetr_l")).alias("uetrs_l"),
+            collect_list(col("uetr_r")).alias("uetrs_r"),
+            max_("ts_r").alias("last_ts"),
+            min_("ts_l").alias("first_ts"),
+        )
+        .filter(col("roundtrip_count") >= 1)
+    )
+    return alerts.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W3_round_tripping").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("e1").alias("entity_id"),
+        array_distinct(
+            expr("concat(uetrs_l, uetrs_r)")
+        ).alias("related_txn_ids"),
+        array(col("e1"), col("e2")).alias("related_entity_ids"),
+        col("last_ts").alias("alert_ts"),
+        (lit(0.6) + col("roundtrip_count") * lit(0.05)).cast("double").alias("alert_score"),
+        when(col("roundtrip_count") >= 3, lit("HIGH"))
+            .when(col("roundtrip_count") >= 2, lit("MED"))
+            .otherwise(lit("LOW"))
+            .alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("round_tripping").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Round-trip between entities ', cast(e1 as string), ' and ', "
+            "cast(e2 as string), ' -- ', cast(roundtrip_count as string), "
+            "' back-and-forth pairs between ', cast(first_ts as string), ' and ', "
+            "cast(last_ts as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(lit("rule"), lit("window_hours")),
+            array(lit("W3_round_tripping"), lit(str(window_hours))),
+        ).alias("evidence"),
     )
 
 
 def w4_risk_propagation(
     silver_txns: DataFrame,
     velocity_hours: int = 6,
-    min_hops: int = 3,
+    forward_ratio: float = 0.8,
     run_id: str = "unknown",
 ) -> DataFrame:
-    """Detect rapid multi-hop chains where an entity receives funds and
-    forwards >90% of it within velocity_hours. Placeholder: not
-    implemented; returns an empty alerts frame.
+    """Detect rapid pass-through: entity B receives funds from A and
+    forwards >= forward_ratio of them to some entity C, all within
+    velocity_hours.
+
+    Fires on the `rapid_layering` typology (participants=3, whole chain
+    within one civil day per datagen). Approximation: does not require
+    C != A (which would require another join step); a self-loop that
+    just cycles back also fires, treated as a subset of round-tripping.
+
+    Emits one alert per B (the intermediate entity) with related_txn_ids
+    = [incoming_uetr, outgoing_uetr] pair.
     """
-    return w3_round_tripping(silver_txns, run_id=run_id).limit(0).withColumn(
-        "rule_id", lit("W4_risk_propagation")
-    ).withColumn("alert_type", lit("risk_propagation"))
+    from pyspark.sql.functions import unix_timestamp
+
+    incoming = silver_txns.select(
+        col("uetr").alias("uetr_in"),
+        col("originator_id").alias("a"),
+        col("beneficiary_id").alias("b"),
+        col("txn_amount_usd").alias("amt_in"),
+        col("txn_timestamp").alias("ts_in"),
+    )
+    outgoing = silver_txns.select(
+        col("uetr").alias("uetr_out"),
+        col("originator_id").alias("b2"),
+        col("beneficiary_id").alias("c"),
+        col("txn_amount_usd").alias("amt_out"),
+        col("txn_timestamp").alias("ts_out"),
+    )
+    seconds = velocity_hours * 3600
+    joined = (
+        incoming.join(outgoing, col("b") == col("b2"), "inner")
+        .filter(col("ts_out") >= col("ts_in"))
+        .filter(
+            (unix_timestamp(col("ts_out")) - unix_timestamp(col("ts_in"))) <= seconds
+        )
+        .filter(col("amt_out") >= col("amt_in") * lit(forward_ratio))
+    )
+    return joined.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W4_risk_propagation").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("b").alias("entity_id"),
+        array(col("uetr_in"), col("uetr_out")).alias("related_txn_ids"),
+        array(col("a"), col("b"), col("c")).alias("related_entity_ids"),
+        col("ts_out").alias("alert_ts"),
+        (
+            lit(0.7) + ((col("amt_out") / col("amt_in")) - lit(forward_ratio)) * lit(0.3)
+        ).cast("double").alias("alert_score"),
+        lit("HIGH").alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("risk_propagation").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Rapid pass-through at entity ', cast(b as string), "
+            "': received ', cast(amt_in as string), ' from ', cast(a as string), "
+            "' at ', cast(ts_in as string), ', forwarded ', cast(amt_out as string), "
+            "' to ', cast(c as string), ' at ', cast(ts_out as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(lit("rule"), lit("velocity_hours"), lit("forward_ratio")),
+            array(lit("W4_risk_propagation"), lit(str(velocity_hours)), lit(str(forward_ratio))),
+        ).alias("evidence"),
+    )
 
 
 _RULE_DISPATCH = {
