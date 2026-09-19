@@ -63,8 +63,17 @@ def replay(
         float | None, typer.Option(help="Rule-specific threshold override")
     ] = None,
     output_alerts: Annotated[
-        str, typer.Option(help="Fully-qualified output alerts table")
-    ] = "gold.alerts_replay",
+        str,
+        typer.Option(
+            help=(
+                "Fully-qualified output alerts table (catalog.namespace.table). "
+                "Defaults to the config's gold_alerts table so score_financial's "
+                "join finds the rows without extra plumbing. Multiple rules can "
+                "share the same table -- replay does DELETE WHERE rule_id=X "
+                "before appending, so each rule owns its rows."
+            ),
+        ),
+    ] = "",
 ) -> None:
     """Rerun a detection rule against a historical Iceberg snapshot (W8)."""
     from lakebench.k8s.client import KubernetesClient
@@ -73,6 +82,14 @@ def replay(
     cfg = _load_config(config)
     k8s = KubernetesClient(context=None)
     mgr = SparkJobManager(cfg, k8s)
+
+    # Default to the config's gold_alerts table, fully qualified with the
+    # active catalog. score_financial reads exactly this table, so
+    # defaulting here removes the "why is my recall 0.0" foot-gun of
+    # writing to a different table than what score reads.
+    if not output_alerts:
+        catalog = cfg.architecture.query_engine.trino.catalog_name
+        output_alerts = f"{catalog}.{cfg.architecture.tables.gold_alerts}"
 
     extra_args = [
         "--rule",

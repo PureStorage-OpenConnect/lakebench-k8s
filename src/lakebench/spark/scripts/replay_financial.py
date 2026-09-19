@@ -153,11 +153,9 @@ def main() -> None:
 
     alert_count = alerts.count()
     log(f"Rule produced {alert_count} alert rows")
-    # Bootstrap the replay target with the full alerts schema + partition
-    # spec (days(alert_ts)) via CREATE IF NOT EXISTS so the subsequent
-    # overwrite preserves partitioning. createOrReplace() on the writer
-    # would reset partitioning on every run (silent regression -- same
-    # defect class silver_build/gold_finalize fixed). Idempotent.
+    # Bootstrap the target with the full alerts schema + partition spec
+    # (days(alert_ts)) via CREATE IF NOT EXISTS. Preserves partitioning
+    # on repeat runs.
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {args.output_alerts} (
             alert_id           STRING NOT NULL,
@@ -180,8 +178,16 @@ def main() -> None:
         ) USING iceberg PARTITIONED BY (days(alert_ts))
         TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
     """)
-    alerts.writeTo(args.output_alerts).overwrite(lit(True))
-    log(f"Wrote {args.output_alerts}")
+    # Delete-then-append scoped to THIS rule's rows. Multiple rules coexist
+    # in the same alerts table keyed by rule_id (W2, W3, W4 append side by
+    # side). Re-running the same rule replaces only its own rows, not
+    # other rules'. score_financial reads all rows and joins by uetr.
+    spark.sql(
+        f"DELETE FROM {args.output_alerts} WHERE rule_id = '{args.rule}'"
+    )
+    if alert_count > 0:
+        alerts.writeTo(args.output_alerts).append()
+    log(f"Wrote {args.output_alerts} (rule={args.rule} rows={alert_count})")
     spark.stop()
 
 
