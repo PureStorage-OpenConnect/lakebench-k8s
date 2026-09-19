@@ -4,22 +4,33 @@
 //! file is built into an in-memory `Vec<u8>` and PUT directly to S3, so the
 //! local filesystem is never used as a staging buffer.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
 
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 
 use datagen_rs::amounts::{lognormal_amount, structuring_amount};
 use datagen_rs::emit::{build_batch, Batch};
-use datagen_rs::hash::Rng;
+use datagen_rs::hash::{splitmix64, Rng};
 use datagen_rs::model::build_world_ex;
 use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
 use datagen_rs::s3sink::{S3Cfg, S3Sink};
 use datagen_rs::timing::{sample_ts, shape_fixed_day, DayCal};
 use datagen_rs::world::ring_member;
+use datagen_rs::writer::writer_properties;
+
+/// Stable uid for a typology row, used to seed the row's UETR in the bronze
+/// emit AND recovered by the manifest builder to populate
+/// `participant_uetrs`. Top bit = 1 so it cannot collide with the base
+/// row uid namespace `(fid<<40)|i` -- base rows always have top bit 0
+/// because fid fits in far fewer than 24 bits at any realistic scale.
+#[inline]
+fn typology_uid(inst_seed: i64, row_idx: usize) -> u64 {
+    let mixed = splitmix64((inst_seed as u64).wrapping_add((row_idx as u64) << 40));
+    mixed | 0x8000_0000_0000_0000
+}
 
 const US_PER_DAY: i64 = 86_400_000_000;
 
@@ -53,48 +64,11 @@ struct TypRow {
     ts_us: i64,
     amount: f64,
     ccy: &'static str,
-}
-
-fn writer_props() -> WriterProperties {
-    use parquet::basic::ZstdLevel;
-    use parquet::file::properties::EnabledStatistics;
-    // Bronze parquet is scanned by DuckDB/Spark, which do not need per-page
-    // column statistics; computing them for 41 mostly-nested columns is pure
-    // encode overhead. DG_STATS=page|chunk|none (default none), DG_DICT=0|1
-    // (default 1), DG_PAGESZ bytes let a run tune the encode without a rebuild.
-    // DG_COMPRESSION=snappy|zstd1|zstd3|zstd6|lz4|none picks the codec
-    // (default zstd1). Payment/pacs.008 columns (country, ccy, BIC, party
-    // name pool, purpose codes) are drawn from bounded pools and compress
-    // ~39% smaller under ZSTD-1 than SNAPPY on this cluster's scale-100
-    // run (1036 GB -> 636 GB, wall 428s -> 372s), because ZSTD's larger
-    // match window sees across the row group while SNAPPY's 32 KB window
-    // does not. Level 1 hits the pareto point: 35% smaller than SNAPPY at
-    // wall-neutral encode cost; higher levels add CPU for <2% more shrink.
-    let stats = match std::env::var("DG_STATS").as_deref() {
-        Ok("page") => EnabledStatistics::Page,
-        Ok("chunk") => EnabledStatistics::Chunk,
-        _ => EnabledStatistics::None,
-    };
-    let dict = std::env::var("DG_DICT").map(|v| v != "0").unwrap_or(true);
-    let compression = match std::env::var("DG_COMPRESSION").as_deref() {
-        Ok("snappy") => Compression::SNAPPY,
-        Ok("zstd3") => Compression::ZSTD(ZstdLevel::try_new(3).unwrap()),
-        Ok("zstd6") => Compression::ZSTD(ZstdLevel::try_new(6).unwrap()),
-        Ok("lz4") => Compression::LZ4_RAW,
-        Ok("none") => Compression::UNCOMPRESSED,
-        // Default (unset or "zstd1"): ZSTD level 1 -- see comment above.
-        _ => Compression::ZSTD(ZstdLevel::try_new(1).unwrap()),
-    };
-    let mut b = WriterProperties::builder()
-        .set_compression(compression)
-        .set_statistics_enabled(stats)
-        .set_dictionary_enabled(dict);
-    if let Ok(ps) = std::env::var("DG_PAGESZ") {
-        if let Ok(n) = ps.parse::<usize>() {
-            b = b.set_data_page_size_limit(n);
-        }
-    }
-    b.build()
+    // Stable uid for this typology row. Chosen at scheduling time
+    // (deterministic in `(inst.seed, row_idx)`) and carried through the
+    // per-file sort so the row's bronze UETR can be reproduced in the
+    // manifest without needing the sorted position.
+    uid: u64,
 }
 
 fn encode_parquet(batch: &arrow::record_batch::RecordBatch, cap_hint: usize) -> Vec<u8> {
@@ -102,8 +76,10 @@ fn encode_parquet(batch: &arrow::record_batch::RecordBatch, cap_hint: usize) -> 
     // configured file_size_mb so a small --file-size-mb doesn't pre-allocate
     // 64 MiB per worker; at 32-way rayon and --file-size-mb 32, transient
     // peak is roughly 32 * cap_hint plus the live RecordBatch, well under
-    // the pod's memory request.
-    let props = writer_props();
+    // the pod's memory request. writer_properties() reads DG_COMPRESSION /
+    // DG_STATS / DG_DICT / DG_PAGESZ from env (shared with party/account
+    // writers so codec choice is uniform across every parquet emitted).
+    let props = writer_properties();
     let mut buf: Vec<u8> = Vec::with_capacity(cap_hint);
     {
         let mut w = ArrowWriter::try_new(&mut buf, batch.schema(), Some(props)).unwrap();
@@ -135,6 +111,17 @@ fn main() {
     // manifest only, on a dedicated pod). Offloading reference removes the
     // node-0 straggler so bronze pods finish together.
     let mode: String = arg("--mode", "all".to_string());
+    // Reject typos explicitly so an operator's `--mode brozne` does not
+    // silently succeed with zero files written (previously it fell through
+    // to do_bronze=false, do_reference=false and exit 0 -- caught by an
+    // arg-fuzzing pass).
+    if !matches!(mode.as_str(), "all" | "bronze" | "reference") {
+        eprintln!(
+            "--mode must be one of: all | bronze | reference; got {:?}",
+            mode
+        );
+        std::process::exit(2);
+    }
     let do_bronze = mode == "all" || mode == "bronze";
     let do_reference = mode == "reference" || (mode == "all" && node_id == 0);
     // Validate --corpus-months FIRST, before rayon pool init and before the
@@ -222,9 +209,17 @@ fn main() {
     let t_typ0 = std::time::Instant::now();
     let instances = datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
+    // Instance-id -> list of uids for the rows emitted for that instance.
+    // Populated at typology-scheduling time so it's deterministic (both
+    // bronze and reference pods build the identical map from the same
+    // schedule, but only the reference pod writes the manifest that
+    // consumes it). Downstream (`score_financial.py`, `verify_run.py`)
+    // joins `manifest.participant_uetrs` against `gold.alerts.related_txn_ids`;
+    // an empty list here was silently making recall = 0/0.
+    let mut inst_uids: HashMap<String, Vec<u64>> = HashMap::new();
     let mut trng = Rng::new((seed as u64) ^ 0x7791);
     for inst in &instances {
-        for r in datagen_rs::typology::emit_instance(inst) {
+        for (row_idx, r) in datagen_rs::typology::emit_instance(inst).into_iter().enumerate() {
             let ccy = w.ccy[r.orig as usize];
             let amount = if r.structuring {
                 structuring_amount(&mut trng, ccy)
@@ -232,7 +227,11 @@ fn main() {
                 lognormal_amount(&mut trng)
             };
             let fid = (((r.ts_us - start_us) / step_us).clamp(0, total_files - 1)) as usize;
-            typ_by_file[fid].push(TypRow { orig: r.orig, bene: r.bene, ts_us: r.ts_us, amount, ccy });
+            let uid = typology_uid(inst.seed, row_idx);
+            typ_by_file[fid].push(TypRow {
+                orig: r.orig, bene: r.bene, ts_us: r.ts_us, amount, ccy, uid,
+            });
+            inst_uids.entry(inst.id.clone()).or_default().push(uid);
         }
     }
 
@@ -293,8 +292,14 @@ fn main() {
         let mut ts_us = Vec::with_capacity(cap);
         let mut amount = Vec::with_capacity(cap);
         let mut ccy: Vec<&'static str> = Vec::with_capacity(cap);
+        // Pre-assigned uid per row: base rows use (fid<<40)|base_idx
+        // (top bit 0), typology rows carry their scheduling-time uid
+        // (top bit 1). Kept through the sort so bronze UETRs stay
+        // recoverable by the manifest builder.
+        let mut uid_pre = Vec::with_capacity(cap);
+        let base_uid_hi = (fid as u64) << 40;
 
-        for _ in 0..n_base {
+        for base_idx in 0..n_base {
             let o = sample_orig(&cum, total_w, pop, &mut rng);
             // Beneficiary drawn from a bounded core counterparty set so that
             // recurring-counterparty volume stays concentrated at any scale
@@ -321,6 +326,7 @@ fn main() {
             ts_us.push(sample_ts(&mut rng, &cal, w.country[o as usize]));
             amount.push(lognormal_amount(&mut rng));
             ccy.push(cc);
+            uid_pre.push(base_uid_hi | base_idx as u64);
         }
         for r in typ {
             orig.push(r.orig);
@@ -329,6 +335,7 @@ fn main() {
             ts_us.push(shape_fixed_day(&mut rng, r.ts_us, w.country[r.orig as usize]));
             amount.push(r.amount);
             ccy.push(r.ccy);
+            uid_pre.push(r.uid);
         }
 
         // sort by ts
@@ -340,10 +347,9 @@ fn main() {
         let ts2: Vec<i64> = idx.iter().map(|&i| ts_us[i]).collect();
         let amt2: Vec<f64> = idx.iter().map(|&i| amount[i]).collect();
         let ccy2: Vec<&'static str> = idx.iter().map(|&i| ccy[i]).collect();
-        // Globally-unique per-row id: file_id in the high bits, sorted row index
-        // in the low bits. Deterministic per (seed, file_id); collision-free.
-        let base_uid = (fid as u64) << 40;
-        let uid: Vec<u64> = (0..orig2.len() as u64).map(|i| base_uid | i).collect();
+        // Permute the pre-assigned uid[] with the same sort so each row's
+        // UETR derivation lines up with its position in the batch.
+        let uid: Vec<u64> = idx.iter().map(|&i| uid_pre[i]).collect();
 
         let tb = std::time::Instant::now();
         let batch = build_batch(&w, &Batch { orig: orig2, bene: bene2, ts_us: ts2, amount: amt2, ccy: ccy2, uid });
@@ -366,19 +372,38 @@ fn main() {
     let t_gen = t_gen0.elapsed().as_secs_f64();
 
     let t_ref0 = std::time::Instant::now();
+    // Track reference-zone bytes/files separately so the final summary line
+    // reflects what a `--mode reference` pod produced. Previously the
+    // reference path did not touch `total_bytes`/`files_written`, so a
+    // reference pod always logged `files_written=0 bytes=0` even after
+    // successfully uploading party/account/manifest -- confusing for
+    // anyone monitoring aggregate throughput from pod logs.
+    let mut ref_bytes: u64 = 0;
+    let mut ref_files: u64 = 0;
     if do_reference {
         // Streamed in row-group chunks into an in-memory buffer, then PUT
         // as one object each. Party is the biggest (~ population * ~200 B),
         // still well under a pod's memory request at scale 100.
         let mut party_buf: Vec<u8> = Vec::with_capacity(256 * 1024 * 1024);
         write_party_to(&w, &instances, &mut party_buf);
+        ref_bytes += party_buf.len() as u64;
+        ref_files += 1;
         sink.put("bronze/party.parquet", party_buf);
         let mut acct_buf: Vec<u8> = Vec::with_capacity(128 * 1024 * 1024);
         write_account_to(&w, &mut acct_buf);
+        ref_bytes += acct_buf.len() as u64;
+        ref_files += 1;
         sink.put("bronze/account.parquet", acct_buf);
-        let man_bytes = encode_parquet(&build_manifest(&instances), 8 * 1024 * 1024);
+        let man_bytes = encode_parquet(
+            &build_manifest(&instances, seed, &inst_uids),
+            8 * 1024 * 1024,
+        );
+        ref_bytes += man_bytes.len() as u64;
+        ref_files += 1;
         sink.put("manifest/manifest.parquet", man_bytes);
     }
+    let total_bytes = total_bytes + ref_bytes;
+    let files_written = files_written + ref_files;
     let t_ref = t_ref0.elapsed().as_secs_f64();
     let up_s = upload_ns.load(Ordering::Relaxed) as f64 / 1e9;
     let el = t0.elapsed().as_secs_f64();

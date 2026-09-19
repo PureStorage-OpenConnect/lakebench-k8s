@@ -809,12 +809,19 @@ def _build_customer360_table(file_id: int, config: Config, get_loyalty_fn) -> pa
 
 
 def _parquet_compression() -> tuple[str, int | None]:
-    """Codec + optional level from DG_COMPRESSION env
-    (snappy|zstd1|zstd3|zstd6|lz4|none). Default zstd1: matches the Rust
-    financial datagen -- payment/customer-shaped columns dictionary-encode
-    well and ZSTD-1's larger match window is ~35% smaller than SNAPPY at
-    wall-neutral encode cost."""
-    v = os.environ.get("DG_COMPRESSION", "zstd1").lower()
+    """Codec + optional level from DG_COMPRESSION env.
+
+    Accepts (matches the Rust datagen's contract exactly, to prevent silent
+    cross-image codec drift):
+        snappy | zstd | zstdN for N in 1..=22 | lz4 | none | uncompressed
+    Default: zstd1.
+
+    Raises ValueError on any other value or out-of-range level. An early
+    ValueError is easier to diagnose than a mid-run pyarrow crash or a
+    silent fallback to a different codec than the operator expected."""
+    v = os.environ.get("DG_COMPRESSION", "zstd1").strip().lower()
+    if v in ("", "zstd", "zstd1"):
+        return "zstd", 1
     if v == "snappy":
         return "snappy", None
     if v == "lz4":
@@ -823,11 +830,19 @@ def _parquet_compression() -> tuple[str, int | None]:
         return "none", None
     if v.startswith("zstd"):
         try:
-            lvl = int(v[4:]) if len(v) > 4 else 1
-        except ValueError:
-            lvl = 1
+            lvl = int(v[4:])
+        except ValueError as exc:
+            raise ValueError(
+                f"DG_COMPRESSION={v!r}: could not parse level after 'zstd'"
+            ) from exc
+        if not 1 <= lvl <= 22:
+            raise ValueError(
+                f"DG_COMPRESSION={v!r}: level out of range 1..=22"
+            )
         return "zstd", lvl
-    return "zstd", 1
+    raise ValueError(
+        f"DG_COMPRESSION={v!r}: expected snappy|zstd|zstdN|lz4|none"
+    )
 
 
 def write_file_to_s3(file_id: int, config: Config, generator: Generator) -> dict:
