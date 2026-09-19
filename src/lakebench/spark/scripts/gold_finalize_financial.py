@@ -194,15 +194,18 @@ def main() -> None:
 
     txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
     baseline = build_baseline_dashboards(txns, RUN_ID)
-    # `.overwrite(lit(True))` replaces data rows while preserving the table's
-    # partition spec and schema, unlike `.createOrReplace()` which reverts
-    # partitioning on every write (see silver_build_financial for the same
-    # fix). More importantly for the refresh loop path: a partial-data
-    # refresh via createOrReplace would wipe rows written by concurrent
-    # detection workloads. `.overwrite(lit(True))` still wipes them, so
-    # gold_refresh must ONLY overwrite its own baseline rows -- see
-    # gold_refresh_financial.py for the partition-predicate refresh path.
-    baseline.writeTo(f"{CATALOG}.{GOLD_DASH}").overwrite(lit(True))
+    # Delete-only-baseline-then-append: overwrite ONLY the baseline rows,
+    # not the whole table. Detection workloads write rows keyed by
+    # non-'baseline' rule_ids into the same table; the previous
+    # createOrReplace / overwrite(lit(True)) would wipe every one of them
+    # on a finalize re-run (silent data loss of the exact rows scoring
+    # depends on). Uses SQL DELETE + append because DataFrameWriterV2's
+    # overwrite(condition) requires a Column that references source-side
+    # columns, which is awkward when the intent is a target-side filter.
+    spark.sql(
+        f"DELETE FROM {CATALOG}.{GOLD_DASH} WHERE rule_id = 'baseline'"
+    )
+    baseline.writeTo(f"{CATALOG}.{GOLD_DASH}").append()
     log(f"Wrote {GOLD_DASH} baseline rows")
 
     log("=" * 60)

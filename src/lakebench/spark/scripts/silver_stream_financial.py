@@ -131,6 +131,14 @@ def main() -> None:
     while query.isActive:
         time.sleep(1)
 
+    # Re-raise any streaming exception so silent PASS-with-zero-rows
+    # can't happen; K8s Job status must reflect the real outcome.
+    exc = query.exception()
+    if exc is not None:
+        log(f"Streaming query failed: {exc}")
+        spark.stop()
+        raise exc
+
     log("Silver stream stopped")
     if query.lastProgress:
         log(f"  batchId: {query.lastProgress.get('batchId')}")

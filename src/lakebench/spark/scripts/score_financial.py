@@ -25,9 +25,11 @@ import argparse
 from common import env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
+    coalesce,
     col,
     countDistinct,
     explode,
+    explode_outer,
     lit,
     when,
 )
@@ -69,12 +71,16 @@ def main() -> None:
     log(f"gold.alerts rows: {total_alerts:,}")
 
     # Explode manifest to (typology_id, typology_type, expected_workload, uetr) pairs.
+    # explode_outer, not explode: a manifest row with a NULL/empty participant_uetrs
+    # array must still contribute to the denominator with detected=0. explode
+    # would silently drop the whole instance, inflating recall by removing
+    # the "we never fired for this instance" data points.
     manifest_uetrs = (
         manifest.select(
             "typology_id",
             "typology_type",
             "expected_workload",
-            explode(col("participant_uetrs")).alias("uetr"),
+            explode_outer(col("participant_uetrs")).alias("uetr"),
         )
         .distinct()
     )
@@ -93,9 +99,14 @@ def main() -> None:
     # A typology instance is "detected" if any of its uetrs appears in any
     # alert -- so for each (typology_id, uetr), left-join and mark hit=1 if
     # the alert row is present. Then per typology_id: detected = max(hit).
+    # coalesce(hit, 0) covers instances whose participant_uetrs was NULL
+    # (explode_outer emits NULL uetr; the join leaves alert_id NULL too).
     per_instance = (
         manifest_uetrs.join(alert_uetrs, on="uetr", how="left")
-        .withColumn("hit", when(col("alert_id").isNotNull(), 1).otherwise(0))
+        .withColumn(
+            "hit",
+            coalesce(when(col("alert_id").isNotNull(), 1).otherwise(0), lit(0)),
+        )
         .groupBy("typology_id", "typology_type", "expected_workload")
         .agg({"hit": "max"})
         .withColumnRenamed("max(hit)", "detected")

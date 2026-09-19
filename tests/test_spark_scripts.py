@@ -63,11 +63,23 @@ class TestCommonModule:
         assert "parse_size_gb" in func_names
 
 
+_LIBRARY_SCRIPTS = {"detection_rules.py"}
+
+
 class TestScriptImports:
-    """Verify each script imports from common module."""
+    """Verify each script imports from common module.
+
+    Library modules (imported by other scripts, not invoked as Spark
+    entry points) are exempt via _LIBRARY_SCRIPTS -- they don't need the
+    common env/log helpers. Kept as an explicit allow-list so a new
+    script with a typo'd name doesn't slip past a heuristic pattern.
+    """
 
     @pytest.fixture(
-        params=[p for p in _get_script_files() if p.name != "common.py"],
+        params=[
+            p for p in _get_script_files()
+            if p.name != "common.py" and p.name not in _LIBRARY_SCRIPTS
+        ],
         ids=lambda p: p.stem,
     )
     def non_common_script(self, request):

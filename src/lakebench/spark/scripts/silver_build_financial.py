@@ -181,12 +181,18 @@ def _entity_id_from(name_col, country_col, city_col=None):
     identical name+country+city will still merge -- for a real system, LEI/
     BIC/DOB would be additional keys, but pacs.008 dbtr/cdtr do not always
     carry them. Splink (W5) is the intended resolution layer for that.
+
+    Each column is coalesced to "" BEFORE concat_ws because concat_ws
+    silently skips NULL columns rather than emitting a delimiter -- so
+    without the coalesce, a NULL city collides with a missing city
+    segment and NULL country collides with a missing country segment,
+    letting anonymous entities collapse across otherwise-distinct rows.
     """
     if city_col is None:
         city_col = lit("")
     key = concat_ws(
         "|",
-        upper(trim(name_col)),
+        coalesce(upper(trim(name_col)), lit("")),
         coalesce(country_col, lit("")),
         coalesce(upper(trim(city_col)), lit("")),
     )
@@ -275,8 +281,14 @@ def build_entities(txns_df):
     picked = (
         orig.unionByName(bene)
         .groupBy("entity_id")
-        .agg(_min("name").alias("name"))
+        .agg(_min("name").alias("_min_name"))
     )
+    # Coalesce to an explicit "UNKNOWN" so an entity whose reported name is
+    # NULL for every occurrence (plausible when a party name field is
+    # missing) doesn't violate silver.entities.name NOT NULL. Emitting
+    # "UNKNOWN" here is loud in a downstream dashboard; a NULL would
+    # crash the write with a delayed error.
+    picked = picked.withColumn("name", coalesce(col("_min_name"), lit("UNKNOWN"))).drop("_min_name")
     return picked.select(
         col("entity_id"),
         # We can't tell Person from Company from FI from pacs.008 name alone;
