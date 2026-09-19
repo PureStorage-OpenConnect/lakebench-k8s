@@ -788,7 +788,13 @@ def _build_customer360_table(file_id: int, config: Config, get_loyalty_fn) -> pa
         [
             ("id", pa.int64()),
             ("row_id", pa.int64()),
-            ("event_timestamp", pa.timestamp("us")),
+            # Explicit UTC in the schema. Naive `pa.timestamp("us")` silently
+            # drops the tz metadata even when the input datetimes are
+            # tz-aware, which downstream tools then read as "local" time.
+            # The upstream `generate_timestamps` already returns UTC-aware
+            # datetimes; carrying that into the schema keeps the (seed,
+            # file_id) -> same-content contract witnessable in parquet.
+            ("event_timestamp", pa.timestamp("us", tz="UTC")),
             ("event_id", pa.string()),
             ("session_id", pa.string()),
             ("customer_id", pa.int64()),
