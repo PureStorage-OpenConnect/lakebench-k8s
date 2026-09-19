@@ -12,8 +12,6 @@ use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
-use parquet::basic::Compression;
-use parquet::file::properties::WriterProperties;
 
 use crate::hash::splitmix64;
 use crate::ids::iban_for;
@@ -21,13 +19,19 @@ use crate::model::{World, MODEL_VERSION};
 use crate::realism as R;
 use crate::typology::Instance;
 use crate::world::{TYPE_FI, TYPE_LABELS, TYPE_PERSON};
+use crate::writer::writer_properties;
 
 /// Entities per row group when streaming the party/account zones, so node 0's
 /// memory stays bounded at scale instead of materialising all ~11M rows at once.
 const CHUNK: usize = 1_000_000;
 
-fn props() -> WriterProperties {
-    WriterProperties::builder().set_compression(Compression::SNAPPY).build()
+fn props() -> parquet::file::properties::WriterProperties {
+    // Uses the shared writer_properties helper so party/account inherit the
+    // same DG_COMPRESSION as pacs008 and the manifest. Previously this
+    // hard-coded SNAPPY, so a run advertised as ZSTD-1 silently shipped
+    // party.parquet + account.parquet still SNAPPY-compressed -- caught
+    // by a live read-back verification after the ZSTD-1 default flip.
+    writer_properties()
 }
 
 #[derive(Default, Clone)]
@@ -281,8 +285,12 @@ pub fn manifest_schema() -> SchemaRef {
             DataType::List(Arc::new(Field::new("item", DataType::Int64, true))),
             true,
         ),
+        // Downstream tooling (`score_financial.py`, `verify_run.py`) joins
+        // this against `gold.alerts.related_txn_ids` -- keep the name in
+        // sync with those consumers, and keep the list populated (not just
+        // the schema field).
         Field::new(
-            "transaction_ids",
+            "participant_uetrs",
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
             true,
         ),
@@ -296,11 +304,25 @@ pub fn manifest_schema() -> SchemaRef {
     ]))
 }
 
-pub fn build_manifest(instances: &[Instance]) -> RecordBatch {
+/// Populate participant_uetrs from the (instance_id -> row uids) map that
+/// bin/generate.rs builds at typology-scheduling time. `seed` matches the
+/// pipeline seed so the UETR derivation here is bit-identical to the bronze
+/// emit's (see `emit::build_batch` -- same splitmix64 + uuid_v4_into with the
+/// same 0x0E7A / 0x5A1D salts). A drift in that derivation would silently
+/// break `score_financial.py`'s recall join, so any change here must be
+/// mirrored in the bronze emit and vice versa; the `manifest_uetr_round_trip`
+/// regression test pins the identity.
+pub fn build_manifest(
+    instances: &[Instance],
+    seed: i64,
+    inst_uids: &std::collections::HashMap<String, Vec<u64>>,
+) -> RecordBatch {
     use arrow::array::TimestampMicrosecondArray;
+    use crate::ids::uuid_v4_into;
     let m = instances.len();
     let tid: Vec<String> = instances.iter().map(|i| i.id.clone()).collect();
     let ttype: Vec<String> = instances.iter().map(|i| i.typ.to_string()).collect();
+    let seed_u = seed as u64;
 
     // participant list<int64>
     let mut pvals = Vec::new();
@@ -317,11 +339,26 @@ pub fn build_manifest(instances: &[Instance]) -> RecordBatch {
         Arc::new(Int64Array::from(pvals)),
         None,
     );
-    // empty transaction_ids
-    let txn_ids = ListArray::new(
+    // participant_uetrs: for each instance, derive UETR per stored uid using
+    // the same splitmix64 salts as the bronze emit's `build_batch`.
+    let mut uetr_vals: Vec<String> = Vec::new();
+    let mut uetr_counts: Vec<i32> = Vec::with_capacity(m);
+    let mut buf = String::with_capacity(40);
+    for inst in instances {
+        let uids = inst_uids.get(&inst.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        for &uid in uids {
+            let us = crate::hash::splitmix64(uid ^ seed_u ^ 0x0E7A);
+            let us2 = crate::hash::splitmix64(uid ^ seed_u ^ 0x5A1D);
+            buf.clear();
+            uuid_v4_into(us, us2, &mut buf);
+            uetr_vals.push(buf.clone());
+        }
+        uetr_counts.push(uids.len() as i32);
+    }
+    let participant_uetrs = ListArray::new(
         Arc::new(Field::new("item", DataType::Utf8, true)),
-        offsets(&vec![0i32; m]),
-        sarr(Vec::new()),
+        offsets(&uetr_counts),
+        sarr(uetr_vals),
         None,
     );
     let start: Vec<i64> = instances.iter().map(|i| i.start_us).collect();
@@ -354,7 +391,7 @@ pub fn build_manifest(instances: &[Instance]) -> RecordBatch {
         sarr(tid),
         sarr(ttype),
         Arc::new(participants),
-        Arc::new(txn_ids),
+        Arc::new(participant_uetrs),
         Arc::new(TimestampMicrosecondArray::from(start)),
         Arc::new(TimestampMicrosecondArray::from(end)),
         Arc::new(map),
