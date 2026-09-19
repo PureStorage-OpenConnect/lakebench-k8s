@@ -239,14 +239,27 @@ def w3_round_tripping(
         col("ts_l"),
         col("ts_r"),
     )
+    # roundtrip_count is triangular-inflated by the self-join (for k
+    # matching pairs each direction, the join produces up to
+    # k*(k+1)/2 rows because every earlier ts_l matches every later
+    # ts_r). Dedupe by taking the SIZE OF THE DISTINCT UETR SET / 2:
+    # each real round-trip pair contributes exactly 2 UETRs (l, r).
     alerts = (
         canon.groupBy("e1", "e2")
         .agg(
-            count(lit(1)).alias("roundtrip_count"),
             collect_list(col("uetr_l")).alias("uetrs_l"),
             collect_list(col("uetr_r")).alias("uetrs_r"),
             max_("ts_r").alias("last_ts"),
             min_("ts_l").alias("first_ts"),
+        )
+        .withColumn(
+            "related_txn_ids",
+            array_distinct(expr("concat(uetrs_l, uetrs_r)")),
+        )
+        # 2 UETRs per real round-trip; divide the deduped uetr count.
+        .withColumn(
+            "roundtrip_count",
+            (expr("size(related_txn_ids)") / lit(2)).cast("int"),
         )
         .filter(col("roundtrip_count") >= 1)
     )
@@ -257,12 +270,12 @@ def w3_round_tripping(
         lit(MODEL_ID).alias("model_id"),
         lit(MODEL_VERSION).alias("model_version"),
         col("e1").alias("entity_id"),
-        array_distinct(
-            expr("concat(uetrs_l, uetrs_r)")
-        ).alias("related_txn_ids"),
+        col("related_txn_ids"),
         array(col("e1"), col("e2")).alias("related_entity_ids"),
         col("last_ts").alias("alert_ts"),
-        (lit(0.6) + col("roundtrip_count") * lit(0.05)).cast("double").alias("alert_score"),
+        # Score clamped to [0, 0.95] so aggregate percentiles don't
+        # exceed the [0,1] domain analysts expect.
+        expr("least(0.95, 0.6 + roundtrip_count * 0.05)").cast("double").alias("alert_score"),
         when(col("roundtrip_count") >= 3, lit("HIGH"))
             .when(col("roundtrip_count") >= 2, lit("MED"))
             .otherwise(lit("LOW"))
@@ -325,31 +338,62 @@ def w4_risk_propagation(
         .filter(
             (unix_timestamp(col("ts_out")) - unix_timestamp(col("ts_in"))) <= seconds
         )
+        # amt_in > 0 guards against div-by-zero downstream on the score
+        # computation AND filters degenerate matches when txn_amount_usd
+        # coerced to 0 (nullable xchg_rate paths). Without it, entities
+        # with a zero-value incoming txn matched every outgoing txn,
+        # blowing up alert count by cartesian.
+        .filter(col("amt_in") > lit(0))
         .filter(col("amt_out") >= col("amt_in") * lit(forward_ratio))
     )
-    return joined.select(
+    # Group by B (the entity being alerted on) so the alert count is
+    # per-entity, not per (uetr_in, uetr_out) pair. Prior design produced
+    # N*M rows for an entity with N incoming + M outgoing matches
+    # (10000 rows for a moderate case). Collect all in/out UETRs per B
+    # into related_txn_ids and the counterparty ids into
+    # related_entity_ids so investigators can trace all txns from a
+    # single alert row.
+    per_entity = joined.groupBy("b").agg(
+        collect_list(col("uetr_in")).alias("uetrs_in"),
+        collect_list(col("uetr_out")).alias("uetrs_out"),
+        collect_set(col("a")).alias("as_set"),
+        collect_set(col("c")).alias("cs_set"),
+        count(lit(1)).alias("chain_count"),
+        max_("ts_out").alias("last_ts"),
+        min_("ts_in").alias("first_ts"),
+        max_(col("amt_out") / col("amt_in")).alias("max_forward_ratio"),
+    )
+    return per_entity.select(
         expr("uuid()").alias("alert_id"),
         lit("W4_risk_propagation").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
         lit(MODEL_VERSION).alias("model_version"),
         col("b").alias("entity_id"),
-        array(col("uetr_in"), col("uetr_out")).alias("related_txn_ids"),
-        array(col("a"), col("b"), col("c")).alias("related_entity_ids"),
-        col("ts_out").alias("alert_ts"),
-        (
-            lit(0.7) + ((col("amt_out") / col("amt_in")) - lit(forward_ratio)) * lit(0.3)
+        array_distinct(expr("concat(uetrs_in, uetrs_out)")).alias("related_txn_ids"),
+        # cast(set as array<bigint>) via expr for compat with older Spark
+        expr("cast(array_union(as_set, cs_set) as array<bigint>)").alias(
+            "related_entity_ids"
+        ),
+        col("last_ts").alias("alert_ts"),
+        # Score clamped to [0, 0.95] so downstream percentile aggregations
+        # don't skew from >1 values (see W3 fix). max_forward_ratio -
+        # threshold is scaled and offset from 0.7 baseline.
+        expr(
+            "least(0.95, 0.7 + (max_forward_ratio - {th}) * 0.15)".format(th=forward_ratio)
         ).cast("double").alias("alert_score"),
-        lit("HIGH").alias("priority"),
+        when(col("chain_count") >= 3, lit("HIGH"))
+            .when(col("chain_count") >= 2, lit("MED"))
+            .otherwise(lit("LOW"))
+            .alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
         lit("risk_propagation").alias("alert_type"),
         lit(run_id).alias("run_id"),
         expr(
-            "concat('Rapid pass-through at entity ', cast(b as string), "
-            "': received ', cast(amt_in as string), ' from ', cast(a as string), "
-            "' at ', cast(ts_in as string), ', forwarded ', cast(amt_out as string), "
-            "' to ', cast(c as string), ' at ', cast(ts_out as string))"
+            "concat('Rapid pass-through at entity ', cast(b as string), ': ', "
+            "cast(chain_count as string), ' incoming/outgoing chains, first ', "
+            "cast(first_ts as string), ' last ', cast(last_ts as string))"
         ).alias("narrative"),
         map_from_arrays(
             array(lit("rule"), lit("velocity_hours"), lit("forward_ratio")),
