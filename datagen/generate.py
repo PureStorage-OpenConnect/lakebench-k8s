@@ -23,7 +23,9 @@ Usage:
 import argparse
 import io
 import json
+import multiprocessing
 import os
+import signal
 import sys
 import threading
 import time
@@ -40,6 +42,15 @@ import pyarrow.parquet as pq
 from botocore.config import Config as BotoConfig
 from tqdm import tqdm
 
+# Disable tqdm's TMonitor thread. It runs as a non-daemon background
+# thread that pings every 10s to re-render if a bar hasn't updated; on
+# interpreter shutdown Python waits for it, and it doesn't observe
+# SIGTERM/SIGINT reliably. A hung TMonitor was what turned a clean
+# continuous-mode duration-expiry run into a 30s pod-grace-period
+# SIGKILL (main printed "Complete!" then wedged; kubelet killed).
+# monitor_interval=0 stops the thread from being created at all.
+tqdm.monitor_interval = 0
+
 # =============================================================================
 # Continuous Mode Constants
 # =============================================================================
@@ -47,6 +58,76 @@ from tqdm import tqdm
 NUM_GENERATORS = 8  # Number of generator processes
 NUM_UPLOADERS = 2  # Number of uploader threads
 QUEUE_DEPTH = 8  # Max items in upload queue (backpressure)
+
+# Shutdown coordination for graceful SIGTERM/SIGINT handling.
+#
+# Two events are needed because the main process (Python threads) and the
+# generator workers (multiprocessing.Process children) live in different
+# memory spaces:
+#   - SHUTDOWN_REQUESTED (threading.Event) -- polled by the main run_continuous
+#     loop and by uploader threads.
+#   - MP_SHUTDOWN_EVENT (multiprocessing.Event) -- shared with generator
+#     child processes; they poll it out-of-band from file_queue.
+#
+# Both are created at module load, BEFORE any handler is installed and
+# before any child fork. A prior design deferred mp_event creation into
+# run_continuous, which opened a millisecond-scale race: SIGTERM landing
+# between the initial main() install (mp_event=None) and the deferred
+# creation set SHUTDOWN_REQUESTED only. Generators (which don't share the
+# parent's threading memory) then never saw shutdown, drained the full
+# Phase 1 pre-load, and blew past terminationGracePeriodSeconds. Now the
+# event exists at import time so every install path passes the real
+# object; children fork with the semaphore fd already inherited.
+#
+# Why not just use poison pills on file_queue? Phase 1 pre-loads file_queue
+# with EVERY remaining file_id (can be thousands at large --target-tb).
+# Pills appended by the SIGTERM handler sit at the END of that queue, so
+# generators would have to work through all pending file_ids before seeing
+# them -- shutdown takes minutes instead of seconds. The MP event
+# bypasses the queue entirely: workers check it between file_queue.get()s
+# and inside their put()/upload_queue.put() paths so they exit within one
+# poll interval regardless of queue depth.
+#
+# Without this, K8s pod deletion would kill the process mid-upload,
+# leaking S3 multipart uploads to FlashBlade (CLAUDE.md gotcha 2:
+# multipart ghosts) and losing the in-flight batch's checkpoint update.
+SHUTDOWN_REQUESTED = threading.Event()
+MP_SHUTDOWN_EVENT = multiprocessing.Event()
+
+
+def _install_shutdown_handlers() -> None:
+    """Install SIGTERM/SIGINT handlers on the CURRENT process only.
+
+    Both events (SHUTDOWN_REQUESTED and MP_SHUTDOWN_EVENT) are module-level
+    singletons created at import time -- there's no race window between
+    install and event creation. The handler flips both so main-process
+    threads and forked child generators wake within one poll interval.
+
+    Multiprocessing.Process children fork/spawn with this handler
+    attached, but the generator worker resets to SIG_IGN as its first
+    action so shutdown stays driven by the parent through
+    MP_SHUTDOWN_EVENT. Without SIG_IGN in children, SIGTERM to the pod's
+    process group would kill workers immediately, dropping in-flight
+    files and skipping the None poison pill on upload_queue.
+
+    Idempotent. In non-main threads (e.g. under pytest), Python refuses
+    to set a signal handler; we swallow the ValueError.
+    """
+    def _handler(signum, frame):  # noqa: ARG001
+        SHUTDOWN_REQUESTED.set()
+        try:
+            MP_SHUTDOWN_EVENT.set()
+        except Exception:
+            # An mp.Event backed by a torn-down semaphore (interpreter
+            # shutdown) can raise; keep the threading flag set.
+            pass
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _handler)
+        except ValueError:
+            # "signal only works in main thread of the main interpreter"
+            pass
 
 # =============================================================================
 # Constants matching Bronze schema
@@ -188,6 +269,20 @@ class Config:
         self.target_bytes = int(target_tb * 1024 * 1024 * 1024 * 1024)
         self.file_size_bytes = file_size_mb * 1024 * 1024
         self.total_files = max(1, int(self.target_bytes / self.file_size_bytes))
+
+        # FlashBlade single-PUT ceiling is 5 GiB; boto3's `put_object`
+        # (the code path we chose over `upload_fileobj` to eliminate MPU
+        # ghosts) fails a single request past that. Refuse >5000 MiB at
+        # config load so an operator who set `--file-size-mb 8192`
+        # doesn't discover it via `EntityTooLarge` on every uploaded
+        # file. The 5000 (vs 5120) leaves headroom for parquet padding
+        # and codec overhead.
+        if file_size_mb > 5000:
+            raise ValueError(
+                f"--file-size-mb={file_size_mb} exceeds the 5000 MiB single-PUT "
+                "cap enforced by boto3 put_object against FlashBlade. Split "
+                "into smaller files or use a multipart-capable path."
+            )
 
         # Estimate rows per file to achieve target compressed file size.
         # Schema-specific -- prior single value (4200 = C360 with 2KB payload)
@@ -944,12 +1039,27 @@ def write_file_to_s3(file_id: int, config: Config, generator: Generator) -> dict
 
 
 def _continuous_generator_worker(
-    file_queue: MPQueue, upload_queue: MPQueue, config_dict: dict, generator_id: int
+    file_queue: MPQueue,
+    upload_queue: MPQueue,
+    config_dict: dict,
+    generator_id: int,
+    mp_shutdown_event,
 ):
     """
     Generator process: pulls file_ids from file_queue, generates data,
     compresses to Parquet bytes, and pushes to upload_queue.
+
+    ``mp_shutdown_event`` is a multiprocessing.Event shared with the parent.
+    When set (e.g. by the parent's SIGTERM handler), this worker exits at
+    the next poll boundary without draining the rest of file_queue.
     """
+    # Reset signal handlers inherited from the parent. SIG_IGN is deliberate:
+    # SIGTERM to the pod's process group must NOT kill this worker mid-file.
+    # Graceful shutdown drives the exit path via mp_shutdown_event, set by
+    # the main process's SIGTERM handler. If the pod grace period expires
+    # the kubelet sends SIGKILL, which is uncatchable.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     config = Config(**config_dict)
     has_duration = bool(config.duration_seconds)
 
@@ -958,13 +1068,45 @@ def _continuous_generator_worker(
     generator = create_generator(config.schema_name, config)
     generator.ensure_loyalty()
 
-    while True:
+    def _shutdown() -> bool:
+        return mp_shutdown_event.is_set()
+
+    def _shutdown_exit():
+        # multiprocessing.Queue uses a background feeder thread to move
+        # items from the process-local buffer through the pipe. If the
+        # reader (uploader) has already exited on SHUTDOWN_REQUESTED,
+        # any pending items in the feeder buffer cause the process to
+        # hang on exit waiting for feeder-thread join. cancel_join_thread
+        # tells the interpreter to abandon those pending items and let
+        # the process exit -- which is exactly what we want during
+        # shutdown (dropped items are regenerated on resume). Without
+        # this, generators consumed 3s each in the parent's join(timeout=3)
+        # before .kill() finished them, burning the pod's grace budget.
+        # (file_queue only has a feeder in the parent -- child never
+        # put()s to it -- so no cancel needed on that one.)
         try:
-            file_id = file_queue.get(timeout=5)
+            upload_queue.cancel_join_thread()
         except Exception:
-            # In duration mode, the main loop feeds Phase 2 IDs after
-            # Phase 1 completes.  Generators must NOT exit on an empty
-            # queue -- only the None poison pill signals shutdown.
+            pass
+
+    while True:
+        # mp_shutdown fast-path: exit immediately without touching
+        # upload_queue. Uploader threads already exit on
+        # SHUTDOWN_REQUESTED (their own top-of-loop check) so no pill is
+        # needed. put_nowait on a full queue would block otherwise; that
+        # blocked generator kills for us and burns grace-period budget.
+        if _shutdown():
+            _shutdown_exit()
+            return
+
+        # Short poll timeout so shutdown is detected within ~0.5s regardless
+        # of file_queue depth.
+        try:
+            file_id = file_queue.get(timeout=0.5)
+        except Exception:
+            if _shutdown():
+                _shutdown_exit()
+                return
             if has_duration:
                 continue
             if file_queue.empty():
@@ -972,8 +1114,17 @@ def _continuous_generator_worker(
             continue
 
         if file_id is None:
-            upload_queue.put(None)
+            # Legacy pill on file_queue (from a non-shutdown Phase 1 or
+            # duration expiry). Simply exit; the main thread will set the
+            # generators_done_event after joining, so uploaders shut down
+            # via that path rather than pill-relay.
             break
+
+        # Check shutdown once more before starting a potentially expensive
+        # generate+encode cycle.
+        if _shutdown():
+            _shutdown_exit()
+            return
 
         try:
             table = generator.generate_file_data(file_id)
@@ -1002,17 +1153,27 @@ def _continuous_generator_worker(
             del table
             buffer.close()
 
-            upload_queue.put((file_id, parquet_bytes, rows, size_bytes))
+            # Bounded put: if upload_queue is full and shutdown fires we
+            # must not block forever. Retry with periodic shutdown checks.
+            while True:
+                try:
+                    upload_queue.put((file_id, parquet_bytes, rows, size_bytes), timeout=0.5)
+                    break
+                except Exception:
+                    if _shutdown():
+                        _shutdown_exit()
+                        return
 
         except Exception as e:
-            upload_queue.put((file_id, None, 0, 0, str(e)))
+            try:
+                upload_queue.put((file_id, None, 0, 0, str(e)), timeout=2)
+            except Exception:
+                pass
 
 
 def _continuous_uploader_worker(
     upload_queue: MPQueue,
-    shutdown_counter: list,
-    shutdown_target: int,
-    shutdown_lock: threading.Lock,
+    generators_done_event: threading.Event,
     config: Config,
     results: list,
     results_lock: threading.Lock,
@@ -1020,34 +1181,40 @@ def _continuous_uploader_worker(
 ):
     """Uploader thread: pulls compressed data from upload_queue and uploads to S3.
 
-    Shutdown protocol: generators put one `None` pill each when they exit
-    (total = NUM_GENERATORS). Uploaders share one queue and cannot
-    predict how the pills will distribute across them; the previous
-    per-thread `pills_received == pills_per_uploader` check hung whenever
-    one uploader consumed more than its share (a scheduling-dependent
-    race that surfaces as an indistinguishable pod timeout). Fix:
-    increment a SHARED counter on every pill and exit when it reaches
-    `shutdown_target = NUM_GENERATORS`, regardless of how the pills
-    landed across threads."""
+    Shutdown protocol has two exits:
+
+    - Fast SIGTERM/SIGINT path: SHUTDOWN_REQUESTED (module-level threading
+      Event) is set by the signal handler. Uploader checks it at the top
+      of every iteration and returns immediately, dropping any queued items
+      (their generators haven't yet checkpointed them, so resume regenerates).
+
+    - Normal drain path: main sets ``generators_done_event`` after all
+      generator processes have joined. Uploader exits on the next empty
+      poll if the event is set. This replaced the prior pill-counter
+      design, which could hang at duration expiry: generators relayed
+      pills via ``upload_queue.put_nowait`` which silently dropped them
+      when the queue was full, so the pill counter never reached its
+      target and uploaders spun forever on an already-drained queue.
+    """
     s3_client = get_s3_client(config)
 
     while True:
+        if SHUTDOWN_REQUESTED.is_set():
+            return
+
         try:
             item = upload_queue.get(timeout=1)
         except Exception:
-            # Poll: if the shared counter already hit the target while we
-            # were waiting on an empty queue, exit rather than spin.
-            with shutdown_lock:
-                if shutdown_counter[0] >= shutdown_target:
-                    return
+            # Empty poll: exit if generators are done. Otherwise there
+            # may still be items in transit through the mp.Queue pipe.
+            if generators_done_event.is_set():
+                return
             continue
 
         if item is None:
-            with shutdown_lock:
-                shutdown_counter[0] += 1
-                done = shutdown_counter[0] >= shutdown_target
-            if done:
-                return
+            # Legacy pill (from a generator that hit its file_queue's
+            # None). No longer used for shutdown coordination but still
+            # emitted for backwards behavior; just consume and continue.
             continue
 
         if len(item) == 5:
@@ -1062,8 +1229,36 @@ def _continuous_uploader_worker(
         file_id, parquet_bytes, rows, size_bytes = item
         s3_key = f"{config.prefix}/part-{file_id:06d}.parquet"
 
+        # Shutdown fast-path: if SIGTERM has fired, DROP this in-flight
+        # item rather than start a new S3 upload. put_object below is a
+        # single request (not multipart), so a completed upload is atomic
+        # and no MPU ghosts leak -- but each upload can still take multiple
+        # seconds for a 512MB payload, which could push us past the pod's
+        # remaining grace period. Dropping a queued item is safe: no
+        # checkpoint has been written for it, so a resumed pod will
+        # regenerate it. Continue rather than return so the pill loop above
+        # can advance and terminate the thread through the normal path.
+        if SHUTDOWN_REQUESTED.is_set():
+            with results_lock:
+                results.append(
+                    {"file_id": file_id, "success": False, "error": "dropped: shutdown"}
+                )
+            progress_callback(0, 0, False)
+            continue
+
         try:
-            s3_client.upload_fileobj(io.BytesIO(parquet_bytes), config.bucket, s3_key)
+            # put_object (single PUT) rather than upload_fileobj (which
+            # switches to boto3 TransferManager multipart for >8MB, and
+            # its worker threads are not interruptible by shutdown -- an
+            # in-flight multipart on a 512MB file could orphan parts on
+            # FlashBlade if the pod dies mid-upload). put_object is atomic:
+            # either the object exists in full or it doesn't. FlashBlade
+            # accepts single PUTs up to 5GB, well over our per-file cap.
+            s3_client.put_object(
+                Bucket=config.bucket,
+                Key=s3_key,
+                Body=parquet_bytes,
+            )
 
             with results_lock:
                 results.append(
@@ -1109,6 +1304,11 @@ def run_continuous(
 
     if not remaining and not config.duration_seconds:
         return 0, 0, []
+
+    # MP_SHUTDOWN_EVENT and SHUTDOWN_REQUESTED are module-level singletons
+    # created at import; no need to make new ones here. Re-install handlers
+    # in case main() didn't (defensive; harmless if it did).
+    _install_shutdown_handlers()
 
     file_queue = MPQueue()
     upload_queue = MPQueue(maxsize=QUEUE_DEPTH)
@@ -1163,26 +1363,24 @@ def run_continuous(
     for i in range(NUM_GENERATORS):
         p = Process(
             target=_continuous_generator_worker,
-            args=(file_queue, upload_queue, config_dict, i),
+            args=(file_queue, upload_queue, config_dict, i, MP_SHUTDOWN_EVENT),
             name=f"gen-{i}",
         )
         p.start()
         generators.append(p)
 
-    # Shared pill-count across uploaders. Each generator puts exactly one
-    # `None` pill when it exits, so the total pill count is NUM_GENERATORS
-    # regardless of how they distribute across the uploader threads.
-    shutdown_counter = [0]
-    shutdown_lock = threading.Lock()
+    # Threading Event that main sets after all generator processes have
+    # been joined. Uploaders exit on the next empty poll if this is set.
+    # Replaces the prior pill-counter design (see uploader worker docstring
+    # for why relayed pills through a bounded queue were unsafe).
+    generators_done_event = threading.Event()
     uploaders = []
     for i in range(NUM_UPLOADERS):
         t = threading.Thread(
             target=_continuous_uploader_worker,
             args=(
                 upload_queue,
-                shutdown_counter,
-                NUM_GENERATORS,
-                shutdown_lock,
+                generators_done_event,
                 config,
                 results,
                 results_lock,
@@ -1210,13 +1408,49 @@ def run_continuous(
                 current_rows = total_rows
                 current_bytes = total_bytes
 
+            # SIGTERM/SIGINT triggers graceful shutdown. The signal handler
+            # sets both SHUTDOWN_REQUESTED (threading Event, for main + uploader
+            # threads) and mp_shutdown_event (shared with generator children).
+            # Generators check the mp event between file_queue.get()s and
+            # inside their upload_queue.put() retry loop, so they exit within
+            # ~0.5s regardless of how many pending file_ids sit ahead of any
+            # queued poison pill. Also enqueue N pills as a backup path for
+            # generators that were mid-put() and skipped the shutdown check
+            # window; put_nowait avoids blocking if the queue happens to be
+            # full (unlikely but possible under high pressure).
+            if SHUTDOWN_REQUESTED.is_set():
+                for _ in range(NUM_GENERATORS):
+                    try:
+                        file_queue.put(None, timeout=0.1)
+                    except Exception:
+                        pass
+                if current_done > last_done:
+                    pbar.update(current_done - last_done)
+                pbar.set_description("Shutdown requested (SIGTERM/SIGINT)")
+                break
+
             # Check duration expiry
             if config.duration_seconds:
                 elapsed = time.monotonic() - start_time
                 if elapsed >= config.duration_seconds:
-                    # Time's up -- send poison pills to stop generators
+                    # Time's up. Use the SAME mechanism as SIGTERM: flip
+                    # MP_SHUTDOWN_EVENT so generators exit via their fast
+                    # out-of-band check rather than by draining thousands
+                    # of file_ids to find pill(s) at the tail of file_queue.
+                    # (Without this the process wedges: generators sit in
+                    # CPU-bound generate_file_data() calls, complete the
+                    # current file, put to upload_queue, loop back to
+                    # file_queue.get() -- but there are 1500+ file_ids
+                    # ahead of the pills so they keep pumping. Duration-
+                    # expiry shutdown then blows past 30s.)
+                    MP_SHUTDOWN_EVENT.set()
+                    # Belt-and-braces pills for the rare generator that's
+                    # already blocked on file_queue.get() with no signal.
                     for _ in range(NUM_GENERATORS):
-                        file_queue.put(None)
+                        try:
+                            file_queue.put(None, timeout=0.1)
+                        except Exception:
+                            pass
                     if current_done > last_done:
                         pbar.update(current_done - last_done)
                     pbar.set_description(f"Duration {config.duration_seconds}s reached")
@@ -1274,15 +1508,45 @@ def run_continuous(
 
                 last_done = current_done
 
-            threading.Event().wait(0.5)
+            # 0.1s not 0.5s so a SIGTERM landing between iterations still
+            # exits within a bounded window. Cheap; wakeups are just cheap
+            # progress polling.
+            threading.Event().wait(0.1)
 
-    for t in uploaders:
-        t.join()
-
+    # Reap generators first. On graceful shutdown they exit within ~0.5s of
+    # the mp event flipping (cancel_join_thread on their outgoing queue
+    # prevents the feeder from blocking exit). If any is stuck (rare),
+    # .kill() is SIGKILL directly -- .terminate() would send SIGTERM which
+    # the worker's SIG_IGN handler drops.
     for p in generators:
-        p.join(timeout=5)
+        p.join(timeout=3)
         if p.is_alive():
-            p.terminate()
+            p.kill()
+            p.join(timeout=1)
+
+    # Then tell uploaders no more items are coming, so an empty poll can
+    # confidently exit rather than spin waiting for more work.
+    generators_done_event.set()
+    for t in uploaders:
+        t.join(timeout=10)
+        if t.is_alive():
+            print(f"WARN: uploader {t.name} did not exit within 10s", file=sys.stderr, flush=True)
+
+    # Cancel the parent's mp.Queue feeder threads. At duration expiry, the
+    # parent pre-loaded file_queue with the full remaining list (thousands
+    # of file_ids); only a handful were consumed before the timer fired.
+    # The rest sit in the parent's feeder-thread outgoing buffer waiting
+    # to be piped to children that are now dead. Interpreter exit joins
+    # those feeders, which block forever on the closed pipe. cancel_join
+    # abandons the buffered items so the interpreter can exit cleanly.
+    try:
+        file_queue.cancel_join_thread()
+    except Exception:
+        pass
+    try:
+        upload_queue.cancel_join_thread()
+    except Exception:
+        pass
 
     # Only checkpoint Phase 1 files (not duration-phase ephemeral files)
     with results_lock:
@@ -1499,6 +1763,15 @@ Endpoint: {config.s3_endpoint or "AWS default"}
         print(f"Error connecting to S3: {e}")
         sys.exit(1)
 
+    # Install SIGTERM/SIGINT handlers early. For continuous mode,
+    # run_continuous re-installs with the mp_shutdown_event once it has
+    # created it, so child generator processes also see shutdown flips.
+    # For batch/sequential mode, this install alone (no mp_event) still
+    # gives Ctrl-C a clean path: it sets SHUTDOWN_REQUESTED, which the
+    # main loop can check between file completions rather than
+    # KeyboardInterrupt-ing mid-ProcessPoolExecutor context manager.
+    _install_shutdown_handlers()
+
     # Build the schema-specific generator via dispatch and warm any
     # per-schema caches before forking child processes so workers inherit
     # them via copy-on-write.
@@ -1521,7 +1794,13 @@ Endpoint: {config.s3_endpoint or "AWS default"}
         total_rows, total_bytes, all_results = run_continuous(
             config, my_files, completed, config.checkpoint_file
         )
-        errors = [r for r in all_results if not r["success"]]
+        # "dropped: shutdown" is a graceful outcome (SIGTERM fired
+        # mid-pipeline; the file will regenerate on resume) so it does not
+        # count as a run error. Real S3/generation failures still do.
+        errors = [
+            r for r in all_results
+            if not r["success"] and not r.get("error", "").startswith("dropped:")
+        ]
         for r in all_results:
             if r["success"]:
                 completed.add(r["file_id"])
@@ -1535,6 +1814,21 @@ Endpoint: {config.s3_endpoint or "AWS default"}
 
             with tqdm(total=len(remaining), unit="files") as pbar:
                 for future in as_completed(futures):
+                    # SIGTERM/SIGINT during batch mode: cancel every future
+                    # that hasn't started, then break the loop. The context
+                    # manager exit still waits for in-flight workers, but
+                    # they upload atomically via put_object so no ghost
+                    # multipart uploads are left behind (unlike continuous
+                    # mode's multipart path).
+                    if SHUTDOWN_REQUESTED.is_set():
+                        for f in futures:
+                            f.cancel()
+                        print(
+                            "Shutdown requested; cancelling pending batch work.",
+                            file=sys.stderr,
+                        )
+                        break
+
                     result = future.result()
 
                     if result["success"]:
@@ -1591,6 +1885,21 @@ Errors: {len(errors)}
             print(f"  File {err['file_id']}: {err['error']}")
         if len(errors) > 10:
             print(f"  ... and {len(errors) - 10} more errors")
+
+    # Force clean process exit. Python 3.11+ interpreter shutdown after a
+    # continuous-mode run occasionally hangs in the multiprocessing
+    # atexit hook (`_exit_function`) even when every non-daemon thread
+    # has already exited (verified via `threading.enumerate()` returning
+    # only ['MainThread']). At that point every result has been printed,
+    # every S3 upload has completed, checkpoint is saved, and there is
+    # nothing more for the interpreter to do -- os._exit(0) skips the
+    # atexit dance and returns rc=0 to the shell / kubelet, avoiding a
+    # spurious SIGKILL after terminationGracePeriodSeconds. Failure code
+    # 1 if there were errors so K8s Job status reflects reality.
+    rc = 1 if errors else 0
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(rc)
 
 
 if __name__ == "__main__":
