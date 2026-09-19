@@ -1952,6 +1952,10 @@ class SparkJobManager:
             "replay_financial.py",
             "reproduce_financial.py",
             "score_financial.py",
+            # Library module imported by replay_financial (not a Spark
+            # entry point but must be mounted alongside so the local
+            # import resolves inside the driver pod).
+            "detection_rules.py",
         ]
 
         # Build ConfigMap data
