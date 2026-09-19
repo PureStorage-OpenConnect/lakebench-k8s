@@ -93,10 +93,17 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
     rptd_originator_address STRING,
     rptd_beneficiary_name   STRING,
     rptd_beneficiary_address STRING,
-    source_message_ref      STRING
+    source_message_ref      STRING,
+    _batch_id               BIGINT
 ) USING iceberg PARTITIONED BY (days(txn_timestamp))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
+# `_batch_id` supports the silver_stream two-phase batchId idempotency
+# protocol (LB-109). Batch-mode writes leave it NULL; streaming writes
+# tag each row with the Structured Streaming batchId so that on retry the
+# handler can DELETE WHERE _batch_id = X + reinsert without double-count.
+# Nullable so batch-mode `_replace_data(build_transactions(...))` works
+# unchanged.
 
 DDL_ENTITIES = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_ENTITIES} (
@@ -162,10 +169,19 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_EDGES} (
     first_seen_ts          TIMESTAMP NOT NULL,
     last_seen_ts           TIMESTAMP NOT NULL,
     cumulative_amount_usd  DECIMAL(38, 2) NOT NULL,
-    txn_count              BIGINT NOT NULL
+    txn_count              BIGINT NOT NULL,
+    _batch_id              BIGINT
 ) USING iceberg PARTITIONED BY (bucket(64, source_entity_id))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
+# LB-109: `_batch_id` lets silver_stream tag per-batch aggregates so a
+# streaming retry can DELETE WHERE _batch_id = X + reinsert without
+# double-adding. Rows in this table are now per-(source, target, batch),
+# not the previous per-(source, target) cumulative. Downstream analytical
+# queries (e.g. benchmark FQ3) already SUM(cumulative_amount_usd) and
+# SUM(txn_count) grouped by source_entity_id, so per-batch storage is
+# transparent to them. Batch-mode silver_build writes with _batch_id = NULL
+# (one row per pair, same as before).
 
 
 # ---------------------------------------------------------------------------
@@ -256,6 +272,10 @@ def build_transactions(bronze):
         col("cdtr.nm").alias("rptd_beneficiary_name"),
         col("cdtr.pstl_adr.strt_nm").alias("rptd_beneficiary_address"),
         col("msg_id").alias("source_message_ref"),
+        # LB-109: _batch_id populated by silver_stream, NULL for batch mode.
+        # Present in every DataFrame that writes silver.transactions so the
+        # DataFrameWriterV2.overwrite() column set matches the target schema.
+        lit(None).cast("bigint").alias("_batch_id"),
     )
 
 
@@ -533,6 +553,10 @@ def build_edges(txns_df):
             col("last_seen_ts"),
             col("cumulative_amount_usd"),
             col("txn_count"),
+            # LB-109: NULL in batch mode; silver_stream overrides in its
+            # per-batch build_edges wrapper. Present so overwrite() writes
+            # match the target schema.
+            lit(None).cast("bigint").alias("_batch_id"),
         )
     )
 

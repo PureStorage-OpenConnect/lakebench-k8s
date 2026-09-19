@@ -423,38 +423,40 @@ fn main() {
     let mut ref_bytes: u64 = 0;
     let mut ref_files: u64 = 0;
     if do_reference {
-        // Streamed in row-group chunks into an in-memory buffer, then PUT
-        // as one object each. Party is the biggest (~ population * ~200 B),
-        // still well under a pod's memory request at scale 100.
-        let mut party_buf: Vec<u8> = Vec::with_capacity(256 * 1024 * 1024);
-        write_party_to(&w, &instances, &mut party_buf);
-        // S3 single-PUT ceiling is 5 GiB on FlashBlade / AWS. object_store::put
-        // does single-part uploads; anything above 5 GiB will silently be
-        // rejected server-side or corrupt on some backends. Fail LOUD here
-        // rather than after minutes of world-build + party-build wasted work.
-        // Realistic thresholds:
-        //   scale <=  100: party_buf ~ 800 MB compressed, fine
-        //   scale ~   500: party_buf ~ 4 GB compressed, marginal
-        //   scale >= 1000: party_buf > 5 GB, requires multipart (BUGS.md)
-        const PARTY_SINGLE_PUT_CAP: usize = 5 * 1024 * 1024 * 1024;
-        if party_buf.len() > PARTY_SINGLE_PUT_CAP {
-            panic!(
-                "party.parquet buffer is {} bytes, exceeds S3 single-PUT ceiling of {}. \
-                 Multipart streaming is not yet wired for the reference zone; scale \
-                 must be reduced or the multipart path implemented (tracked as LB \
-                 follow-up in BUGS.md).",
-                party_buf.len(),
-                PARTY_SINGLE_PUT_CAP,
-            );
-        }
-        ref_bytes += party_buf.len() as u64;
+        // Party and account stream through a real S3 multipart upload
+        // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
+        // into MpuWriter, which enqueues 5 MiB parts against S3 as they
+        // fill. Whole-object size is no longer bounded by process RAM
+        // or the 5 GiB single-PUT ceiling -- S3 multipart supports up
+        // to 5 TiB per object across 10k parts, so at 5 MiB parts we
+        // top out around 50 GiB per file (well past scale >=1000's
+        // ~5-10 GB party.parquet). If the caller wants larger, bump
+        // WriteMultipart's chunk_size via a new S3Sink helper.
+        //
+        // finish() is fail-loud: on error we panic so the pod exits
+        // non-zero and the datagen Job restarts (same semantics as the
+        // single-PUT path). Drop's best-effort abort covers panics.
+        let mut party_mpu = sink.put_multipart("bronze/party.parquet");
+        write_party_to(&w, &instances, &mut party_mpu);
+        let party_bytes = party_mpu.bytes_written();
+        party_mpu
+            .finish()
+            .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
+        ref_bytes += party_bytes;
         ref_files += 1;
-        sink.put("bronze/party.parquet", party_buf);
-        let mut acct_buf: Vec<u8> = Vec::with_capacity(128 * 1024 * 1024);
-        write_account_to(&w, &mut acct_buf);
-        ref_bytes += acct_buf.len() as u64;
+
+        let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
+        write_account_to(&w, &mut acct_mpu);
+        let acct_bytes = acct_mpu.bytes_written();
+        acct_mpu
+            .finish()
+            .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
+        ref_bytes += acct_bytes;
         ref_files += 1;
-        sink.put("bronze/account.parquet", acct_buf);
+
+        // Manifest stays on the single-PUT path: it's a handful of MB
+        // even at scale 1000 (one row per typology instance), so
+        // multipart adds request overhead with no benefit.
         let man_bytes = encode_parquet(
             &build_manifest(&instances, seed, &inst_uids),
             8 * 1024 * 1024,
