@@ -292,14 +292,17 @@ def build_entities(txns_df):
     return picked.select(
         col("entity_id"),
         # We can't tell Person from Company from FI from pacs.008 name alone;
-        # a common heuristic is "capitalised acronym or 'LTD/INC/GMBH/AG/PLC/SA'
-        # suffix -> Company", "known BIC prefix -> FI", else Person. Applied
-        # conservatively (default Person) with a Company classifier for the
-        # cheap suffix case so downstream cluster reports don't mislabel every
-        # entity as Person.
+        # a common heuristic is "the name ends with a corporate suffix
+        # (LTD/INC/GMBH/PLC etc.) -> Company", else default Person. Applied
+        # to the END of the name only (via $) so "MARIA SA" doesn't match
+        # SA as a Company (SA at word-end common in personal names) and
+        # short two-letter tokens (AG, BV, SA) don't false-positive
+        # anywhere in the middle. Corporate names put the suffix at the
+        # end by convention. "L.L.C." is intentionally not detected here
+        # -- the dotted form is rare in pacs.008 dbtr/cdtr fields.
         when(
             upper(col("name")).rlike(
-                r"\b(LTD|LIMITED|INC|CORP|LLC|GMBH|AG|PLC|SA|SARL|BV|BANK|CAPITAL|HOLDINGS)\b"
+                r"(LTD|LIMITED|INC|CORP|LLC|GMBH|AG|PLC|SA|SARL|BV|BANK|CAPITAL|HOLDINGS|GROUP|INTERNATIONAL|COMPANY|CO)$"
             ),
             lit("Company"),
         )

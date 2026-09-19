@@ -244,11 +244,193 @@ _CUSTOMER360_QUERIES: list[BenchmarkQuery] = [
 ]
 
 
-# Financial (FinServ-Crime, AML) benchmark queries land with the ENG-2C.4.6-7
-# investigator-workload authoring. Empty list until then; callers should
-# treat an empty list as "no benchmark configured for this schema" and skip
-# the benchmark rather than fail.
-_FINANCIAL_QUERIES: list[BenchmarkQuery] = []
+# Financial (FinServ-Crime, AML) benchmark queries.
+#
+# Eight queries covering the analyst workloads a fraud/AML investigator
+# actually runs against a completed medallion pipeline:
+#
+# - FQ1: silver.transactions full scan aggregation (I/O)
+# - FQ2: top corridors by volume in a rolling window (filter + agg)
+# - FQ3: entity risk propagation via edges (join + agg)
+# - FQ4: rolling running-balance window over account_statements (analytic)
+# - FQ5: gold.alerts triage by priority + rule (operational)
+# - FQ6: structuring-band transaction detection (filter, mirrors W2 rule)
+# - FQ7: cross-border corridor concentration (Trino/Iceberg hint test)
+# - FQ8: alert-to-entity join for case investigation (small-N join)
+#
+# Uses table placeholders {catalog}.{silver_table}, {silver_entities},
+# {silver_counterparty_edges}, {silver_account_statements}, {gold_alerts},
+# {gold_daily_dashboards} filled by benchmark/runner.py.
+
+_FQ1 = BenchmarkQuery(
+    name="FQ1_txn_full_scan",
+    display_name="Silver transactions full aggregation",
+    query_class="scan",
+    sql="""\
+SELECT
+  COUNT(*) AS total_txns,
+  COUNT(DISTINCT originator_id) AS unique_originators,
+  COUNT(DISTINCT beneficiary_id) AS unique_beneficiaries,
+  ROUND(SUM(txn_amount_usd), 2) AS total_volume_usd,
+  ROUND(AVG(txn_amount_usd), 2) AS avg_txn_usd
+FROM {catalog}.{silver_table}""",
+)
+
+_FQ2 = BenchmarkQuery(
+    name="FQ2_top_corridors_window",
+    display_name="Top payment corridors by volume (last 30 days)",
+    query_class="filter_prune",
+    sql="""\
+SELECT
+  originator_bank_bic,
+  beneficiary_bank_bic,
+  txn_currency,
+  COUNT(*) AS txn_count,
+  ROUND(SUM(txn_amount_usd), 2) AS volume_usd
+FROM {catalog}.{silver_table}
+WHERE txn_timestamp >= date_add('day', -30, (SELECT MAX(txn_timestamp) FROM {catalog}.{silver_table}))
+GROUP BY originator_bank_bic, beneficiary_bank_bic, txn_currency
+ORDER BY volume_usd DESC
+LIMIT 100""",
+)
+
+_FQ3 = BenchmarkQuery(
+    name="FQ3_entity_edge_risk",
+    display_name="Entity out-degree + volume via edges",
+    query_class="aggregation",
+    sql="""\
+SELECT
+  e.name,
+  e.entity_type,
+  COUNT(DISTINCT ce.target_entity_id) AS distinct_beneficiaries,
+  SUM(ce.txn_count) AS total_txns,
+  ROUND(SUM(ce.cumulative_amount_usd), 2) AS total_out_usd
+FROM {catalog}.{silver_counterparty_edges} ce
+JOIN {catalog}.{silver_entities} e ON ce.source_entity_id = e.entity_id
+GROUP BY e.entity_id, e.name, e.entity_type
+ORDER BY total_out_usd DESC
+LIMIT 200""",
+)
+
+_FQ4 = BenchmarkQuery(
+    name="FQ4_running_balance_window",
+    display_name="Running balance for high-activity accounts",
+    query_class="analytics",
+    sql="""\
+WITH top_accts AS (
+  SELECT account_id
+  FROM {catalog}.{silver_account_statements}
+  GROUP BY account_id
+  ORDER BY COUNT(*) DESC
+  LIMIT 50
+)
+SELECT
+  s.account_id,
+  s.book_ts,
+  s.cdt_dbt_ind,
+  s.amt,
+  s.bal_after,
+  ROW_NUMBER() OVER (PARTITION BY s.account_id ORDER BY s.book_ts) AS entry_ord
+FROM {catalog}.{silver_account_statements} s
+JOIN top_accts t USING (account_id)
+ORDER BY s.account_id, entry_ord""",
+)
+
+_FQ5 = BenchmarkQuery(
+    name="FQ5_alert_triage",
+    display_name="Alert triage by priority + rule",
+    query_class="operational",
+    sql="""\
+SELECT
+  rule_id,
+  priority,
+  status,
+  COUNT(*) AS alerts,
+  COUNT(DISTINCT entity_id) AS entities,
+  ROUND(AVG(alert_score), 3) AS avg_score
+FROM {catalog}.{gold_alerts}
+GROUP BY rule_id, priority, status
+ORDER BY alerts DESC""",
+)
+
+_FQ6 = BenchmarkQuery(
+    name="FQ6_structuring_scan",
+    display_name="Structuring-band transaction detection (W2 shape)",
+    query_class="filter_prune",
+    sql="""\
+SELECT
+  originator_id,
+  txn_currency,
+  COUNT(*) AS txn_count,
+  MIN(txn_timestamp) AS first_ts,
+  MAX(txn_timestamp) AS last_ts,
+  ROUND(SUM(txn_amount), 2) AS total_amount
+FROM {catalog}.{silver_table}
+WHERE (
+       (txn_currency IN ('USD', 'CAD', 'AUD') AND txn_amount BETWEEN 9000 AND 9999)
+    OR (txn_currency IN ('GBP', 'EUR', 'CHF') AND txn_amount BETWEEN 14000 AND 14995)
+    OR (txn_currency IN ('JPY', 'INR')       AND txn_amount BETWEEN 900000 AND 999999)
+  )
+GROUP BY originator_id, txn_currency
+HAVING COUNT(*) >= 3
+ORDER BY txn_count DESC
+LIMIT 500""",
+)
+
+_FQ7 = BenchmarkQuery(
+    name="FQ7_cross_border_concentration",
+    display_name="Cross-border corridor concentration",
+    query_class="aggregation",
+    sql="""\
+SELECT
+  originator_bank_bic,
+  beneficiary_bank_bic,
+  ROUND(SUM(CASE WHEN cross_border THEN txn_amount_usd ELSE 0 END), 2) AS xborder_usd,
+  ROUND(SUM(txn_amount_usd), 2) AS total_usd,
+  ROUND(
+    SUM(CASE WHEN cross_border THEN txn_amount_usd ELSE 0 END) * 1.0 / NULLIF(SUM(txn_amount_usd), 0),
+    3
+  ) AS xborder_share
+FROM {catalog}.{silver_table}
+GROUP BY originator_bank_bic, beneficiary_bank_bic
+HAVING SUM(txn_amount_usd) > 0
+ORDER BY xborder_usd DESC
+LIMIT 100""",
+)
+
+_FQ8 = BenchmarkQuery(
+    name="FQ8_alert_to_entity_join",
+    display_name="Case investigation: alert -> entity -> recent txns",
+    query_class="operational",
+    sql="""\
+WITH recent_alerts AS (
+  SELECT alert_id, entity_id, alert_ts, related_txn_ids
+  FROM {catalog}.{gold_alerts}
+  ORDER BY alert_ts DESC
+  LIMIT 100
+)
+SELECT
+  a.alert_id,
+  a.alert_ts,
+  e.name AS entity_name,
+  e.entity_type,
+  cardinality(a.related_txn_ids) AS txns_in_alert
+FROM recent_alerts a
+LEFT JOIN {catalog}.{silver_entities} e ON a.entity_id = e.entity_id
+ORDER BY a.alert_ts DESC""",
+)
+
+
+_FINANCIAL_QUERIES: list[BenchmarkQuery] = [
+    _FQ1,  # scan
+    _FQ2,  # filter_prune
+    _FQ6,  # filter_prune
+    _FQ3,  # aggregation
+    _FQ7,  # aggregation
+    _FQ4,  # analytics
+    _FQ5,  # operational
+    _FQ8,  # operational
+]
 
 
 BENCHMARK_QUERIES_BY_DOMAIN: dict[WorkloadSchema, list[BenchmarkQuery]] = {

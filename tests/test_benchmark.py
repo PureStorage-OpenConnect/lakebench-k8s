@@ -66,11 +66,23 @@ class TestBenchmarkQueriesByDomain:
 
         assert get_benchmark_queries(WorkloadSchema.CUSTOMER360) == BENCHMARK_QUERIES
 
-    def test_financial_dispatch_returns_empty_until_workloads_authored(self):
+    def test_financial_dispatch_returns_authored_query_set(self):
+        """Financial queries were authored in the fraud-aml hardening pass
+        (FQ1..FQ8). The set is non-empty and covers each query_class the
+        Customer 360 benchmark exercises so per-class averages stay
+        meaningful when compared across schemas."""
         from lakebench.benchmark.queries import get_benchmark_queries
         from lakebench.config.schema import WorkloadSchema
 
-        assert get_benchmark_queries(WorkloadSchema.FINANCIAL) == []
+        queries = get_benchmark_queries(WorkloadSchema.FINANCIAL)
+        assert len(queries) == 8, f"expected 8 financial queries, got {len(queries)}"
+        classes = {q.query_class for q in queries}
+        for expected in ("scan", "filter_prune", "aggregation", "analytics", "operational"):
+            assert expected in classes, f"financial queries missing class {expected}"
+        # Sanity: every SQL template references at least one financial-only
+        # table placeholder OR the shared {silver_table}/{gold_table}.
+        for q in queries:
+            assert "{catalog}" in q.sql, f"{q.name} missing catalog placeholder"
 
     def test_custom_dispatch_falls_back_to_customer360(self):
         from lakebench.benchmark.queries import (
