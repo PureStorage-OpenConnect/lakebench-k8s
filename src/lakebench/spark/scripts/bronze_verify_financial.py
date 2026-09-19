@@ -35,6 +35,24 @@ REGISTER = env("LB_REGISTER_TABLE", "1") == "1"
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
+# add_files preflight thresholds (LB-110). At scale 100+ the pacs008/
+# tree can be 700 GB and 700k+ files; add_files manifest generation
+# scans every file and holds per-file state on the driver, which OOMs
+# the default 4Gi bronze-verify executor. When either threshold is
+# exceeded we deliberately skip add_files and go straight to CTAS with
+# a loud warning (doubles S3 usage; caller can raise the thresholds or
+# bump the bronze-verify executor sizing to keep zero-copy).
+# Default 1.5 TiB / 800k files. Scale 100 pacs008/ is ~730 GB, well
+# under the cap so scale-100 keeps the zero-copy register path -- the
+# previous 500 GB default would have force-CTAS'd scale 100 and doubled
+# S3 usage silently at every UAT run. Heuristic, not a validated safe
+# cap: 4Gi bronze-verify has been proven OK at scale 100 (~700 GB /
+# ~200k files), and untested above that. Callers going past scale 200
+# should either raise `bronze-verify` executor memory OR set these
+# env vars lower to force CTAS and know they're doubling S3 by choice.
+ADD_FILES_MAX_BYTES = int(env("LB_BRONZE_ADD_FILES_MAX_BYTES", str(1536 * 1024**3)))
+ADD_FILES_MAX_FILES = int(env("LB_BRONZE_ADD_FILES_MAX_FILES", "800000"))
+
 
 REQUIRED_FLAT_COLS = (
     "msg_id",
@@ -120,8 +138,71 @@ def main() -> None:
         #    the missing struct columns.
         #
         # 2. CTAS fallback: if add_files isn't supported by the catalog
-        #    (e.g. Nessie REST prior to a certain version), rewrite the
-        #    data into the Iceberg table. Doubles S3 usage.
+        #    (e.g. Nessie REST prior to a certain version) OR the source
+        #    parquet exceeds ADD_FILES_MAX_BYTES / ADD_FILES_MAX_FILES
+        #    (LB-110: add_files manifest generation OOMs a 4Gi executor
+        #    at scale 100+), rewrite the data into the Iceberg table.
+        #    Doubles S3 usage; operators can bump the thresholds or the
+        #    executor sizing to keep zero-copy.
+        force_ctas = False
+        try:
+            # Enumerate source files once. Uses Hadoop FS listing via the
+            # Spark session; cheap at 100k files, and gives us honest bytes
+            # + file count for the preflight decision.
+            jvm = spark._jvm  # type: ignore[attr-defined]
+            hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+            uri = jvm.java.net.URI(BRONZE_URI + PACS_PREFIX)
+            fs = jvm.org.apache.hadoop.fs.FileSystem.get(uri, hconf)
+            path = jvm.org.apache.hadoop.fs.Path(BRONZE_URI + PACS_PREFIX)
+            it = fs.listFiles(path, True)  # recursive
+            total_bytes = 0
+            total_files = 0
+            while it.hasNext():
+                st = it.next()
+                if st.isFile() and st.getPath().getName().endswith(".parquet"):
+                    total_bytes += int(st.getLen())
+                    total_files += 1
+            log(
+                f"Source parquet: {total_files:,} files, "
+                f"{total_bytes / 1024**3:.1f} GB "
+                f"(add_files thresholds: {ADD_FILES_MAX_FILES:,} files, "
+                f"{ADD_FILES_MAX_BYTES / 1024**3:.1f} GB)"
+            )
+            if total_bytes > ADD_FILES_MAX_BYTES or total_files > ADD_FILES_MAX_FILES:
+                log(
+                    "WARNING: source exceeds add_files preflight threshold; "
+                    "skipping zero-copy register and using CTAS (doubles S3). "
+                    "Raise LB_BRONZE_ADD_FILES_MAX_BYTES / "
+                    "LB_BRONZE_ADD_FILES_MAX_FILES or the bronze-verify "
+                    "executor sizing to keep zero-copy."
+                )
+                force_ctas = True
+        except Exception as e:  # noqa: BLE001
+            # Enumeration is a safety check, not a correctness gate. If it
+            # fails (rare FS oddity), fall through and let add_files run;
+            # its own exception handler still routes to CTAS.
+            log(f"Preflight enumeration failed ({e}); proceeding to add_files.")
+
+        if force_ctas:
+            spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
+            spark.sql(f"""
+                CREATE TABLE {CATALOG}.{BRONZE_TABLE}
+                USING iceberg
+                PARTITIONED BY (days(intr_bk_sttlm_dt))
+                TBLPROPERTIES ('format-version' = '2')
+                AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
+            """)
+            log(f"Registered via CTAS (preflight): {CATALOG}.{BRONZE_TABLE}")
+            elapsed = time.time() - start_time
+            log("=" * 60)
+            log(
+                f"Bronze verification complete in {elapsed:.1f}s: rows={row_count:,} "
+                f"cols={col_count} days={partition_days}"
+            )
+            log("=" * 60)
+            spark.stop()
+            return
+
         try:
             # Full inferred schema for the CREATE, so add_files finds
             # every column of the parquet source under its real name.

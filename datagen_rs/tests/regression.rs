@@ -334,3 +334,110 @@ fn compression_snappy_lz4_none() {
         Compression::UNCOMPRESSED
     ));
 }
+
+/// LB-107: streaming multipart upload for large reference-zone objects.
+///
+/// Exercises the `MpuWriter` end-to-end against an in-memory
+/// `object_store` so the test doesn't need S3: writes ~40 MiB across
+/// many small `Write::write` calls (well above the 5 MiB part
+/// threshold, so at least 8 real multipart parts get emitted), then
+/// re-reads the object and verifies byte-for-byte equality plus the
+/// tracked `bytes_written()` accounting.
+#[test]
+fn mpu_writer_large_roundtrip() {
+    use std::io::Write;
+    use datagen_rs::s3sink::MpuWriter;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+    let key = "test/large.bin";
+    let path = Path::from(key);
+
+    // Begin a real multipart upload against the in-memory store.
+    let store_c = store.clone();
+    let path_c = path.clone();
+    let upload = handle
+        .block_on(async move { store_c.put_multipart(&path_c).await })
+        .expect("begin multipart");
+
+    let mut mpu = MpuWriter::from_upload(upload, handle.clone(), key.to_string());
+
+    // 40 MiB of a repeating pattern, in ~64 KiB chunks. Pattern varies
+    // by offset so a byte swap or dropped chunk would be caught by
+    // the equality check below.
+    const TOTAL: usize = 40 * 1024 * 1024;
+    const CHUNK: usize = 64 * 1024;
+    let mut expected = Vec::with_capacity(TOTAL);
+    let mut written = 0usize;
+    while written < TOTAL {
+        let n = CHUNK.min(TOTAL - written);
+        let mut chunk = vec![0u8; n];
+        for (i, b) in chunk.iter_mut().enumerate() {
+            *b = ((written + i) & 0xFF) as u8;
+        }
+        mpu.write_all(&chunk).expect("mpu write_all");
+        expected.extend_from_slice(&chunk);
+        written += n;
+    }
+    assert_eq!(mpu.bytes_written(), TOTAL as u64);
+    mpu.finish().expect("mpu finish");
+
+    // Read it back and compare byte-for-byte.
+    let store_c = store.clone();
+    let got = handle
+        .block_on(async move { store_c.get(&path).await.unwrap().bytes().await.unwrap() });
+    assert_eq!(got.len(), TOTAL, "readback size");
+    assert_eq!(&got[..], &expected[..], "readback content");
+}
+
+/// LB-107 negative path: dropping an MpuWriter without calling
+/// `finish()` must not leak an incomplete object. We can't observe
+/// FlashBlade's actual abort in a unit test, but we can verify the
+/// in-memory store never saw the object (multipart-in-progress is
+/// separate from the completed-object namespace).
+#[test]
+fn mpu_writer_drop_without_finish_leaves_no_object() {
+    use std::io::Write;
+    use datagen_rs::s3sink::MpuWriter;
+    use object_store::memory::InMemory;
+    use object_store::path::Path;
+    use object_store::ObjectStore;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .unwrap();
+    let handle = rt.handle().clone();
+    let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
+    let key = "test/abandoned.bin";
+    let path = Path::from(key);
+
+    let store_c = store.clone();
+    let path_c = path.clone();
+    let upload = handle
+        .block_on(async move { store_c.put_multipart(&path_c).await })
+        .expect("begin multipart");
+
+    {
+        let mut mpu = MpuWriter::from_upload(upload, handle.clone(), key.to_string());
+        // Write more than one chunk so at least one part is actually
+        // uploaded before we drop.
+        mpu.write_all(&vec![0u8; 6 * 1024 * 1024]).expect("write");
+        // Deliberately drop without finish() -- Drop's abort runs.
+    }
+
+    // The object was never completed, so a GET must fail.
+    let store_c = store.clone();
+    let path_c = path.clone();
+    let res = handle.block_on(async move { store_c.get(&path_c).await });
+    assert!(res.is_err(), "abandoned object should not be readable");
+}

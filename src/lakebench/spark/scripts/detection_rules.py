@@ -1,22 +1,22 @@
-"""Detection rule modules (LB-108, partial implementation).
+"""Detection rule modules (LB-108).
 
 Provides rule dispatchers for the fraud-aml pipeline. Each rule takes a
 silver.transactions DataFrame (already filtered/time-travelled by the
 caller) and returns a DataFrame conforming to the gold.alerts schema.
 
 Rules implemented in this file:
+- W1_connected_components: undirected connected components over the
+  entity graph induced by silver.transactions. Iterative label
+  propagation, O(graph-diameter) iterations, no GraphFrames dependency.
 - W2_structuring: entities making N>=3 transactions in a rolling window
   where every amount is within 90-100% of the local reporting threshold.
-- W3_round_tripping: (stub) sequences of 3+ transactions where
-  money returns to origin within a short window.
-- W4_risk_propagation: (stub) high-velocity entity-to-entity chains.
+- W3_round_tripping: sequences of transactions where money returns to
+  origin within a short window.
+- W4_risk_propagation: high-velocity entity-to-entity chains.
 
-Two more rules that the datagen's synthetic typologies would benefit from
-but which need graph libraries (GraphFrames, sparkling-graph) are tracked
-as follow-ups:
-- W1_connected_components: entity clustering for synthetic_identity /
-  entity_clusters gold table population.
-- W5_splink_resolution: probabilistic entity resolution.
+W5_splink_resolution (probabilistic entity resolution) is a separate
+research effort tracked as ENH; it is not a "fix" and is intentionally
+out of scope here.
 
 The rule dispatcher (`get_rule`) is called by replay_financial.py.
 """
@@ -401,7 +401,276 @@ def w4_risk_propagation(
     )
 
 
+def w1_connected_components(
+    silver_txns: DataFrame,
+    min_cluster_size: int = 3,
+    max_iterations: int = 20,
+    max_vertices: int = 5_000_000,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Undirected connected components over the entity graph induced by
+    silver.transactions. Emits one alert per component whose vertex count
+    reaches `min_cluster_size`.
+
+    Algorithm: iterative label propagation using the classic
+    "min-neighbour-id" rule. Each vertex starts with its own id as its
+    label; on each iteration a vertex adopts the minimum label seen
+    among itself and its neighbours. Converges to the "min id in the
+    connected component" label in O(diameter) iterations. Bounded by
+    `max_iterations` so a pathologically hostile graph can't hang the
+    replay job.
+
+    Implemented directly in Spark SQL rather than through GraphFrames
+    because GraphFrames publishes per Spark minor and per Scala minor
+    (e.g. `graphframes:graphframes:0.8.4-spark3.5-s_2.12`) and lakebench
+    supports Spark 3.5, 4.0, 4.1 across Scala 2.12/2.13 -- a single
+    dependency string cannot span that matrix, so wiring GraphFrames
+    would silently downgrade in the matrix cells the artifact doesn't
+    cover. Iterative label propagation is O(graph-diameter) iterations
+    which is a handful for fraud graphs (typology instances are small
+    cliques and short chains); slower than a Pregel implementation at
+    the top end but with no dependency risk.
+
+    Args:
+        silver_txns: DataFrame of silver.transactions schema.
+        min_cluster_size: minimum vertex count in a component to emit
+            an alert. Default 3 (a pair is a normal transaction; three
+            or more entities sharing a component is worth flagging).
+        max_iterations: safety cap on label-propagation rounds. Default
+            20 (fraud graphs almost always converge in <10). If the
+            job hits this cap the emitted alerts still reflect the
+            partial labeling; a diagnostic row is logged.
+        max_vertices: refuse to run above this vertex count. Iterative
+            label propagation shuffles O(edges) per iteration; a
+            multi-million-vertex silver at scale >= 100 would produce
+            an unhelpful multi-hour replay. Default 5M; operator
+            raises it when they have the executor budget.
+        run_id: opaque id written into every alert row.
+
+    Returns:
+        DataFrame with the gold.alerts schema. Empty when no component
+        meets min_cluster_size or when the vertex count exceeds
+        max_vertices (a warning is emitted in the latter case).
+    """
+    spark = silver_txns.sparkSession
+    from pyspark.sql.functions import min as _min
+
+    edges = (
+        silver_txns
+        .select(
+            col("originator_id").alias("src"),
+            col("beneficiary_id").alias("dst"),
+            col("uetr"),
+            col("txn_timestamp"),
+        )
+        .filter(col("src").isNotNull() & col("dst").isNotNull())
+        .filter(col("src") != col("dst"))  # self-loops don't affect components
+    )
+
+    # Symmetric edge list: undirected components need both directions.
+    edges_u = (
+        edges.select(col("src"), col("dst"))
+        .unionByName(edges.select(col("dst").alias("src"), col("src").alias("dst")))
+        .distinct()
+    )
+
+    vertices = (
+        edges_u.select(col("src").alias("id"))
+        .unionByName(edges_u.select(col("dst").alias("id")))
+        .distinct()
+    )
+    v_count = vertices.count()
+    if v_count > max_vertices:
+        # Fail loud but return an empty alerts DF so replay_financial
+        # can proceed with its usual DELETE-then-append behavior (which
+        # will simply clear any prior W1 rows for this rule_id).
+        print(
+            f"[W1] vertex count {v_count:,} exceeds max_vertices "
+            f"{max_vertices:,}; skipping connected-components. Raise "
+            f"max_vertices with the CLI --threshold-vertices override."
+        )
+        return _empty_alerts_df(spark, run_id)
+
+    if v_count == 0:
+        # Empty edge set (or every txn was a self-loop) -- nothing to
+        # propagate. Return early with an empty alerts DF so we don't
+        # emit a false "hit max_iterations without convergence" warning.
+        return _empty_alerts_df(spark, run_id)
+
+    labels = vertices.withColumn("label", col("id")).cache()
+
+    converged = False
+    for iteration in range(max_iterations):
+        # Propagate: each vertex takes min(own label, min(neighbours' labels)).
+        neighbour_labels = (
+            labels.join(edges_u, labels["id"] == edges_u["src"])
+            .select(edges_u["dst"].alias("id"), labels["label"])
+        )
+        new_labels = (
+            labels.select("id", "label")
+            .unionByName(neighbour_labels)
+            .groupBy("id")
+            .agg(_min("label").alias("label"))
+            .cache()
+        )
+        # Convergence check: per-vertex label deltas, not distinct-label
+        # count. A component that still has multiple live labels can
+        # keep shuffling vertices between them without changing the
+        # distinct set, so distinct().count() reports "converged" while
+        # min-propagation is still bubbling. That silently splits a real
+        # cluster into two smaller ones and mis-sizes the alert. Correct
+        # signal: count vertices whose label strictly decreased between
+        # iterations; propagation is stable iff that count is zero.
+        changed = (
+            new_labels.alias("n")
+            .join(labels.alias("p"), col("n.id") == col("p.id"), "inner")
+            .filter(col("n.label") < col("p.label"))
+            .limit(1)
+            .count()
+        )
+        labels.unpersist(blocking=False)
+        labels = new_labels
+        if changed == 0:
+            converged = True
+            break
+
+    if not converged:
+        print(
+            f"[W1] hit max_iterations={max_iterations} without convergence; "
+            f"emitting components from partial labeling. Consider raising "
+            f"max_iterations if precision matters."
+        )
+
+    # Vertex -> component: labels is (id, label). Component = label.
+    # Group by component to get its members.
+    components = (
+        labels.groupBy(col("label").alias("component"))
+        .agg(
+            collect_set(col("id")).alias("entity_ids"),
+            count(lit(1)).alias("component_size"),
+        )
+        .filter(col("component_size") >= min_cluster_size)
+    )
+
+    # For each qualifying component, gather the transactions that
+    # touch its members. Tag each edge with the src vertex's component
+    # label via a single hash join -- since both endpoints of every
+    # edge are in the same connected component by construction, the
+    # src's label IS the component. This avoids the previous
+    # union-of-two-joins pattern (which doubled shuffle: each edge
+    # appeared once under src_hits and once under dst_hits, then
+    # collect_list->distinct dedup'd on the reduce side). Single
+    # equi-join, each edge counted once, no dedup shuffle.
+    edges_tagged = (
+        edges.join(
+            labels.select(col("id").alias("_src"), col("label").alias("component")),
+            edges["src"] == col("_src"),
+            "inner",
+        )
+        .select(col("component"), col("uetr"), col("txn_timestamp"))
+    )
+    edge_aggs = (
+        edges_tagged
+        .groupBy("component")
+        .agg(
+            array_distinct(collect_list("uetr")).alias("related_txn_ids"),
+            min_("txn_timestamp").alias("first_ts"),
+            max_("txn_timestamp").alias("last_ts"),
+        )
+    )
+    # Bring the components metadata back for alert construction. Inner
+    # join on component drops any component_size < min_cluster_size
+    # component that has no in-cluster edges (self-loop cluster edge
+    # case, filtered out earlier).
+    with_txns = components.join(edge_aggs, "component", "inner")
+
+    alerts = with_txns.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W1_connected_components").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        # No single entity owns a cluster alert -- pick the min id
+        # deterministically so replay is stable across runs.
+        col("component").alias("entity_id"),
+        col("related_txn_ids"),
+        expr("cast(entity_ids as array<bigint>)").alias("related_entity_ids"),
+        col("last_ts").alias("alert_ts"),
+        # Larger components ~= higher risk. Bounded 0.5-0.95.
+        expr(
+            "cast(least(0.95, 0.5 + 0.05 * cast(component_size - "
+            + str(min_cluster_size)
+            + " as double)) as double)"
+        ).alias("alert_score"),
+        when(col("component_size") >= 8, lit("HIGH"))
+            .when(col("component_size") >= 5, lit("MED"))
+            .otherwise(lit("LOW"))
+            .alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("cluster").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Connected component of ', cast(component_size as string), "
+            "' entities (min id ', cast(component as string), "
+            "') active between ', cast(first_ts as string), ' and ', "
+            "cast(last_ts as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(
+                lit("rule"), lit("min_cluster_size"), lit("max_iterations"),
+                lit("max_vertices"),
+            ),
+            array(
+                lit("W1_connected_components"),
+                lit(str(min_cluster_size)),
+                lit(str(max_iterations)),
+                lit(str(max_vertices)),
+            ),
+        ).alias("evidence"),
+    )
+    return alerts
+
+
+def _empty_alerts_df(spark, run_id: str) -> DataFrame:
+    """Zero-row DataFrame with the gold.alerts schema, for the case
+    where a rule declines to run (e.g. W1 above max_vertices)."""
+    from pyspark.sql.types import (
+        ArrayType,
+        BooleanType,  # noqa: F401
+        DoubleType,
+        LongType,
+        MapType,
+        StringType,
+        StructField,
+        StructType,
+        TimestampType,
+    )
+
+    schema = StructType([
+        StructField("alert_id", StringType(), False),
+        StructField("rule_id", StringType(), False),
+        StructField("rule_version", StringType(), False),
+        StructField("model_id", StringType(), False),
+        StructField("model_version", StringType(), False),
+        StructField("entity_id", LongType(), True),
+        StructField("related_txn_ids", ArrayType(StringType()), True),
+        StructField("related_entity_ids", ArrayType(LongType()), True),
+        StructField("alert_ts", TimestampType(), True),
+        StructField("alert_score", DoubleType(), True),
+        StructField("priority", StringType(), True),
+        StructField("status", StringType(), True),
+        StructField("disposition", StringType(), True),
+        StructField("alert_type", StringType(), True),
+        StructField("run_id", StringType(), True),
+        StructField("narrative", StringType(), True),
+        StructField("evidence", MapType(StringType(), StringType()), True),
+    ])
+    return spark.createDataFrame([], schema)
+
+
 _RULE_DISPATCH = {
+    "W1_connected_components": w1_connected_components,
     "W2_structuring": w2_structuring,
     "W3_round_tripping": w3_round_tripping,
     "W4_risk_propagation": w4_risk_propagation,

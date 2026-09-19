@@ -135,7 +135,8 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     rptd_originator_address STRING,
     rptd_beneficiary_name   STRING,
     rptd_beneficiary_address STRING,
-    source_message_ref      STRING
+    source_message_ref      STRING,
+    _batch_id               BIGINT
 )
 USING iceberg
 PARTITIONED BY (days(txn_timestamp))
@@ -234,8 +235,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     target_entity_id       BIGINT NOT NULL,
     first_seen_ts          TIMESTAMP NOT NULL,
     last_seen_ts           TIMESTAMP NOT NULL,
-    cumulative_amount_usd  DECIMAL(18, 2) NOT NULL,
-    txn_count              BIGINT NOT NULL
+    cumulative_amount_usd  DECIMAL(38, 2) NOT NULL,
+    txn_count              BIGINT NOT NULL,
+    _batch_id              BIGINT
 )
 USING iceberg
 PARTITIONED BY (bucket(64, source_entity_id))
@@ -244,6 +246,12 @@ TBLPROPERTIES (
     'write.parquet.compression-codec' = 'snappy'
 )
 """.strip()
+# LB-109: `_batch_id` mirrors silver_build_financial's DDL so
+# silver_stream's DELETE+append idempotency protocol works against the
+# tables the deployer creates. `cumulative_amount_usd` widened to
+# decimal(38, 2) to match silver_build's schema; the previous (18, 2)
+# would NULL-overflow the moment an aggregator entity crossed 10^16
+# USD (already possible at scale 100+).
 
 
 # ---------------------------------------------------------------------------

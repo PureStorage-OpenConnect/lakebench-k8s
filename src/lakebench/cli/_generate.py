@@ -59,9 +59,14 @@ def generate(
         typer.Option(
             "--timeout",
             "-t",
-            help="Timeout in seconds when waiting for completion",
+            help=(
+                "Timeout in seconds when waiting for completion. "
+                "0 (default) auto-computes from scale, parallelism and a "
+                "conservative per-pod throughput; pass a positive int to "
+                "override."
+            ),
         ),
-    ] = 7200,
+    ] = 0,
     resume: Annotated[
         bool,
         typer.Option(
@@ -122,6 +127,48 @@ def generate(
     workload = cfg.architecture.workload
     datagen_cfg = workload.datagen
     dims = cfg.get_scale_dimensions()
+
+    # Auto-compute --timeout when the operator passed 0 (the new default).
+    # Anchored on live UAT: scale 100 (~730 GB) with 30 pods took ~4500 s,
+    # so per-pod effective throughput is ~5 MB/s to S3-A after row build,
+    # partitioning, and parquet encoding. Formula:
+    #   time = (gb * 1024) / (pods * 5 MB/s) * 2   (100% headroom)
+    # Floor 900 s so small scales still have room for pod scheduling and
+    # image pull; ceiling 86400 s (24 h) to keep a typo from parking a
+    # runaway wait forever. If `approx_bronze_gb` isn't populated the
+    # formula cannot estimate wall time -- fall back to a fixed 7200 s
+    # default (matching the pre-LB-111 hard-coded value) rather than
+    # let it clamp to the 900 s floor and declare a 75-minute job
+    # failed after 15 minutes.
+    if timeout <= 0:
+        pods = max(1, int(datagen_cfg.parallelism or 1))
+        gb = max(0.0, float(dims.approx_bronze_gb or 0.0))
+        if gb <= 0:
+            timeout = 7200
+            print_info(
+                "--timeout auto: approx_bronze_gb not populated by scale "
+                "dimensions; falling back to 7200s. Pass --timeout N to "
+                "override for jobs longer than 2 hours."
+            )
+        else:
+            auto = int((gb * 1024.0 / (pods * 5.0)) * 2.0)
+            timeout = max(900, min(auto, 86400))
+            if auto > 86400:
+                # Real datagens can plausibly exceed 24 hours at scale
+                # >= 500. Warn LOUD so the operator explicitly picks
+                # --timeout, rather than watching the wait declare
+                # failure at 24h while pods keep succeeding.
+                print_info(
+                    f"--timeout auto WARNING: computed {auto}s exceeds the "
+                    f"86400s (24h) safety cap. Clamped to 86400s -- pass "
+                    f"--timeout {auto} explicitly if the job really needs "
+                    f"the full estimate."
+                )
+            print_info(
+                f"--timeout auto={timeout}s "
+                f"(scale~{gb:.0f} GB / {pods} pods @ 5 MB/s/pod, 2x headroom)"
+            )
+
     console.print(
         Panel(
             f"Generating data for: [bold]{cfg.name}[/bold]\n\n"

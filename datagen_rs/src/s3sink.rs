@@ -17,7 +17,10 @@ use std::time::Duration;
 use bytes::Bytes;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path;
-use object_store::{ClientOptions, Error as OsError, ObjectStore, PutPayload, RetryConfig};
+use object_store::{
+    ClientOptions, Error as OsError, MultipartUpload, ObjectStore, PutPayload, RetryConfig,
+    WriteMultipart,
+};
 use tokio::runtime::{Handle, Runtime};
 
 /// Config resolved once at startup from flags/env. Everything a worker needs
@@ -106,12 +109,40 @@ impl S3Sink {
         }
     }
 
-    pub fn put(&self, key: &str, bytes: Vec<u8>) {
-        let full = if self.prefix.is_empty() {
+    /// Absolute key (bucket-relative) formed from the sink prefix and the
+    /// caller's key. Extracted so single-PUT and multipart paths agree.
+    fn full_key(&self, key: &str) -> String {
+        if self.prefix.is_empty() {
             key.to_string()
         } else {
             format!("{}/{}", self.prefix, key.trim_start_matches('/'))
-        };
+        }
+    }
+
+    /// Begin a multipart upload and return a synchronous `std::io::Write`
+    /// adapter over it. Wrap this in `ArrowWriter` (or any streaming
+    /// writer) to emit an object of arbitrary size without holding the
+    /// whole thing in a single `Vec<u8>`. Caller must invoke
+    /// `MpuWriter::finish()` to complete the upload; dropping without
+    /// finish aborts the upload so no orphan parts accumulate on S3.
+    ///
+    /// LB-107: party.parquet and account.parquet at scale >= 1000 exceed
+    /// the 5 GiB S3 single-PUT ceiling; this path removes that limit
+    /// (S3 multipart supports up to 5 TiB per object across 10k parts).
+    pub fn put_multipart(&self, key: &str) -> MpuWriter {
+        let full = self.full_key(key);
+        let path = Path::from(full.as_str());
+        let store = self.store.clone();
+        let path_c = path.clone();
+        let upload = self
+            .handle
+            .block_on(async move { store.put_multipart(&path_c).await })
+            .unwrap_or_else(|e| panic!("s3 put_multipart begin key={} err={}", full, e));
+        MpuWriter::from_upload(upload, self.handle.clone(), full)
+    }
+
+    pub fn put(&self, key: &str, bytes: Vec<u8>) {
+        let full = self.full_key(key);
         let path = Path::from(full.as_str());
         let payload = PutPayload::from(Bytes::from(bytes));
         let store = self.store.clone();
@@ -166,5 +197,161 @@ fn is_fatal(e: &OsError) -> bool {
         // deterministic; no point retrying.
         OsError::NotFound { .. } => true,
         _ => false,
+    }
+}
+
+/// Sync `std::io::Write` adapter over `object_store::WriteMultipart`.
+///
+/// Rust callers stream into it (`ArrowWriter` calls `Write::write`);
+/// internally each call bridges into the tokio runtime the owning
+/// `S3Sink` holds and enqueues 5 MiB parts against a live S3 multipart
+/// upload. The whole object never sits in a single `Vec<u8>`, which is
+/// what lifts party.parquet / account.parquet past the 5 GiB single-PUT
+/// ceiling.
+///
+/// Lifecycle: after the writer has produced its last byte, call
+/// `finish()` to commit the upload. On any error (or if the caller
+/// simply drops the writer, e.g. on panic) the destructor issues an
+/// abort so partially-uploaded parts don't accumulate on FlashBlade.
+/// Abort on drop is best-effort; explicit `finish()` or `abort()` is
+/// the correct path for error handling.
+pub struct MpuWriter {
+    /// Inner upload; `None` after `finish()` or `abort()` consumed it,
+    /// or if `Drop` cleaned it up.
+    inner: Option<WriteMultipart>,
+    handle: Handle,
+    key: String,
+    bytes_written: u64,
+}
+
+impl MpuWriter {
+    /// Wrap an already-started multipart upload. Public so tests can
+    /// build one against `object_store::memory::InMemory` without going
+    /// through `S3Sink`. Chunk size is object_store's default 5 MiB
+    /// (matches the S3 multipart minimum for non-final parts).
+    pub fn from_upload(
+        upload: Box<dyn MultipartUpload>,
+        handle: Handle,
+        key: String,
+    ) -> Self {
+        Self {
+            inner: Some(WriteMultipart::new(upload)),
+            handle,
+            key,
+            bytes_written: 0,
+        }
+    }
+
+    /// Bytes handed to `write()` so far. Used by the emit binary to
+    /// aggregate ref-zone throughput without needing the underlying
+    /// object size returned by S3.
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    /// Commit the multipart upload. On error, `WriteMultipart::finish`
+    /// itself calls `abort()` internally before returning the error, so
+    /// we don't need to duplicate the abort here -- but we do surface
+    /// the failure to the caller (currently by panic in `generate.rs`
+    /// to match the single-PUT path's fail-loud semantics).
+    pub fn finish(mut self) -> Result<(), String> {
+        let Some(w) = self.inner.take() else {
+            return Err(format!("mpu writer key={} already finalized", self.key));
+        };
+        self.handle
+            .block_on(w.finish())
+            .map(|_| ())
+            .map_err(|e| format!("mpu finish key={}: {}", self.key, e))
+    }
+
+    /// Explicitly abort the upload. Consumes self. Used on error paths
+    /// where the caller wants to surface an explicit abort result
+    /// rather than rely on `Drop`'s best-effort cleanup.
+    pub fn abort(mut self) -> Result<(), String> {
+        let Some(w) = self.inner.take() else {
+            return Ok(());
+        };
+        self.handle
+            .block_on(w.abort())
+            .map_err(|e| format!("mpu abort key={}: {}", self.key, e))
+    }
+}
+
+/// Upper bound on concurrent in-flight upload parts before Write::write
+/// blocks. Also functions as the error-surfacing checkpoint: at each
+/// call we drain any completed tasks (via `wait_for_capacity`), which
+/// is the only place `object_store::WriteMultipart` reports part
+/// failures to the caller. Small enough to bound memory (~5 MiB * N),
+/// large enough to keep S3 pipelined.
+const MPU_MAX_CONCURRENT_PARTS: usize = 4;
+
+impl std::io::Write for MpuWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let Some(w) = self.inner.as_mut() else {
+            return Err(std::io::Error::other(format!(
+                "mpu write after finalize (key={})",
+                self.key
+            )));
+        };
+        // WriteMultipart::write spawns upload tasks on the current
+        // tokio runtime. We're being called from a sync rayon worker
+        // that isn't itself inside a runtime, so enter the sink's
+        // handle for the duration of the call so `tokio::spawn` /
+        // `JoinSet::spawn` resolve to the right runtime.
+        let _guard = self.handle.enter();
+        // Back-pressure: cap in-flight parts at MPU_MAX_CONCURRENT_PARTS
+        // so buffered RSS stays bounded (~N * chunk_size = ~20 MiB at
+        // N=4). Note this is capacity-bound only; when fewer than N
+        // parts are in flight, `poll_for_capacity` returns immediately
+        // WITHOUT polling the JoinSet, so a 5xx from part #1 does not
+        // surface here. Error surfacing happens in `flush()` at the
+        // parquet row-group boundary (worst-case delay: one row group,
+        // typically 128 MiB) and unconditionally in `finish()`.
+        self.handle
+            .block_on(w.wait_for_capacity(MPU_MAX_CONCURRENT_PARTS))
+            .map_err(|e| {
+                std::io::Error::other(format!(
+                    "mpu part upload failed (key={}): {}",
+                    self.key, e
+                ))
+            })?;
+        w.write(buf);
+        self.bytes_written += buf.len() as u64;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // ArrowWriter calls flush() between parquet row groups; use
+        // this as the natural checkpoint to force-drain any completed
+        // part tasks and surface errors. `wait_for_capacity(1)` blocks
+        // until at most one task remains, so any failed part
+        // (regardless of position in the JoinSet) is polled and its
+        // Err returned. This bounds delayed-error surfacing to one
+        // row group (~128 MiB) instead of "until finish() panics".
+        // We do NOT force chunk-flushing to S3 -- WriteMultipart
+        // buffers a partial chunk internally and emits it on finish;
+        // that's the correct trade for streaming parquet writes.
+        let Some(w) = self.inner.as_mut() else { return Ok(()); };
+        let _guard = self.handle.enter();
+        self.handle
+            .block_on(w.wait_for_capacity(1))
+            .map_err(|e| {
+                std::io::Error::other(format!(
+                    "mpu part upload failed on flush (key={}): {}",
+                    self.key, e
+                ))
+            })
+    }
+}
+
+impl Drop for MpuWriter {
+    fn drop(&mut self) {
+        // Best-effort abort if the caller neither finished nor aborted
+        // (typically because they panicked mid-write). Prevents orphan
+        // parts on FlashBlade. Errors here are swallowed -- we're
+        // already unwinding or exiting.
+        if let Some(w) = self.inner.take() {
+            let _ = self.handle.block_on(w.abort());
+        }
     }
 }

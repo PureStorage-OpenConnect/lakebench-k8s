@@ -47,9 +47,40 @@ def test_dispatcher_covers_documented_rules():
                     break
     assert dispatch is not None, "_RULE_DISPATCH not found"
     keys = [k.value for k in dispatch.keys if isinstance(k, ast.Constant)]
-    # The scoring loop expects at least these three workloads.
-    for expected in ("W2_structuring", "W3_round_tripping", "W4_risk_propagation"):
+    # W1 landed with LB-108; the scoring loop and replay CLI expect all
+    # four workloads to be routable through the dispatcher.
+    for expected in (
+        "W1_connected_components",
+        "W2_structuring",
+        "W3_round_tripping",
+        "W4_risk_propagation",
+    ):
         assert expected in keys, f"missing rule {expected} in dispatcher"
+
+
+def test_w1_signature_and_defaults():
+    """W1_connected_components must accept the kwargs replay_financial
+    passes it, and its numeric defaults must be sane (min_cluster_size
+    >= 2 so pairs don't over-fire, max_iterations bounded so a hostile
+    graph can't wedge the replay)."""
+    tree = _module_ast()
+    fn = next(
+        (n for n in tree.body
+         if isinstance(n, ast.FunctionDef) and n.name == "w1_connected_components"),
+        None,
+    )
+    assert fn is not None, "w1_connected_components not defined"
+    argnames = [a.arg for a in fn.args.args]
+    for expected in ("silver_txns", "min_cluster_size", "max_iterations", "run_id"):
+        assert expected in argnames, f"w1_connected_components missing arg {expected}"
+
+    # Defaults are the last-N args aligned with argnames tail.
+    defaults = fn.args.defaults
+    def_map = dict(zip(argnames[-len(defaults):], defaults))
+    for key, low in (("min_cluster_size", 2), ("max_iterations", 1)):
+        node = def_map[key]
+        assert isinstance(node, ast.Constant) and isinstance(node.value, int)
+        assert node.value >= low, f"{key} default {node.value} below sane floor {low}"
 
 
 def test_structuring_thresholds_cover_datagen_currencies():
@@ -109,7 +140,12 @@ def test_w2_structuring_takes_expected_kwargs():
 
 @pytest.mark.parametrize(
     "rule_id",
-    ["W2_structuring", "W3_round_tripping", "W4_risk_propagation"],
+    [
+        "W1_connected_components",
+        "W2_structuring",
+        "W3_round_tripping",
+        "W4_risk_propagation",
+    ],
 )
 def test_rule_ids_stable(rule_id):
     """These rule IDs are wire contract: score_financial groups by
