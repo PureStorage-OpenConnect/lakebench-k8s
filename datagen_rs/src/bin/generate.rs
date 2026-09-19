@@ -428,6 +428,25 @@ fn main() {
         // still well under a pod's memory request at scale 100.
         let mut party_buf: Vec<u8> = Vec::with_capacity(256 * 1024 * 1024);
         write_party_to(&w, &instances, &mut party_buf);
+        // S3 single-PUT ceiling is 5 GiB on FlashBlade / AWS. object_store::put
+        // does single-part uploads; anything above 5 GiB will silently be
+        // rejected server-side or corrupt on some backends. Fail LOUD here
+        // rather than after minutes of world-build + party-build wasted work.
+        // Realistic thresholds:
+        //   scale <=  100: party_buf ~ 800 MB compressed, fine
+        //   scale ~   500: party_buf ~ 4 GB compressed, marginal
+        //   scale >= 1000: party_buf > 5 GB, requires multipart (BUGS.md)
+        const PARTY_SINGLE_PUT_CAP: usize = 5 * 1024 * 1024 * 1024;
+        if party_buf.len() > PARTY_SINGLE_PUT_CAP {
+            panic!(
+                "party.parquet buffer is {} bytes, exceeds S3 single-PUT ceiling of {}. \
+                 Multipart streaming is not yet wired for the reference zone; scale \
+                 must be reduced or the multipart path implemented (tracked as LB \
+                 follow-up in BUGS.md).",
+                party_buf.len(),
+                PARTY_SINGLE_PUT_CAP,
+            );
+        }
         ref_bytes += party_buf.len() as u64;
         ref_files += 1;
         sink.put("bronze/party.parquet", party_buf);
