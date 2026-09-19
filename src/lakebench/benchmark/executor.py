@@ -83,9 +83,24 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
                 "silver": s3.buckets.silver,
                 "gold": s3.buckets.gold,
             },
+            # Financial FQ3/FQ4/FQ5/FQ8 reference silver_entities /
+            # silver_counterparty_edges / silver_account_statements /
+            # gold_alerts placeholders; without them in table_names the
+            # DuckDB adapter can't rewrite the placeholder to
+            # iceberg_scan(...) and every financial FQ that hits an
+            # extra table fails on DuckDB. Populate every table name
+            # here so the adapter has a full lookup.
             table_names={
                 "silver": tables.silver,
                 "gold": tables.gold,
+                "silver_entities": tables.silver_entities,
+                "silver_accounts": tables.silver_accounts,
+                "silver_account_statements": tables.silver_account_statements,
+                "silver_counterparty_edges": tables.silver_counterparty_edges,
+                "gold_alerts": tables.gold_alerts,
+                "gold_risk_scores": tables.gold_risk_scores,
+                "gold_entity_clusters": tables.gold_entity_clusters,
+                "gold_daily_dashboards": tables.gold_daily_dashboards,
             },
             table_format=table_format,
             catalog_type=catalog_type,

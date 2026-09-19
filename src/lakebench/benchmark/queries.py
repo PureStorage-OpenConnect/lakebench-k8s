@@ -280,6 +280,11 @@ _FQ2 = BenchmarkQuery(
     name="FQ2_top_corridors_window",
     display_name="Top payment corridors by volume (last 30 days)",
     query_class="filter_prune",
+    # `date_add('day', -30, ts)` is Trino syntax; Spark Thrift and DuckDB
+    # reject the 3-arg form. Use the ANSI INTERVAL literal which both
+    # engines parse consistently. Trino: `ts - INTERVAL '30' DAY`, Spark:
+    # `ts - INTERVAL 30 DAYS`, DuckDB: `ts - INTERVAL 30 DAY`. All three
+    # of those parse `ts - INTERVAL '30' DAY` correctly.
     sql="""\
 SELECT
   originator_bank_bic,
@@ -288,7 +293,7 @@ SELECT
   COUNT(*) AS txn_count,
   ROUND(SUM(txn_amount_usd), 2) AS volume_usd
 FROM {catalog}.{silver_table}
-WHERE txn_timestamp >= date_add('day', -30, (SELECT MAX(txn_timestamp) FROM {catalog}.{silver_table}))
+WHERE txn_timestamp >= (SELECT MAX(txn_timestamp) FROM {catalog}.{silver_table}) - INTERVAL '30' DAY
 GROUP BY originator_bank_bic, beneficiary_bank_bic, txn_currency
 ORDER BY volume_usd DESC
 LIMIT 100""",
@@ -357,6 +362,9 @@ _FQ6 = BenchmarkQuery(
     name="FQ6_structuring_scan",
     display_name="Structuring-band transaction detection (W2 shape)",
     query_class="filter_prune",
+    # Currency bands must match detection_rules._STRUCTURING_THRESHOLDS
+    # and datagen_rs::amounts::structuring_band. A missing currency
+    # under-fires vs. the W2 rule this query benchmarks against.
     sql="""\
 SELECT
   originator_id,
@@ -370,6 +378,12 @@ WHERE (
        (txn_currency IN ('USD', 'CAD', 'AUD') AND txn_amount BETWEEN 9000 AND 9999)
     OR (txn_currency IN ('GBP', 'EUR', 'CHF') AND txn_amount BETWEEN 14000 AND 14995)
     OR (txn_currency IN ('JPY', 'INR')       AND txn_amount BETWEEN 900000 AND 999999)
+    OR (txn_currency = 'AED'                 AND txn_amount BETWEEN 49500 AND 54999)
+    OR (txn_currency = 'SGD'                 AND txn_amount BETWEEN 18000 AND 19999)
+    OR (txn_currency = 'MXN'                 AND txn_amount BETWEEN 90000 AND 99999)
+    OR (txn_currency IN ('CNY', 'BRL')       AND txn_amount BETWEEN 45000 AND 49999)
+    OR (txn_currency = 'HKD'                 AND txn_amount BETWEEN 67500 AND 74999)
+    OR (txn_currency = 'KRW'                 AND txn_amount BETWEEN 9000000 AND 9999999)
   )
 GROUP BY originator_id, txn_currency
 HAVING COUNT(*) >= 3
