@@ -10,14 +10,16 @@ Three verbs shipped in ENG-2C.3:
 - ``reproduce`` -- W10 time-travel reproduction of a specific alert.
 - ``score``     -- Compute recall from datagen manifest + gold.alerts.
 
-Each verb loads the config, resolves the schema-aware ComponentSpec for
-its JobType, and submits it via the active runtime (K8s for cluster
-deployments, ContainerRuntime for ``--local``).
+Each verb loads the config, gets the shared k8s client + SparkJobManager,
+ensures the scripts ConfigMap is deployed (idempotent), then submits the
+appropriate JobType with CLI --arguments passed through to the Python
+script.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Annotated
 
@@ -54,6 +56,56 @@ def _load_config(config_path: Path):
     return cfg
 
 
+def _get_job_manager(cfg):
+    """Build k8s client + SparkJobManager + ensure scripts ConfigMap is
+    up-to-date. Matches the pattern in cli/_run.py so replay/reproduce/score
+    use the same script-mount path as bronze_verify/silver_build/gold_finalize.
+    """
+    from lakebench.engine import get_engine
+    from lakebench.k8s import get_k8s_client
+
+    k8s = get_k8s_client(
+        context=cfg.platform.kubernetes.context,
+        namespace=cfg.get_namespace(),
+    )
+    job_manager = get_engine(cfg, k8s)
+    if not job_manager.deploy_scripts_configmap():
+        raise typer.Exit("Failed to deploy Spark scripts ConfigMap")
+    return job_manager
+
+
+def _wait_for_sparkapp(namespace: str, name: str, timeout: int = 1800) -> str:
+    """Poll a SparkApplication until it reaches a terminal state, return state."""
+    from kubernetes import client
+    from kubernetes.client.rest import ApiException
+
+    api = client.CustomObjectsApi()
+    start = time.time()
+    last_state = ""
+    while time.time() - start < timeout:
+        try:
+            obj = api.get_namespaced_custom_object(
+                group="sparkoperator.k8s.io",
+                version="v1beta2",
+                namespace=namespace,
+                plural="sparkapplications",
+                name=name,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                time.sleep(5)
+                continue
+            raise
+        state = (obj.get("status", {}) or {}).get("applicationState", {}).get("state", "")
+        if state != last_state:
+            console.print(f"  [dim]{name}: {state}[/dim]")
+            last_state = state
+        if state in ("COMPLETED", "FAILED"):
+            return state
+        time.sleep(10)
+    return "TIMEOUT"
+
+
 @financial_app.command("replay")
 def replay(
     config: Annotated[Path, typer.Argument(help="Lakebench config YAML")],
@@ -74,53 +126,65 @@ def replay(
             ),
         ),
     ] = "",
+    wait: Annotated[bool, typer.Option(help="Wait for job completion")] = True,
 ) -> None:
     """Rerun a detection rule against a historical Iceberg snapshot (W8)."""
-    from lakebench.k8s.client import KubernetesClient
-    from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+    from lakebench.modules.pipeline_engines.spark.job import JobType
 
     cfg = _load_config(config)
-    k8s = KubernetesClient(context=None)
-    mgr = SparkJobManager(cfg, k8s)
 
-    # Default to the config's gold_alerts table, fully qualified with the
-    # active catalog. score_financial reads exactly this table, so
-    # defaulting here removes the "why is my recall 0.0" foot-gun of
-    # writing to a different table than what score reads.
+    # Default target = config's gold_alerts, fully qualified with the active
+    # catalog. score_financial reads exactly this table, so defaulting here
+    # removes the "why is my recall 0" foot-gun of writing to a different
+    # table than what score reads.
     if not output_alerts:
         catalog = cfg.architecture.query_engine.trino.catalog_name
         output_alerts = f"{catalog}.{cfg.architecture.tables.gold_alerts}"
 
-    extra_args = [
-        "--rule",
-        rule,
-        "--depth-months",
-        str(depth_months),
-        "--output-alerts",
-        output_alerts,
+    args = [
+        "--rule", rule,
+        "--depth-months", str(depth_months),
+        "--output-alerts", output_alerts,
     ]
     if threshold is not None:
-        extra_args += ["--threshold", str(threshold)]
+        args += ["--threshold", str(threshold)]
 
-    console.print(f"[bold]lakebench financial replay[/bold] rule={rule} depth={depth_months}mo")
-    mgr.submit(JobType.REPLAY_FINANCIAL, arguments=extra_args)
+    console.print(
+        f"[bold]lakebench financial replay[/bold] rule={rule} depth={depth_months}mo"
+    )
+    job_manager = _get_job_manager(cfg)
+    status = job_manager.submit_job(JobType.REPLAY_FINANCIAL, arguments=args)
+    console.print(f"  submitted: {status.message}")
+
+    if wait:
+        result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-replay-financial")
+        console.print(f"[bold]replay result:[/bold] {result}")
+        if result != "COMPLETED":
+            raise typer.Exit(1)
 
 
 @financial_app.command("reproduce")
 def reproduce(
     config: Annotated[Path, typer.Argument(help="Lakebench config YAML")],
     alert_id: Annotated[str, typer.Option(help="Alert id to reproduce")],
+    wait: Annotated[bool, typer.Option(help="Wait for job completion")] = True,
 ) -> None:
     """Reproduce a specific past alert via Iceberg time-travel (W10)."""
-    from lakebench.k8s.client import KubernetesClient
-    from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+    from lakebench.modules.pipeline_engines.spark.job import JobType
 
     cfg = _load_config(config)
-    k8s = KubernetesClient(context=None)
-    mgr = SparkJobManager(cfg, k8s)
-
     console.print(f"[bold]lakebench financial reproduce[/bold] alert_id={alert_id}")
-    mgr.submit(JobType.REPRODUCE_FINANCIAL, arguments=["--alert-id", alert_id])
+    job_manager = _get_job_manager(cfg)
+    status = job_manager.submit_job(
+        JobType.REPRODUCE_FINANCIAL, arguments=["--alert-id", alert_id],
+    )
+    console.print(f"  submitted: {status.message}")
+
+    if wait:
+        result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-reproduce-financial")
+        console.print(f"[bold]reproduce result:[/bold] {result}")
+        if result != "COMPLETED":
+            raise typer.Exit(1)
 
 
 @financial_app.command("score")
@@ -128,14 +192,22 @@ def score(
     config: Annotated[Path, typer.Argument(help="Lakebench config YAML")],
     manifest: Annotated[str, typer.Option(help="S3 URI to datagen manifest.parquet")],
     output: Annotated[str, typer.Option(help="S3 URI for recall.parquet output")],
+    wait: Annotated[bool, typer.Option(help="Wait for job completion")] = True,
 ) -> None:
     """Compute recall from datagen manifest and gold.alerts."""
-    from lakebench.k8s.client import KubernetesClient
-    from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+    from lakebench.modules.pipeline_engines.spark.job import JobType
 
     cfg = _load_config(config)
-    k8s = KubernetesClient(context=None)
-    mgr = SparkJobManager(cfg, k8s)
-
     console.print("[bold]lakebench financial score[/bold]")
-    mgr.submit(JobType.SCORE_FINANCIAL, arguments=["--manifest", manifest, "--output", output])
+    job_manager = _get_job_manager(cfg)
+    status = job_manager.submit_job(
+        JobType.SCORE_FINANCIAL,
+        arguments=["--manifest", manifest, "--output", output],
+    )
+    console.print(f"  submitted: {status.message}")
+
+    if wait:
+        result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial")
+        console.print(f"[bold]score result:[/bold] {result}")
+        if result != "COMPLETED":
+            raise typer.Exit(1)

@@ -40,7 +40,6 @@ from pyspark.sql.functions import (
     min as min_,
     row_number,
     to_timestamp,
-    uuid,
     when,
 )
 from pyspark.sql import Window
@@ -419,4 +418,4 @@ def known_rules() -> list[str]:
 
 
 # Guard against ruff unused-import warnings for symbols exported for callers.
-_ = (row_number, uuid, to_timestamp, explode, Window)
+_ = (row_number, to_timestamp, explode, Window)
