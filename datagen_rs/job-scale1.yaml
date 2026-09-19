@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: datagen-rs-s1
+  namespace: fraud-aml-uat
+spec:
+  completionMode: Indexed
+  completions: 4
+  parallelism: 4
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: datagen-rs
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: generate
+          image: docker.io/sillidata/lb-datagen-rs:latest
+          imagePullPolicy: Always
+          args:
+            - "--schema"
+            - "financial"
+            - "--scale"
+            - "1"
+            - "--total-nodes"
+            - "4"
+            - "--bucket"
+            - "fraud-aml-uat-bronze"
+            - "--prefix"
+            - "datagen-v2-rs-s1"
+          env:
+            - name: S3_ENDPOINT
+              value: "http://10.21.227.93:80"
+            - name: AWS_REGION
+              value: "us-east-1"
+            - name: AWS_ACCESS_KEY_ID
+              value: "PSFBSAZRNJDECALDJDHMGAFMOIMBAPECMKPDKBJNAH"
+            - name: AWS_SECRET_ACCESS_KEY
+              value: "C89B1A3FAc24f01c8+011a+A3F91E75477c1FJBM"
+          resources:
+            requests:
+              cpu: "8"
+              memory: "4Gi"
+            limits:
+              cpu: "16"
+              memory: "8Gi"

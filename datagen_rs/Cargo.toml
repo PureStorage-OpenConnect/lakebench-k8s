@@ -1,0 +1,33 @@
+[package]
+name = "datagen_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "datagen_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "generate"
+path = "src/bin/generate.rs"
+
+[[bin]]
+name = "dump_world"
+path = "src/bin/dump_world.rs"
+
+[dependencies]
+arrow = "53"
+parquet = "53"
+rayon = "1.10"
+# object_store is Apache Arrow's canonical S3 client. Its sigv4 works against
+# FlashBlade (rust-s3 0.35's did not). Async only; we hold one tokio runtime
+# globally and bridge from rayon workers with `Handle::block_on`, which is safe
+# on a multi-thread runtime called from a non-runtime OS thread.
+object_store = { version = "0.11", features = ["aws"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+bytes = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
