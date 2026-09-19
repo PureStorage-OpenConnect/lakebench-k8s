@@ -871,6 +871,7 @@ class SparkJobManager:
         job_type: JobType,
         extra_conf: dict[str, str] | None = None,
         cycle_env: dict[str, str] | None = None,
+        arguments: list[str] | None = None,
     ) -> JobStatus:
         """Submit a Spark job.
 
@@ -879,6 +880,9 @@ class SparkJobManager:
             extra_conf: Additional Spark configuration
             cycle_env: Extra environment variables for multi-cycle batch runs
                        (e.g. LB_SILVER_INCREMENTAL, LB_GOLD_INCREMENTAL)
+            arguments: CLI arguments to append to the main application file.
+                       Used by financial replay/reproduce/score which take
+                       --rule / --alert-id / --manifest at the script level.
 
         Returns:
             Initial JobStatus
@@ -889,7 +893,9 @@ class SparkJobManager:
         self._delete_job(job_name)
 
         # Build SparkApplication manifest
-        manifest = self._build_manifest(job_type, extra_conf, cycle_env=cycle_env)
+        manifest = self._build_manifest(
+            job_type, extra_conf, cycle_env=cycle_env, arguments=arguments,
+        )
 
         # Apply manifest
         from kubernetes import client as k8s_client
@@ -1044,6 +1050,7 @@ class SparkJobManager:
         job_type: JobType,
         extra_conf: dict[str, str] | None = None,
         cycle_env: dict[str, str] | None = None,
+        arguments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build SparkApplication manifest.
 
@@ -1051,6 +1058,7 @@ class SparkJobManager:
             job_type: Type of job
             extra_conf: Additional Spark configuration
             cycle_env: Extra env vars for multi-cycle batch (e.g. LB_SILVER_INCREMENTAL)
+            arguments: CLI arguments appended to the main app file.
 
         Returns:
             SparkApplication manifest dict
@@ -1732,6 +1740,11 @@ class SparkJobManager:
                 "image": cfg.images.spark,
                 "imagePullPolicy": cfg.images.pull_policy.value,
                 "mainApplicationFile": main_file,
+                # Args for scripts that take CLI options (replay/reproduce/score).
+                # SparkOperator maps this to the driver's Python argv after the
+                # script path. Omit when unused so we don't break the older
+                # config's assumption that omitting the field is safe.
+                **({"arguments": arguments} if arguments else {}),
                 # No deps.pyFiles needed - PYTHONPATH includes /opt/spark/scripts for common.py imports
                 "sparkVersion": spark_image_tag,  # From config: images.spark
                 "restartPolicy": _restart_policy,
