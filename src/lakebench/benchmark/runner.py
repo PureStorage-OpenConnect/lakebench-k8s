@@ -137,6 +137,20 @@ class BenchmarkRunner:
         self.catalog = self.executor.catalog_name
         self.silver_table = config.architecture.tables.silver
         self.gold_table = config.architecture.tables.gold
+        # Financial pipeline extra tables. On non-financial workloads these
+        # still get populated with their defaults (silver.entities etc)
+        # which are harmless in a queries file that never references them.
+        t = config.architecture.tables
+        self._extra_tables = {
+            "silver_entities": t.silver_entities,
+            "silver_accounts": t.silver_accounts,
+            "silver_account_statements": t.silver_account_statements,
+            "silver_counterparty_edges": t.silver_counterparty_edges,
+            "gold_alerts": t.gold_alerts,
+            "gold_risk_scores": t.gold_risk_scores,
+            "gold_entity_clusters": t.gold_entity_clusters,
+            "gold_daily_dashboards": t.gold_daily_dashboards,
+        }
 
     def run(
         self,
@@ -475,6 +489,7 @@ class BenchmarkRunner:
             catalog=self.catalog,
             silver_table=self.silver_table,
             gold_table=self.gold_table,
+            **self._extra_tables,
         )
 
         # Adapt SQL for engine-specific dialect (e.g. DuckDB Iceberg syntax)
