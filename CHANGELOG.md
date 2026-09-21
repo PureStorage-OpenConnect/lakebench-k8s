@@ -37,6 +37,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regardless of the flag.
 - **Root `--version` / `-V` flag.** Both `lakebench --version` and
   the existing `lakebench version` subcommand now work.
+- **FAML product-surface docs.** Marcus's roleplay-persona pass in
+  `dev-artifacts/roleplay/COLLATED.md` flagged that FAML was invisible
+  from the front door: no mention in `README.md`, no getting-started
+  section, and `docs/financial-benchmark-baselines.md` reads as
+  "not run yet." New `docs/faml-scoring.md` explains what benchmark
+  precision measures vs what an AML ops team's FP rate measures, the
+  W1/W2/W3/W4/W7/W8 rule to typology mapping, the leakage gate + the
+  scikit-learn reference detector shipped in PR-A, `UNMAPPED_TYPOLOGIES`
+  and why untargeted-typology recall is untestable, and the three
+  metric-trust caveats Marcus surfaced (`compute_efficiency_gb_per_core_hour`
+  reports requested cores, `ingest_ratio` denominator is scale-derived,
+  `qph_degradation_pct` wants at least four rounds). README now names
+  the two workloads (Customer 360 and FAML) as a first-class distinction
+  above Quick Start, adds `financial` to the commands table, and links
+  the new doc. Getting-started grows a "Choosing a Workload" section
+  after "Choosing a Recipe" with a worked deploy -> generate -> run ->
+  score example and pointers to `financial replay` /
+  `financial reproduce`. The one populated baseline row in
+  `docs/financial-benchmark-baselines.md` remains deferred until a live
+  scale-10 and scale-100 UAT run.
 - **FAML leakage gate + reference detector (`score_financial_reference.py`,
   `lakebench.faml.reference_score`).** Closes the "distribution checks
   do not prove semantics -- must run reference detector + leakage
