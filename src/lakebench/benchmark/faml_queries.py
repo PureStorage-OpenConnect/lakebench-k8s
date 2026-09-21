@@ -200,6 +200,7 @@ def load_faml_queries(catalog: str) -> list[FamlQuery]:
         ("aggregate_alert_volume.sql", "aggregate_alert_volume"),
         ("aggregate_top_entities.sql", "aggregate_top_entities"),
         ("aggregate_typology_coverage.sql", "aggregate_typology_coverage"),
+        ("aggregate_reference_vs_rule.sql", "aggregate_reference_vs_rule"),
     ):
         sql = _read_template(filename).format(catalog=catalog)
         queries.append(
@@ -222,7 +223,7 @@ def query_count() -> int:
         n += 1  # detect
         if typ is not None:
             n += 3  # precision + recall + ttd
-    n += 3  # aggregates
+    n += 4  # aggregates: volume, top entities, typology coverage, reference-vs-rule
     return n
 
 
@@ -238,6 +239,7 @@ def _self_check() -> None:
         "aggregate_alert_volume.sql",
         "aggregate_top_entities.sql",
         "aggregate_typology_coverage.sql",
+        "aggregate_reference_vs_rule.sql",
     ):
         if not (_TEMPLATE_DIR / name).exists():
             raise ImportError(
