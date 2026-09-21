@@ -901,16 +901,81 @@ def destroy_all(
                 core_v1.delete_namespaced_secret(secret, namespace)
             except ApiException as e:
                 logger.debug("Secret %s delete skipped: %s", secret, e.reason)
-        # Delete SecretClass (cluster-scoped)
+        # Delete SecretClasses (cluster-scoped, namespace-suffixed).
+        # Both credentials and CA-cert SecretClasses carry the deploying
+        # namespace as a suffix so parallel deployments do not collide;
+        # destroy removes only the ones scoped to this deployment.
+        for sc_name in (
+            f"lakebench-s3-credentials-{namespace}",
+            f"lakebench-s3-ca-cert-{namespace}",
+        ):
+            try:
+                custom_api.delete_cluster_custom_object(
+                    group="secrets.stackable.tech",
+                    version="v1alpha1",
+                    plural="secretclasses",
+                    name=sc_name,
+                )
+            except ApiException as e:
+                logger.debug("SecretClass %s delete skipped: %s", sc_name, e.reason)
+        # ADR-F6: legacy fixed-name SecretClasses (`lakebench-s3-credentials-class`,
+        # `lakebench-s3-ca-cert-class`) belong to pre-PR-2 deployments. They
+        # only exist in cluster state if this or another deployment was
+        # migrated from pre-PR-2 via `admin migrate-deployment` (which
+        # copies but does not delete). It is safe to clean them up when
+        # this destroy is the last remaining deployment that could
+        # depend on them -- i.e. no other lakebench-annotated namespace
+        # remains cluster-wide, and no annotationless legacy namespace
+        # is still around either. If either is present we leave the
+        # legacy names in place; the operator can reclaim them once the
+        # final deployment migrates and destroys.
         try:
-            custom_api.delete_cluster_custom_object(
-                group="secrets.stackable.tech",
-                version="v1alpha1",
-                plural="secretclasses",
-                name="lakebench-s3-credentials-class",
-            )
-        except ApiException as e:
-            logger.debug("SecretClass delete skipped: %s", e.reason)
+            all_ns = core_v1.list_namespace().items
+
+            # ADR-F6b: a legacy pre-PR-1 deployment predates the
+            # annotation. Detect it via the managed-by LABEL that both
+            # PR-1 (annotated) and pre-PR-1 (annotationless) namespaces
+            # carry. Also skip cleanup on any namespace still in
+            # ``Active`` phase to avoid ripping the legacy SC out from
+            # under a mid-run Terminating tenant.
+            def _is_other_lakebench(n) -> bool:
+                if n.metadata.name == namespace:
+                    return False
+                anns = n.metadata.annotations or {}
+                labels = n.metadata.labels or {}
+                if anns.get("lakebench.deployment/name"):
+                    return True
+                if labels.get("app.kubernetes.io/managed-by") == "lakebench":
+                    return True
+                if labels.get("app.kubernetes.io/name") == "lakebench":
+                    return True
+                return False
+
+            other_lakebench = [n for n in all_ns if _is_other_lakebench(n)]
+            if not other_lakebench:
+                for legacy_name in (
+                    "lakebench-s3-credentials-class",
+                    "lakebench-s3-ca-cert-class",
+                ):
+                    try:
+                        custom_api.delete_cluster_custom_object(
+                            group="secrets.stackable.tech",
+                            version="v1alpha1",
+                            plural="secretclasses",
+                            name=legacy_name,
+                        )
+                        logger.info(
+                            "Removed legacy SecretClass %s (last migrated deployment)",
+                            legacy_name,
+                        )
+                    except ApiException as e:
+                        logger.debug(
+                            "Legacy SecretClass %s delete skipped: %s",
+                            legacy_name,
+                            e.reason,
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Legacy SecretClass cluster-wide check skipped: %s", e)
         results.append(
             DeploymentResult(
                 component="rbac",
@@ -928,30 +993,12 @@ def destroy_all(
             )
         )
 
-    # Step 9: Remove scratch StorageClass (cluster-scoped, best-effort)
-    scratch_cfg = engine.config.platform.storage.scratch
-    if scratch_cfg.enabled and scratch_cfg.create_storage_class:
-        report("scratch-sc", DeploymentStatus.IN_PROGRESS, "Removing scratch StorageClass...")
-        try:
-            storage_v1 = k8s_client.StorageV1Api()
-            storage_v1.delete_storage_class(scratch_cfg.storage_class)
-            results.append(
-                DeploymentResult(
-                    component="scratch-sc",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"Removed StorageClass: {scratch_cfg.storage_class}",
-                )
-            )
-            report("scratch-sc", DeploymentStatus.SUCCESS, "Scratch StorageClass removed")
-        except Exception as e:
-            logger.debug("Scratch StorageClass cleanup skipped: %s", e)
-            results.append(
-                DeploymentResult(
-                    component="scratch-sc",
-                    status=DeploymentStatus.SUCCESS,
-                    message="Scratch StorageClass cleanup skipped",
-                )
-            )
+    # Step 9: StorageClass is Category 2 shared infrastructure. lakebench
+    # never deletes it -- another parallel deployment on the same cluster
+    # relies on it, and stripping it out from under them would break
+    # every running Spark job that references it. A cluster admin who
+    # genuinely wants it gone deletes it directly with
+    # `kubectl delete storageclass <name>`.
 
     # Finally, delete namespace if we created it
     if engine.config.platform.kubernetes.create_namespace:
@@ -960,24 +1007,73 @@ def destroy_all(
         # ("failed to wait for ... caches to sync"), which breaks
         # SparkApplication reconciliation for every other namespace on the
         # cluster. Doing this after the delete would leave exactly that
-        # window open. Best-effort: a shared operator we cannot reconfigure
-        # must not block a destroy the user asked for.
-        try:
-            from lakebench.spark import SparkOperatorManager
+        # window open.
+        #
+        # strict=True lease-gates the mutation against parallel destroys
+        # and raises WatchListMutationError on failure -- surfacing a
+        # crash-looping operator explicitly rather than swallowing it as
+        # a successful destroy. Any failure here is captured as a
+        # DeploymentResult and reported in the destroy summary.
+        from lakebench.modules.pipeline_engines.spark.operator import (
+            WatchListMutationError,
+        )
+        from lakebench.spark import SparkOperatorManager
 
-            spark_op_cfg = engine.config.platform.compute.spark.operator
+        spark_op_cfg = engine.config.platform.compute.spark.operator
+        watch_list_ok = True
+        try:
             SparkOperatorManager(
                 namespace=spark_op_cfg.namespace,
                 version=spark_op_cfg.version,
                 job_namespace=namespace,
-            ).remove_namespace_from_watch(namespace)
-        except Exception as e:  # noqa: BLE001 - never block the destroy
-            logger.warning(
-                "Could not remove '%s' from spark.jobNamespaces: %s. "
-                "The operator may crash-loop until it is pruned.",
-                namespace,
-                e,
+            ).remove_namespace_from_watch(namespace, strict=True)
+            report(
+                "spark-operator-watch",
+                DeploymentStatus.SUCCESS,
+                f"Dropped {namespace} from Spark Operator watch list",
             )
+        except WatchListMutationError as e:
+            # ADR-F1: watch-list drop failed. Do NOT delete the namespace
+            # after this: the operator would crash-loop on a watched
+            # namespace that no longer exists ("failed to wait for
+            # spark-application-controller caches to sync"), taking down
+            # SparkApplication reconciliation for every namespace on the
+            # cluster -- the exact failure this whole path is written to
+            # prevent. Record the failure loudly and leave the namespace
+            # in place until `lakebench admin repair-operator` succeeds.
+            watch_list_ok = False
+            logger.error("Spark Operator watch-list mutation failed: %s", e)
+            results.append(
+                DeploymentResult(
+                    component="spark-operator-watch",
+                    status=DeploymentStatus.FAILED,
+                    message=str(e),
+                )
+            )
+            report(
+                "spark-operator-watch",
+                DeploymentStatus.FAILED,
+                "Watch-list mutation failed; run admin repair-operator",
+            )
+
+        if not watch_list_ok:
+            # Preserve the invariant: never delete a namespace the operator
+            # still watches. The namespace stays, the user runs
+            # `admin repair-operator`, then re-runs destroy.
+            skip_msg = (
+                f"Namespace {namespace!r} NOT deleted because the operator "
+                "watch-list mutation failed. Run "
+                "`lakebench admin repair-operator` first, then re-run destroy."
+            )
+            results.append(
+                DeploymentResult(
+                    component="namespace",
+                    status=DeploymentStatus.SKIPPED,
+                    message=skip_msg,
+                )
+            )
+            report("namespace", DeploymentStatus.SKIPPED, skip_msg)
+            return results
 
         report("namespace", DeploymentStatus.IN_PROGRESS, f"Deleting namespace {namespace}...")
         try:

@@ -409,12 +409,13 @@ platform:
     ## Any StorageClass that provides RWO volumes works (Portworx, local-path, EBS, etc.).
     # scratch:
     #   enabled: false
-    #   storage_class: px-csi-scratch    # Name of the StorageClass to use
+    #   storage_class: px-csi-scratch    # Name of the StorageClass to use. Must exist
+    #                                    # before `deploy` runs -- a cluster admin
+    #                                    # installs it once with
+    #                                    # `lakebench admin install-scratch-storage-class`.
     #   size: 100Gi
-    #   create_storage_class: true       # If true, lakebench creates this StorageClass
-    #                                    # on deploy (requires cluster-admin). Set false
-    #                                    # if the SC already exists or is managed externally.
-    #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Examples:
+    #   provisioner: pxd.portworx.com    # CSI provisioner for the SC. Consumed by
+    #                                    # `admin install-scratch-storage-class`. Examples:
     #                                    #   pxd.portworx.com (Portworx)
     #                                    #   rancher.io/local-path (local-path)
     #                                    #   ebs.csi.aws.com (AWS EBS)

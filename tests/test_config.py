@@ -441,10 +441,19 @@ class TestScratchStorageConfig:
         assert scratch.storage_class == "px-csi-scratch"
         assert scratch.size == "100Gi"
 
-    def test_scratch_create_sc_field(self):
-        """create_storage_class defaults to True."""
-        config = LakebenchConfig(name="test")
-        assert config.platform.storage.scratch.create_storage_class is True
+    def test_scratch_legacy_create_sc_field_ignored(self):
+        """create_storage_class is a legacy field.
+
+        StorageClass is Category 2 shared infrastructure; lakebench no
+        longer creates it. YAML that still carries the field loads
+        cleanly (pydantic's default is to ignore extras on this model),
+        but the field is not present on the resulting config.
+        """
+        config = LakebenchConfig(
+            name="test",
+            platform={"storage": {"scratch": {"create_storage_class": False}}},
+        )
+        assert not hasattr(config.platform.storage.scratch, "create_storage_class")
 
     def test_scratch_override(self):
         """Override scratch config values."""
@@ -456,7 +465,6 @@ class TestScratchStorageConfig:
                         "enabled": True,
                         "storage_class": "my-sc",
                         "size": "200Gi",
-                        "create_storage_class": False,
                     }
                 }
             },
@@ -465,7 +473,6 @@ class TestScratchStorageConfig:
         assert scratch.enabled is True
         assert scratch.storage_class == "my-sc"
         assert scratch.size == "200Gi"
-        assert scratch.create_storage_class is False
 
     def test_scratch_provisioner_default(self):
         """BUG-001: Default scratch provisioner is Portworx."""

@@ -239,12 +239,19 @@ class S3Config(BaseModel):
 
 
 class ScratchStorageConfig(BaseModel):
-    """Scratch storage configuration for Spark shuffle."""
+    """Scratch storage configuration for Spark shuffle.
+
+    The StorageClass is Category 2 shared infrastructure: lakebench uses
+    it, lakebench does not create or destroy it. ``deploy`` verifies the
+    named StorageClass exists at preflight; a cluster admin installs it
+    once with ``lakebench admin install-scratch-storage-class``. The
+    ``provisioner`` and ``parameters`` fields are consumed by that admin
+    command via the ``storageclass/px-csi-scratch.yaml.j2`` template.
+    """
 
     enabled: bool = False
     storage_class: str = "px-csi-scratch"
     size: str = "100Gi"
-    create_storage_class: bool = True
     provisioner: str = "pxd.portworx.com"
     parameters: dict[str, str] = Field(
         default_factory=lambda: {"repl": "1", "io_profile": "auto", "priority_io": "high"}

@@ -18,6 +18,16 @@ class _DeploymentReadError(Exception):
     """Raised when the controller deployment spec cannot be read."""
 
 
+class WatchListMutationError(RuntimeError):
+    """Raised when a strict watch-list mutation fails.
+
+    Destroy paths raise this rather than warning so a crash-looping
+    operator is reported to the user explicitly, not swallowed as a
+    successful destroy. The message names ``admin repair-operator`` for
+    recovery.
+    """
+
+
 @dataclass
 class OperatorStatus:
     """Status of Spark Operator."""
@@ -495,7 +505,7 @@ class SparkOperatorManager:
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
         return self._add_namespace_to_watch(namespace)
 
-    def remove_namespace_from_watch(self, namespace: str) -> bool:
+    def remove_namespace_from_watch(self, namespace: str, *, strict: bool = False) -> bool:
         """Drop a namespace from the operator's watch list before deleting it.
 
         A watched namespace that does not exist is not a harmless leftover:
@@ -511,10 +521,18 @@ class SparkOperatorManager:
 
         Args:
             namespace: The namespace about to be deleted.
+            strict: When True, the call is lease-gated against the
+                cluster-wide ``lakebench-cluster-lock`` (serialises
+                parallel destroys mutating the shared watch list) and
+                any failure raises ``WatchListMutationError`` instead of
+                returning False. Destroy paths use strict=True; older
+                internal callers keep the historical bool contract.
 
         Returns:
             True if the watch list no longer contains the namespace.
         """
+        if strict:
+            return self._remove_namespace_from_watch_locked(namespace)
         for attempt in range(self._HELM_CONFLICT_RETRIES):
             watched = self._get_watched_namespaces()
             if watched is None:
@@ -585,6 +603,78 @@ class SparkOperatorManager:
 
         return False
 
+    def _remove_namespace_from_watch_locked(self, namespace: str) -> bool:
+        """Strict variant of ``remove_namespace_from_watch``.
+
+        Acquires the cluster-wide lease so parallel destroys cannot race
+        the same Helm upgrade, then delegates to the non-strict helper.
+        Failure raises ``WatchListMutationError`` naming
+        ``admin repair-operator`` as the recovery path. Success returns
+        True to match the non-strict contract callers already expect.
+        """
+        from kubernetes import client as _kclient
+        from kubernetes.client.exceptions import ApiException
+
+        from lakebench.deploy.cluster_lock import (
+            ClusterLockError,
+            ClusterLockHeld,
+            cluster_lock,
+        )
+
+        try:
+            core_v1 = _kclient.CoreV1Api()
+        except Exception as e:  # noqa: BLE001
+            raise WatchListMutationError(
+                f"cannot open Kubernetes client to acquire cluster lock: {e}. "
+                "The operator's watch list was NOT modified; run "
+                "`lakebench admin repair-operator` after the cluster is reachable."
+            ) from e
+
+        try:
+            with cluster_lock(core_v1, timeout=30):
+                ok = self._remove_namespace_from_watch_impl(namespace)
+        except ClusterLockHeld as e:
+            raise WatchListMutationError(
+                f"another lakebench process holds the cluster lock ({e.holder}); "
+                "wait for it or run `lakebench admin release-lock --expired-only`. "
+                "The operator's watch list was NOT modified."
+            ) from e
+        except ClusterLockError as e:
+            raise WatchListMutationError(
+                f"could not acquire cluster lock: {e}. The operator's watch "
+                "list was NOT modified; run `lakebench admin repair-operator` "
+                "after clearing the underlying issue."
+            ) from e
+        except ApiException as e:
+            raise WatchListMutationError(
+                f"Kubernetes API error while acquiring cluster lock: {e}. "
+                "The operator's watch list was NOT modified; run "
+                "`lakebench admin repair-operator` after the cluster is reachable."
+            ) from e
+
+        if not ok:
+            raise WatchListMutationError(
+                f"failed to remove namespace '{namespace}' from the Spark "
+                "Operator watch list. The operator may crash-loop on the "
+                "stale entry, which would break SparkApplication reconciliation "
+                "for every namespace on the cluster. Run "
+                "`lakebench admin repair-operator` to reconcile the watch "
+                "list against live namespaces."
+            )
+        return True
+
+    def _remove_namespace_from_watch_impl(self, namespace: str) -> bool:
+        """Non-strict watch-list drop reused by ``_locked``.
+
+        Kept as a thin re-entry into the historical implementation to
+        avoid duplicating the retry/backoff logic. Returns False on
+        failure so the ``_locked`` wrapper can raise with a specific
+        error message.
+        """
+        # Call self.remove_namespace_from_watch with strict=False. Guard
+        # against infinite recursion by passing strict=False explicitly.
+        return self.remove_namespace_from_watch(namespace, strict=False)
+
     @classmethod
     def _is_helm_conflict(cls, stderr: str) -> bool:
         """Return True when Helm stderr indicates contention, not misconfig.
@@ -611,6 +701,16 @@ class SparkOperatorManager:
         failure or as a lost update.  Both are handled by re-reading the list
         and retrying rather than by assuming the first read is still valid.
 
+        ADR-F5: this method is lease-gated (symmetric with the strict
+        remove path). Without the lease a concurrent strict destroy of
+        namespace Y racing this add of namespace X can produce a
+        watch-list that includes Y even after Y's destroy dropped it --
+        Y then gets deleted, and the operator crash-loops on the stale
+        entry the add path re-introduced. The lease is best-effort: on
+        infrastructure failure (workstation with no cluster, unit
+        tests) we log-warn and proceed unlocked; production always has
+        access to the lease namespace.
+
         Args:
             namespace: The namespace to add.
             _retry_on_eviction: Internal. Allows exactly one re-add when a
@@ -618,7 +718,118 @@ class SparkOperatorManager:
                 upgrade. Bounded to one to avoid two deploys ping-ponging.
 
         Returns:
-            True if helm upgrade succeeded.
+            True if helm upgrade succeeded. False if the shared cluster
+            lease is held by another process (real contention) or the
+            lease infrastructure denied RBAC access -- in both cases,
+            proceeding unlocked would reopen the exact race F5 closes,
+            so we refuse rather than press on.
+        """
+        # ADR-F5b: distinguish lease-infra-genuinely-absent (workstation
+        # without a cluster, unit tests) from real contention. The
+        # first case is safe to proceed unlocked -- there is no other
+        # writer to race with. The second case must NOT proceed
+        # unlocked; if we did, a concurrent strict destroy holding the
+        # lease could drop namespace Y while our unlocked add of X
+        # writes back a list that still contains Y, and the ns delete
+        # that follows crashes the operator globally.
+        lease_cm, mode = self._acquire_watch_lease()
+        try:
+            if mode == "refuse":
+                logger.error(
+                    "spark-operator watch-list: refusing to add %r -- cluster "
+                    "lease is held (concurrent destroy) or lease RBAC denied. "
+                    "Retry when the holder releases; if the operator was left "
+                    "inconsistent by a prior failure, run "
+                    "`lakebench admin repair-operator`.",
+                    namespace,
+                )
+                return False
+            return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction)
+        finally:
+            if lease_cm is not None:
+                try:
+                    lease_cm.__exit__(None, None, None)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("spark-operator watch-list: lease release failed: %s", e)
+
+    def _acquire_watch_lease(self):
+        """Return (lease_ctx | None, mode).
+
+        - mode == "locked":   we hold the lease; lease_ctx is the entered
+          context to __exit__ later.
+        - mode == "unlocked": there is no cluster to acquire against (no
+          kubeconfig, or connection refused). Safe to proceed -- no other
+          writer can be racing us. lease_ctx is None.
+        - mode == "refuse":   the lease is held by another process or the
+          API denied access. lease_ctx is None. Caller must NOT proceed.
+        """
+        if getattr(self, "_bypass_cluster_lock", False):
+            return None, "unlocked"
+
+        from kubernetes import client as _kclient
+
+        from lakebench.deploy.cluster_lock import (
+            ClusterLockError,
+            ClusterLockHeld,
+            cluster_lock,
+        )
+
+        try:
+            core_v1 = _kclient.CoreV1Api()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "spark-operator watch-list: no k8s client, proceeding unlocked: %s",
+                e,
+            )
+            return None, "unlocked"
+
+        lease_cm = cluster_lock(core_v1, timeout=30)
+        try:
+            lease_cm.__enter__()
+            return lease_cm, "locked"
+        except ClusterLockHeld as e:
+            logger.warning("spark-operator watch-list: lease held by %s", e.holder)
+            return None, "refuse"
+        except ClusterLockError as e:
+            # RBAC denial, API failure managing the lease namespace,
+            # unreachable cluster with a *loaded* kubeconfig -- any of
+            # these mean either (a) production integrity requires the
+            # lease and it's broken, or (b) we can't tell whether
+            # someone else is mutating the same state. Either way,
+            # refuse rather than paper over.
+            msg = str(e).lower()
+            if "connection refused" in msg or "not resolve" in msg or "timed out" in msg:
+                logger.warning(
+                    "spark-operator watch-list: cluster unreachable, proceeding unlocked: %s",
+                    e,
+                )
+                return None, "unlocked"
+            logger.warning(
+                "spark-operator watch-list: lease acquire failed, refusing: %s",
+                e,
+            )
+            return None, "refuse"
+        except Exception as e:  # noqa: BLE001
+            # urllib3 transport errors on a broken kubeconfig look like
+            # workstation-no-cluster: proceed unlocked. Anything else
+            # that reaches here (Python-level bug in the lease
+            # implementation) also fails safe as unlocked, but only
+            # because the ClusterLockError branch above catches the
+            # cases where refusal is the right call.
+            logger.warning(
+                "spark-operator watch-list: proceeding unlocked (lease unavailable: %s)",
+                e,
+            )
+            return None, "unlocked"
+
+    def _add_namespace_to_watch_impl(self, namespace: str, _retry_on_eviction: bool = True) -> bool:
+        """Non-lease-gated body of ``_add_namespace_to_watch``.
+
+        Split out so ADR-F5's lease acquisition wraps only the mutation
+        loop, and existing test callers that patch the mutation body
+        keep working. Callers on the deploy path must go through
+        ``_add_namespace_to_watch`` (which lease-gates); this variant is
+        internal.
         """
         new_list: list[str] = []
 
@@ -728,7 +939,8 @@ class SparkOperatorManager:
                     "successful upgrade -- a concurrent deploy overwrote it. Re-adding.",
                     namespace,
                 )
-                return self._add_namespace_to_watch(namespace, _retry_on_eviction=False)
+                # We already hold the cluster lease; do not re-acquire.
+                return self._add_namespace_to_watch_impl(namespace, _retry_on_eviction=False)
             logger.error(
                 "Operator restarted but deployment spec does not include namespace '%s'",
                 namespace,

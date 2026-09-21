@@ -281,7 +281,7 @@ class TestContextStorageVars:
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     def test_scratch_sc_dry_run(self, _mock_ocp):
-        """Dry-run scratch SC deploy returns success without K8s calls."""
+        """Dry-run scratch SC verify returns success without K8s calls."""
         config = _make_config()
         # Enable scratch
         config.platform.storage.scratch.enabled = True
@@ -290,11 +290,11 @@ class TestContextStorageVars:
 
         result = engine._deploy_scratch_storageclass()
         assert result.status == DeploymentStatus.SUCCESS
-        assert "Would create" in result.message
+        assert "Would verify" in result.message
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     def test_scratch_sc_skipped_when_disabled(self, _mock_ocp):
-        """Scratch SC creation skipped when scratch is disabled."""
+        """Scratch SC verify skipped when scratch is disabled."""
         config = _make_config()
         # scratch.enabled defaults to False
         k8s = _mock_k8s()
@@ -304,16 +304,37 @@ class TestContextStorageVars:
         assert result.status == DeploymentStatus.SKIPPED
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
-    def test_scratch_sc_skipped_when_create_false(self, _mock_ocp):
-        """Scratch SC creation skipped when create_storage_class=False."""
+    def test_scratch_sc_refuses_when_absent(self, _mock_ocp):
+        """Scratch SC verify FAILS with actionable hint when SC is missing."""
+        from kubernetes.client.exceptions import ApiException
+
         config = _make_config()
         config.platform.storage.scratch.enabled = True
-        config.platform.storage.scratch.create_storage_class = False
         k8s = _mock_k8s()
         engine = DeploymentEngine(config, k8s_client=k8s)
 
-        result = engine._deploy_scratch_storageclass()
-        assert result.status == DeploymentStatus.SKIPPED
+        with patch(
+            "kubernetes.client.StorageV1Api.read_storage_class",
+            side_effect=ApiException(status=404, reason="Not Found"),
+        ):
+            result = engine._deploy_scratch_storageclass()
+
+        assert result.status == DeploymentStatus.FAILED
+        assert "admin install-scratch-storage-class" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    def test_scratch_sc_verified_when_present(self, _mock_ocp):
+        """Scratch SC verify succeeds when SC exists."""
+        config = _make_config()
+        config.platform.storage.scratch.enabled = True
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        with patch("kubernetes.client.StorageV1Api.read_storage_class"):
+            result = engine._deploy_scratch_storageclass()
+
+        assert result.status == DeploymentStatus.SUCCESS
+        assert "verified" in result.message
 
 
 class TestDeployBuckets:

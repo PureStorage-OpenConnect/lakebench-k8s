@@ -672,7 +672,7 @@ class TestTemplateConditionals:
         ctx = _enrich_context(engine)
 
         rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
-        assert "lakebench-s3-ca-cert-class" in rendered
+        assert f"lakebench-s3-ca-cert-{ctx['namespace']}" in rendered
         assert "tls:" in rendered or "secretClass" in rendered
 
     def test_hive_no_tls_block_for_http(self, renderer: TemplateRenderer):
@@ -681,7 +681,7 @@ class TestTemplateConditionals:
         ctx = _enrich_context(engine)
 
         rendered = renderer.render("hive/stackable-hivecluster.yaml.j2", ctx)
-        assert "lakebench-s3-ca-cert-class" not in rendered
+        assert f"lakebench-s3-ca-cert-{ctx['namespace']}" not in rendered
 
     def test_all_templates_render_with_https_context(self, renderer: TemplateRenderer):
         """All templates should render without error with HTTPS + CA cert context."""

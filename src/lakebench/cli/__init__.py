@@ -60,11 +60,13 @@ app = typer.Typer(
 )
 
 # Config subcommand group
+from lakebench.cli._admin import admin_app  # noqa: E402
 from lakebench.cli._config import config_app  # noqa: E402
 from lakebench.cli._financial import financial_app  # noqa: E402
 
 app.add_typer(config_app)
 app.add_typer(financial_app)
+app.add_typer(admin_app)
 
 # Compare command (registered from separate module)
 from lakebench.cli._compare import compare as _compare_fn  # noqa: E402
@@ -727,9 +729,9 @@ def validate(
         storage_classes = []
         scratch_cfg = cfg.platform.storage.scratch
         if scratch_cfg.enabled and scratch_cfg.storage_class:
-            storage_classes.append(
-                (scratch_cfg.storage_class, "scratch", not scratch_cfg.create_storage_class)
-            )
+            # StorageClass is Category 2 shared infrastructure: preflight
+            # requires it to exist before deploy runs.
+            storage_classes.append((scratch_cfg.storage_class, "scratch", True))
 
         pg_sc = cfg.platform.compute.postgres.storage_class
         if pg_sc:
