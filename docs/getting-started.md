@@ -38,10 +38,10 @@ job profiles:
 
 | Scale | Bronze data | Minimum CPU | Minimum RAM | Scratch PVC |
 |------:|------------:|------------:|------------:|------------:|
-| 1 | ~10 GB | 36 cores | 512 GB | 1,200 Gi |
-| 10 | ~100 GB | 36 cores | 512 GB | 1,200 Gi |
-| 50 | ~500 GB | 52 cores | 752 GB | 1,800 Gi |
-| 100 | ~1 TB | 76 cores | 1,112 GB | 2,700 Gi |
+| 1 | ~10 GB | 36 cores | 512 GB | 2,400 Gi |
+| 10 | ~100 GB | 36 cores | 512 GB | 2,400 Gi |
+| 50 | ~500 GB | 52 cores | 752 GB | 3,600 Gi |
+| 100 | ~1 TB | 76 cores | 1,112 GB | 5,400 Gi |
 
 Three things surprise people about this table:
 
