@@ -59,6 +59,18 @@ def clean(
             help="Skip confirmation prompt",
         ),
     ] = False,
+    force_legacy: Annotated[
+        bool,
+        typer.Option(
+            "--force-legacy",
+            help=(
+                "Clean a bucket that has no lakebench ownership tag "
+                "(legacy). Caution: another team's data may live in an "
+                "untagged bucket. Refuses always on foreign-tagged "
+                "buckets regardless of this flag."
+            ),
+        ),
+    ] = False,
     metrics_dir: Annotated[
         Path,
         typer.Option(
@@ -183,12 +195,49 @@ def clean(
                 ca_cert=s3_cfg.ca_cert,
                 verify_ssl=s3_cfg.verify_ssl,
             )
+            # F1-A: bail on S3 init failure with a clean refusal.
+            # Without this guard, `raw_client` returns None and every
+            # verify_bucket_ownership call raises AttributeError.
+            if s3._init_error:
+                print_error(f"S3 client init failed: {s3._init_error}")
+                raise typer.Exit(1)
 
             def _clean_progress(bkt: str, count: int) -> None:
                 console.print(f"  Deleting from s3://{bkt}/... ({count:,} objects so far)")
 
+            # F-1: ownership check per bucket before touching contents.
+            # Foreign-tagged buckets always refuse; legacy (untagged)
+            # buckets need --force-legacy. This mirrors the deploy and
+            # destroy paths so `clean` cannot be used as a bypass.
+            from lakebench.deploy.ownership import (
+                IdentityVerdict,
+                verify_bucket_ownership,
+            )
+
             for layer, bucket in bucket_targets.items():
                 try:
+                    v = verify_bucket_ownership(s3.raw_client, bucket, cfg.name)
+                    if v.verdict is IdentityVerdict.MISMATCH:
+                        errors.append(f"{layer}: {v.hint}")
+                        print_error(
+                            f"Refusing to clean {layer}: bucket "
+                            f"{bucket!r} is owned by another lakebench "
+                            f"deployment. {v.hint}"
+                        )
+                        continue
+                    if v.verdict is IdentityVerdict.ABSENT and not force_legacy:
+                        errors.append(f"{layer}: legacy untagged bucket, --force-legacy required")
+                        print_error(
+                            f"Refusing to clean {layer}: bucket "
+                            f"{bucket!r} has no lakebench ownership tag. "
+                            "Pass --force-legacy to clean (caution: this "
+                            "may collide with another team's data)."
+                        )
+                        continue
+                    if v.verdict is IdentityVerdict.NOT_FOUND:
+                        print_info(f"{layer}: bucket {bucket!r} does not exist")
+                        continue
+
                     deleted = s3.empty_bucket(bucket, progress_callback=_clean_progress)
                     total_deleted += deleted
                     if deleted > 0:

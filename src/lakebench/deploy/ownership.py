@@ -1,0 +1,732 @@
+"""Deployment identity + resource ownership for shared clusters.
+
+Every lakebench deployment carries an identity: a name and a fingerprint of
+the Kubernetes API server it was deployed to. That identity is stamped onto
+every resource lakebench creates and checked before any destructive
+mutation. If the stamp on a resource does not match the current
+deployment, we refuse rather than warn.
+
+This is the machinery behind the invariant "destroying deployment A does
+not affect deployment B running in parallel." See
+``dev-artifacts/DESIGN-namespace-isolation.md`` for the design rationale
+and category taxonomy this module enforces.
+
+The pieces:
+
+- ``api_server_fingerprint`` produces a stable identifier for the target
+  cluster from the kubeconfig context. Local kubectl-context names differ
+  per workstation, so we hash the cluster's CA certificate material: two
+  engineers on the same cluster produce the same fingerprint, and the
+  workstation and in-cluster paths against the same cluster also agree
+  (both see the same CA cert, even though they use different endpoint
+  URLs).
+- ``stamp_namespace`` writes deployment-identity annotations on the
+  namespace under optimistic-concurrency. A conflict resolves to either
+  "already claimed by us -- proceed" or "claimed by someone else --
+  refuse".
+- ``verify_namespace_identity`` reads those annotations and returns a
+  verdict that destroy paths and other identity-sensitive commands act on.
+- ``write_bucket_ownership_tag`` and ``read_bucket_ownership_tag`` are the
+  S3 side: the tag is written unconditionally on every ensure_buckets
+  call, the read verifies the round trip, and destroy refuses on mismatch.
+
+The failure modes this module explicitly forbids (silent-warn-and-proceed
+was the class the shared-cluster review caught last time):
+
+- Cross-context destroy: the api-server fingerprint on the namespace does
+  not match the current cluster.
+- Cross-deployment destroy: name annotation on the namespace does not
+  match ``cfg.name``.
+- Cross-deployment bucket empty: bucket tag does not match ``cfg.name``.
+- Legacy namespace or bucket: no annotation / tag present, refuse by
+  default. Explicit opt-in flag on ``deploy`` re-stamps it; ``destroy``
+  never bypasses.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+# Annotation keys stamped onto every lakebench-managed namespace.
+ANNOTATION_DEPLOYMENT_NAME = "lakebench.deployment/name"
+ANNOTATION_API_SERVER = "lakebench.deployment/api-server"
+ANNOTATION_COMMITTED_SHA = "lakebench.deployment/committed-sha"
+ANNOTATION_STAMPED_AT = "lakebench.deployment/stamped-at"
+
+# Bucket tag keys.
+TAG_DEPLOYMENT_NAME = "lakebench.deployment"
+TAG_WORKLOAD_SCHEMA = "lakebench.workload"
+
+# Namespace name max length (matches K8s + doubles as the bucket-tag length
+# guard: AWS caps tag values at 256, so 63 chars is well within bounds).
+DEPLOYMENT_NAME_MAX = 63
+
+
+class IdentityVerdict(str, Enum):
+    """Outcome of comparing a resource's identity against the current run."""
+
+    #: Identity annotations/tags match this deployment. Safe to proceed.
+    MATCH = "match"
+    #: Resource carries a foreign identity. Refuse.
+    MISMATCH = "mismatch"
+    #: Resource has no identity annotations/tags. Legacy; caller decides.
+    ABSENT = "absent"
+    #: Resource does not exist at all.
+    NOT_FOUND = "not_found"
+
+
+@dataclass(frozen=True)
+class IdentityReport:
+    """What a verify call found. All fields together, no dangling defaults.
+
+    ``verdict`` is the actionable answer. The rest is diagnostics for the
+    caller to include in a user-visible refusal message.
+    """
+
+    verdict: IdentityVerdict
+    resource_name: str
+    expected_deployment: str
+    found_deployment: str | None = None
+    found_api_server: str | None = None
+    current_api_server: str | None = None
+    hint: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# API server fingerprint
+# ---------------------------------------------------------------------------
+
+
+def api_server_fingerprint(context: str | None = None) -> str | None:
+    """Return a stable 12-hex-digit identifier for the cluster.
+
+    We hash the cluster's CA certificate material. Two engineers hitting
+    the same cluster produce the same fingerprint even though their local
+    context names differ; more importantly, a workstation context and an
+    in-cluster pod context targeting the same cluster ALSO produce the
+    same fingerprint, because the cluster's CA is stable regardless of
+    how you reach it (F2a: earlier revision hashed server URL + CA,
+    which false-mismatched workstation vs in-cluster against the same
+    cluster because they see different server URLs).
+
+    **Known limitation (F-3)**: two clusters that share a CA
+    (e.g. dev rings bootstrapped from the same self-signed org CA)
+    collide on this fingerprint. If your workflow includes multiple
+    clusters that share PKI, verify the current ``kubectl`` context
+    manually before running ``lakebench destroy``. The name annotation
+    still provides second-line defence -- destroy will refuse if the
+    deployment name does not match -- but two clusters with the same
+    name AND the same CA would pass the check. Adding the API-server
+    hostname would distinguish them, but hostnames differ between
+    workstation and in-cluster reachability paths (external URL vs
+    KUBERNETES_SERVICE_HOST), so we cannot include it without
+    reintroducing F2a. This is a documented trade-off.
+
+    Returns None only when no CA material can be located at all. None is
+    treated as "cannot verify" by callers; refusal on asymmetric None
+    still fires unless the caller opts in with allow_unverified_cluster.
+    """
+    try:
+        from kubernetes import config as _kube_config
+    except ImportError:  # pragma: no cover -- kubernetes lib is a hard dep
+        return None
+
+    try:
+        contexts, active = _kube_config.list_kube_config_contexts()
+    except Exception as e:  # noqa: BLE001 -- kubeconfig may be missing
+        logger.debug("api_server_fingerprint: cannot list contexts: %s", e)
+        return _try_incluster_fingerprint()
+
+    if not contexts:
+        return _try_incluster_fingerprint()
+
+    cluster_name: str | None = None
+    if context:
+        # Find the requested context's cluster.
+        for ctx in contexts:
+            if ctx.get("name") == context:
+                cluster_name = ctx.get("context", {}).get("cluster")
+                break
+        if cluster_name is None:
+            logger.debug("api_server_fingerprint: context %r not found", context)
+            return None
+    else:
+        if active is None:
+            return _try_incluster_fingerprint()
+        cluster_name = active.get("context", {}).get("cluster")
+
+    if not cluster_name:
+        return None
+
+    # Reach into the raw kubeconfig to pull the cluster block. The
+    # high-level loader doesn't expose it; the low-level KubeConfigMerger
+    # does. Different kubernetes-client versions wrap this in a ConfigNode
+    # (list-of-dicts under `.value` per entry) vs a plain dict, so
+    # tolerate both.
+    try:
+        merger = _kube_config.kube_config.KubeConfigMerger(
+            _kube_config.KUBE_CONFIG_DEFAULT_LOCATION
+        )
+        raw = merger.config.value
+        raw_clusters = raw.get("clusters", []) if isinstance(raw, dict) else []
+    except Exception as e:  # noqa: BLE001
+        logger.debug("api_server_fingerprint: cannot read raw kubeconfig: %s", e)
+        return None
+
+    for entry in raw_clusters:
+        # ConfigNode wraps per-entry dicts under `.value` on some client
+        # versions; unwrap when needed.
+        entry_dict = entry.value if hasattr(entry, "value") else entry
+        if not isinstance(entry_dict, dict):
+            continue
+        if entry_dict.get("name") != cluster_name:
+            continue
+        block_raw = entry_dict.get("cluster", {})
+        block = block_raw.value if hasattr(block_raw, "value") else block_raw
+        if not isinstance(block, dict):
+            block = {}
+        # Normalise to raw CA bytes so the workstation path and the
+        # in-cluster path (which reads bytes off disk) hash the SAME
+        # material for the same cluster (F2a).
+        ca_bytes = _load_ca_bytes(block)
+        if not ca_bytes:
+            return None
+        return hashlib.sha256(ca_bytes).hexdigest()[:12]
+
+    return None
+
+
+def _load_ca_bytes(cluster_block: dict[str, Any]) -> bytes:
+    """Return the CA certificate bytes for a kubeconfig cluster block.
+
+    kubeconfig stores the CA as either:
+    - ``certificate-authority-data``: base64-encoded PEM (inline),
+    - ``certificate-authority``: path to a PEM file on disk.
+
+    Some producers write hex instead of base64 into
+    ``certificate-authority-data`` when they emit the file. We treat
+    both encodings as valid CA material and decode to raw bytes so all
+    paths (workstation, in-cluster, inline, file) hash the same thing.
+    """
+    import base64
+    import binascii
+
+    inline = cluster_block.get("certificate-authority-data", "")
+    if isinstance(inline, bytes):
+        return inline
+    if isinstance(inline, str) and inline:
+        # Try base64 first (the standard); fall back to hex.
+        try:
+            return base64.b64decode(inline, validate=True)
+        except (binascii.Error, ValueError):
+            try:
+                return bytes.fromhex(inline)
+            except ValueError:
+                # Not decodable -- treat as the raw string bytes.
+                return inline.encode()
+
+    ca_path = cluster_block.get("certificate-authority")
+    if isinstance(ca_path, str) and ca_path:
+        try:
+            with open(ca_path, "rb") as f:
+                return f.read()
+        except OSError:
+            return b""
+
+    return b""
+
+
+def _try_incluster_fingerprint() -> str | None:
+    """Fingerprint an in-cluster (pod) context via the mounted service-account
+    CA. Returns None if the path does not exist (running outside a pod).
+
+    Hashes ONLY the CA bytes -- same as the kubeconfig path (F2a) so a
+    pod-context fingerprint matches the workstation fingerprint for the
+    same cluster.
+    """
+    try:
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", "rb") as f:
+            ca = f.read()
+    except OSError:
+        return None
+    return hashlib.sha256(ca).hexdigest()[:12]
+
+
+# ---------------------------------------------------------------------------
+# Namespace identity
+# ---------------------------------------------------------------------------
+
+
+def _now_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def stamp_namespace(
+    core_v1: Any,
+    namespace: str,
+    deployment_name: str,
+    api_server: str | None,
+    committed_sha: str | None = None,
+    force_legacy: bool = False,
+    max_retries: int = 3,
+) -> IdentityReport:
+    """Stamp deployment-identity annotations on a namespace.
+
+    Uses an optimistic-concurrency PATCH keyed on the current
+    ``resourceVersion`` so two parallel deploys racing an annotation-less
+    namespace cannot both silently claim it -- the loser sees a 409 and
+    re-reads. If the re-read shows the same deployment already stamped,
+    we proceed; if it shows a different deployment, we refuse.
+
+    Legacy annotation-less namespaces are treated as UNSAFE by default:
+    the caller must pass ``force_legacy=True`` to overwrite them. This
+    catches the "annotation-less namespace already has running lakebench
+    resources inside" case that revision-1 of the design missed.
+    """
+    if len(deployment_name) > DEPLOYMENT_NAME_MAX:
+        raise ValueError(
+            f"deployment_name is {len(deployment_name)} chars; max is "
+            f"{DEPLOYMENT_NAME_MAX} (matches K8s namespace + S3 tag limits)"
+        )
+
+    from kubernetes.client.rest import ApiException  # local import: light dep
+
+    for attempt in range(max_retries):
+        try:
+            ns = core_v1.read_namespace(namespace)
+        except ApiException as e:
+            if e.status == 404:
+                return IdentityReport(
+                    verdict=IdentityVerdict.NOT_FOUND,
+                    resource_name=namespace,
+                    expected_deployment=deployment_name,
+                    hint=f"namespace {namespace!r} does not exist",
+                )
+            raise
+
+        existing = (ns.metadata.annotations or {}) if ns.metadata else {}
+        existing_name = existing.get(ANNOTATION_DEPLOYMENT_NAME)
+        existing_server = existing.get(ANNOTATION_API_SERVER)
+
+        # Already stamped with a foreign identity -- refuse cold.
+        if existing_name and existing_name != deployment_name:
+            return IdentityReport(
+                verdict=IdentityVerdict.MISMATCH,
+                resource_name=namespace,
+                expected_deployment=deployment_name,
+                found_deployment=existing_name,
+                found_api_server=existing_server,
+                current_api_server=api_server,
+                hint=(
+                    f"namespace {namespace!r} is already claimed by "
+                    f"deployment {existing_name!r}. Pick a different "
+                    "namespace, or destroy the existing deployment first."
+                ),
+            )
+
+        # Already stamped with our identity -- idempotent no-op.
+        if existing_name == deployment_name and existing_server == api_server:
+            return IdentityReport(
+                verdict=IdentityVerdict.MATCH,
+                resource_name=namespace,
+                expected_deployment=deployment_name,
+                found_deployment=existing_name,
+                found_api_server=existing_server,
+                current_api_server=api_server,
+            )
+
+        # Legacy annotation-less namespace: opt in explicitly.
+        if not existing_name and not force_legacy:
+            return IdentityReport(
+                verdict=IdentityVerdict.ABSENT,
+                resource_name=namespace,
+                expected_deployment=deployment_name,
+                found_deployment=None,
+                hint=(
+                    f"namespace {namespace!r} exists without lakebench "
+                    "identity annotations. Pass --force-legacy on deploy "
+                    "to claim it (destroy still refuses without migration)."
+                ),
+            )
+
+        # Build the annotation patch. Use resourceVersion-based OCC.
+        annotations = dict(existing)
+        annotations[ANNOTATION_DEPLOYMENT_NAME] = deployment_name
+        if api_server:
+            annotations[ANNOTATION_API_SERVER] = api_server
+        if committed_sha:
+            annotations[ANNOTATION_COMMITTED_SHA] = committed_sha
+        annotations[ANNOTATION_STAMPED_AT] = _now_iso()
+
+        body = {
+            "metadata": {
+                "annotations": annotations,
+                "resourceVersion": ns.metadata.resource_version,
+            }
+        }
+        try:
+            core_v1.patch_namespace(namespace, body)
+        except ApiException as e:
+            if e.status == 409:
+                # Conflict: someone else patched the namespace between our
+                # read and our write. Re-read and reconsider.
+                logger.info(
+                    "stamp_namespace: 409 on attempt %d/%d for %s; retrying",
+                    attempt + 1,
+                    max_retries,
+                    namespace,
+                )
+                time.sleep(0.2 * (attempt + 1))
+                continue
+            raise
+
+        return IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name=namespace,
+            expected_deployment=deployment_name,
+            found_deployment=deployment_name,
+            found_api_server=api_server,
+            current_api_server=api_server,
+        )
+
+    # Exhausted retries -- last thing we saw. Report as mismatch so the
+    # caller refuses to proceed rather than deploying blind.
+    return IdentityReport(
+        verdict=IdentityVerdict.MISMATCH,
+        resource_name=namespace,
+        expected_deployment=deployment_name,
+        hint=(
+            f"failed to stamp namespace {namespace!r} after {max_retries} "
+            "OCC retries; another process may be claiming it concurrently"
+        ),
+    )
+
+
+def verify_namespace_identity(
+    core_v1: Any,
+    namespace: str,
+    expected_deployment: str,
+    expected_api_server: str | None,
+    allow_unverified_cluster: bool = False,
+) -> IdentityReport:
+    """Read namespace annotations and return the verdict.
+
+    This never mutates. Callers (destroy, admin migrate) decide what to do
+    with an ABSENT verdict; MISMATCH is unconditional refuse.
+    """
+    from kubernetes.client.rest import ApiException
+
+    try:
+        ns = core_v1.read_namespace(namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return IdentityReport(
+                verdict=IdentityVerdict.NOT_FOUND,
+                resource_name=namespace,
+                expected_deployment=expected_deployment,
+            )
+        raise
+
+    annotations = (ns.metadata.annotations or {}) if ns.metadata else {}
+    found_name = annotations.get(ANNOTATION_DEPLOYMENT_NAME)
+    found_server = annotations.get(ANNOTATION_API_SERVER)
+
+    if not found_name:
+        return IdentityReport(
+            verdict=IdentityVerdict.ABSENT,
+            resource_name=namespace,
+            expected_deployment=expected_deployment,
+            hint=(
+                f"namespace {namespace!r} has no lakebench identity. "
+                "Run `lakebench admin migrate-deployment` to claim it."
+            ),
+        )
+
+    if found_name != expected_deployment:
+        return IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name=namespace,
+            expected_deployment=expected_deployment,
+            found_deployment=found_name,
+            found_api_server=found_server,
+            current_api_server=expected_api_server,
+            hint=(
+                f"namespace {namespace!r} is owned by deployment "
+                f"{found_name!r}, not {expected_deployment!r}. Refusing."
+            ),
+        )
+
+    # Symmetric-both-present: enforce fingerprint match.
+    # Asymmetric (one side None): refuse unless --allow-unverified-cluster.
+    # Symmetric-both-None: refuse unless --allow-unverified-cluster (F3:
+    # a fully-offline destroy against a fully-offline deploy would
+    # otherwise match by name alone -- and namespace-name collisions
+    # across clusters absolutely happen at Tier-1 shops).
+    if found_server is not None and expected_api_server is not None:
+        if found_server != expected_api_server:
+            return IdentityReport(
+                verdict=IdentityVerdict.MISMATCH,
+                resource_name=namespace,
+                expected_deployment=expected_deployment,
+                found_deployment=found_name,
+                found_api_server=found_server,
+                current_api_server=expected_api_server,
+                hint=(
+                    f"namespace {namespace!r} was deployed to cluster "
+                    f"{found_server[:12]!r}, current context is "
+                    f"{expected_api_server[:12]!r}. Wrong kubectl context?"
+                ),
+            )
+    elif not allow_unverified_cluster:
+        # F2a/F3: asymmetric OR both-None. Cannot prove same cluster.
+        # F-5: split the hint so the user knows which side broke.
+        if found_server is None and expected_api_server is None:
+            broken = (
+                "neither the deploy nor this destroy could compute a "
+                "cluster fingerprint (both kubeconfigs missing CA data?)"
+            )
+        elif found_server is None:
+            broken = (
+                "the deploy did not stamp a cluster fingerprint "
+                "(deploy-time kubeconfig had no CA data)"
+            )
+        else:
+            broken = (
+                "this destroy cannot compute a cluster fingerprint "
+                "(current kubeconfig has no CA data)"
+            )
+        return IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name=namespace,
+            expected_deployment=expected_deployment,
+            found_deployment=found_name,
+            found_api_server=found_server,
+            current_api_server=expected_api_server,
+            hint=(
+                f"namespace {namespace!r}: {broken}. Cannot verify same "
+                "cluster. Pass --allow-unverified-cluster to override "
+                "(only when you are certain the current context is "
+                "correct)."
+            ),
+        )
+
+    return IdentityReport(
+        verdict=IdentityVerdict.MATCH,
+        resource_name=namespace,
+        expected_deployment=expected_deployment,
+        found_deployment=found_name,
+        found_api_server=found_server,
+        current_api_server=expected_api_server,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bucket ownership tag
+# ---------------------------------------------------------------------------
+
+
+class BucketOwnershipError(Exception):
+    """Raised when a bucket cannot be tagged, or its tag disagrees."""
+
+
+def write_bucket_ownership_tag(
+    boto_client: Any,
+    bucket: str,
+    deployment_name: str,
+    workload_schema: str | None = None,
+) -> None:
+    """Write the ownership tag and verify the round trip.
+
+    Called by ``ensure_buckets`` unconditionally: not only on bucket create.
+    A bucket created by a prior deploy that raced ours (or a legacy bucket
+    reclaimed by admin) would otherwise sit tag-less and read as legacy on
+    every subsequent destroy.
+
+    Round-trip verify catches:
+    - Backends that silently drop tagging (SeaweedFS class).
+    - Truncation on unusually long deployment_name (guarded at schema, but
+      belt-and-braces).
+    - PutBucketTagging succeeded, GetBucketTagging returns 404 (async
+      propagation on some object stores).
+
+    **TOCTOU note**: the read-back proves *we* were the last writer at the
+    time of our GET, not that we are still the last writer when destroy
+    reads later. Two deploys racing an untagged bucket -- one wins the
+    final PUT, the other's later destroy sees the winner's tag and
+    refuses. That refusal is the correct outcome (last-writer-wins on
+    ownership; the loser's data still lives in the winner's bucket, so
+    the loser cannot safely wipe it anyway). Callers must not treat a
+    successful round-trip verify as "no one else can claim this bucket
+    later" -- it is only "no one had claimed it before our PUT completed."
+    """
+    if len(deployment_name) > DEPLOYMENT_NAME_MAX:
+        raise BucketOwnershipError(
+            f"deployment_name {len(deployment_name)} chars exceeds "
+            f"{DEPLOYMENT_NAME_MAX}; would truncate in the bucket tag."
+        )
+
+    tag_set = [{"Key": TAG_DEPLOYMENT_NAME, "Value": deployment_name}]
+    if workload_schema:
+        tag_set.append({"Key": TAG_WORKLOAD_SCHEMA, "Value": workload_schema})
+
+    boto_client.put_bucket_tagging(
+        Bucket=bucket,
+        Tagging={"TagSet": tag_set},
+    )
+
+    # Read back and verify. If the backend does not support tagging, or
+    # dropped the write, we surface it here instead of pretending the
+    # bucket is now owned.
+    got = read_bucket_ownership_tag(boto_client, bucket)
+    if got is None:
+        raise BucketOwnershipError(
+            f"bucket {bucket!r}: PutBucketTagging succeeded but "
+            "GetBucketTagging returned no tags. Backend may not support "
+            "bucket tagging (see docs/storage-backends.md)."
+        )
+    if got.get(TAG_DEPLOYMENT_NAME) != deployment_name:
+        raise BucketOwnershipError(
+            f"bucket {bucket!r}: tag round-trip mismatch. Wrote "
+            f"{deployment_name!r}, read {got.get(TAG_DEPLOYMENT_NAME)!r}."
+        )
+
+
+def read_bucket_ownership_tag(boto_client: Any, bucket: str) -> dict[str, str] | None:
+    """Return the tag map for a bucket, or None if the bucket has no tags.
+
+    Never raises for the "no tags on this bucket" case (S3 returns
+    NoSuchTagSet). Other errors propagate.
+    """
+    from botocore.exceptions import ClientError
+
+    try:
+        resp = boto_client.get_bucket_tagging(Bucket=bucket)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchTagSet", "NoSuchTagSetError"):
+            return None
+        raise
+
+    return {t["Key"]: t["Value"] for t in resp.get("TagSet", [])}
+
+
+def verify_bucket_ownership(
+    boto_client: Any,
+    bucket: str,
+    expected_deployment: str,
+) -> IdentityReport:
+    """Read a bucket's ownership tag and return the verdict."""
+    from botocore.exceptions import ClientError
+
+    try:
+        tags = read_bucket_ownership_tag(boto_client, bucket)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("NoSuchBucket", "404"):
+            return IdentityReport(
+                verdict=IdentityVerdict.NOT_FOUND,
+                resource_name=bucket,
+                expected_deployment=expected_deployment,
+            )
+        raise
+
+    if tags is None:
+        return IdentityReport(
+            verdict=IdentityVerdict.ABSENT,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            hint=(
+                f"bucket {bucket!r} has no lakebench.deployment tag. "
+                "Legacy bucket. Pass --force-legacy on deploy to claim "
+                "it (destroy always refuses without migration)."
+            ),
+        )
+
+    found = tags.get(TAG_DEPLOYMENT_NAME)
+    if found is None:
+        return IdentityReport(
+            verdict=IdentityVerdict.ABSENT,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            hint=(f"bucket {bucket!r} has tags but no {TAG_DEPLOYMENT_NAME!r}. Legacy bucket."),
+        )
+
+    if found != expected_deployment:
+        return IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            found_deployment=found,
+            hint=(
+                f"bucket {bucket!r} is owned by deployment {found!r}, "
+                f"not {expected_deployment!r}. Refusing."
+            ),
+        )
+
+    return IdentityReport(
+        verdict=IdentityVerdict.MATCH,
+        resource_name=bucket,
+        expected_deployment=expected_deployment,
+        found_deployment=found,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Convenience: gather the current run's identity in one call
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DeploymentIdentity:
+    """Identity of the current run. Passed to every stamp / verify call."""
+
+    name: str
+    api_server: str | None
+    committed_sha: str | None = None
+    workload_schema: str | None = None
+
+
+def build_identity_from_config(cfg: Any, context: str | None = None) -> DeploymentIdentity:
+    """Assemble a DeploymentIdentity from a loaded LakebenchConfig."""
+    import subprocess
+
+    committed_sha: str | None = None
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        committed_sha = out.stdout.strip() or None
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+    workload_schema: str | None = None
+    try:
+        ws = cfg.architecture.workload.schema_type
+        # Only accept a real enum or string; a Mock proxy would `str()` to
+        # something like "<MagicMock id=...>" and end up in the bucket tag.
+        candidate = getattr(ws, "value", None)
+        if candidate is None and isinstance(ws, str):
+            candidate = ws
+        if isinstance(candidate, str) and candidate:
+            workload_schema = candidate
+    except Exception:  # noqa: BLE001 -- best-effort; None is a valid value
+        pass
+
+    return DeploymentIdentity(
+        name=cfg.name,
+        api_server=api_server_fingerprint(context),
+        committed_sha=committed_sha,
+        workload_schema=workload_schema,
+    )

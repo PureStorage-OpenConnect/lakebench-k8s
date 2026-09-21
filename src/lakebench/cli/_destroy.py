@@ -138,6 +138,18 @@ def destroy(
             help="Local mode: also delete generated data and the Ivy cache",
         ),
     ] = False,
+    allow_unverified_cluster: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unverified-cluster",
+            help=(
+                "Bypass the api-server fingerprint match when it cannot "
+                "be computed on one or both sides. Only use when you "
+                "know the current kubectl context is correct (dev "
+                "environment with a broken kubeconfig, etc)."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Tear down lakehouse infrastructure.
 
@@ -263,7 +275,10 @@ def destroy(
     destroy_start = time.time()
     try:
         engine = DeploymentEngine(cfg)
-        results = engine.destroy_all(progress_callback=on_progress)
+        results = engine.destroy_all(
+            progress_callback=on_progress,
+            allow_unverified_cluster=allow_unverified_cluster,
+        )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
         _journal_safe(j.end_command, success=False, message=str(e))

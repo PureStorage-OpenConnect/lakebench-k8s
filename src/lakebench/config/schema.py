@@ -1313,6 +1313,7 @@ class LakebenchConfig(BaseModel):
     name: str = Field(
         default="",
         description="Unique name for this deployment (REQUIRED)",
+        max_length=63,  # matches K8s namespace + S3 bucket-tag safe length
     )
     description: str = ""
     version: int = 1  # Config schema version

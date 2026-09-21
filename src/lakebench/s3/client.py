@@ -135,6 +135,18 @@ class S3Client:
             self._client = None  # type: ignore[assignment]
             self._init_error = str(e)
 
+    @property
+    def raw_client(self) -> Any:
+        """Return the underlying boto3 client for callers that need to
+        issue operations lakebench does not wrap (bucket tagging in
+        ``deploy.ownership``, for instance).
+
+        Prefer ``self._client`` internally; ``raw_client`` is the stable
+        surface external modules should reach for so a future refactor of
+        client init does not have to chase every ``_client`` accessor.
+        """
+        return self._client
+
     @classmethod
     def from_connection_info(cls, info: S3ConnectionInfo) -> S3Client:
         """Create client from connection info dataclass."""
