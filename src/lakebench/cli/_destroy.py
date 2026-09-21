@@ -150,6 +150,22 @@ def destroy(
             ),
         ),
     ] = False,
+    force_legacy: Annotated[
+        bool,
+        typer.Option(
+            "--force-legacy",
+            help=(
+                "Destroy a legacy pre-ownership namespace or bucket that "
+                "has no lakebench identity annotations / ownership tag. "
+                "Caution: another workload's data may live there. "
+                "Prefer `lakebench admin migrate-deployment <namespace>` "
+                "first, which stamps the annotations so a normal "
+                "destroy can verify ownership. Refuses always on "
+                "foreign-tagged buckets or namespaces regardless of "
+                "this flag."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Tear down lakehouse infrastructure.
 
@@ -278,6 +294,7 @@ def destroy(
         results = engine.destroy_all(
             progress_callback=on_progress,
             allow_unverified_cluster=allow_unverified_cluster,
+            force_legacy=force_legacy,
         )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")

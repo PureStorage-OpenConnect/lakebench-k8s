@@ -285,7 +285,7 @@ default).
 ### 3. Validate the configuration
 
 ```bash
-lakebench validate lakebench.yaml
+lakebench config validate lakebench.yaml
 ```
 
 This checks YAML syntax, Pydantic schema validation, Kubernetes connectivity,
@@ -537,7 +537,7 @@ recipe: polaris-iceberg-spark-trino   # one-line setup
 | Polaris + DuckDB | `polaris-iceberg-spark-duckdb` | REST catalog with lightweight engine |
 | Polaris headless | `polaris-iceberg-spark-none` | REST catalog, ETL-only |
 
-See the [Recipes Guide](recipes.md) for all 8 combinations, decision guidance,
+See the [Recipes Guide](recipes.md) for all 11 combinations, decision guidance,
 and detailed YAML snippets.
 
 Use `lakebench recommend` to get cluster-aware sizing guidance before choosing

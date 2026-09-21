@@ -1052,6 +1052,7 @@ class DeploymentEngine:
         progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
         clean_buckets: bool = True,
         allow_unverified_cluster: bool = False,
+        force_legacy: bool = False,
     ) -> list[DeploymentResult]:
         """Destroy all deployed components.
 
@@ -1065,4 +1066,5 @@ class DeploymentEngine:
             progress_callback=progress_callback,
             clean_buckets=clean_buckets,
             allow_unverified_cluster=allow_unverified_cluster,
+            force_legacy=force_legacy,
         )

@@ -144,7 +144,7 @@ pod).
 | Command | Description |
 |---------|-------------|
 | `init` | Generate a starter config file |
-| `validate` | Check config and cluster connectivity |
+| `config validate` | Check config and cluster connectivity |
 | `config storage` | Check the S3 backend supports what lakebench needs |
 | `info` | Show deployment configuration summary |
 | `deploy` | Deploy all infrastructure components |
