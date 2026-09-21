@@ -37,6 +37,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regardless of the flag.
 - **Root `--version` / `-V` flag.** Both `lakebench --version` and
   the existing `lakebench version` subcommand now work.
+- **FAML leakage gate + reference detector (`score_financial_reference.py`,
+  `lakebench.faml.reference_score`).** Closes the "distribution checks
+  do not prove semantics -- must run reference detector + leakage
+  check" standing rule that came out of a prior review pass and
+  reappeared in the FAML audit. The gate compares baseline
+  (log-normal) transaction density against typology density inside
+  each currency-specific structuring band; a ratio below 10 % means
+  the band effectively IS the label, and an all-empty report is not
+  a pass. Writes `leakage_report.parquet` with per-band verdict +
+  hint. The reference detector is a scikit-learn Gradient Boosted
+  Classifier trained on a deliberately narrow feature set
+  (``log_amount_mean``, ``log_amount_std``, ``amount_pct_of_ceiling``,
+  ``mean_hour``, ``std_hour``) that excludes both the API-level
+  leaks (``amount_in_structuring_band`` and four other columns the
+  library refuses to accept) and three known-leaky structural
+  proxies against the current datagen (``txn_count``,
+  ``unique_counterparties``, any country-set membership feature).
+  The trade-off is documented in
+  ``score_financial_reference.py``'s ``_build_reference_feature_frame``:
+  the corridor and cardinality-planted typologies will read as
+  ``recall = 0`` until the datagen ships probabilistic overlays
+  that mix baseline and typology distributions in those features.
+  Writes `reference_metrics.parquet`. New benchmark aggregate
+  `aggregate_reference_vs_rule` joins rule recall with reference
+  recall per typology, distinguishing "model didn't run"
+  (verdict `not_run`, recall NULL) from "model got 0" (verdict
+  `ok`, recall 0.0).
 
 ### Changed
 - **Datagen: Python image retired; Rust image handles both schemas.** The

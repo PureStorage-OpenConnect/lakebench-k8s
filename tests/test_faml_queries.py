@@ -50,16 +50,30 @@ def test_all_w_rules_have_target_entry():
 def test_query_count_matches_documented():
     """6 rules with typology targets * 4 kinds (detect + precision +
     recall + ttd) + 2 rules with no target * 1 kind (detect only) +
-    3 aggregate queries = 29. W5/W6 have `None` target because
+    4 aggregate queries = 30. W5/W6 have `None` target because
     sanctions and PEP are party attributes in the datagen, not
     typology_type rows, so precision/recall/ttd would silently report
-    0/0 -- omitted rather than misleading. See RULE_TARGETS docstring."""
-    assert query_count() == 29
+    0/0 -- omitted rather than misleading. See RULE_TARGETS docstring.
+    The 4th aggregate is `aggregate_reference_vs_rule` from PR-A
+    (reference-detector + leakage-gate wiring)."""
+    assert query_count() == 30
 
 
 def test_load_faml_queries_returns_expected_count():
     qs = load_faml_queries("iceberg")
-    assert len(qs) == 29
+    assert len(qs) == 30
+
+
+def test_reference_vs_rule_aggregate_present():
+    """PR-A wired an aggregate that compares rule recall to the
+    sklearn-GBT reference model. Regression against dropping it."""
+    qs = load_faml_queries("iceberg")
+    aggs = [q.query_id for q in qs if q.kind == "aggregate"]
+    assert "aggregate_reference_vs_rule" in aggs
+    for q in qs:
+        if q.query_id == "aggregate_reference_vs_rule":
+            assert "reference_metrics" in q.sql
+            assert "recall_gap" in q.sql
 
 
 def test_catalog_placeholder_expanded_in_every_query():
@@ -154,7 +168,7 @@ def test_rule_targets_reference_real_typology_names():
 def test_aggregate_queries_do_not_reference_rule():
     qs = load_faml_queries("iceberg")
     aggs = [q for q in qs if q.kind == "aggregate"]
-    assert len(aggs) == 3
+    assert len(aggs) == 4  # + aggregate_reference_vs_rule from PR-A
     for q in aggs:
         assert q.rule_id is None
 
