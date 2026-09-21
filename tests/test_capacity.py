@@ -25,11 +25,16 @@ class TestComputePeakRequirements:
     """Peak resource derivation from _JOB_PROFILES."""
 
     def test_scale_1_matches_documented_minimums(self):
-        """The published docs table must match this exactly."""
+        """The published docs table must match this exactly.
+
+        Scratch bumped from 150Gi to 300Gi per silver-build executor
+        during the AML/silver hardening work (fixes for typology
+        window OOMs). 8 executors x 300Gi = 2400 GiB peak.
+        """
         peak = compute_peak_requirements(1)
         assert peak.cpu_cores == 36
         assert peak.memory_gb == 512
-        assert peak.scratch_gb == 1200
+        assert peak.scratch_gb == 2400
 
     def test_silver_build_drives_the_peak(self):
         """silver-build is the largest batch job at every scale."""
