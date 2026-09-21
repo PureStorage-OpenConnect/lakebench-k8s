@@ -858,26 +858,26 @@ class DeploymentEngine:
         )
 
     def _deploy_scratch_storageclass(self) -> DeploymentResult:
-        """Deploy the Spark scratch StorageClass (px-csi-scratch, repl=1).
+        """Preflight-verify the scratch StorageClass exists.
 
-        Non-fatal: if the SC already exists or creation fails (no cluster-admin),
-        the pipeline continues -- Spark will use whatever SC is configured.
+        StorageClass is Category 2 shared infrastructure: lakebench uses
+        it but never creates or destroys it (a create would race with
+        parallel deploys, a destroy would strip the class out from under
+        every other user of the cluster). We verify presence at deploy
+        preflight and refuse with a pointer to
+        ``lakebench admin install-scratch-storage-class`` when the class
+        is missing.
         """
         import time
 
         start = time.time()
 
         scratch_cfg = self.config.platform.storage.scratch
-        if not scratch_cfg.enabled or not scratch_cfg.create_storage_class:
-            reasons = []
-            if not scratch_cfg.enabled:
-                reasons.append("scratch.enabled=false")
-            if not scratch_cfg.create_storage_class:
-                reasons.append("scratch.create_storage_class=false")
+        if not scratch_cfg.enabled:
             return DeploymentResult(
                 component="scratch-sc",
                 status=DeploymentStatus.SKIPPED,
-                message=f"Scratch StorageClass creation disabled ({', '.join(reasons)})",
+                message="Scratch storage disabled (scratch.enabled=false)",
                 elapsed_seconds=0,
             )
 
@@ -885,52 +885,45 @@ class DeploymentEngine:
             return DeploymentResult(
                 component="scratch-sc",
                 status=DeploymentStatus.SUCCESS,
-                message=f"Would create StorageClass: {scratch_cfg.storage_class}",
+                message=f"Would verify StorageClass: {scratch_cfg.storage_class}",
                 elapsed_seconds=0,
             )
 
+        from kubernetes import client as k8s_client
+        from kubernetes.client.exceptions import ApiException
+
+        storage_v1 = k8s_client.StorageV1Api()
         try:
-            from kubernetes import client as k8s_client
-
-            storage_v1 = k8s_client.StorageV1Api()
-
-            # Check if SC already exists
-            try:
-                storage_v1.read_storage_class(scratch_cfg.storage_class)
+            storage_v1.read_storage_class(scratch_cfg.storage_class)
+        except ApiException as e:
+            if e.status == 404:
+                hint = (
+                    f"StorageClass '{scratch_cfg.storage_class}' does not exist. "
+                    "A cluster admin can install it with: "
+                    "`lakebench admin install-scratch-storage-class`. "
+                    "Or set scratch.enabled=false to disable scratch PVCs."
+                )
                 return DeploymentResult(
                     component="scratch-sc",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"StorageClass '{scratch_cfg.storage_class}' already exists",
+                    status=DeploymentStatus.FAILED,
+                    message=hint,
                     elapsed_seconds=time.time() - start,
-                    label="StorageClass",
-                    detail=scratch_cfg.storage_class,
                 )
-            except Exception:
-                logger.debug("StorageClass '%s' not found, will create", scratch_cfg.storage_class)
-
-            import yaml
-
-            yaml_content = self.renderer.render("storageclass/px-csi-scratch.yaml.j2", self.context)
-            manifest = yaml.safe_load(yaml_content)
-            storage_v1.create_storage_class(body=manifest)
-
             return DeploymentResult(
                 component="scratch-sc",
-                status=DeploymentStatus.SUCCESS,
-                message=f"Created StorageClass: {scratch_cfg.storage_class}",
-                elapsed_seconds=time.time() - start,
-                label="StorageClass",
-                detail=scratch_cfg.storage_class,
-            )
-        except Exception as e:
-            # Non-fatal -- cluster-admin may be needed
-            logger.warning("Scratch StorageClass creation failed: %s", e)
-            return DeploymentResult(
-                component="scratch-sc",
-                status=DeploymentStatus.SKIPPED,
-                message=f"Scratch StorageClass creation failed (may need cluster-admin): {e}",
+                status=DeploymentStatus.FAILED,
+                message=f"Cannot read StorageClass '{scratch_cfg.storage_class}': {e}",
                 elapsed_seconds=time.time() - start,
             )
+
+        return DeploymentResult(
+            component="scratch-sc",
+            status=DeploymentStatus.SUCCESS,
+            message=f"StorageClass '{scratch_cfg.storage_class}' verified",
+            elapsed_seconds=time.time() - start,
+            label="StorageClass",
+            detail=scratch_cfg.storage_class,
+        )
 
     @staticmethod
     def _operator_rbac_exists(namespace: str) -> bool:

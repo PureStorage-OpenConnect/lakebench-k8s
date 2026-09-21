@@ -29,10 +29,10 @@ spec:
           verification:
             server:
               caCert:
-                secretClass: "lakebench-s3-ca-cert-class"
+                secretClass: "lakebench-s3-ca-cert-{{ namespace }}"
         {% endif %}
         credentials:
-          secretClass: "lakebench-s3-credentials-class"
+          secretClass: "lakebench-s3-credentials-{{ namespace }}"
   metastore:
     roleGroups:
       default:

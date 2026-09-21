@@ -1075,6 +1075,26 @@ class TestStreamingThroughputEnvVars:
 class TestSparkOperatorNamespaceWatching:
     """Tests for Spark Operator namespace watching detection and self-healing."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_cluster_lock(self):
+        """ADR-F5 wraps _add_namespace_to_watch in a cluster lease
+        acquisition. In this class the tests mock subprocess.run to
+        drive helm exchange; the lease attempt would introduce extra
+        subprocess.run calls (git rev-parse in build_holder_id) and
+        upset side_effect counts. Bypass the lease here -- the
+        concurrency safety it provides is covered by
+        test_watch_list_strict.py."""
+        from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+
+        SparkOperatorManager._bypass_cluster_lock = True
+        try:
+            yield
+        finally:
+            try:
+                del SparkOperatorManager._bypass_cluster_lock
+            except AttributeError:
+                pass
+
     def test_operator_status_backward_compatible(self):
         """OperatorStatus can be constructed without the new fields."""
         from lakebench.spark.operator import OperatorStatus

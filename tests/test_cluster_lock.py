@@ -1,0 +1,262 @@
+"""Unit tests for the cluster-wide lakebench lease.
+
+The lease guards Category 4 (shared mutable state) mutations under
+concurrent lakebench invocations. See
+``dev-artifacts/DESIGN-namespace-isolation.md``.
+"""
+
+from __future__ import annotations
+
+import time
+from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
+
+import pytest
+from kubernetes.client.exceptions import ApiException
+from kubernetes.client.models import V1ConfigMap, V1ObjectMeta
+
+from lakebench.deploy.cluster_lock import (
+    LOCK_CONFIGMAP_NAME,
+    LOCK_NAMESPACE,
+    ClusterLockError,
+    ClusterLockHeld,
+    LeaseHandle,
+    LeaseState,
+    _now_iso,
+    _parse_iso8601,
+    acquire_cluster_lock,
+    build_holder_id,
+    cluster_lock,
+    force_release_cluster_lock,
+    read_cluster_lock,
+    release_cluster_lock,
+)
+
+
+def _cm(holder: str, acquired_at: str, ttl: int, rv: str = "1") -> V1ConfigMap:
+    return V1ConfigMap(
+        metadata=V1ObjectMeta(
+            name=LOCK_CONFIGMAP_NAME,
+            namespace=LOCK_NAMESPACE,
+            resource_version=rv,
+        ),
+        data={
+            "holder": holder,
+            "acquired-at": acquired_at,
+            "ttl-seconds": str(ttl),
+        },
+    )
+
+
+def _api_exc(status: int) -> ApiException:
+    e = ApiException(status=status, reason="test")
+    return e
+
+
+class TestHolderId:
+    def test_build_holder_id_returns_three_segments(self):
+        h = build_holder_id()
+        assert h.count("@") == 2
+
+
+class TestReadClusterLock:
+    def test_returns_none_when_absent(self):
+        core = MagicMock()
+        core.read_namespaced_config_map.side_effect = _api_exc(404)
+        assert read_cluster_lock(core) is None
+
+    def test_parses_valid_configmap(self):
+        core = MagicMock()
+        core.read_namespaced_config_map.return_value = _cm(
+            "host@user@abc", "2026-09-21T12:00:00+00:00", 60, rv="42"
+        )
+        state = read_cluster_lock(core)
+        assert isinstance(state, LeaseState)
+        assert state.holder == "host@user@abc"
+        assert state.ttl_seconds == 60
+        assert state.resource_version == "42"
+
+    def test_raises_on_non_404(self):
+        core = MagicMock()
+        core.read_namespaced_config_map.side_effect = _api_exc(500)
+        with pytest.raises(ClusterLockError):
+            read_cluster_lock(core)
+
+
+class TestAcquireClusterLock:
+    def test_creates_when_absent(self):
+        core = MagicMock()
+        core.read_namespace.return_value = MagicMock()
+        # First read -> 404, then create -> new configmap.
+        core.read_namespaced_config_map.side_effect = _api_exc(404)
+        created = _cm("host@user@abc", _now_iso(), 60, rv="1")
+        core.create_namespaced_config_map.return_value = created
+
+        handle = acquire_cluster_lock(core, ttl_seconds=60, timeout=1, holder="host@user@abc")
+        assert isinstance(handle, LeaseHandle)
+        assert handle.holder == "host@user@abc"
+        core.create_namespaced_config_map.assert_called_once()
+
+    def test_refuses_when_held_within_ttl(self):
+        core = MagicMock()
+        core.read_namespace.return_value = MagicMock()
+        core.read_namespaced_config_map.return_value = _cm(
+            "other-host@other-user@xyz", _now_iso(), 3600, rv="1"
+        )
+
+        with pytest.raises(ClusterLockHeld) as ei:
+            acquire_cluster_lock(core, ttl_seconds=60, timeout=0.5, holder="me@here@abc")
+        assert ei.value.holder == "other-host@other-user@xyz"
+
+    def test_steals_expired_lease(self):
+        core = MagicMock()
+        core.read_namespace.return_value = MagicMock()
+        # Expired: acquired 2 hours ago with 60s TTL.
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        expired = _cm("crashed-host@ghost@000", past, 60, rv="7")
+        core.read_namespaced_config_map.return_value = expired
+        core.replace_namespaced_config_map.return_value = _cm("me@here@abc", _now_iso(), 60, rv="8")
+
+        handle = acquire_cluster_lock(core, ttl_seconds=60, timeout=1, holder="me@here@abc")
+        assert handle.resource_version == "8"
+
+    def test_ttl_must_be_positive(self):
+        core = MagicMock()
+        with pytest.raises(ValueError):
+            acquire_cluster_lock(core, ttl_seconds=0, timeout=1, holder="x@y@z")
+
+
+class TestReleaseClusterLock:
+    def test_release_when_still_ours(self):
+        core = MagicMock()
+        core.read_namespaced_config_map.return_value = _cm(
+            "me@here@abc", "2026-09-21T12:00:00+00:00", 60, rv="1"
+        )
+        handle = LeaseHandle(
+            holder="me@here@abc",
+            acquired_at="2026-09-21T12:00:00+00:00",
+            ttl_seconds=60,
+            resource_version="1",
+        )
+        release_cluster_lock(core, handle)
+        core.delete_namespaced_config_map.assert_called_once_with(
+            LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE
+        )
+
+    def test_release_skipped_when_stolen(self):
+        """A lease admin-released mid-run must not error at release time."""
+        core = MagicMock()
+        core.read_namespaced_config_map.return_value = _cm(
+            "someone-else@host@xyz", "2026-09-21T14:00:00+00:00", 60, rv="9"
+        )
+        handle = LeaseHandle(
+            holder="me@here@abc",
+            acquired_at="2026-09-21T12:00:00+00:00",
+            ttl_seconds=60,
+            resource_version="1",
+        )
+        release_cluster_lock(core, handle)  # no exception
+        core.delete_namespaced_config_map.assert_not_called()
+
+    def test_release_when_already_gone(self):
+        core = MagicMock()
+        core.read_namespaced_config_map.side_effect = _api_exc(404)
+        handle = LeaseHandle(
+            holder="me@here@abc",
+            acquired_at="2026-09-21T12:00:00+00:00",
+            ttl_seconds=60,
+            resource_version="1",
+        )
+        release_cluster_lock(core, handle)  # no exception
+
+
+class TestForceRelease:
+    def test_expired_only_refuses_live(self):
+        core = MagicMock()
+        core.read_namespaced_config_map.return_value = _cm(
+            "prod-host@sre@abc", _now_iso(), 3600, rv="1"
+        )
+        with pytest.raises(ClusterLockHeld):
+            force_release_cluster_lock(core, expired_only=True)
+
+    def test_expired_only_deletes_expired(self):
+        core = MagicMock()
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        core.read_namespaced_config_map.return_value = _cm("ghost@host@x", past, 60, rv="1")
+        state = force_release_cluster_lock(core, expired_only=True)
+        assert state is not None
+        core.delete_namespaced_config_map.assert_called_once()
+
+    def test_force_deletes_live(self):
+        core = MagicMock()
+        core.read_namespaced_config_map.return_value = _cm(
+            "live-holder@host@abc", _now_iso(), 3600, rv="1"
+        )
+        state = force_release_cluster_lock(core, expired_only=False)
+        assert state is not None
+        core.delete_namespaced_config_map.assert_called_once()
+
+
+class TestContextManager:
+    def test_releases_on_normal_exit(self):
+        core = MagicMock()
+        core.read_namespace.return_value = MagicMock()
+        core.read_namespaced_config_map.side_effect = [
+            _api_exc(404),  # acquire path: create branch
+            _cm("me@here@abc", _now_iso(), 60, rv="1"),  # release path: read to compare holder
+        ]
+        core.create_namespaced_config_map.return_value = _cm("me@here@abc", _now_iso(), 60, rv="1")
+
+        with cluster_lock(core, ttl_seconds=60, timeout=1, holder="me@here@abc") as h:
+            assert isinstance(h, LeaseHandle)
+        core.delete_namespaced_config_map.assert_called_once()
+
+    def test_releases_on_exception(self):
+        core = MagicMock()
+        core.read_namespace.return_value = MagicMock()
+        core.read_namespaced_config_map.side_effect = [
+            _api_exc(404),
+            _cm("me@here@abc", _now_iso(), 60, rv="1"),
+        ]
+        core.create_namespaced_config_map.return_value = _cm("me@here@abc", _now_iso(), 60, rv="1")
+
+        class Boom(RuntimeError):
+            pass
+
+        with pytest.raises(Boom):
+            with cluster_lock(core, ttl_seconds=60, timeout=1, holder="me@here@abc"):
+                raise Boom("body failed")
+        core.delete_namespaced_config_map.assert_called_once()
+
+
+class TestParseIso:
+    def test_parses_z_and_offset(self):
+        a = _parse_iso8601("2026-09-21T12:00:00Z")
+        b = _parse_iso8601("2026-09-21T12:00:00+00:00")
+        assert abs(a - b) < 1
+
+    def test_bad_string_treated_as_expired(self):
+        assert _parse_iso8601("not-a-timestamp") == 0.0
+
+
+class TestLeaseStateExpiry:
+    def test_is_expired_true_when_past(self):
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        state = LeaseState(
+            holder="x@y@z",
+            acquired_at=past,
+            ttl_seconds=60,
+            expires_at_epoch=_parse_iso8601(past) + 60,
+            resource_version="1",
+        )
+        assert state.is_expired() is True
+
+    def test_is_expired_false_when_future(self):
+        state = LeaseState(
+            holder="x@y@z",
+            acquired_at=_now_iso(),
+            ttl_seconds=3600,
+            expires_at_epoch=time.time() + 3600,
+            resource_version="1",
+        )
+        assert state.is_expired() is False
