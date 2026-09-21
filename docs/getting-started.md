@@ -11,6 +11,16 @@ pipeline with Spark, Iceberg, and Trino -- all from a single YAML file.
 
 Before you begin, make sure your environment has the following.
 
+If you are the **cluster admin** setting up Lakebench on a shared cluster for the first time, the fastest path is:
+
+```bash
+lakebench admin install-spark-operator            # once per cluster
+lakebench admin install-scratch-storage-class     # once per cluster, if using scratch PVCs
+lakebench admin doctor                            # confirm everything is in place
+```
+
+Developers then use ordinary `lakebench deploy` / `run` / `destroy` without cluster-admin privileges. Every `admin` mutation takes a cluster-wide lease so concurrent admins on different workstations do not race each other; see `lakebench admin --help` for the full subcommand tree.
+
 ### Kubernetes cluster
 
 Any cluster running Kubernetes 1.26+ will work. Lakebench is tested on:
@@ -91,6 +101,12 @@ kubectl get storageclass -o wide
 
 Look for `(default)` next to one of the class names.
 
+**Scratch StorageClass**: if you enable `platform.storage.scratch` (Portworx-backed shuffle volumes on OpenShift, for example), the named `StorageClass` must exist before `deploy` runs. `deploy` will refuse with an actionable error rather than create it -- a `StorageClass` is shared infrastructure and a create-race between parallel deploys could strip it out from under an in-flight run. A cluster admin installs it once with:
+
+```bash
+lakebench admin install-scratch-storage-class
+```
+
 ### S3-compatible object storage
 
 Lakebench needs an S3-compatible endpoint for the bronze, silver, and gold
@@ -105,12 +121,17 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide.
-Lakebench assumes the operator is pre-installed (the default is
-`platform.compute.spark.operator.install: false`). Set it to `true` if you
-want `lakebench deploy` to install it automatically via Helm.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; a developer's `deploy` will not install or upgrade it.
 
-Install manually with Helm if you prefer:
+The supported installation path is:
+
+```bash
+lakebench admin install-spark-operator
+```
+
+`admin install-spark-operator` takes the cluster-wide `lakebench-cluster-lock` lease before running `helm upgrade`, so concurrent `admin` invocations from different workstations cannot race each other. Confirm the install with `lakebench admin doctor`.
+
+Falling back to raw Helm still works:
 
 ```bash
 helm repo add spark-operator https://kubeflow.github.io/spark-operator
@@ -121,6 +142,8 @@ helm install spark-operator spark-operator/spark-operator \
   --set spark.jobNamespaces="" \
   --set webhook.enable=true
 ```
+
+but note that no lock is taken, so two parallel Helm installs may still stomp each other. Prefer the `admin` command on any cluster used by more than one engineer.
 
 ### Catalog operator (depends on your recipe)
 
