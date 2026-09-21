@@ -1,6 +1,6 @@
 # Namespace isolation and cluster ownership taxonomy
 
-Status: shipped in v1.5.0 (commits `30be5ba`, `9992e6a`, `8398745`).
+Status: shipping in v1.5.0 (currently `1.5.0.dev0` on `feat/fraud-aml`; commits `30be5ba` PR-1, `9992e6a` PR-2, `8398745` PR-3 docs, plus the destroy-legacy-refuse hardening from the post-roleplay pass).
 
 ## Problem
 

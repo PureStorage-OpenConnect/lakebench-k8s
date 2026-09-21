@@ -24,6 +24,7 @@ def destroy_all(
     progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
     clean_buckets: bool = True,
     allow_unverified_cluster: bool = False,
+    force_legacy: bool = False,
 ) -> list[DeploymentResult]:
     """Destroy all deployed components.
 
@@ -40,6 +41,11 @@ def destroy_all(
         allow_unverified_cluster: Bypass the api-server fingerprint match
             when it cannot be computed on one or both sides. Only use
             when you know the current kubectl context is correct.
+        force_legacy: Proceed on a namespace or bucket that has no
+            lakebench ownership annotations/tags. Refused by default
+            (the design invariant is "destroy refuses without proof
+            of ownership"; a warn-and-proceed defeats it). Foreign
+            annotations/tags are refused regardless of this flag.
 
     Returns:
         List of destruction results
@@ -57,12 +63,17 @@ def destroy_all(
 
     # Step 0: Identity check. Refuse if this namespace is owned by another
     # lakebench deployment or targets a different cluster. See
-    # dev-artifacts/DESIGN-namespace-isolation.md.
+    # docs/design/namespace-isolation.md.
     #
-    # Legacy (annotation-less) namespaces are WARN-and-proceed for now: the
-    # admin migrate-deployment command lands in PR-2, and until then a
-    # legacy namespace has no other way to be destroyed. This keeps
-    # backward compat without weakening the MISMATCH refusal.
+    # Legacy (annotation-less) namespaces are REFUSED unless the caller
+    # passes ``force_legacy=True``. Warn-and-proceed on legacy state
+    # would defeat the whole invariant: a destroy pointed at a
+    # namespace we cannot prove is ours would proceed to empty its
+    # buckets. The supported path is ``lakebench admin
+    # migrate-deployment`` first (which stamps the annotations), then
+    # an ordinary destroy that verifies. `--force-legacy` is the
+    # explicit escape hatch for operators who have confirmed the
+    # namespace is theirs and cannot run migrate first.
     from lakebench.deploy.ownership import (
         IdentityVerdict,
         build_identity_from_config,
@@ -97,14 +108,32 @@ def destroy_all(
             )
             return results
         if v.verdict is IdentityVerdict.ABSENT:
+            if not force_legacy:
+                hint = (
+                    f"Namespace {namespace!r} has no lakebench identity "
+                    "annotations. Refusing to destroy without proof of "
+                    "ownership. Run `lakebench admin migrate-deployment "
+                    f"{namespace}` first to stamp identity, then re-run "
+                    "destroy; or pass --force-legacy if you have "
+                    "confirmed the namespace is yours and cannot migrate."
+                )
+                results.append(
+                    DeploymentResult(
+                        component="ownership-check",
+                        status=DeploymentStatus.FAILED,
+                        message=hint,
+                    )
+                )
+                report("ownership-check", DeploymentStatus.FAILED, hint)
+                return results
             report(
                 "ownership-check",
                 DeploymentStatus.SUCCESS,
-                f"WARN legacy namespace (no identity annotations); proceeding. {v.hint}",
+                f"--force-legacy: proceeding on unannotated namespace {namespace!r}.",
             )
             logger.warning(
-                "destroy: legacy namespace %s without identity annotations; "
-                "future releases will require migration first",
+                "destroy --force-legacy: proceeding on unannotated namespace %s "
+                "(no lakebench identity to verify against)",
                 namespace,
             )
         else:
@@ -420,9 +449,12 @@ def destroy_all(
                     s3_cfg.buckets.gold,
                 ]
                 # Ownership check per bucket: refuse to empty a bucket
-                # that carries another deployment's tag. Legacy (no tag)
-                # is warn-and-proceed for the same backward-compat reason
-                # as the namespace check above.
+                # that carries another deployment's tag OR that has no
+                # lakebench ownership tag at all (legacy). The design
+                # invariant is "destroy refuses without proof of
+                # ownership"; a warn-and-proceed on absent tags would
+                # let a destroy empty a bucket that belongs to another
+                # workload. `--force-legacy` is the explicit opt-in.
                 from lakebench.deploy.ownership import (
                     IdentityVerdict,
                     verify_bucket_ownership,
@@ -430,34 +462,42 @@ def destroy_all(
 
                 identity_name = engine.config.name
                 mismatched: list[str] = []
-                legacy: list[str] = []
+                legacy_refused: list[str] = []
+                legacy_forced: list[str] = []
                 for bucket in buckets:
                     v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
                     if v.verdict is IdentityVerdict.MISMATCH:
                         mismatched.append(f"{bucket} ({v.hint})")
                     elif v.verdict is IdentityVerdict.ABSENT:
-                        # R3: legacy untagged bucket. Warn loudly so the
-                        # user sees we're about to empty something we
-                        # cannot prove is ours.
-                        legacy.append(bucket)
-                        logger.warning(
-                            "destroy: bucket %s has no lakebench ownership "
-                            "tag; proceeding as legacy (may contain data "
-                            "from another workload)",
-                            bucket,
+                        if not force_legacy:
+                            legacy_refused.append(bucket)
+                        else:
+                            legacy_forced.append(bucket)
+                            logger.warning(
+                                "destroy --force-legacy: emptying untagged "
+                                "bucket %s (no lakebench ownership tag; "
+                                "may contain data from another workload)",
+                                bucket,
+                            )
+                            report(
+                                "s3-buckets",
+                                DeploymentStatus.IN_PROGRESS,
+                                f"--force-legacy: untagged bucket {bucket}",
+                            )
+                if mismatched or legacy_refused:
+                    parts = []
+                    if mismatched:
+                        parts.append("owned by another deployment: " + "; ".join(mismatched))
+                    if legacy_refused:
+                        parts.append(
+                            "no lakebench ownership tag: "
+                            + ", ".join(legacy_refused)
+                            + " (pass --force-legacy if you have "
+                            "confirmed these are yours; otherwise use "
+                            "`lakebench admin reclaim-bucket <name>` to "
+                            "adopt an untagged bucket)"
                         )
-                        report(
-                            "s3-buckets",
-                            DeploymentStatus.IN_PROGRESS,
-                            f"WARN legacy untagged bucket: {bucket}",
-                        )
-                if mismatched:
-                    msg = (
-                        "Bucket ownership refused for: "
-                        + "; ".join(mismatched)
-                        + ". Refusing to empty buckets owned by another "
-                        "deployment."
-                    )
+                    msg = "Bucket ownership refused; " + " | ".join(parts)
                     results.append(
                         DeploymentResult(
                             component="s3-buckets",
@@ -467,6 +507,7 @@ def destroy_all(
                     )
                     report("s3-buckets", DeploymentStatus.FAILED, msg)
                 else:
+                    legacy = legacy_forced  # preserved local name for summary below
                     total_deleted = 0
                     for bucket in buckets:
                         deleted = s3.empty_bucket(bucket)

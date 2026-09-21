@@ -59,6 +59,37 @@ app = typer.Typer(
     epilog="[dim]Workflow: init -> run -> results -> destroy[/dim]",
 )
 
+
+def _version_callback(value: bool) -> None:
+    """Print version and exit. Invoked eagerly so `--version` short-
+    circuits subcommand dispatch (and works before any subcommand-
+    validation errors would fire)."""
+    if value:
+        console.print(f"Lakebench version {__version__}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            help="Show version and exit.",
+            callback=_version_callback,
+            is_eager=True,
+        ),
+    ] = False,
+) -> None:
+    """Root callback. Exists so `--version` is a top-level flag.
+
+    Priya (roleplay P2) tried ``lakebench --version`` and got
+    ``No such option``; the ``version`` subcommand is idiomatic but
+    the flag form is muscle memory for anyone coming from any other
+    CLI. Both work now."""
+
+
 # Config subcommand group
 from lakebench.cli._admin import admin_app  # noqa: E402
 from lakebench.cli._config import config_app  # noqa: E402
@@ -457,7 +488,10 @@ def _write_local_config(output: Path, name: str, scale: float) -> None:
     console.print(f"    [bold]lakebench run {output} --local[/bold]")
 
 
-@app.command(hidden=True, deprecated=True)
+@app.command(
+    help="Validate configuration and test cluster + S3 connectivity. "
+    "Equivalent to `lakebench config validate`."
+)
 def validate(
     config_file: Annotated[
         Path | None,

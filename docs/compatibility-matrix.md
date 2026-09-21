@@ -18,13 +18,14 @@
 
 ## Pipeline Mode Support
 
-All 11 recipes support all three pipeline modes:
+All 11 recipes support both pipeline modes:
 
 | Mode | Description | Tested With |
 |------|-------------|-------------|
 | `batch` | Single-pass: bronze-verify -> silver-build -> gold-finalize -> benchmark | All recipes |
 | `sustained` | Sustained streaming with periodic benchmarks | hive-delta-spark-trino |
-| `iterative` | Repeated batch cycles with accumulating data | All recipes |
+
+Multi-cycle batch is available via the `cycles: N` field on a `batch` config; there is no separate `iterative` mode.
 
 ## Excluded Combinations
 

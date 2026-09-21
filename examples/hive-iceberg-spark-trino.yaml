@@ -14,7 +14,7 @@ recipe: hive-iceberg-spark-trino
 images:
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
-  trino: trinodb/trino:479
+  trino: trinodb/trino:483
   pull_policy: Always
 
 platform:

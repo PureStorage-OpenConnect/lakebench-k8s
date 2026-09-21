@@ -26,9 +26,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   from a run and verifies later runs against it with per-metric
   direction tables and tolerance banding. Exit codes 0/1/2
   distinguish pass / performance drift / correctness drift.
-- **`--force-legacy` on `deploy` and `clean`; `--allow-unverified-cluster` on `destroy`.**
-  Explicit escape hatches for the pre-ownership world. Refuses always
-  on foreign-tagged buckets regardless of the flag.
+- **`--force-legacy` on `deploy`, `clean`, and `destroy`;
+  `--allow-unverified-cluster` on `destroy`.** Explicit escape hatches
+  for the pre-ownership world. `destroy` now REFUSES on legacy
+  annotation-less namespaces and untagged buckets by default (the
+  design invariant is "no destroy without proof of ownership"); use
+  `lakebench admin migrate-deployment <namespace>` first to stamp
+  identity, or pass `--force-legacy` if you have confirmed the
+  resource is yours. Foreign tags/annotations are refused always,
+  regardless of the flag.
+- **Root `--version` / `-V` flag.** Both `lakebench --version` and
+  the existing `lakebench version` subcommand now work.
 
 ### Changed
 - **Datagen: Python image retired; Rust image handles both schemas.** The
