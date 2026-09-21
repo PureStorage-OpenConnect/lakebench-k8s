@@ -267,6 +267,18 @@ def deploy(
             help="Host directory for local mode state (default: ~/.lakebench/local/<name>)",
         ),
     ] = None,
+    force_legacy: Annotated[
+        bool,
+        typer.Option(
+            "--force-legacy",
+            help=(
+                "Claim ownership of a pre-existing annotation-less "
+                "namespace and untagged buckets. Use only when migrating "
+                "a pre-1.5 deployment; a mistake can silently take over "
+                "another team's storage."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Deploy lakehouse infrastructure.
 
@@ -376,7 +388,11 @@ def deploy(
                 elapsed = time.time() - _step_start.pop(component, time.time())
                 console.print(_fmt_deploy_line("x", "red", elapsed))
 
-        results = engine.deploy_all(progress_callback=on_progress, timeout=timeout)
+        results = engine.deploy_all(
+            progress_callback=on_progress,
+            timeout=timeout,
+            force_legacy=force_legacy,
+        )
 
         # Record each component result in journal
         for r in results:

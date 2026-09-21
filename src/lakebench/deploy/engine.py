@@ -146,6 +146,11 @@ class DeploymentEngine:
         self.config = config
         self.dry_run = dry_run
         self.results: list[DeploymentResult] = []
+        # PR-1-F1: if we create the namespace in this run, remember it so
+        # a transient stamp failure + retry does not turn the namespace
+        # from "we created it" into "unowned legacy" that then requires
+        # the dangerous --force-legacy flag.
+        self._namespace_created_this_run: set[str] = set()
 
         if k8s_client:
             self.k8s = k8s_client
@@ -392,6 +397,7 @@ class DeploymentEngine:
         self,
         progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
         timeout: int = 3600,
+        force_legacy: bool = False,
     ) -> list[DeploymentResult]:
         """Deploy all components in order.
 
@@ -400,6 +406,11 @@ class DeploymentEngine:
                                (component, status, message)
             timeout: Global deployment timeout in seconds (0 = no timeout).
                      Checked between steps -- does not interrupt a step in progress.
+            force_legacy: Claim ownership of a pre-existing annotation-less
+                     namespace and untagged buckets. Use only when
+                     migrating a pre-ownership-taxonomy deployment; a
+                     mistake here can silently take over another team's
+                     storage.
 
         Returns:
             List of deployment results
@@ -429,9 +440,17 @@ class DeploymentEngine:
         # Only the one matching config.architecture.catalog.type deploys;
         # the other returns SKIPPED.
         steps = [
-            ("namespace", "Creating namespace", self._deploy_namespace),
+            (
+                "namespace",
+                "Creating namespace",
+                lambda: self._deploy_namespace(force_legacy=force_legacy),
+            ),
             ("secrets", "Creating secrets", self._deploy_secrets),
-            ("s3-buckets", "Creating S3 buckets", self._deploy_buckets),
+            (
+                "s3-buckets",
+                "Creating S3 buckets",
+                lambda: self._deploy_buckets(force_legacy=force_legacy),
+            ),
             ("scratch-sc", "Creating scratch StorageClass", self._deploy_scratch_storageclass),
             ("postgres", "Deploying PostgreSQL", postgres.deploy),
             ("hive", "Deploying Hive Metastore", hive.deploy),
@@ -512,8 +531,14 @@ class DeploymentEngine:
             return True
         return False
 
-    def _deploy_namespace(self) -> DeploymentResult:
-        """Deploy namespace."""
+    def _deploy_namespace(self, force_legacy: bool = False) -> DeploymentResult:
+        """Deploy namespace and stamp ownership annotations.
+
+        The stamp is the anchor for the "delete A does not affect B"
+        invariant: destroy compares it before touching any resource, and
+        a foreign stamp is a hard refuse. See
+        dev-artifacts/DESIGN-namespace-isolation.md.
+        """
         import time
 
         start = time.time()
@@ -529,43 +554,127 @@ class DeploymentEngine:
             )
 
         # Check if namespace exists and wait if it's terminating
+        pre_existing = False
         if self.k8s.namespace_exists(namespace):
             phase = self.k8s.get_namespace_phase(namespace)
             if phase == "Terminating":
                 self.k8s.wait_for_namespace_deleted(namespace, timeout=120)
             else:
+                pre_existing = True
+
+        # Create namespace when missing.
+        created = False
+        if not pre_existing:
+            if not self.config.platform.kubernetes.create_namespace:
                 return DeploymentResult(
                     component="namespace",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"Namespace '{namespace}' already exists",
+                    status=DeploymentStatus.FAILED,
+                    message=(f"Namespace '{namespace}' does not exist and create_namespace=false"),
                     elapsed_seconds=time.time() - start,
-                    label="Namespace",
-                    detail=namespace,
                 )
-
-        # Create namespace
-        if self.config.platform.kubernetes.create_namespace:
             yaml_content = self.renderer.render("namespace.yaml.j2", self.context)
             import yaml
 
             manifest = yaml.safe_load(yaml_content)
-            self.k8s.apply_manifest(manifest)
+            # F-2: seed the tracking BEFORE apply. If K8s accepts the
+            # create but the response is lost to a network reset, our
+            # retry sees `namespace_exists=True` with the tracking bit
+            # already set, so we correctly stamp with force_legacy.
+            # If apply fails and K8s did NOT create, the retry sees no
+            # namespace, creates fresh, and force_legacy stays correct.
+            # If a foreign namespace with the same name appears between
+            # attempts, stamp_namespace's foreign-identity refuse cold
+            # branch still catches it before writing.
+            self._namespace_created_this_run.add(namespace)
+            try:
+                self.k8s.apply_manifest(manifest)
+            except Exception as e:
+                # F2-A: on a non-transient failure (K8s definitively
+                # rejected the create), un-seed the tracking so a
+                # caller reusing this engine cannot silently claim a
+                # legacy annotation-less namespace that appeared later
+                # under the same name.
+                if not self._is_transient_error(e):
+                    self._namespace_created_this_run.discard(namespace)
+                raise
+            created = True
 
-            return DeploymentResult(
-                component="namespace",
-                status=DeploymentStatus.SUCCESS,
-                message=f"Created namespace: {namespace}",
-                elapsed_seconds=time.time() - start,
-                label="Namespace",
-                detail=namespace,
-            )
-        else:
+        # Stamp deployment identity onto the namespace. A pre-existing
+        # legacy (annotation-less) namespace requires force_legacy=True to
+        # claim; otherwise deploy refuses and points at admin migration
+        # (which lands in PR-2). New namespaces we created ourselves are
+        # stamped unconditionally.
+        from kubernetes import client as _kclient
+
+        from lakebench.deploy.ownership import (
+            IdentityVerdict,
+            build_identity_from_config,
+            stamp_namespace,
+        )
+
+        identity = build_identity_from_config(
+            self.config,
+            context=self.config.platform.kubernetes.context or None,
+        )
+        core_v1 = _kclient.CoreV1Api()
+        # PR-1-F1: force_legacy on the FIRST create OR on any retry after a
+        # transient failure that saw us create the namespace earlier.
+        we_own_it = created or namespace in self._namespace_created_this_run
+        stamp = stamp_namespace(
+            core_v1,
+            namespace,
+            deployment_name=identity.name,
+            api_server=identity.api_server,
+            committed_sha=identity.committed_sha,
+            force_legacy=force_legacy or we_own_it,
+        )
+
+        if stamp.verdict is IdentityVerdict.MISMATCH:
+            # R5: distinguish "raced a competing create" from "existing
+            # foreign deployment" so the operator knows whether to
+            # abandon this config name or reconcile. F1 covers the same
+            # case on retry after a transient stamp failure.
+            extra = ""
+            if we_own_it:
+                extra = (
+                    " Your create raced a competing deploy that stamped "
+                    "the namespace first. No lakebench resources were "
+                    "created here (only the namespace label). It is safe "
+                    "to abandon this config name and pick a different "
+                    "deployment name."
+                )
             return DeploymentResult(
                 component="namespace",
                 status=DeploymentStatus.FAILED,
-                message=f"Namespace '{namespace}' does not exist and create_namespace=false",
+                message=f"Namespace ownership refused: {stamp.hint}{extra}",
                 elapsed_seconds=time.time() - start,
             )
+        if stamp.verdict is IdentityVerdict.ABSENT:
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    f"Namespace '{namespace}' exists without lakebench "
+                    "identity annotations. Pass --force-legacy on `lakebench "
+                    "deploy` to claim it (destroy still refuses until "
+                    "the admin migrate-deployment command ships)."
+                ),
+                elapsed_seconds=time.time() - start,
+            )
+
+        msg = (
+            f"Created namespace: {namespace}"
+            if created
+            else f"Namespace '{namespace}' already exists"
+        )
+        return DeploymentResult(
+            component="namespace",
+            status=DeploymentStatus.SUCCESS,
+            message=msg,
+            elapsed_seconds=time.time() - start,
+            label="Namespace",
+            detail=namespace,
+        )
 
     def _deploy_secrets(self) -> DeploymentResult:
         """Deploy secrets (S3 credentials, PostgreSQL credentials)."""
@@ -603,7 +712,7 @@ class DeploymentEngine:
             detail="S3 + PostgreSQL",
         )
 
-    def _deploy_buckets(self) -> DeploymentResult:
+    def _deploy_buckets(self, force_legacy: bool = False) -> DeploymentResult:
         """Create S3 buckets if create_buckets is enabled.
 
         Uses S3Client.ensure_buckets() which is idempotent -- existing
@@ -666,6 +775,72 @@ class DeploymentEngine:
         results = s3.ensure_buckets(bucket_names)
         created = [name for name, was_created in results.items() if was_created]
         existed = [name for name, was_created in results.items() if not was_created]
+
+        # Ownership tag: write unconditionally on every ensure_buckets call
+        # (not just on create) so a bucket someone else created can be
+        # claimed only if unowned, and our redeployed bucket is always
+        # correctly tagged. Any pre-existing bucket owned by another
+        # deployment stops the deploy here.
+        from lakebench.deploy.ownership import (
+            BucketOwnershipError,
+            IdentityVerdict,
+            build_identity_from_config,
+            verify_bucket_ownership,
+            write_bucket_ownership_tag,
+        )
+
+        identity = build_identity_from_config(
+            self.config,
+            context=self.config.platform.kubernetes.context or None,
+        )
+        boto = s3.raw_client  # boto3 client under the hood
+        for name in bucket_names:
+            v = verify_bucket_ownership(boto, name, identity.name)
+            if v.verdict is IdentityVerdict.MISMATCH:
+                return DeploymentResult(
+                    component="s3-buckets",
+                    status=DeploymentStatus.FAILED,
+                    message=f"Bucket ownership refused: {v.hint}",
+                    elapsed_seconds=time.time() - start,
+                )
+            # R2: an ABSENT (legacy, untagged) bucket must NOT be claimed
+            # silently. Freshly-created buckets ARE our own untagged
+            # buckets (ensure_buckets returned True for was_created);
+            # those we tag. Pre-existing untagged buckets require
+            # explicit --force-legacy so a user cannot silently take
+            # over another team's untagged storage.
+            if v.verdict is IdentityVerdict.ABSENT:
+                was_created = results.get(name, False)
+                if not was_created and not force_legacy:
+                    return DeploymentResult(
+                        component="s3-buckets",
+                        status=DeploymentStatus.FAILED,
+                        message=(
+                            f"Bucket {name!r} exists without a lakebench "
+                            "ownership tag. Refusing to claim it. Pass "
+                            "--force-legacy on deploy to take ownership "
+                            "(caution: this may collide with another "
+                            "team's storage). " + (v.hint or "")
+                        ),
+                        elapsed_seconds=time.time() - start,
+                    )
+            if v.verdict is IdentityVerdict.NOT_FOUND:
+                # Should not happen after ensure_buckets returned. Skip.
+                continue
+            try:
+                write_bucket_ownership_tag(
+                    boto,
+                    name,
+                    identity.name,
+                    workload_schema=identity.workload_schema,
+                )
+            except BucketOwnershipError as e:
+                return DeploymentResult(
+                    component="s3-buckets",
+                    status=DeploymentStatus.FAILED,
+                    message=f"Bucket ownership tag failed for {name}: {e}",
+                    elapsed_seconds=time.time() - start,
+                )
 
         parts = []
         if created:
@@ -883,6 +1058,7 @@ class DeploymentEngine:
         self,
         progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
         clean_buckets: bool = True,
+        allow_unverified_cluster: bool = False,
     ) -> list[DeploymentResult]:
         """Destroy all deployed components.
 
@@ -895,4 +1071,5 @@ class DeploymentEngine:
             engine=self,
             progress_callback=progress_callback,
             clean_buckets=clean_buckets,
+            allow_unverified_cluster=allow_unverified_cluster,
         )

@@ -23,6 +23,7 @@ def destroy_all(
     engine: DeploymentEngine,
     progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
     clean_buckets: bool = True,
+    allow_unverified_cluster: bool = False,
 ) -> list[DeploymentResult]:
     """Destroy all deployed components.
 
@@ -36,6 +37,9 @@ def destroy_all(
     Args:
         progress_callback: Optional callback for progress updates
         clean_buckets: Whether to clean S3 bucket contents
+        allow_unverified_cluster: Bypass the api-server fingerprint match
+            when it cannot be computed on one or both sides. Only use
+            when you know the current kubectl context is correct.
 
     Returns:
         List of destruction results
@@ -50,6 +54,65 @@ def destroy_all(
     def report(component: str, status: DeploymentStatus, message: str) -> None:
         if progress_callback:
             progress_callback(component, status, message)
+
+    # Step 0: Identity check. Refuse if this namespace is owned by another
+    # lakebench deployment or targets a different cluster. See
+    # dev-artifacts/DESIGN-namespace-isolation.md.
+    #
+    # Legacy (annotation-less) namespaces are WARN-and-proceed for now: the
+    # admin migrate-deployment command lands in PR-2, and until then a
+    # legacy namespace has no other way to be destroyed. This keeps
+    # backward compat without weakening the MISMATCH refusal.
+    from lakebench.deploy.ownership import (
+        IdentityVerdict,
+        build_identity_from_config,
+        verify_namespace_identity,
+    )
+
+    if engine.k8s.namespace_exists(namespace):
+        identity = build_identity_from_config(
+            engine.config,
+            context=engine.config.platform.kubernetes.context or None,
+        )
+        core_v1 = k8s_client.CoreV1Api()
+        v = verify_namespace_identity(
+            core_v1,
+            namespace,
+            identity.name,
+            identity.api_server,
+            allow_unverified_cluster=allow_unverified_cluster,
+        )
+        if v.verdict is IdentityVerdict.MISMATCH:
+            results.append(
+                DeploymentResult(
+                    component="ownership-check",
+                    status=DeploymentStatus.FAILED,
+                    message=f"Namespace ownership refused: {v.hint}",
+                )
+            )
+            report(
+                "ownership-check",
+                DeploymentStatus.FAILED,
+                f"Refused: {v.hint}",
+            )
+            return results
+        if v.verdict is IdentityVerdict.ABSENT:
+            report(
+                "ownership-check",
+                DeploymentStatus.SUCCESS,
+                f"WARN legacy namespace (no identity annotations); proceeding. {v.hint}",
+            )
+            logger.warning(
+                "destroy: legacy namespace %s without identity annotations; "
+                "future releases will require migration first",
+                namespace,
+            )
+        else:
+            report(
+                "ownership-check",
+                DeploymentStatus.SUCCESS,
+                f"Verified deployment: {identity.name}",
+            )
 
     # Step 1: Delete SparkApplications
     report("spark-jobs", DeploymentStatus.IN_PROGRESS, "Deleting SparkApplications...")
@@ -356,22 +419,78 @@ def destroy_all(
                     s3_cfg.buckets.silver,
                     s3_cfg.buckets.gold,
                 ]
-                total_deleted = 0
+                # Ownership check per bucket: refuse to empty a bucket
+                # that carries another deployment's tag. Legacy (no tag)
+                # is warn-and-proceed for the same backward-compat reason
+                # as the namespace check above.
+                from lakebench.deploy.ownership import (
+                    IdentityVerdict,
+                    verify_bucket_ownership,
+                )
+
+                identity_name = engine.config.name
+                mismatched: list[str] = []
+                legacy: list[str] = []
                 for bucket in buckets:
-                    deleted = s3.empty_bucket(bucket)
-                    total_deleted += deleted
-                results.append(
-                    DeploymentResult(
-                        component="s3-buckets",
-                        status=DeploymentStatus.SUCCESS,
-                        message=f"Cleaned {len(buckets)} S3 buckets ({total_deleted} objects)",
+                    v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
+                    if v.verdict is IdentityVerdict.MISMATCH:
+                        mismatched.append(f"{bucket} ({v.hint})")
+                    elif v.verdict is IdentityVerdict.ABSENT:
+                        # R3: legacy untagged bucket. Warn loudly so the
+                        # user sees we're about to empty something we
+                        # cannot prove is ours.
+                        legacy.append(bucket)
+                        logger.warning(
+                            "destroy: bucket %s has no lakebench ownership "
+                            "tag; proceeding as legacy (may contain data "
+                            "from another workload)",
+                            bucket,
+                        )
+                        report(
+                            "s3-buckets",
+                            DeploymentStatus.IN_PROGRESS,
+                            f"WARN legacy untagged bucket: {bucket}",
+                        )
+                if mismatched:
+                    msg = (
+                        "Bucket ownership refused for: "
+                        + "; ".join(mismatched)
+                        + ". Refusing to empty buckets owned by another "
+                        "deployment."
                     )
-                )
-                report(
-                    "s3-buckets",
-                    DeploymentStatus.SUCCESS,
-                    f"S3 buckets cleaned ({total_deleted} objects)",
-                )
+                    results.append(
+                        DeploymentResult(
+                            component="s3-buckets",
+                            status=DeploymentStatus.FAILED,
+                            message=msg,
+                        )
+                    )
+                    report("s3-buckets", DeploymentStatus.FAILED, msg)
+                else:
+                    total_deleted = 0
+                    for bucket in buckets:
+                        deleted = s3.empty_bucket(bucket)
+                        total_deleted += deleted
+                    legacy_note = (
+                        f" (WARN: {len(legacy)} legacy untagged buckets: {', '.join(legacy)})"
+                        if legacy
+                        else ""
+                    )
+                    results.append(
+                        DeploymentResult(
+                            component="s3-buckets",
+                            status=DeploymentStatus.SUCCESS,
+                            message=(
+                                f"Cleaned {len(buckets)} S3 buckets "
+                                f"({total_deleted} objects)" + legacy_note
+                            ),
+                        )
+                    )
+                    report(
+                        "s3-buckets",
+                        DeploymentStatus.SUCCESS,
+                        f"S3 buckets cleaned ({total_deleted} objects)" + legacy_note,
+                    )
         except Exception as e:
             results.append(
                 DeploymentResult(

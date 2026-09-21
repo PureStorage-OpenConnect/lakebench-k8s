@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from lakebench.config import LakebenchConfig
 from lakebench.deploy.engine import (
     DeploymentEngine,
@@ -189,13 +191,26 @@ class TestDeploymentEngine:
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     def test_deploy_namespace_already_exists(self, _mock_ocp):
-        """Existing namespace should return success without creating."""
+        """Existing namespace should return success without creating.
+        The ownership stamp is mocked -- its own tests live in
+        tests/test_ownership.py."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
         config = _make_config()
         k8s = _mock_k8s()
         k8s.namespace_exists.return_value = True
         engine = DeploymentEngine(config, k8s_client=k8s)
 
-        result = engine._deploy_namespace()
+        with patch(
+            "lakebench.deploy.ownership.stamp_namespace",
+            return_value=IdentityReport(
+                verdict=IdentityVerdict.MATCH,
+                resource_name="test-deploy",
+                expected_deployment="test-deploy",
+                found_deployment="test-deploy",
+            ),
+        ):
+            result = engine._deploy_namespace()
         assert result.status == DeploymentStatus.SUCCESS
         assert "already exists" in result.message
 
@@ -340,9 +355,14 @@ class TestDeployBuckets:
         assert "No S3 endpoint" in result.message
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
     @patch("lakebench.s3.S3Client")
-    def test_buckets_created(self, mock_s3_cls, _mock_ocp):
-        """Buckets are created via S3Client.ensure_buckets()."""
+    def test_buckets_created(self, mock_s3_cls, mock_verify, _mock_write, _mock_ocp):
+        """Buckets are created via S3Client.ensure_buckets(). Ownership tag
+        write is mocked -- see tests/test_ownership.py for its own tests."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
         config = _make_config()
         k8s = _mock_k8s()
         engine = DeploymentEngine(config, k8s_client=k8s)
@@ -355,6 +375,11 @@ class TestDeployBuckets:
             "lakebench-gold": True,
         }
         mock_s3_cls.return_value = mock_client
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="b",
+            expected_deployment="test-deploy",
+        )
 
         result = engine._deploy_buckets()
         assert result.status == DeploymentStatus.SUCCESS
@@ -364,9 +389,13 @@ class TestDeployBuckets:
         )
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
     @patch("lakebench.s3.S3Client")
-    def test_buckets_already_exist(self, mock_s3_cls, _mock_ocp):
+    def test_buckets_already_exist(self, mock_s3_cls, mock_verify, _mock_write, _mock_ocp):
         """Already-existing buckets are reported correctly."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
         config = _make_config()
         k8s = _mock_k8s()
         engine = DeploymentEngine(config, k8s_client=k8s)
@@ -379,6 +408,11 @@ class TestDeployBuckets:
             "lakebench-gold": False,
         }
         mock_s3_cls.return_value = mock_client
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="b",
+            expected_deployment="test-deploy",
+        )
 
         result = engine._deploy_buckets()
         assert result.status == DeploymentStatus.SUCCESS
@@ -727,3 +761,487 @@ class TestDatagenCycleTimestampRange:
         start, end = DatagenDeployer._cycle_timestamp_range(0, 1)
         assert start == "2024-01-01"
         assert end == "2025-12-31"
+
+
+# ---------------------------------------------------------------------------
+# Integration: ownership hooks actually fire in deploy + destroy
+#
+# These guard against silent removal of the hook call sites in engine.py
+# and destroy.py. Deleting them would leave the ownership module intact
+# and its unit tests still passing, so we need call-site assertions.
+# ---------------------------------------------------------------------------
+
+
+class TestOwnershipHooksFire:
+    """PR-1-R6: prove the hooks are wired into deploy and destroy paths."""
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.stamp_namespace")
+    def test_deploy_namespace_calls_stamp(self, mock_stamp, _mock_ocp):
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        k8s.namespace_exists.return_value = True
+        engine = DeploymentEngine(config, k8s_client=k8s)
+        mock_stamp.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="test-deploy",
+            expected_deployment="test-deploy",
+        )
+
+        engine._deploy_namespace()
+
+        mock_stamp.assert_called_once()
+        _args, kwargs = mock_stamp.call_args
+        assert kwargs["deployment_name"] == "test-deploy"
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.stamp_namespace")
+    def test_deploy_namespace_refuses_on_mismatch(self, mock_stamp, _mock_ocp):
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        k8s.namespace_exists.return_value = True
+        engine = DeploymentEngine(config, k8s_client=k8s)
+        mock_stamp.return_value = IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name="test-deploy",
+            expected_deployment="test-deploy",
+            found_deployment="someone-else",
+            hint="claimed by someone-else",
+        )
+        result = engine._deploy_namespace()
+        assert result.status == DeploymentStatus.FAILED
+        assert "ownership refused" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
+    @patch("lakebench.s3.S3Client")
+    def test_deploy_buckets_calls_verify_and_write(
+        self, mock_s3_cls, mock_verify, mock_write, _mock_ocp
+    ):
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        mock_client = MagicMock()
+        mock_client._init_error = None
+        mock_client.raw_client = MagicMock()
+        mock_client.ensure_buckets.return_value = {
+            "lakebench-bronze": True,
+            "lakebench-silver": True,
+            "lakebench-gold": True,
+        }
+        mock_s3_cls.return_value = mock_client
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="b",
+            expected_deployment="test-deploy",
+        )
+
+        engine._deploy_buckets()
+
+        # Verify called on every bucket
+        assert mock_verify.call_count == 3
+        # Tag written on every bucket
+        assert mock_write.call_count == 3
+        # Tags include our deployment name
+        for call in mock_write.call_args_list:
+            assert call.args[2] == "test-deploy"  # (client, bucket, deployment_name)
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
+    @patch("lakebench.s3.S3Client")
+    def test_deploy_buckets_refuses_legacy_bucket_without_force(
+        self, mock_s3_cls, mock_verify, _mock_ocp
+    ):
+        """PR-1-R2: pre-existing untagged bucket refuses without --force-legacy."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        mock_client = MagicMock()
+        mock_client._init_error = None
+        mock_client.raw_client = MagicMock()
+        # Bucket already existed (was_created=False for all)
+        mock_client.ensure_buckets.return_value = {
+            "lakebench-bronze": False,
+            "lakebench-silver": False,
+            "lakebench-gold": False,
+        }
+        mock_s3_cls.return_value = mock_client
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.ABSENT,
+            resource_name="b",
+            expected_deployment="test-deploy",
+            hint="untagged bucket",
+        )
+
+        result = engine._deploy_buckets(force_legacy=False)
+        assert result.status == DeploymentStatus.FAILED
+        assert "force-legacy" in result.message
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.write_bucket_ownership_tag")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
+    @patch("lakebench.s3.S3Client")
+    def test_deploy_buckets_freshly_created_untagged_is_ok(
+        self, mock_s3_cls, mock_verify, mock_write, _mock_ocp
+    ):
+        """A bucket ensure_buckets JUST created is untagged; we tag it
+        without needing --force-legacy. F4: assert the write actually
+        fires so a future refactor cannot silently drop tagging."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        mock_client = MagicMock()
+        mock_client._init_error = None
+        mock_client.raw_client = MagicMock()
+        mock_client.ensure_buckets.return_value = {
+            "lakebench-bronze": True,  # was_created=True
+            "lakebench-silver": True,
+            "lakebench-gold": True,
+        }
+        mock_s3_cls.return_value = mock_client
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.ABSENT,  # freshly created is untagged
+            resource_name="b",
+            expected_deployment="test-deploy",
+        )
+
+        result = engine._deploy_buckets(force_legacy=False)
+        assert result.status == DeploymentStatus.SUCCESS
+        # F4: the tag write must fire on every bucket. If a future refactor
+        # gates the write on force_legacy (or any other flag), this
+        # assertion breaks the build. F-6: tolerate both positional and
+        # keyword calling conventions.
+        assert mock_write.call_count == 3
+        deployment_names_written: set[str] = set()
+        for call in mock_write.call_args_list:
+            if len(call.args) >= 3:
+                deployment_names_written.add(call.args[2])
+            elif "deployment_name" in call.kwargs:
+                deployment_names_written.add(call.kwargs["deployment_name"])
+        assert deployment_names_written == {"test-deploy"}
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.stamp_namespace")
+    def test_namespace_retry_after_transient_stamp_failure_does_not_brick(
+        self, mock_stamp, _mock_ocp
+    ):
+        """F1: first attempt creates the namespace, stamp raises transient;
+        deploy retries. On retry, `namespace_exists=True` (we just made it)
+        but the engine remembers "we created it this run" so the retry
+        stamps with force_legacy=True implicitly, not the dangerous
+        --force-legacy prompt the user never asked for."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        # Simulate the first call: namespace does not exist. Second call:
+        # after we apply_manifest it does exist.
+        k8s.namespace_exists.side_effect = [False, True]
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        # First stamp: raise a transient failure. Second stamp: MATCH.
+        # We can't easily replay the engine's retry loop here without
+        # driving deploy_all, so we validate the smaller property: given
+        # we tracked "created this run", a subsequent _deploy_namespace
+        # call sees pre_existing=True but must still force_legacy the
+        # stamp because we own it.
+        mock_stamp.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="test-deploy",
+            expected_deployment="test-deploy",
+        )
+
+        # First call: creates the namespace, calls stamp, we return MATCH.
+        result1 = engine._deploy_namespace(force_legacy=False)
+        assert result1.status == DeploymentStatus.SUCCESS
+        # Retain the tracking that we created it.
+        assert "test-deploy" in engine._namespace_created_this_run
+
+        # Simulate retry: namespace now exists. We must still stamp with
+        # force_legacy=True implicitly because we own it.
+        result2 = engine._deploy_namespace(force_legacy=False)
+        assert result2.status == DeploymentStatus.SUCCESS
+        # Second stamp call: force_legacy must be True.
+        second_call = mock_stamp.call_args_list[-1]
+        assert second_call.kwargs["force_legacy"] is True
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.stamp_namespace")
+    def test_apply_manifest_transient_error_retry_is_covered(self, mock_stamp, _mock_ocp):
+        """F-2: apply_manifest can raise transient error AFTER the K8s
+        API accepted the create. The retry sees namespace_exists=True
+        but must know we own it. Seed of _namespace_created_this_run
+        BEFORE apply is the guarantee. Without F-2 fix, retry would
+        refuse without --force-legacy."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        # First namespace_exists check: not there. apply_manifest raises
+        # a transient ConnectionError (K8s accepted, network reset).
+        # Second attempt: namespace_exists returns True (K8s did create).
+        k8s.namespace_exists.side_effect = [False, True]
+        k8s.apply_manifest.side_effect = [ConnectionError("reset"), None]
+        engine = DeploymentEngine(config, k8s_client=k8s)
+
+        mock_stamp.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="test-deploy",
+            expected_deployment="test-deploy",
+        )
+
+        # First attempt: apply raises, but the seed happened first.
+        with pytest.raises(ConnectionError):
+            engine._deploy_namespace(force_legacy=False)
+        assert "test-deploy" in engine._namespace_created_this_run
+
+        # Second attempt (simulates deploy_all's retry): namespace now
+        # exists. Must still stamp with force_legacy=True implicitly.
+        result = engine._deploy_namespace(force_legacy=False)
+        assert result.status == DeploymentStatus.SUCCESS
+        assert mock_stamp.call_args.kwargs["force_legacy"] is True
+
+    @patch("kubernetes.client.BatchV1Api")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
+    @patch("lakebench.s3.S3Client")
+    def test_clean_refuses_foreign_tagged_bucket(self, mock_s3_cls, mock_verify, _mock_batch):
+        """F-1: `lakebench clean` must call verify_bucket_ownership.
+        Foreign-tagged buckets refuse; --force alone is not enough.
+        This closes the bypass hole where clean could be used to
+        wipe another team's data by pointing config at their bucket."""
+        from pathlib import Path
+        from tempfile import NamedTemporaryFile
+
+        from lakebench.cli._clean import clean
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        # Build a minimal valid config file on disk.
+        cfg_yaml = (
+            "name: my-clean\n"
+            "platform:\n"
+            "  storage:\n"
+            "    s3:\n"
+            "      endpoint: http://minio:9000\n"
+            "      access_key: k\n"
+            "      secret_key: s\n"
+        )
+        with NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(cfg_yaml)
+            cfg_path = f.name
+
+        s3 = MagicMock()
+        s3._init_error = None
+        s3.raw_client = MagicMock()
+        s3.empty_bucket.return_value = 0
+        mock_s3_cls.return_value = s3
+        # verify_bucket_ownership returns MISMATCH: the bucket belongs
+        # to someone else.
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name="lakebench-bronze",
+            expected_deployment="my-clean",
+            found_deployment="someone-else",
+            hint="owned by someone-else",
+        )
+
+        # BatchV1Api mocked to raise on read_namespaced_job -- clean.py
+        # swallows this and proceeds (no datagen check).
+        _mock_batch.return_value.read_namespaced_job.side_effect = Exception("no k8s")
+
+        # Run clean with --force (skip confirmation) but NOT
+        # --force-legacy. Expect refusal on every bucket, no empty_bucket
+        # calls, and a nonzero typer.Exit at the end.
+        import typer
+
+        with pytest.raises(typer.Exit) as exc:
+            clean(
+                target="data",
+                config_file=Path(cfg_path),
+                file_option=None,
+                force=True,
+                force_legacy=False,
+                metrics_dir=Path("/tmp/nonexistent-metrics"),
+            )
+        assert exc.value.exit_code == 1
+
+        # empty_bucket must never fire on any bucket.
+        assert s3.empty_bucket.call_count == 0
+
+    @pytest.mark.parametrize("target", ["bronze", "silver", "gold"])
+    @patch("kubernetes.client.BatchV1Api")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
+    @patch("lakebench.s3.S3Client")
+    def test_clean_individual_target_uses_same_gate(
+        self, mock_s3_cls, mock_verify, _mock_batch, target
+    ):
+        """F-1 test gap: prove the ownership gate fires for individual
+        bronze/silver/gold targets, not only the aggregate 'data' target.
+        A regression in bucket_targets construction would slip through
+        the data-only test."""
+        from pathlib import Path
+        from tempfile import NamedTemporaryFile
+
+        from lakebench.cli._clean import clean
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        cfg_yaml = (
+            "name: my-clean\n"
+            "platform:\n"
+            "  storage:\n"
+            "    s3:\n"
+            "      endpoint: http://minio:9000\n"
+            "      access_key: k\n"
+            "      secret_key: s\n"
+        )
+        with NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(cfg_yaml)
+            cfg_path = f.name
+
+        s3 = MagicMock()
+        s3._init_error = None
+        s3.raw_client = MagicMock()
+        s3.empty_bucket.return_value = 0
+        mock_s3_cls.return_value = s3
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.MISMATCH,
+            resource_name=f"lakebench-{target}",
+            expected_deployment="my-clean",
+            found_deployment="someone-else",
+            hint="owned by someone-else",
+        )
+        _mock_batch.return_value.read_namespaced_job.side_effect = Exception("no k8s")
+
+        import typer
+
+        with pytest.raises(typer.Exit):
+            clean(
+                target=target,
+                config_file=Path(cfg_path),
+                file_option=None,
+                force=True,
+                force_legacy=False,
+                metrics_dir=Path("/tmp/nonexistent-metrics"),
+            )
+
+        # verify_bucket_ownership was called with the specific bucket.
+        assert mock_verify.called
+        assert s3.empty_bucket.call_count == 0
+
+    @patch("kubernetes.client.BatchV1Api")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
+    @patch("lakebench.s3.S3Client")
+    def test_clean_absent_bucket_refuses_without_force_legacy(
+        self, mock_s3_cls, mock_verify, _mock_batch
+    ):
+        """F-1 test gap: legacy (untagged) bucket refuses without
+        --force-legacy on the clean path. Mirror of the deploy-side gate."""
+        from pathlib import Path
+        from tempfile import NamedTemporaryFile
+
+        from lakebench.cli._clean import clean
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        cfg_yaml = (
+            "name: my-clean\n"
+            "platform:\n"
+            "  storage:\n"
+            "    s3:\n"
+            "      endpoint: http://minio:9000\n"
+            "      access_key: k\n"
+            "      secret_key: s\n"
+        )
+        with NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(cfg_yaml)
+            cfg_path = f.name
+
+        s3 = MagicMock()
+        s3._init_error = None
+        s3.raw_client = MagicMock()
+        s3.empty_bucket.return_value = 0
+        mock_s3_cls.return_value = s3
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.ABSENT,
+            resource_name="lakebench-bronze",
+            expected_deployment="my-clean",
+            hint="no lakebench tag",
+        )
+        _mock_batch.return_value.read_namespaced_job.side_effect = Exception("no k8s")
+
+        import typer
+
+        # Without --force-legacy: refuse.
+        with pytest.raises(typer.Exit):
+            clean(
+                target="data",
+                config_file=Path(cfg_path),
+                file_option=None,
+                force=True,
+                force_legacy=False,
+                metrics_dir=Path("/tmp/nonexistent-metrics"),
+            )
+        assert s3.empty_bucket.call_count == 0
+
+    @patch("kubernetes.client.BatchV1Api")
+    @patch("lakebench.deploy.ownership.verify_bucket_ownership")
+    @patch("lakebench.s3.S3Client")
+    def test_clean_absent_bucket_proceeds_with_force_legacy(
+        self, mock_s3_cls, mock_verify, _mock_batch
+    ):
+        """--force-legacy on an untagged bucket proceeds. Confirms the
+        opt-in escape hatch works so users can clean legacy state."""
+        from pathlib import Path
+        from tempfile import NamedTemporaryFile
+
+        from lakebench.cli._clean import clean
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        cfg_yaml = (
+            "name: my-clean\n"
+            "platform:\n"
+            "  storage:\n"
+            "    s3:\n"
+            "      endpoint: http://minio:9000\n"
+            "      access_key: k\n"
+            "      secret_key: s\n"
+        )
+        with NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(cfg_yaml)
+            cfg_path = f.name
+
+        s3 = MagicMock()
+        s3._init_error = None
+        s3.raw_client = MagicMock()
+        s3.empty_bucket.return_value = 5
+        mock_s3_cls.return_value = s3
+        mock_verify.return_value = IdentityReport(
+            verdict=IdentityVerdict.ABSENT,
+            resource_name="lakebench-bronze",
+            expected_deployment="my-clean",
+            hint="no lakebench tag",
+        )
+        _mock_batch.return_value.read_namespaced_job.side_effect = Exception("no k8s")
+
+        # With --force-legacy: empty_bucket fires.
+        clean(
+            target="data",
+            config_file=Path(cfg_path),
+            file_option=None,
+            force=True,
+            force_legacy=True,
+            metrics_dir=Path("/tmp/nonexistent-metrics"),
+        )
+        assert s3.empty_bucket.call_count == 3
