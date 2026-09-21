@@ -4,6 +4,68 @@ All notable changes to Lakebench are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **Shared-cluster ownership discipline.** Every deployment now carries an
+  identity: a `lakebench.deployment/name` annotation on its namespace
+  and a matching `lakebench.deployment` tag on each of its S3 buckets.
+  Destroy and clean paths verify identity before mutating; a foreign
+  stamp is a hard refusal, not a warning. Cluster-scoped resources
+  (Stackable `SecretClass`) are renamed per-deployment to prevent name
+  collisions between parallel deploys. See
+  `docs/design/namespace-isolation.md` for the full taxonomy.
+- **`lakebench admin` subcommand tree.** Cluster admins run one-time
+  setup (`install-spark-operator`, `install-scratch-storage-class`)
+  before developers can `deploy`. Also `status`, `doctor`,
+  `release-lock`, `migrate-deployment` (for legacy pre-ownership
+  namespaces), `repair-operator` (reconciles the Spark Operator watch
+  list), and `reclaim-bucket`. Every mutating admin command acquires
+  the cluster-wide `lakebench-cluster-lock` lease.
+- **`lakebench reproduce` command.** Records a reproduction package
+  from a run and verifies later runs against it with per-metric
+  direction tables and tolerance banding. Exit codes 0/1/2
+  distinguish pass / performance drift / correctness drift.
+- **`--force-legacy` on `deploy` and `clean`; `--allow-unverified-cluster` on `destroy`.**
+  Explicit escape hatches for the pre-ownership world. Refuses always
+  on foreign-tagged buckets regardless of the flag.
+
+### Changed
+- **Datagen: Python image retired; Rust image handles both schemas.** The
+  `datagen/` directory (Python generator: `generate.py`, `financial.py`,
+  `realism.py`, `typologies.py`, `verify_run.py`, `manifest.py`, Dockerfile,
+  tests) has been removed. The Rust image at `datagen_rs/` now serves both
+  `--schema customer360` and `--schema financial` and is what
+  `docker.io/sillidata/lb-datagen:latest` points to. Per-pod throughput on
+  customer360 measured at 590 MB/s (snappy, 8 CPU / 8 Gi), ~76x the Python
+  path's 6-8 MB/s. Efficiency 6 CPU-hours per TB written, down from ~344.
+- **Datagen default codec is now `snappy`.** Was `zstd1`. Snappy is 40-55%
+  faster on both schemas at the cost of ~1.5x on-disk file size. Override
+  with `DG_COMPRESSION=zstd` (or `lz4`, `none`) in the pod env if disk size
+  matters more than throughput.
+- **Continuous-mode datagen pod default memory: 24 Gi -> 8 Gi.** The Rust
+  generator uses under 2 GiB per pod in measured runs (vs Python's ~8 GiB
+  with per-worker process overhead), so the old 24 Gi lock was 3-8x
+  over-provisioned. Continuous mode still hard-locks CPU at 8. Batch mode
+  unchanged (4 CPU / 4 Gi).
+- **`ScratchStorageConfig.create_storage_class` removed.** The
+  StorageClass is Category 2 shared infrastructure: a create-race
+  between parallel deploys could strip it out from under an in-flight
+  run. `deploy` now preflight-verifies the SC exists and refuses with
+  a pointer to `lakebench admin install-scratch-storage-class`.
+  Existing YAML that still carries `create_storage_class: true|false`
+  loads without error but the field is silently ignored.
+- **Spark Operator watch-list mutation now lease-gated in strict mode.**
+  `destroy` calls the strict path so parallel destroys cannot race the
+  same helm upgrade. On failure, destroy raises
+  `WatchListMutationError` and BLOCKS the namespace delete -- deleting
+  a namespace the operator still watches crash-loops the operator
+  globally, and refusing to delete is the only safe response. The
+  user is directed to `lakebench admin repair-operator` to reconcile.
+
+### Removed
+- **`platform.storage.scratch.create_storage_class`.** See above.
+
 ## [1.3.1] - 2026-04-05
 
 ### Fixed
