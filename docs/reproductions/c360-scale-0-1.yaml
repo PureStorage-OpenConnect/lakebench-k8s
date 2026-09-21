@@ -1,0 +1,96 @@
+schema_version: 1
+reproduction_metadata:
+  commit_sha: ead6722
+  recorded_at: '2026-09-21T04:37:32+00:00'
+  source_run_id: 20260920-210120-9d4b92
+  deployment_name: c360-e2e-proof
+  pipeline_mode: batch
+  config_reference: examples/c360-scale-0-1.yaml
+  expected_numbers:
+    time_to_value_seconds: 405.83
+    pipeline_throughput_gb_per_second: 0.0073
+    compute_efficiency_gb_per_core_hour: 1.7813
+    scale_ratio: 0.992
+    composite_qph: 1305.8
+    datagen_seconds: 6.894
+    bronze_seconds: 240.19453620910645
+    silver_seconds: 90.06978440284729
+    gold_seconds: 75.05720496177673
+    query_seconds: 22.054964578070212
+    datagen_aggregate_mbps: 154.449
+    datagen_cpu_hr_per_tb: 14.36
+  tolerance_pct:
+    performance: 20.0
+    correctness: 0.0
+  config_snapshot:
+    name: c360-e2e-proof
+    scale: 0.1
+    approx_bronze_gb: 1.0
+    processing_pattern: medallion
+    s3:
+      endpoint: http://10.21.227.93:80
+      buckets:
+        bronze: c360-e2e-bronze
+        silver: c360-e2e-silver
+        gold: c360-e2e-gold
+    scratch:
+      enabled: true
+      storage_class: px-csi-scratch
+      size: 100Gi
+    spark:
+      driver:
+        cores: 2
+        memory: 2g
+      executor:
+        instances: 2
+        cores: 2
+        memory: 4g
+        memory_overhead: 1g
+      executor_overrides:
+        bronze: null
+        silver: null
+        gold: null
+        bronze_ingest: null
+        silver_stream: null
+        gold_refresh: null
+    catalog: polaris
+    table_format: iceberg
+    pipeline_engine: spark
+    query_engine: trino
+    workload_schema: customer360
+    sustained:
+      bronze_trigger_interval: 30 seconds
+      silver_trigger_interval: 60 seconds
+      gold_refresh_interval: 5 minutes
+      run_duration: 1800
+      max_files_per_trigger: 50
+      bronze_target_file_size_mb: 512
+      silver_target_file_size_mb: 512
+      gold_target_file_size_mb: 128
+      benchmark_interval: 300
+      benchmark_warmup: 300
+    datagen:
+      scale: 0.1
+      mode: auto
+      parallelism: 2
+      file_size: 64mb
+    images:
+      datagen: docker.io/sillidata/lb-datagen:latest
+      spark: apache/spark:4.0.2-python3
+      trino: trinodb/trino:479
+    trino:
+      coordinator:
+        cpu: '2'
+        memory: 8Gi
+      worker:
+        replicas: 2
+        cpu: '4'
+        memory: 16Gi
+    benchmark:
+      mode: power
+      streams: 4
+      cache: hot
+      iterations: 1
+  datagen_fleet_summary:
+    pods_reported: 2
+    data_quality: complete
