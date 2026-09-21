@@ -549,9 +549,75 @@ lakebench recommend --scale 100
 
 ---
 
+## Choosing a Workload
+
+Lakebench ships two workload schemas. The recipe (catalog + format + engine)
+is orthogonal to the workload -- switch schemas by changing one field.
+
+### Customer 360 (default)
+
+Retail customer-interactions from ~8 channels through a bronze / silver /
+gold medallion into an executive dashboard, then the 8-query analytical
+benchmark. This is the workload the [First Deployment Walkthrough](#first-deployment-walkthrough)
+above runs.
+
+```yaml
+architecture:
+  workload:
+    schema: customer360   # default; can be omitted
+```
+
+### Financial-crime / AML (FAML)
+
+pacs.008 wire-message pipeline with six W-rule detectors scoring against
+planted AML typologies. The scorecard reports per-rule recall, precision,
+and time-to-detect, joined against a scikit-learn reference detector so a
+rule cannot read high recall from a label proxy without being caught.
+
+```yaml
+architecture:
+  workload:
+    schema: financial
+    retention_workload: true    # keeps snapshots for replay / reproduce
+    retention_months: 60
+```
+
+A worked example ships at [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml).
+The full loop is `deploy -> generate -> run -> financial score`:
+
+```bash
+lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
+lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
+lakebench run      examples/polaris-iceberg-spark-financial.yaml
+lakebench financial score \
+    examples/polaris-iceberg-spark-financial.yaml \
+    --manifest s3://<bronze-bucket>/manifest/manifest.parquet \
+    --output   s3://<bronze-bucket>/scores/recall.parquet
+```
+
+Two additional operator subcommands cover the retention scenarios:
+
+- `lakebench financial replay CONFIG --rule W2_structuring --depth-months 60`
+  reruns one rule against a historical Iceberg snapshot.
+- `lakebench financial reproduce CONFIG --alert-id <id>` reproduces a specific
+  past alert via Iceberg time-travel.
+
+`CONFIG` in both cases is the same YAML you passed to `deploy`.
+
+The FAML precision numbers on this benchmark are not a claim about a
+production ops-queue false-positive rate -- the datagen has one baseline
+distribution and roughly a dozen planted typology shapes, and the rules
+were tuned against it. Use them for stack comparison and regression
+detection. See [FAML Scoring](faml-scoring.md) for the full explanation
+of what the metrics measure, the leakage gate, the reference detector,
+and the current untargeted typologies.
+
+---
+
 ## Next Steps
 
 - [Recipes Guide](recipes.md) -- all supported component combinations
 - [Polaris Quick Start](quickstart-polaris.md) -- use Apache Polaris instead of Hive
+- [FAML Scoring](faml-scoring.md) -- financial-crime / AML workload: what precision and recall measure here, the leakage gate, and the reference detector
 - [Configuration Reference](configuration.md) -- full YAML schema with all options
 - [Operators and Catalogs](operators-and-catalogs.md) -- tested versions and troubleshooting
