@@ -416,6 +416,7 @@ class MetricsStorage:
             benchmark_rounds=top_rounds,
             platform_metrics=data.get("platform_metrics"),
             cycles=_deserialize_cycles(data.get("cycles", [])),
+            datagen_fleet=data.get("datagen_fleet"),
         )
 
         if data.get("end_time"):
