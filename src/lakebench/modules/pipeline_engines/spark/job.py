@@ -516,6 +516,16 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 # No (4, 2) entry: Spark 4.2 is not in _SUPPORTED_SPARK_VERSIONS. Borrowing
 # the 4.1 jar there throws IncompatibleClassChangeError -- see LB-069.
 
+# Additional Maven repositories to include in ``spark.jars.repositories`` /
+# ``--repositories`` on every job. Google mirrors Maven Central at
+# ``maven-central.storage-download.googleapis.com`` and rate-limits
+# independently, so when Central returns HTTP 429 to the cluster's egress
+# IP (which happens after a burst of UAT deploys) Ivy falls to the mirror
+# and the driver still resolves cleanly. Ordered mirror-first: Ivy tries
+# resolvers in list order, and Central 429s register as "not found" which
+# is exactly the signal that triggers the next resolver.
+_MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
+
 # Spark version -> the first Iceberg version publishing a native runtime for it.
 # Below this, the fallback in _ICEBERG_RUNTIME_SUFFIX applies.
 _ICEBERG_NATIVE_RUNTIME_FROM: dict[tuple[int, int], tuple[int, int, int]] = {
@@ -1278,6 +1288,7 @@ class SparkJobManager:
                     f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
                 )
             spark_conf["spark.jars.packages"] = ",".join(packages)
+            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
             spark_conf["spark.sql.extensions"] = "io.delta.sql.DeltaSparkSessionExtension"
         else:
             # Iceberg (default)
@@ -1297,6 +1308,16 @@ class SparkJobManager:
                     f"io.unitycatalog:unitycatalog-spark{scala_suffix}:{unity_version}",
                 )
             spark_conf["spark.jars.packages"] = ",".join(packages)
+            # Central rate-limits per-egress-IP (HTTP 429), and a burst of
+            # UAT deploys can silently starve a fresh driver pod's Ivy
+            # resolve. Google's Central mirror at
+            # ``maven-central.storage-download.googleapis.com`` is
+            # rate-limited independently and works with a plain
+            # ``--repositories`` entry -- Ivy falls to it when Central
+            # returns 429 as "not found". Adding as spark_conf so both
+            # the SparkApplication CR and the ivy-warmer init container
+            # (which reads spark.jars.* from the same conf) see it.
+            spark_conf["spark.jars.repositories"] = _MAVEN_MIRROR_REPOS
             spark_conf["spark.sql.extensions"] = (
                 "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
             )
@@ -1616,6 +1637,7 @@ class SparkJobManager:
                                 "set -e; "
                                 "/opt/spark/bin/spark-submit "
                                 f'--packages "{packages_str}" '
+                                f'--repositories "{_MAVEN_MIRROR_REPOS}" '
                                 "--conf spark.jars.ivy=/tmp/.ivy2 "
                                 "--class org.apache.spark.deploy.DummyNonExistent "
                                 "local:///dev/null 2>&1 || true; "

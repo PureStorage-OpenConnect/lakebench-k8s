@@ -213,6 +213,29 @@ class TestSparkJobManager:
         assert "iceberg-spark-runtime" in packages
         assert "hadoop-aws" in packages
 
+    def test_manifest_has_maven_mirror_repositories(self):
+        """Spark conf must set ``spark.jars.repositories`` to a Central
+        mirror so Ivy falls to it when the cluster's egress hits an
+        HTTP 429 rate-limit on repo1.maven.org. Live-verified 2026-09-22
+        on faml-baseline-s1 where a fresh Central 429 blocked
+        bronze-verify; adding this fallback let the same run finish.
+        """
+        from lakebench.spark.job import _MAVEN_MIRROR_REPOS
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        spark_conf = manifest["spec"]["sparkConf"]
+
+        assert "spark.jars.repositories" in spark_conf, (
+            "spark.jars.repositories missing -- Ivy has no Central mirror "
+            "fallback when repo1.maven.org 429s the cluster's egress IP"
+        )
+        assert spark_conf["spark.jars.repositories"] == _MAVEN_MIRROR_REPOS
+        assert "maven-central.storage-download.googleapis.com" in _MAVEN_MIRROR_REPOS
+
     def test_manifest_has_s3_config(self):
         """Spark conf should include S3A endpoint."""
         config = _make_config()

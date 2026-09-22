@@ -328,7 +328,7 @@ class DeploymentEngine:
         # Parse S3 endpoint for Stackable (needs host and port separately)
         from urllib.parse import urlparse
 
-        from lakebench.spark.job import _spark_compat
+        from lakebench.spark.job import _MAVEN_MIRROR_REPOS, _spark_compat
 
         parsed_s3 = urlparse(s3.endpoint)
         s3_host = (
@@ -425,6 +425,10 @@ class DeploymentEngine:
             "query_engine_type": cfg.architecture.query_engine.type.value,
             # Spark Thrift packages (computed from config versions)
             "spark_thrift_packages": self._build_spark_thrift_packages(cfg),
+            # Fallback Maven mirror -- Ivy falls to this when Central 429s
+            # on the cluster's egress IP (see _MAVEN_MIRROR_REPOS in
+            # spark/job.py for the rationale).
+            "spark_thrift_repositories": _MAVEN_MIRROR_REPOS,
             "spark_major_minor": self._get_spark_major_minor(cfg),
             "scala_suffix": _spark_compat(cfg.images.spark)[0],
             # DuckDB
