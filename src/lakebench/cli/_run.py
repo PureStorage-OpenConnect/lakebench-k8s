@@ -35,6 +35,44 @@ from lakebench.k8s import K8sConnectionError
 logger = logging.getLogger(__name__)
 
 
+def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
+    """Load the per-pod datagen metrics sidecar written by `lakebench generate`.
+
+    Sidecar is keyed by namespace, so `lakebench run` only ever attributes
+    fleet metrics that come from a `lakebench generate` against the same
+    namespace as the run. This closes the cross-run silent-attribution hole
+    that would let two parallel UAT runs pollute each other's scorecards.
+
+    Returns None if the sidecar for `namespace` does not exist, cannot be
+    parsed, or does not carry a matching `namespace` payload. Never raises;
+    the fleet rollup is best-effort enrichment for the pipeline scorecard.
+    """
+    import json as _json
+
+    from lakebench._constants import DEFAULT_OUTPUT_DIR
+
+    if not namespace:
+        return None
+    path = Path(DEFAULT_OUTPUT_DIR) / "datagen" / f"{namespace}-datagen-metrics.json"
+    if not path.exists():
+        return None
+    try:
+        data = _json.loads(path.read_text())
+    except Exception as e:  # noqa: BLE001 -- best-effort
+        logger.warning("could not read datagen fleet sidecar %s: %s", path, e)
+        return None
+    payload_ns = data.get("namespace")
+    if payload_ns and payload_ns != namespace:
+        logger.warning(
+            "datagen fleet sidecar %s has namespace %r but run is in %r; ignoring",
+            path,
+            payload_ns,
+            namespace,
+        )
+        return None
+    return data
+
+
 def _print_pipeline_scorecard(
     pb,
     stage_results: list[tuple[str, bool, float]],
@@ -307,10 +345,14 @@ def _save_local_metrics(
     try:
         from lakebench.metrics import build_pipeline_benchmark
 
+        fleet = _load_latest_datagen_fleet(cfg.get_namespace())
+        if fleet is not None:
+            run_metrics.datagen_fleet = fleet
         run_metrics.pipeline_benchmark = build_pipeline_benchmark(
             run_metrics,
             datagen_elapsed=datagen_elapsed,
             datagen_output_gb=run_metrics.bronze_size_gb,
+            datagen_fleet=fleet,
         )
     except Exception as e:  # noqa: BLE001
         console.print(f"  [yellow]Could not build pipeline benchmark: {e}[/yellow]")
@@ -693,8 +735,15 @@ def run(
         scale = cfg.architecture.workload.datagen.get_effective_scale()
         # int() because scale is a float: a float timeout would propagate into
         # manifests and log lines that expect a whole number of seconds.
-        timeout = max(3600, int(scale * 120))
-        if scale >= 50:
+        # Financial adds ~15 min of detection rules to gold-finalize on top
+        # of the batch stages; add a 900s cushion so gold-finalize does not
+        # blow the timeout at scale ~5+ (adversarial-review finding). The
+        # cushion is applied uniformly since the timeout is per-job and
+        # gold-finalize is the tightest budget in the pipeline.
+        base = max(3600, int(scale * 120))
+        detection_cushion = 900 if cfg.architecture.workload.schema_type.value == "financial" else 0
+        timeout = base + detection_cushion
+        if scale >= 50 or detection_cushion:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
     # Flag mutual exclusivity
@@ -1494,11 +1543,15 @@ def run(
             try:
                 from lakebench.metrics import build_pipeline_benchmark
 
+                fleet = _load_latest_datagen_fleet(cfg.get_namespace())
+                if fleet is not None:
+                    run_metrics.datagen_fleet = fleet
                 pb = build_pipeline_benchmark(
                     run_metrics,
                     datagen_elapsed=_datagen_elapsed,
                     datagen_output_gb=_datagen_output_gb,
                     datagen_output_rows=_datagen_output_rows,
+                    datagen_fleet=fleet,
                 )
                 run_metrics.pipeline_benchmark = pb
 

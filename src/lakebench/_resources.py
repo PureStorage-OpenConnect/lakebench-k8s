@@ -34,3 +34,12 @@ def get_templates_dir() -> Path:
 def get_scripts_dir() -> Path:
     """Return path to Spark pipeline scripts directory."""
     return _package_dir() / "spark" / "scripts"
+
+
+def get_faml_data_dir() -> Path | None:
+    """Return path to packaged FAML reference data (JSON sidecars for
+    sanctions / PEP / high-risk jurisdictions). None when the tree
+    does not ship the data directory (older installs, PyInstaller
+    bundles that excluded it, etc.)."""
+    candidate = _package_dir() / "spark" / "data" / "faml"
+    return candidate if candidate.exists() else None

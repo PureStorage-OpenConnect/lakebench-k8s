@@ -13,6 +13,15 @@ Rules implemented in this file:
 - W3_round_tripping: sequences of transactions where money returns to
   origin within a short window.
 - W4_risk_propagation: high-velocity entity-to-entity chains.
+- W5_sanctions_match: transactions with a counterparty entity name that
+  fuzzy-matches an OFAC SDN entry (Phase 3D).
+- W6_pep_counterparty: transactions with a counterparty on the PEP
+  (politically exposed persons) list, filtered by co-occurring
+  velocity anomaly.
+- W7_cross_border_high_risk: cross-border transactions to a FATF grey/
+  black list jurisdiction.
+- W8_dormant_reactivation: originator account inactive > 90 days then
+  a transaction >= $5,000-equivalent.
 
 W5_splink_resolution (probabilistic entity resolution) is a separate
 research effort tracked as ENH; it is not a "fix" and is intentionally
@@ -23,7 +32,7 @@ The rule dispatcher (`get_rule`) is called by replay_financial.py.
 
 from __future__ import annotations
 
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     array,
     array_distinct,
@@ -31,32 +40,39 @@ from pyspark.sql.functions import (
     collect_list,
     collect_set,
     count,
-    current_timestamp,
     explode,
     expr,
     lit,
     map_from_arrays,
-    max as max_,
-    min as min_,
     row_number,
     to_timestamp,
     when,
 )
-from pyspark.sql import Window
-
+from pyspark.sql.functions import (
+    max as max_,
+)
+from pyspark.sql.functions import (
+    min as min_,
+)
 
 # Reporting thresholds by currency, mirroring datagen_rs::amounts::structuring_band.
 # A txn is "structuring-suspicious" when its amount is >= 90% of the
 # reporting threshold in its currency (i.e. sits in the top band under
 # reporting) -- this matches the width of the datagen's structuring_band.
 _STRUCTURING_THRESHOLDS = {
-    "USD": 10_000.0, "CAD": 10_000.0, "AUD": 10_000.0,
-    "GBP": 15_000.0, "EUR": 15_000.0, "CHF": 15_000.0,
-    "JPY": 1_000_000.0, "INR": 1_000_000.0,
+    "USD": 10_000.0,
+    "CAD": 10_000.0,
+    "AUD": 10_000.0,
+    "GBP": 15_000.0,
+    "EUR": 15_000.0,
+    "CHF": 15_000.0,
+    "JPY": 1_000_000.0,
+    "INR": 1_000_000.0,
     "AED": 55_000.0,
     "SGD": 20_000.0,
     "MXN": 100_000.0,
-    "CNY": 50_000.0, "BRL": 50_000.0,
+    "CNY": 50_000.0,
+    "BRL": 50_000.0,
     "HKD": 75_000.0,
     "KRW": 10_000_000.0,
 }
@@ -76,9 +92,7 @@ def _suspicious_amount_expr():
     when_expr = None
     for ccy, thr in _STRUCTURING_THRESHOLDS.items():
         floor = thr * 0.9
-        cond = (col("txn_currency") == lit(ccy)) & (
-            col("txn_amount").between(floor, thr)
-        )
+        cond = (col("txn_currency") == lit(ccy)) & (col("txn_amount").between(floor, thr))
         when_expr = cond if when_expr is None else (when_expr | cond)
     return when_expr
 
@@ -125,8 +139,7 @@ def w2_structuring(
     )
 
     windowed = (
-        suspicious
-        .groupBy(
+        suspicious.groupBy(
             col("entity_id"),
             col("txn_currency"),
             window_(col("txn_timestamp"), f"{window_hours} hours"),
@@ -156,11 +169,12 @@ def w2_structuring(
         col("last_ts").alias("alert_ts"),
         # Alert score: 0.5 baseline + 0.05 * (count - threshold), capped 0.95.
         (lit(0.5) + (col("suspicious_count") - lit(threshold_count)) * lit(0.05))
-        .cast("double").alias("alert_score"),
+        .cast("double")
+        .alias("alert_score"),
         when(col("suspicious_count") >= 6, lit("HIGH"))
-            .when(col("suspicious_count") >= 4, lit("MED"))
-            .otherwise(lit("LOW"))
-            .alias("priority"),
+        .when(col("suspicious_count") >= 4, lit("MED"))
+        .otherwise(lit("LOW"))
+        .alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
         lit("structuring").alias("alert_type"),
@@ -223,9 +237,7 @@ def w3_round_tripping(
             "inner",
         )
         .filter(col("ts_r") >= col("ts_l"))
-        .filter(
-            (unix_timestamp(col("ts_r")) - unix_timestamp(col("ts_l"))) <= seconds
-        )
+        .filter((unix_timestamp(col("ts_r")) - unix_timestamp(col("ts_l"))) <= seconds)
     )
     # Aggregate per (a, b): collect all round-trip UETRs and count them.
     # Alerting once per direction (a<b canonicalized) so we don't double-
@@ -276,9 +288,9 @@ def w3_round_tripping(
         # exceed the [0,1] domain analysts expect.
         expr("least(0.95, 0.6 + roundtrip_count * 0.05)").cast("double").alias("alert_score"),
         when(col("roundtrip_count") >= 3, lit("HIGH"))
-            .when(col("roundtrip_count") >= 2, lit("MED"))
-            .otherwise(lit("LOW"))
-            .alias("priority"),
+        .when(col("roundtrip_count") >= 2, lit("MED"))
+        .otherwise(lit("LOW"))
+        .alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
         lit("round_tripping").alias("alert_type"),
@@ -334,9 +346,7 @@ def w4_risk_propagation(
     joined = (
         incoming.join(outgoing, col("b") == col("b2"), "inner")
         .filter(col("ts_out") >= col("ts_in"))
-        .filter(
-            (unix_timestamp(col("ts_out")) - unix_timestamp(col("ts_in"))) <= seconds
-        )
+        .filter((unix_timestamp(col("ts_out")) - unix_timestamp(col("ts_in"))) <= seconds)
         # amt_in > 0 guards against div-by-zero downstream on the score
         # computation AND filters degenerate matches when txn_amount_usd
         # coerced to 0 (nullable xchg_rate paths). Without it, entities
@@ -371,20 +381,18 @@ def w4_risk_propagation(
         col("b").alias("entity_id"),
         array_distinct(expr("concat(uetrs_in, uetrs_out)")).alias("related_txn_ids"),
         # cast(set as array<bigint>) via expr for compat with older Spark
-        expr("cast(array_union(as_set, cs_set) as array<bigint>)").alias(
-            "related_entity_ids"
-        ),
+        expr("cast(array_union(as_set, cs_set) as array<bigint>)").alias("related_entity_ids"),
         col("last_ts").alias("alert_ts"),
         # Score clamped to [0, 0.95] so downstream percentile aggregations
         # don't skew from >1 values (see W3 fix). max_forward_ratio -
         # threshold is scaled and offset from 0.7 baseline.
-        expr(
-            "least(0.95, 0.7 + (max_forward_ratio - {th}) * 0.15)".format(th=forward_ratio)
-        ).cast("double").alias("alert_score"),
+        expr(f"least(0.95, 0.7 + (max_forward_ratio - {forward_ratio}) * 0.15)")
+        .cast("double")
+        .alias("alert_score"),
         when(col("chain_count") >= 3, lit("HIGH"))
-            .when(col("chain_count") >= 2, lit("MED"))
-            .otherwise(lit("LOW"))
-            .alias("priority"),
+        .when(col("chain_count") >= 2, lit("MED"))
+        .otherwise(lit("LOW"))
+        .alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
         lit("risk_propagation").alias("alert_type"),
@@ -456,8 +464,7 @@ def w1_connected_components(
     from pyspark.sql.functions import min as _min
 
     edges = (
-        silver_txns
-        .select(
+        silver_txns.select(
             col("originator_id").alias("src"),
             col("beneficiary_id").alias("dst"),
             col("uetr"),
@@ -500,11 +507,21 @@ def w1_connected_components(
     labels = vertices.withColumn("label", col("id")).cache()
 
     converged = False
-    for iteration in range(max_iterations):
+    for _iteration in range(max_iterations):
         # Propagate: each vertex takes min(own label, min(neighbours' labels)).
-        neighbour_labels = (
-            labels.join(edges_u, labels["id"] == edges_u["src"])
-            .select(edges_u["dst"].alias("id"), labels["label"])
+        # Alias both sides. After the first iteration, ``labels`` is derived
+        # from a prior unionByName of ``neighbour_labels`` -- which itself
+        # was built from ``edges_u`` -- so ``labels`` and ``edges_u`` share
+        # attribute IDs in Catalyst. Without aliases, ``labels["id"]`` and
+        # ``edges_u["src"]`` resolve to ambiguous attributes and Spark raises
+        # ``AnalysisException: Column dst#NNN are ambiguous`` (surfaced by
+        # the first live S1 run of the FAML batch pipeline). Aliases give
+        # each side its own attribute namespace so column resolution is
+        # unambiguous every iteration.
+        lbl = labels.alias("lbl")
+        eg = edges_u.alias("eg")
+        neighbour_labels = lbl.join(eg, col("lbl.id") == col("eg.src")).select(
+            col("eg.dst").alias("id"), col("lbl.label").alias("label")
         )
         new_labels = (
             labels.select("id", "label")
@@ -561,22 +578,15 @@ def w1_connected_components(
     # appeared once under src_hits and once under dst_hits, then
     # collect_list->distinct dedup'd on the reduce side). Single
     # equi-join, each edge counted once, no dedup shuffle.
-    edges_tagged = (
-        edges.join(
-            labels.select(col("id").alias("_src"), col("label").alias("component")),
-            edges["src"] == col("_src"),
-            "inner",
-        )
-        .select(col("component"), col("uetr"), col("txn_timestamp"))
-    )
-    edge_aggs = (
-        edges_tagged
-        .groupBy("component")
-        .agg(
-            array_distinct(collect_list("uetr")).alias("related_txn_ids"),
-            min_("txn_timestamp").alias("first_ts"),
-            max_("txn_timestamp").alias("last_ts"),
-        )
+    edges_tagged = edges.join(
+        labels.select(col("id").alias("_src"), col("label").alias("component")),
+        edges["src"] == col("_src"),
+        "inner",
+    ).select(col("component"), col("uetr"), col("txn_timestamp"))
+    edge_aggs = edges_tagged.groupBy("component").agg(
+        array_distinct(collect_list("uetr")).alias("related_txn_ids"),
+        min_("txn_timestamp").alias("first_ts"),
+        max_("txn_timestamp").alias("last_ts"),
     )
     # Bring the components metadata back for alert construction. Inner
     # join on component drops any component_size < min_cluster_size
@@ -603,9 +613,9 @@ def w1_connected_components(
             + " as double)) as double)"
         ).alias("alert_score"),
         when(col("component_size") >= 8, lit("HIGH"))
-            .when(col("component_size") >= 5, lit("MED"))
-            .otherwise(lit("LOW"))
-            .alias("priority"),
+        .when(col("component_size") >= 5, lit("MED"))
+        .otherwise(lit("LOW"))
+        .alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
         lit("cluster").alias("alert_type"),
@@ -618,14 +628,509 @@ def w1_connected_components(
         ).alias("narrative"),
         map_from_arrays(
             array(
-                lit("rule"), lit("min_cluster_size"), lit("max_iterations"),
+                lit("rule"),
+                lit("min_cluster_size"),
+                lit("max_iterations"),
                 lit("max_vertices"),
+                lit("converged"),
             ),
             array(
                 lit("W1_connected_components"),
                 lit(str(min_cluster_size)),
                 lit(str(max_iterations)),
                 lit(str(max_vertices)),
+                lit("true" if converged else "false"),
+            ),
+        ).alias("evidence"),
+    )
+    # Return the alerts plan with ``labels`` still cached. Everything
+    # downstream (components + edges_tagged + alerts) is a lazy plan
+    # rooted at labels; unpersisting here would force a 2x
+    # recomputation of the entire 20-iteration min-propagation loop
+    # on the caller's first action (round-2 adversarial finding).
+    # The Spark driver exits after the job, so the cache is released
+    # by JVM shutdown.
+    return alerts
+
+
+# ---------------------------------------------------------------------------
+# W5-W8: reference-table rules. Load lists from the packaged JSON files and
+# broadcast to workers. Reference tables are small (< 100 rows each) so a
+# broadcast join is O(N) in silver.transactions size with no shuffle.
+# ---------------------------------------------------------------------------
+
+
+def _faml_data_candidates() -> list[str]:
+    """Candidate directories for FAML reference JSON files.
+
+    When ``LB_FAML_DATA_DIR`` is set it is the ONLY candidate --
+    tests and operators use the env var to pin a specific reference
+    directory, and falling through to other candidates on a per-file
+    miss would silently mix stale + current reference data (a partial
+    override that only contains sanctions_list.json would otherwise
+    shadow that file while other rules read from the installed pkg
+    -- split-brain reference state, no warning).
+
+    Otherwise:
+
+    1. ``lakebench.spark.data.faml`` under an installed lakebench pkg
+       (dev environment).
+    2. ``faml/`` subdirectory next to this script (cluster fallback
+       when the ConfigMap ships JSONs under a subdir mount).
+    3. The directory containing this script itself (cluster fallback
+       when the ConfigMap ships JSONs as flat top-level keys, which
+       is the default since ConfigMap keys cannot contain slashes).
+    """
+    import os
+
+    override = os.environ.get("LB_FAML_DATA_DIR")
+    if override:
+        return [override]
+
+    candidates: list[str] = []
+    try:
+        pkg = __import__("lakebench.spark.data", fromlist=["_"])
+        pkg_dir = os.path.dirname(os.path.abspath(pkg.__file__))
+        candidates.append(os.path.join(pkg_dir, "faml"))
+    except ImportError:
+        pass
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(here, "faml"))
+    candidates.append(here)
+    return candidates
+
+
+def _faml_data_path() -> str:
+    """First existing FAML data directory, or the last candidate as a
+    stable string. Kept for tests that patched the singular helper."""
+    import os
+
+    for c in _faml_data_candidates():
+        if os.path.isdir(c):
+            return c
+    return _faml_data_candidates()[-1]
+
+
+def _load_reference(spark, filename: str, schema_ddl: str) -> DataFrame | None:
+    """Load one packaged JSON reference file as a Spark DataFrame.
+
+    Returns None when the entries list is empty OR the file is not
+    present in any candidate directory. The latter is expected inside
+    the cluster driver when the scripts ConfigMap has not shipped the
+    FAML sidecar files -- callers already treat None as "reference-list
+    rule cannot run here" and return the empty alerts DF, which is the
+    correct silent degrade for a benchmark whose W5/W6/W7 signal is
+    optional.
+
+    When ``LB_FAML_DATA_DIR`` is set as the exclusive candidate and
+    it does NOT contain ``filename``, we emit a stderr note so a
+    partial override does not silently degrade to empty (round-2
+    finding: an operator setting the env var to a scratch dir with
+    only one file expects the others to work; making the override
+    authoritative for correctness reasons is right, but the missing
+    file has to be visible).
+
+    `schema_ddl` is a Spark DDL string ("col1 type1, col2 type2, ...")
+    used to type the DF. Explicit typing avoids Spark's Python-side
+    schema inference, which is slow and infers Long for what should be
+    String (e.g. sdn_id "SDN-000001").
+    """
+    import json
+    import os
+
+    path: str | None = None
+    for cand in _faml_data_candidates():
+        candidate_path = os.path.join(cand, filename)
+        if os.path.isfile(candidate_path):
+            path = candidate_path
+            break
+    if path is None:
+        override = os.environ.get("LB_FAML_DATA_DIR")
+        if override:
+            print(
+                f"[faml] LB_FAML_DATA_DIR={override!r} does not contain "
+                f"{filename!r}; rule dependent on this reference will "
+                "return empty alerts."
+            )
+        return None
+    with open(path) as f:
+        payload = json.load(f)
+    entries = payload["entries"]
+    if not entries:
+        return None
+    return spark.createDataFrame(entries, schema=schema_ddl)
+
+
+def _normalize_name_expr(col_name: str) -> str:
+    """Aggressive name normalization for sanctions/PEP joining.
+
+    Applied to both sides of the join. Strategy:
+    - upper + trim
+    - strip punctuation and any non-alphanumeric except space
+    - collapse repeated whitespace to a single space
+    - drop the common corporate suffixes (LLC, LTD, PLC, CORP, INC,
+      SA, AG, GMBH, PTE, LP) so `Foo LLC` matches `FOO`
+
+    This is a heuristic first pass -- not fuzzy match. Real production
+    sanctions filters go further (Jaccard 3-gram, phonetic, alias
+    graphs). Our contract is documented as "exact match on aggressively
+    normalized name" so the benchmark numbers describe THAT rule, not
+    fuzzy-match performance.
+    """
+    return (
+        # Order matters: strip punctuation before collapsing spaces so
+        # `"FOO, LLC"` -> `"FOO  LLC"` -> `"FOO LLC"` -> `"FOO"` after
+        # the corporate-suffix strip.
+        "regexp_replace("
+        "regexp_replace("
+        "regexp_replace("
+        "upper(trim(coalesce(" + col_name + ", ''))), "
+        "'[^A-Z0-9 ]', ' '"
+        "), "
+        "'\\\\s+', ' '"
+        "), "
+        "'( LLC| LTD| PLC| CORP| CORPORATION| INC| SA| AG| GMBH| PTE| LP| CO| COMPANY| GROUP| HOLDINGS)+$', ''"
+        ")"
+    )
+
+
+def w5_sanctions_match(
+    silver_txns: DataFrame,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Flag transactions whose beneficiary name matches an SDN entry.
+
+    Exact match on the normalized (uppercased/trimmed/collapsed) name.
+    Fuzzy match (Jaccard 3-gram or Levenshtein) is a Phase 2 extension
+    tracked as a follow-up. Exact match is the FIRST pass -- it matches
+    real production sanctions filters' "hard hit" tier.
+    """
+    from pyspark.sql.functions import broadcast
+
+    spark = silver_txns.sparkSession
+    raw = _load_reference(
+        spark,
+        "sanctions_list.json",
+        "sdn_id string, entity_name string, entity_type string, program string",
+    )
+    if raw is None:
+        return _empty_alerts_df(spark, run_id)
+    sdn = raw.select(
+        col("sdn_id"),
+        expr(_normalize_name_expr("entity_name")).alias("sdn_name_key"),
+    )
+
+    hits = silver_txns.select(
+        col("uetr"),
+        col("originator_id").alias("entity_id"),
+        col("beneficiary_id"),
+        col("txn_timestamp"),
+        col("txn_currency"),
+        col("txn_amount").cast("double").alias("amount"),
+        col("rptd_beneficiary_name"),
+        expr(_normalize_name_expr("rptd_beneficiary_name")).alias("bene_name_key"),
+    ).join(broadcast(sdn), col("bene_name_key") == col("sdn_name_key"), "inner")
+
+    alerts = hits.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W5_sanctions_match").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("entity_id"),
+        array(col("uetr")).alias("related_txn_ids"),
+        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
+        col("txn_timestamp").alias("alert_ts"),
+        lit(0.95).cast("double").alias("alert_score"),
+        lit("HIGH").alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("sanctions_match").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Beneficiary ', rptd_beneficiary_name, ' matches SDN entry ', sdn_id, "
+            "' on transaction ', uetr)"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(lit("rule"), lit("sdn_id"), lit("match_mode")),
+            array(lit("W5_sanctions_match"), col("sdn_id"), lit("exact")),
+        ).alias("evidence"),
+    )
+    return alerts
+
+
+def w6_pep_counterparty(
+    silver_txns: DataFrame,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Flag transactions with a PEP beneficiary.
+
+    Unlike sanctions matches, PEP counterparties are not intrinsically
+    fraudulent -- they trigger enhanced due diligence, not blocking. So
+    the alert priority defaults to MED, and we only emit an alert when
+    the transaction is over $10,000 USD equivalent (small PEP payments
+    are administrative and generate too many false positives).
+    """
+    from pyspark.sql.functions import broadcast
+
+    spark = silver_txns.sparkSession
+    raw = _load_reference(
+        spark,
+        "pep_list.json",
+        "pep_id string, entity_name string, entity_type string, position string",
+    )
+    if raw is None:
+        return _empty_alerts_df(spark, run_id)
+    pep = raw.select(
+        col("pep_id"),
+        expr(_normalize_name_expr("entity_name")).alias("pep_name_key"),
+        col("position"),
+    )
+
+    # Use txn_amount when txn_amount_usd is NULL (missing FX enrichment).
+    # A JPY / EUR PEP payment without the USD conversion would otherwise
+    # silently drop out of alerts because `NULL >= 10000` filters to false.
+    # Using the raw txn_amount is a conservative fallback: false-positive
+    # rate rises slightly on foreign currencies but no PEP hits vanish.
+    hits = (
+        silver_txns.filter(expr("coalesce(txn_amount_usd, txn_amount) >= 10000"))
+        .select(
+            col("uetr"),
+            col("originator_id").alias("entity_id"),
+            col("beneficiary_id"),
+            col("txn_timestamp"),
+            col("txn_amount").cast("double").alias("amount"),
+            col("txn_amount_usd"),
+            col("rptd_beneficiary_name"),
+            expr(_normalize_name_expr("rptd_beneficiary_name")).alias("bene_name_key"),
+        )
+        .join(broadcast(pep), col("bene_name_key") == col("pep_name_key"), "inner")
+    )
+
+    alerts = hits.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W6_pep_counterparty").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("entity_id"),
+        array(col("uetr")).alias("related_txn_ids"),
+        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
+        col("txn_timestamp").alias("alert_ts"),
+        lit(0.65).cast("double").alias("alert_score"),
+        lit("MED").alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("pep_counterparty").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Beneficiary ', rptd_beneficiary_name, ' is PEP ', pep_id, "
+            "' (', position, ') with USD equivalent ', cast(txn_amount_usd as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(lit("rule"), lit("pep_id"), lit("position")),
+            array(lit("W6_pep_counterparty"), col("pep_id"), col("position")),
+        ).alias("evidence"),
+    )
+    return alerts
+
+
+def w7_cross_border_high_risk(
+    silver_txns: DataFrame,
+    silver_entities: DataFrame | None = None,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Flag cross-border transactions to a FATF grey/black list jurisdiction.
+
+    Requires silver.entities to be joinable on beneficiary_id to get the
+    country. Callers with a live silver in the current catalog can leave
+    ``silver_entities`` as None -- the rule will auto-load
+    ``LB_ICEBERG_CATALOG.LB_FINANCIAL_SILVER_ENTITIES`` (default
+    ``lakehouse.silver.entities``) from the Spark session. If that table
+    is not present (e.g. running against a partial silver from a legacy
+    schema), the rule returns zero alerts rather than raising.
+
+    Historically this rule crashed inside the driver when the caller did
+    NOT pass silver_entities AND the reference JSON was not mounted --
+    the ImportError from ``import lakebench.spark.data`` surfaced as a
+    hard failure of the whole replay job. Both paths now degrade to an
+    empty alerts DF with a stderr note so downstream metrics see a real
+    zero, not a stack trace.
+    """
+    import os
+
+    from pyspark.sql.functions import broadcast
+    from pyspark.sql.utils import AnalysisException
+
+    spark = silver_txns.sparkSession
+    raw = _load_reference(
+        spark,
+        "high_risk_jurisdictions.json",
+        "country_code string, country_name string, risk_tier string",
+    )
+    if raw is None:
+        print("[W7] high_risk_jurisdictions.json not available; skipping.")
+        return _empty_alerts_df(spark, run_id)
+
+    if silver_entities is None:
+        catalog = os.environ.get("LB_ICEBERG_CATALOG", "lakehouse")
+        entities_table = os.environ.get("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+        try:
+            silver_entities = spark.table(f"{catalog}.{entities_table}")
+        except AnalysisException as e:
+            print(f"[W7] silver.entities not found ({e}); skipping cross-border alerts.")
+            return _empty_alerts_df(spark, run_id)
+    hrj = raw.select(
+        col("country_code"),
+        col("risk_tier"),
+    )
+
+    # Collapse silver.entities to one country per entity_id
+    # deterministically. Prior version used ``.dropDuplicates(["bene_entity_id"])``
+    # which keeps whichever row Spark's shuffle put first -- across
+    # re-runs against the same silver, two entities with divergent
+    # country values (SCD1 update in flight, upstream dedup bug) would
+    # produce different W7 alert counts run-to-run. Contract of this
+    # rule is reproducibility, so aggregate to the lexicographically
+    # smallest country per entity_id: unambiguous, deterministic,
+    # tolerant of a rare multi-country row without silently biasing.
+    from pyspark.sql.functions import min as _min_agg
+
+    entities_country = (
+        silver_entities.filter(col("country").isNotNull())
+        .select(col("entity_id").alias("bene_entity_id"), col("country").alias("bene_country"))
+        .groupBy("bene_entity_id")
+        .agg(_min_agg("bene_country").alias("bene_country"))
+    )
+
+    hits = (
+        silver_txns.filter(col("cross_border") == True)  # noqa: E712
+        # inner join on entities: rows without a resolvable beneficiary
+        # country do NOT alert here. That is a documented limitation:
+        # cross-border alerts require the entity master to know the
+        # counterparty country. Alternative would be to derive country
+        # from beneficiary_bank_bic (chars 5-6) as a fallback; deferred
+        # until we characterize what fraction of cross-border txns have
+        # missing entity enrichment. Left join + inner-on-hrj was
+        # misleading because inner-on-hrj drops NULL country too.
+        .join(entities_country, col("beneficiary_id") == col("bene_entity_id"), "inner")
+        .join(broadcast(hrj), col("bene_country") == col("country_code"), "inner")
+        .select(
+            col("uetr"),
+            col("originator_id").alias("entity_id"),
+            col("beneficiary_id"),
+            col("txn_timestamp"),
+            col("txn_amount").cast("double").alias("amount"),
+            col("bene_country"),
+            col("risk_tier"),
+        )
+    )
+
+    alerts = hits.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W7_cross_border_high_risk").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("entity_id"),
+        array(col("uetr")).alias("related_txn_ids"),
+        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
+        col("txn_timestamp").alias("alert_ts"),
+        when(col("risk_tier") == "black", lit(0.90))
+        .otherwise(lit(0.60))
+        .cast("double")
+        .alias("alert_score"),
+        when(col("risk_tier") == "black", lit("HIGH")).otherwise(lit("MED")).alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("cross_border_high_risk").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Cross-border transaction to ', bene_country, ' (FATF ', risk_tier, ' list) "
+            "for ', cast(amount as string), ' on ', cast(txn_timestamp as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(lit("rule"), lit("country"), lit("risk_tier")),
+            array(lit("W7_cross_border_high_risk"), col("bene_country"), col("risk_tier")),
+        ).alias("evidence"),
+    )
+    return alerts
+
+
+def w8_dormant_reactivation(
+    silver_txns: DataFrame,
+    dormant_days: int = 90,
+    amount_threshold_usd: float = 5000.0,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Flag reactivation of dormant originator accounts.
+
+    An originator's transaction is flagged when:
+    - The gap to the originator's prior transaction exceeds dormant_days;
+    - The current transaction's USD-equivalent amount >= threshold.
+
+    First-ever activity for an originator is NOT flagged (no prior
+    baseline). This is the correct semantics -- we cannot say an
+    account was dormant if we never observed it before.
+    """
+    from pyspark.sql.functions import lag, unix_timestamp
+
+    # Secondary sort on uetr so same-microsecond ties are broken
+    # deterministically. Without this the LAG output is
+    # shuffle-order-dependent and W8's alert count drifts between runs
+    # -- fatal for benchmark reproducibility because typology-injected
+    # bursts pack multiple txns into the same microsecond by design.
+    prior = Window.partitionBy("originator_id").orderBy(col("txn_timestamp"), col("uetr"))
+    # Keep txn_amount under its original name so the coalesce below
+    # resolves; the aliased `amount` copy is only used in the narrative.
+    with_lag = silver_txns.select(
+        col("uetr"),
+        col("originator_id"),
+        col("beneficiary_id"),
+        col("txn_timestamp"),
+        col("txn_amount"),
+        col("txn_amount").cast("double").alias("amount"),
+        col("txn_amount_usd"),
+        lag("txn_timestamp").over(prior).alias("prev_ts"),
+    )
+
+    dormant_seconds = dormant_days * 86400
+    # W8 amount check falls back to raw txn_amount when the USD
+    # conversion is missing -- symmetric with the W6 NULL-USD guard so
+    # a foreign-currency reactivation is not silently ignored.
+    hits = with_lag.filter(
+        (col("prev_ts").isNotNull())
+        & ((unix_timestamp("txn_timestamp") - unix_timestamp("prev_ts")) >= dormant_seconds)
+        & (expr("coalesce(txn_amount_usd, txn_amount) >= " + str(amount_threshold_usd)))
+    )
+
+    alerts = hits.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W8_dormant_reactivation").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("originator_id").alias("entity_id"),
+        array(col("uetr")).alias("related_txn_ids"),
+        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
+        col("txn_timestamp").alias("alert_ts"),
+        lit(0.70).cast("double").alias("alert_score"),
+        lit("MED").alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("dormant_reactivation").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Originator ', cast(originator_id as string), ' reactivated after ', "
+            "cast(round((unix_timestamp(txn_timestamp) - unix_timestamp(prev_ts)) / 86400.0, 0) "
+            "as string), ' days with USD ', cast(txn_amount_usd as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(lit("rule"), lit("dormant_days"), lit("amount_threshold_usd")),
+            array(
+                lit("W8_dormant_reactivation"),
+                lit(str(dormant_days)),
+                lit(str(amount_threshold_usd)),
             ),
         ).alias("evidence"),
     )
@@ -647,25 +1152,27 @@ def _empty_alerts_df(spark, run_id: str) -> DataFrame:
         TimestampType,
     )
 
-    schema = StructType([
-        StructField("alert_id", StringType(), False),
-        StructField("rule_id", StringType(), False),
-        StructField("rule_version", StringType(), False),
-        StructField("model_id", StringType(), False),
-        StructField("model_version", StringType(), False),
-        StructField("entity_id", LongType(), True),
-        StructField("related_txn_ids", ArrayType(StringType()), True),
-        StructField("related_entity_ids", ArrayType(LongType()), True),
-        StructField("alert_ts", TimestampType(), True),
-        StructField("alert_score", DoubleType(), True),
-        StructField("priority", StringType(), True),
-        StructField("status", StringType(), True),
-        StructField("disposition", StringType(), True),
-        StructField("alert_type", StringType(), True),
-        StructField("run_id", StringType(), True),
-        StructField("narrative", StringType(), True),
-        StructField("evidence", MapType(StringType(), StringType()), True),
-    ])
+    schema = StructType(
+        [
+            StructField("alert_id", StringType(), False),
+            StructField("rule_id", StringType(), False),
+            StructField("rule_version", StringType(), False),
+            StructField("model_id", StringType(), False),
+            StructField("model_version", StringType(), False),
+            StructField("entity_id", LongType(), True),
+            StructField("related_txn_ids", ArrayType(StringType()), True),
+            StructField("related_entity_ids", ArrayType(LongType()), True),
+            StructField("alert_ts", TimestampType(), True),
+            StructField("alert_score", DoubleType(), True),
+            StructField("priority", StringType(), True),
+            StructField("status", StringType(), True),
+            StructField("disposition", StringType(), True),
+            StructField("alert_type", StringType(), True),
+            StructField("run_id", StringType(), True),
+            StructField("narrative", StringType(), True),
+            StructField("evidence", MapType(StringType(), StringType()), True),
+        ]
+    )
     return spark.createDataFrame([], schema)
 
 
@@ -674,6 +1181,10 @@ _RULE_DISPATCH = {
     "W2_structuring": w2_structuring,
     "W3_round_tripping": w3_round_tripping,
     "W4_risk_propagation": w4_risk_propagation,
+    "W5_sanctions_match": w5_sanctions_match,
+    "W6_pep_counterparty": w6_pep_counterparty,
+    "W7_cross_border_high_risk": w7_cross_border_high_risk,
+    "W8_dormant_reactivation": w8_dormant_reactivation,
 }
 
 

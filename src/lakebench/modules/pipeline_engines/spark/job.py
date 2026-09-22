@@ -67,7 +67,13 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "executor_cores": 4,
         "executor_memory": "48g",
         "executor_memory_overhead": "12g",
-        "scratch_size": "150Gi",
+        # 300Gi (was 150Gi). At scale 100, live UAT hit "No space left
+        # on device" mid-silver-build: c360's window + wide-join shuffle
+        # spill exceeds 150Gi per executor once the max_executors cap
+        # (28) means data-per-executor stops decreasing with scale.
+        # Portworx px-csi-scratch is repl=1 (ephemeral), so growing this
+        # only costs bare block storage. Do not shrink.
+        "scratch_size": "300Gi",
         "base_executors": 8,  # scale <= 10
         "executors_per_100_scale": 12,  # add 12 per 100 scale units
         "max_executors": _MAX_EXECUTORS_SAFE,
@@ -894,7 +900,10 @@ class SparkJobManager:
 
         # Build SparkApplication manifest
         manifest = self._build_manifest(
-            job_type, extra_conf, cycle_env=cycle_env, arguments=arguments,
+            job_type,
+            extra_conf,
+            cycle_env=cycle_env,
+            arguments=arguments,
         )
 
         # Apply manifest
@@ -1490,8 +1499,14 @@ class SparkJobManager:
         # At scale 100 (1TB): 1024MB partitions = ~1000 tasks.
         # At scale 10 (100GB): 256MB partitions = ~400 tasks (floor applies).
         target_tasks = 2000
-        approx_bronze_gb = scale * 10
-        partition_mb = max(256, min(2048, (approx_bronze_gb * 1024) // target_tasks))
+        # `scale` is a float (e.g. 100.0). Without int() the arithmetic
+        # returns a float, `str(536870912.0) = "536870912.0"`, and Spark
+        # rejects the fractional byte value with `NumberFormatException:
+        # Size must be specified as bytes ...`. Only manifests when
+        # `partition_bytes` is not a whole GiB (i.e. at scales where the
+        # formula lands between the 256 MiB floor and the 2 GiB ceiling).
+        approx_bronze_gb = int(scale * 10)
+        partition_mb = int(max(256, min(2048, (approx_bronze_gb * 1024) // target_tasks)))
         partition_bytes = partition_mb * 1024 * 1024
         spark_conf.update(
             {
@@ -1978,6 +1993,26 @@ class SparkJobManager:
             if script_path.exists():
                 data[script_file] = script_path.read_text()
                 logger.info(f"Loaded script: {script_file}")
+
+        # FAML reference JSON sidecars (sanctions, PEP, high-risk
+        # jurisdictions). Detection rules load these by filename via
+        # ``_load_reference`` in detection_rules.py; without them
+        # inside the driver, W5/W6/W7 silently return zero alerts,
+        # and W7 previously crashed with an opaque ImportError from
+        # ``import lakebench.spark.data`` because the lakebench
+        # package is not installed in the apache/spark image. The
+        # three files together are ~8 KB, well under the 1 MiB
+        # ConfigMap limit. ConfigMap keys cannot contain slashes so
+        # the files land flat next to the scripts under
+        # /opt/spark/scripts/; the reader's candidate-directory search
+        # finds them there.
+        from lakebench._resources import get_faml_data_dir
+
+        faml_data_dir = get_faml_data_dir()
+        if faml_data_dir is not None and faml_data_dir.is_dir():
+            for json_path in sorted(faml_data_dir.glob("*.json")):
+                data[json_path.name] = json_path.read_text()
+                logger.info(f"Loaded FAML reference: {json_path.name}")
 
         if not data:
             logger.warning("No Spark scripts found")
