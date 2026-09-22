@@ -771,6 +771,64 @@ def _print_rounds_summary(console, rounds: list) -> None:
     console.print(f"  {' | '.join(parts)}")
 
 
+def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
+    """Poll the bronze bucket for the first ``.parquet`` file to land.
+
+    Called before the FAML bronze-verify preflight so
+    ``spark.read.parquet(prefix)`` does not hit AnalysisException on
+    an empty prefix. Returns True when a parquet is visible, False
+    on timeout. Best-effort: falls through (returns True) if the S3
+    client cannot be constructed, so a config with a rotated key
+    doesn't wedge the sustained CLI here -- the preflight itself
+    will surface any real credential issues.
+    """
+    import time as _t
+
+    try:
+        from lakebench.s3 import S3Client
+    except Exception:  # noqa: BLE001
+        return True
+
+    s3_cfg = cfg.platform.storage.s3
+    try:
+        client = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=getattr(s3_cfg, "ca_cert", None),
+            verify_ssl=getattr(s3_cfg, "verify_ssl", True),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not construct S3 client for preflight wait: %s", e)
+        return True
+
+    bronze = s3_cfg.buckets.bronze
+    raw = client.raw_client
+    deadline = _t.time() + timeout_seconds
+    interval = 5.0
+    while _t.time() < deadline:
+        try:
+            resp = raw.list_objects_v2(Bucket=bronze, MaxKeys=50)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("list_objects_v2 on %s failed: %s", bronze, e)
+            _t.sleep(interval)
+            continue
+        for item in resp.get("Contents") or []:
+            key = item.get("Key", "")
+            if key.endswith(".parquet"):
+                return True
+        _t.sleep(interval)
+    logger.warning(
+        "No parquet under s3://%s/ after %ds; running preflight anyway (it will "
+        "fail loudly if the prefix is still empty).",
+        bronze,
+        timeout_seconds,
+    )
+    return False
+
+
 def _run_sustained(
     cfg,
     config_file: Path,
@@ -865,7 +923,10 @@ def _run_sustained(
             raise typer.Exit(1)
         print_success("Spark scripts deployed")
 
-        # Start datagen (runs concurrently with streaming jobs)
+        # Start datagen first so the FAML preflight below has parquet
+        # data to infer a schema from. Datagen runs concurrently with
+        # every subsequent stage (streaming jobs consume the same
+        # prefix as it lands).
         console.print()
         console.print("[bold]Starting datagen...[/bold]")
         engine = DeploymentEngine(cfg)
@@ -889,6 +950,56 @@ def _run_sustained(
                 "target_gb": round(dims.approx_bronze_gb, 1),
             },
         )
+
+        # LB-091: FAML sustained mode needs the bronze Iceberg table to
+        # exist before bronze_ingest_financial starts -- the streaming
+        # source cannot infer a schema from parquet files, so it hard-
+        # exits with `sys.exit(2)` when the table is missing. Only
+        # bronze_verify_financial creates the table (with
+        # LB_REGISTER_TABLE=1); nothing else in the sustained path
+        # writes it. Run one bronze-verify pass here so the streaming
+        # jobs have a target to write to. C360 uses `bronze_ingest.py`
+        # which does not have this dependency, so we scope the
+        # preflight to workload.schema=financial.
+        #
+        # Ordering is intentional: bronze_verify_financial's schema
+        # inference calls ``spark.read.parquet(prefix)`` which fails
+        # with AnalysisException on an empty prefix, so we start
+        # datagen first and poll for the first parquet to land before
+        # submitting bronze-verify. Adversarial-review finding: without
+        # this ordering the preflight hard-fails on the first ever
+        # sustained deploy of a fresh bronze bucket.
+        if cfg.architecture.workload.schema_type.value == "financial":
+            console.print()
+            print_info("Waiting for first parquet to land in bronze before preflight...")
+            _wait_for_bronze_data(cfg, timeout_seconds=300)
+
+            console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
+            preflight_status = job_manager.submit_job(
+                JobType.BRONZE_VERIFY,
+                cycle_env={"LB_REGISTER_TABLE": "1"},
+            )
+            if preflight_status.state == JobState.FAILED:
+                print_error(f"bronze-verify preflight submit failed: {preflight_status.message}")
+                pipeline_success = False
+                raise typer.Exit(1)
+            # Preflight budget is a hard 20 min: it should complete in
+            # under 5 min at any realistic scale (registers an Iceberg
+            # table from a partial parquet listing). Using the CLI's
+            # sustained ``timeout`` here would be misleading -- that's
+            # for the whole streaming window, not a preflight step.
+            preflight_result = monitor.wait_for_completion(
+                "lakebench-bronze-verify",
+                timeout_seconds=1200,
+                poll_interval=15,
+            )
+            if not preflight_result.success:
+                print_error(f"bronze-verify preflight failed: {preflight_result.message}")
+                pipeline_success = False
+                raise typer.Exit(1)
+            print_success(
+                f"bronze-verify preflight complete in {preflight_result.elapsed_seconds:.0f}s"
+            )
 
         # Launch all streaming jobs concurrently
         console.print()
