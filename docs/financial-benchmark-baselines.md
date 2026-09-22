@@ -40,25 +40,63 @@ go elsewhere.
 
 ## Batch pipeline (bronze_verify -> silver_build -> gold_finalize)
 
-Wall-clock covers the batch pipeline only. Detection rules run separately via `lakebench financial replay` (LB-092 tracks the gap); recall in this table is derived from that manual detection loop plus `lakebench financial score`. Alert count is the sum across every W-rule that completed. Cores used is the peak Spark-executor request across the three batch jobs (silver_build is the peak in every measured run).
+Wall-clock covers the batch pipeline only. As of PR-G (LB-112) detection
+rules run inline as the final step of gold_finalize, so `alert count`
+below reflects what one `lakebench run` writes to `gold.alerts` per
+cycle (no separate `lakebench financial replay` needed). Cores used is
+the peak Spark-executor request across the three batch jobs
+(silver_build is the peak in every measured run).
 
 | Scale | Wall-clock p50 (s) | Wall-clock p95 (s) | Alert count | Recall | Cores used | Storage read (GB) |
 |------:|-------------------:|-------------------:|------------:|-------:|-----------:|------------------:|
-|     1 |            707.5[1]|                TBD |    163,526[2]|   0.331[3]|         32 |             14.4  |
+|     1 |            930.5[1]|          1065.6[2] |         [3] |   [3]  |         32 |             14.4  |
 |    10 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 |   100 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 |  1000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 | 10000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 
-Footnotes on scale 1 (run-20260921-220243-fea608, first live end-to-end FAML pipeline on the reference cluster, 2026-09-21):
+Footnotes on scale 1 (three runs, first three-iter clean baseline on
+the reference cluster after PR-G + PR-H, 2026-09-22):
 
-[1] Single run; treat as p50 not p95. bronze_verify 360s, silver_build 255s, gold_finalize 75s. Datagen wrote 10 GB pacs.008 (26.66M silver rows).
+[1] Median of three consecutive `lakebench run` cycles at scale 1 on
+2026-09-22. Wall-clock per iter: 1065.6s, 930.5s, 930.1s. Per-stage
+figures (min/p50/max): bronze_verify 360.3 / 360.3 / 495.4s;
+silver_build 255.2 / 255.2 / 255.2s; gold_finalize 300.2 / 300.2 /
+300.3s. Silver_build and gold_finalize are within-0.1s across runs
+-- the wall-clock spread lives entirely in bronze_verify's Ivy jar
+resolution, which took 135s longer on iter 1 than on iter 2/3 (cold
+mirror fetch first time through -- see PR-H Maven mirror fallback).
+Gold_finalize is 300s (up from 75s in the earlier LB-092 run) because
+the six W-rules now run inline as part of gold_finalize -- W1 through
+W4, W7, and W8 all executed; the alert-writing DELETE-then-INSERT is
+per-rule idempotent, so a re-run against the same silver yields the
+same alert set.
 
-[2] Sum across the four W-rules that completed via `lakebench financial replay --depth-months 0`: W2_structuring 2,438; W3_round_tripping 180; W4_risk_propagation 98,786; W8_dormant_reactivation 62,122. W1_connected_components and W7_cross_border_high_risk crashed on rule-code defects (`Column dst#63L are ambiguous` self-join in W1) and are not counted; file follow-ups against `detection_rules.py` before quoting this number in an external context.
+[2] With n=3, p95 is effectively the maximum. The 1065.6s upper bound
+was driven by the first run's cold Maven mirror fetch; a warmer cache
+would bring this closer to p50. Repopulate once n >= 10 for a real p95.
 
-[3] Weighted mean over the four typologies each completed rule targets per `RULE_TARGETS` in `benchmark/faml_queries.py`: micro_structuring 0.482 (222 instances), rapid_layering 0.305 (889), stack 0.401 (444), dormant_reactivation 0.233 (356). UETR-level FP rate across the full alert set is 0.985 -- roughly 98% of alerts do not touch any manifest-tagged typology row, which is expected on a synthetic baseline and NOT a claim about ops-queue FP rate (see `docs/faml-scoring.md`). Per-typology recall for all 15 planted typologies is in the `recall.parquet` artifact under the gold bucket.
+[3] Alert count and per-rule recall are not yet reported in this row.
+The three runs each wrote 1.068 GB to `gold.alerts` (identical to
+three significant figures across runs -- consistent evidence detection
+is deterministic), but the driver's per-rule alerts=N log lines were
+not extracted into `metrics.json` at run time and the buckets were
+destroyed between iterations. LB-116 tracks the missing metric
+extraction; the next baseline pass (once the per-rule counts are
+recorded to `metrics.json`) will populate both. LB-094 (silver-build
+role-prefix bug that splits every entity into two silver rows) also
+depresses recall structurally and is not addressed in PR-G; W1-W4
+recall will step up once LB-101 lands.
 
-Not populated in this row: QpH (LB-093: spark-thrift default 4Gi limit OOMs on scale-1 silver aggregation, so the 8-query FAML benchmark returns 0/8 until sizing is bumped) and Wall-clock p95 (single run).
+Not populated in this row: QpH. Post-compaction QpH across the three
+runs was 6.6 / 0.0 / 8.2. The zero was a spark-thrift pod crash
+mid-benchmark on iter 2, not a pipeline failure. The other two runs
+had four of eight FAML queries timing out at 300 s (FQ1 full silver
+scan, FQ2 top corridors, FQ4 running balance, FQ5 alert triage, FQ8
+alert-to-entity join). Pre-compaction QpH was 38.8 / 39.1 / 39.0
+(4/8 queries succeeded, cadre stable). LB-113 fixed the 4 Gi OOM;
+LB-117 tracks the remaining query-timeout tune for FAML analytical
+queries. QpH will populate here after LB-117 lands.
 
 ## Sustained pipeline (bronze_ingest -> silver_stream -> gold_refresh)
 
@@ -108,4 +146,6 @@ Follow this after each release UAT:
 
 ## History
 
-**2026-09-21 (v1.5.0.dev0, run-20260921-220243-fea608)** -- first live end-to-end FAML pipeline on the reference cluster. Scale-1 row populated in the batch table. Not a release measurement -- the run surfaced five real defects (LB-088 FlashBlade tagging, LB-089 datagen v2 layout drift, LB-090 sustained-mode env-var drift, LB-091 sustained CLI missing bronze_verify, LB-092 gold_finalize does not invoke detection rules, LB-093 spark-thrift undersized) and the fixes are still in flight. Scale-10 and above will not be measured until LB-092 and LB-093 are closed.
+**2026-09-21 (v1.5.0.dev0, run-20260921-220243-fea608)** -- first live end-to-end FAML pipeline on the reference cluster. Scale-1 row populated in the batch table. Not a release measurement -- the run surfaced five real defects (LB-088 FlashBlade tagging, LB-089 datagen v2 layout drift, LB-090 sustained-mode env-var drift, LB-091 sustained CLI missing bronze_verify, LB-112 gold_finalize does not invoke detection rules, LB-113 spark-thrift undersized) and the fixes are still in flight. Scale-10 and above will not be measured until the batch pipeline runs three times cleanly.
+
+**2026-09-22 (v1.5.0.dev0, three consecutive S1 runs)** -- first clean three-iter S1 baseline on the reference cluster after PR-G (LB-112/113/114/115) and PR-H (Google Maven mirror fallback for repo1.maven.org rate-limits) landed. All three pipelines completed rc=0, gold_finalize wrote an identical 1.068 GB to `gold.alerts` in every run, and per-stage timings were within 0.1s except for iter-1's Ivy jar-resolution cold start. Scale-1 row repopulated with p50 = 930.5s and n=3 max = 1065.6s. LB-116 and LB-117 track two remaining follow-ups (missing per-rule alert counts in metrics.json, FAML analytical query timeouts); LB-094 (bipartite silver-build entity split) still depresses recall structurally.
