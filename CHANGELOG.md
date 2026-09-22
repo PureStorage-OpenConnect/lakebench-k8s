@@ -7,6 +7,60 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **LB-089 (P0): FAML pipeline broken end-to-end since the datagen
+  Rust rewrite.** `bronze_verify_financial.py` and
+  `bronze_ingest_financial.py` read pacs.008 transactions from
+  `LB_BRONZE_URI + LB_FINANCIAL_BRONZE_PREFIX` (default `pacs008/`)
+  -- the flat layout the retired Python datagen used. datagen_rs
+  writes into a nested layout to hold four related bronze tables
+  (`{root}/bronze/pacs008/part-*.parquet` for the pacs.008
+  transactions, plus `{root}/bronze/party.parquet`,
+  `{root}/bronze/account.parquet`, and
+  `{root}/manifest/manifest.parquet`). Spark listing the root
+  hits three subdirs with different schemas and refuses with
+  `UNABLE_TO_INFER_SCHEMA`. Found live on 2026-09-21 during the
+  first end-to-end FAML deploy attempt. Same systemic pattern as
+  LB-088: shipped through PR-A/B/C/D/E because no unit test read
+  real datagen v2 output and no live pipeline run gated the
+  branch. C360 was unaffected -- its datagen writes flat and its
+  reader reads flat. Round 1 fix: both bronze readers now honour
+  `LB_FINANCIAL_BRONZE_PREFIX` as the ROOT prefix (matches what
+  `job.py` mirrors from `path_template`) and derive
+  `PACS_PREFIX = root + "bronze/pacs008/"`. New env
+  `LB_FINANCIAL_PACS_PATH` is the escape hatch for a bespoke
+  layout without leaking that concern into every reader.
+  Adversarial pass on round 1 found round 2: `bronze.manifest`
+  Iceberg table was never registered so 4 of 7 FAML benchmark
+  queries (`rule_precision`, `rule_recall`, `rule_ttd`,
+  `aggregate_typology_coverage`) failed at Trino with "Table does
+  not exist" -- fixed by extending `bronze_verify_financial` to
+  register `{catalog}.bronze.manifest` from the manifest sidecar
+  via CTAS (small table, unconditional; failure is logged and
+  non-fatal so batch alerts still ship). Added
+  `tests/test_faml_datagen_reader_layout.py` (5 tests): AST-based
+  cross-language lock-step gate between the Rust writer and the
+  Python reader; docstrings stripped so a comment mentioning the
+  string cannot satisfy the check while the code path reverts.
+  Not live-verified post-fix -- unit-tested only; live re-run
+  pending on `faml-baseline-s1`. LB-090 and LB-091 opened for
+  sustained-mode-only follow-ups (env-var contract drift on
+  streaming, and `bronze_verify` never scheduled by the sustained
+  CLI).
+
+### Changed
+- **`LB_FINANCIAL_BRONZE_PREFIX` semantic on `bronze_ingest_financial`
+  (LB-089).** The env var previously meant the INNER path
+  (default `bronze/pacs008/`) on `bronze_ingest_financial.py`
+  while it meant the OUTER root on `bronze_verify_financial.py`
+  and in `job.py`. Both scripts now agree: OUTER root, datagen
+  v2 sub-path derived internally. Any external caller that had
+  set `LB_FINANCIAL_BRONZE_PREFIX=bronze/pacs008/` on
+  `bronze_ingest_financial` for its old-contract semantics
+  will now double-prefix to `bronze/pacs008/bronze/pacs008/`
+  and read zero rows without erroring; set
+  `LB_FINANCIAL_BRONZE_PREFIX` to the datagen root
+  (`pacs008/` at the default) or use `LB_FINANCIAL_PACS_PATH`
+  to override the derived sub-path directly.
 - **LB-088 (P0): FlashBlade returns `NotImplemented` on
   `GetBucketTagging` and `PutBucketTagging`.** The primary tested S3
   target does not implement the tagging APIs that PR-1's ownership

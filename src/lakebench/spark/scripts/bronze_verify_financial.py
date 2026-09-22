@@ -17,13 +17,36 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, expr
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-# datagen_rs writes pacs.008 files under `<uploader_prefix>/bronze/pacs008/*`
-# (see datagen_rs/src/bin/generate.rs: `bronze/pacs008/...`). The datagen_py
-# Financial generator writes under `pacs008/`. Datagen_py is the shipping
-# batch-mode path (`lakebench generate` uses the Docker image), so default
-# to that layout; operators using the Rust datagen at scale >100 override
-# to `bronze/pacs008/`.
-PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
+# datagen_rs is the only shipping datagen after the Python generator was
+# removed. It writes into a nested layout under the ROOT prefix it was
+# invoked with (--prefix, mirrored to LB_FINANCIAL_BRONZE_PREFIX by
+# lakebench/modules/pipeline_engines/spark/job.py from path_template):
+#     {root}/bronze/pacs008/part-*.parquet   (pacs.008 transactions)
+#     {root}/bronze/party.parquet            (reference table)
+#     {root}/bronze/account.parquet          (reference table)
+#     {root}/manifest/manifest.parquet       (typology ground truth)
+# LB-089: prior to PR-F this script assumed the flat datagen_py layout
+# where the ROOT prefix directly held the pacs.008 files, and Spark
+# listing the ROOT hit the three subdirs and failed with
+# UNABLE_TO_INFER_SCHEMA. PACS_PATH is derived from the root plus the
+# datagen_rs sub-path; LB_FINANCIAL_PACS_PATH lets an operator override
+# for a bespoke layout without leaking that concern into every reader.
+BRONZE_ROOT_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
+PACS_PREFIX = env(
+    "LB_FINANCIAL_PACS_PATH",
+    BRONZE_ROOT_PREFIX.rstrip("/") + "/bronze/pacs008/",
+)
+# Manifest sidecar (typology ground truth). The FAML benchmark queries
+# rule_precision, rule_recall, rule_ttd, and aggregate_typology_coverage
+# all read `{catalog}.bronze.manifest`; without a registration here the
+# whole scoring stack fails at Trino with 'Table does not exist'.
+# LB-089 round 1 fixed only the pacs.008 read; round 2 (this) adds the
+# manifest registration so a FAML benchmark actually produces recall.
+MANIFEST_PATH = env(
+    "LB_FINANCIAL_MANIFEST_PATH",
+    BRONZE_ROOT_PREFIX.rstrip("/") + "/manifest/manifest.parquet",
+)
+MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 # Default REGISTER=1: silver_build reads a real Iceberg table
 # (spark.table(CATALOG.pacs008_raw)), not the raw parquet, so without
 # registration the entire pipeline stalls at silver-build with
@@ -242,6 +265,31 @@ def main() -> None:
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
             log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
+
+        # Manifest registration (LB-089 round 2). One file, small; CTAS
+        # unconditionally. Failure of the pacs.008 registration above
+        # would have already raised, so if we're here the catalog and
+        # the SparkSession are known good. Manifest failure is however
+        # not fatal to bronze itself -- we log and continue so batch
+        # can still emit alerts; the benchmark scoring queries will
+        # then fail loudly at their own `bronze.manifest` reads.
+        manifest_ns = MANIFEST_TABLE.split(".", 1)[0] if "." in MANIFEST_TABLE else "bronze"
+        try:
+            spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{manifest_ns}")
+            spark.sql(f"""
+                CREATE OR REPLACE TABLE {CATALOG}.{MANIFEST_TABLE}
+                USING iceberg
+                TBLPROPERTIES ('format-version' = '2')
+                AS SELECT * FROM parquet.`{BRONZE_URI}{MANIFEST_PATH}`
+            """)
+            log(f"Registered manifest Iceberg table: {CATALOG}.{MANIFEST_TABLE}")
+        except Exception as e:  # noqa: BLE001
+            log(
+                f"WARNING: manifest registration failed ({e}). "
+                "FAML precision/recall/ttd/coverage queries will fail "
+                "at benchmark time; alert-volume queries and score_financial "
+                "(reads manifest via --manifest arg) are unaffected."
+            )
 
     elapsed = time.time() - start_time
     log("=" * 60)
