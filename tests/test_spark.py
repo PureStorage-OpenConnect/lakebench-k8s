@@ -1089,6 +1089,99 @@ class TestStreamingThroughputEnvVars:
         assert silver_env["TARGET_FILE_SIZE_BYTES"] == str(512 * 1024 * 1024)
         assert gold_env["TARGET_FILE_SIZE_BYTES"] == str(128 * 1024 * 1024)
 
+    def test_financial_bronze_ingest_gets_lb_financial_env_aliases(self):
+        """LB-090 bronze half: bronze_ingest_financial reads
+        ``LB_FINANCIAL_BRONZE_CHECKPOINT``, ``LB_FINANCIAL_BRONZE_MAX_FILES``,
+        ``LB_FINANCIAL_BRONZE_TRIGGER_S``. Without matching aliases the
+        script falls back to a hard-coded checkpoint under
+        ``s3a://lb-bronze/`` (a bucket that is NOT part of the current
+        deployment on any non-default config), and two parallel
+        sustained runs stomp each other's checkpoint state -- silent
+        corruption of the very parallel-safety invariant the S-P
+        scenarios exist to prove.
+        """
+        config = _make_config(
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "processing": {
+                    "sustained": {
+                        "max_files_per_trigger": 30,
+                        "bronze_trigger_interval": "20 seconds",
+                    },
+                },
+            },
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.BRONZE_INGEST)
+        env = self._get_env_dict(manifest)
+
+        assert "CHECKPOINT_LOCATION" in env
+        assert env["MAX_FILES_PER_TRIGGER"] == "30"
+        assert env["TRIGGER_INTERVAL"] == "20 seconds"
+
+        assert env.get("LB_FINANCIAL_BRONZE_CHECKPOINT") == env["CHECKPOINT_LOCATION"]
+        assert env.get("LB_FINANCIAL_BRONZE_MAX_FILES") == "30"
+        # bronze_ingest_financial expects an int-seconds string.
+        assert env.get("LB_FINANCIAL_BRONZE_TRIGGER_S") == "20"
+
+    def test_financial_silver_stream_gets_lb_financial_env_aliases(self):
+        """LB-090 silver half: silver_stream_financial reads
+        ``LB_FINANCIAL_SILVER_CHECKPOINT`` and
+        ``LB_FINANCIAL_SILVER_TRIGGER_S``. Same failure shape as bronze
+        -- silent checkpoint at a wrong bucket on any non-default
+        config, and cross-run stomping on parallel deploys."""
+        config = _make_config(
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "processing": {
+                    "sustained": {"silver_trigger_interval": "45 seconds"},
+                },
+            },
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.SILVER_STREAM)
+        env = self._get_env_dict(manifest)
+
+        assert env.get("LB_FINANCIAL_SILVER_CHECKPOINT") == env["CHECKPOINT_LOCATION"]
+        assert env.get("LB_FINANCIAL_SILVER_TRIGGER_S") == "45"
+
+    def test_financial_gold_refresh_gets_lb_financial_env_alias(self):
+        """LB-090 gold half: gold_refresh_financial reads
+        ``LB_FINANCIAL_GOLD_REFRESH_S`` (an int seconds trigger). Gold
+        refresh does not have a checkpoint like the streaming stages,
+        so only the refresh-interval alias is required."""
+        config = _make_config(
+            architecture={
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "processing": {
+                    "sustained": {"gold_refresh_interval": "2 minutes"},
+                },
+            },
+        )
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        manifest = mgr._build_manifest(JobType.GOLD_REFRESH)
+        env = self._get_env_dict(manifest)
+
+        assert env.get("LB_FINANCIAL_GOLD_REFRESH_S") == "120"
+
+    def test_c360_streaming_does_not_get_lb_financial_env(self):
+        """The LB_FINANCIAL_* aliases must only appear under
+        ``workload.schema=financial``. Belt and braces against a
+        future generic script that greps for the LB_FINANCIAL_ prefix."""
+        config = _make_config()  # default schema = customer360
+        k8s = _mock_k8s()
+        mgr = SparkJobManager(config, k8s)
+        for jt in (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH):
+            manifest = mgr._build_manifest(jt)
+            env = self._get_env_dict(manifest)
+            for k in env:
+                assert not k.startswith("LB_FINANCIAL_"), (
+                    f"{jt.value} unexpectedly carries {k!r} under a C360 schema"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Spark Operator Namespace Watching

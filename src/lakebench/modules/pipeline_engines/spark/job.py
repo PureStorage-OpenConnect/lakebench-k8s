@@ -526,6 +526,33 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 # is exactly the signal that triggers the next resolver.
 _MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
 
+
+def _spark_interval_to_seconds(interval: str) -> int:
+    """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
+    ``"1 hour"``) to an integer seconds value. Returns 10 on unparseable
+    input rather than raising, since this feeds a env-var value that the
+    FAML sustained scripts use as a trigger period; a bad parse should
+    default to their previous hard-coded fallback rather than blow up
+    the manifest build. Kept alongside the mirror constant so the two
+    small stringy helpers live together instead of drifting into
+    separate modules."""
+    parts = interval.strip().lower().split()
+    if len(parts) != 2:
+        return 10
+    try:
+        value = int(parts[0])
+    except ValueError:
+        return 10
+    unit = parts[1].rstrip("s")
+    if unit == "second":
+        return value
+    if unit == "minute":
+        return value * 60
+    if unit == "hour":
+        return value * 3600
+    return 10
+
+
 # Spark version -> the first Iceberg version publishing a native runtime for it.
 # Below this, the fallback in _ICEBERG_RUNTIME_SUFFIX applies.
 _ICEBERG_NATIVE_RUNTIME_FROM: dict[tuple[int, int], tuple[int, int, int]] = {
@@ -1956,6 +1983,57 @@ class SparkJobManager:
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
             )
+            # LB-090: FAML sustained scripts read a different set of env
+            # var names than the schema-agnostic C360 scripts do.
+            # Rather than rename either side (both have callers), set
+            # BOTH spellings under financial so bronze_ingest_financial,
+            # silver_stream_financial, and gold_refresh_financial pick up
+            # the configured values. Without these, the FAML scripts
+            # fall back to hard-coded defaults that write checkpoints
+            # to ``s3a://lb-bronze/_checkpoints/...`` -- a bucket that
+            # is NOT part of the current deployment on any non-default
+            # config, and that two parallel sustained runs would stomp
+            # on each other (silent corruption of the very parallel-
+            # safety invariant the shared-cluster ownership discipline
+            # exists to prove).
+            if cfg.architecture.workload.schema_type.value == "financial":
+                if job_type == JobType.BRONZE_INGEST:
+                    env.extend(
+                        [
+                            {
+                                "name": "LB_FINANCIAL_BRONZE_CHECKPOINT",
+                                "value": checkpoint_location,
+                            },
+                            {
+                                "name": "LB_FINANCIAL_BRONZE_MAX_FILES",
+                                "value": str(sustained.max_files_per_trigger),
+                            },
+                            {
+                                "name": "LB_FINANCIAL_BRONZE_TRIGGER_S",
+                                "value": str(_spark_interval_to_seconds(trigger_interval)),
+                            },
+                        ]
+                    )
+                elif job_type == JobType.SILVER_STREAM:
+                    env.extend(
+                        [
+                            {
+                                "name": "LB_FINANCIAL_SILVER_CHECKPOINT",
+                                "value": checkpoint_location,
+                            },
+                            {
+                                "name": "LB_FINANCIAL_SILVER_TRIGGER_S",
+                                "value": str(_spark_interval_to_seconds(trigger_interval)),
+                            },
+                        ]
+                    )
+                elif job_type == JobType.GOLD_REFRESH:
+                    env.append(
+                        {
+                            "name": "LB_FINANCIAL_GOLD_REFRESH_S",
+                            "value": str(_spark_interval_to_seconds(trigger_interval)),
+                        }
+                    )
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
         if cycle_env:
