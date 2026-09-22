@@ -24,6 +24,8 @@ Namespace, PostgreSQL, Hive Metastore, Polaris, Trino, Spark Thrift, DuckDB, S3 
 
 Identity carrier: a `lakebench.deployment/name` annotation on the namespace, a `lakebench.deployment=<name>` tag on each bucket. Set on deploy, verified before every destructive mutation, refused on mismatch.
 
+**S3 backends that do not implement bucket tagging (LB-088).** Pure Storage FlashBlade returns HTTP 501 `NotImplemented` on both `GetBucketTagging` and `PutBucketTagging`, so the tag-based identity carrier is unavailable. The fallback is a name-prefix check: the bucket name must be exactly the deployment name or start with `{deployment_name}-`. Deploy warns once per run and skips the tag write; destroy proceeds on name-prefix match and refuses otherwise unless `--force-legacy` is passed. Users who follow the example-config bucket-naming convention (`{deployment}-bronze`, `{deployment}-silver`, `{deployment}-gold`) get destroy safety on FlashBlade equivalent to tagged backends. Users who name buckets outside the convention on FlashBlade must pass `--force-legacy` on destroy: at that point ownership rests on operator vigilance, not code. `lakebench config storage` reports the backend's tagging support in the `bucket-tagging` ADVISORY row so this trade-off is visible before deploy.
+
 ### Category 2 -- shared read-only infrastructure
 
 Version-asserted at preflight. Never created, never destroyed by lakebench.

@@ -837,6 +837,9 @@ def reclaim_bucket(
         cluster_lock,
     )
     from lakebench.deploy.ownership import (
+        BucketTaggingUnsupported,
+        bucket_name_matches_deployment,
+        list_lakebench_deployment_names,
         write_bucket_ownership_tag,
     )
     from lakebench.s3 import S3Client
@@ -881,12 +884,56 @@ def reclaim_bucket(
                         "another team's data may be under this name."
                     )
                     raise typer.Exit(1)
-            write_bucket_ownership_tag(
-                s3.raw_client,
-                bucket=bucket,
-                deployment_name=cfg.name,
-                workload_schema=workload_schema,
-            )
+            try:
+                write_bucket_ownership_tag(
+                    s3.raw_client,
+                    bucket=bucket,
+                    deployment_name=cfg.name,
+                    workload_schema=workload_schema,
+                )
+            except BucketTaggingUnsupported:
+                # Backend does not support bucket tagging (e.g.
+                # FlashBlade). There is no tag to write, so
+                # reclaim-bucket is a no-op on this backend. Report
+                # honestly and direct the operator to the name-prefix
+                # fallback rather than crash. F1 (round-3): pass the
+                # sibling list so the answer here matches what deploy /
+                # destroy will do on the same bucket. Without this the
+                # success message ("destroy will proceed on the
+                # name-prefix fallback") is a lie whenever a
+                # longer-prefix sibling deployment exists.
+                others = list_lakebench_deployment_names(core_v1, exclude=cfg.get_namespace())
+                if others is None:
+                    print_error(
+                        f"bucket {bucket!r}: backend does not support "
+                        "bucket tagging, and lakebench could not "
+                        "enumerate other deployments on the cluster "
+                        "to check for sibling-collision risk. Grant "
+                        "cluster-wide `list namespaces` to this token "
+                        "and try again."
+                    )
+                    raise typer.Exit(1) from None
+                if bucket_name_matches_deployment(bucket, cfg.name, others):
+                    print_success(
+                        f"bucket {bucket!r} on a backend that does not "
+                        "support tagging: nothing to write, and the "
+                        f"name grants deployment {cfg.name!r} a "
+                        "longest-prefix claim over any sibling "
+                        "deployment on the cluster. Destroy will "
+                        "proceed on the name-prefix fallback."
+                    )
+                    raise typer.Exit(0) from None
+                print_error(
+                    f"bucket {bucket!r}: backend does not support "
+                    "bucket tagging, and the name does not grant "
+                    f"deployment {cfg.name!r} a longest-prefix claim "
+                    "(name mismatch, or a sibling deployment on the "
+                    "cluster has a longer prefix). Rename the bucket "
+                    f"to start with {cfg.name}- to get destroy safety, "
+                    "or pass --force-legacy on destroy (last-resort "
+                    "operator assertion)."
+                )
+                raise typer.Exit(1) from None
     except ClusterLockHeld as e:
         print_error(str(e))
         raise typer.Exit(1) from e
