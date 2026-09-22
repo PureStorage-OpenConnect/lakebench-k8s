@@ -134,6 +134,64 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 
 
 # ---------------------------------------------------------------------------
+# Per-workload-schema profile overrides
+# ---------------------------------------------------------------------------
+# Base ``_JOB_PROFILES`` are sized for Customer360. Other workload schemas
+# whose data-per-executor characteristics differ patch specific fields here
+# rather than owning a full parallel profile tree. Fields not listed stay at
+# the base value.
+#
+# Financial (FAML / FinServ-Crime) bronze-verify: c360's bronze_verify does a
+# thin schema/row-count check and hands off to Iceberg add_files (zero-copy
+# register). FAML's bronze source (pacs.008) routinely exceeds ADD_FILES_MAX
+# thresholds at scale >= 5, tripping the CTAS fallback in
+# bronze_verify_financial.py -- a full parquet rewrite through an Iceberg
+# write, whose per-executor staging + shuffle spill overwhelms the 50 Gi
+# base PVC. Live at scale 10 this hit ``No space left on device`` after
+# 78 min (LB-118).
+#
+# Sizing headroom: at scale 10, ~25 GB input/executor blew out 50 Gi
+# (~2x amplification through the Iceberg CTAS shuffle+staging path).
+# Scaling projections at higher scales without more executors turn ugly:
+# scale 100 reaches 143 GB/exec at 7 executors, scale 500 reaches
+# 250 GB/exec at the 20-executor cap. Fix widens on three axes:
+#   * ``scratch_size`` 50Gi -> 500Gi (thin-provisioned Portworx repl=1)
+#   * ``executors_per_100_scale`` 4 -> 8 (halves per-exec load at s100+)
+#   * ``max_executors`` 20 -> 28 (matches the proven fabric8 ceiling
+#     already used by silver/gold)
+# Combined ~10x headroom at scale 10, ~4x at scale 100, ~2x at scale 500.
+# Fields not listed here stay at the c360 base value.
+_SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
+    "financial": {
+        "bronze-verify": {
+            "scratch_size": "500Gi",
+            "executors_per_100_scale": 8,
+            "max_executors": 28,
+        },
+    },
+}
+
+
+def _resolve_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
+    """Return the resolved profile for ``job_type`` under ``schema_type``.
+
+    Merges ``_SCHEMA_PROFILE_OVERRIDES[schema][job_type]`` on top of the base
+    ``_JOB_PROFILES[job_type]``. Returns a shallow copy so callers can mutate
+    the result without corrupting module-level state. Returns ``None`` if the
+    base job type is unknown.
+    """
+    base = _JOB_PROFILES.get(job_type)
+    if base is None:
+        return None
+    merged = dict(base)
+    if schema_type:
+        overrides = _SCHEMA_PROFILE_OVERRIDES.get(schema_type, {}).get(job_type)
+        if overrides:
+            merged.update(overrides)
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Local mode job profiles
 # ---------------------------------------------------------------------------
 # Spark runs as ``local[N]``: one JVM is driver and executor at once, so there
@@ -280,9 +338,16 @@ class PeakRequirement:
     per_job: tuple[JobRequirement, ...]
 
 
-def _job_requirement(job_type: str, scale: float) -> JobRequirement | None:
-    """Compute the resource request for one job at a given scale."""
-    profile = _JOB_PROFILES.get(job_type)
+def _job_requirement(
+    job_type: str, scale: float, schema_type: str | None = None
+) -> JobRequirement | None:
+    """Compute the resource request for one job at a given scale.
+
+    ``schema_type`` (e.g. ``"financial"``) selects per-workload profile
+    overrides. Omitted or unknown values fall through to the Customer360
+    baseline.
+    """
+    profile = _resolve_job_profile(job_type, schema_type)
     if not profile:
         return None
 
@@ -312,7 +377,9 @@ def _job_requirement(job_type: str, scale: float) -> JobRequirement | None:
     )
 
 
-def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirement:
+def compute_peak_requirements(
+    scale: float, mode: str = "batch", schema_type: str | None = None
+) -> PeakRequirement:
     """Compute the peak resources the pipeline requests at a given scale.
 
     This is the single source of truth for "how big a cluster do I need".
@@ -325,6 +392,10 @@ def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirem
     Args:
         scale: Scale factor from config.
         mode: Pipeline mode, ``"batch"`` or ``"sustained"``.
+        schema_type: Workload schema (``"c360"``, ``"financial"``). Selects
+            per-workload profile overrides; ``None`` uses the Customer360
+            baseline. FAML at scale >= 5 needs a larger bronze-verify PVC
+            than c360 (LB-118).
 
     Returns:
         PeakRequirement describing the peak CPU, memory, and scratch request.
@@ -332,7 +403,9 @@ def compute_peak_requirements(scale: float, mode: str = "batch") -> PeakRequirem
     streaming = str(mode).lower() == "sustained"
     job_types = STREAMING_JOB_TYPES if streaming else BATCH_JOB_TYPES
 
-    reqs = tuple(r for jt in job_types if (r := _job_requirement(jt, scale)) is not None)
+    reqs = tuple(
+        r for jt in job_types if (r := _job_requirement(jt, scale, schema_type)) is not None
+    )
     if not reqs:
         return PeakRequirement(
             scale=scale,
@@ -1116,8 +1189,14 @@ class SparkJobManager:
         job_name = f"lakebench-{job_type.value}"
         spark_major = _parse_spark_major(cfg.images.spark)
 
-        # Per-job resource profile (proven at 1TB+ scale)
-        profile = _JOB_PROFILES.get(job_type.value, _JOB_PROFILES["silver-build"])
+        # Per-job resource profile (proven at 1TB+ scale). Schema-aware:
+        # FAML bronze-verify needs a bigger scratch PVC than c360 to survive
+        # the CTAS fallback path (LB-118).
+        _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
+        profile = _resolve_job_profile(job_type.value, _schema) or _resolve_job_profile(
+            "silver-build", _schema
+        )
+        assert profile is not None  # silver-build always exists
         scale = cfg.architecture.workload.datagen.scale
         executor_count = _scale_executor_count(profile, scale)
 
