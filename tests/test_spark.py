@@ -1739,6 +1739,111 @@ class TestFinancialScriptDispatch:
         assert "financial" not in manifest["spec"]["mainApplicationFile"]
 
 
+class TestSchemaProfileOverrides:
+    """LB-118: FAML bronze-verify needs a bigger scratch PVC than c360's
+    50Gi baseline because the CTAS fallback path rewrites the full pacs.008
+    dataset through Iceberg and its per-executor spill overwhelms 50Gi at
+    scale >= 5. Live at scale 10 this hit ``No space left on device`` after
+    78 min."""
+
+    def _find_pvc_size_limit(self, manifest):
+        conf = manifest["spec"]["sparkConf"]
+        key = (
+            "spark.kubernetes.executor.volumes.persistentVolumeClaim."
+            "spark-local-dir-1.options.sizeLimit"
+        )
+        return conf.get(key)
+
+    def _make_config(self, schema):
+        from lakebench.config import LakebenchConfig
+
+        cfg = _make_config()
+        blob = cfg.model_dump(by_alias=True)
+        blob["architecture"]["workload"]["schema"] = schema
+        # Portworx scratch must be enabled for sizeLimit to appear in the manifest.
+        blob["platform"]["storage"]["scratch"]["enabled"] = True
+        blob["platform"]["storage"]["scratch"]["storage_class"] = "px-csi-scratch"
+        return LakebenchConfig(**blob)
+
+    def test_faml_bronze_verify_gets_500gi_scratch(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_config("financial")
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert self._find_pvc_size_limit(manifest) == "500Gi"
+
+    def test_c360_bronze_verify_stays_50gi_scratch(self):
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_config("customer360")
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
+        assert self._find_pvc_size_limit(manifest) == "50Gi"
+
+    def test_faml_silver_build_scratch_unchanged(self):
+        """FAML overrides scoped to bronze-verify only; silver-build stays at c360."""
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_config("financial")
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.SILVER_BUILD)
+        assert self._find_pvc_size_limit(manifest) == "300Gi"
+
+    def test_resolve_job_profile_returns_copy(self):
+        """Callers must be able to mutate the resolved profile without
+        corrupting module-level state (regression guard: _JOB_PROFILES.get()
+        returns a reference)."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _JOB_PROFILES,
+            _resolve_job_profile,
+        )
+
+        base_before = _JOB_PROFILES["bronze-verify"]["scratch_size"]
+        merged = _resolve_job_profile("bronze-verify", "financial")
+        assert merged is not None
+        merged["scratch_size"] = "999Gi"
+        assert _JOB_PROFILES["bronze-verify"]["scratch_size"] == base_before
+
+    def test_compute_peak_requirements_faml_bumps_bronze_scratch(self):
+        """compute_peak_requirements is the docs source of truth; FAML
+        peaks must reflect the bronze-verify override."""
+        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+        c360 = compute_peak_requirements(1, "batch", "customer360")
+        faml = compute_peak_requirements(1, "batch", "financial")
+        c360_bronze = next(r for r in c360.per_job if r.job_type == "bronze-verify")
+        faml_bronze = next(r for r in faml.per_job if r.job_type == "bronze-verify")
+        assert faml_bronze.scratch_gb == 10 * c360_bronze.scratch_gb  # 500 / 50
+
+    def test_faml_bronze_verify_scales_executors_at_scale_100(self):
+        """LB-118 review finding: at scale 100 the base bronze-verify
+        profile gives 7 executors (~143 GB input/executor for FAML),
+        which projects to CTAS spill above 200 Gi. The FAML override
+        bumps ``executors_per_100_scale`` 4 -> 8 and ``max_executors``
+        20 -> 28 so per-executor load at scale 100 stays under 100 GB."""
+        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+        c360 = compute_peak_requirements(100, "batch", "customer360")
+        faml = compute_peak_requirements(100, "batch", "financial")
+        c360_bronze = next(r for r in c360.per_job if r.job_type == "bronze-verify")
+        faml_bronze = next(r for r in faml.per_job if r.job_type == "bronze-verify")
+        # FAML must have more executors than c360 at s100+.
+        assert faml_bronze.executors > c360_bronze.executors
+        # And scale toward the fabric8 ceiling by scale 500.
+        faml_500 = compute_peak_requirements(500, "batch", "financial")
+        faml_500_bronze = next(r for r in faml_500.per_job if r.job_type == "bronze-verify")
+        assert faml_500_bronze.executors == 28  # matches silver/gold ceiling
+
+    def test_compute_peak_requirements_defaults_to_c360(self):
+        """Backward compat: no schema arg == c360 baseline."""
+        from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+        default = compute_peak_requirements(1, "batch")
+        c360 = compute_peak_requirements(1, "batch", "customer360")
+        assert default.scratch_gb == c360.scratch_gb
+
+
 # ---------------------------------------------------------------------------
 # PipelineEngine protocol conformance
 # ---------------------------------------------------------------------------

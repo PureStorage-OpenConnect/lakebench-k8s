@@ -7,6 +7,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **LB-118 (P1): FAML bronze-verify ran out of scratch disk at scale
+  >= 5.** `bronze_verify_financial.py` trips its CTAS fallback path
+  above `ADD_FILES_MAX_BYTES` / `ADD_FILES_MAX_FILES` and rewrites the
+  full pacs.008 source through an Iceberg CTAS, spilling ~2x the
+  per-executor input to local disk. The c360-shaped base profile
+  gave bronze-verify only 50Gi/executor -- fine for the thin
+  add_files register c360 does, blown out at 78 min for FAML scale
+  10 with `No space left on device`. Fix: added
+  `_SCHEMA_PROFILE_OVERRIDES` and `_resolve_job_profile()` in
+  `modules/pipeline_engines/spark/job.py`. FAML bronze-verify now
+  gets 500Gi scratch, `executors_per_100_scale: 8` (vs c360's 4),
+  and `max_executors: 28` (vs 20) so per-executor input load
+  halves at scale 100 and stays under the fabric8 ceiling. Base
+  `_JOB_PROFILES` stays c360-shaped. `_job_requirement`,
+  `compute_peak_requirements`, and `_build_manifest` all take an
+  optional `schema_type` arg and route through the resolver; the
+  capacity-preflight in `cli/_prerequisites.py` reads
+  `cfg.architecture.workload.schema_type` and plumbs it down so
+  documented cluster minimums reflect FAML sizing when the workload
+  is financial.
 - **LB-112 (P0): batch FAML pipeline never invoked the detection
   rules.** `lakebench run` on a batch financial config completed
   bronze-verify + silver-build + gold-finalize and emitted an empty

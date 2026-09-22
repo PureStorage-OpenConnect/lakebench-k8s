@@ -166,6 +166,30 @@ class TestClusterCapacityCheck:
         assert result.passed
         assert "sustained" in result.message
 
+    def test_capacity_check_plumbs_schema_to_compute_peak(self):
+        """LB-118 review finding: the fix is only operator-visible if
+        _check_cluster_capacity actually passes the workload schema down
+        to compute_peak_requirements. A refactor that drops the schema
+        arg would leave every unit test green while silently reverting
+        FAML sizing to c360."""
+        cfg = _cfg()
+        cfg.architecture.workload.schema_type.value = "financial"
+        with (
+            mock.patch("lakebench.k8s.get_k8s_client") as get_client,
+            mock.patch(
+                "lakebench.modules.pipeline_engines.spark.job.compute_peak_requirements"
+            ) as peak,
+        ):
+            get_client.return_value.get_cluster_capacity.return_value = ClusterCapacity(
+                652_000, 4000 * GIB, 20, 64_000, 256 * GIB
+            )
+            _check_cluster_capacity(cfg)
+        assert peak.called
+        # positional-arg or kwarg both fine; the third value is the schema.
+        args, kwargs = peak.call_args
+        schema_arg = kwargs.get("schema_type", args[2] if len(args) > 2 else None)
+        assert schema_arg == "financial"
+
 
 class TestDocumentedMinimumsMatchCode:
     """The published docs table must stay in sync with _JOB_PROFILES.

@@ -359,7 +359,9 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
         scale = cfg.architecture.workload.datagen.scale
         raw_mode = cfg.architecture.pipeline.mode
         mode = getattr(raw_mode, "value", raw_mode)
-        peak = compute_peak_requirements(scale, mode)
+        raw_schema = getattr(cfg.architecture.workload, "schema_type", None)
+        schema = getattr(raw_schema, "value", raw_schema)
+        peak = compute_peak_requirements(scale, mode, schema)
 
         k8s = get_k8s_client(
             context=cfg.platform.kubernetes.context,
