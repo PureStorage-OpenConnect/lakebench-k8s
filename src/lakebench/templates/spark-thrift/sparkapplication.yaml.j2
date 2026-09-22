@@ -67,6 +67,7 @@ spec:
               mkdir -p /tmp/.ivy2
               /opt/spark/bin/spark-submit \
                 --packages "{{ spark_thrift_packages }}" \
+                --repositories "{{ spark_thrift_repositories }}" \
                 --conf spark.jars.ivy=/tmp/.ivy2 \
                 --class org.apache.spark.deploy.DummyNonExistent \
                 local:///dev/null 2>&1 || true
