@@ -405,6 +405,122 @@ class ConformanceRunner:
                 except Exception:
                     pass
 
+    def _check_bucket_tagging(self, report: ConformanceReport) -> None:
+        """Record whether the backend implements bucket tagging APIs.
+
+        Not a REQUIRED defect. Lakebench uses bucket tags as the primary
+        S3-side ownership signal (see ``deploy/ownership.py``). Backends
+        that return ``NotImplemented`` on ``GetBucketTagging`` /
+        ``PutBucketTagging`` (LB-088: FlashBlade) work fine with lakebench;
+        deploy and destroy fall back to matching the bucket name against
+        the deployment name. Reporting this here lets a user see the
+        weaker ownership discipline they will get on this backend before
+        they hit it live.
+        """
+        from botocore.exceptions import ClientError
+
+        # We probe against ``self._bucket`` in both modes: an owned
+        # scratch bucket when the run has write permission, or the
+        # caller's declared bucket for a read-only run. The write half
+        # only runs when we own the bucket.
+        target = self._bucket
+        supports_get = True
+        supports_put: bool | None = True
+        get_error: str | None = None
+        put_error: str | None = None
+
+        try:
+            self._client.get_bucket_tagging(Bucket=target)
+        except ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("NoSuchTagSet", "NoSuchTagSetError"):
+                pass  # empty-tags is fine, API is implemented
+            elif code == "NotImplemented":
+                supports_get = False
+                get_error = code
+            else:
+                # Some other error (auth, network); do not report a
+                # tagging defect on a general failure.
+                supports_get = True
+                get_error = code
+        except Exception as e:  # noqa: BLE001 -- surface any unusual failure
+            get_error = str(e)[:80]
+
+        if self._owns_bucket:
+            try:
+                self._client.put_bucket_tagging(
+                    Bucket=target,
+                    Tagging={"TagSet": [{"Key": "lakebench.conformance", "Value": "probe"}]},
+                )
+                # Cleanup: remove the probe tag. Failing to delete leaves
+                # a harmless tag behind; do not fail the check on cleanup.
+                try:
+                    self._client.delete_bucket_tagging(Bucket=target)
+                except Exception:  # noqa: BLE001
+                    pass
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code == "NotImplemented":
+                    supports_put = False
+                    put_error = code
+                else:
+                    put_error = code
+            except Exception as e:  # noqa: BLE001
+                put_error = str(e)[:80]
+        else:
+            supports_put = None  # not probed
+
+        report.properties["bucket_tagging_get"] = supports_get
+        report.properties["bucket_tagging_put"] = supports_put
+
+        if supports_get and supports_put:
+            report.checks.append(
+                CheckResult(
+                    "bucket-tagging",
+                    CheckStatus.PASS,
+                    Severity.ADVISORY,
+                    "Backend implements bucket tagging",
+                    impact=(
+                        "Lakebench uses server-side tags for cross-team "
+                        "ownership discipline on shared buckets."
+                    ),
+                )
+            )
+        elif not supports_get and (supports_put is False or supports_put is None):
+            report.checks.append(
+                CheckResult(
+                    "bucket-tagging",
+                    CheckStatus.SKIP,
+                    Severity.ADVISORY,
+                    "Backend does not implement bucket tagging",
+                    impact=(
+                        "Ownership discipline falls back to matching "
+                        "the bucket name against the deployment name. "
+                        "Buckets not named {deployment}-* on this "
+                        "backend will require --force-legacy on "
+                        "destroy. Longest-prefix-wins protects against "
+                        "sibling-deployment collisions."
+                    ),
+                )
+            )
+        else:
+            report.checks.append(
+                CheckResult(
+                    "bucket-tagging",
+                    CheckStatus.FAIL,
+                    Severity.ADVISORY,
+                    (
+                        f"Bucket tagging inconsistent: GET supported="
+                        f"{supports_get} (err={get_error}), PUT supported="
+                        f"{supports_put} (err={put_error})"
+                    ),
+                    impact=(
+                        "Ownership discipline may partially work. "
+                        "Report this backend combination as a lakebench issue."
+                    ),
+                )
+            )
+
     def _check_region_strictness(self, report: ConformanceReport) -> None:
         """Record whether the backend validates the sigv4 region scope.
 
@@ -484,6 +600,7 @@ class ConformanceRunner:
                         )
                     )
             self._check_region_strictness(report)
+            self._check_bucket_tagging(report)
         finally:
             self._release_bucket()
 

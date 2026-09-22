@@ -20,13 +20,13 @@ you which operation is missing and what will break.
 shown, not that it is the only thing that works. An unlisted store is checked at
 runtime, never refused.
 
-| Backend | Status | Region strict | Notes |
-|---|---|---|---|
-| **Pure Storage FlashBlade** | Validated 2026-07-25 | No | Reference platform. Path-style required. |
-| **Garage** 1.0.1+ | Validated 2026-07-25 | Yes | Default for local mode. Apache 2.0, 21.7 MB image. |
-| **AWS S3** | Not yet validated | Yes | Set `path_style: false` for virtual-hosted addressing. |
-| **MinIO** | Not yet validated | -- | Community edition is maintenance-only since 2025. |
-| **SeaweedFS** | **Not supported** | No | Bucket enumeration is broken. See below. |
+| Backend | Status | Region strict | Bucket tagging | Notes |
+|---|---|---|---|---|
+| **Pure Storage FlashBlade** | Validated 2026-07-25, tagging re-checked 2026-09-21 | No | **No (LB-088)** | Reference platform. Path-style required. |
+| **Garage** 1.0.1+ | Validated 2026-07-25 | Yes | -- | Default for local mode. Apache 2.0, 21.7 MB image. |
+| **AWS S3** | Not yet validated | Yes | Yes | Set `path_style: false` for virtual-hosted addressing. |
+| **MinIO** | Not yet validated | -- | Yes | Community edition is maintenance-only since 2025. |
+| **SeaweedFS** | **Not supported** | No | -- | Bucket enumeration is broken. See below. |
 
 Ceph RGW, Dell ECS, and other S3-compatible stores are expected to work but have
 not been run against the checks. Run `lakebench config storage` to find out.
@@ -65,9 +65,31 @@ defect.
 | Property | Meaning | Lakebench's response |
 |---|---|---|
 | `region-strictness` | Whether the backend validates the sigv4 region scope | Sets `spark.hadoop.fs.s3a.endpoint.region` from `s3.region` on every job. Automatic; no action needed. |
+| `bucket-tagging` | Whether `GetBucketTagging` / `PutBucketTagging` work at all | Uses tags for cross-team ownership when available; falls back to bucket-name-prefix matching on backends that return `NotImplemented`. |
 
 Both behaviours are legitimate. FlashBlade accepts any region; Garage rejects a
 mismatch. Lakebench sets the region explicitly so both work.
+
+### Bucket tagging and ownership discipline (LB-088)
+
+Lakebench stamps every bucket it creates with a `lakebench.deployment` tag so
+`destroy` can refuse to empty a bucket that belongs to a different deployment.
+On backends that implement bucket tagging (AWS S3, MinIO, Garage), this is the
+authoritative check.
+
+Pure Storage FlashBlade **does not implement** `GetBucketTagging` or
+`PutBucketTagging` at all -- both return HTTP 501 `NotImplemented`. Lakebench
+detects this at runtime and falls back to a weaker check: the bucket name must
+be exactly the deployment name or start with `{deployment_name}-`. The example
+configs and `lakebench init` follow this convention, so a user who does not go
+out of their way to rename buckets gets destroy safety on FlashBlade the same
+as on any other backend. A user who names buckets outside the convention on
+FlashBlade will hit a hard refusal on destroy and must pass `--force-legacy` to
+proceed.
+
+`lakebench deploy` logs a warning once per run when it takes this fallback, and
+`lakebench config storage` reports the backend's tagging support in the
+`bucket-tagging` ADVISORY row.
 
 ## Running the check
 

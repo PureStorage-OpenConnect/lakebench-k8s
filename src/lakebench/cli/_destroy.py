@@ -155,14 +155,17 @@ def destroy(
         typer.Option(
             "--force-legacy",
             help=(
-                "Destroy a legacy pre-ownership namespace or bucket that "
-                "has no lakebench identity annotations / ownership tag. "
-                "Caution: another workload's data may live there. "
-                "Prefer `lakebench admin migrate-deployment <namespace>` "
-                "first, which stamps the annotations so a normal "
-                "destroy can verify ownership. Refuses always on "
-                "foreign-tagged buckets or namespaces regardless of "
-                "this flag."
+                "Destroy without tag / annotation proof of ownership. "
+                "Covers two cases: (1) legacy pre-ownership namespace "
+                "or bucket that carries no lakebench identity "
+                "annotation / ownership tag; (2) a bucket on an S3 "
+                "backend that does not implement tagging AND does not "
+                "match the deployment-name prefix. Caution: another "
+                "workload's data may live there. Prefer `lakebench "
+                "admin migrate-deployment <namespace>` first (case 1) "
+                "or rename the bucket to start with the deployment "
+                "name (case 2). Refuses always on foreign-tagged "
+                "buckets or namespaces regardless of this flag."
             ),
         ),
     ] = False,

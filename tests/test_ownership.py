@@ -26,9 +26,11 @@ from lakebench.deploy.ownership import (
     TAG_DEPLOYMENT_NAME,
     TAG_WORKLOAD_SCHEMA,
     BucketOwnershipError,
+    BucketTaggingUnsupported,
     DeploymentIdentity,
     IdentityVerdict,
     api_server_fingerprint,
+    bucket_name_matches_deployment,
     read_bucket_ownership_tag,
     stamp_namespace,
     verify_bucket_ownership,
@@ -532,6 +534,278 @@ class TestBucketOwnershipTag:
         s3.get_bucket_tagging.side_effect = _client_error("NoSuchBucket")
         r = verify_bucket_ownership(s3, "b1", "mine")
         assert r.verdict is IdentityVerdict.NOT_FOUND
+
+
+class TestBucketTaggingUnsupported:
+    """LB-088: FlashBlade returns NotImplemented on GetBucketTagging /
+    PutBucketTagging. Never seen before because the unit tests used moto,
+    which implements tagging cleanly. Every path must handle it
+    explicitly rather than falling through to a generic error.
+    """
+
+    def test_read_raises_unsupported_on_not_implemented(self):
+        s3 = mock.MagicMock()
+        s3.get_bucket_tagging.side_effect = _client_error("NotImplemented")
+        with pytest.raises(BucketTaggingUnsupported, match="NotImplemented"):
+            read_bucket_ownership_tag(s3, "b1")
+
+    def test_read_propagates_method_not_allowed_as_client_error(self):
+        """MethodNotAllowed (HTTP 405) is a permissions / policy
+        problem, NOT a missing feature. It must NOT downgrade to the
+        Unsupported fallback, because doing so would silently switch
+        to name-prefix ownership on a backend where the API works
+        but the caller isn't authorised. Propagate as ClientError so
+        the caller sees the real error."""
+        from botocore.exceptions import ClientError as _CE
+
+        s3 = mock.MagicMock()
+        s3.get_bucket_tagging.side_effect = _client_error("MethodNotAllowed")
+        with pytest.raises(_CE):
+            read_bucket_ownership_tag(s3, "b1")
+
+    def test_write_raises_unsupported_on_not_implemented(self):
+        """PutBucketTagging NotImplemented must surface distinctly from
+        a permissions error or a payload rejection -- the caller may
+        want to fall back to name-prefix ownership rather than fail."""
+        s3 = mock.MagicMock()
+        s3.put_bucket_tagging.side_effect = _client_error("NotImplemented")
+        with pytest.raises(BucketTaggingUnsupported, match="NotImplemented"):
+            write_bucket_ownership_tag(s3, "b1", "my-config")
+
+    def test_verify_returns_unsupported_verdict(self):
+        s3 = mock.MagicMock()
+        s3.get_bucket_tagging.side_effect = _client_error("NotImplemented")
+        r = verify_bucket_ownership(s3, "b1", "mine")
+        assert r.verdict is IdentityVerdict.UNSUPPORTED
+        assert "NotImplemented" in (r.hint or "")
+
+    def test_verify_unsupported_distinct_from_absent(self):
+        """Load-bearing: destroy relies on this to fall back to name-
+        prefix instead of the --force-legacy migration path."""
+        s3_unsupported = mock.MagicMock()
+        s3_unsupported.get_bucket_tagging.side_effect = _client_error("NotImplemented")
+        s3_absent = mock.MagicMock()
+        s3_absent.get_bucket_tagging.side_effect = _client_error("NoSuchTagSet")
+        assert (
+            verify_bucket_ownership(s3_unsupported, "b1", "mine").verdict
+            is IdentityVerdict.UNSUPPORTED
+        )
+        assert verify_bucket_ownership(s3_absent, "b1", "mine").verdict is IdentityVerdict.ABSENT
+
+
+class TestBucketNamePrefixFallback:
+    """Name-prefix ownership check used on UNSUPPORTED backends.
+
+    The safety property is: a deployment's fallback ownership check
+    must never grant it a bucket that a longer-prefix sibling
+    deployment owns. Otherwise ``prod`` silently adopts ``prod-eu``'s
+    buckets on backends without tag support.
+    """
+
+    def test_exact_deployment_name_matches(self):
+        assert bucket_name_matches_deployment("mydeploy", "mydeploy") is True
+
+    def test_prefix_with_hyphen_matches(self):
+        assert bucket_name_matches_deployment("mydeploy-bronze", "mydeploy") is True
+        assert bucket_name_matches_deployment("mydeploy-silver", "mydeploy") is True
+        assert bucket_name_matches_deployment("mydeploy-gold", "mydeploy") is True
+
+    def test_prefix_without_hyphen_does_not_match(self):
+        """Load-bearing safety: ``mydeploybar-bronze`` must not match
+        deployment ``mydeploy``. Without the required hyphen separator
+        an adjacent deployment's bucket would be adopted."""
+        assert bucket_name_matches_deployment("mydeploybar-bronze", "mydeploy") is False
+        assert bucket_name_matches_deployment("mydeploy2-bronze", "mydeploy") is False
+
+    def test_unrelated_name_does_not_match(self):
+        assert bucket_name_matches_deployment("otherteam-bronze", "mydeploy") is False
+        assert bucket_name_matches_deployment("legacy-data", "mydeploy") is False
+
+    def test_empty_deployment_name_never_matches(self):
+        """Fail-safe: an empty deployment name (misconfig) must not
+        adopt any bucket."""
+        assert bucket_name_matches_deployment("anything", "") is False
+        assert bucket_name_matches_deployment("", "") is False
+
+    def test_longer_prefix_sibling_wins(self):
+        """The finding that motivated the round-2 rewrite: deployment
+        ``prod`` and deployment ``prod-eu`` coexist on the same
+        cluster. Bucket ``prod-eu-bronze`` prefix-matches BOTH names.
+        Longest-prefix-wins: ``prod-eu`` owns it, ``prod`` does not.
+        Without this rule, ``prod`` destroy silently empties ``prod-eu``'s
+        bronze layer on a backend that cannot tag (LB-088)."""
+        # From prod's perspective, prod-eu-bronze is NOT ours.
+        assert (
+            bucket_name_matches_deployment(
+                "prod-eu-bronze",
+                "prod",
+                other_deployment_names=["prod-eu"],
+            )
+            is False
+        )
+        # From prod-eu's perspective, prod-eu-bronze IS ours.
+        assert (
+            bucket_name_matches_deployment(
+                "prod-eu-bronze",
+                "prod-eu",
+                other_deployment_names=["prod"],
+            )
+            is True
+        )
+
+    def test_longer_prefix_sibling_wins_multiple(self):
+        """Three-way: prod, prod-eu, prod-eu-preview coexist. Bucket
+        prod-eu-preview-silver belongs only to the longest match."""
+        others = ["prod", "prod-eu"]
+        assert (
+            bucket_name_matches_deployment("prod-eu-preview-silver", "prod-eu-preview", others)
+            is True
+        )
+        assert (
+            bucket_name_matches_deployment(
+                "prod-eu-preview-silver", "prod-eu", others + ["prod-eu-preview"]
+            )
+            is False
+        )
+
+    def test_same_length_sibling_does_not_block(self):
+        """A sibling that prefix-matches only via being a substring
+        of the bucket but does NOT have a longer name does not block
+        the current deployment. (In practice a same-length prefix
+        collision is a name conflict at deploy time, not a fallback
+        issue.)"""
+        assert (
+            bucket_name_matches_deployment(
+                "myapp-bronze",
+                "myapp",
+                other_deployment_names=["other"],  # unrelated name
+            )
+            is True
+        )
+
+    def test_self_in_others_is_ignored(self):
+        """A defensive-copy corner case: if the caller accidentally
+        passes the current deployment name in ``other_deployment_names``,
+        the check should not falsely refuse."""
+        assert (
+            bucket_name_matches_deployment(
+                "myapp-bronze",
+                "myapp",
+                other_deployment_names=["myapp", "other"],
+            )
+            is True
+        )
+
+
+class TestListLakebenchDeploymentNames:
+    """The enumerator must distinguish 'no other deployments' from
+    'cannot tell'. Both cases arise in production: multi-tenant
+    OpenShift denies cluster-wide namespace list under a
+    namespace-scoped token; that must NOT downgrade to naive
+    prefix ownership (round-3 F2)."""
+
+    def _ns(self, name, annotations=None, labels=None):
+        return SimpleNamespace(
+            metadata=SimpleNamespace(
+                name=name,
+                annotations=annotations,
+                labels=labels,
+            )
+        )
+
+    def test_returns_empty_list_when_no_other_lakebench_namespaces(self):
+        from lakebench.deploy.ownership import list_lakebench_deployment_names
+
+        core_v1 = mock.MagicMock()
+        core_v1.list_namespace.return_value = SimpleNamespace(
+            items=[
+                self._ns("default"),
+                self._ns("kube-system"),
+            ]
+        )
+        assert list_lakebench_deployment_names(core_v1) == []
+
+    def test_returns_deployment_names_from_annotation(self):
+        from lakebench.deploy.ownership import list_lakebench_deployment_names
+
+        core_v1 = mock.MagicMock()
+        core_v1.list_namespace.return_value = SimpleNamespace(
+            items=[
+                self._ns(
+                    "team-a-ns",
+                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-a"},
+                ),
+                self._ns(
+                    "team-b-ns",
+                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-b"},
+                ),
+            ]
+        )
+        assert sorted(list_lakebench_deployment_names(core_v1)) == ["team-a", "team-b"]
+
+    def test_returns_namespace_name_for_legacy_managed_by(self):
+        """Pre-PR-1 namespaces have no annotation but carry the label."""
+        from lakebench.deploy.ownership import list_lakebench_deployment_names
+
+        core_v1 = mock.MagicMock()
+        core_v1.list_namespace.return_value = SimpleNamespace(
+            items=[
+                self._ns(
+                    "legacy-ns",
+                    labels={"app.kubernetes.io/managed-by": "lakebench"},
+                ),
+            ]
+        )
+        assert list_lakebench_deployment_names(core_v1) == ["legacy-ns"]
+
+    def test_exclude_skips_self(self):
+        from lakebench.deploy.ownership import list_lakebench_deployment_names
+
+        core_v1 = mock.MagicMock()
+        core_v1.list_namespace.return_value = SimpleNamespace(
+            items=[
+                self._ns(
+                    "team-a-ns",
+                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-a"},
+                ),
+                self._ns(
+                    "team-b-ns",
+                    annotations={ANNOTATION_DEPLOYMENT_NAME: "team-b"},
+                ),
+            ]
+        )
+        assert list_lakebench_deployment_names(core_v1, exclude="team-a-ns") == ["team-b"]
+
+    def test_returns_none_on_api_exception(self):
+        """Load-bearing: RBAC 403 must return None (not []) so callers
+        refuse the name-prefix fallback rather than silently accept."""
+        from lakebench.deploy.ownership import list_lakebench_deployment_names
+
+        core_v1 = mock.MagicMock()
+        core_v1.list_namespace.side_effect = _api_exception(403, "Forbidden")
+        assert list_lakebench_deployment_names(core_v1) is None
+
+    def test_returns_none_on_config_exception(self):
+        """Kubeconfig missing / broken must return None."""
+        from kubernetes.config.config_exception import ConfigException
+
+        from lakebench.deploy.ownership import list_lakebench_deployment_names
+
+        core_v1 = mock.MagicMock()
+        core_v1.list_namespace.side_effect = ConfigException("no config")
+        assert list_lakebench_deployment_names(core_v1) is None
+
+    def test_unexpected_exception_propagates(self):
+        """A genuine bug (KeyError from a rename, etc.) must NOT be
+        swallowed as 'enumeration failed' -- that would mask real
+        problems as safety refusals. Only ApiException and
+        ConfigException are treated as enumeration failure."""
+        from lakebench.deploy.ownership import list_lakebench_deployment_names
+
+        core_v1 = mock.MagicMock()
+        core_v1.list_namespace.side_effect = RuntimeError("bug")
+        with pytest.raises(RuntimeError):
+            list_lakebench_deployment_names(core_v1)
 
 
 # ---------------------------------------------------------------------------

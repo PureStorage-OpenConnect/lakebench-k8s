@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -81,6 +82,20 @@ class IdentityVerdict(str, Enum):
     ABSENT = "absent"
     #: Resource does not exist at all.
     NOT_FOUND = "not_found"
+    #: Backend does not implement the tagging API (e.g. FlashBlade returns
+    #: ``NotImplemented`` on ``GetBucketTagging`` / ``PutBucketTagging``).
+    #: Tag-based ownership is impossible; callers must fall back to a
+    #: weaker check (name-prefix on buckets) or refuse. See LB-088.
+    UNSUPPORTED = "unsupported"
+
+
+class BucketTaggingUnsupported(Exception):
+    """Raised when the backend does not implement bucket tagging.
+
+    Distinguishes an inability to check from a check that ran and returned
+    "no tags." The former means we cannot use tagging as the ownership
+    signal at all; the latter is the legacy-bucket case.
+    """
 
 
 @dataclass(frozen=True)
@@ -577,15 +592,37 @@ def write_bucket_ownership_tag(
     if workload_schema:
         tag_set.append({"Key": TAG_WORKLOAD_SCHEMA, "Value": workload_schema})
 
-    boto_client.put_bucket_tagging(
-        Bucket=bucket,
-        Tagging={"TagSet": tag_set},
-    )
+    from botocore.exceptions import ClientError
+
+    try:
+        boto_client.put_bucket_tagging(
+            Bucket=bucket,
+            Tagging={"TagSet": tag_set},
+        )
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "NotImplemented":
+            # Backend does not implement bucket tagging at all (LB-088:
+            # FlashBlade returns HTTP 501 NotImplemented). Cannot
+            # enforce tag-based ownership. Caller handles the fallback
+            # identity check. Narrow to NotImplemented only: HTTP 405
+            # MethodNotAllowed and other 4xx codes indicate a
+            # permissions or policy problem, not a missing feature.
+            raise BucketTaggingUnsupported(
+                f"bucket {bucket!r}: PutBucketTagging returned NotImplemented. "
+                "Backend does not implement bucket tagging."
+            ) from e
+        raise
 
     # Read back and verify. If the backend does not support tagging, or
     # dropped the write, we surface it here instead of pretending the
     # bucket is now owned.
-    got = read_bucket_ownership_tag(boto_client, bucket)
+    try:
+        got = read_bucket_ownership_tag(boto_client, bucket)
+    except BucketTaggingUnsupported:
+        # Should not happen if PUT succeeded above, but handle to keep
+        # the invariant "raise Unsupported, never lie about ownership."
+        raise
     if got is None:
         raise BucketOwnershipError(
             f"bucket {bucket!r}: PutBucketTagging succeeded but "
@@ -603,7 +640,9 @@ def read_bucket_ownership_tag(boto_client: Any, bucket: str) -> dict[str, str] |
     """Return the tag map for a bucket, or None if the bucket has no tags.
 
     Never raises for the "no tags on this bucket" case (S3 returns
-    NoSuchTagSet). Other errors propagate.
+    NoSuchTagSet). Raises ``BucketTaggingUnsupported`` for backends that
+    do not implement the tagging API at all (LB-088: FlashBlade returns
+    ``NotImplemented``, not ``NoSuchTagSet``). Other errors propagate.
     """
     from botocore.exceptions import ClientError
 
@@ -613,6 +652,15 @@ def read_bucket_ownership_tag(boto_client: Any, bucket: str) -> dict[str, str] |
         code = e.response.get("Error", {}).get("Code", "")
         if code in ("NoSuchTagSet", "NoSuchTagSetError"):
             return None
+        if code == "NotImplemented":
+            # LB-088: FlashBlade returns HTTP 501 NotImplemented.
+            # Narrow to this code only: MethodNotAllowed and other
+            # 4xx codes indicate permissions / policy problems, not a
+            # missing feature.
+            raise BucketTaggingUnsupported(
+                f"bucket {bucket!r}: GetBucketTagging returned NotImplemented. "
+                "Backend does not implement bucket tagging."
+            ) from e
         raise
 
     return {t["Key"]: t["Value"] for t in resp.get("TagSet", [])}
@@ -623,11 +671,27 @@ def verify_bucket_ownership(
     bucket: str,
     expected_deployment: str,
 ) -> IdentityReport:
-    """Read a bucket's ownership tag and return the verdict."""
+    """Read a bucket's ownership tag and return the verdict.
+
+    Returns ``IdentityVerdict.UNSUPPORTED`` when the backend does not
+    implement the tagging API (LB-088). Callers MUST handle this verdict
+    explicitly: it is not "no tag found" (that is ABSENT) and it is not
+    "cannot reach the bucket" (that is NOT_FOUND). It is "the answer to
+    'who owns this?' cannot be obtained from tags on this backend at all."
+    Deploy s3-buckets and destroy s3-buckets fall back to a weaker
+    name-prefix check.
+    """
     from botocore.exceptions import ClientError
 
     try:
         tags = read_bucket_ownership_tag(boto_client, bucket)
+    except BucketTaggingUnsupported as e:
+        return IdentityReport(
+            verdict=IdentityVerdict.UNSUPPORTED,
+            resource_name=bucket,
+            expected_deployment=expected_deployment,
+            hint=str(e),
+        )
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
         if code in ("NoSuchBucket", "404"):
@@ -730,3 +794,130 @@ def build_identity_from_config(cfg: Any, context: str | None = None) -> Deployme
         committed_sha=committed_sha,
         workload_schema=workload_schema,
     )
+
+
+def _prefix_matches(bucket: str, name: str) -> bool:
+    """Bucket name is exactly ``name`` or starts with ``name-``.
+
+    Empty ``name`` never matches (fail-safe). Trailing hyphen required
+    so ``foobar-bronze`` cannot be mistaken for deployment ``foo``.
+    """
+    if not name:
+        return False
+    if bucket == name:
+        return True
+    return bucket.startswith(name + "-")
+
+
+def bucket_name_matches_deployment(
+    bucket: str,
+    deployment_name: str,
+    other_deployment_names: Iterable[str] = (),
+) -> bool:
+    """Weaker ownership check for backends that lack bucket tagging.
+
+    Used only when ``verify_bucket_ownership`` returns
+    ``IdentityVerdict.UNSUPPORTED``. Returns True when the bucket name
+    matches this deployment via ``_prefix_matches`` AND no other
+    deployment on the cluster has a longer-prefix match on the same
+    bucket. Longest-prefix-wins: if deployments ``prod`` and
+    ``prod-eu`` coexist, only ``prod-eu`` may claim bucket
+    ``prod-eu-bronze``.
+
+    Rationale: on tagged backends the ownership tag is authoritative
+    and the bucket name is cosmetic. On untagged backends we have no
+    server-side proof of ownership at all, so we fall back to the
+    naming convention. Without cluster-scoped disambiguation a
+    deployment ``prod`` would silently adopt (and on destroy, empty)
+    every bucket owned by a deployment whose name begins with
+    ``prod``. That is the cross-team data-loss shape this helper
+    exists to prevent -- so the fallback MUST consult other
+    lakebench-annotated namespaces on the cluster before granting
+    ownership. Callers pass the list of other deployment names they
+    discovered via ``list_lakebench_deployment_names``.
+
+    ``other_deployment_names`` should not include the current
+    deployment. Callers that cannot enumerate (no k8s client, offline
+    unit test) may pass an empty iterable; in that case the caller
+    accepts the shorter-prefix collision risk explicitly.
+    """
+    if not _prefix_matches(bucket, deployment_name):
+        return False
+    my_len = len(deployment_name)
+    for other in other_deployment_names:
+        if not other or other == deployment_name:
+            continue
+        if _prefix_matches(bucket, other) and len(other) > my_len:
+            return False
+    return True
+
+
+def list_lakebench_deployment_names(core_v1: Any, exclude: str | None = None) -> list[str] | None:
+    """Return the deployment names carried by other lakebench namespaces.
+
+    Mirrors the ``_is_other_lakebench`` pattern used elsewhere in
+    ``destroy.py``: reads the ``lakebench.deployment/name`` annotation
+    when present, and falls back to the namespace name for pre-PR-1
+    legacy namespaces that carry the ``managed-by=lakebench`` label
+    but no annotation. Legacy names still count as "another deployment
+    on the cluster" for prefix-collision purposes.
+
+    ``exclude`` skips the caller's own namespace name from the result.
+
+    **Return-value contract, load-bearing.** Returns:
+
+    - ``list[str]`` (possibly empty) when the enumeration ran to
+      completion and the result is trustworthy. An empty list means
+      "no other lakebench deployments exist on this cluster" and the
+      name-prefix fallback may proceed.
+    - ``None`` when enumeration failed (RBAC denied, k8s API
+      unreachable, kubeconfig missing). Callers MUST NOT treat this
+      the same as an empty list: doing so would let the name-prefix
+      fallback fire under a namespace-scoped token, silently
+      re-opening the sibling-collision hole the round-2 fix closed.
+      Callers should refuse the UNSUPPORTED verdict entirely unless
+      the operator has opted in with ``--force-legacy``.
+
+    Narrow catch: only ``ApiException`` and ``ConfigException`` are
+    treated as enumeration-failure. Any other exception is a bug and
+    bubbles up.
+    """
+    from kubernetes.client.rest import ApiException
+    from kubernetes.config.config_exception import ConfigException
+
+    try:
+        items = core_v1.list_namespace().items
+    except ApiException as e:
+        logger.warning(
+            "list_lakebench_deployment_names: k8s API refused namespace list "
+            "(status=%s reason=%s). Returning None so callers refuse the "
+            "name-prefix fallback rather than silently accepting.",
+            getattr(e, "status", "?"),
+            getattr(e, "reason", "?"),
+        )
+        return None
+    except ConfigException:
+        logger.warning(
+            "list_lakebench_deployment_names: kubeconfig unavailable. "
+            "Returning None so callers refuse the name-prefix fallback."
+        )
+        return None
+
+    names: list[str] = []
+    for ns in items:
+        if not ns or not ns.metadata:
+            continue
+        if exclude and ns.metadata.name == exclude:
+            continue
+        anns = ns.metadata.annotations or {}
+        labels = ns.metadata.labels or {}
+        deployment = anns.get(ANNOTATION_DEPLOYMENT_NAME)
+        if deployment:
+            names.append(deployment)
+            continue
+        if labels.get("app.kubernetes.io/managed-by") == "lakebench":
+            names.append(ns.metadata.name)
+            continue
+        if labels.get("app.kubernetes.io/name") == "lakebench":
+            names.append(ns.metadata.name)
+    return names

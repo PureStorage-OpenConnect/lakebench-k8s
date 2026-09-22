@@ -6,6 +6,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **LB-088 (P0): FlashBlade returns `NotImplemented` on
+  `GetBucketTagging` and `PutBucketTagging`.** The primary tested S3
+  target does not implement the tagging APIs that PR-1's ownership
+  discipline uses as the identity mechanism. Found live on 2026-09-21
+  when the first end-to-end FAML deploy failed at the `s3-buckets`
+  step. Shipped through unit tests, PR-1 code review, PR-2 adversarial
+  review, and PR-C regression tests because the tests used moto (which
+  implements tagging cleanly); no path exercised a backend that
+  returns `NotImplemented`. Fix: new `IdentityVerdict.UNSUPPORTED`
+  verdict and `BucketTaggingUnsupported` exception surface the gap
+  distinctly from `NoSuchTagSet` (no tags) or `NoSuchBucket` (does not
+  exist). `write_bucket_ownership_tag` and `read_bucket_ownership_tag`
+  catch the `NotImplemented` `ClientError` (narrowed from an earlier
+  draft that also caught `MethodNotAllowed` -- that's a permissions
+  problem, not a missing feature). Deploy s3-buckets warns once per
+  run and skips the tag write; UNSUPPORTED-verdict buckets require a
+  name-prefix match against the deployment name, and any freshly
+  created bucket we cannot claim is deleted so a rerun doesn't leave
+  orphans. Destroy s3-buckets falls back to the same name-prefix
+  check on UNSUPPORTED, refusing unless `--force-legacy`. New
+  `bucket_name_matches_deployment` helper enforces **longest-prefix
+  wins** against a cluster-scan of other lakebench deployment names
+  (`list_lakebench_deployment_names(core_v1)`) so that deployment
+  `prod` cannot silently adopt bucket `prod-eu-bronze` owned by
+  deployment `prod-eu`. Round-3 adversarial review of the round-2
+  fix found TWO more silent-corruption holes: `admin reclaim-bucket`
+  still called the helper without the sibling list (naive prefix
+  re-opened on the admin path), and `list_lakebench_deployment_names`
+  returned an empty list on every exception -- a namespace-scoped
+  kubeconfig hitting RBAC 403 downgraded to naive prefix silently,
+  the round-1 bug re-opened for every multi-tenant OpenShift token.
+  Round-3 fix: `list_lakebench_deployment_names` returns
+  `list[str] | None`, where `None` means "cannot tell"; every
+  UNSUPPORTED-verdict caller (deploy, destroy, admin) refuses on
+  `None` unless `--force-legacy`. Narrowed the catch to
+  `ApiException` + `ConfigException` only (unexpected exceptions
+  bubble so a future refactor bug does not disarm the safety check).
+  Destroy uses `get_k8s_client(context=cfg.context)` instead of
+  ambient kubeconfig so a stale `KUBECONFIG` cannot enumerate the
+  wrong cluster. Orphan-cleanup on refuse checks the bucket is empty
+  before deleting (racing writer's data is left with a WARN naming
+  the orphan). `report()` fires per-bucket on the `--force-legacy`
+  branch of destroy. `admin reclaim-bucket` enumerates siblings
+  symmetrically. `--force-legacy` help text on both `deploy` and
+  `destroy` names the second case. `lakebench config storage` gains
+  a `bucket-tagging` ADVISORY check that reports SKIP for
+  unsupporting backends. Destroy summary distinguishes tag-verified,
+  name-prefix, and --force-legacy buckets. `docs/storage-backends.md`
+  documents the fallback; `docs/design/namespace-isolation.md`
+  documents the Category 1 identity-carrier trade-off. New tests:
+  `TestBucketTaggingUnsupported` (5), `TestBucketNamePrefixFallback`
+  (10 including nested-prefix collision + empty-name fail-safe),
+  `TestListLakebenchDeploymentNames` (7 including None-on-403 and
+  bubble-on-unexpected-exception). Known debt: TOCTOU race on
+  parallel first-time deploys of sibling-prefix names on
+  unsupporting backends documented but not resolved (requires
+  s3-buckets-under-cluster-lease refactor). Follow-up: integration
+  fake-tagging-unsupported boto client.
+
 ### Added
 - **Shared-cluster ownership discipline.** Every deployment now carries an
   identity: a `lakebench.deployment/name` annotation on its namespace

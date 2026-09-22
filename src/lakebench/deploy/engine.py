@@ -34,6 +34,53 @@ def image_tag(image: str) -> str:
     return tag
 
 
+def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
+    """Delete a freshly-created bucket when ownership was refused.
+
+    Round-3 F5: the naive ``delete_bucket`` call raced a concurrent
+    writer who could have written objects between our CreateBucket
+    and our refusal. If the bucket is non-empty at cleanup time we
+    do NOT delete -- silently emptying-then-deleting could destroy
+    data written by a racer. Instead we log a warning naming the
+    orphan and leave it for the operator to investigate.
+
+    All exceptions are caught and logged; the caller is already
+    refusing the deploy for a different reason and cleanup is
+    best-effort.
+    """
+    try:
+        r = boto_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "orphan bucket %s: could not verify empty before delete; "
+            "leaving in place (operator: investigate).",
+            bucket,
+            exc_info=True,
+        )
+        return
+    if r.get("KeyCount", 0) > 0 or r.get("Contents"):
+        logger.warning(
+            "orphan bucket %s: contains objects (a concurrent process "
+            "wrote between our CreateBucket and our ownership refusal). "
+            "Not deleting -- operator: investigate whether a racing "
+            "lakebench deploy or an unrelated writer needs this data.",
+            bucket,
+        )
+        return
+    try:
+        boto_client.delete_bucket(Bucket=bucket)
+        logger.info(
+            "deleted freshly-created bucket %s after ownership refusal (empty at cleanup time).",
+            bucket,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "could not delete freshly-created bucket %s; may leave an orphan on the backend.",
+            bucket,
+            exc_info=True,
+        )
+
+
 class DeploymentStatus(Enum):
     """Status of a deployment step."""
 
@@ -783,8 +830,11 @@ class DeploymentEngine:
         # deployment stops the deploy here.
         from lakebench.deploy.ownership import (
             BucketOwnershipError,
+            BucketTaggingUnsupported,
             IdentityVerdict,
+            bucket_name_matches_deployment,
             build_identity_from_config,
+            list_lakebench_deployment_names,
             verify_bucket_ownership,
             write_bucket_ownership_tag,
         )
@@ -794,6 +844,25 @@ class DeploymentEngine:
             context=self.config.platform.kubernetes.context or None,
         )
         boto = s3.raw_client  # boto3 client under the hood
+        unsupported_warned = False  # log the tagging fallback once per deploy
+        # Enumerate other lakebench deployments on the cluster once so
+        # the UNSUPPORTED-fallback prefix check can enforce
+        # longest-prefix-wins. ``None`` means "cannot enumerate": the
+        # UNSUPPORTED branch below MUST refuse rather than fall back
+        # to naive prefix (F2 finding, round-3 review). Uses the
+        # convention already in this module -- get_k8s_client loads
+        # the right kubeconfig context (F8) and CoreV1Api uses it.
+        from kubernetes import client as _kclient
+
+        from lakebench.k8s import get_k8s_client as _get_k8s
+
+        _get_k8s(
+            context=self.config.platform.kubernetes.context or None,
+            namespace=self.config.get_namespace(),
+        )
+        other_deployments = list_lakebench_deployment_names(
+            _kclient.CoreV1Api(), exclude=self.config.get_namespace()
+        )
         for name in bucket_names:
             v = verify_bucket_ownership(boto, name, identity.name)
             if v.verdict is IdentityVerdict.MISMATCH:
@@ -827,6 +896,71 @@ class DeploymentEngine:
             if v.verdict is IdentityVerdict.NOT_FOUND:
                 # Should not happen after ensure_buckets returned. Skip.
                 continue
+            if v.verdict is IdentityVerdict.UNSUPPORTED:
+                # Backend does not implement PutBucketTagging /
+                # GetBucketTagging (FlashBlade). Cannot stamp identity.
+                # Fallback: require that the bucket name follows the
+                # convention AND that no other lakebench deployment on
+                # the cluster has a longer-prefix claim. Enumeration
+                # must have succeeded: if it returned None (RBAC 403,
+                # kubeconfig missing) we cannot enforce longest-prefix
+                # and MUST refuse unless the operator has explicitly
+                # asserted ownership with --force-legacy.
+                was_created = results.get(name, False)
+                enumeration_failed = other_deployments is None
+                prefix_ok = not enumeration_failed and bucket_name_matches_deployment(
+                    name, identity.name, other_deployments or ()
+                )
+                if not (prefix_ok or force_legacy):
+                    if was_created:
+                        _try_cleanup_orphan_bucket(boto, name)
+                    if enumeration_failed:
+                        msg = (
+                            f"Bucket {name!r}: backend does not support "
+                            "bucket tagging, and lakebench could not "
+                            "enumerate other deployments on the cluster "
+                            "(likely RBAC on `namespaces` list). "
+                            "Cannot enforce sibling-collision safety. "
+                            "Grant cluster-wide `list namespaces` to "
+                            "this token, or pass --force-legacy after "
+                            "confirming no other lakebench deployment "
+                            "on this cluster shares a name prefix with "
+                            f"{identity.name!r}."
+                        )
+                    else:
+                        msg = (
+                            f"Bucket {name!r}: backend does not support "
+                            "bucket tagging. Name-prefix fallback "
+                            f"cannot grant ownership to deployment "
+                            f"{identity.name!r} (another deployment on "
+                            "the cluster may have a longer-prefix "
+                            "claim, or the bucket does not follow the "
+                            f"{identity.name}- naming convention). "
+                            "Rename the bucket, or pass --force-legacy "
+                            "if you have confirmed this is yours."
+                        )
+                    return DeploymentResult(
+                        component="s3-buckets",
+                        status=DeploymentStatus.FAILED,
+                        message=msg,
+                        elapsed_seconds=time.time() - start,
+                    )
+                if not unsupported_warned:
+                    logger.warning(
+                        "S3 backend does not implement bucket tagging. "
+                        "Ownership discipline falls back to bucket-name "
+                        "prefix matching the deployment name %r. See "
+                        "docs/storage-backends.md.",
+                        identity.name,
+                    )
+                    unsupported_warned = True
+                if was_created:
+                    logger.info(
+                        "bucket %s: created under name-prefix ownership; "
+                        "no tag written (backend unsupported).",
+                        name,
+                    )
+                continue
             try:
                 write_bucket_ownership_tag(
                     boto,
@@ -834,6 +968,35 @@ class DeploymentEngine:
                     identity.name,
                     workload_schema=identity.workload_schema,
                 )
+            except BucketTaggingUnsupported:
+                # Rare race: verify said tags exist earlier in this
+                # loop, then the write said Unsupported (permissions
+                # rotated, or a transient backend upgrade dropped the
+                # API). Fall back the same way as the pre-check path,
+                # including refusal when enumeration failed.
+                prefix_ok = other_deployments is not None and bucket_name_matches_deployment(
+                    name, identity.name, other_deployments
+                )
+                if not (prefix_ok or force_legacy):
+                    return DeploymentResult(
+                        component="s3-buckets",
+                        status=DeploymentStatus.FAILED,
+                        message=(
+                            f"Bucket {name!r}: PutBucketTagging returned "
+                            "NotImplemented and name-prefix fallback "
+                            "cannot grant ownership (name mismatch or "
+                            "cluster-enumeration failure). Cannot "
+                            "enforce ownership."
+                        ),
+                        elapsed_seconds=time.time() - start,
+                    )
+                if not unsupported_warned:
+                    logger.warning(
+                        "S3 backend does not implement PutBucketTagging. "
+                        "Falling back to name-prefix ownership."
+                    )
+                    unsupported_warned = True
+                continue
             except BucketOwnershipError as e:
                 return DeploymentResult(
                     component="s3-buckets",

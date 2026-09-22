@@ -457,13 +457,38 @@ def destroy_all(
                 # workload. `--force-legacy` is the explicit opt-in.
                 from lakebench.deploy.ownership import (
                     IdentityVerdict,
+                    bucket_name_matches_deployment,
+                    list_lakebench_deployment_names,
                     verify_bucket_ownership,
                 )
 
                 identity_name = engine.config.name
+                # Cluster-scan other lakebench deployments so the
+                # UNSUPPORTED fallback can enforce longest-prefix-wins.
+                # ``None`` means "cannot know" and the UNSUPPORTED
+                # branch below MUST refuse rather than fall back to
+                # naive prefix. F8 (round-3): load the kubeconfig via
+                # get_k8s_client(context=...) so a stale ambient
+                # KUBECONFIG cannot make CoreV1Api target the wrong
+                # cluster.
+                from kubernetes import client as _kclient
+
+                from lakebench.k8s import get_k8s_client as _get_k8s
+
+                _get_k8s(
+                    context=engine.config.platform.kubernetes.context or None,
+                    namespace=engine.config.get_namespace(),
+                )
+                other_deployments = list_lakebench_deployment_names(
+                    _kclient.CoreV1Api(),
+                    exclude=engine.config.get_namespace(),
+                )
                 mismatched: list[str] = []
                 legacy_refused: list[str] = []
                 legacy_forced: list[str] = []
+                unsupported_refused: list[str] = []
+                unsupported_forced: list[str] = []
+                unsupported_by_prefix: list[str] = []
                 for bucket in buckets:
                     v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
                     if v.verdict is IdentityVerdict.MISMATCH:
@@ -484,7 +509,59 @@ def destroy_all(
                                 DeploymentStatus.IN_PROGRESS,
                                 f"--force-legacy: untagged bucket {bucket}",
                             )
-                if mismatched or legacy_refused:
+                    elif v.verdict is IdentityVerdict.UNSUPPORTED:
+                        # Backend does not implement bucket tagging.
+                        # Fallback: proceed only if the bucket name
+                        # prefix-matches this deployment AND no other
+                        # lakebench deployment on the cluster has a
+                        # longer-prefix claim (longest-prefix-wins).
+                        # ``other_deployments is None`` means the
+                        # enumeration itself failed and we cannot
+                        # enforce longest-prefix -- refuse rather than
+                        # fall back to naive prefix (F2, round-3).
+                        prefix_ok = (
+                            other_deployments is not None
+                            and bucket_name_matches_deployment(
+                                bucket, identity_name, other_deployments
+                            )
+                        )
+                        if prefix_ok:
+                            unsupported_by_prefix.append(bucket)
+                            logger.warning(
+                                "destroy: bucket %s on a backend without "
+                                "tagging support. Proceeding by "
+                                "name-prefix match against deployment %r.",
+                                bucket,
+                                identity_name,
+                            )
+                            report(
+                                "s3-buckets",
+                                DeploymentStatus.IN_PROGRESS,
+                                f"name-prefix ownership: {bucket}",
+                            )
+                        elif force_legacy:
+                            unsupported_forced.append(bucket)
+                            logger.warning(
+                                "destroy --force-legacy: emptying bucket "
+                                "%s on a backend without tagging support "
+                                "AND without name-prefix match against "
+                                "deployment %r. Operator has asserted "
+                                "ownership.",
+                                bucket,
+                                identity_name,
+                            )
+                            # F6: mirror the IN_PROGRESS report on the
+                            # forced branch so a --force-legacy wipe is
+                            # visible in the progress stream, not just
+                            # in the final summary.
+                            report(
+                                "s3-buckets",
+                                DeploymentStatus.IN_PROGRESS,
+                                f"--force-legacy (no tagging, no prefix match): {bucket}",
+                            )
+                        else:
+                            unsupported_refused.append(bucket)
+                if mismatched or legacy_refused or unsupported_refused:
                     parts = []
                     if mismatched:
                         parts.append("owned by another deployment: " + "; ".join(mismatched))
@@ -496,6 +573,32 @@ def destroy_all(
                             "confirmed these are yours; otherwise use "
                             "`lakebench admin reclaim-bucket <name>` to "
                             "adopt an untagged bucket)"
+                        )
+                    if unsupported_refused:
+                        if other_deployments is None:
+                            unsupported_reason = (
+                                "backend does not support bucket tagging, "
+                                "and lakebench could not enumerate other "
+                                "deployments on the cluster (likely RBAC "
+                                "on `namespaces` list) so longest-prefix "
+                                "safety cannot be enforced: "
+                            )
+                        else:
+                            unsupported_reason = (
+                                "backend does not support bucket tagging "
+                                f"and bucket name does not grant "
+                                f"deployment {identity_name!r} a "
+                                "name-prefix claim (or another lakebench "
+                                "deployment on this cluster has a longer "
+                                "prefix): "
+                            )
+                        parts.append(
+                            unsupported_reason
+                            + ", ".join(unsupported_refused)
+                            + " (rename buckets to start with the "
+                            "deployment name, grant cluster-wide "
+                            "`list namespaces`, or pass --force-legacy "
+                            "if you have confirmed these are yours)"
                         )
                     msg = "Bucket ownership refused; " + " | ".join(parts)
                     results.append(
@@ -512,25 +615,38 @@ def destroy_all(
                     for bucket in buckets:
                         deleted = s3.empty_bucket(bucket)
                         total_deleted += deleted
-                    legacy_note = (
-                        f" (WARN: {len(legacy)} legacy untagged buckets: {', '.join(legacy)})"
-                        if legacy
-                        else ""
-                    )
+                    notes = []
+                    if legacy:
+                        notes.append(
+                            f"WARN: {len(legacy)} legacy untagged buckets: {', '.join(legacy)}"
+                        )
+                    if unsupported_by_prefix:
+                        notes.append(
+                            f"{len(unsupported_by_prefix)} buckets destroyed by "
+                            "name-prefix (backend does not support tagging): "
+                            + ", ".join(unsupported_by_prefix)
+                        )
+                    if unsupported_forced:
+                        notes.append(
+                            f"WARN: {len(unsupported_forced)} buckets destroyed "
+                            "by --force-legacy on a backend without tagging "
+                            "AND without name-prefix match: " + ", ".join(unsupported_forced)
+                        )
+                    summary_note = f" ({' | '.join(notes)})" if notes else ""
                     results.append(
                         DeploymentResult(
                             component="s3-buckets",
                             status=DeploymentStatus.SUCCESS,
                             message=(
                                 f"Cleaned {len(buckets)} S3 buckets "
-                                f"({total_deleted} objects)" + legacy_note
+                                f"({total_deleted} objects)" + summary_note
                             ),
                         )
                     )
                     report(
                         "s3-buckets",
                         DeploymentStatus.SUCCESS,
-                        f"S3 buckets cleaned ({total_deleted} objects)" + legacy_note,
+                        f"S3 buckets cleaned ({total_deleted} objects)" + summary_note,
                     )
         except Exception as e:
             results.append(

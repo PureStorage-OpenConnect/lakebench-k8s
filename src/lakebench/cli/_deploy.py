@@ -272,10 +272,13 @@ def deploy(
         typer.Option(
             "--force-legacy",
             help=(
-                "Claim ownership of a pre-existing annotation-less "
-                "namespace and untagged buckets. Use only when migrating "
-                "a pre-1.5 deployment; a mistake can silently take over "
-                "another team's storage."
+                "Claim ownership without tag proof. Covers two cases: "
+                "(1) a pre-1.5 annotation-less namespace or untagged "
+                "bucket being migrated; (2) a bucket on a backend that "
+                "does not implement bucket tagging AND does not match "
+                "the deployment-name prefix. Use only when you have "
+                "confirmed the resources are yours -- a mistake can "
+                "silently take over another team's storage."
             ),
         ),
     ] = False,
