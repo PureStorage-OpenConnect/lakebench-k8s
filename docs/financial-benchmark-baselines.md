@@ -40,13 +40,25 @@ go elsewhere.
 
 ## Batch pipeline (bronze_verify -> silver_build -> gold_finalize)
 
+Wall-clock covers the batch pipeline only. Detection rules run separately via `lakebench financial replay` (LB-092 tracks the gap); recall in this table is derived from that manual detection loop plus `lakebench financial score`. Alert count is the sum across every W-rule that completed. Cores used is the peak Spark-executor request across the three batch jobs (silver_build is the peak in every measured run).
+
 | Scale | Wall-clock p50 (s) | Wall-clock p95 (s) | Alert count | Recall | Cores used | Storage read (GB) |
 |------:|-------------------:|-------------------:|------------:|-------:|-----------:|------------------:|
-|     1 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
+|     1 |            707.5[1]|                TBD |    163,526[2]|   0.331[3]|         32 |             14.4  |
 |    10 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 |   100 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 |  1000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 | 10000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
+
+Footnotes on scale 1 (run-20260921-220243-fea608, first live end-to-end FAML pipeline on the reference cluster, 2026-09-21):
+
+[1] Single run; treat as p50 not p95. bronze_verify 360s, silver_build 255s, gold_finalize 75s. Datagen wrote 10 GB pacs.008 (26.66M silver rows).
+
+[2] Sum across the four W-rules that completed via `lakebench financial replay --depth-months 0`: W2_structuring 2,438; W3_round_tripping 180; W4_risk_propagation 98,786; W8_dormant_reactivation 62,122. W1_connected_components and W7_cross_border_high_risk crashed on rule-code defects (`Column dst#63L are ambiguous` self-join in W1) and are not counted; file follow-ups against `detection_rules.py` before quoting this number in an external context.
+
+[3] Weighted mean over the four typologies each completed rule targets per `RULE_TARGETS` in `benchmark/faml_queries.py`: micro_structuring 0.482 (222 instances), rapid_layering 0.305 (889), stack 0.401 (444), dormant_reactivation 0.233 (356). UETR-level FP rate across the full alert set is 0.985 -- roughly 98% of alerts do not touch any manifest-tagged typology row, which is expected on a synthetic baseline and NOT a claim about ops-queue FP rate (see `docs/faml-scoring.md`). Per-typology recall for all 15 planted typologies is in the `recall.parquet` artifact under the gold bucket.
+
+Not populated in this row: QpH (LB-093: spark-thrift default 4Gi limit OOMs on scale-1 silver aggregation, so the 8-query FAML benchmark returns 0/8 until sizing is bumped) and Wall-clock p95 (single run).
 
 ## Sustained pipeline (bronze_ingest -> silver_stream -> gold_refresh)
 
@@ -96,4 +108,4 @@ Follow this after each release UAT:
 
 ## History
 
-Empty until v1 release measurements land.
+**2026-09-21 (v1.5.0.dev0, run-20260921-220243-fea608)** -- first live end-to-end FAML pipeline on the reference cluster. Scale-1 row populated in the batch table. Not a release measurement -- the run surfaced five real defects (LB-088 FlashBlade tagging, LB-089 datagen v2 layout drift, LB-090 sustained-mode env-var drift, LB-091 sustained CLI missing bronze_verify, LB-092 gold_finalize does not invoke detection rules, LB-093 spark-thrift undersized) and the fixes are still in flight. Scale-10 and above will not be measured until LB-092 and LB-093 are closed.
