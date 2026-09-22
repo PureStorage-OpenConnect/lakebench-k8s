@@ -165,16 +165,26 @@ def resolve_auto_sizing(
         changes.append(f"trino.worker.memory={guidance.trino.worker_memory}")
 
     # -- Datagen --
-    # CPU and memory per pod are hard-locked by mode (MVP sizing):
-    #   batch:      4 CPU, 4Gi
-    #   continuous: 8 CPU, 24Gi
+    # CPU and memory per pod are hard-locked by mode. Sizing updated
+    # 2026-09-20 after the Rust c360 port + perf sweep: the Rust datagen
+    # uses <2 GiB memory typical (vs Python's ~8 GiB with per-worker
+    # process overhead), so the 24 GiB continuous-mode default from the
+    # Python era was 3-8x over-provisioned. New defaults target 4x safety
+    # headroom over actual measured usage.
+    #
+    #   batch:      4 CPU,  4Gi   (unchanged -- single-process Python path)
+    #   continuous: 8 CPU,  8Gi   (was 24Gi -- Rust never approaches this)
+    #
     # These are always overridden regardless of user config to prevent
-    # OOMKill from mode/memory mismatches.
-    # Scaling is via parallelism (number of pods).
+    # OOMKill from mode/memory mismatches. Scaling is via parallelism.
+    #
+    # generators/uploaders are Python-legacy knobs the Rust image ignores
+    # (it uses rayon threads sized from cgroup CPU quota). Kept at the old
+    # continuous-mode values so a Python-image regression path still works.
     datagen = config.architecture.workload.datagen
 
     if effective_mode == DatagenMode.CONTINUOUS.value:
-        mode_cpu, mode_memory = "8", "24Gi"
+        mode_cpu, mode_memory = "8", "8Gi"
         mode_generators, mode_uploaders = 8, 2
     else:
         mode_cpu, mode_memory = "4", "4Gi"
@@ -203,7 +213,7 @@ def resolve_auto_sizing(
     # size for Financial (200Gi vs Customer360's 150Gi) per spec §2C.21;
     # workload-specific stage profiles (W1-W7) are applied by ENG-2C.3
     # at manifest-build time, not autosizer time.
-    schema_change = _apply_schema_overrides(config)
+    schema_change = _apply_schema_overrides(config, cluster_capacity)
     if schema_change:
         changes.append(schema_change)
 
@@ -221,13 +231,31 @@ def resolve_auto_sizing(
         )
 
 
-def _apply_schema_overrides(config: LakebenchConfig) -> str | None:
+def _apply_schema_overrides(
+    config: LakebenchConfig,
+    cluster_capacity: ClusterCapacity | None = None,
+) -> str | None:
     """Apply per-workload-schema default overrides.
 
     Baseline (Customer360) leaves everything at scale-tier guidance.
     Financial (FinServ-Crime, AML) bumps the shared scratch PVC to 200 Gi
-    for silver_build headroom on pacs.008 rows (spec §2C.21). Only fields
-    the user did not explicitly set are touched.
+    for silver_build headroom on pacs.008 rows (spec §2C.21) and lifts
+    the Spark Thrift default from 4g toward 16g -- LB-093, first live
+    S1 run OOM'd every FAML benchmark query at 4g because the silver
+    aggregation and rule-target joins are heavier than C360's silver.
+    Only fields the user did not explicitly set are touched.
+
+    Cluster-cap on the thrift bump: on a small cluster whose largest
+    node cannot fit 16g + ~4g overhead + kubelet/system reservation,
+    requesting 16g causes the thrift pod to sit Pending forever. A
+    20 GiB *raw* node typically has 17-18 GiB *allocatable* after
+    system reservation, so the effective floor for a comfortable 16g
+    pod is closer to 24 GiB raw. When ``cluster_capacity`` is
+    available and the largest node has less than ~24 GiB, fall back
+    to ~80 % of that node's raw memory (with a floor at 4g so we
+    never silently regress below the original default). When
+    capacity is not available (offline autosizing), stay at 16g --
+    users on a small cluster can override explicitly.
     """
     from lakebench.config.schema import WorkloadSchema
 
@@ -235,10 +263,39 @@ def _apply_schema_overrides(config: LakebenchConfig) -> str | None:
     if schema != WorkloadSchema.FINANCIAL:
         return None
 
+    changes: list[str] = []
     scratch = config.platform.storage.scratch
     if _set_if_default(scratch, "size", "200Gi"):
-        return "storage.scratch.size=200Gi (schema=financial)"
-    return None
+        changes.append("storage.scratch.size=200Gi")
+
+    if config.architecture.query_engine.type.value == "spark-thrift":
+        thrift = config.architecture.query_engine.spark_thrift
+        target_memory = "16g"
+        if cluster_capacity is not None:
+            largest_node_gi = _largest_node_memory_gi(cluster_capacity)
+            if largest_node_gi is not None and largest_node_gi < 24.0:
+                fitted = max(4.0, largest_node_gi * 0.8)
+                target_memory = f"{int(fitted)}g"
+        if _set_if_default(thrift, "memory", target_memory):
+            changes.append(f"query_engine.spark_thrift.memory={target_memory}")
+
+    if not changes:
+        return None
+    return ", ".join(changes) + " (schema=financial)"
+
+
+def _largest_node_memory_gi(cluster_capacity: ClusterCapacity) -> float | None:
+    """Largest allocatable node memory in GiB, or None if the field
+    is missing / unreadable. Best-effort guard for the 16g thrift bump
+    on tiny clusters -- a miss falls through to 16g rather than to a
+    fabricated cap."""
+    val = getattr(cluster_capacity, "largest_node_memory_bytes", None)
+    if val is None:
+        return None
+    try:
+        return float(val) / (1024**3)
+    except (TypeError, ValueError):
+        return None
 
 
 def _round_down_even(n: int) -> int:

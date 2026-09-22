@@ -7,6 +7,91 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Fixed
+- **LB-112 (P0): batch FAML pipeline never invoked the detection
+  rules.** `lakebench run` on a batch financial config completed
+  bronze-verify + silver-build + gold-finalize and emitted an empty
+  `gold.alerts` table. Baseline population required a separate
+  `lakebench financial replay --depth-months 0` per rule, which does
+  not include the detection wall-clock in `metrics.json` -- so the
+  baseline row's TTV understated the pipeline's real cost. Fix:
+  `gold_finalize_financial.main()` now calls
+  `run_detection_rules(spark, txns, RUN_ID)` after baseline
+  dashboards. Iterates `DEFAULT_DETECTION_RULES` = (W2, W3, W4, W7,
+  W8, W1 -- cheapest first, W1 last as most expensive), materialises
+  each rule's alerts frame into a temp view, DELETE-per-rule_id then
+  INSERT so re-runs against the same silver corpus produce
+  reproducible alert counts and a transient write failure does not
+  silently split. Per-rule try/except so one bad rule cannot abort
+  the pipeline; failure log line uses `alerts=0 error=...` shape so
+  metrics parsers see a row for every rule attempted. Signature
+  filter uses `inspect.signature(fn).parameters` (not
+  `fn.__code__.co_varnames`, which leaks locals into the kwarg
+  filter). Per-job timeout in `cli/_run.py` also bumped by 900 s
+  when `workload.schema=financial` so gold-finalize + detection
+  fits at scale ~5+.
+
+- **LB-113 (P0): Spark Thrift default 4Gi OOMs every FAML benchmark
+  query at scale 1.** First live S1 run 2026-09-21 showed exit 137
+  on query 1 (silver full aggregation) cascading to "container not
+  found" on 7/7 remaining queries as the thrift pod terminated,
+  producing 0/8 QpH. Fix: autosizer `_apply_schema_overrides` bumps
+  `query_engine.spark_thrift.memory` to `16g` when
+  `workload.schema=financial` and the field is at its default.
+  Guarded on cluster capacity: when the largest allocatable node
+  has < 20 GiB, cap to `max(4g, 0.8 * largest_node_gi)` so a small
+  cluster does not silently get a Pending pod. Autosizer test
+  actually invokes the autosizer against a real config (not a
+  source grep) so a future refactor that keeps the strings but
+  breaks the mutation trips a real assertion. Does not
+  self-propagate on upgrade -- an already-deployed 4g thrift pod
+  needs a destroy-then-deploy cycle to pick up the new default.
+
+- **LB-114 (P0): W1_connected_components crashed with
+  `AnalysisException: Column dst#63L are ambiguous` on iteration 2
+  of label propagation.** `labels` after the first iteration
+  inherits Catalyst attribute IDs from `edges_u` via the prior
+  `unionByName(neighbour_labels)`, so `labels.join(edges_u, ...)`
+  on subsequent iterations cannot disambiguate `edges_u["dst"]`
+  from `labels`' shared IDs. Fix: `.alias("lbl")` and `.alias("eg")`
+  on both sides inside each loop iteration + qualified
+  `col("lbl.id") == col("eg.src")` join predicate. Also:
+  `labels.unpersist(blocking=False)` at function return so the
+  cached vertex-label frame is not pinned in executor storage
+  through the `collect_set` shuffle downstream. Evidence map now
+  carries `converged=true|false` so a non-convergence emission of
+  partial-labeling alerts is visible to downstream metrics.
+  Surfaced by first live S1 run 2026-09-21.
+
+- **LB-115 (P0): W7_cross_border_high_risk crashed inside the driver
+  on every S1 run.** Two independent defects combined into one hard
+  failure: (a) the caller (both `replay_financial` and the new
+  gold-finalize detection loop) did not pass `silver_entities`, and
+  (b) `_faml_data_path()` tried `import lakebench.spark.data` which
+  raises ImportError inside the apache/spark image (lakebench pkg
+  not installed there), and that ImportError was uncaught -- the
+  whole rule dispatcher stack-traced. Fix has four parts: (i)
+  `_faml_data_candidates()` walks env-override -> pkg-import ->
+  script-dir-subfolder -> script-dir with import-error tolerance,
+  and returns `[override]` early when `LB_FAML_DATA_DIR` is set so
+  a partial override does not silently mix with pkg data (split-
+  brain reference state); (ii) `w7_cross_border_high_risk`
+  auto-loads `silver.entities` from `LB_ICEBERG_CATALOG` +
+  `LB_FINANCIAL_SILVER_ENTITIES` when the caller passes None,
+  catching `AnalysisException` so a missing table degrades to
+  empty alerts rather than crashing the rule dispatcher; (iii)
+  `deploy_scripts_configmap` ships the three FAML JSON sidecars
+  (`sanctions_list.json`, `pep_list.json`,
+  `high_risk_jurisdictions.json`, ~8 KB total) alongside the .py
+  scripts using flat keys since ConfigMap keys cannot contain
+  slashes -- they mount under `/opt/spark/scripts/` where the
+  script-dir candidate finds them; (iv) new
+  `get_faml_data_dir()` helper in `lakebench._resources`. Also
+  fixed in W7: `dropDuplicates(['entity_id'])` on
+  `silver.entities` was shuffle-order-dependent, so an entity
+  with multiple country values produced different W7 alert
+  counts across runs; replaced with deterministic
+  `groupBy + min(country)`.
+
 - **LB-089 (P0): FAML pipeline broken end-to-end since the datagen
   Rust rewrite.** `bronze_verify_financial.py` and
   `bronze_ingest_financial.py` read pacs.008 transactions from
