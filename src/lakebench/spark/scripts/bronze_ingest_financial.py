@@ -24,8 +24,18 @@ from common import env, log
 from pyspark.sql import SparkSession
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-# Match Rust datagen layout by default (bronze/pacs008/*); overridable.
-PACS_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "bronze/pacs008/")
+# LB-089: honor LB_FINANCIAL_BRONZE_PREFIX with the same semantics as
+# bronze_verify_financial: the env var is the ROOT prefix datagen_rs was
+# invoked with (mirrored from path_template by job.py). Transactions
+# land under {root}/bronze/pacs008/. Pre-PR-F this file used the env
+# var as the *inner* path with default "bronze/pacs008/", which broke
+# whenever job.py set the env var to the outer prefix -- the same class
+# of drift that bit the batch path.
+BRONZE_ROOT_PREFIX = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/")
+PACS_PREFIX = env(
+    "LB_FINANCIAL_PACS_PATH",
+    BRONZE_ROOT_PREFIX.rstrip("/") + "/bronze/pacs008/",
+)
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 CHECKPOINT_URI = env(
