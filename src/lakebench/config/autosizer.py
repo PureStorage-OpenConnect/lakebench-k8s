@@ -246,16 +246,18 @@ def _apply_schema_overrides(
     Only fields the user did not explicitly set are touched.
 
     Cluster-cap on the thrift bump: on a small cluster whose largest
-    node cannot fit 16g + ~4g overhead + kubelet/system reservation,
-    requesting 16g causes the thrift pod to sit Pending forever. A
-    20 GiB *raw* node typically has 17-18 GiB *allocatable* after
-    system reservation, so the effective floor for a comfortable 16g
-    pod is closer to 24 GiB raw. When ``cluster_capacity`` is
-    available and the largest node has less than ~24 GiB, fall back
-    to ~80 % of that node's raw memory (with a floor at 4g so we
-    never silently regress below the original default). When
-    capacity is not available (offline autosizing), stay at 16g --
-    users on a small cluster can override explicitly.
+    node cannot fit 24g + Spark overhead (~2.4g) + a safety margin for
+    kubelet / co-scheduled pods, requesting 24g causes the thrift pod
+    to sit Pending forever or drives the node into memory pressure.
+    ``largest_node_memory_bytes`` is *allocatable* (post-reservation);
+    Spark still needs its own overhead on top and the node still needs
+    room to run other pods. Rule of thumb: leave ~8 GiB headroom below
+    allocatable. When ``cluster_capacity`` is available and the largest
+    allocatable node has less than 36 GiB, fall back to
+    ``min(20g, largest_node_gi - 8g)`` (with a floor of 4g so we never
+    silently regress below the original 4g default). When capacity is
+    not available (offline autosizing), stay at 24g -- users on a small
+    cluster can override explicitly.
     """
     from lakebench.config.schema import WorkloadSchema
 
@@ -270,11 +272,18 @@ def _apply_schema_overrides(
 
     if config.architecture.query_engine.type.value == "spark-thrift":
         thrift = config.architecture.query_engine.spark_thrift
-        target_memory = "16g"
+        # LB-117: 16g was on the edge for FAML analytical queries -- three
+        # S1 iters saw QpH 6.6 / 0.0 / 8.2 with the 0.0 being a thrift-pod
+        # OOM mid-benchmark on aggregate_typology_coverage.sql. 24g clears
+        # it with headroom. Cluster-cap threshold is 36 GiB *allocatable*:
+        # 24g heap + ~2.4g Spark overhead + ~8 GiB safety margin for the
+        # driver, kubelet and any co-scheduled pod. Below the threshold,
+        # target = min(20g, allocatable - 8g) with a 4g floor.
+        target_memory = "24g"
         if cluster_capacity is not None:
             largest_node_gi = _largest_node_memory_gi(cluster_capacity)
-            if largest_node_gi is not None and largest_node_gi < 24.0:
-                fitted = max(4.0, largest_node_gi * 0.8)
+            if largest_node_gi is not None and largest_node_gi < 36.0:
+                fitted = max(4.0, min(20.0, largest_node_gi - 8.0))
                 target_memory = f"{int(fitted)}g"
         if _set_if_default(thrift, "memory", target_memory):
             changes.append(f"query_engine.spark_thrift.memory={target_memory}")

@@ -465,10 +465,11 @@ def test_autosizer_bumps_spark_thrift_memory_for_financial():
         },
     }
     cfg = LakebenchConfig.model_validate(cfg_yaml)
-    # No cluster capacity: the guard's fallback keeps the default 16g.
+    # No cluster capacity: the guard's fallback keeps the FAML default 24g
+    # (LB-117: 16g was on the edge; three-iter S1 crashed thrift mid-query).
     resolve_auto_sizing(cfg, cluster_capacity=None)
-    assert cfg.architecture.query_engine.spark_thrift.memory == "16g", (
-        f"expected spark_thrift.memory=16g on FAML, got "
+    assert cfg.architecture.query_engine.spark_thrift.memory == "24g", (
+        f"expected spark_thrift.memory=24g on FAML, got "
         f"{cfg.architecture.query_engine.spark_thrift.memory!r}"
     )
 
@@ -507,7 +508,9 @@ def test_autosizer_thrift_memory_caps_on_small_node():
             },
         }
     )
-    # Largest node is 16 GiB -> 16g bump would not fit; cap to 12g (0.8 * 16).
+    # Largest node is 16 GiB *allocatable* -> 24g bump would not fit;
+    # cap to min(20, 16-8) = 8g. LB-117 revised: formula leaves ~8 GiB
+    # headroom for Spark overhead + kubelet + other pods.
     cap = ClusterCapacity(
         total_cpu_millicores=8000,
         total_memory_bytes=16 * 1024**3,
@@ -517,14 +520,95 @@ def test_autosizer_thrift_memory_caps_on_small_node():
     )
     resolve_auto_sizing(cfg, cluster_capacity=cap)
     resolved = cfg.architecture.query_engine.spark_thrift.memory
-    assert resolved != "16g", (
-        "autosizer must cap thrift below 16g on a tiny node; got 16g on a 16 GiB cluster"
-    )
-    # Floor at 4g so we never regress below the original default.
-    import re
+    assert resolved == "8g", f"expected 8g on a 16 GiB node, got {resolved}"
 
-    m = re.match(r"^(\d+)g$", resolved)
-    assert m and 4 <= int(m.group(1)) < 16, f"cap must land in [4g, 16g); got {resolved}"
+
+def test_autosizer_thrift_capped_on_24gi_node():
+    """LB-117: a node with 24 GiB *allocatable* is under the 36 GiB
+    threshold that the 24g target needs after Spark overhead + kubelet
+    + co-scheduled pods. On a 24 GiB allocatable node the autosizer
+    must cap thrift to min(20, 24-8) = 16g."""
+    from lakebench.config.autosizer import resolve_auto_sizing
+    from lakebench.config.schema import LakebenchConfig
+    from lakebench.k8s.client import ClusterCapacity
+
+    cfg = LakebenchConfig.model_validate(
+        {
+            "name": "faml-24g-node",
+            "recipe": "polaris-iceberg-spark-thrift",
+            "platform": {
+                "storage": {
+                    "s3": {
+                        "endpoint": "http://example:80",
+                        "access_key": "x",
+                        "secret_key": "y",
+                        "buckets": {
+                            "bronze": "faml-24g-bronze",
+                            "silver": "faml-24g-silver",
+                            "gold": "faml-24g-gold",
+                        },
+                    },
+                },
+            },
+            "architecture": {
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "query_engine": {"type": "spark-thrift"},
+            },
+        }
+    )
+    cap = ClusterCapacity(
+        total_cpu_millicores=8000,
+        total_memory_bytes=24 * 1024**3,
+        node_count=1,
+        largest_node_cpu_millicores=8000,
+        largest_node_memory_bytes=24 * 1024**3,
+    )
+    resolve_auto_sizing(cfg, cluster_capacity=cap)
+    resolved = cfg.architecture.query_engine.spark_thrift.memory
+    assert resolved == "16g", f"expected 16g cap on a 24 GiB node, got {resolved}"
+
+
+def test_autosizer_thrift_at_36gi_uses_full_24g():
+    """LB-117 boundary: at 36 GiB allocatable the cap branch is skipped
+    and thrift gets the full 24g target."""
+    from lakebench.config.autosizer import resolve_auto_sizing
+    from lakebench.config.schema import LakebenchConfig
+    from lakebench.k8s.client import ClusterCapacity
+
+    cfg = LakebenchConfig.model_validate(
+        {
+            "name": "faml-36g-node",
+            "recipe": "polaris-iceberg-spark-thrift",
+            "platform": {
+                "storage": {
+                    "s3": {
+                        "endpoint": "http://example:80",
+                        "access_key": "x",
+                        "secret_key": "y",
+                        "buckets": {
+                            "bronze": "faml-36g-bronze",
+                            "silver": "faml-36g-silver",
+                            "gold": "faml-36g-gold",
+                        },
+                    },
+                },
+            },
+            "architecture": {
+                "workload": {"schema": "financial", "datagen": {"scale": 1}},
+                "query_engine": {"type": "spark-thrift"},
+            },
+        }
+    )
+    cap = ClusterCapacity(
+        total_cpu_millicores=16000,
+        total_memory_bytes=36 * 1024**3,
+        node_count=1,
+        largest_node_cpu_millicores=16000,
+        largest_node_memory_bytes=36 * 1024**3,
+    )
+    resolve_auto_sizing(cfg, cluster_capacity=cap)
+    resolved = cfg.architecture.query_engine.spark_thrift.memory
+    assert resolved == "24g", f"36 GiB allocatable should get full 24g, got {resolved}"
 
 
 def test_gold_finalize_uses_signature_not_covarnames():

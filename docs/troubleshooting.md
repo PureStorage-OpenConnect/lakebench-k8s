@@ -66,7 +66,7 @@ Reference resource profiles:
 
 | Job | Cores | Memory | Overhead | PVC |
 |---|---|---|---|---|
-| bronze-verify | 2 | 4g | 2g | 50Gi |
+| bronze-verify | 2 | 4g | 2g | 50Gi (c360) / 500Gi (financial, LB-118) |
 | silver-build | 4 | 48g | 12g | 150Gi |
 | gold-finalize | 4 | 32g | 8g | 100Gi |
 

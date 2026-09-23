@@ -197,9 +197,15 @@ user-configurable. They live in
 
 | Job | Executor Cores | Executor Memory | Overhead | Scratch PVC | Driver (Spark 3) | Driver (Spark 4) |
 |---|---|---|---|---|---|---|
-| `bronze-verify` | 2 | 4g | 2g | 50Gi | 4g | 4g |
+| `bronze-verify` | 2 | 4g | 2g | 50Gi (c360) / 500Gi (financial) | 4g | 4g |
 | `silver-build` | 4 | 48g | 12g | 150Gi | 24g | 32g |
 | `gold-finalize` | 4 | 32g | 8g | 100Gi | 24g | 32g |
+
+For financial workloads (LB-118) `bronze-verify` also overrides
+`executors_per_100_scale` (4 -> 8) and `max_executors` (20 -> 28) since
+the CTAS fallback in `bronze_verify_financial.py` rewrites the full
+pacs.008 source above scale 5. Overrides live in
+`_SCHEMA_PROFILE_OVERRIDES` alongside the base profiles.
 
 ### Streaming Jobs
 

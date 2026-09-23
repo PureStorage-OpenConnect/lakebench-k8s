@@ -181,9 +181,18 @@ them causes OOM kills or disk-full failures at scale.
 
 | Stage | Cores | Memory | Overhead | Scratch PVC |
 |---|---|---|---|---|
-| `bronze-verify` | 2 | 4g | 2g | 50Gi |
+| `bronze-verify` | 2 | 4g | 2g | 50Gi (c360) / 500Gi (financial) |
 | `silver-build` | 4 | 48g | 12g | 150Gi |
 | `gold-finalize` | 4 | 32g | 8g | 100Gi |
+
+The financial workload's bronze-verify trips a CTAS fallback in
+`bronze_verify_financial.py` above scale 5 (Iceberg `add_files` cannot
+zero-copy-register the pacs.008 source once it exceeds the size/file
+thresholds), which rewrites the full source through an Iceberg CTAS and
+spills roughly twice the per-executor input to local disk. The c360
+profile is a thin `add_files` register and never sees that spill. See
+LB-118 and `_SCHEMA_PROFILE_OVERRIDES` in
+`modules/pipeline_engines/spark/job.py`.
 
 Per-executor sizing (cores, memory, overhead, PVC) is fixed. What scales with
 data is the **executor count**. Executor count is derived automatically from
@@ -191,7 +200,9 @@ the scale factor using a linear formula:
 
 - At scale <= 10: uses a base count (4 for bronze, 8 for silver, 4 for gold)
 - Above scale 10: adds executors linearly (e.g., silver adds 12 per 100 scale units)
-- Each job has a maximum executor cap (20 for bronze, 28 for silver/gold)
+- Each job has a maximum executor cap: 20 for c360 bronze, 28 for silver / gold
+  and for financial bronze (financial also bumps `executors_per_100_scale`
+  from 4 to 8 so per-executor load halves at scale 100+).
 
 Per-job executor count can be overridden in the config for manual tuning:
 

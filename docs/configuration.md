@@ -790,7 +790,7 @@ resolved resources are approximately:
 | Component | Instances | Per-Instance Resources |
 |---|---|---|
 | Datagen pods | 10 | 8 CPU, 24Gi |
-| Bronze-verify executors | 8 | 2 cores, 4g+2g overhead, 50Gi PVC |
+| Bronze-verify executors | 8 | 2 cores, 4g+2g overhead, 50Gi PVC (c360) / 500Gi PVC (financial, LB-118) |
 | Silver-build executors | 8 | 4 cores, 48g+12g overhead, 150Gi PVC |
 | Gold-finalize executors | 8 | 4 cores, 32g+8g overhead, 100Gi PVC |
 | Trino workers | 4 | 4 cores, 16Gi |

@@ -31,7 +31,10 @@ schema conformance, flags quality issues (nulls, format inconsistencies,
 duplicates), and writes validation summary metrics. This stage is I/O-bound
 and exercises the S3 read path.
 
-**Job profile:** 2 cores, 4g memory, 2g overhead per executor, 50Gi PVC.
+**Job profile:** 2 cores, 4g memory, 2g overhead per executor, 50Gi PVC
+(c360) or 500Gi PVC (financial; LB-118 --- financial trips the CTAS
+fallback above scale 5 which spills roughly twice the per-executor input
+to local disk).
 
 ### Stage 2: silver-build
 
