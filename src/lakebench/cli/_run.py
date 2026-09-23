@@ -1259,11 +1259,15 @@ def run(
                     parsed = collector.parse_driver_logs(result.driver_logs, stage_name)
                     _apply_parsed_job_metrics(job_metrics, parsed)
 
-                # Populate resource metrics from job profile
-                _profile = get_job_profile(stage_name)
+                # Populate resource metrics from job profile. Pass the schema so
+                # FAML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)
+                # are reflected -- otherwise the scorecard under-reports the
+                # deployed resources (LB-135 review finding).
+                _schema = cfg.architecture.workload.schema_type.value
+                _profile = get_job_profile(stage_name, _schema)
                 if _profile:
                     _scale = cfg.architecture.workload.datagen.get_effective_scale()
-                    _expected_executors = get_executor_count(stage_name, _scale)
+                    _expected_executors = get_executor_count(stage_name, _scale, _schema)
 
                     # Check per-job executor override
                     _override_map = {

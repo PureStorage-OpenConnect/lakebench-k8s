@@ -123,8 +123,20 @@ the pipeline.
 | Scale | Ingest rate (rows/s) | Silver merge p50 (s) | Gold refresh p50 (s) | Cores used |
 |------:|---------------------:|---------------------:|---------------------:|-----------:|
 |     1 |                  TBD |                  TBD |                  TBD |        TBD |
-|    10 |                  TBD |                  TBD |                  TBD |        TBD |
+|    10 |              n/a[s1] |              n/a[s1] |              n/a[s1] |        ~18 |
 |   100 |                  TBD |                  TBD |                  TBD |        TBD |
+
+[s1] Scale-10 continuous ran end to end and PASSED the honest alert gate on
+2026-09-23 (run-20260923-162712-724805): bronze-verify preflight completed in
+1937s (LB-132 timeout budget + LB-135 20Gi memory), the three streaming stages
+ran concurrently for the 30-min window, and detection wrote 752,422 alerts
+(W2/W3/W4; W1/W7/W8 skipped in continuous). But the per-stage throughput /
+freshness / ingest-rate metrics all read 0/None: the collector's streaming
+parsers do not match FAML's gold_refresh logs and ingest_ratio uses the c360
+denominator (LB-136, Phase 4). So the pipeline is proven at scale 10 but these
+sustained rate columns cannot be populated with real numbers until Phase 4
+wires real freshness/TTD + the FAML ingest denominator. Cores ~18 = 2+2+2
+streaming executors x ~cores, excluding the one-shot bronze-verify preflight.
 
 ## Replay (W8, `lakebench financial replay`)
 

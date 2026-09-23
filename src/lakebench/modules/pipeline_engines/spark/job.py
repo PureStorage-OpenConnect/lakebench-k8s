@@ -181,12 +181,40 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 #     already used by silver/gold)
 # Combined ~10x headroom at scale 10, ~4x at scale 100, ~2x at scale 500.
 # Fields not listed here stay at the c360 base value.
+#
+# Memory: the c360 base (4g heap + 2g overhead = 6Gi) is sized for a thin
+# add_files register. FAML's CTAS fallback runs a partitioned Iceberg write --
+# `CREATE TABLE ... PARTITIONED BY (days(intr_bk_sttlm_dt)) AS SELECT * FROM
+# parquet` over the whole pacs.008 corpus (266M rows / ~94 GB at scale 10) --
+# and executors were OOMKilled (ExitCode 137, container cgroup limit) on 6Gi:
+# repeatedly in the scale-10 continuous preflight, once transiently in the
+# scale-10 batch run that squeaked by on data-distribution luck. This is
+# per-executor undersizing, not node contention (OOMKilled is the container
+# hitting its own limit, not eviction), so it bites regardless of scheduling in
+# both modes.
+#
+# The pressure is OFF-HEAP, not heap (adversarial review, LB-135): there is no
+# aggregation/ORDER BY in the CTAS. What blows the container is the partitioned
+# write -- the days() clustering shuffle plus S3A `fast.upload.buffer=bytebuffer`
+# uploads (256 MB direct ByteBuffers, uncapped active blocks) and Iceberg
+# parquet row-group buffers, all charged to memoryOverhead. So the bump goes
+# into OVERHEAD, not heap: 8g heap + 12g overhead (20Gi total). 8g heap is ample
+# for a streaming `SELECT *` scan with cores=2 (no in-memory aggregation); 12g
+# overhead (vs the base 2g) gives 6x the off-heap headroom where the OOM
+# actually lives. 20Gi total stays well under silver-build (60Gi) and
+# gold-finalize (40Gi). At the scale-10 bronze-verify executor count (4, from
+# base_executors -- the override does not change base_executors) that is ~84Gi,
+# comfortable on the reference cluster. If scale-100 still OOMs off-heap, cap
+# fs.s3a.fast.upload.active.blocks or set -XX:MaxDirectMemorySize before adding
+# more total memory.
 _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
     "financial": {
         "bronze-verify": {
             "scratch_size": "500Gi",
             "executors_per_100_scale": 8,
             "max_executors": 28,
+            "executor_memory": "8g",
+            "executor_memory_overhead": "12g",
         },
     },
 }
@@ -286,30 +314,48 @@ def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     return min(base + extra, profile["max_executors"])
 
 
-def get_job_profile(job_type: str) -> dict[str, Any] | None:
+def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
     """Return the resource profile for a given job type.
 
     Args:
         job_type: Job type string (e.g. "bronze-verify", "silver-build").
+        schema_type: Workload schema (e.g. "financial"). When given, the
+            schema's ``_SCHEMA_PROFILE_OVERRIDES`` are merged on top of the base
+            profile, so the returned memory/scratch/executor fields match what
+            the job actually deploys. The metrics/scorecard path MUST pass this
+            or it under-reports FAML resources (e.g. bronze-verify as 6Gi when
+            the pod requests 20Gi -- LB-135 review finding). Omitting it keeps
+            the c360 base for backward compatibility.
 
     Returns:
         Profile dict copy or None if job_type is unknown.
     """
+    if schema_type is not None:
+        return _resolve_job_profile(job_type, schema_type)
     profile = _JOB_PROFILES.get(job_type)
     return dict(profile) if profile else None
 
 
-def get_executor_count(job_type: str, scale: float) -> int:
+def get_executor_count(job_type: str, scale: float, schema_type: str | None = None) -> int:
     """Compute the deterministic executor count for a job at a given scale.
 
     Args:
         job_type: Job type string.
         scale: Scale factor from config.
+        schema_type: Workload schema. When given, schema overrides to
+            ``base_executors`` / ``executors_per_100_scale`` / ``max_executors``
+            are applied (FAML bronze-verify scales 8-per-100 to a 28 cap, vs the
+            c360 base 4-per-100 / 20 cap). The metrics path must pass this so the
+            scorecard's executor count matches the deployed job at scale > 10.
 
     Returns:
         Expected executor count, or 0 if job_type is unknown.
     """
-    profile = _JOB_PROFILES.get(job_type)
+    profile = (
+        _resolve_job_profile(job_type, schema_type)
+        if schema_type is not None
+        else _JOB_PROFILES.get(job_type)
+    )
     if not profile:
         return 0
     return _scale_executor_count(profile, scale)
