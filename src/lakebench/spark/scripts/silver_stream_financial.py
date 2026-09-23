@@ -65,7 +65,15 @@ import time
 from common import env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
-from silver_build_financial import build_edges, build_transactions
+from silver_build_financial import (
+    DDL_ACCOUNTS,
+    DDL_EDGES,
+    DDL_ENTITIES,
+    DDL_STATEMENTS,
+    DDL_TXNS,
+    build_edges,
+    build_transactions,
+)
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
@@ -84,9 +92,7 @@ def _ensure_batch_id_column(spark, table: str) -> None:
     one metadata read on subsequent restarts.
     """
     try:
-        spark.sql(
-            f"ALTER TABLE {CATALOG}.{table} ADD COLUMN IF NOT EXISTS _batch_id BIGINT"
-        )
+        spark.sql(f"ALTER TABLE {CATALOG}.{table} ADD COLUMN IF NOT EXISTS _batch_id BIGINT")
     except Exception as e:  # noqa: BLE001
         # Some catalog implementations reject ADD COLUMN IF NOT EXISTS
         # against a table that already has the column. Fall through: if
@@ -121,22 +127,17 @@ def _merge_batch(batch_df, batch_id: int) -> None:
         # ghost rows behind; INSERT then re-materializes the batch. On a
         # first attempt DELETE is a no-op (nothing matches). Iceberg V2
         # supports row-level DELETE; both COW and MoR configurations work.
-        spark.sql(
-            f"DELETE FROM {CATALOG}.{SILVER_TXNS} WHERE _batch_id = {int(batch_id)}"
-        )
+        spark.sql(f"DELETE FROM {CATALOG}.{SILVER_TXNS} WHERE _batch_id = {int(batch_id)}")
         tagged_txns.writeTo(f"{CATALOG}.{SILVER_TXNS}").append()
 
         # PHASE 2: silver.counterparty_edges.
         # Per-batch aggregates only; cumulative sums are computed on read
         # by consumers via SUM(cumulative_amount_usd) GROUP BY
         # source_entity_id, target_entity_id (FQ3 already does this).
-        edges_batch = (
-            build_edges(tagged_txns.drop("_batch_id"))
-            .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
+        edges_batch = build_edges(tagged_txns.drop("_batch_id")).withColumn(
+            "_batch_id", lit(int(batch_id)).cast("bigint")
         )
-        spark.sql(
-            f"DELETE FROM {CATALOG}.{SILVER_EDGES} WHERE _batch_id = {int(batch_id)}"
-        )
+        spark.sql(f"DELETE FROM {CATALOG}.{SILVER_EDGES} WHERE _batch_id = {int(batch_id)}")
         edges_batch.writeTo(f"{CATALOG}.{SILVER_EDGES}").append()
 
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
@@ -156,12 +157,42 @@ def main() -> None:
     log(f"triggerSeconds={TRIGGER_S}")
     log("=" * 60)
 
+    # LB-127: create the silver tables if absent. In CONTINUOUS mode
+    # silver_build never runs, so nothing else creates silver.transactions /
+    # silver.counterparty_edges (and the dimensions) -- the per-batch
+    # writeTo(...).append() below requires them to exist, and without this
+    # every micro-batch failed, leaving silver empty and the gold detection
+    # stage with nothing to scan. Mirrors silver_build_financial.main()'s
+    # bootstrap loop (same DDL constants) so both modes converge on one
+    # schema. All CREATE TABLE IF NOT EXISTS -- idempotent on restart.
+    for _name, _ddl in (
+        ("transactions", DDL_TXNS),
+        ("entities", DDL_ENTITIES),
+        ("accounts", DDL_ACCOUNTS),
+        ("account_statements", DDL_STATEMENTS),
+        ("edges", DDL_EDGES),
+    ):
+        spark.sql(_ddl)
+        log(f"[startup] bootstrapped silver.{_name}")
+
     # LB-109: guarantee the idempotency-key column exists on the target
     # tables before the first micro-batch fires. Idempotent on re-runs.
     _ensure_batch_id_column(spark, SILVER_TXNS)
     _ensure_batch_id_column(spark, SILVER_EDGES)
 
-    stream = spark.readStream.format("iceberg").load(f"{CATALOG}.{BRONZE_TABLE}")
+    # LB-127: the bronze table carries an OVERWRITE snapshot from the
+    # bronze-verify preflight (LB_REGISTER_TABLE=1 does a full CTAS/register
+    # of the pacs.008 corpus). Iceberg's streaming source refuses overwrite
+    # (and delete) snapshots by default and throws
+    # "Cannot process overwrite snapshot", crash-looping silver-stream so
+    # silver never fills. Skip non-append snapshots: bronze-ingest writes
+    # append-only micro-batches, which is what silver must consume.
+    stream = (
+        spark.readStream.format("iceberg")
+        .option("streaming-skip-overwrite-snapshots", "true")
+        .option("streaming-skip-delete-snapshots", "true")
+        .load(f"{CATALOG}.{BRONZE_TABLE}")
+    )
     query = (
         stream.writeStream.foreachBatch(_merge_batch)
         .option("checkpointLocation", CHECKPOINT_URI)

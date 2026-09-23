@@ -36,13 +36,9 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     array,
     array_distinct,
-    array_join,
-    array_sort,
-    coalesce,
     col,
     collect_list,
     collect_set,
-    concat_ws,
     count,
     current_timestamp,
     explode,
@@ -50,7 +46,6 @@ from pyspark.sql.functions import (
     lit,
     map_from_arrays,
     row_number,
-    sha2,
     to_timestamp,
     when,
 )
@@ -137,57 +132,6 @@ class RuleSkipped(Exception):
         super().__init__(f"{self.reason}: {detail}" if detail else self.reason)
 
 
-def _deterministic_alert_id(rule_id: str, entity_col, related_txn_ids_col):
-    """Stable alert_id for idempotent + dedupable detection (LB-127).
-
-    Returns an unaliased Column: sha2-256 over the alert's natural key
-    (rule_id, entity_id, and the sorted-deduplicated set of related UETRs).
-    The caller applies ``.alias("alert_id")`` inline so the projection's
-    column name stays visible in the rule body (the AST tests read it there).
-
-    Why a content hash rather than ``uuid()``:
-      * Reproducibility: a batch run or ``financial replay`` over the same
-        silver corpus yields byte-identical alert_ids, which stabilises
-        entity_clusters.cluster_id and ``reproduce --alert-id``. array_sort
-        makes the hash independent of the non-deterministic collect_list
-        ordering, so the id depends only on the alert's content.
-      * A stable id is the natural primary key for the alert, useful to any
-        consumer that needs to reference a specific alert across runs.
-
-    Dedup/idempotency in continuous mode does NOT rely on this id: the
-    continuous driver re-detects the full corpus each tick and rewrites per
-    rule via DELETE + INSERT (see gold_refresh_financial), so a rule's alerts
-    are the single correct set every tick regardless of alert_id. (An earlier
-    MERGE-on-alert_id design was dropped in review: keyed on the in-window txn
-    set, the id drifted as a sliding window filled/trimmed, defeating the
-    MERGE.) The batch driver adds ``dropDuplicates(["alert_id"])`` as a
-    fan-out guard.
-
-    Two genuinely distinct alerts can only collide if they share rule_id,
-    entity_id, AND txn set -- in which case they are the same alert. The txn
-    set is per-rule the same expression the projection stores as
-    related_txn_ids, so the key matches the row it identifies.
-    """
-    # concat_ws SKIPS null arguments, which would collapse a null-entity or
-    # null-txn-set alert onto a shorter key and silently merge unrelated
-    # alerts (adversarial-review Finding 4). silver.transactions enforces the
-    # source columns NOT NULL today, but coalesce to explicit sentinels so the
-    # key stays positional and collision-safe regardless of a future nullable
-    # feed.
-    return sha2(
-        concat_ws(
-            "|",
-            lit(rule_id),
-            coalesce(entity_col.cast("string"), lit("__NULL_ENTITY__")),
-            coalesce(
-                array_join(array_sort(array_distinct(related_txn_ids_col)), ","),
-                lit("__NULL_TXNS__"),
-            ),
-        ),
-        256,
-    )
-
-
 def _suspicious_amount_expr():
     """Build a boolean Column expressing "txn amount is in the structuring
     band for its currency". The band per datagen is (9500, 9999) for USD;
@@ -262,9 +206,7 @@ def w2_structuring(
     )
 
     alerts = windowed.select(
-        _deterministic_alert_id("W2_structuring", col("entity_id"), col("related_txn_ids")).alias(
-            "alert_id"
-        ),
+        expr("uuid()").alias("alert_id"),
         lit("W2_structuring").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
@@ -388,9 +330,7 @@ def w3_round_tripping(
         .filter(col("roundtrip_count") >= 1)
     )
     return alerts.select(
-        _deterministic_alert_id("W3_round_tripping", col("e1"), col("related_txn_ids")).alias(
-            "alert_id"
-        ),
+        expr("uuid()").alias("alert_id"),
         lit("W3_round_tripping").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
@@ -493,9 +433,7 @@ def w4_risk_propagation(
         max_(col("amt_out") / col("amt_in")).alias("max_forward_ratio"),
     )
     return per_entity.select(
-        _deterministic_alert_id(
-            "W4_risk_propagation", col("b"), expr("concat(uetrs_in, uetrs_out)")
-        ).alias("alert_id"),
+        expr("uuid()").alias("alert_id"),
         lit("W4_risk_propagation").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
@@ -731,9 +669,7 @@ def w1_connected_components(
     with_txns = components.join(edge_aggs, "component", "inner")
 
     alerts = with_txns.select(
-        _deterministic_alert_id(
-            "W1_connected_components", col("component"), col("related_txn_ids")
-        ).alias("alert_id"),
+        expr("uuid()").alias("alert_id"),
         lit("W1_connected_components").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
@@ -975,9 +911,7 @@ def w5_sanctions_match(
     ).join(broadcast(sdn), col("bene_name_key") == col("sdn_name_key"), "inner")
 
     alerts = hits.select(
-        _deterministic_alert_id("W5_sanctions_match", col("entity_id"), array(col("uetr"))).alias(
-            "alert_id"
-        ),
+        expr("uuid()").alias("alert_id"),
         lit("W5_sanctions_match").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
@@ -1058,9 +992,7 @@ def w6_pep_counterparty(
     )
 
     alerts = hits.select(
-        _deterministic_alert_id("W6_pep_counterparty", col("entity_id"), array(col("uetr"))).alias(
-            "alert_id"
-        ),
+        expr("uuid()").alias("alert_id"),
         lit("W6_pep_counterparty").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
@@ -1184,9 +1116,7 @@ def w7_cross_border_high_risk(
     )
 
     alerts = hits.select(
-        _deterministic_alert_id(
-            "W7_cross_border_high_risk", col("entity_id"), array(col("uetr"))
-        ).alias("alert_id"),
+        expr("uuid()").alias("alert_id"),
         lit("W7_cross_border_high_risk").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
@@ -1269,9 +1199,7 @@ def w8_dormant_reactivation(
     )
 
     alerts = hits.select(
-        _deterministic_alert_id(
-            "W8_dormant_reactivation", col("originator_id"), array(col("uetr"))
-        ).alias("alert_id"),
+        expr("uuid()").alias("alert_id"),
         lit("W8_dormant_reactivation").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
