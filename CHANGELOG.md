@@ -6,7 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **LB-116: per-rule FAML alert counts + errors surfaced into
+  `metrics.json`.** ``JobMetrics`` gains ``alerts_by_rule: dict[str,
+  int]`` and ``rule_errors: dict[str, str]`` fields. Populated from the
+  ``[detection] {rule_id}: alerts=N ...`` lines the driver already
+  emits per rule; a crashed rule shows up as ``alerts=0`` with the
+  exception preserved in ``rule_errors``. Anchors on trailing
+  ``elapsed=Ns`` at end-of-line so an inline ``elapsed=`` or ``prior=``
+  substring inside an exception message survives intact (adversarial
+  review caught the earlier non-greedy slurp truncating error text).
+
 ### Fixed
+- **LB-117 (P2): FAML analytical query QpH unstable.** Three S1 iters
+  saw QpH 6.6 / 0.0 / 8.2 -- the 0.0 was a spark-thrift OOM mid-benchmark
+  on ``aggregate_typology_coverage.sql`` at the FAML 16g target, and
+  the successful iters clipped queries that overran the 300s default.
+  Fix: (a) FAML ``spark_thrift.memory`` target 16g -> 24g in
+  ``_apply_schema_overrides``; (b) benchmark ``query_timeout`` 300s ->
+  900s (post-compaction) and 60s -> 180s (pre-compaction) when
+  ``workload.schema=financial``; (c) small-cluster cap threshold
+  reworked to leave ~8 GiB headroom for Spark overhead + kubelet: below
+  36 GiB allocatable target = ``max(4, min(20, allocatable - 8))g``.
 - **LB-118 (P1): FAML bronze-verify ran out of scratch disk at scale
   >= 5.** `bronze_verify_financial.py` trips its CTAS fallback path
   above `ADD_FILES_MAX_BYTES` / `ADD_FILES_MAX_FILES` and rewrites the

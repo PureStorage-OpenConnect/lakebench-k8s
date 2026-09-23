@@ -41,6 +41,13 @@ class JobMetrics:
     throughput_gb_per_second: float = 0.0
     throughput_rows_per_second: float = 0.0
 
+    # Detection rules (FAML gold-finalize only). Empty for c360 and for
+    # non-gold jobs. Populated from ``[detection] {rule_id}: alerts=N ...``
+    # lines the driver emits per rule; a rule that crashed shows up as
+    # ``alerts=0`` with ``rule_errors[rule_id]`` carrying the exception.
+    alerts_by_rule: dict[str, int] = field(default_factory=dict)
+    rule_errors: dict[str, str] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = asdict(self)
@@ -216,6 +223,11 @@ class PipelineMetrics:
     # Per-cycle metrics (multi-cycle batch runs only)
     cycles: list[CycleMetrics] = field(default_factory=list)
 
+    # Datagen fleet metrics (optional -- populated when the datagen pods
+    # emitted LB_METRICS_JSON lines and the aggregator collected them).
+    # Shape: dict from FleetSummary.to_dict().
+    datagen_fleet: dict[str, Any] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = {
@@ -243,6 +255,8 @@ class PipelineMetrics:
             d["platform_metrics"] = self.platform_metrics
         if self.cycles:
             d["cycles"] = [c.to_dict() for c in self.cycles]
+        if self.datagen_fleet is not None:
+            d["datagen_fleet"] = self.datagen_fleet
         return d
 
 
@@ -926,6 +940,7 @@ def build_pipeline_benchmark(
     datagen_elapsed: float = 0.0,
     datagen_output_gb: float = 0.0,
     datagen_output_rows: int = 0,
+    datagen_fleet: dict[str, Any] | None = None,
 ) -> PipelineBenchmark:
     """Build a PipelineBenchmark from a completed PipelineMetrics.
 
@@ -973,15 +988,49 @@ def build_pipeline_benchmark(
     """
     stages: list[StageMetrics] = []
 
-    # Datagen stage (if provided)
-    if datagen_elapsed > 0:
+    # Datagen stage (if provided). Fleet metrics take precedence: they
+    # carry actual per-pod cores and CPU-seconds, which the elapsed-only
+    # form has no way to know. The elapsed_seconds passed in remains the
+    # wall time of the K8s Job as observed from outside; fleet's
+    # wall_elapsed_max_s is the slowest pod's own timer -- these agree to
+    # within a poll interval.
+    #
+    # NOTE: `datagen_fleet` alone is not enough to trigger a stage; an
+    # empty fleet dict (all pods failed to emit) is truthy and would
+    # append a bogus zero-length stage that gets counted in CPU-hour
+    # aggregations. Require `pods_reported > 0` on the fleet path.
+    fleet_has_data = bool(datagen_fleet) and int(datagen_fleet.get("pods_reported", 0)) > 0
+    if datagen_elapsed > 0 or fleet_has_data:
+        elapsed = datagen_elapsed
+        output_gb = datagen_output_gb
+        output_rows = datagen_output_rows
+        exec_count = 0
+        exec_cores = 0
+        if fleet_has_data:
+            elapsed = elapsed or float(datagen_fleet.get("wall_elapsed_max_s", 0.0))
+            fleet_bytes = float(datagen_fleet.get("total_bytes_written", 0))
+            if fleet_bytes > 0:
+                output_gb = output_gb or fleet_bytes / 1e9
+            fleet_rows = int(datagen_fleet.get("total_rows_written", 0))
+            if fleet_rows > 0:
+                output_rows = output_rows or fleet_rows
+            exec_count = int(datagen_fleet.get("pods_reported", 0))
+            # Per-pod cores: total cores / reported pods, rounded. All pods
+            # are sized identically so this is exact modulo integer division.
+            # Downstream CPU-hours derives from executor_count * executor_cores
+            # * elapsed_seconds, so this fields lets datagen roll into the
+            # existing pipeline core-hours computation.
+            if exec_count > 0:
+                exec_cores = int(datagen_fleet.get("cores_total", 0)) // exec_count
         dg = StageMetrics(
             stage_name="datagen",
             stage_type="datagen",
             engine="datagen",
-            elapsed_seconds=datagen_elapsed,
-            output_size_gb=datagen_output_gb,
-            output_rows=datagen_output_rows,
+            elapsed_seconds=elapsed,
+            output_size_gb=output_gb,
+            output_rows=output_rows,
+            executor_count=exec_count,
+            executor_cores=exec_cores,
             success=True,
         )
         dg.compute_derived()
@@ -1542,6 +1591,37 @@ class MetricsCollector:
         )
         if time_match:
             metrics.elapsed_seconds = float(time_match.group(2))
+
+        # LB-116: per-rule alert counts and per-rule errors, from the
+        # driver log line ``[detection] {rule_id}: alerts=N ...``.
+        # Emitter format is fixed with ``elapsed=Ns`` as the trailing token:
+        #   success: ``[detection] {rule}: alerts=N prior=P elapsed=Ts``
+        #   crashed: ``[detection] {rule}: alerts=0 error=<Class>: <msg> elapsed=Ts``
+        # Anchor on the LAST ``elapsed=Ns`` at end-of-line via a greedy
+        # middle capture + MULTILINE ``$``; the engine backtracks from
+        # the newline to the final ``elapsed=`` on the line, so an inline
+        # ``elapsed=`` substring inside the error message survives intact.
+        # Rule slug is ``[A-Za-z0-9_]+`` (matches DEFAULT_DETECTION_RULES
+        # plus any future additions) so a stray ``:`` in a message cannot
+        # be mis-picked as the rule/alerts separator.
+        detection_re = re.compile(
+            r"\[detection\]\s+"
+            r"(?P<rule>[A-Za-z0-9_]+):\s+"
+            r"alerts=(?P<n>\d+)"
+            r"(?P<mid>.*?)"
+            r"\s+elapsed=[\d.]+s\s*$",
+            re.MULTILINE,
+        )
+        for m in detection_re.finditer(logs):
+            rule = m.group("rule")
+            try:
+                metrics.alerts_by_rule[rule] = int(m.group("n"))
+            except ValueError:
+                continue
+            mid = (m.group("mid") or "").strip()
+            err_match = re.search(r"\berror=(.+)$", mid)
+            if err_match:
+                metrics.rule_errors[rule] = err_match.group(1).strip()
 
         # Calculate throughput
         if metrics.elapsed_seconds > 0:

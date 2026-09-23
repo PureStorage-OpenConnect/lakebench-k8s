@@ -1518,6 +1518,78 @@ class TestDriverLogParsingWithLbPrefix:
         assert metrics.elapsed_seconds == pytest.approx(22.5)
 
 
+class TestDetectionRulesMetrics:
+    """LB-116: per-rule FAML alert counts surfaced from the driver log
+    into JobMetrics.alerts_by_rule / rule_errors so a metrics parser
+    sees one row per rule attempted, not a single total."""
+
+    def test_parse_success_rules(self):
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
+[lb] 2026-09-22T10:00:16 - [detection] W3_round_tripping: alerts=42 prior=42 elapsed=8.9s
+[lb] 2026-09-22T10:00:25 - [detection] W1_connected_components: alerts=17 prior=17 elapsed=120.4s
+[lb] 2026-09-22T10:02:26 - [detection] total alerts written: 1293
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {
+            "W2_structuring": 1234,
+            "W3_round_tripping": 42,
+            "W1_connected_components": 17,
+        }
+        assert metrics.rule_errors == {}
+
+    def test_parse_crashed_rule(self):
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
+[lb] 2026-09-22T10:00:16 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: silver.entities not found elapsed=0.4s
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule["W2_structuring"] == 1234
+        assert metrics.alerts_by_rule["W7_cross_border_high_risk"] == 0
+        assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
+        assert "silver.entities not found" in metrics.rule_errors["W7_cross_border_high_risk"]
+
+    def test_c360_gold_finalize_has_empty_rule_metrics(self):
+        """c360 gold-finalize emits no [detection] lines; the fields
+        default to empty dicts, not None."""
+        c = MetricsCollector()
+        logs = "[lb] 2026-09-22T10:00:00 - ordinary gold-finalize output"
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {}
+        assert metrics.rule_errors == {}
+
+    def test_alerts_by_rule_serialised_in_to_dict(self):
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=42 prior=0 elapsed=1.0s"
+        )
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        d = metrics.to_dict()
+        assert d["alerts_by_rule"] == {"W2_structuring": 42}
+        assert d["rule_errors"] == {}
+
+    def test_error_message_containing_elapsed_or_prior_not_truncated(self):
+        """Adversarial-review finding (silent corruption): a non-greedy
+        error slurp that stopped at the first ``prior=`` or ``elapsed=``
+        substring inside the error message would silently truncate the
+        recorded error. Anchor on trailing ``elapsed=Ns`` (the guaranteed
+        last token) instead."""
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-22T10:00:00 - [detection] W7_cross_border_high_risk: alerts=0 "
+            "error=RuntimeError: expected prior=42 rows and elapsed=0.1s per shard elapsed=0.9s\n"
+        )
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule["W7_cross_border_high_risk"] == 0
+        recorded = metrics.rule_errors["W7_cross_border_high_risk"]
+        # The inline exception text must survive; only the trailing
+        # ``elapsed=0.9s`` terminator is stripped.
+        assert "expected prior=42 rows" in recorded
+        assert "elapsed=0.1s per shard" in recorded
+
+
 # ---------------------------------------------------------------------------
 # Phase 1+2: Streaming timing and freshness parsing
 # ---------------------------------------------------------------------------
@@ -2470,6 +2542,66 @@ class TestBuildPipelineBenchmark:
         pb = build_pipeline_benchmark(run, datagen_elapsed=0.0)
 
         assert pb.stages[0].stage_name != "datagen"
+
+    def test_empty_fleet_dict_does_not_append_zero_stage(self):
+        """A fleet with pods_reported=0 (all pods failed to emit) is still
+        a truthy dict; the datagen stage must NOT be appended, otherwise
+        core-hour aggregation double-counts a zero-length stage."""
+        run = self._make_run()
+        empty_fleet = {
+            "schema": "customer360",
+            "pods_expected": 8,
+            "pods_reported": 0,
+            "pods_missing": 8,
+            "data_quality": "empty",
+            "total_bytes_written": 0,
+            "total_files_written": 0,
+            "total_rows_written": 0,
+            "aggregate_mbps": 0.0,
+            "wall_elapsed_max_s": 0.0,
+            "wall_elapsed_min_s": 0.0,
+            "cores_total": 0.0,
+            "cpu_seconds_total": 0.0,
+            "cpu_hr_per_tb": None,
+            "phase_pct": {"build_batch": 0, "encode_parquet": 0, "s3_put": 0},
+            "phase_p50_s": {"build_batch": 0, "encode_parquet": 0, "s3_put": 0},
+            "phase_p95_s": {"build_batch": 0, "encode_parquet": 0, "s3_put": 0},
+            "worst_pod_elapsed_s": 0.0,
+            "best_pod_elapsed_s": 0.0,
+            "per_pod": [],
+        }
+        pb = build_pipeline_benchmark(run, datagen_elapsed=0.0, datagen_fleet=empty_fleet)
+        stage_names = [s.stage_name for s in pb.stages]
+        assert "datagen" not in stage_names
+
+    def test_fleet_enriches_datagen_stage_with_executors(self):
+        run = self._make_run()
+        fleet = {
+            "schema": "customer360",
+            "pods_expected": 4,
+            "pods_reported": 4,
+            "pods_missing": 0,
+            "data_quality": "complete",
+            "total_bytes_written": 100_000_000_000,
+            "total_files_written": 200,
+            "total_rows_written": 40_000_000,
+            "aggregate_mbps": 833.0,
+            "wall_elapsed_max_s": 120.0,
+            "wall_elapsed_min_s": 118.0,
+            "cores_total": 32.0,  # 4 pods * 8 cores
+            "cpu_seconds_total": 3840.0,
+            "cpu_hr_per_tb": 10.66,
+            "phase_pct": {"build_batch": 55, "encode_parquet": 40, "s3_put": 5},
+            "phase_p50_s": {"build_batch": 200, "encode_parquet": 150, "s3_put": 15},
+            "phase_p95_s": {"build_batch": 220, "encode_parquet": 165, "s3_put": 20},
+            "worst_pod_elapsed_s": 120.0,
+            "best_pod_elapsed_s": 118.0,
+            "per_pod": [],
+        }
+        pb = build_pipeline_benchmark(run, datagen_elapsed=120.0, datagen_fleet=fleet)
+        dg = next(s for s in pb.stages if s.stage_name == "datagen")
+        assert dg.executor_count == 4
+        assert dg.executor_cores == 8  # 32 / 4
 
     def test_pipeline_mode_detection(self):
         run = self._make_run()

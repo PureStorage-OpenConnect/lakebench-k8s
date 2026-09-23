@@ -1361,10 +1361,15 @@ def run(
                     console.print("[bold]Pre-compaction benchmark[/bold]")
                     print_info("Benchmarking before maintenance (uncompacted data)...")
                     _pre_runner = _BR(cfg)
+                    # LB-117: 60s is too tight for FAML pre-compaction
+                    # queries even at small scale; bump to 180s for FAML.
+                    _pre_timeout = (
+                        180 if cfg.architecture.workload.schema_type.value == "financial" else 60
+                    )
                     _pre_result = _pre_runner.run_power(
                         cache="hot",
                         progress_callback=_bench_progress,
-                        query_timeout=60,
+                        query_timeout=_pre_timeout,
                     )
                     pre_compaction_qph = _pre_result.qph
                     _succeeded = sum(1 for q in _pre_result.queries if q.success)
@@ -1444,9 +1449,16 @@ def run(
                             console.print(f"[red]FAIL[/red] ({short_err})")
 
                 bench_runner = BenchmarkRunner(cfg)
+                # LB-117: FAML analytical queries (aggregate_typology_coverage
+                # etc) can exceed the 300s default at scale >= 5; a timeout
+                # here masquerades as a failed query and drops QpH to 0.
+                _bench_timeout = (
+                    900 if cfg.architecture.workload.schema_type.value == "financial" else 300
+                )
                 bench_result = bench_runner.run_power(
                     cache="hot",
                     progress_callback=_post_bench_progress,
+                    query_timeout=_bench_timeout,
                 )
 
                 console.print(f"\n  Total: {bench_result.total_seconds:.2f}s")
