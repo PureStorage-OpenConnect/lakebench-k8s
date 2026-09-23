@@ -1,0 +1,36 @@
+-- Q_{rule_id}_pattern_span: median + p95 PATTERN SPAN (seconds) per typology.
+--
+-- WARNING -- this is NOT detection latency / time-to-detect. It is the
+-- span between a planted typology's injection start and the event time of
+-- the last transaction a rule cites for it (alert_ts = the last
+-- contributing txn's event time, not the wall-clock at which the alert was
+-- produced). That makes this quantity a property of the datagen's typology
+-- window arithmetic (datagen_rs/src/typology.rs), invariant to how fast or
+-- slow the stack under test actually runs. A true time-to-detect requires a
+-- data-arrival clock in the same frame as the alert, which only exists in
+-- multi-cycle (per-cycle ingest timestamp) or sustained mode; see LB-121.
+-- Published only as a description of the injected data, never as a platform
+-- measurement.
+--
+-- Placeholders: {catalog}, {rule_id}, {typology_type}.
+WITH typ_instances AS (
+  SELECT typology_id, participant_uetrs, injection_ts_start
+  FROM {catalog}.bronze.manifest
+  WHERE typology_type = '{typology_type}'
+),
+earliest_alert AS (
+  SELECT
+    si.typology_id,
+    si.injection_ts_start,
+    MIN(a.alert_ts) AS first_alert_ts
+  FROM typ_instances si
+  JOIN {catalog}.gold.alerts a
+    ON a.rule_id = '{rule_id}'
+    AND ARRAYS_OVERLAP(a.related_txn_ids, si.participant_uetrs)
+  GROUP BY si.typology_id, si.injection_ts_start
+)
+SELECT
+  APPROX_PERCENTILE(DATE_DIFF('second', injection_ts_start, first_alert_ts), 0.5) AS median_pattern_span_s,
+  APPROX_PERCENTILE(DATE_DIFF('second', injection_ts_start, first_alert_ts), 0.95) AS p95_pattern_span_s,
+  COUNT(*) AS typologies_with_alert
+FROM earliest_alert;

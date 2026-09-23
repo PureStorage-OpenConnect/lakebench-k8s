@@ -32,7 +32,7 @@ schema flag routes datagen and the pipeline scripts.
   bronze / silver / gold. Six W-rule detectors score against planted
   typologies (structuring, gather-scatter, rapid-layering, dormant
   reactivation, corridor risk, high-velocity chains). Per-rule recall,
-  precision, and time-to-detect are joined against a scikit-learn
+  precision, and pattern-span are joined against a scikit-learn
   reference detector and a distribution-leakage gate, so a rule cannot
   read high recall from a label proxy without being caught.
   `workload.schema: financial`. See

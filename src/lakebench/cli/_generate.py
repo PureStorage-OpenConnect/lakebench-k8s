@@ -304,6 +304,53 @@ def generate(
 
         console.print()
         if completion_result.status == DeploymentStatus.SUCCESS:
+            # Collect per-pod metrics from the datagen pod logs. Failure to
+            # collect is not a hard failure: the metrics are for the pipeline
+            # scorecard, not for correctness of the data. Log a warning and
+            # continue.
+            fleet_dict: dict | None = None
+            try:
+                from lakebench._constants import DEFAULT_OUTPUT_DIR
+                from lakebench.metrics.datagen_aggregator import collect_from_k8s
+
+                fleet = collect_from_k8s(
+                    namespace=cfg.get_namespace(),
+                    job_completions=int(
+                        completion_result.details.get(
+                            "completions", completion_result.details.get("succeeded", 0)
+                        )
+                        or 0
+                    ),
+                )
+                fleet_dict = fleet.to_dict()
+                # Sidecar file keyed by namespace so parallel UAT runs in
+                # different namespaces do NOT overwrite each other. The
+                # payload also carries `namespace` so a run in ns-A that
+                # accidentally reads ns-B's sidecar is caught downstream.
+                # Wall-clock timestamp lets `lakebench run` reject a
+                # sidecar that predates the pipeline invocation.
+                from datetime import datetime, timezone
+
+                ns = cfg.get_namespace()
+                fleet_dict["namespace"] = ns
+                fleet_dict["written_at"] = datetime.now(timezone.utc).isoformat()
+                out_dir = Path(DEFAULT_OUTPUT_DIR) / "datagen"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_path = out_dir / f"{ns}-datagen-metrics.json"
+                import json as _json
+
+                out_path.write_text(_json.dumps(fleet_dict, indent=2))
+                print_info(
+                    f"Datagen metrics: {fleet.pods_reported}/{fleet.pods_expected} pods "
+                    f"reported, aggregate {fleet.aggregate_mbps:.1f} MB/s, "
+                    f"{fleet.cpu_hr_per_tb:.2f} CPU-hr/TB"
+                    if fleet.cpu_hr_per_tb is not None
+                    else f"Datagen metrics: {fleet.pods_reported}/{fleet.pods_expected} pods reported"
+                )
+                print_info(f"  written to {out_path}")
+            except Exception as e:
+                logger.warning("failed to collect per-pod datagen metrics: %s", e)
+
             _journal_safe(
                 j.record,
                 EventType.GENERATE_COMPLETE,
@@ -313,6 +360,7 @@ def generate(
                     "succeeded_pods": completion_result.details.get("succeeded", 0),
                     "failed_pods": completion_result.details.get("failed", 0),
                     "elapsed_seconds": completion_result.elapsed_seconds,
+                    "datagen_metrics": fleet_dict,
                 },
             )
             _journal_safe(j.end_command, success=True)

@@ -37,7 +37,7 @@ PACS_PREFIX = env(
     BRONZE_ROOT_PREFIX.rstrip("/") + "/bronze/pacs008/",
 )
 # Manifest sidecar (typology ground truth). The FAML benchmark queries
-# rule_precision, rule_recall, rule_ttd, and aggregate_typology_coverage
+# rule_precision, rule_recall, rule_pattern_span, and aggregate_typology_coverage
 # all read `{catalog}.bronze.manifest`; without a registration here the
 # whole scoring stack fails at Trino with 'Table does not exist'.
 # LB-089 round 1 fixed only the pacs.008 read; round 2 (this) adds the
@@ -286,7 +286,7 @@ def main() -> None:
         except Exception as e:  # noqa: BLE001
             log(
                 f"WARNING: manifest registration failed ({e}). "
-                "FAML precision/recall/ttd/coverage queries will fail "
+                "FAML precision/recall/pattern_span/coverage queries will fail "
                 "at benchmark time; alert-volume queries and score_financial "
                 "(reads manifest via --manifest arg) are unaffected."
             )

@@ -81,9 +81,11 @@ class TrinoGuidance:
 class DatagenGuidance:
     """Datagen resource recommendation for a given scale.
 
-    Proven defaults:
+    Proven defaults (updated 2026-09-20 after Rust c360 port perf sweep):
     - batch mode: 1 generator, 1 uploader, 4 CPU / 4Gi per pod
-    - continuous mode: 8 generators, 2 uploaders, 8 CPU / 24Gi per pod
+    - continuous mode: 8 generators, 2 uploaders, 8 CPU / 8Gi per pod
+      (Rust generator uses <2 GiB per pod; 8 GiB gives 4x safety headroom.
+      Was 24 GiB for the Python image with per-worker process overhead.)
     """
 
     parallelism: int
@@ -337,11 +339,13 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     """
     spark = compute_guidance(scale)
 
-    # Datagen: CPU and memory are hard-locked per mode (MVP sizing):
+    # Datagen: CPU and memory are hard-locked per mode. Sizing updated
+    # 2026-09-20 after the Rust c360 port perf sweep:
     #   batch:      4 CPU, 4Gi per pod, 1 generator, 1 uploader
-    #   continuous: 8 CPU, 24Gi per pod, 8 generators, 2 uploaders
-    # Observed peak at scale 100: ~18.4Gi with spikes above 20Gi.
-    # 24Gi provides ~30% headroom above steady-state peak.
+    #   continuous: 8 CPU, 8Gi per pod, 8 generators, 2 uploaders
+    # Measured Rust-image steady-state peak: ~1.5-2 GiB per pod. 8 GiB gives
+    # ~4x safety headroom. The pre-Rust-port sizing was 24 GiB, calibrated for
+    # the Python image's per-worker process overhead.
     # Scaling is done by parallelism (number of pods), not per-pod resources.
 
     if scale <= SCALE_TIER_MINIMAL:
@@ -377,7 +381,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             datagen = DatagenGuidance(
                 parallelism=max(4, int(scale // 5)),
                 cpu="8",
-                memory="24Gi",
+                memory="8Gi",
                 mode="sustained",
                 generators=8,
                 uploaders=2,
@@ -394,7 +398,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
         datagen = DatagenGuidance(
             parallelism=max(8, int(scale // 10)),
             cpu="8",
-            memory="24Gi",
+            memory="8Gi",
             mode="sustained",
             generators=8,
             uploaders=2,
@@ -411,7 +415,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
         datagen = DatagenGuidance(
             parallelism=max(16, int(scale // 30)),
             cpu="8",
-            memory="24Gi",
+            memory="8Gi",
             mode="sustained",
             generators=8,
             uploaders=2,

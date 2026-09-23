@@ -103,6 +103,17 @@ spec:
             - name: S3_VERIFY_SSL
               value: "false"
             {% endif %}
+            # k8s CPU request in millicores, read by the Rust datagen at
+            # completion for accurate CPU-hour accounting. When set, the
+            # aggregator prefers this over rayon's pool size (which may
+            # differ from the pod's request because rayon's default reads
+            # `available_parallelism()`, not the cgroup CPU quota).
+            - name: LB_POD_CPU_REQUEST_MILLI
+              valueFrom:
+                resourceFieldRef:
+                  containerName: datagen
+                  resource: requests.cpu
+                  divisor: "1m"
           {% if s3_ca_cert_pem %}
           volumeMounts:
             - name: ca-cert

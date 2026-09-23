@@ -141,7 +141,7 @@ def test_reader_default_matches_datagen_default_prefix():
 
 def test_bronze_verify_registers_manifest_iceberg_table():
     """LB-089 round 2: FAML benchmark queries rule_precision,
-    rule_recall, rule_ttd, and aggregate_typology_coverage all read
+    rule_recall, rule_pattern_span, and aggregate_typology_coverage all read
     `{catalog}.bronze.manifest`. Without a registration in
     bronze_verify_financial the four scoring queries fail with
     'Table does not exist' at benchmark time -- baseline recall

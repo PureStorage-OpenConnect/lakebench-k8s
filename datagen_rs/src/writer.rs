@@ -8,21 +8,21 @@
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::{EnabledStatistics, WriterProperties};
 
-/// Resolve `DG_COMPRESSION` from env. Default zstd1. Accepts:
-/// `snappy | zstd | zstdN` for N in 1..=22 | `lz4` | `none|uncompressed`.
-/// The parser must accept the same set as the Python datagen's
-/// `_parquet_compression` -- an adversarial review caught that a
-/// literal-match implementation silently mapped `zstd9` -> `zstd1` while
-/// Python honored the same value, producing silently-different bytes in
-/// two datagen images sharing one documented env-var contract. Panics on
-/// bad input rather than silently defaulting: a startup panic is easier to
-/// diagnose than a mysterious codec swap partway through a UAT.
+/// Resolve `DG_COMPRESSION` from env. **Default snappy** as of the c360 Rust
+/// port perf sweep (2026-09-20): snappy is 40-55% faster than zstd on both
+/// pacs.008 and customer360 while producing files ~1.5x larger on disk. For
+/// datagen throughput that trade is a clear win; benchmarks that care about
+/// on-disk footprint can still opt into zstd via `DG_COMPRESSION=zstd`.
+///
+/// Accepts: `snappy | zstd | zstdN` for N in 1..=22 | `lz4` | `none|uncompressed`.
+/// Panics on bad input rather than silently defaulting: a startup panic is
+/// easier to diagnose than a mysterious codec swap partway through a UAT.
 pub fn compression_from_env() -> Compression {
     let v = std::env::var("DG_COMPRESSION").unwrap_or_default();
     let v = v.trim().to_ascii_lowercase();
     match v.as_str() {
-        "" | "zstd" | "zstd1" => Compression::ZSTD(ZstdLevel::try_new(1).unwrap()),
-        "snappy" => Compression::SNAPPY,
+        "" | "snappy" => Compression::SNAPPY,
+        "zstd" | "zstd1" => Compression::ZSTD(ZstdLevel::try_new(1).unwrap()),
         "lz4" => Compression::LZ4_RAW,
         "none" | "uncompressed" => Compression::UNCOMPRESSED,
         other if other.starts_with("zstd") => {
@@ -61,17 +61,50 @@ pub fn compression_from_env() -> Compression {
 /// table describes a different row layout, so `("financial", "zstd")=133`
 /// there is NOT the same measurement as `zstd1 -> 227` here. Do not
 /// reconcile the two tables against each other.
-pub fn bytes_per_row_default() -> f64 {
+/// (This applies to pacs.008 only. For customer360, `customer360_bytes_per_row_default`
+/// intentionally mirrors the Python `_BYTES_PER_ROW` table verbatim -- same
+/// schema, same measurements.)
+pub fn pacs008_bytes_per_row_default() -> f64 {
     match compression_from_env() {
         Compression::ZSTD(_) => 227.0,
         Compression::SNAPPY => 345.0,
         Compression::LZ4_RAW => 350.0,
         Compression::UNCOMPRESSED => 495.0,
-        // Any codec compression_from_env() would return that isn't listed
-        // above didn't exist when this table was measured. Return the ZSTD
-        // value as a safe middle: a future codec is more likely to be a
-        // compressor than not.
-        _ => 227.0,
+        // Any Compression variant not measured above indicates a codec was
+        // added to `compression_from_env()` without a matching row here. A
+        // silent fallback would size files against the wrong compression
+        // ratio; panicking forces the missing measurement.
+        other => panic!(
+            "pacs008_bytes_per_row_default: unmapped codec {:?}; add a bytes/row row here",
+            other
+        ),
+    }
+}
+
+/// Bytes/row default for customer360 rows at the current DG_COMPRESSION.
+///
+/// Measured against the Python generator's output (`datagen/generate.py:305-315`
+/// documents the same table). Copied verbatim so the file-count formula picks
+/// the right shape:
+///   snappy 4332, zstd1 2233, lz4 4356, none 4399.
+///
+/// The row is ~10-20x wider than pacs.008 because the payload column is 2 KiB
+/// of random hex (compressed effectively by zstd, barely by snappy/lz4). A
+/// silent fallback to `pacs008_bytes_per_row_default()` would produce c360
+/// files ~10x too small -- the exact silent-corruption failure mode the M1
+/// review flagged as design-critical. Keep the schema dispatch explicit.
+pub fn customer360_bytes_per_row_default() -> f64 {
+    match compression_from_env() {
+        Compression::ZSTD(_) => 2233.0,
+        Compression::SNAPPY => 4332.0,
+        Compression::LZ4_RAW => 4356.0,
+        Compression::UNCOMPRESSED => 4399.0,
+        // Same rationale as `pacs008_bytes_per_row_default`: panic on an
+        // unmapped codec rather than shipping silently-wrong file sizes.
+        other => panic!(
+            "customer360_bytes_per_row_default: unmapped codec {:?}; add a bytes/row row here",
+            other
+        ),
     }
 }
 

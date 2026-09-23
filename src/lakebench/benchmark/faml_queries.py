@@ -1,12 +1,13 @@
 """FAML benchmark query set.
 
-Ships four SQL templates (detect / precision / recall / ttd) that are
+Ships four SQL templates (detect / precision / recall / pattern_span)
+that are
 instantiated once per W-rule, plus three aggregate queries that run
-as-is. This lands 35 executable queries with 7 source files -- a
+as-is. This lands 30 executable queries with 8 source files -- a
 readable version of the design in
 `dev-artifacts/FAML-SCORING-QUERIES.md`.
 
-Precision, recall, and time-to-detect all need to know which planted
+Precision, recall, and pattern-span all need to know which planted
 typology TYPE a rule targets. That mapping lives here as the single
 source of truth; changing it changes what the score attributes to
 what typology.
@@ -49,7 +50,7 @@ RULE_TARGETS: dict[str, str | None] = {
     # `datagen_rs/src/party.rs::party_flags`), not as typology_type
     # rows in `bronze.manifest`. Extending the datagen to plant
     # sanctions/PEP typologies is a follow-up; until then these rules
-    # only emit the `detect` query and skip precision/recall/ttd
+    # only emit the `detect` query and skip precision/recall/pattern_span
     # (downstream reports N/A rather than a bogus 0/0).
     "W5_sanctions_match": None,
     "W6_pep_counterparty": None,
@@ -129,7 +130,7 @@ class FamlQuery:
     query_id: str  # e.g. "W2_structuring_precision"
     sql: str
     rule_id: str | None  # rule the query attributes to, None for aggregates
-    kind: str  # "detect" | "precision" | "recall" | "ttd" | "aggregate"
+    kind: str  # "detect" | "precision" | "recall" | "pattern_span" | "aggregate"
 
 
 def _read_template(name: str) -> str:
@@ -140,7 +141,8 @@ def _read_template(name: str) -> str:
 def load_faml_queries(catalog: str) -> list[FamlQuery]:
     """Return the full FAML query set instantiated for `catalog`.
 
-    32 rule queries (4 kinds x 8 W-rules) + 3 aggregate queries.
+    26 rule queries (8 detect + 6 targeted rules x 3 kinds) + 4 aggregate
+    queries = 30 total.
     Query text uses `{catalog}` as a placeholder; the caller has
     already picked the catalog name (varies per config: iceberg,
     spark_catalog, polaris, etc.).
@@ -157,7 +159,7 @@ def load_faml_queries(catalog: str) -> list[FamlQuery]:
     detect_tmpl = _read_template("rule_detect.sql.tmpl")
     precision_tmpl = _read_template("rule_precision.sql.tmpl")
     recall_tmpl = _read_template("rule_recall.sql.tmpl")
-    ttd_tmpl = _read_template("rule_ttd.sql.tmpl")
+    pattern_span_tmpl = _read_template("rule_pattern_span.sql.tmpl")
 
     queries: list[FamlQuery] = []
     for rule_id, typology_type in RULE_TARGETS.items():
@@ -171,7 +173,7 @@ def load_faml_queries(catalog: str) -> list[FamlQuery]:
                 kind="detect",
             )
         )
-        # Precision / recall / ttd need a typology target. Rules that
+        # Precision / recall / pattern_span need a typology target. Rules that
         # have none produce no query in these kinds; downstream
         # scoring reports them as N/A.
         if typology_type is None:
@@ -179,7 +181,7 @@ def load_faml_queries(catalog: str) -> list[FamlQuery]:
         for kind, tmpl in (
             ("precision", precision_tmpl),
             ("recall", recall_tmpl),
-            ("ttd", ttd_tmpl),
+            ("pattern_span", pattern_span_tmpl),
         ):
             queries.append(
                 FamlQuery(
@@ -222,7 +224,7 @@ def query_count() -> int:
     for typ in RULE_TARGETS.values():
         n += 1  # detect
         if typ is not None:
-            n += 3  # precision + recall + ttd
+            n += 3  # precision + recall + pattern_span
     n += 4  # aggregates: volume, top entities, typology coverage, reference-vs-rule
     return n
 
@@ -235,7 +237,7 @@ def _self_check() -> None:
         "rule_detect.sql.tmpl",
         "rule_precision.sql.tmpl",
         "rule_recall.sql.tmpl",
-        "rule_ttd.sql.tmpl",
+        "rule_pattern_span.sql.tmpl",
         "aggregate_alert_volume.sql",
         "aggregate_top_entities.sql",
         "aggregate_typology_coverage.sql",

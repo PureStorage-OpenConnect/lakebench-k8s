@@ -10,9 +10,12 @@ to run one end-to-end.
 
 ## What you get on the scorecard
 
-The three headline numbers are per-rule **recall**, per-rule
-**precision**, and **time-to-detect (TTD)** against the planted
-typology set. All three are computed by the SQL templates registered in
+The two headline numbers are per-rule **recall** and per-rule
+**precision** against the planted typology set. A third per-rule
+quantity, **pattern-span**, is published alongside them but is a
+description of the injected data, not a platform measurement -- see the
+metric-trust caveats below before quoting it. All are computed by the
+SQL templates registered in
 [`src/lakebench/benchmark/faml_queries.py`](../src/lakebench/benchmark/faml_queries.py)
 and joined against the datagen manifest at `bronze.manifest`. Two
 aggregates round out the primary view:
@@ -192,6 +195,21 @@ mode, and the shipped FAML example is batch mode.
 - **`qph_degradation_pct`** (sustained mode only) wants at least four
   rounds to read as a trend. Typical sustained runs produce five.
   Interpret values from a five-round run as a signal, not a conclusion.
+- **`pattern_span_s`** (per rule, was labelled "time-to-detect") is NOT
+  detection latency. It is the span from a planted typology's injection
+  start to the event time of the last transaction a rule cites for it,
+  because `alert_ts` carries the last contributing transaction's event
+  time, not the wall-clock at which the alert was produced. The value is
+  therefore a property of the datagen's typology window arithmetic in
+  `datagen_rs/src/typology.rs` (roughly 3 days for `micro_structuring`,
+  one civil day for `rapid_layering`), invariant to how fast or slow the
+  stack under test runs -- median pattern-span at scale 10000 on a fast
+  cluster equals median pattern-span at scale 1 on a slow one. A true
+  time-to-detect needs a data-arrival clock in the same frame as the
+  alert, which only exists in multi-cycle (per-cycle ingest timestamp)
+  or sustained mode; it is tracked for a later release (LB-121). Use
+  pattern-span to sanity-check that a rule fires inside its typology
+  window, never as a speed comparison between stacks.
 
 Precision and recall for FAML themselves are honest measurements of
 what they say -- rule alerts joined against manifest rows -- with the
