@@ -1091,7 +1091,10 @@ def build_pipeline_benchmark(
             try:
                 from lakebench.spark.job import get_job_profile as _get_profile
 
-                _b_profile = _get_profile(job.job_type)
+                # Schema-aware so FAML overrides (e.g. bronze-verify 20Gi) are
+                # reported, not the c360 base (LB-135 review finding).
+                _schema = run.config_snapshot.get("workload_schema")
+                _b_profile = _get_profile(job.job_type, _schema)
                 if _b_profile:
                     stage.executor_cores = _b_profile["executor_cores"]
                     if stage.executor_memory_gb == 0.0:
@@ -1123,11 +1126,12 @@ def build_pipeline_benchmark(
             from lakebench.spark.job import get_executor_count as _get_exec_count
             from lakebench.spark.job import get_job_profile as _get_profile
 
-            _s_profile = _get_profile(sj.job_type)
+            _s_schema = run.config_snapshot.get("workload_schema")
+            _s_profile = _get_profile(sj.job_type, _s_schema)
             if _s_profile:
                 _s_cores = _s_profile["executor_cores"]
                 _s_scale = run.config_snapshot.get("scale", 10)
-                _s_execs = _get_exec_count(sj.job_type, _s_scale)
+                _s_execs = _get_exec_count(sj.job_type, _s_scale, _s_schema)
                 # Check config overrides (streaming jobs may have explicit counts)
                 _override_key = sj.job_type.replace("-", "_")
                 _overrides = run.config_snapshot.get("spark", {}).get("executor_overrides", {})

@@ -1937,6 +1937,62 @@ class TestSchemaProfileOverrides:
         c360 = compute_peak_requirements(1, "batch", "customer360")
         assert default.scratch_gb == c360.scratch_gb
 
+    def test_get_job_profile_is_schema_aware(self):
+        """LB-135 review Finding 2: the metrics/scorecard path must be able to
+        get schema-resolved profiles, else FAML bronze-verify is reported at the
+        c360 base (6Gi) instead of the deployed 20Gi -- an honest-scorecard bug."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            get_executor_count,
+            get_job_profile,
+        )
+
+        # No schema == c360 base (backward compat).
+        base = get_job_profile("bronze-verify")
+        assert base["executor_memory"] == "4g"
+        # Schema-aware == deployed FAML profile.
+        faml = get_job_profile("bronze-verify", "financial")
+        assert faml["executor_memory"] == "8g"
+        assert faml["executor_memory_overhead"] == "12g"
+        # Executor count also schema-aware at scale > 10 (FAML 8-per-100 vs base 4).
+        assert get_executor_count("bronze-verify", 100, "financial") > get_executor_count(
+            "bronze-verify", 100
+        )
+
+    def test_faml_bronze_verify_has_memory_headroom_over_c360(self):
+        """LB-135: c360's 4g+2g bronze-verify (a thin add_files register) is too
+        small for FAML's full-corpus CTAS DISTINCT/ORDER BY -- executors
+        OOMKilled on the 6Gi container limit at scale 10. The FAML override must
+        give real per-executor memory headroom, in both modes (OOMKilled is a
+        container-limit hit, not node contention)."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _JOB_PROFILES,
+            _resolve_job_profile,
+        )
+
+        base = _JOB_PROFILES["bronze-verify"]
+        faml = _resolve_job_profile("bronze-verify", "financial")
+        assert faml is not None
+        # The OOM is OFF-HEAP (partitioned Iceberg write shuffle + S3A bytebuffer
+        # uploads), so the bump goes into OVERHEAD, not heap. Total 20Gi.
+        assert faml["executor_memory"] == "8g"
+        assert faml["executor_memory_overhead"] == "12g"
+        heap = int(faml["executor_memory"].rstrip("g"))
+        overhead = int(faml["executor_memory_overhead"].rstrip("g"))
+        assert heap + overhead == 20  # total container
+        # Overhead must exceed heap -- the pressure is off-heap, not heap. A
+        # regression that pours the bump back into heap (the original mistake)
+        # would flip this.
+        assert overhead > heap, "bronze-verify memory bump must favour overhead, not heap"
+        assert overhead > int(base["executor_memory_overhead"].rstrip("g"))
+        # Still bounded well under the heaviest batch job (silver-build 48g heap).
+        assert heap + overhead < int(
+            _JOB_PROFILES["silver-build"]["executor_memory"].rstrip("g")
+        ) + int(_JOB_PROFILES["silver-build"]["executor_memory_overhead"].rstrip("g"))
+        # c360 bronze-verify must stay register-sized (no FAML cost leak).
+        c360 = _resolve_job_profile("bronze-verify", "customer360")
+        assert c360["executor_memory"] == base["executor_memory"]
+        assert c360["executor_memory_overhead"] == base["executor_memory_overhead"]
+
 
 # ---------------------------------------------------------------------------
 # PipelineEngine protocol conformance
