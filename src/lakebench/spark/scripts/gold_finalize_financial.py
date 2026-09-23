@@ -296,7 +296,7 @@ def main() -> None:
     spark.stop()
 
 
-def run_detection_rules(spark, txns, run_id: str) -> None:
+def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None) -> None:
     """Invoke each configured detection rule and append alerts to gold.alerts.
 
     Per-rule isolation: a rule that raises is logged and skipped, and
@@ -336,6 +336,17 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
 
     from detection_rules import RULE_TARGET_TYPOLOGY, RuleSkipped, get_rule
 
+    # Which rules to run this invocation. Batch passes None (the full default
+    # set); the continuous gold loop passes a bounded set (W2/W3/W4) plus a
+    # skipped_rules list for the rules it deliberately does NOT run there --
+    # W1 (per-tick graph recompute too costly), W7 (silver.entities is not
+    # maintained by silver_stream, so it would false-report 0% recall), and
+    # W8 (needs a 90-day dormancy gap a narrow continuous corpus cannot hold).
+    # Marking them 'skipped' (not simply omitting them) is what lets
+    # score_financial render their typologies "not run" instead of a false 0%.
+    rules = tuple(rules) if rules is not None else DEFAULT_DETECTION_RULES
+    skipped_rules = tuple(skipped_rules or ())
+
     # Load silver.entities once. W7 needs it; loading up-front is cheap
     # (Iceberg metadata read) and avoids each rule invocation paying its
     # own catalog resolution cost.
@@ -346,7 +357,7 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
         silver_entities = None
 
     log("=" * 60)
-    log(f"Running detection rules: {list(DEFAULT_DETECTION_RULES)}")
+    log(f"Running detection rules: {list(rules)}")
     log("=" * 60)
 
     total_alerts = 0
@@ -354,7 +365,7 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
     # (LB-119). Each entry: (rule_id, status, reason, target_typology,
     # alert_count). status in {'ran','skipped','error'}.
     status_rows: list[tuple] = []
-    for rule_id in DEFAULT_DETECTION_RULES:
+    for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
         if fn is None:
@@ -382,6 +393,8 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
             if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
                 params["max_vertices"] = _W1_MAX_VERTICES
             alerts = fn(txns, **params)
+            # Dedup on the deterministic alert_id before count + write.
+            alerts = alerts.dropDuplicates(["alert_id"])
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
             # partial-write incident (DELETE commits, INSERT throws)
@@ -440,6 +453,11 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
             status_rows.append((rule_id, "error", err, target_typology, None))
     log(f"[detection] total alerts written: {total_alerts}")
+
+    for rule_id in skipped_rules:
+        target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
+        log(f"[detection] {rule_id}: skipped=mode-excluded elapsed=0.0s")
+        status_rows.append((rule_id, "skipped", "mode-excluded", target_typology, None))
 
     _write_detection_status(spark, status_rows, run_id)
 

@@ -829,6 +829,29 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     return False
 
 
+def _faml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
+    """Return the peak gold.alerts row count reported by the continuous gold
+    stage, or None if the logs show no detection activity.
+
+    gold_refresh_financial logs one ``[detection] cumulative gold.alerts
+    rows: N`` line per tick. Because each tick re-detects the full corpus and
+    rewrites per rule (DELETE + INSERT), the per-tick total can rise or fall
+    slightly, so this is the peak across ticks, not necessarily the last one.
+    The peak is the right signal for the gate's only decision -- did detection
+    ever produce alerts (>0) or not (0/None). None (no such line at all) is
+    distinct from 0 (line present, no alerts) so the caller can tell
+    "detection never ran" from "detection ran and found nothing".
+    """
+    if not gold_refresh_logs:
+        return None
+    import re as _re
+
+    counts = [
+        int(m) for m in _re.findall(r"cumulative gold\.alerts rows:\s*(\d+)", gold_refresh_logs)
+    ]
+    return max(counts) if counts else None
+
+
 def _run_sustained(
     cfg,
     config_file: Path,
@@ -1257,6 +1280,52 @@ def _run_sustained(
             details={"duration_seconds": run_duration},
         )
 
+        # LB-127 honest continuous runner (closes LB-044 for FAML). A
+        # continuous FAML run whose gold stage produced ZERO alerts is a
+        # FAILURE, not a PASS: it means detection never fired (empty silver,
+        # a data-clock/window miss, or a broken rule), and the whole point of
+        # the run -- measuring detection under a sustained trickle -- did not
+        # happen. Exit-code-only success let this masquerade as PASS for two
+        # UAT rounds on the C360 side (LB-044); FAML asserts on real output.
+        # Evaluated BEFORE the per-stage record loop so streaming_metrics.success
+        # is recorded consistent with the run-level verdict, and it only sets
+        # the flag here -- the non-zero exit is raised at the end of the try so
+        # metrics + streaming stats still persist. Gated to financial so
+        # non-detection C360 sustained runs (no alerts by design) are unaffected.
+        # None gold-refresh logs => FAILURE by deliberate LB-044 policy
+        # (absence of proof is not proof of success); the trade-off is a
+        # possible false-fail if driver-log capture times out on a very long
+        # run, which is preferred over silently passing an unverifiable run.
+        if cfg.architecture.workload.schema_type.value == "financial":
+            gold_logs = driver_logs.get("gold-refresh")
+            alert_count = _faml_cumulative_alerts(gold_logs)
+            if gold_logs is None:
+                print_error(
+                    "FAML continuous gate: no gold-refresh driver logs captured; "
+                    "cannot confirm detection ran. Marking FAILURE."
+                )
+                pipeline_success = False
+            elif alert_count is None:
+                print_error(
+                    "FAML continuous gate: gold-refresh logs show no detection "
+                    "activity (no '[detection] cumulative gold.alerts rows:' line). "
+                    "Detection did not run. Marking FAILURE."
+                )
+                pipeline_success = False
+            elif alert_count == 0:
+                print_error(
+                    "FAML continuous gate: detection ran but produced 0 alerts over "
+                    "the whole run. Either silver stayed empty, or every detection "
+                    "rule errored. Marking FAILURE (a real continuous run must "
+                    "detect something)."
+                )
+                pipeline_success = False
+            else:
+                print_success(
+                    f"FAML continuous gate: detection produced {alert_count:,} "
+                    "alerts over the window."
+                )
+
         # Record streaming metrics (from pre-captured driver logs)
         console.print()
         console.print("[bold]Parsing streaming metrics...[/bold]")
@@ -1320,18 +1389,31 @@ def _run_sustained(
             except Exception as e:
                 print_warning(f"Benchmark aggregation failed: {e}")
 
-        # Summary
-        console.print(
-            Panel(
-                f"[green]Sustained pipeline completed![/green]\n\n"
-                f"  Duration: {run_duration}s ({run_duration / 60:.0f} min)\n"
-                f"  Streaming jobs: {len(submitted)}\n\n"
-                f"Query results: lakebench query --example count\n"
-                f"Generate report: lakebench report",
-                title="Sustained Pipeline Complete",
-                expand=False,
+        # Summary. Only the green "completed" panel is success-gated: printing
+        # it after the gate flagged FAILURE would contradict the red error and
+        # read as a pass to an operator scanning stdout (adversarial-review P1).
+        if pipeline_success:
+            console.print(
+                Panel(
+                    f"[green]Sustained pipeline completed![/green]\n\n"
+                    f"  Duration: {run_duration}s ({run_duration / 60:.0f} min)\n"
+                    f"  Streaming jobs: {len(submitted)}\n\n"
+                    f"Query results: lakebench query --example count\n"
+                    f"Generate report: lakebench report",
+                    title="Sustained Pipeline Complete",
+                    expand=False,
+                )
             )
-        )
+
+        # LB-127 P0 fix: a flagged failure MUST exit non-zero. Every other
+        # failure site in this function raises typer.Exit(1); the gate above
+        # only set the flag (so the record loop + benchmark aggregation could
+        # still persist). Raise now, inside the try, so the finally block still
+        # runs (metrics + journal persist with success=False) and the process
+        # exits 1 -- the exact signal an exit-code-only UAT runner reads, which
+        # is the whole point of closing LB-044.
+        if not pipeline_success:
+            raise typer.Exit(1)
 
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
