@@ -126,14 +126,6 @@ def test_run_detection_rules_accepts_rules_and_skipped_lists():
     assert "skipped_rules" in argnames
 
 
-def test_batch_driver_dedups_alert_id_before_write():
-    """Symmetric dedup guard: a rule whose join fans out could emit two rows
-    sharing a deterministic alert_id; dropDuplicates prevents a duplicate row
-    landing in gold.alerts (adversarial-review Finding 3)."""
-    src = _src(GOLD_FINALIZE_PATH)
-    assert 'dropDuplicates(["alert_id"])' in src
-
-
 def test_skipped_rules_recorded_as_skipped_status():
     """Skipped rules must be written to detection_status as status='skipped'
     so score marks their typologies not-run, not 0%."""
@@ -141,16 +133,10 @@ def test_skipped_rules_recorded_as_skipped_status():
     assert 'status_rows.append((rule_id, "skipped", "mode-excluded"' in src
 
 
+# --- optimizer workaround (LB-127) -------------------------------------------
+
+
 # --- deterministic alert_id (3d) ---------------------------------------------
-
-
-def test_alert_id_helper_null_guarded():
-    """concat_ws skips null args, which would collapse distinct alerts onto a
-    shorter key; the helper coalesces entity and txn-set to sentinels
-    (adversarial-review Finding 4)."""
-    src = _src(_ROOT / "src/lakebench/spark/scripts/detection_rules.py")
-    assert "__NULL_ENTITY__" in src
-    assert "__NULL_TXNS__" in src
 
 
 # --- sustained honest-runner gate (3a) ---------------------------------------

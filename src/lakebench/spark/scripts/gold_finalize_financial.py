@@ -393,8 +393,6 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
                 params["max_vertices"] = _W1_MAX_VERTICES
             alerts = fn(txns, **params)
-            # Dedup on the deterministic alert_id before count + write.
-            alerts = alerts.dropDuplicates(["alert_id"])
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
             # partial-write incident (DELETE commits, INSERT throws)
