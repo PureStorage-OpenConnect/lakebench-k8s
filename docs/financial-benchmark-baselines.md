@@ -50,7 +50,7 @@ the peak Spark-executor request across the three batch jobs
 | Scale | Wall-clock p50 (s) | Wall-clock p95 (s) | Alert count | Recall | Cores used | Storage read (GB) |
 |------:|-------------------:|-------------------:|------------:|-------:|-----------:|------------------:|
 |     1 |            930.5[1]|          1065.6[2] |         [3] |   [3]  |         32 |             14.4  |
-|    10 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
+|    10 |          7971[4]    |                TBD |   1665017[4]| 0.322[4]|        32 |            186.1[4]|
 |   100 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 |  1000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
 | 10000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
@@ -97,6 +97,26 @@ alert-to-entity join). Pre-compaction QpH was 38.8 / 39.1 / 39.0
 (4/8 queries succeeded, cadre stable). LB-113 fixed the 4 Gi OOM;
 LB-117 tracks the remaining query-timeout tune for FAML analytical
 queries. QpH will populate here after LB-117 lands.
+
+[4] Single scale-10 batch run (n=1, run-20260923-120258-b71af2,
+2026-09-23), first clean scale-10 run after LB-118 (500Gi bronze-verify
+PVC, executors_per_100_scale:8, max_executors:28). p95 stays TBD until
+n>=3. Per-stage wall-clock: bronze_verify 4278s (dominant -- the
+pacs.008 CTAS fallback rewrites ~186 GB through Iceberg on 7 executors),
+silver_build 1216s, gold_finalize 2477s. Zero OOMKilled and no
+'No space left on device' across the run -- LB-118 verified at scale 10.
+Cores used = peak single-job executor-core request (silver_build and
+gold_finalize each 8x4=32; bronze_verify 7x2=14; jobs run sequentially).
+Storage read = bronze input size (186.1 GB) read by bronze_verify;
+silver measured 99.0 GB. Alert count 1,665,017 across W2=5,173,
+W3=128, W4=1,045,602, W7=0, W8=614,114 (W1 ran, 0 components above
+threshold). fp_rate 98.8% -- W4 (63%) and W8 (37%) dominate the alert
+volume and are the two precision blockers (LB-130). Recall is the
+unweighted mean across 15 scored typologies (min corridor_high_risk
+0.043, max fan_out 0.911); all 15 rendered as 'scored', none faked as
+0%/skipped. scale_ratio reported 0.0 -- the scorecard's expected-bronze
+denominator is not wired for FAML (LB-131), cosmetic, does not affect
+the pipeline.
 
 ## Sustained pipeline (bronze_ingest -> silver_stream -> gold_refresh)
 
@@ -151,3 +171,5 @@ Follow this after each release UAT:
 **2026-09-22 (v1.5.0.dev0, three consecutive S1 runs)** -- first clean three-iter S1 baseline on the reference cluster after PR-G (LB-112/113/114/115) and PR-H (Google Maven mirror fallback for repo1.maven.org rate-limits) landed. All three pipelines completed rc=0, gold_finalize wrote an identical 1.068 GB to `gold.alerts` in every run, and per-stage timings were within 0.1s except for iter-1's Ivy jar-resolution cold start. Scale-1 row repopulated with p50 = 930.5s and n=3 max = 1065.6s. LB-116 and LB-117 track two remaining follow-ups (missing per-rule alert counts in metrics.json, FAML analytical query timeouts); LB-094 (bipartite silver-build entity split) still depresses recall structurally.
 
 **2026-09-22 (v1.5.0.dev0, scale-10 attempt)** -- first live scale-10 FAML batch attempt failed at bronze-verify with `java.io.IOException: No space left on device` after 78 minutes (three attempts, same failure). Per-executor scratch PVC (50 Gi) is undersized for the bronze_verify_financial CTAS + DISTINCT ORDER BY on 100 GB of pacs.008 raw. Filed as LB-118; scale 10 row stays TBD pending the fix. All lower-scale rows (scale 1) unaffected -- 50 Gi is comfortable at that volume. This is per-job local disk, unrelated to the LB-113 spark-thrift heap bump.
+
+**2026-09-23 (v1.5.0.dev0, scale-10 batch, run-20260923-120258-b71af2)** -- first clean scale-10 FAML batch run end to end after LB-118. Pipeline completed rc=0 in 7971s (bronze_verify 4278s, silver_build 1216s, gold_finalize 2477s), zero OOMKilled, no disk-full. Financial scoring ran inline inside `lakebench run` (Phase 1a fold -- no separate `financial score` invocation) and the scorecard rendered all 15 typologies as scored with a real recall spread (mean 0.322, fan_out 0.911 down to corridor_high_risk 0.043). The unflattering honest numbers it surfaced: 1,665,017 alerts at 98.8% false-positive rate, driven by W4 (1.05M) and W8 (614K) over-firing -- filed LB-130 as the top credibility blocker. W7 fired 0 alerts (high-risk entity plumbing gap) and scale_ratio reported 0.0 (LB-131, cosmetic). Scale-10 batch row populated (n=1); p95 pending n>=3.

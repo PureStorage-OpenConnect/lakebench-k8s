@@ -212,5 +212,48 @@ def test_sustained_success_panel_is_guarded():
     assert "if pipeline_success:" in prefix
 
 
+def test_faml_bronze_verify_timeout_budget_clears_measured_cost():
+    """The shared FAML bronze-verify budget must clear the measured scale-10
+    cost (4278s, run-20260923-120258-b71af2) with real headroom, be flat at
+    the floor for the scales we operate at, and grow at high scale."""
+    from lakebench.spark.job import faml_bronze_verify_timeout_budget as budget
+
+    assert budget(1) == 5400
+    assert budget(10) == 5400 and budget(10) - 4278 >= 1000  # >= ~23% headroom
+    assert budget(45) == 5400  # floor still dominates
+    assert budget(100) == 12000  # slope active past the floor
+    # Float scales (local mode allows <1) must not blow up.
+    assert budget(0.1) == 5400
+    assert budget(2.5) == 5400
+
+
+def test_bronze_verify_preflight_uses_shared_budget():
+    """The FAML continuous preflight must size off the shared helper, never the
+    old fixed 1200s cap that could not pass at scale >= 10."""
+    src = _src(_ROOT / "src/lakebench/cli/_sustained.py")
+    assert "timeout_seconds=1200," not in src, (
+        "preflight reverted to the fixed 1200s cap that cannot pass at scale >= 10"
+    )
+    assert "_preflight_timeout = faml_bronze_verify_timeout_budget(_preflight_scale)" in src, (
+        "preflight no longer sizes off the shared faml_bronze_verify_timeout_budget helper"
+    )
+    assert "timeout_seconds=_preflight_timeout," in src, (
+        "computed preflight budget is not wired into wait_for_completion"
+    )
+
+
+def test_batch_timeout_floors_at_shared_bronze_verify_budget():
+    """The batch per-job timeout is applied to every stage; FAML bronze-verify
+    is the tightest. It must be floored at the shared budget so it does not
+    false-fail with only 222s headroom (the pre-fix state)."""
+    src = _src(_ROOT / "src/lakebench/cli/_run.py")
+    assert "faml_bronze_verify_timeout_budget(scale)" in src, (
+        "batch path no longer floors its per-job timeout at the shared budget"
+    )
+    assert "timeout = max(timeout, faml_bronze_verify_timeout_budget(scale))" in src, (
+        "batch floor is not applied via max(timeout, shared_budget)"
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

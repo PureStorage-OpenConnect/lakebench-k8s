@@ -315,6 +315,29 @@ def get_executor_count(job_type: str, scale: float) -> int:
     return _scale_executor_count(profile, scale)
 
 
+def faml_bronze_verify_timeout_budget(scale: float) -> int:
+    """Wall-clock kill-switch budget (seconds) for a single FAML bronze-verify.
+
+    FAML bronze-verify is NOT the thin add_files register c360 uses. It trips
+    the CTAS fallback in bronze_verify_financial.py that rewrites the full
+    pacs.008 corpus through Iceberg and spills ~2x the input per executor.
+    Measured live at 4278s at scale 10 (run-20260923-120258-b71af2, 7
+    executors, ~100 GB raw pacs008 present at job start). Executor count scales
+    with data (executors_per_100_scale=8, capped at max_executors=28), so cost
+    grows sublinearly with scale rather than 1:1.
+
+    The 5400s floor covers the scale-10 measurement plus headroom for a cold
+    Ivy jar fetch (~135s) or a transient OOM-retry, and the gentle scale*120
+    slope adds growth once executor scaling saturates at high scale. Both the
+    batch per-job timeout (cli/_run.py) and the sustained bronze-verify
+    preflight (cli/_sustained.py) size against this single helper so they
+    cannot diverge for the same job -- the batch path had only 222s (5%)
+    headroom over the measured cost before this was shared, a false-failure
+    risk on the primary UAT path under a cold classpath or OOM retry.
+    """
+    return max(5400, int(scale * 120))
+
+
 # Batch pipeline job order.  These run sequentially, so the cluster only ever
 # needs to satisfy the single largest job, not the sum of all three.
 BATCH_JOB_TYPES: tuple[str, ...] = ("bronze-verify", "silver-build", "gold-finalize")
@@ -901,6 +924,10 @@ class JobType(Enum):
     REPLAY_FINANCIAL = "replay-financial"
     REPRODUCE_FINANCIAL = "reproduce-financial"
     SCORE_FINANCIAL = "score-financial"
+    # Reference detector + leakage gate: the "distribution checks do not
+    # prove semantics" gate that a relative-threshold rule rewrite (e.g. the
+    # W4/W8 precision work, LB-130) must be validated against before it ships.
+    SCORE_FINANCIAL_REFERENCE = "score-financial-reference"
 
 
 # Streaming job types (for conditional manifest logic)
@@ -1372,6 +1399,7 @@ class SparkJobManager:
         script_map.setdefault(JobType.REPLAY_FINANCIAL, "replay_financial.py")
         script_map.setdefault(JobType.REPRODUCE_FINANCIAL, "reproduce_financial.py")
         script_map.setdefault(JobType.SCORE_FINANCIAL, "score_financial.py")
+        script_map.setdefault(JobType.SCORE_FINANCIAL_REFERENCE, "score_financial_reference.py")
         # Use local:// to reference scripts already in the container filesystem
         # (mounted from lakebench-spark-scripts ConfigMap)
         main_file = f"local:///opt/spark/scripts/{script_map[job_type]}"
@@ -2189,6 +2217,7 @@ class SparkJobManager:
             "replay_financial.py",
             "reproduce_financial.py",
             "score_financial.py",
+            "score_financial_reference.py",
             # Library module imported by replay_financial (not a Spark
             # entry point but must be mounted alongside so the local
             # import resolves inside the driver pod).
@@ -2202,6 +2231,22 @@ class SparkJobManager:
             if script_path.exists():
                 data[script_file] = script_path.read_text()
                 logger.info(f"Loaded script: {script_file}")
+
+        # reference_score.py is the single source of truth for the leakage
+        # gate + reference-detector logic and lives in the lakebench.faml
+        # package (unit-tested there as lakebench.faml.reference_score). The
+        # apache/spark image has no lakebench install, so it is packaged flat
+        # into the ConfigMap next to the scripts and imported by
+        # score_financial_reference.py as a bare `from reference_score import`
+        # -- the same pattern common.py and detection_rules.py use. It is
+        # self-contained (stdlib + optional sklearn/pandas at call time), so a
+        # flat mount resolves with no lakebench package on the driver.
+        from lakebench._resources import _package_dir
+
+        _ref_score_path = _package_dir() / "faml" / "reference_score.py"
+        if _ref_score_path.exists():
+            data["reference_score.py"] = _ref_score_path.read_text()
+            logger.info("Loaded script: reference_score.py (from lakebench.faml)")
 
         # FAML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via
