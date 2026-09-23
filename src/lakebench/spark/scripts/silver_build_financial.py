@@ -189,30 +189,59 @@ TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snap
 # ---------------------------------------------------------------------------
 
 
-def _entity_id_from(name_col, country_col, city_col=None):
-    """Deterministic BIGINT entity_id from (uppercased trimmed name, country,
-    optional city). Adding city reduces the collision rate for common names
-    ("HSBC BANK PLC" in "GB", "MOHAMMED ALI" in "PK") from what
-    name+country alone can achieve. Even so, two real distinct entities with
-    identical name+country+city will still merge -- for a real system, LEI/
-    BIC/DOB would be additional keys, but pacs.008 dbtr/cdtr do not always
-    carry them. Splink (W5) is the intended resolution layer for that.
+def _entity_id_from(name_col, country_col, city_col=None, lei_col=None):
+    """Deterministic BIGINT entity_id, LEI-first with name-hash fallback.
 
-    Each column is coalesced to "" BEFORE concat_ws because concat_ws
-    silently skips NULL columns rather than emitting a delimiter -- so
-    without the coalesce, a NULL city collides with a missing city
-    segment and NULL country collides with a missing country segment,
-    letting anonymous entities collapse across otherwise-distinct rows.
+    LB-101 (P1): bronze carries a role-independent LEI on both dbtr and
+    cdtr sides (``dbtr.id.lei``, ``cdtr.id.lei``); the Rust datagen
+    stamps ``lei_for(entity_id)`` for both roles, so the same real
+    entity appears with the same LEI on either side of a wire. Keying
+    entity_id on LEI collapses the bipartite split at its root: the
+    same real entity gets one silver entity_id regardless of whether
+    the row is a debit or credit.
+
+    Name-hash fallback preserves compatibility with historical bronze
+    or upstream sources that do not populate LEI. When ``lei_col`` is
+    None or the value is NULL / empty for a row, the fallback hashes
+    ``(upper(trim(name)), country, upper(trim(city)))`` -- Even so,
+    two real distinct entities with identical name+country+city will
+    still merge; for a real system, BIC/DOB would be additional keys.
+    Splink (W5) is the intended resolution layer for name-only rows.
+
+    Mixed-LEI risk (real-world only): if the same real entity appears
+    with LEI populated on some rows and NULL on others (a real-world
+    data-quality pattern that does NOT occur in the current Rust
+    datagen, which stamps LEI unconditionally at
+    ``datagen_rs/src/emit.rs:242-243``), silver produces two entity_ids
+    for that entity -- one LEI-hash, one name-hash. Not a defect of
+    this fix; a downstream Splink pass or an ingest-time LEI-backfill
+    handles it. Documented as a known constraint on non-synthetic
+    bronze rather than papered over here.
+
+    Each fallback column is coalesced to "" BEFORE concat_ws because
+    concat_ws silently skips NULL columns rather than emitting a
+    delimiter -- so without the coalesce, a NULL city collides with a
+    missing city segment and NULL country collides with a missing
+    country segment, letting anonymous entities collapse across
+    otherwise-distinct rows.
     """
     if city_col is None:
         city_col = lit("")
-    key = concat_ws(
+    fallback_key = concat_ws(
         "|",
         coalesce(upper(trim(name_col)), lit("")),
         coalesce(country_col, lit("")),
         coalesce(upper(trim(city_col)), lit("")),
     )
-    return xxhash64(key)
+    fallback = xxhash64(fallback_key)
+    if lei_col is None:
+        return fallback
+    # LEI is a 20-char string; treat empty / whitespace-only as absent.
+    trimmed_lei = trim(lei_col)
+    return when(
+        trimmed_lei.isNotNull() & (trimmed_lei != lit("")),
+        xxhash64(trimmed_lei),
+    ).otherwise(fallback)
 
 
 def build_transactions(bronze):
@@ -238,17 +267,24 @@ def build_transactions(bronze):
         col("txn_id"),
         col("uetr"),
         _entity_id_from(
-            col("dbtr.nm"), col("dbtr.ctry_of_res"), col("dbtr.pstl_adr.twn_nm"),
+            col("dbtr.nm"),
+            col("dbtr.ctry_of_res"),
+            col("dbtr.pstl_adr.twn_nm"),
+            col("dbtr.id.lei"),
         ).alias("originator_id"),
         _entity_id_from(
-            col("cdtr.nm"), col("cdtr.ctry_of_res"), col("cdtr.pstl_adr.twn_nm"),
+            col("cdtr.nm"),
+            col("cdtr.ctry_of_res"),
+            col("cdtr.pstl_adr.twn_nm"),
+            col("cdtr.id.lei"),
         ).alias("beneficiary_id"),
         col("dbtr_agt.bicfi").alias("originator_bank_bic"),
         col("cdtr_agt.bicfi").alias("beneficiary_bank_bic"),
         col("intr_bk_sttlm_amt").cast("decimal(18,2)").alias("txn_amount"),
         col("intr_bk_sttlm_ccy").alias("txn_currency"),
         (col("intr_bk_sttlm_amt") * coalesce(col("xchg_rate"), lit(1.0)))
-            .cast("decimal(18,2)").alias("txn_amount_usd"),
+        .cast("decimal(18,2)")
+        .alias("txn_amount_usd"),
         col("cre_dt_tm").alias("txn_timestamp"),
         lit("wire").alias("txn_type"),
         col("purp_cd").alias("purpose_code"),
@@ -298,11 +334,7 @@ def build_entities(txns_df):
     )
     from pyspark.sql.functions import min as _min
 
-    picked = (
-        orig.unionByName(bene)
-        .groupBy("entity_id")
-        .agg(_min("name").alias("_min_name"))
-    )
+    picked = orig.unionByName(bene).groupBy("entity_id").agg(_min("name").alias("_min_name"))
     # Coalesce to an explicit "UNKNOWN" so an entity whose reported name is
     # NULL for every occurrence (plausible when a party name field is
     # missing) doesn't violate silver.entities.name NOT NULL. Emitting
@@ -360,7 +392,10 @@ def build_accounts(bronze):
     dbtr = bronze.select(
         col("dbtr_acct.iban").alias("iban"),
         _entity_id_from(
-            col("dbtr.nm"), col("dbtr.ctry_of_res"), col("dbtr.pstl_adr.twn_nm"),
+            col("dbtr.nm"),
+            col("dbtr.ctry_of_res"),
+            col("dbtr.pstl_adr.twn_nm"),
+            col("dbtr.id.lei"),
         ).alias("holder_entity_id"),
         col("dbtr_agt.bicfi").alias("bank_bic"),
         col("dbtr_acct.ccy").alias("currency"),
@@ -369,7 +404,10 @@ def build_accounts(bronze):
     cdtr = bronze.select(
         col("cdtr_acct.iban").alias("iban"),
         _entity_id_from(
-            col("cdtr.nm"), col("cdtr.ctry_of_res"), col("cdtr.pstl_adr.twn_nm"),
+            col("cdtr.nm"),
+            col("cdtr.ctry_of_res"),
+            col("cdtr.pstl_adr.twn_nm"),
+            col("cdtr.id.lei"),
         ).alias("holder_entity_id"),
         col("cdtr_agt.bicfi").alias("bank_bic"),
         col("cdtr_acct.ccy").alias("currency"),
@@ -425,8 +463,12 @@ def build_statements(bronze, accounts_df):
         col("txn_id"),
         col("uetr"),
     ]
-    dbit = bronze.select(col("dbtr_acct.iban").alias("iban"), lit("DBIT").alias("cdt_dbt_ind"), *common_cols)
-    crdt = bronze.select(col("cdtr_acct.iban").alias("iban"), lit("CRDT").alias("cdt_dbt_ind"), *common_cols)
+    dbit = bronze.select(
+        col("dbtr_acct.iban").alias("iban"), lit("DBIT").alias("cdt_dbt_ind"), *common_cols
+    )
+    crdt = bronze.select(
+        col("cdtr_acct.iban").alias("iban"), lit("CRDT").alias("cdt_dbt_ind"), *common_cols
+    )
     entries = dbit.unionByName(crdt).filter(col("iban").isNotNull())
 
     # Join to accounts to recover the BIGINT account_id and a deterministic
@@ -440,8 +482,9 @@ def build_statements(bronze, accounts_df):
         # in roughly (-190000, 10000) -- half the accounts started underwater
         # for reasons unrelated to any transaction. abs() before modulo
         # forces the range into (10000, 210000] as intended.
-        (((abs_(col("account_id")) % lit(200_000)) + lit(10_000))
-            .cast("decimal(18,2)")).alias("opening_balance"),
+        (((abs_(col("account_id")) % lit(200_000)) + lit(10_000)).cast("decimal(18,2)")).alias(
+            "opening_balance"
+        ),
     )
     entries = entries.join(acc, entries["iban"] == acc["_ac_iban"], "inner").drop("_ac_iban")
 
@@ -587,6 +630,24 @@ def main() -> None:
     ):
         spark.sql(ddl)
         log(f"Bootstrapped silver.{name}")
+
+    # LB-109: upgrade-path safety. If the tables were created by an
+    # older silver_build_financial or by deploy/financial_ddl.py before
+    # `_batch_id` was added, `CREATE TABLE IF NOT EXISTS` above is a
+    # no-op and the subsequent `.writeTo(...).overwrite(lit(True))`
+    # would reject with a schema mismatch (the DataFrame now includes
+    # `_batch_id` from build_transactions/build_edges). ADD COLUMN IF
+    # NOT EXISTS is idempotent -- a no-op on fresh tables where the
+    # column already exists.
+    for table in (SILVER_TRANSACTIONS, SILVER_EDGES):
+        try:
+            spark.sql(f"ALTER TABLE {CATALOG}.{table} ADD COLUMN IF NOT EXISTS _batch_id BIGINT")
+        except Exception as e:  # noqa: BLE001
+            # Some catalogs don't accept ADD COLUMN IF NOT EXISTS on a
+            # table that already has the column; that's the desired
+            # end state, so swallow. If the column truly is missing
+            # the write below will fail loud with the schema mismatch.
+            log(f"[startup] ADD COLUMN _batch_id on {table} skipped: {e}")
 
     bronze = spark.table(f"{CATALOG}.{BRONZE_TABLE}")
     log(f"Read bronze: {CATALOG}.{BRONZE_TABLE} ({bronze.count():,} rows)")
