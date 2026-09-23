@@ -847,9 +847,21 @@ def run(
         # cushion is applied uniformly since the timeout is per-job and
         # gold-finalize is the tightest budget in the pipeline.
         base = max(3600, int(scale * 120))
-        detection_cushion = 900 if cfg.architecture.workload.schema_type.value == "financial" else 0
+        is_financial = cfg.architecture.workload.schema_type.value == "financial"
+        detection_cushion = 900 if is_financial else 0
         timeout = base + detection_cushion
-        if scale >= 50 or detection_cushion:
+        if is_financial:
+            # This one per-job timeout is applied to EVERY batch stage, and
+            # FAML bronze-verify (CTAS fallback over the full pacs.008 corpus,
+            # measured 4278s at scale 10) is the tightest of the three. Floor
+            # the budget at the shared bronze-verify budget so bronze-verify
+            # keeps real headroom over its measured cost -- base+cushion alone
+            # left only 222s (5%) at scale 10, a false-failure risk under a
+            # cold Ivy fetch or an OOM retry.
+            from lakebench.spark.job import faml_bronze_verify_timeout_budget
+
+            timeout = max(timeout, faml_bronze_verify_timeout_budget(scale))
+        if scale >= 50 or is_financial:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
     # Flag mutual exclusivity

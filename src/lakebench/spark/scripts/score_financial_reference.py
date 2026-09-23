@@ -217,14 +217,14 @@ def _build_reference_feature_frame(spark: SparkSession, silver_txns_name: str, m
         when(col("typology_type").isNull(), lit("baseline")).otherwise(col("typology_type")),
     )
 
-    # Aggregate to entity-day. Bucket key is ``to_date(txn_ts)``,
+    # Aggregate to entity-day. Bucket key is ``to_date(txn_timestamp)``,
     # NOT ``dayofmonth`` -- the latter collapses Jan 15 + Feb 15
     # into a single ``day=15`` groupBy key, mashing unrelated
     # transactions and destroying the signal the model tries to
     # learn (P1 finding from PR-A adversarial review). FAML datagen
     # spans multi-week windows by design (CLAUDE.md gotcha 17).
     per_entity_day = (
-        labelled.withColumn("day", to_date(col("txn_ts")))
+        labelled.withColumn("day", to_date(col("txn_timestamp")))
         .groupBy("originator_id", "day", "label")
         .agg(
             mean_(spark_log("txn_amount")).alias("log_amount_mean"),
@@ -232,8 +232,8 @@ def _build_reference_feature_frame(spark: SparkSession, silver_txns_name: str, m
             mean_(spark_log("txn_amount") / spark_log(lit(50_000_000.0))).alias(
                 "amount_pct_of_ceiling"
             ),
-            mean_(hour("txn_ts")).alias("mean_hour"),
-            stddev(hour("txn_ts")).alias("std_hour"),
+            mean_(hour("txn_timestamp")).alias("mean_hour"),
+            stddev(hour("txn_timestamp")).alias("std_hour"),
         )
     )
 
@@ -346,7 +346,7 @@ def main() -> None:
     log(f"Manifest instances: {manifest_n:,}")
 
     # ---------- Leakage gate ----------
-    from lakebench.faml.reference_score import compute_leakage_gate
+    from reference_score import compute_leakage_gate
 
     band_rows = _compute_leakage_bands(spark, args.silver_txns, manifest)
     leakage_report = compute_leakage_gate(band_rows, threshold_ratio=args.leakage_threshold)
@@ -364,7 +364,7 @@ def main() -> None:
     log(f"Wrote {leakage_out}")
 
     # ---------- Reference detector ----------
-    from lakebench.faml.reference_score import (
+    from reference_score import (
         LEAKY_FEATURES,
         ReferenceModelVerdict,
         train_reference_gbt,
@@ -416,7 +416,7 @@ def main() -> None:
             f"BUG: feature frame contains leaky columns {leaks!r}. "
             "This should have been caught by train_reference_gbt's own "
             "leak check -- if you reached here, the LEAKY_FEATURES set "
-            "in reference_score.py is out of sync with what this Spark "
+            "in reference_score.py (packaged flat on the driver) is out of sync with what this Spark "
             "script builds."
         )
 

@@ -61,7 +61,9 @@ class TestJobType:
     def test_all_types_iterable(self):
         types = list(JobType)
         # 6 medallion + 3 Financial-only operator actions (ENG-2C.3g/h/i)
-        assert len(types) == 9
+        # + 1 reference detector / leakage gate (SCORE_FINANCIAL_REFERENCE, LB-130 gate)
+        assert len(types) == 10
+        assert JobType.SCORE_FINANCIAL_REFERENCE in types
 
 
 class TestJobState:
@@ -1737,6 +1739,81 @@ class TestFinancialScriptDispatch:
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
         assert manifest["spec"]["mainApplicationFile"].endswith("bronze_verify.py")
         assert "financial" not in manifest["spec"]["mainApplicationFile"]
+
+    def test_reference_score_dispatches_to_reference_script(self):
+        """SCORE_FINANCIAL_REFERENCE routes to score_financial_reference.py so
+        the leakage gate + reference detector (the LB-130 gate) is runnable."""
+        from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+        cfg = self._make_financial_config()
+        mgr = SparkJobManager(cfg, _mock_k8s())
+        manifest = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
+        assert "score_financial_reference.py" in manifest["spec"]["mainApplicationFile"]
+        assert manifest["metadata"]["name"] == "lakebench-score-financial-reference"
+
+
+class TestReferenceScoreWiring:
+    """The reference detector (LB-130 gate) must be packaged and importable on a
+    Spark driver that has no lakebench install."""
+
+    def test_configmap_includes_reference_script_and_module(self):
+        """deploy_scripts_configmap must ship BOTH score_financial_reference.py
+        and reference_score.py (the self-contained module it imports) flat, so
+        the bare `from reference_score import` resolves on the driver."""
+        config = _make_config()
+        k8s = _mock_k8s()
+        k8s.apply_manifest.return_value = True
+        mgr = SparkJobManager(config, k8s)
+
+        result = mgr.deploy_scripts_configmap()
+        assert result is True
+        data = k8s.apply_manifest.call_args[0][0]["data"]
+        assert "score_financial_reference.py" in data, "reference Spark entry point not packaged"
+        assert "reference_score.py" in data, (
+            "reference_score.py module not packaged -- the driver has no lakebench "
+            "install, so the bare import would fail at runtime"
+        )
+        # The packaged module must be the real thing, not an empty stub.
+        assert "def compute_leakage_gate" in data["reference_score.py"]
+        assert "def train_reference_gbt" in data["reference_score.py"]
+
+    def test_reference_spark_script_uses_bare_import(self):
+        """score_financial_reference.py must import the module by its flat name,
+        never `from lakebench.faml...` -- the lakebench package is not on the
+        apache/spark driver image."""
+        from lakebench._resources import get_scripts_dir
+
+        src = (get_scripts_dir() / "score_financial_reference.py").read_text()
+        assert "from lakebench.faml" not in src, (
+            "reference script imports from lakebench.faml, which is absent on the driver"
+        )
+        assert "from reference_score import" in src, (
+            "reference script no longer imports the flat-packaged reference_score module"
+        )
+
+    def test_reference_score_module_is_self_contained(self):
+        """reference_score.py must not import from lakebench (it ships flat with
+        no package around it)."""
+        from lakebench._resources import _package_dir
+
+        src = (_package_dir() / "faml" / "reference_score.py").read_text()
+        assert "from lakebench" not in src and "import lakebench" not in src, (
+            "reference_score.py imports lakebench; it cannot ship as a flat driver module"
+        )
+
+    def test_reference_script_uses_real_silver_column(self):
+        """The reference feature build must read silver's real timestamp column
+        (txn_timestamp), not the txn_ts that never existed in the DDL -- a
+        column-not-found at runtime is exactly the never-run-script bug class."""
+        from lakebench._resources import get_scripts_dir
+
+        src = (get_scripts_dir() / "score_financial_reference.py").read_text()
+        import re
+
+        assert not re.search(r'"txn_ts"|\btxn_ts\b', src), (
+            "reference script still references the nonexistent txn_ts column"
+        )
+        assert "txn_timestamp" in src, "reference script no longer reads txn_timestamp"
 
 
 class TestSchemaProfileOverrides:

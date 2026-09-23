@@ -871,7 +871,12 @@ def _run_sustained(
     from lakebench.engine import get_engine
     from lakebench.metrics import MetricsCollector, MetricsStorage, StreamingJobMetrics
     from lakebench.spark import SparkJobMonitor, SparkOperatorManager
-    from lakebench.spark.job import JobState, JobType, SparkJobManager
+    from lakebench.spark.job import (
+        JobState,
+        JobType,
+        SparkJobManager,
+        faml_bronze_verify_timeout_budget,
+    )
 
     run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
 
@@ -1006,14 +1011,23 @@ def _run_sustained(
                 print_error(f"bronze-verify preflight submit failed: {preflight_status.message}")
                 pipeline_success = False
                 raise typer.Exit(1)
-            # Preflight budget is a hard 20 min: it should complete in
-            # under 5 min at any realistic scale (registers an Iceberg
-            # table from a partial parquet listing). Using the CLI's
-            # sustained ``timeout`` here would be misleading -- that's
-            # for the whole streaming window, not a preflight step.
+            # Preflight budget must scale with data. This bronze-verify reads
+            # whatever raw pacs.008 already sits under the bronze prefix -- and
+            # when a `generate` step precedes `run --sustained` (the standard
+            # cycle) that is close to the full corpus (~100 GB observed at
+            # scale 10 before preflight), not a trickle. bronze_verify_financial
+            # trips the CTAS fallback on it, so the old fixed 1200s cap could
+            # never pass at scale >= 10 -- it timed out with the job still
+            # legitimately RUNNING. The budget is shared with the batch path via
+            # faml_bronze_verify_timeout_budget so the two cannot diverge for
+            # the same job. Using the CLI's sustained ``timeout`` here would be
+            # wrong -- that's the streaming window, not a preflight step, and
+            # the streaming clock only starts after preflight returns.
+            _preflight_scale = cfg.architecture.workload.datagen.get_effective_scale()
+            _preflight_timeout = faml_bronze_verify_timeout_budget(_preflight_scale)
             preflight_result = monitor.wait_for_completion(
                 "lakebench-bronze-verify",
-                timeout_seconds=1200,
+                timeout_seconds=_preflight_timeout,
                 poll_interval=15,
             )
             if not preflight_result.success:

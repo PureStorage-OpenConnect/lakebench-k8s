@@ -142,16 +142,17 @@ def replay(
         output_alerts = f"{catalog}.{cfg.architecture.tables.gold_alerts}"
 
     args = [
-        "--rule", rule,
-        "--depth-months", str(depth_months),
-        "--output-alerts", output_alerts,
+        "--rule",
+        rule,
+        "--depth-months",
+        str(depth_months),
+        "--output-alerts",
+        output_alerts,
     ]
     if threshold is not None:
         args += ["--threshold", str(threshold)]
 
-    console.print(
-        f"[bold]lakebench financial replay[/bold] rule={rule} depth={depth_months}mo"
-    )
+    console.print(f"[bold]lakebench financial replay[/bold] rule={rule} depth={depth_months}mo")
     job_manager = _get_job_manager(cfg)
     status = job_manager.submit_job(JobType.REPLAY_FINANCIAL, arguments=args)
     console.print(f"  submitted: {status.message}")
@@ -176,7 +177,8 @@ def reproduce(
     console.print(f"[bold]lakebench financial reproduce[/bold] alert_id={alert_id}")
     job_manager = _get_job_manager(cfg)
     status = job_manager.submit_job(
-        JobType.REPRODUCE_FINANCIAL, arguments=["--alert-id", alert_id],
+        JobType.REPRODUCE_FINANCIAL,
+        arguments=["--alert-id", alert_id],
     )
     console.print(f"  submitted: {status.message}")
 
@@ -209,5 +211,56 @@ def score(
     if wait:
         result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial")
         console.print(f"[bold]score result:[/bold] {result}")
+        if result != "COMPLETED":
+            raise typer.Exit(1)
+
+
+@financial_app.command("reference-score")
+def reference_score(
+    config: Annotated[Path, typer.Argument(help="Lakebench config YAML")],
+    manifest: Annotated[str, typer.Option(help="S3 URI to datagen manifest.parquet")],
+    output_prefix: Annotated[
+        str,
+        typer.Option(help="S3 URI prefix for leakage_report.parquet + reference_metrics.parquet"),
+    ],
+    leakage_threshold: Annotated[
+        float,
+        typer.Option(help="Min baseline/typology ratio in a structuring band to pass the gate"),
+    ] = 0.10,
+    wait: Annotated[bool, typer.Option(help="Wait for job completion")] = True,
+) -> None:
+    """Run the reference detector + leakage gate over silver + manifest.
+
+    This is the "distribution checks do not prove semantics" gate: it measures
+    whether a canonical detector (a GBT trained on non-leaky features) can
+    recover each typology, and whether any planted signal leaks through the raw
+    amount band. A relative-threshold rule rewrite (e.g. the W4/W8 precision
+    work, LB-130) is validated against this envelope before it ships -- a rule
+    whose precision/recall diverges sharply from the reference is scoring
+    against label knowledge it should not have. Requires scikit-learn on the
+    Spark driver image for the GBT half; without it the leakage gate still runs
+    and the model verdict is reported as no_sklearn.
+    """
+    from lakebench.modules.pipeline_engines.spark.job import JobType
+
+    cfg = _load_config(config)
+    console.print("[bold]lakebench financial reference-score[/bold]")
+    job_manager = _get_job_manager(cfg)
+    status = job_manager.submit_job(
+        JobType.SCORE_FINANCIAL_REFERENCE,
+        arguments=[
+            "--manifest",
+            manifest,
+            "--output-prefix",
+            output_prefix,
+            "--leakage-threshold",
+            str(leakage_threshold),
+        ],
+    )
+    console.print(f"  submitted: {status.message}")
+
+    if wait:
+        result = _wait_for_sparkapp(cfg.get_namespace(), "lakebench-score-financial-reference")
+        console.print(f"[bold]reference-score result:[/bold] {result}")
         if result != "COMPLETED":
             raise typer.Exit(1)
