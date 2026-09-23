@@ -1,0 +1,23 @@
+-- Q_{rule_id}_recall: fraction of planted {typology_type} instances
+-- that generated at least one {rule_id} alert. Recall = TP / (TP + FN).
+-- Placeholders: {catalog}, {rule_id}, {typology_type}.
+WITH typ_instances AS (
+  SELECT typology_id, participant_uetrs, injection_ts_start, injection_ts_end
+  FROM {catalog}.bronze.manifest
+  WHERE typology_type = '{typology_type}'
+),
+detected AS (
+  SELECT DISTINCT si.typology_id
+  FROM typ_instances si
+  JOIN {catalog}.gold.alerts a
+    ON a.rule_id = '{rule_id}'
+    AND ARRAYS_OVERLAP(a.related_txn_ids, si.participant_uetrs)
+    AND a.alert_ts BETWEEN si.injection_ts_start
+                        AND si.injection_ts_end + INTERVAL '7' DAY
+)
+SELECT
+  ROUND(100.0 * COUNT(d.typology_id) / NULLIF(COUNT(si.typology_id), 0), 2) AS recall_pct,
+  COUNT(si.typology_id) AS total_typologies,
+  COUNT(d.typology_id) AS detected
+FROM typ_instances si
+LEFT JOIN detected d USING (typology_id);

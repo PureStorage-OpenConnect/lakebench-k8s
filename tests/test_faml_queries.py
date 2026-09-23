@@ -49,10 +49,10 @@ def test_all_w_rules_have_target_entry():
 
 def test_query_count_matches_documented():
     """6 rules with typology targets * 4 kinds (detect + precision +
-    recall + ttd) + 2 rules with no target * 1 kind (detect only) +
+    recall + pattern_span) + 2 rules with no target * 1 kind (detect only) +
     4 aggregate queries = 30. W5/W6 have `None` target because
     sanctions and PEP are party attributes in the datagen, not
-    typology_type rows, so precision/recall/ttd would silently report
+    typology_type rows, so precision/recall/pattern_span would silently report
     0/0 -- omitted rather than misleading. See RULE_TARGETS docstring.
     The 4th aggregate is `aggregate_reference_vs_rule` from PR-A
     (reference-detector + leakage-gate wiring)."""
@@ -91,10 +91,10 @@ def test_rule_id_placeholder_expanded_where_used():
         assert "{typology_type}" not in q.sql, f"{q.query_id} left {{typology_type}}"
 
 
-def test_precision_recall_ttd_all_reference_the_rule():
+def test_precision_recall_pattern_span_all_reference_the_rule():
     qs = load_faml_queries("iceberg")
     for q in qs:
-        if q.kind in ("precision", "recall", "ttd"):
+        if q.kind in ("precision", "recall", "pattern_span"):
             assert q.rule_id in q.sql, f"{q.query_id} does not reference its rule_id in SQL"
 
 
@@ -161,7 +161,7 @@ def test_rule_targets_reference_real_typology_names():
         assert typology in valid_typology_names, (
             f"{rule_id} -> {typology!r} is not a valid typology name from "
             f"datagen_rs/src/typology.rs::RAW_TYPOLOGIES. This would cause "
-            f"the precision/recall/ttd queries to silently return 0/0."
+            f"the precision/recall/pattern_span queries to silently return 0/0."
         )
 
 

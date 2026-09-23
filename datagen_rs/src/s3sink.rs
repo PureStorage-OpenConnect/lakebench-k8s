@@ -62,9 +62,24 @@ pub struct S3Sink {
 
 impl S3Sink {
     pub fn new(cfg: &S3Cfg) -> Self {
+        // S3 upload concurrency = number of tokio worker threads. Previously
+        // hardcoded to 4, which throttled aggregate upload rate to ~4 in-flight
+        // PUTs even when 16+ rayon workers were calling `handle.block_on(put)`
+        // concurrently -- the s3_put phase became the ceiling as pod count
+        // grew (measured: 44s -> 316s thread-time as pods went 8 -> 16 in
+        // c360 sweep, 2026-09-20). Bumped to 8 as a default and made env-
+        // overridable via DG_S3_IO_THREADS so operators can trade tokio thread
+        // count against total CPU pressure. On FlashBlade in-cluster HTTP the
+        // per-PUT time is ~5-15ms; 8 concurrent PUTs sustain ~500-1500 PUT/s
+        // per pod, well above what rayon can feed at typical file sizes.
+        let io_threads: usize = env::var("DG_S3_IO_THREADS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n: &usize| *n > 0)
+            .unwrap_or(8);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
-            .worker_threads(4)
+            .worker_threads(io_threads)
             .thread_name("s3-io")
             .build()
             .expect("build tokio runtime");

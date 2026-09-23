@@ -66,7 +66,7 @@ def main() -> None:
     # was declared failed.
     try:
         target_schema = spark.table(f"{CATALOG}.{BRONZE_TABLE}").schema
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log(
             f"ERROR: {CATALOG}.{BRONZE_TABLE} does not exist; run "
             "bronze_verify_financial with LB_REGISTER_TABLE=1 first. ({e})"

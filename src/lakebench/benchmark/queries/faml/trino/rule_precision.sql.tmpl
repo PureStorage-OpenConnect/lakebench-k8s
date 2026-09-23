@@ -1,0 +1,23 @@
+-- Q_{rule_id}_precision: fraction of alerts that landed on a planted
+-- {typology_type} typology row. Precision = TP / (TP + FP).
+-- Placeholders: {catalog}, {rule_id}, {typology_type}.
+WITH rule_alerts AS (
+  SELECT alert_id, entity_id, alert_ts, related_txn_ids
+  FROM {catalog}.gold.alerts
+  WHERE rule_id = '{rule_id}'
+),
+matched AS (
+  SELECT DISTINCT sa.alert_id
+  FROM rule_alerts sa
+  JOIN {catalog}.bronze.manifest m
+    ON m.typology_type = '{typology_type}'
+    AND ARRAYS_OVERLAP(sa.related_txn_ids, m.participant_uetrs)
+    AND sa.alert_ts BETWEEN m.injection_ts_start
+                        AND m.injection_ts_end + INTERVAL '7' DAY
+)
+SELECT
+  ROUND(100.0 * COUNT(m.alert_id) / NULLIF(COUNT(sa.alert_id), 0), 2) AS precision_pct,
+  COUNT(sa.alert_id) AS total_alerts,
+  COUNT(m.alert_id) AS true_positives
+FROM rule_alerts sa
+LEFT JOIN matched m USING (alert_id);

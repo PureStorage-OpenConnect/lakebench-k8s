@@ -1,10 +1,12 @@
 # Building Custom Datagen Images
 
 The Lakebench data generator runs as a container image deployed to Kubernetes.
-The default image (`docker.io/sillidata/lb-datagen:latest`) produces the Customer360 schema
-described in [datagen-schema.md](datagen-schema.md). You can build a custom
-image to add columns, change statistical distributions, use a different data
-domain, or adjust dependencies.
+The default image (`docker.io/sillidata/lb-datagen:latest`) is built from
+`datagen_rs/` (Rust) and produces both the Customer360 schema
+([datagen-schema.md](datagen-schema.md)) and the Financial `pacs.008` schema,
+dispatched by `--schema`. You can build a custom image to add columns, change
+statistical distributions, use a different data domain, or adjust the row
+generator.
 
 ## Why Customize
 
@@ -17,14 +19,19 @@ Common reasons to build your own datagen image:
   amounts.
 - **Use a different data domain** -- replace the Customer360 schema entirely
   with IoT sensor data, financial transactions, or clickstream events.
-- **Update dependencies** -- pin specific versions of PyArrow, NumPy, or boto3
-  for compatibility with your environment.
+- **Change the codec or file sizing** -- set `DG_COMPRESSION` in the pod env,
+  tune `--file-size-mb` on the CLI, or update the codec-conditional
+  `bytes_per_row` tables in `datagen_rs/src/writer.rs`.
 - **Add post-processing** -- inject custom corruption patterns, additional
-  quality flags, or domain-specific realism features.
+  quality flags, or domain-specific realism features (see the 7 realism
+  features in `datagen_rs/src/customer360_realism.rs`).
 
 ## Prerequisites
 
 - **podman** (recommended on RHEL/OpenShift) or **docker**
+- **Rust toolchain** -- the Dockerfile compiles the datagen binary from source
+  in a multi-stage build, so no local Rust install is required unless you want
+  to run `cargo test` before building.
 - Access to a container registry (Docker Hub, private registry, or OpenShift
   internal registry)
 - Registry credentials configured (`podman login` or `docker login`)

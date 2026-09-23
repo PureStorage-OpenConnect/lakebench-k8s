@@ -1,8 +1,11 @@
 pub mod amounts;
 pub mod arena;
+pub mod customer360;
+pub mod customer360_realism;
 pub mod emit;
 pub mod hash;
 pub mod ids;
+pub mod metrics;
 pub mod model;
 pub mod party;
 pub mod realism;

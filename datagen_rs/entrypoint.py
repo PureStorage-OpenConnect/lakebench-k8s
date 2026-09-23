@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Entrypoint for the Rust financial datagen image.
+"""Entrypoint for the Rust datagen image.
 
-Thin launcher: the Rust binary now writes bronze + party + account + manifest
-directly to S3 via rust-s3, so this shell holds no state and never touches the
-local filesystem for parquet output. It only:
+Thin launcher: the Rust binary writes directly to S3 (rust-s3), so this shell
+holds no state and never touches the local filesystem for parquet output. It
+only:
   1. Detects the pod's CPU quota from cgroups so the rayon pool sizes correctly.
   2. Resolves --node-id from JOB_COMPLETION_INDEX for K8s Indexed Jobs.
-  3. Exec's the Rust binary with the passed-through args and env.
+  3. Builds a schema-conditional argv and execs the Rust binary.
+
+Two schemas are supported today:
+  - financial   -> pacs.008 + party + account + manifest
+  - customer360 -> single-table customer interaction event stream
 
 S3 credentials + endpoint are read by the Rust binary directly from env vars:
   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, AWS_REGION.
@@ -17,6 +21,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+
+
+SUPPORTED_SCHEMAS = ("financial", "customer360")
 
 
 def detect_cpu_quota() -> int:
@@ -54,20 +61,57 @@ def detect_cpu_quota() -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--schema", default="financial")
-    ap.add_argument("--scale", type=float, default=1.0)
+    ap.add_argument("--schema", default="financial", choices=SUPPORTED_SCHEMAS)
+    # Shared args -- both schemas consume these.
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--corpus-months", type=int, default=60)
+    # NOTE: default is 32 to match the pre-M6 entrypoint (existing financial
+    # K8s Job YAMLs assume 32). c360 K8s Job templates that want a different
+    # file size pass --file-size-mb explicitly.
     ap.add_argument("--file-size-mb", type=int, default=32)
-    ap.add_argument("--bucket", default=os.environ.get("BRONZE_BUCKET", "fraud-aml-uat-bronze"))
-    ap.add_argument("--prefix", default=os.environ.get("PREFIX", "datagen-v2-rs"))
+    ap.add_argument("--bucket", default=os.environ.get("BRONZE_BUCKET", ""))
+    ap.add_argument("--prefix", default=os.environ.get("PREFIX", ""))
     ap.add_argument("--node-id", type=int, default=None)
     ap.add_argument("--total-nodes", type=int, default=1)
-    ap.add_argument("--mode", default="all", choices=["all", "bronze", "reference"])
-    args = ap.parse_args()
+    # Financial-only args -- ignored on the customer360 path.
+    ap.add_argument("--scale", type=float, default=1.0)
+    ap.add_argument("--corpus-months", type=int, default=60)
+    # `batch` accepted as a synonym for `all` because the K8s Job template
+    # in `src/lakebench/templates/datagen/job.yaml.j2` unconditionally
+    # passes `--mode batch` for both schemas; the Rust financial driver
+    # only accepts all/bronze/reference. Mapping keeps existing K8s
+    # templates working without a template + entrypoint rev at the same
+    # time. On the customer360 path --mode is dropped entirely.
+    ap.add_argument(
+        "--mode", default="all",
+        choices=["all", "bronze", "reference", "batch"],
+    )
+    # customer360-only args -- ignored on the financial path.
+    ap.add_argument("--target-tb", type=float, default=0.1)
+    ap.add_argument("--customer-id-max", type=int, default=500_000)
+    ap.add_argument("--payload-kb", type=int, default=2)
+    ap.add_argument("--dirty-ratio", type=float, default=0.08)
+    ap.add_argument("--duplicate-email-pct", type=float, default=0.10)
+    ap.add_argument("--timestamp-start", default="2024-01-01")
+    ap.add_argument("--timestamp-end", default="2025-01-01")
+    # `--workers` is what the lakebench K8s Job template passes today. Accept
+    # it as an alias for `--threads` so the Rust rayon pool sizes correctly
+    # even if the template hasn't been updated to pass --threads explicitly.
+    ap.add_argument("--workers", type=int, default=None)
+    # Ignore any other args silently (e.g. --payload-kb=0 which some templates
+    # pass): argparse handles unknown args by erroring, so we let it.
+    args, unknown = ap.parse_known_args()
+    if unknown:
+        print(f"[entrypoint] ignoring unknown args: {unknown}", file=sys.stderr)
 
-    if args.schema != "financial":
-        print(f"schema {args.schema!r} is served by the Python image, not this one", file=sys.stderr)
+    if args.schema not in SUPPORTED_SCHEMAS:
+        print(
+            f"[entrypoint] --schema must be one of {SUPPORTED_SCHEMAS}; got {args.schema!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if not args.bucket:
+        print("[entrypoint] --bucket is required (or set BRONZE_BUCKET env)", file=sys.stderr)
         return 2
 
     node_id = args.node_id
@@ -75,22 +119,62 @@ def main() -> int:
         node_id = int(os.environ.get("JOB_COMPLETION_INDEX", "0"))
 
     threads = detect_cpu_quota()
-    cmd = [
+    if args.workers and args.workers > 0:
+        # Explicit --workers overrides the cgroup-detected default so the K8s
+        # Job template can size datagen concurrency independently of the pod's
+        # CPU limit.
+        threads = args.workers
+
+    # Schema-conditional argv. --schema first so the Rust binary can dispatch
+    # before parsing the shared args.
+    common = [
         "/app/datagen_rs",
+        "--schema", args.schema,
         "--bucket", args.bucket,
-        "--prefix", args.prefix,
-        "--scale", str(args.scale),
         "--seed", str(args.seed),
-        "--corpus-months", str(args.corpus_months),
         "--file-size-mb", str(args.file_size_mb),
         "--node-id", str(node_id),
         "--total-nodes", str(args.total_nodes),
         "--threads", str(threads),
-        "--mode", args.mode,
     ]
+    # --prefix: only forward when explicitly set. Forwarding empty overrides
+    # the Rust binary's schema-appropriate default (e.g. c360's
+    # "customer/interactions/" default), and would silently write files at
+    # bucket root, breaking Silver's read path.
+    if args.prefix:
+        common += ["--prefix", args.prefix]
+
+    if args.schema == "financial":
+        # Rust driver only knows all/bronze/reference. Map the K8s
+        # template's `batch` alias to `all`.
+        rust_mode = "all" if args.mode == "batch" else args.mode
+        cmd = common + [
+            "--scale", str(args.scale),
+            "--corpus-months", str(args.corpus_months),
+            "--mode", rust_mode,
+        ]
+        summary = (
+            f"scale={args.scale} corpus_months={args.corpus_months} mode={rust_mode}"
+        )
+    else:  # customer360
+        cmd = common + [
+            "--target-tb", str(args.target_tb),
+            "--customer-id-max", str(args.customer_id_max),
+            "--payload-kb", str(args.payload_kb),
+            "--dirty-ratio", str(args.dirty_ratio),
+            "--duplicate-email-pct", str(args.duplicate_email_pct),
+            "--timestamp-start", args.timestamp_start,
+            "--timestamp-end", args.timestamp_end,
+        ]
+        summary = (
+            f"target_tb={args.target_tb} customer_id_max={args.customer_id_max} "
+            f"payload_kb={args.payload_kb} dirty_ratio={args.dirty_ratio} "
+            f"ts=[{args.timestamp_start},{args.timestamp_end})"
+        )
+
     print(
-        f"[entrypoint] node {node_id}/{args.total_nodes} mode={args.mode} "
-        f"scale={args.scale} threads={threads} -> s3://{args.bucket}/{args.prefix}",
+        f"[entrypoint] schema={args.schema} node {node_id}/{args.total_nodes} "
+        f"threads={threads} -> s3://{args.bucket}/{args.prefix} :: {summary}",
         flush=True,
     )
     # execvp replaces this process, so the Rust binary is PID 1 of the pod and

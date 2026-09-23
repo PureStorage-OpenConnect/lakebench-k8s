@@ -571,7 +571,8 @@ architecture:
 
 pacs.008 wire-message pipeline with six W-rule detectors scoring against
 planted AML typologies. The scorecard reports per-rule recall, precision,
-and time-to-detect, joined against a scikit-learn reference detector so a
+and pattern-span (a datagen window-width property, not detection latency),
+joined against a scikit-learn reference detector so a
 rule cannot read high recall from a label proxy without being caught.
 
 ```yaml

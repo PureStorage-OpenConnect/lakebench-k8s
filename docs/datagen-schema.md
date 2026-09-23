@@ -5,9 +5,12 @@ e-commerce customer interaction dataset. The data is written as Snappy-compresse
 Apache Parquet files directly to the S3 bronze bucket, where it serves as the
 input for the medallion pipeline (bronze -> silver -> gold).
 
-The generator (`datagen/generate.py`) produces deterministic, reproducible output
-seeded per file. Each file contains approximately 122,000 rows at the default
-512 MB file size, with ~4.1 KB per row after Snappy compression.
+The generator (`datagen_rs/src/customer360.rs`, Rust) produces deterministic,
+reproducible output seeded per (seed, file_id). File sizing is codec-conditional
+via `customer360_bytes_per_row_default` in `datagen_rs/src/writer.rs`: at the
+default `DG_COMPRESSION=snappy` a 64 MB file holds ~15,500 rows (~4.3 KB per row
+compressed); at `DG_COMPRESSION=zstd` the same file holds ~30,000 rows (~2.2 KB
+per row).
 
 ## Column Reference
 

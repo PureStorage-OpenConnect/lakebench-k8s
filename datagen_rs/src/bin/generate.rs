@@ -12,14 +12,19 @@ use rayon::prelude::*;
 use parquet::arrow::ArrowWriter;
 
 use datagen_rs::amounts::{lognormal_amount, structuring_amount};
+use datagen_rs::customer360;
+use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{splitmix64, Rng};
+use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_ex;
 use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
 use datagen_rs::s3sink::{S3Cfg, S3Sink};
 use datagen_rs::timing::{sample_ts, shape_fixed_day, DayCal};
 use datagen_rs::world::ring_member;
-use datagen_rs::writer::{bytes_per_row_default, writer_properties};
+use datagen_rs::writer::{
+    customer360_bytes_per_row_default, pacs008_bytes_per_row_default, writer_properties,
+};
 
 /// Stable uid for a typology row, used to seed the row's UETR in the bronze
 /// emit AND recovered by the manifest builder to populate
@@ -90,6 +95,27 @@ fn encode_parquet(batch: &arrow::record_batch::RecordBatch, cap_hint: usize) -> 
 }
 
 fn main() {
+    // Schema dispatch: default "financial" for back-compat with any K8s Job
+    // manifest that predates the c360 branch. `entrypoint.py` gates schema
+    // choice before invoking us, but keep a defensive check here too so a
+    // typo doesn't fall through to the pacs.008 path silently.
+    let schema: String = arg("--schema", "financial".to_string());
+    match schema.as_str() {
+        "financial" => pacs008_main(),
+        "customer360" => customer360_main(),
+        other => {
+            eprintln!(
+                "--schema must be one of: financial | customer360; got {:?}",
+                other
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// pacs.008 datagen driver. Unchanged from the pre-c360 codepath -- extracted
+/// into a named function only to make room for schema dispatch in `main()`.
+fn pacs008_main() {
     // Direct-to-S3: pod holds no state. --bucket / --prefix name where the files
     // go, S3 creds and endpoint come from env (AWS_ACCESS_KEY_ID,
     // AWS_SECRET_ACCESS_KEY, S3_ENDPOINT, AWS_REGION).
@@ -104,7 +130,7 @@ fn main() {
     let corpus_months: i64 = arg("--corpus-months", 60);
     let file_size_mb: i64 = arg("--file-size-mb", 32);
     // Bytes/row is used only to size total_files from total_txns. If the flag
-    // is not passed we pick a codec-aware default from writer::bytes_per_row_default
+    // is not passed we pick a codec-aware default from writer::pacs008_bytes_per_row_default
     // (a single scalar was wrong under any codec other than the one it was
     // measured against -- see writer.rs for the measured table).
     //
@@ -126,7 +152,7 @@ fn main() {
         }
         match present {
             None => {
-                let d = bytes_per_row_default();
+                let d = pacs008_bytes_per_row_default();
                 eprintln!("--bytes-per-row not set: using codec-aware default {}", d);
                 d
             }
@@ -301,6 +327,9 @@ fn main() {
 
     let total_bytes = AtomicU64::new(0);
     let files_written = AtomicU64::new(0);
+    // Rows THIS POD wrote (not corpus-wide `total_txns`; that is a
+    // constant across every pod). Fleet aggregator sums this.
+    let rows_written = AtomicU64::new(0);
     let upload_ns = AtomicU64::new(0);
     // Split gen time into batch-assembly (arrow builders) vs parquet write
     // (encode + SNAPPY + disk), summed across worker threads (thread-nanos).
@@ -408,9 +437,11 @@ fn main() {
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
         total_bytes.fetch_add(sz, Ordering::Relaxed);
         files_written.fetch_add(1, Ordering::Relaxed);
+        rows_written.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
     });
     let total_bytes = total_bytes.load(Ordering::Relaxed);
     let files_written = files_written.load(Ordering::Relaxed);
+    let rows_written = rows_written.load(Ordering::Relaxed);
     let t_gen = t_gen0.elapsed().as_secs_f64();
 
     let t_ref0 = std::time::Instant::now();
@@ -486,4 +517,344 @@ fn main() {
         "gen split (thread-s): build_batch={:.1}s ({:.0}%) encode_parquet={:.1}s ({:.0}%) s3_put={:.1}s",
         build_s, 100.0 * build_s / cpu_tot, write_s, 100.0 * write_s / cpu_tot, up_s
     );
+
+    // Machine-readable per-pod metrics line for the lakebench aggregator.
+    // See datagen_rs::metrics for the schema; lakebench parses on prefix
+    // `LB_METRICS_JSON `.
+    PodMetrics {
+        schema: "financial".into(),
+        node_id,
+        node_count: total_nodes,
+        cores_used: rayon::current_num_threads(),
+        cpu_request_millicores: read_cpu_request_millicores(),
+        bucket: bucket.clone(),
+        prefix: prefix.clone(),
+        scale: Some(scale),
+        corpus_months: Some(corpus_months),
+        population: Some(pop as u64),
+        total_txns: Some(total_txns as u64),
+        typology_instances: Some(instances.len() as u64),
+        file_size_mb,
+        rows_per_file: rows_per_file as u64,
+        total_files,
+        files_written,
+        bytes_written: total_bytes,
+        rows_written,
+        elapsed_s: el,
+        setup_s: 0.0,
+        world_s: Some(t_world),
+        typology_s: Some(t_typ),
+        gen_s: t_gen,
+        reference_s: Some(t_ref),
+        build_batch_s: build_s,
+        encode_parquet_s: write_s,
+        s3_put_s: up_s,
+        ..Default::default()
+    }
+    .emit();
+}
+
+/// Read LB_POD_CPU_REQUEST_MILLI from the environment. The K8s Job template
+/// sets this to the pod's `resources.requests.cpu` in millicores; returns
+/// None if the env is unset or malformed. When set, the aggregator prefers
+/// this over the rayon pool size for CPU-seconds accounting.
+fn read_cpu_request_millicores() -> Option<u64> {
+    std::env::var("LB_POD_CPU_REQUEST_MILLI")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&m| m > 0)
+}
+
+// ---------------------------------------------------------------------------
+// customer360 datagen driver.
+//
+// Wall-clock structure: parse args + init S3 in ms, then a single rayon
+// parallel-for over `total_files` file ids. Each worker builds one RecordBatch
+// via `customer360::build_batch`, encodes to Parquet in memory, and PUTs to
+// S3. No world / typology / manifest phases: c360 is a flat interaction table
+// with no reference zones.
+//
+// Sizing:
+//   rows_per_file = file_size_bytes / customer360_bytes_per_row_default()
+//   total_files   = target_bytes / file_size_bytes   (from --target-tb)
+//   per_node_files = { fid : fid % total_nodes == node_id }
+//
+// Determinism: every file is `Rng::new(seed + file_id)` (mixed via splitmix64
+// in Rng::new). Node id affects only which subset of file ids this pod owns;
+// the file content depends only on (seed, file_id), so two pods writing the
+// same fid produce identical bytes.
+// ---------------------------------------------------------------------------
+fn customer360_main() {
+    let bucket: String = arg("--bucket", String::new());
+    let prefix: String = arg("--prefix", "customer/interactions/".to_string());
+    if bucket.is_empty() {
+        eprintln!("--bucket is required (destination S3 bucket)");
+        std::process::exit(2);
+    }
+    let seed: i64 = arg("--seed", 42);
+    // Two sizing controls: --target-tb picks total file count, --file-size-mb
+    // picks per-file size. --scale is accepted but ignored on the c360 path
+    // (it's the Python-side abstraction and only informs row density; on the
+    // Rust c360 path, target_tb is what actually drives file count).
+    let target_tb: f64 = arg("--target-tb", 0.1);
+    if !target_tb.is_finite() || target_tb <= 0.0 {
+        eprintln!("--target-tb must be a positive finite number; got {}", target_tb);
+        std::process::exit(2);
+    }
+    let file_size_mb: i64 = arg("--file-size-mb", 64);
+    if file_size_mb < 1 {
+        eprintln!("--file-size-mb must be >= 1; got {}", file_size_mb);
+        std::process::exit(2);
+    }
+    let node_id: i64 = {
+        // Kubernetes Indexed Jobs set JOB_COMPLETION_INDEX; use it as
+        // node_id default so the K8s Job template does not have to thread
+        // it through explicitly.
+        let env_default: i64 = std::env::var("JOB_COMPLETION_INDEX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        arg("--node-id", env_default)
+    };
+    let total_nodes: i64 = arg("--total-nodes", 1);
+    if total_nodes < 1 || node_id < 0 || node_id >= total_nodes {
+        eprintln!(
+            "--total-nodes must be >= 1 and --node-id in [0, total_nodes); got node_id={} total_nodes={}",
+            node_id, total_nodes
+        );
+        std::process::exit(2);
+    }
+    let customer_id_max: u64 = arg("--customer-id-max", 500_000u64);
+    // `customer360_bytes_per_row_default()` is measured at payload_kb=2. Any
+    // other value silently mis-sizes rows_per_file (files 1/N or Nx too
+    // large). Refuse until per-payload measurements are folded in.
+    let payload_kb: usize = arg("--payload-kb", 2usize);
+    if payload_kb != 2 {
+        eprintln!(
+            "--payload-kb {} is not supported (bytes/row measurements are for payload_kb=2 only); \
+             either pass --payload-kb 2 or extend customer360_bytes_per_row_default to be \
+             payload-aware",
+            payload_kb
+        );
+        std::process::exit(2);
+    }
+    let dirty_ratio: f64 = arg("--dirty-ratio", 0.08);
+    let duplicate_email_pct: f64 = arg("--duplicate-email-pct", 0.10);
+    // Timestamp range as YYYY-MM-DD; default 2024-01-01..2025-01-01 matching
+    // the Python c360 defaults.
+    let ts_start_str: String = arg("--timestamp-start", "2024-01-01".to_string());
+    let ts_end_str: String = arg("--timestamp-end", "2025-01-01".to_string());
+    let ts_start_us = parse_date_to_us(&ts_start_str).unwrap_or_else(|| {
+        eprintln!("--timestamp-start must be YYYY-MM-DD; got {:?}", ts_start_str);
+        std::process::exit(2);
+    });
+    let ts_end_us = parse_date_to_us(&ts_end_str).unwrap_or_else(|| {
+        eprintln!("--timestamp-end must be YYYY-MM-DD; got {:?}", ts_end_str);
+        std::process::exit(2);
+    });
+    if ts_end_us <= ts_start_us {
+        eprintln!(
+            "--timestamp-end must be after --timestamp-start; got start={} end={}",
+            ts_start_str, ts_end_str
+        );
+        std::process::exit(2);
+    }
+    // Rayon pool: honor --threads if set, fall back to --workers for K8s Job
+    // templates that don't yet know about --threads. 0 leaves rayon's default.
+    let threads: usize = {
+        let t = arg::<usize>("--threads", 0);
+        if t == 0 {
+            arg::<usize>("--workers", 0)
+        } else {
+            t
+        }
+    };
+    if threads > 0 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .expect("failed to size rayon pool");
+    }
+
+    let s3_cfg = match S3Cfg::try_from_env(bucket.clone(), prefix.clone()) {
+        Ok(c) => c,
+        Err(msg) => {
+            eprintln!("s3 config error: {}", msg);
+            std::process::exit(2);
+        }
+    };
+    let sink = S3Sink::new(&s3_cfg);
+
+    let t0 = std::time::Instant::now();
+    let file_size_bytes = (file_size_mb as usize) * 1024 * 1024;
+    let bytes_per_row = customer360_bytes_per_row_default();
+    if bytes_per_row <= 0.0 || !bytes_per_row.is_finite() {
+        panic!("customer360_bytes_per_row_default returned non-positive {}", bytes_per_row);
+    }
+    let rows_per_file: usize = ((file_size_bytes as f64) / bytes_per_row).max(1000.0) as usize;
+    let target_bytes: u64 = (target_tb * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64;
+    // Match Python's `max(1, target_bytes // file_size_bytes)` at
+    // datagen/generate.py:271. Very small target_tb still gets at least 1
+    // file so the run isn't a no-op.
+    let total_files: i64 = (target_bytes / file_size_bytes as u64).max(1) as i64;
+
+    // Build the loyalty lookup + customer_id sampler ONCE, then share via Arc
+    // across rayon workers. Same lookup used by every file so
+    // `loyalty_member` is consistent for a given customer_id across the whole
+    // run; same sampler so the hot-customer distribution is stable across
+    // files.
+    let loyalty = std::sync::Arc::new(LoyaltyLookup::build(seed as u64, customer_id_max));
+    let cid_sampler = std::sync::Arc::new(CustomerIdSampler::new(customer_id_max));
+    let t_setup = t0.elapsed().as_secs_f64();
+
+    let my_files: Vec<i64> = (0..total_files)
+        .filter(|fid| fid % total_nodes == node_id)
+        .collect();
+
+    let total_bytes = AtomicU64::new(0);
+    let files_written = AtomicU64::new(0);
+    let rows_written = AtomicU64::new(0);
+    let upload_ns = AtomicU64::new(0);
+    let build_ns = AtomicU64::new(0);
+    let write_ns = AtomicU64::new(0);
+    let t_gen0 = std::time::Instant::now();
+
+    my_files.par_iter().for_each(|&fid| {
+        let cfg = customer360::Config {
+            seed: seed as u64,
+            file_id: fid as u64,
+            rows_per_file,
+            customer_id_max,
+            dirty_ratio,
+            duplicate_email_pct,
+            payload_kb,
+            timestamp_start_us: ts_start_us,
+            timestamp_end_us: ts_end_us,
+        };
+        let tb = std::time::Instant::now();
+        let batch = customer360::build_batch(&cfg, &loyalty, &cid_sampler);
+        build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
+
+        let tw = std::time::Instant::now();
+        let cap_hint = (file_size_bytes + file_size_bytes / 8).max(1024 * 1024);
+        let buf = encode_parquet(&batch, cap_hint);
+        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let sz = buf.len() as u64;
+
+        // key is relative to S3Sink.prefix (set from --prefix). Sink prepends.
+        let key = format!("part-{:06}.parquet", fid);
+        let tu = std::time::Instant::now();
+        sink.put(&key, buf);
+        upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        total_bytes.fetch_add(sz, Ordering::Relaxed);
+        files_written.fetch_add(1, Ordering::Relaxed);
+        rows_written.fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+    });
+
+    let total_bytes = total_bytes.load(Ordering::Relaxed);
+    let files_written = files_written.load(Ordering::Relaxed);
+    let rows_written = rows_written.load(Ordering::Relaxed);
+    let t_gen = t_gen0.elapsed().as_secs_f64();
+    let up_s = upload_ns.load(Ordering::Relaxed) as f64 / 1e9;
+    let build_s = build_ns.load(Ordering::Relaxed) as f64 / 1e9;
+    let write_s = write_ns.load(Ordering::Relaxed) as f64 / 1e9;
+    let cpu_tot = (build_s + write_s).max(1e-9);
+    let el = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "customer360: node={} of {} target_tb={} file_size_mb={} rows_per_file={} \
+         total_files={} files_written={} elapsed={:.2}s bytes={} ({:.1} MB/s)",
+        node_id,
+        total_nodes,
+        target_tb,
+        file_size_mb,
+        rows_per_file,
+        total_files,
+        files_written,
+        el,
+        total_bytes,
+        total_bytes as f64 / el / 1e6
+    );
+    eprintln!(
+        "phases: setup={:.2}s gen={:.2}s (build_batch={:.1}s ({:.0}%) encode_parquet={:.1}s ({:.0}%) s3_put={:.1}s)",
+        t_setup,
+        t_gen,
+        build_s,
+        100.0 * build_s / cpu_tot,
+        write_s,
+        100.0 * write_s / cpu_tot,
+        up_s
+    );
+
+    // Machine-readable per-pod metrics line for the lakebench aggregator.
+    // See datagen_rs::metrics for the schema; lakebench parses on prefix
+    // `LB_METRICS_JSON `.
+    PodMetrics {
+        schema: "customer360".into(),
+        node_id,
+        node_count: total_nodes,
+        cores_used: rayon::current_num_threads(),
+        cpu_request_millicores: read_cpu_request_millicores(),
+        bucket: bucket.clone(),
+        prefix: prefix.clone(),
+        target_tb: Some(target_tb),
+        customer_id_max: Some(customer_id_max),
+        dirty_ratio: Some(dirty_ratio),
+        file_size_mb,
+        rows_per_file: rows_per_file as u64,
+        total_files,
+        files_written,
+        bytes_written: total_bytes,
+        rows_written,
+        elapsed_s: el,
+        setup_s: t_setup,
+        gen_s: t_gen,
+        build_batch_s: build_s,
+        encode_parquet_s: write_s,
+        s3_put_s: up_s,
+        ..Default::default()
+    }
+    .emit();
+}
+
+/// Parse a YYYY-MM-DD string into microseconds since the Unix epoch (UTC).
+/// Returns None on malformed input. Uses `days_from_civil` for the calendar
+/// math so it agrees with the pacs.008 corpus-window computation.
+fn parse_date_to_us(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let y: i64 = parts[0].parse().ok()?;
+    let m: i64 = parts[1].parse().ok()?;
+    let d: i64 = parts[2].parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    Some(days_from_civil(y, m, d) * US_PER_DAY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_date_to_us_epoch() {
+        assert_eq!(parse_date_to_us("1970-01-01"), Some(0));
+    }
+
+    #[test]
+    fn parse_date_to_us_2024_01_01() {
+        // 2024-01-01T00:00:00Z = 1704067200 seconds since epoch.
+        assert_eq!(parse_date_to_us("2024-01-01"), Some(1_704_067_200 * 1_000_000));
+    }
+
+    #[test]
+    fn parse_date_to_us_rejects_bad() {
+        assert_eq!(parse_date_to_us("2024/01/01"), None);
+        assert_eq!(parse_date_to_us("2024-13-01"), None);
+        assert_eq!(parse_date_to_us("2024-01-32"), None);
+        assert_eq!(parse_date_to_us(""), None);
+        assert_eq!(parse_date_to_us("abc"), None);
+    }
 }

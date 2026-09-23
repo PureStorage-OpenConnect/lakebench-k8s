@@ -1,0 +1,13 @@
+-- Q_{rule_id}_detect: alerts per day for one rule.
+-- Signal: silver enrichment throughput + gold materialization latency.
+-- Placeholders: {catalog}, {rule_id}.
+SELECT
+  DATE_TRUNC('day', alert_ts) AS alert_day,
+  rule_id,
+  priority,
+  COUNT(*) AS alerts
+FROM {catalog}.gold.alerts
+WHERE rule_id = '{rule_id}'
+  AND alert_ts BETWEEN CURRENT_TIMESTAMP - INTERVAL '30' DAY AND CURRENT_TIMESTAMP
+GROUP BY 1, 2, 3
+ORDER BY 1;
