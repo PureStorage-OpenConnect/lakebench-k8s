@@ -130,6 +130,26 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
         "max_executors": 10,
         "base_partitions": 32,
     },
+    # Recall/precision scoring (LB-123). A manifest read + a linear
+    # explode-and-join against gold.alerts (score_financial.py rewrote the
+    # old N*M crossjoin to a single explode per side, so it stays linear in
+    # the UETR footprint). Deliberately small: without this entry the job
+    # falls back to the silver-build profile (~36 cores / 512 GB at scale 1)
+    # just to score a handful of typologies, which under the 4-parallel UAT
+    # limit fails to schedule and blocks on the per-job timeout after the
+    # pipeline already reported success (adversarial-review finding).
+    "score-financial": {
+        "driver_cores": 2,
+        "driver_memory": "8g",
+        "executor_cores": 4,
+        "executor_memory": "16g",
+        "executor_memory_overhead": "4g",
+        "scratch_size": "50Gi",
+        "base_executors": 2,
+        "executors_per_100_scale": 4,
+        "max_executors": 10,
+        "base_partitions": 32,
+    },
 }
 
 
@@ -2017,6 +2037,16 @@ class SparkJobManager:
                 {
                     "name": "LB_FINANCIAL_BRONZE_TABLE",
                     "value": cfg.architecture.tables.bronze,
+                }
+            )
+            # W1 connected-components vertex cap (LB-119/LB-120). Read by
+            # gold_finalize_financial and threaded into the W1 rule so the
+            # graph detector runs at scale 10 by default and can be raised
+            # for larger scales via config rather than a code edit.
+            env.append(
+                {
+                    "name": "LB_FINANCIAL_W1_MAX_VERTICES",
+                    "value": str(cfg.architecture.workload.w1_max_vertices),
                 }
             )
 

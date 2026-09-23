@@ -2092,6 +2092,13 @@ class ReportGenerator:
                         <th>Status</th>"""
             detail_cards = ""
 
+        # Per-domain detail (e.g. the FAML detection scorecard). Empty string
+        # for domains without extra rows. Rendered after the stage table.
+        from lakebench.reports.scorecard import get_scorecard_block
+
+        cs = metrics.config_snapshot or {}
+        domain_detail = get_scorecard_block(cs.get("workload_schema")).render_detail_html(metrics)
+
         return f"""
         <section>
             <h2>{section_title}</h2>
@@ -2109,6 +2116,7 @@ class ReportGenerator:
                 </tbody>
             </table>
             {detail_cards}
+            {domain_detail}
         </section>
         """
 

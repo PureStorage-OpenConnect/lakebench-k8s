@@ -1805,6 +1805,23 @@ class TestSchemaProfileOverrides:
         merged["scratch_size"] = "999Gi"
         assert _JOB_PROFILES["bronze-verify"]["scratch_size"] == base_before
 
+    def test_score_financial_has_dedicated_small_profile(self):
+        """LB-123 review: score-financial must NOT inherit the silver-build
+        fallback (36 cores / 512 GB at scale 1) just to score recall. It has
+        its own small profile."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _JOB_PROFILES,
+            _resolve_job_profile,
+        )
+
+        prof = _resolve_job_profile("score-financial", "financial")
+        assert prof is not None
+        silver = _JOB_PROFILES["silver-build"]
+        # Must be genuinely smaller than the silver-build fallback it replaces.
+        assert prof["executor_memory"] != silver["executor_memory"]
+        assert prof["scratch_size"] == "50Gi"
+        assert prof["max_executors"] <= 10
+
     def test_compute_peak_requirements_faml_bumps_bronze_scratch(self):
         """compute_peak_requirements is the docs source of truth; FAML
         peaks must reflect the bronze-verify override."""

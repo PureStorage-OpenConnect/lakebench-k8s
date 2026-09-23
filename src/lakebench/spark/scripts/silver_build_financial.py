@@ -615,9 +615,33 @@ def main() -> None:
     # produce different partition layouts (reproducibility failure).
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
+    # Multi-cycle mode contract (LB-121). The orchestrator sets
+    # LB_SILVER_INCREMENTAL=true for cycles 2+ of a multi-cycle batch run.
+    # Customer 360's silver_build honours that by APPENDING the cycle's
+    # bronze read. FAML must NOT: its bronze is CUMULATIVE across cycles
+    # (the datagen writes every cycle to the same pacs008 prefix, and
+    # bronze_verify_financial DROPs and re-registers the whole prefix each
+    # cycle), so silver_build already reads the full corpus 1..N. Appending
+    # that full read every cycle would duplicate the entire prior corpus,
+    # and the derived-state tables (account_statements running balance,
+    # entity/account dimensions) cannot be correctly maintained by a naive
+    # append anyway. The correct and only-correct behaviour here is a full
+    # rebuild from cumulative bronze every cycle -- expensive but exact,
+    # and cycle-progression is measured as the rebuild cost growing with
+    # the corpus. Do NOT "optimise" this to an append without implementing
+    # slice-scoped reads + MERGE on the dimensions + running-balance
+    # carry-forward, and validating it on a live multi-cycle run.
+    incremental_flag = env("LB_SILVER_INCREMENTAL", "false").lower() == "true"
+
     log("=" * 60)
     log("Silver Build (Financial)")
     log(f"Strategy: {STRATEGY}")
+    if incremental_flag:
+        log(
+            "Multi-cycle: LB_SILVER_INCREMENTAL=true -- FAML does a FULL "
+            "rebuild from cumulative bronze (append would double-count; see "
+            "the mode-contract note in main())."
+        )
     log(f"Session TZ: {spark.conf.get('spark.sql.session.timeZone')}")
     log("=" * 60)
 

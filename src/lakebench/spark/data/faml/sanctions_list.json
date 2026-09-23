@@ -1,0 +1,27 @@
+{
+  "source": "Synthetic sanctions list. Real name-alias structure modelled after OFAC SDN. NOT the real SDN. Real deployments should replace this file with the current SDN download from https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV",
+  "license": "Synthetic, no restriction.",
+  "note": "The synthetic entries below are constructed to trigger W5 detection at a documented rate against our synthetic transaction generator. They do NOT represent real sanctioned entities. See dev-artifacts/FAML-PUBLIC-REFERENCE.md for the trade-off between real SDN and synthetic list.",
+  "entries": [
+    {"sdn_id": "SDN-000001", "entity_name": "GLOBAL COMMODITY TRADING LLC", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000002", "entity_name": "PACIFIC HOLDINGS INTERNATIONAL", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000003", "entity_name": "ATLANTIC RESOURCES GROUP", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000004", "entity_name": "MIDDLE EASTERN LOGISTICS CORP", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000005", "entity_name": "STAR ENTERPRISES PLC", "entity_type": "corp", "program": "IFSR"},
+    {"sdn_id": "SDN-000006", "entity_name": "ORION SHIPPING COMPANY", "entity_type": "corp", "program": "NKMB"},
+    {"sdn_id": "SDN-000007", "entity_name": "PHOENIX INVESTMENT HOLDINGS", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000008", "entity_name": "SILVER MOUNTAIN TRADING", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000009", "entity_name": "GOLDEN GATE FINANCIAL LTD", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000010", "entity_name": "MARITIME EXPORT CORPORATION", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000011", "entity_name": "APEX TRADING BUREAU", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000012", "entity_name": "REGIONAL COMMERCE ALLIANCE", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000013", "entity_name": "SUMMIT LOGISTICS PARTNERS", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000014", "entity_name": "HORIZON INDUSTRIES LTD", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000015", "entity_name": "SPECTRUM CAPITAL RESOURCES", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000016", "entity_name": "OMEGA TRADING ENTERPRISES", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000017", "entity_name": "PINNACLE FINANCIAL GROUP", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000018", "entity_name": "CENTURION EXPORT COMPANY", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000019", "entity_name": "VANGUARD RESOURCE TRADING", "entity_type": "corp", "program": "SDGT"},
+    {"sdn_id": "SDN-000020", "entity_name": "SIGNATURE INVESTMENT CORP", "entity_type": "corp", "program": "SDGT"}
+  ]
+}
