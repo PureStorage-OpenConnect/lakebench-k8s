@@ -51,7 +51,20 @@ GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 GOLD_RISK = env("LB_FINANCIAL_GOLD_RISK_SCORES", "gold.risk_scores")
 GOLD_CLUSTERS = env("LB_FINANCIAL_GOLD_CLUSTERS", "gold.entity_clusters")
 GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
+GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
+
+# W1 connected-components vertex cap. Defaults above the scale-10 vertex
+# count (5M accounts) so W1 runs cleanly at scale 10 out of the box;
+# raise it via the `financial.w1_max_vertices` config field for larger
+# scales that have the executor budget. Whether W1 completes in
+# acceptable wall-clock above the cap is a measured question (LB-120),
+# not a config guarantee. A value <= 0 means "use the rule's own
+# default" so a mis-set env var cannot silently disable W1.
+try:
+    _W1_MAX_VERTICES = int(env("LB_FINANCIAL_W1_MAX_VERTICES", "8000000"))
+except ValueError:
+    _W1_MAX_VERTICES = 8_000_000
 
 # Which W-rules to invoke as part of gold_finalize. Ordering is
 # intentional (cheapest first) so a failure in an expensive rule does
@@ -89,7 +102,8 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_ALERTS} (
     alert_type         STRING,
     run_id             STRING NOT NULL,
     narrative          STRING,
-    evidence           MAP<STRING, STRING>
+    evidence           MAP<STRING, STRING>,
+    detected_ts        TIMESTAMP
 ) USING iceberg PARTITIONED BY (days(alert_ts))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
@@ -122,6 +136,27 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_CLUSTERS} (
 ) USING iceberg
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
+
+DDL_STATUS = f"""
+CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_STATUS} (
+    rule_id          STRING NOT NULL,
+    status           STRING NOT NULL,
+    reason           STRING,
+    target_typology  STRING,
+    alert_count      BIGINT,
+    run_id           STRING NOT NULL,
+    computed_ts      TIMESTAMP NOT NULL
+) USING iceberg
+TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+"""
+# LB-119: durable, data-plane record of what each detection rule did this
+# run -- 'ran' (with alert_count), 'skipped' (with reason, e.g. vertex-cap),
+# or 'error' (with the exception class). This is the bridge that lets
+# score_financial mark a skipped rule's target typology "not run" in
+# recall.parquet instead of 0%, which the log-only rules_skipped in
+# metrics.json could not reach (the recall scorer runs in Spark and reads
+# the data plane, not the driver log). Overwritten every gold_finalize run
+# so it reflects the run that produced the current gold.alerts.
 
 DDL_DASH = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_DASH} (
@@ -217,9 +252,27 @@ def main() -> None:
         ("risk_scores", DDL_RISK),
         ("entity_clusters", DDL_CLUSTERS),
         ("daily_dashboards", DDL_DASH),
+        ("detection_status", DDL_STATUS),
     ):
         spark.sql(ddl)
         log(f"Bootstrapped gold.{name}")
+
+    # LB-125 upgrade guard: on a REUSED catalog whose gold.alerts predates
+    # detected_ts, `CREATE TABLE IF NOT EXISTS` is a no-op, and the detection
+    # loop's positional `INSERT INTO gold.alerts SELECT *` (now 18 columns)
+    # would fail against a 17-column table. Check the live schema and add the
+    # column only when it is genuinely missing -- Spark/Iceberg has no
+    # `ADD COLUMN IF NOT EXISTS` for columns (that clause is for PARTITION), so
+    # a blind ALTER would ParseException, and the plain `ADD COLUMNS` would
+    # error if the column already exists. On a fresh table (created 18-col by
+    # the DDL above) this reads the column present and does nothing.
+    try:
+        _alert_cols = [f.name for f in spark.table(f"{CATALOG}.{GOLD_ALERTS}").schema.fields]
+        if "detected_ts" not in _alert_cols:
+            spark.sql(f"ALTER TABLE {CATALOG}.{GOLD_ALERTS} ADD COLUMNS (detected_ts TIMESTAMP)")
+            log(f"[startup] added detected_ts to {GOLD_ALERTS} (reused-catalog upgrade)")
+    except Exception as e:  # noqa: BLE001
+        log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
 
     txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
     baseline = build_baseline_dashboards(txns, RUN_ID)
@@ -281,7 +334,7 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
     """
     import inspect
 
-    from detection_rules import get_rule
+    from detection_rules import RULE_TARGET_TYPOLOGY, RuleSkipped, get_rule
 
     # Load silver.entities once. W7 needs it; loading up-front is cheap
     # (Iceberg metadata read) and avoids each rule invocation paying its
@@ -297,10 +350,16 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
     log("=" * 60)
 
     total_alerts = 0
+    # Per-rule status accumulated for the durable gold.detection_status table
+    # (LB-119). Each entry: (rule_id, status, reason, target_typology,
+    # alert_count). status in {'ran','skipped','error'}.
+    status_rows: list[tuple] = []
     for rule_id in DEFAULT_DETECTION_RULES:
+        target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
         if fn is None:
             log(f"[detection] {rule_id}: alerts=0 error=unknown-rule elapsed=0.0s")
+            status_rows.append((rule_id, "error", "unknown-rule", target_typology, None))
             continue
         rule_start = time.time()
         try:
@@ -316,6 +375,12 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
             params = {"run_id": run_id}
             if "silver_entities" in sig.parameters:
                 params["silver_entities"] = silver_entities
+            # Thread the configured W1 vertex cap through to any rule that
+            # accepts it (W1 today). A non-positive override means "leave
+            # the rule default in place" so a mis-set env var cannot
+            # silently disable the rule by capping it at zero.
+            if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
+                params["max_vertices"] = _W1_MAX_VERTICES
             alerts = fn(txns, **params)
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
@@ -346,7 +411,21 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
                 f"[detection] {rule_id}: alerts={alert_count} "
                 f"prior={prior_count} elapsed={elapsed:.1f}s"
             )
+            status_rows.append((rule_id, "ran", None, target_typology, int(alert_count)))
             total_alerts += alert_count
+        except RuleSkipped as skip:
+            # A structural skip is NOT a zero and NOT an error. Emit a
+            # third log shape the collector records distinctly so the
+            # scorecard renders "not run" rather than 0% recall. Prior
+            # rows for this rule_id are left untouched (we never reached
+            # the DELETE), so a later run at a higher cap can still write
+            # them without a stale-delete gap.
+            elapsed = time.time() - rule_start
+            log(
+                f"[detection] {rule_id}: skipped={skip.reason} "
+                f"detail={skip.detail} elapsed={elapsed:.1f}s"
+            )
+            status_rows.append((rule_id, "skipped", skip.reason, target_typology, None))
         except Exception as e:  # noqa: BLE001 -- one rule cannot fail the pipeline
             elapsed = time.time() - rule_start
             # Emit the alerts=0 shape so a downstream metrics parser
@@ -359,7 +438,138 @@ def run_detection_rules(spark, txns, run_id: str) -> None:
             # successful run.
             err = f"{type(e).__name__}: {e}"[:200]
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
+            status_rows.append((rule_id, "error", err, target_typology, None))
     log(f"[detection] total alerts written: {total_alerts}")
+
+    _write_detection_status(spark, status_rows, run_id)
+
+    # P0.5: project the two derived gold tables from the alerts the rules
+    # just wrote. No new detection compute -- entity_clusters is a
+    # reshape of W1 alerts, risk_scores a reshape of W4 alerts. Best-effort
+    # and isolated: a failure here does not fail the pipeline, and an empty
+    # source (e.g. W1 skipped at high scale) writes an empty derived table,
+    # which is the correct "nothing to project" state, not a bug.
+    _project_derived_gold(spark, run_id)
+
+
+def _write_detection_status(spark, status_rows: list, run_id: str) -> None:
+    """Persist per-rule detection status to gold.detection_status (LB-119).
+
+    Overwrites the table with this run's status so it reflects the run that
+    produced the current gold.alerts. Best-effort: a failure here is logged
+    and does not fail the pipeline (the log lines still carry the status).
+    """
+    from pyspark.sql.functions import current_timestamp, lit
+
+    try:
+        from pyspark.sql.types import (
+            LongType,
+            StringType,
+            StructField,
+            StructType,
+        )
+
+        schema = StructType(
+            [
+                StructField("rule_id", StringType(), False),
+                StructField("status", StringType(), False),
+                StructField("reason", StringType(), True),
+                StructField("target_typology", StringType(), True),
+                StructField("alert_count", LongType(), True),
+            ]
+        )
+        df = (
+            spark.createDataFrame(status_rows, schema=schema)
+            .withColumn("run_id", lit(run_id))
+            .withColumn("computed_ts", current_timestamp())
+        )
+        df.writeTo(f"{CATALOG}.{GOLD_STATUS}").overwrite(lit(True))
+        log(f"[detection] wrote {GOLD_STATUS} ({len(status_rows)} rule rows)")
+    except Exception as e:  # noqa: BLE001
+        log(f"[detection] detection_status write failed: {type(e).__name__}: {e}")
+
+
+def _project_derived_gold(spark, run_id: str) -> None:
+    """Reshape W1 alerts -> gold.entity_clusters and W4 alerts ->
+    gold.risk_scores. Both are full overwrites keyed off gold.alerts, so
+    re-running against the same alerts is deterministic and idempotent.
+
+    Kept separate from the rule loop so a projection error cannot cost a
+    rule its alerts, and so the derived-table schemas live next to their
+    DDL. alert_ts is the last contributing transaction's event time (not a
+    generation timestamp), so it seeds first_seen_ts; computed_ts /
+    detected_ts use current_timestamp() to record when the projection ran.
+
+    Scoped to THIS run's alerts (``run_id`` filter). Without it, a rule
+    that SKIPPED this run (W1 above its vertex cap) would leave a prior
+    run's W1 rows in gold.alerts, and this projection would re-emit them as
+    "freshly detected" (detected_ts = now) while the alert scorecard says
+    W1 did not run -- a direct contradiction on a reused catalog (LB-119
+    review F1). Filtering by run_id makes a skipped rule contribute zero
+    rows this run, so the derived table correctly shows "not run".
+    """
+    from pyspark.sql.functions import array, current_timestamp, size, when
+
+    try:
+        alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").filter(col("run_id") == lit(run_id))
+    except Exception as e:  # noqa: BLE001
+        log(f"[derived] gold.alerts not readable ({e}); skipping projection.")
+        return
+
+    # gold.entity_clusters from W1 connected-components alerts. The
+    # ``related_entity_ids IS NOT NULL`` filter guarantees the NOT NULL
+    # member_entity_ids / cluster_size columns receive non-null input
+    # regardless of the Spark storeAssignmentPolicy (LB-119 review F2):
+    # gold.alerts declares related_entity_ids nullable, so a by-name write
+    # into the NOT NULL target would otherwise rely on ANSI runtime
+    # assertion, and under STRICT would throw and (being caught below)
+    # silently leave the table empty.
+    try:
+        clusters = (
+            alerts.filter(col("rule_id") == lit("W1_connected_components"))
+            .filter(col("related_entity_ids").isNotNull())
+            .select(
+                col("alert_id").alias("cluster_id"),
+                col("run_id").alias("detection_run_id"),
+                lit("connected_components").alias("detection_algorithm"),
+                col("related_entity_ids").alias("member_entity_ids"),
+                size(col("related_entity_ids")).cast("int").alias("cluster_size"),
+                col("alert_ts").alias("first_seen_ts"),
+                current_timestamp().alias("detected_ts"),
+                col("alert_score").alias("suspicion_score"),
+                lit("connected_component").alias("cluster_type"),
+            )
+        )
+        clusters.writeTo(f"{CATALOG}.{GOLD_CLUSTERS}").overwrite(lit(True))
+        log(f"[derived] wrote {GOLD_CLUSTERS} from W1 alerts ({clusters.count()} rows)")
+    except Exception as e:  # noqa: BLE001
+        log(f"[derived] entity_clusters projection failed: {type(e).__name__}: {e}")
+
+    # gold.risk_scores from W4 risk-propagation alerts. ``alert_score IS
+    # NOT NULL`` filter guarantees the NOT NULL risk_score target receives
+    # non-null input (same storeAssignmentPolicy rationale as clusters).
+    try:
+        risk = (
+            alerts.filter(col("rule_id") == lit("W4_risk_propagation"))
+            .filter(col("alert_score").isNotNull())
+            .select(
+                col("entity_id"),
+                col("model_id"),
+                col("model_version"),
+                col("alert_score").alias("risk_score"),
+                when(col("priority") == lit("HIGH"), lit("high"))
+                .when(col("priority") == lit("MED"), lit("medium"))
+                .otherwise(lit("low"))
+                .alias("risk_tier"),
+                array(lit("W4_risk_propagation")).alias("contributing_rule_ids"),
+                current_timestamp().alias("computed_ts"),
+                col("run_id"),
+            )
+        )
+        risk.writeTo(f"{CATALOG}.{GOLD_RISK}").overwrite(lit(True))
+        log(f"[derived] wrote {GOLD_RISK} from W4 alerts ({risk.count()} rows)")
+    except Exception as e:  # noqa: BLE001
+        log(f"[derived] risk_scores projection failed: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

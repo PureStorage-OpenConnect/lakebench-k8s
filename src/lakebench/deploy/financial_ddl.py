@@ -281,7 +281,8 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     alert_type         STRING,                   -- typology label (structuring, cycle, fan_in, ...)
     run_id             STRING NOT NULL,          -- lakebench execution id
     narrative          STRING,                   -- regulator-facing summary (optional in v1)
-    evidence           MAP<STRING, STRING>       -- rule-specific evidence pointers
+    evidence           MAP<STRING, STRING>,      -- rule-specific evidence pointers
+    detected_ts        TIMESTAMP                 -- LB-125: wall-clock at rule execution (freshness/TTD)
 )
 USING iceberg
 PARTITIONED BY (days(alert_ts))

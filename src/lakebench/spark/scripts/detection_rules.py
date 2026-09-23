@@ -40,6 +40,7 @@ from pyspark.sql.functions import (
     collect_list,
     collect_set,
     count,
+    current_timestamp,
     explode,
     expr,
     lit,
@@ -80,6 +81,55 @@ _STRUCTURING_THRESHOLDS = {
 RULE_VERSION = "1.0.0"
 MODEL_ID = "lb-rules"
 MODEL_VERSION = "1.0.0"
+
+# Driver-side rule -> planted-typology-target map. This MUST stay in lock-step
+# with RULE_TARGETS in src/lakebench/benchmark/faml_queries.py (the
+# orchestrator-side authority); a consistency test asserts they match, because
+# the two live on opposite sides of the package boundary (this module ships to
+# the Spark driver under /opt/spark/scripts; faml_queries does not). It exists
+# here so score_financial can attribute a rule SKIP to the typologies that rule
+# was the sole detector for, and mark their recall "not run" instead of 0%
+# (LB-119 review F1). A None target means the rule has no planted typology.
+RULE_TARGET_TYPOLOGY = {
+    "W1_connected_components": "gather_scatter",
+    "W2_structuring": "micro_structuring",
+    "W3_round_tripping": "rapid_layering",
+    "W4_risk_propagation": "stack",
+    "W5_sanctions_match": None,
+    "W6_pep_counterparty": None,
+    "W7_cross_border_high_risk": "corridor_high_risk",
+    "W8_dormant_reactivation": "dormant_reactivation",
+}
+
+
+class RuleSkipped(Exception):
+    """A rule declined to run for a structural reason (not an error).
+
+    Raised when a rule cannot execute against the given silver corpus but
+    nothing is broken -- e.g. W1 connected-components refusing above its
+    vertex cap. The caller (gold_finalize / replay) must treat this as a
+    THIRD outcome, distinct from both "ran and found zero alerts" and
+    "raised an unexpected error". Reporting a skip as ``alerts=0`` makes a
+    scale-100 W1 skip read as a 0% recall regression on the scorecard
+    (LB-119); reporting it as ``error=`` would falsely imply a defect.
+
+    ``reason`` is a short machine-parseable slug (e.g. ``vertex-cap``);
+    ``detail`` carries the human-readable specifics for the driver log.
+    """
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        # Normalise reason to a non-empty slug: the collector's skip parser
+        # matches ``skipped=[A-Za-z0-9_-]+`` and would silently drop a line
+        # whose reason is empty or contains spaces (LB-119 review F2).
+        # Collapse any run of non-slug chars to a single '-' and fall back
+        # to "unknown" so a skip is never lost, whatever a future caller
+        # passes.
+        import re as _re
+
+        slug = _re.sub(r"[^A-Za-z0-9_-]+", "-", (reason or "").strip()).strip("-")
+        self.reason = slug or "unknown"
+        self.detail = detail
+        super().__init__(f"{self.reason}: {detail}" if detail else self.reason)
 
 
 def _suspicious_amount_expr():
@@ -189,6 +239,11 @@ def w2_structuring(
             array(lit("rule"), lit("threshold"), lit("window_hours")),
             array(lit("W2_structuring"), lit(str(threshold_count)), lit(str(window_hours))),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
     return alerts
 
@@ -305,6 +360,11 @@ def w3_round_tripping(
             array(lit("rule"), lit("window_hours")),
             array(lit("W3_round_tripping"), lit(str(window_hours))),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
 
 
@@ -406,6 +466,11 @@ def w4_risk_propagation(
             array(lit("rule"), lit("velocity_hours"), lit("forward_ratio")),
             array(lit("W4_risk_propagation"), lit(str(velocity_hours)), lit(str(forward_ratio))),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
 
 
@@ -486,17 +551,26 @@ def w1_connected_components(
         .unionByName(edges_u.select(col("dst").alias("id")))
         .distinct()
     )
+    # NB: v_count itself is a full O(edges) distinct-count shuffle over the
+    # symmetric edge list, so the cap check is cheaper than running 20
+    # label-propagation iterations but is NOT free -- at scale 100 this
+    # count alone shuffles billions of rows. It is the minimum work needed
+    # to know the vertex count before deciding to run.
     v_count = vertices.count()
     if v_count > max_vertices:
-        # Fail loud but return an empty alerts DF so replay_financial
-        # can proceed with its usual DELETE-then-append behavior (which
-        # will simply clear any prior W1 rows for this rule_id).
-        print(
-            f"[W1] vertex count {v_count:,} exceeds max_vertices "
-            f"{max_vertices:,}; skipping connected-components. Raise "
-            f"max_vertices with the CLI --threshold-vertices override."
+        # Skip loud AND distinguishably. Raising RuleSkipped (rather than
+        # returning an empty alerts DF) lets gold_finalize / replay emit a
+        # ``skipped=vertex-cap`` log line the metrics collector records as a
+        # third state, so a scale-100 W1 skip is never rendered as a 0%
+        # recall regression (LB-119). Raise the cap via the
+        # ``financial.w1_max_vertices`` config field (env
+        # ``LB_FINANCIAL_W1_MAX_VERTICES``), which gold_finalize threads
+        # into this parameter -- there is no separate CLI flag.
+        raise RuleSkipped(
+            "vertex-cap",
+            f"vertices={v_count} max={max_vertices} "
+            f"(raise financial.w1_max_vertices to run W1 at this scale)",
         )
-        return _empty_alerts_df(spark, run_id)
 
     if v_count == 0:
         # Empty edge set (or every txn was a self-loop) -- nothing to
@@ -642,6 +716,11 @@ def w1_connected_components(
                 lit("true" if converged else "false"),
             ),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
     # Return the alerts plan with ``labels`` still cached. Everything
     # downstream (components + edges_tagged + alerts) is a lazy plan
@@ -855,6 +934,11 @@ def w5_sanctions_match(
             array(lit("rule"), lit("sdn_id"), lit("match_mode")),
             array(lit("W5_sanctions_match"), col("sdn_id"), lit("exact")),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
     return alerts
 
@@ -931,6 +1015,11 @@ def w6_pep_counterparty(
             array(lit("rule"), lit("pep_id"), lit("position")),
             array(lit("W6_pep_counterparty"), col("pep_id"), col("position")),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
     return alerts
 
@@ -1053,6 +1142,11 @@ def w7_cross_border_high_risk(
             array(lit("rule"), lit("country"), lit("risk_tier")),
             array(lit("W7_cross_border_high_risk"), col("bene_country"), col("risk_tier")),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
     return alerts
 
@@ -1133,6 +1227,11 @@ def w8_dormant_reactivation(
                 lit(str(amount_threshold_usd)),
             ),
         ).alias("evidence"),
+        # LB-125: wall-clock at rule execution. Batch = detection time;
+        # continuous = the far end of detected_ts - ingest_ts (freshness /
+        # time-to-detect). Appended LAST to match the gold.alerts DDL column
+        # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
     )
     return alerts
 
@@ -1171,6 +1270,8 @@ def _empty_alerts_df(spark, run_id: str) -> DataFrame:
             StructField("run_id", StringType(), True),
             StructField("narrative", StringType(), True),
             StructField("evidence", MapType(StringType(), StringType()), True),
+            # LB-125: last column, matching every rule projection + the DDL.
+            StructField("detected_ts", TimestampType(), True),
         ]
     )
     return spark.createDataFrame([], schema)

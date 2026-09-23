@@ -1294,3 +1294,52 @@ class TestSustainedCompactionConfig:
             },
         )
         assert config.architecture.pipeline.sustained.compaction_interval == 1200
+
+
+class TestFinancialW1MaxVertices:
+    """LB-119/LB-120: the W1 connected-components vertex cap is a config
+    field so the graph detector runs at scale 10 by default and can be
+    raised for larger scales without a code edit."""
+
+    def test_default_is_above_scale_10_vertex_count(self):
+        from lakebench.config.schema import WorkloadConfig
+
+        wc = WorkloadConfig()
+        # Scale 10 is ~5M accounts (~5M vertices); the default must clear it
+        # so W1 does not skip out of the box at scale 10.
+        assert wc.w1_max_vertices >= 5_000_000
+
+    def test_rejects_zero(self):
+        from pydantic import ValidationError
+
+        from lakebench.config.schema import WorkloadConfig
+
+        with pytest.raises(ValidationError):
+            WorkloadConfig(w1_max_vertices=0)
+
+    def test_rejects_above_ceiling(self):
+        from pydantic import ValidationError
+
+        from lakebench.config.schema import WorkloadConfig
+
+        with pytest.raises(ValidationError):
+            WorkloadConfig(w1_max_vertices=200_000_001)
+
+    def test_accepts_raised_value(self):
+        from lakebench.config.schema import WorkloadConfig
+
+        wc = WorkloadConfig(w1_max_vertices=60_000_000)
+        assert wc.w1_max_vertices == 60_000_000
+
+
+def test_job_injects_w1_max_vertices_env():
+    """job.py must inject LB_FINANCIAL_W1_MAX_VERTICES for financial so
+    gold_finalize can thread the configured cap into W1."""
+    from pathlib import Path
+
+    p = Path(__file__).resolve().parents[1] / (
+        "src/lakebench/modules/pipeline_engines/spark/job.py"
+    )
+    body = p.read_text()
+    assert "LB_FINANCIAL_W1_MAX_VERTICES" in body
+    assert "cfg.architecture.workload.w1_max_vertices" in body

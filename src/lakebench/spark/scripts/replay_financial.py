@@ -21,10 +21,17 @@ from datetime import datetime, timedelta, timezone
 
 from common import env, log
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import current_timestamp, lit
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
+# Same W1 vertex cap the batch gold_finalize path honours (LB-119). Threaded
+# into rules that accept it so replaying W1 uses the configured cap, not the
+# rule's hard-coded default -- otherwise replay and gold_finalize disagree on
+# whether W1 runs for a 5M-8M-vertex snapshot.
+try:
+    _W1_MAX_VERTICES = int(env("LB_FINANCIAL_W1_MAX_VERTICES", "8000000"))
+except ValueError:
+    _W1_MAX_VERTICES = 8_000_000
 
 
 def resolve_snapshot_id(spark, catalog: str, table: str, depth_months: int) -> int:
@@ -36,9 +43,7 @@ def resolve_snapshot_id(spark, catalog: str, table: str, depth_months: int) -> i
     # mean than the naive 30.5, keeping deep-history replays inside the
     # right retention window (the Iceberg retention_workload keeper
     # trims by calendar months, not day-count months).
-    target = datetime.now(timezone.utc) - timedelta(
-        days=depth_months * 30.436875
-    )
+    target = datetime.now(timezone.utc) - timedelta(days=depth_months * 30.436875)
     target_sql = target.strftime("%Y-%m-%d %H:%M:%S")
     result = spark.sql(
         f"""
@@ -80,7 +85,8 @@ def _empty_alerts_df(spark):
         "alert_type STRING, "
         "run_id STRING, "
         "narrative STRING, "
-        "evidence MAP<STRING, STRING>"
+        "evidence MAP<STRING, STRING>, "
+        "detected_ts TIMESTAMP"
     )
     return spark.createDataFrame([], schema)
 
@@ -93,7 +99,8 @@ def main() -> None:
         "--threshold", type=float, default=None, help="Rule-specific threshold override"
     )
     parser.add_argument(
-        "--output-alerts", required=True,
+        "--output-alerts",
+        required=True,
         help="Fully-qualified output alerts table (must be catalog.namespace.table)",
     )
     args = parser.parse_args()
@@ -126,7 +133,7 @@ def main() -> None:
 
     # Rule dispatch. Rule functions in detection_rules.py accept a silver
     # DataFrame + params and return a gold.alerts-shaped DataFrame.
-    from detection_rules import get_rule, known_rules
+    from detection_rules import RuleSkipped, get_rule, known_rules
 
     rule_fn = get_rule(args.rule)
     if rule_fn is None:
@@ -142,11 +149,28 @@ def main() -> None:
     if args.threshold is not None:
         # w2_structuring interprets threshold as count. Others may ignore.
         kwargs["threshold_count"] = int(args.threshold)
+    # Thread the configured W1 vertex cap; the signature filter below drops
+    # it for rules that don't accept it, so this is safe for every rule.
+    if _W1_MAX_VERTICES > 0:
+        kwargs["max_vertices"] = _W1_MAX_VERTICES
+    # Filter by the rule's real SIGNATURE parameters, not the code object's
+    # local-variable names (which also include function-body locals).
+    # Matches the primitive gold_finalize deliberately uses, so a future
+    # rule whose internal local collides with a kwarg name can't get the
+    # value mis-injected here.
+    import inspect
+
+    _params = inspect.signature(rule_fn).parameters
     try:
-        alerts = rule_fn(historical, **{
-            k: v for k, v in kwargs.items()
-            if k in rule_fn.__code__.co_varnames
-        })
+        alerts = rule_fn(historical, **{k: v for k, v in kwargs.items() if k in _params})
+    except RuleSkipped as skip:
+        # A structural skip (e.g. W1 above its vertex cap on a large
+        # historical snapshot) is not a replay failure. Log it
+        # distinguishably and exit 0 so the K8s Job is not marked failed;
+        # the target table keeps whatever rows it already had for this rule.
+        log(f"Rule skipped: reason={skip.reason} detail={skip.detail}")
+        spark.stop()
+        sys.exit(0)
     except Exception as e:  # noqa: BLE001
         log(f"Rule execution failed: {e}")
         sys.exit(4)
@@ -174,17 +198,28 @@ def main() -> None:
             alert_type         STRING,
             run_id             STRING NOT NULL,
             narrative          STRING,
-            evidence           MAP<STRING, STRING>
+            evidence           MAP<STRING, STRING>,
+            detected_ts        TIMESTAMP
         ) USING iceberg PARTITIONED BY (days(alert_ts))
         TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
     """)
+    # LB-125 upgrade guard: rules now emit detected_ts, so a pre-existing
+    # target table (reused catalog, or gold.alerts created before detected_ts)
+    # must gain the column or the append below fails on schema mismatch. Check
+    # the live schema and add only when missing -- Spark/Iceberg has no
+    # `ADD COLUMN IF NOT EXISTS` for columns.
+    try:
+        _cols = [f.name for f in spark.table(args.output_alerts).schema.fields]
+        if "detected_ts" not in _cols:
+            spark.sql(f"ALTER TABLE {args.output_alerts} ADD COLUMNS (detected_ts TIMESTAMP)")
+            log(f"[startup] added detected_ts to {args.output_alerts} (reused-catalog upgrade)")
+    except Exception as e:  # noqa: BLE001
+        log(f"[startup] detected_ts upgrade check on {args.output_alerts} skipped: {e}")
     # Delete-then-append scoped to THIS rule's rows. Multiple rules coexist
     # in the same alerts table keyed by rule_id (W2, W3, W4 append side by
     # side). Re-running the same rule replaces only its own rows, not
     # other rules'. score_financial reads all rows and joins by uetr.
-    spark.sql(
-        f"DELETE FROM {args.output_alerts} WHERE rule_id = '{args.rule}'"
-    )
+    spark.sql(f"DELETE FROM {args.output_alerts} WHERE rule_id = '{args.rule}'")
     if alert_count > 0:
         alerts.writeTo(args.output_alerts).append()
     log(f"Wrote {args.output_alerts} (rule={args.rule} rows={alert_count})")

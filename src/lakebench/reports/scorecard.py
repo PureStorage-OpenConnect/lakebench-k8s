@@ -57,15 +57,155 @@ class Customer360ScorecardBlock:
 class FinancialScorecardBlock:
     """Scorecard block for the Financial (FinServ-Crime, AML) workload.
 
-    Detail HTML is empty until the investigator-panel scoring surface
-    from ENG-2C.4.6-7 authoring is finalised.
+    Renders a per-rule detection table for a batch run: alert count, the
+    planted typology each rule targets, recall (from the folded-in
+    ``financial score``, LB-123), and a status that reads "not run" for a
+    rule the gold-finalize step skipped (e.g. W1 above its vertex cap,
+    LB-119) -- never 0%, which would misreport a skip as a miss.
     """
 
     schema_name = "financial"
     domain_label = "Financial (FinServ-Crime, AML)"
 
     def render_detail_html(self, metrics: PipelineMetrics) -> str:
-        return ""
+        # The report generator must never crash rendering a report. This
+        # method reads best-effort, possibly hand-editable data (recall.json,
+        # driver-log-parsed dicts), so the whole body degrades to "" on any
+        # unexpected shape rather than taking down every other report section.
+        try:
+            return self._render_detail_html(metrics)
+        except Exception:  # noqa: BLE001 -- render must never crash the report
+            return ""
+
+    def _render_detail_html(self, metrics: PipelineMetrics) -> str:
+        if metrics is None:
+            return ""
+
+        # Detection metrics come from the gold-finalize job. gold_finalize
+        # re-detects over the WHOLE cumulative silver each cycle and does a
+        # per-rule DELETE-then-INSERT, so each cycle's [detection] counts are
+        # CUMULATIVE and the final gold.alerts holds the last cycle's totals --
+        # NOT the sum across cycles (an earlier "sum" fix was backwards: it
+        # would ~triple a 3-cycle run and contradict the score-financial
+        # footer, which reads the final gold.alerts once). Use the LAST
+        # gold-finalize job's dicts as the authoritative final state
+        # (last-cycle-wins), which is also correct for a single-cycle run.
+        # Taking one job's pair keeps alerts and skips mutually consistent
+        # (a rule skipped in the final cycle is in rules_skipped and absent
+        # from alerts_by_rule).
+        alerts_by_rule: dict[str, int] = {}
+        rules_skipped: dict[str, str] = {}
+        jobs = getattr(metrics, "jobs", None) or []
+        gold_jobs = [j for j in jobs if getattr(j, "job_type", "") == "gold-finalize"]
+        source_jobs = gold_jobs or [
+            j
+            for j in jobs
+            if (getattr(j, "alerts_by_rule", None) or getattr(j, "rules_skipped", None))
+        ]
+        if source_jobs:
+            last = source_jobs[-1]
+            alerts_by_rule = dict(getattr(last, "alerts_by_rule", None) or {})
+            rules_skipped = dict(getattr(last, "rules_skipped", None) or {})
+
+        scoring = getattr(metrics, "financial_scoring", None)
+
+        # Nothing FAML-specific to show (e.g. a c360 run mislabelled, or a
+        # financial run before detection wired) -- stay silent.
+        if not alerts_by_rule and not rules_skipped and not scoring:
+            return ""
+
+        try:
+            from lakebench.benchmark.faml_queries import RULE_TARGETS
+        except Exception:  # noqa: BLE001 -- render must never crash the report
+            RULE_TARGETS = {}
+
+        recall_by_typology: dict[str, dict] = {}
+        total_alerts = None
+        fp_rate = None
+        if scoring:
+            for t in scoring.get("typologies", []) or []:
+                tt = t.get("typology_type")
+                if tt:
+                    recall_by_typology[tt] = t
+            total_alerts = scoring.get("total_alerts")
+            fp_rate = scoring.get("fp_rate")
+
+        # Known rules first (in RULE_TARGETS order), then any rule that
+        # emitted alerts or skipped but is not yet in RULE_TARGETS -- so a
+        # newly added detection rule's alerts are never silently dropped from
+        # the report (LB-123 review).
+        known = list(RULE_TARGETS)
+        extra = sorted((set(alerts_by_rule) | set(rules_skipped)) - set(known))
+        rules = known + extra
+
+        body_rows: list[str] = []
+        for rule in rules:
+            typ = RULE_TARGETS.get(rule)
+            alerts = alerts_by_rule.get(rule)
+            if rule in rules_skipped:
+                status = (
+                    f'<span style="color: var(--warning);">not run</span> ({rules_skipped[rule]})'
+                )
+                recall_cell = "n/a"
+                alerts_cell = "-"
+            elif typ is None:
+                # Attribute rule (W5 sanctions / W6 PEP): matches a party flag,
+                # no planted typology to score recall against.
+                status = "ran"
+                recall_cell = "n/a (attribute)"
+                alerts_cell = f"{alerts:,}" if alerts is not None else "0"
+            else:
+                alerts_cell = f"{alerts:,}" if alerts is not None else "0"
+                trow = recall_by_typology.get(typ)
+                if trow and trow.get("detection_status") == "rule_skipped":
+                    status = '<span style="color: var(--warning);">not run</span>'
+                    recall_cell = "n/a"
+                elif trow and trow.get("recall") is not None:
+                    status = '<span style="color: var(--success, green);">scored</span>'
+                    recall_cell = f"{float(trow['recall']) * 100:.1f}%"
+                else:
+                    status = "ran" if alerts is not None else "no data"
+                    recall_cell = "-"
+            typ_cell = typ if typ is not None else "&mdash;"
+            body_rows.append(
+                f"<tr><td>{rule}</td><td>{typ_cell}</td>"
+                f"<td>{alerts_cell}</td><td>{recall_cell}</td><td>{status}</td></tr>"
+            )
+
+        # Global false-positive rate: score_financial computes FP at the alert
+        # level, not per rule (per-rule precision needs per-alert labels we do
+        # not have), so it is reported once for the run.
+        footer = ""
+        if total_alerts is not None:
+            fp_str = f"{fp_rate * 100:.1f}%" if fp_rate is not None else "n/a"
+            footer = (
+                '<div style="margin-top: 0.5rem; color: var(--text-muted); '
+                'font-size: 0.8125rem;">'
+                f"Total alerts: <strong>{total_alerts:,}</strong> | "
+                f"False-positive rate (alert-level): <strong>{fp_str}</strong>"
+                "</div>"
+            )
+
+        return f"""
+        <section>
+            <h3>Detection Scorecard</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Rule</th>
+                        <th>Target typology</th>
+                        <th title="Alerts emitted by this rule">Alerts</th>
+                        <th title="Fraction of planted instances detected">Recall</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {"".join(body_rows)}
+                </tbody>
+            </table>
+            {footer}
+        </section>
+        """
 
 
 _REGISTRY: dict[str, ScorecardBlock] = {

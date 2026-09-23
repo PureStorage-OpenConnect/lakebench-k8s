@@ -454,6 +454,144 @@ class TestMetricsStorage:
         assert loaded.queries[0].query_name == "rfm"
         assert loaded.queries[0].elapsed_seconds == 3.42
 
+    def test_save_and_load_financial_scoring_and_detection_fields(self, tmp_path):
+        """LB-123: financial_scoring AND the JobMetrics detection dicts must
+        survive save -> load. The report is always rendered from the disk
+        reload, so a field dropped here shows the scorecard zero alerts /
+        no recall even though the live run had them."""
+        storage = MetricsStorage(tmp_path / "metrics")
+        now = datetime.now()
+        metrics = PipelineMetrics(
+            run_id="faml-001",
+            deployment_name="test",
+            start_time=now,
+            success=True,
+            jobs=[
+                JobMetrics(
+                    job_name="lakebench-gold-finalize",
+                    job_type="gold-finalize",
+                    success=True,
+                    alerts_by_rule={"W2_structuring": 12, "W3_round_tripping": 5},
+                    rules_skipped={"W1_connected_components": "vertex-cap"},
+                    rule_errors={"W7_cross_border_high_risk": "boom"},
+                ),
+            ],
+            financial_scoring={
+                "typologies": [
+                    {
+                        "typology_type": "micro_structuring",
+                        "recall": 0.83,
+                        "instance_count": 6,
+                        "detection_status": "scored",
+                    }
+                ],
+                "total_alerts": 17,
+                "fp_alerts": 2,
+                "fp_rate": 0.1176,
+                "run_id": "faml-001",
+            },
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("faml-001")
+        assert loaded is not None
+        # financial_scoring round-trips.
+        assert loaded.financial_scoring is not None
+        assert loaded.financial_scoring["typologies"][0]["recall"] == 0.83
+        assert loaded.financial_scoring["total_alerts"] == 17
+        # JobMetrics detection dicts round-trip (the HIGH finding: previously
+        # serialized but dropped on load).
+        job = loaded.jobs[0]
+        assert job.alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
+        assert job.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert job.rule_errors == {"W7_cross_border_high_risk": "boom"}
+
+    def test_apply_parsed_job_metrics_carries_all_fields(self):
+        """LB-123: the cluster run copies parsed driver-log fields onto the
+        stage JobMetrics via _apply_parsed_job_metrics. This is the exact site
+        whose omission dropped the detection dicts. Assert every data +
+        detection field transfers, so dropping any copy line fails here."""
+        from lakebench.cli._run import _apply_parsed_job_metrics
+
+        parsed = JobMetrics(
+            job_name="p",
+            job_type="gold-finalize",
+            input_size_gb=1.5,
+            output_size_gb=2.5,
+            input_rows=100,
+            output_rows=200,
+            throughput_gb_per_second=0.3,
+            throughput_rows_per_second=40.0,
+            alerts_by_rule={"W2_structuring": 12},
+            rule_errors={"W7_cross_border_high_risk": "boom"},
+            rules_skipped={"W1_connected_components": "vertex-cap"},
+        )
+        target = JobMetrics(job_name="lakebench-gold-finalize", job_type="gold-finalize")
+        _apply_parsed_job_metrics(target, parsed)
+        assert target.input_size_gb == 1.5
+        assert target.output_size_gb == 2.5
+        assert target.input_rows == 100
+        assert target.output_rows == 200
+        assert target.throughput_gb_per_second == 0.3
+        assert target.throughput_rows_per_second == 40.0
+        assert target.alerts_by_rule == {"W2_structuring": 12}
+        assert target.rule_errors == {"W7_cross_border_high_risk": "boom"}
+        assert target.rules_skipped == {"W1_connected_components": "vertex-cap"}
+
+    def test_detection_dicts_parse_record_and_roundtrip(self, tmp_path):
+        """LB-123 re-review F1 guard: the detection dicts must survive the
+        FULL cluster path shape -- parse_driver_logs (the only producer) ->
+        JobMetrics fields the cluster run copies -> save_run -> load_run.
+        The old suite injected dicts straight into JobMetrics, hiding that
+        the cluster run never copied parse_driver_logs' detection fields."""
+        from lakebench.metrics import MetricsCollector
+
+        logs = (
+            "[detection] W2_structuring: alerts=12 elapsed=3.1s\n"
+            "[detection] W3_round_tripping: alerts=5 elapsed=2.0s\n"
+            "[detection] W1_connected_components: skipped=vertex-cap "
+            "detail=vertices=111111 max=100 elapsed=3.5s\n"
+        )
+        parsed = MetricsCollector().parse_driver_logs(logs, "gold-finalize")
+        # Source of truth populates the three dicts.
+        assert parsed.alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
+        assert parsed.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert "W1_connected_components" not in parsed.alerts_by_rule
+
+        # Mirror the cluster run copy (_run.py) onto a fresh JobMetrics, then
+        # round-trip through storage.
+        storage = MetricsStorage(tmp_path / "metrics")
+        job = JobMetrics(
+            job_name="lakebench-gold-finalize",
+            job_type="gold-finalize",
+            success=True,
+            alerts_by_rule=parsed.alerts_by_rule,
+            rule_errors=parsed.rule_errors,
+            rules_skipped=parsed.rules_skipped,
+        )
+        metrics = PipelineMetrics(
+            run_id="det-001",
+            deployment_name="test",
+            start_time=datetime.now(),
+            jobs=[job],
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("det-001")
+        assert loaded.jobs[0].alerts_by_rule == {"W2_structuring": 12, "W3_round_tripping": 5}
+        assert loaded.jobs[0].rules_skipped == {"W1_connected_components": "vertex-cap"}
+
+    def test_save_and_load_without_financial_scoring(self, tmp_path):
+        """Backward compat: a run without financial_scoring loads as None."""
+        storage = MetricsStorage(tmp_path / "metrics")
+        metrics = PipelineMetrics(
+            run_id="no-fs-001",
+            deployment_name="test",
+            start_time=datetime.now(),
+        )
+        storage.save_run(metrics)
+        loaded = storage.load_run("no-fs-001")
+        assert loaded is not None
+        assert loaded.financial_scoring is None
+
     def test_save_and_load_with_platform_metrics(self, tmp_path):
         storage = MetricsStorage(tmp_path / "metrics")
         now = datetime.now()
@@ -1559,6 +1697,38 @@ class TestDetectionRulesMetrics:
         metrics = c.parse_driver_logs(logs, "gold-finalize")
         assert metrics.alerts_by_rule == {}
         assert metrics.rule_errors == {}
+        assert metrics.rules_skipped == {}
+
+    def test_parse_skipped_rule_is_third_state(self):
+        """LB-119: a structural skip (W1 above vertex cap) is recorded in
+        rules_skipped and kept OUT of alerts_by_rule, so a skip is never
+        read as a 0-alert / 0-recall result. The other rules on the same
+        run still parse normally."""
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=1234 prior=0 elapsed=15.2s
+[lb] 2026-09-22T10:00:16 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=50000000 max=8000000 (raise financial.w1_max_vertices to run W1 at this scale) elapsed=0.6s
+[lb] 2026-09-22T10:00:20 - [detection] total alerts written: 1234
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {"W2_structuring": 1234}
+        assert "W1_connected_components" not in metrics.alerts_by_rule
+        assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert metrics.rule_errors == {}
+
+    def test_skip_and_error_and_success_coexist(self):
+        """All three detection outcomes on one run parse into their own
+        maps without cross-contamination."""
+        c = MetricsCollector()
+        logs = """\
+[lb] 2026-09-22T10:00:00 - [detection] W2_structuring: alerts=10 prior=0 elapsed=1.0s
+[lb] 2026-09-22T10:00:01 - [detection] W1_connected_components: skipped=vertex-cap detail=vertices=9000000 max=8000000 elapsed=0.2s
+[lb] 2026-09-22T10:00:02 - [detection] W7_cross_border_high_risk: alerts=0 error=AnalysisException: boom elapsed=0.4s
+"""
+        metrics = c.parse_driver_logs(logs, "gold-finalize")
+        assert metrics.alerts_by_rule == {"W2_structuring": 10, "W7_cross_border_high_risk": 0}
+        assert metrics.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        assert "AnalysisException" in metrics.rule_errors["W7_cross_border_high_risk"]
 
     def test_alerts_by_rule_serialised_in_to_dict(self):
         c = MetricsCollector()

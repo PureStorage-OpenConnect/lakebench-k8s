@@ -364,6 +364,112 @@ def _save_local_metrics(
         return None
 
 
+def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
+    """Copy the data + FAML detection fields parsed from driver logs onto the
+    stage's JobMetrics.
+
+    Kept as one function, unit-tested, so a field that parse_driver_logs
+    populates can never again be silently dropped by the cluster run path. The
+    original LB-123 defect was exactly that: a hand-written field-by-field copy
+    omitted the three detection dicts, so the disk-saved scorecard showed 0
+    alerts and lost skip reasons on every real cluster run.
+    """
+    job_metrics.input_size_gb = parsed.input_size_gb
+    job_metrics.output_size_gb = parsed.output_size_gb
+    job_metrics.input_rows = parsed.input_rows
+    job_metrics.output_rows = parsed.output_rows
+    job_metrics.throughput_gb_per_second = parsed.throughput_gb_per_second
+    job_metrics.throughput_rows_per_second = parsed.throughput_rows_per_second
+    # FAML per-rule detection metrics (LB-116). The ONLY source of alert counts
+    # + skip reasons for the scorecard; must be carried or the report shows
+    # every rule "0 alerts" and drops skips (defeating the LB-119
+    # never-misreport-a-skip invariant).
+    job_metrics.alerts_by_rule = parsed.alerts_by_rule
+    job_metrics.rule_errors = parsed.rule_errors
+    job_metrics.rules_skipped = parsed.rules_skipped
+
+
+def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
+    """Fold ``financial score`` into a batch run (LB-123).
+
+    After gold-finalize, score recall/precision against the datagen manifest
+    and return the recall.json summary so the batch scorecard can render real
+    recall, not just alert counts. Best-effort: a scoring failure never fails
+    the pipeline (the pipeline result is still valid), it just leaves the
+    scorecard without recall. Returns the parsed recall.json dict, or None.
+    """
+    # Whole body is best-effort: NOTHING here (imports, config access, submit,
+    # wait, S3 read) may propagate and fail a pipeline that already reported
+    # success. One outer try guarantees that.
+    try:
+        import json as _json
+
+        from lakebench.s3 import S3Client
+        from lakebench.spark.job import JobState, JobType
+
+        s3 = cfg.platform.storage.s3
+        # Manifest URI mirrors bronze_verify_financial:
+        # {bronze}/{prefix}/manifest/manifest.parquet. Datagen maps the C360
+        # default path_template ("customer/interactions") to "pacs008".
+        prefix = cfg.architecture.pipeline.medallion.bronze.path_template
+        if prefix == "customer/interactions":
+            prefix = "pacs008"
+        prefix = prefix.rstrip("/")
+        manifest_uri = f"s3a://{s3.buckets.bronze}/{prefix}/manifest/manifest.parquet"
+        json_key = f"scoring/{run_id}/recall.json"
+        output_uri = f"s3a://{s3.buckets.gold}/scoring/{run_id}/recall.parquet"
+        # Derive the SparkApplication name from the enum rather than a literal
+        # so it can never drift from submit_job's f"lakebench-{value}".
+        app_name = f"lakebench-{JobType.SCORE_FINANCIAL.value}"
+
+        console.print()
+        console.print("[bold]Stage: financial score[/bold]")
+        print_info("Scoring recall/precision against the datagen manifest...")
+
+        status = job_manager.submit_job(
+            JobType.SCORE_FINANCIAL,
+            arguments=["--manifest", manifest_uri, "--output", output_uri],
+        )
+        if status.state == JobState.FAILED:
+            print_warning(f"Could not submit score job: {status.message}")
+            return None
+        result = monitor.wait_for_completion(
+            app_name,
+            timeout_seconds=timeout,
+            poll_interval=15,
+        )
+        if not result.success:
+            print_warning(f"Financial scoring did not complete: {result.message}")
+            # Surface the score driver's own error -- scoring is best-effort so
+            # its failure is easy to miss, and without the driver tail the only
+            # signal is a generic "driver container failed".
+            if getattr(result, "driver_logs", None):
+                console.print("[dim]Score driver logs (last 25 lines):[/dim]")
+                for line in result.driver_logs.split("\n")[-25:]:
+                    console.print(f"  {line}")
+            return None
+
+        # Read the recall.json sidecar (boto3 only -- the CLI has no
+        # pandas/pyarrow to read recall.parquet).
+        client = S3Client(
+            endpoint=s3.endpoint,
+            access_key=s3.access_key,
+            secret_key=s3.secret_key,
+            region=s3.region,
+            path_style=s3.path_style,
+            ca_cert=s3.ca_cert,
+            verify_ssl=s3.verify_ssl,
+        )
+        body = client.raw_client.get_object(Bucket=s3.buckets.gold, Key=json_key)["Body"].read()
+        summary = _json.loads(body)
+        n = len(summary.get("typologies", []))
+        print_success(f"Financial scoring complete ({n} typologies scored)")
+        return summary
+    except Exception as e:  # noqa: BLE001 -- scoring is best-effort enrichment
+        print_warning(f"Financial scoring failed ({e}); scorecard will omit recall.")
+        return None
+
+
 def _run_local_mode(
     cfg,
     config_file: Path,
@@ -854,6 +960,7 @@ def run(
     _datagen_output_rows = 0
     results: list[tuple[str, bool, float]] = []
     benchmark_qph: float | None = None
+    _financial_scoring: dict | None = None
 
     try:
         # Check Spark operator
@@ -1138,12 +1245,7 @@ def run(
                 # Parse driver logs for data metrics if available
                 if result.driver_logs:
                     parsed = collector.parse_driver_logs(result.driver_logs, stage_name)
-                    job_metrics.input_size_gb = parsed.input_size_gb
-                    job_metrics.output_size_gb = parsed.output_size_gb
-                    job_metrics.input_rows = parsed.input_rows
-                    job_metrics.output_rows = parsed.output_rows
-                    job_metrics.throughput_gb_per_second = parsed.throughput_gb_per_second
-                    job_metrics.throughput_rows_per_second = parsed.throughput_rows_per_second
+                    _apply_parsed_job_metrics(job_metrics, parsed)
 
                 # Populate resource metrics from job profile
                 _profile = get_job_profile(stage_name)
@@ -1299,6 +1401,17 @@ def run(
                 "total_seconds": total_time,
             },
         )
+
+        # LB-123: fold financial recall scoring into the batch run so the
+        # scorecard shows real recall/precision, not just alert counts. Only
+        # for a full financial pipeline run (not a single --stage), and only
+        # when the pipeline succeeded (gold.alerts + manifest must both exist).
+        if (
+            cfg.architecture.workload.schema_type.value == "financial"
+            and not stage
+            and pipeline_success
+        ):
+            _financial_scoring = _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout)
 
         # -- Phase 5/7: Maintenance ------------------------------------------------
         console.print()
@@ -1548,6 +1661,11 @@ def run(
         # Always save metrics, even on failure
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
+            # LB-123: attach folded-in financial recall scoring (if any) so it
+            # persists into metrics.json and renders in the scorecard.
+            if _financial_scoring is not None:
+                run_metrics.financial_scoring = _financial_scoring
+
             # Collect platform metrics from Prometheus (best-effort)
             _collect_platform_metrics(cfg, run_metrics)
 

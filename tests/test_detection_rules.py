@@ -18,6 +18,7 @@ directory once a mini-cluster fixture is available.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -771,3 +772,238 @@ def test_w7_country_dedup_is_deterministic():
         "w7 must collapse silver.entities to one country per entity_id via "
         "a deterministic aggregation"
     )
+
+
+# ---------------------------------------------------------------------------
+# LB-119: W1 vertex-cap skip is a distinct third outcome, not a zero.
+# ---------------------------------------------------------------------------
+
+GOLD_FINALIZE_PATH = Path(__file__).resolve().parents[1] / (
+    "src/lakebench/spark/scripts/gold_finalize_financial.py"
+)
+
+
+def test_ruleskipped_exception_defined():
+    """detection_rules exposes RuleSkipped with a machine-parseable reason
+    so callers can distinguish a structural skip from an error."""
+    tree = _module_ast()
+    classes = {n.name for n in tree.body if isinstance(n, ast.ClassDef)}
+    assert "RuleSkipped" in classes, "RuleSkipped exception must be defined"
+
+
+def test_w1_raises_ruleskipped_on_vertex_cap():
+    """Above max_vertices, W1 must raise RuleSkipped('vertex-cap', ...)
+    rather than return an empty alerts DF -- an empty DF is
+    indistinguishable from a genuine zero and reads as 0% recall."""
+    body = DETECTION_RULES_PATH.read_text()
+    assert 'raise RuleSkipped(\n            "vertex-cap"' in body or (
+        "RuleSkipped(" in body and '"vertex-cap"' in body
+    ), "W1 must raise RuleSkipped('vertex-cap') on the cap"
+    # And the old silent-empty-return path on the cap must be gone.
+    tree = _module_ast()
+    w1 = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "w1_connected_components"
+    )
+    # The v_count > max_vertices branch must contain a raise, not a return.
+    src = ast.get_source_segment(body, w1)
+    assert "v_count > max_vertices" in src
+    cap_branch = src.split("v_count > max_vertices", 1)[1].split("if v_count == 0", 1)[0]
+    assert "raise RuleSkipped" in cap_branch
+    assert "return _empty_alerts_df" not in cap_branch
+
+
+def test_gold_finalize_catches_ruleskipped_and_emits_skipped_line():
+    """gold_finalize must catch RuleSkipped and emit a `skipped=` log line
+    (not `alerts=0`) so the collector records the third state."""
+    body = GOLD_FINALIZE_PATH.read_text()
+    assert "except RuleSkipped" in body, "gold_finalize must catch RuleSkipped"
+    assert "skipped={skip.reason}" in body, "gold_finalize must emit skipped=<reason>"
+    # The skip branch must precede the per-rule generic handler so a skip
+    # is caught as a skip, not swallowed into the alerts=0 error path.
+    per_rule_handler = "except Exception as e:  # noqa: BLE001 -- one rule cannot fail"
+    assert per_rule_handler in body
+    assert body.index("except RuleSkipped") < body.index(per_rule_handler)
+
+
+def test_gold_finalize_threads_max_vertices():
+    """The configured W1 vertex cap (LB_FINANCIAL_W1_MAX_VERTICES) must be
+    read and passed into any rule that accepts max_vertices."""
+    body = GOLD_FINALIZE_PATH.read_text()
+    assert "LB_FINANCIAL_W1_MAX_VERTICES" in body
+    assert '"max_vertices" in sig.parameters' in body
+    assert 'params["max_vertices"]' in body
+
+
+def test_gold_finalize_projects_derived_tables():
+    """P0.5: gold.entity_clusters and gold.risk_scores are projected from
+    W1 / W4 alerts rather than left empty."""
+    body = GOLD_FINALIZE_PATH.read_text()
+    assert "_project_derived_gold" in body
+    assert "GOLD_CLUSTERS" in body and "GOLD_RISK" in body
+    assert "W1_connected_components" in body and "W4_risk_propagation" in body
+
+
+# ---------------------------------------------------------------------------
+# LB-119 review fixes: rule->typology map, detection_status, run_id-scoped
+# projection, non-null guards, reason normalization.
+# ---------------------------------------------------------------------------
+
+
+def _module_const_dict(tree, name):
+    """Extract a module-level ``name = {...}`` literal dict from an AST."""
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", None) == name for t in node.targets
+        ):
+            return {
+                k.value: (v.value if isinstance(v, ast.Constant) else None)
+                for k, v in zip(node.value.keys, node.value.values, strict=True)
+            }
+    return None
+
+
+def test_rule_target_typology_matches_faml_queries():
+    """The driver-side RULE_TARGET_TYPOLOGY must stay in lock-step with the
+    orchestrator-side RULE_TARGETS -- they live on opposite sides of the
+    package boundary and score_financial relies on them agreeing."""
+    from lakebench.benchmark.faml_queries import RULE_TARGETS
+
+    tree = _module_ast()
+    driver_map = _module_const_dict(tree, "RULE_TARGET_TYPOLOGY")
+    assert driver_map is not None, "RULE_TARGET_TYPOLOGY must be defined"
+    assert driver_map == RULE_TARGETS, (
+        "RULE_TARGET_TYPOLOGY (detection_rules) and RULE_TARGETS (faml_queries) "
+        f"drifted: {driver_map} vs {RULE_TARGETS}"
+    )
+
+
+def test_ruleskipped_normalizes_reason_to_slug():
+    """A reason with spaces or empties must not silently drop at the parser;
+    RuleSkipped normalizes to a non-empty [A-Za-z0-9_-] slug."""
+    body = DETECTION_RULES_PATH.read_text()
+    # The normalization must strip non-slug chars and fall back to a default.
+    assert 'or "unknown"' in body
+    assert "[^A-Za-z0-9_-]" in body
+
+
+def test_gold_finalize_writes_detection_status():
+    """gold_finalize must persist per-rule status to a durable gold table so
+    the recall scorer can mark a skipped rule's typology 'not run'."""
+    body = GOLD_FINALIZE_PATH.read_text()
+    assert "GOLD_STATUS" in body and "detection_status" in body
+    assert "DDL_STATUS" in body
+    assert "_write_detection_status" in body
+    # Every rule branch records a status.
+    for st in ('"ran"', '"skipped"', '"error"'):
+        assert st in body, f"detection_status must record {st}"
+
+
+def test_projection_is_run_scoped_and_non_null_guarded():
+    """_project_derived_gold must (a) filter to this run's alerts so a skip
+    can't re-emit stale prior-run clusters as fresh, and (b) guarantee the
+    NOT NULL derived columns receive non-null input regardless of
+    storeAssignmentPolicy."""
+    body = GOLD_FINALIZE_PATH.read_text()
+    assert 'col("run_id") == lit(run_id)' in body, "projection must be run-scoped"
+    assert 'col("related_entity_ids").isNotNull()' in body
+    assert 'col("alert_score").isNotNull()' in body
+
+
+def test_score_financial_consumes_detection_status():
+    """score_financial must mark a skipped rule's target typology as not-run
+    (recall NULL, detection_status='rule_skipped') instead of recall 0."""
+    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/score_financial.py"
+    body = p.read_text()
+    assert "GOLD_STATUS" in body and "detection_status" in body
+    assert "rule_skipped" in body
+    assert 'status") == lit("skipped")' in body
+
+
+def test_replay_threads_w1_vertex_cap():
+    """replay must honour LB_FINANCIAL_W1_MAX_VERTICES so W1 replay uses the
+    configured cap, not the rule's 5M hard-coded default."""
+    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/replay_financial.py"
+    body = p.read_text()
+    assert "LB_FINANCIAL_W1_MAX_VERTICES" in body
+    assert 'kwargs["max_vertices"]' in body
+
+
+def test_score_financial_scopes_alerts_by_run_id():
+    """LB-119 fix S1: score_financial must scope its gold.alerts read to the
+    current run (via detection_status.run_id) so stale prior-run alerts from
+    a skipped rule on a reused catalog don't inflate total_alerts/fp_rate."""
+    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/score_financial.py"
+    body = p.read_text()
+    assert "current_run_id" in body
+    assert 'col("run_id") == lit(current_run_id)' in body
+
+
+def test_replay_uses_signature_not_co_varnames():
+    """LB-119 fix S3: replay must filter rule kwargs by inspect.signature,
+    matching gold_finalize -- co_varnames includes body locals and can
+    mis-inject a kwarg into a future rule."""
+    p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/replay_financial.py"
+    body = p.read_text()
+    assert "inspect.signature(rule_fn)" in body
+    assert "co_varnames" not in body
+
+
+def test_all_rules_stamp_detected_ts():
+    """LB-125: every rule's alert projection appends current_timestamp() as
+    detected_ts. AST-checked per rule so a dropped stamp fails here (the
+    gold.alerts DDL positional INSERT ... SELECT * requires all 8 rules to
+    emit the column, in last position)."""
+    tree = _module_ast()
+    rule_fns = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef)
+        and len(n.name) > 1
+        and n.name[0] == "w"
+        and n.name[1].isdigit()
+    ]
+    assert len(rule_fns) == 8, [f.name for f in rule_fns]
+    src = DETECTION_RULES_PATH.read_text()
+    for fn in rule_fns:
+        fn_src = ast.get_source_segment(src, fn)
+        # Ordered list of alias("X") names in the function source. The final
+        # projected column is the LAST alias in the body. detected_ts must be
+        # that last column: gold_finalize writes via a POSITIONAL
+        # `INSERT ... SELECT *`, so a same-typed reorder (all of
+        # priority/status/disposition/alert_type/narrative are STRING) would
+        # silently corrupt rows while still "containing" detected_ts. Assert
+        # POSITION, not just presence.
+        alias_names = re.findall(r'\.alias\(\s*["\'](\w+)["\']\s*\)', fn_src)
+        assert alias_names, f"{fn.name} has no aliased columns"
+        assert alias_names[-1] == "detected_ts", (
+            f"{fn.name} must project detected_ts LAST (positional INSERT); "
+            f"last alias is {alias_names[-1]!r}"
+        )
+
+
+def test_detected_ts_in_empty_schema_and_all_ddls():
+    """LB-125: detected_ts must be present (and last) in _empty_alerts_df and
+    in all three gold.alerts DDL sites, with the reused-catalog ALTER guard,
+    or a positional INSERT ... SELECT * misaligns."""
+    root = Path(__file__).resolve().parents[1]
+    det = (root / "src/lakebench/spark/scripts/detection_rules.py").read_text()
+    assert 'StructField("detected_ts"' in det
+    # last field in the empty-alerts schema (after evidence).
+    assert det.index('StructField("evidence"') < det.index('StructField("detected_ts"')
+
+    ddl = (root / "src/lakebench/deploy/financial_ddl.py").read_text()
+    assert "detected_ts" in ddl
+
+    # Upgrade guard uses a live-schema check + `ADD COLUMNS (...)`, not the
+    # `ADD COLUMN IF NOT EXISTS` form (invalid for columns in Spark/Iceberg).
+    gf = (root / "src/lakebench/spark/scripts/gold_finalize_financial.py").read_text()
+    assert "detected_ts" in gf
+    assert "ADD COLUMNS (detected_ts TIMESTAMP)" in gf
+    assert '"detected_ts" not in' in gf  # only ALTER when genuinely missing
+
+    rp = (root / "src/lakebench/spark/scripts/replay_financial.py").read_text()
+    assert "detected_ts" in rp
+    assert "ADD COLUMNS (detected_ts TIMESTAMP)" in rp
+    assert '"detected_ts" not in' in rp

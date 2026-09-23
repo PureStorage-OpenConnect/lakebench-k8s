@@ -45,8 +45,13 @@ class JobMetrics:
     # non-gold jobs. Populated from ``[detection] {rule_id}: alerts=N ...``
     # lines the driver emits per rule; a rule that crashed shows up as
     # ``alerts=0`` with ``rule_errors[rule_id]`` carrying the exception.
+    # A rule that declined to run for a structural reason (e.g. W1 above
+    # its vertex cap) shows up in ``rules_skipped[rule_id]`` with the skip
+    # reason, and is deliberately ABSENT from ``alerts_by_rule`` so a skip
+    # is never read as a zero-recall result (LB-119).
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
+    rules_skipped: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -228,6 +233,15 @@ class PipelineMetrics:
     # Shape: dict from FleetSummary.to_dict().
     datagen_fleet: dict[str, Any] | None = None
 
+    # Financial (FAML) recall scoring (optional -- populated for a batch
+    # financial run when `financial score` is folded into `run` (LB-123)).
+    # Shape: the recall.json sidecar written by score_financial.py --
+    # {"typologies": [{typology_type, expected_workload, recall,
+    # instance_count, detection_status}], "total_alerts", "fp_alerts",
+    # "fp_rate", "run_id", "computed_by"}. The scorecard reads this to render
+    # per-rule recall/precision; None means recall was not computed.
+    financial_scoring: dict[str, Any] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = {
@@ -257,6 +271,8 @@ class PipelineMetrics:
             d["cycles"] = [c.to_dict() for c in self.cycles]
         if self.datagen_fleet is not None:
             d["datagen_fleet"] = self.datagen_fleet
+        if self.financial_scoring is not None:
+            d["financial_scoring"] = self.financial_scoring
         return d
 
 
@@ -1622,6 +1638,24 @@ class MetricsCollector:
             err_match = re.search(r"\berror=(.+)$", mid)
             if err_match:
                 metrics.rule_errors[rule] = err_match.group(1).strip()
+
+        # LB-119: structural skips are a THIRD shape, distinct from
+        # ``alerts=N``. Emitter format:
+        #   ``[detection] {rule}: skipped=<reason> detail=<...> elapsed=Ts``
+        # A skipped rule is recorded in ``rules_skipped`` and left OUT of
+        # ``alerts_by_rule`` so downstream scoring renders it as "not run"
+        # rather than as a zero. Anchor on the trailing ``elapsed=Ns`` the
+        # same way the alerts line does, with a non-greedy detail capture.
+        skip_re = re.compile(
+            r"\[detection\]\s+"
+            r"(?P<rule>[A-Za-z0-9_]+):\s+"
+            r"skipped=(?P<reason>[A-Za-z0-9_-]+)"
+            r"(?P<mid>.*?)"
+            r"\s+elapsed=[\d.]+s\s*$",
+            re.MULTILINE,
+        )
+        for m in skip_re.finditer(logs):
+            metrics.rules_skipped[m.group("rule")] = m.group("reason").strip()
 
         # Calculate throughput
         if metrics.elapsed_seconds > 0:

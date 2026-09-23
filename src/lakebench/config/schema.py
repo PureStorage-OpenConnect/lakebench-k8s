@@ -939,6 +939,15 @@ class WorkloadConfig(BaseModel):
     retention_workload: bool = False
     retention_months: int = Field(default=60, ge=1, le=120)
 
+    # W1 connected-components vertex cap for the Financial detection path.
+    # Default sits above the scale-10 vertex count (5M accounts) so W1 runs
+    # out of the box at scale 10; raise it for larger scales that have the
+    # executor budget. Whether W1 completes in acceptable wall-clock above
+    # the cap is a measured question (LB-120), not a config guarantee, so the
+    # ceiling stays generous rather than unbounded. Consumed by
+    # gold_finalize_financial via LB_FINANCIAL_W1_MAX_VERTICES.
+    w1_max_vertices: int = Field(default=8_000_000, ge=1, le=200_000_000)
+
     model_config = {"populate_by_name": True}
 
 

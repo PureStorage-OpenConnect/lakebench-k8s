@@ -1,0 +1,22 @@
+{
+  "source": "Synthetic PEP list. Real PEP lists are commercial (Dow Jones, WorldCheck) or fragmented public sources. Publishing real PEP identities in test data carries perception risk even though the data is public; we ship a synthetic list here with fabricated entity/individual names.",
+  "license": "Synthetic, no restriction.",
+  "note": "PEP transactions are not intrinsically fraudulent. Rule W6 hits are typically feeder signals for enhanced due diligence (EDD), not standalone alerts. In real deployments this file should be replaced with a WorldCheck / Dow Jones export.",
+  "entries": [
+    {"pep_id": "PEP-000001", "entity_name": "MINISTRY OF FINANCE ARCADIA", "entity_type": "gov_body", "position": "government_agency"},
+    {"pep_id": "PEP-000002", "entity_name": "STATE ENERGY COMPANY OF BORVIA", "entity_type": "soe", "position": "state_owned_enterprise"},
+    {"pep_id": "PEP-000003", "entity_name": "CENTRAL BANK OF CALDONIA", "entity_type": "gov_body", "position": "central_bank"},
+    {"pep_id": "PEP-000004", "entity_name": "REGIONAL DEVELOPMENT AUTHORITY DURENIA", "entity_type": "gov_body", "position": "government_agency"},
+    {"pep_id": "PEP-000005", "entity_name": "OFFICE OF THE HEAD OF STATE ELVENIA", "entity_type": "gov_body", "position": "head_of_state_office"},
+    {"pep_id": "PEP-000006", "entity_name": "MINISTRY OF DEFENCE FIRAND", "entity_type": "gov_body", "position": "government_agency"},
+    {"pep_id": "PEP-000007", "entity_name": "SOVEREIGN WEALTH FUND GRACIA", "entity_type": "sovereign_fund", "position": "sovereign_wealth"},
+    {"pep_id": "PEP-000008", "entity_name": "PUBLIC INVESTMENT CORPORATION HELVIA", "entity_type": "soe", "position": "state_owned_enterprise"},
+    {"pep_id": "PEP-000009", "entity_name": "NATIONAL RAILWAYS OF INDRA", "entity_type": "soe", "position": "state_owned_enterprise"},
+    {"pep_id": "PEP-000010", "entity_name": "PORT AUTHORITY OF JURANIA", "entity_type": "gov_body", "position": "government_agency"},
+    {"pep_id": "PEP-000011", "entity_name": "STATE POSTAL SERVICE KOLONIA", "entity_type": "soe", "position": "state_owned_enterprise"},
+    {"pep_id": "PEP-000012", "entity_name": "NATIONAL OIL COMPANY LARANIA", "entity_type": "soe", "position": "state_owned_enterprise"},
+    {"pep_id": "PEP-000013", "entity_name": "MINISTRY OF TRADE MERIDIA", "entity_type": "gov_body", "position": "government_agency"},
+    {"pep_id": "PEP-000014", "entity_name": "STATE UTILITIES AUTHORITY NOVELIA", "entity_type": "soe", "position": "state_owned_enterprise"},
+    {"pep_id": "PEP-000015", "entity_name": "NATIONAL MINING CORPORATION ORINDA", "entity_type": "soe", "position": "state_owned_enterprise"}
+  ]
+}
