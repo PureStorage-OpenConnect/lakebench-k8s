@@ -2,11 +2,56 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+import os
+import tempfile
 
-import pytest
+# Hermetic kube config. Code under test loads kube config before making
+# (mocked) API calls; on a developer machine that silently used the real
+# ~/.kube/config while CI has none, so tests passed locally and failed in CI.
+# The kubernetes client reads KUBECONFIG when it is imported, so this must run
+# at conftest import time, before anything imports kubernetes. Nothing
+# listens on the fake server.
+_FAKE_KUBECONFIG = os.path.join(tempfile.mkdtemp(prefix="lb-test-kube-"), "config")
+with open(_FAKE_KUBECONFIG, "w") as _f:
+    _f.write(
+        "apiVersion: v1\n"
+        "kind: Config\n"
+        "clusters:\n"
+        "- name: test\n"
+        "  cluster: {server: 'https://127.0.0.1:1', insecure-skip-tls-verify: true}\n"
+        "users:\n"
+        "- name: test\n"
+        "  user: {token: test}\n"
+        "contexts:\n"
+        "- name: test\n"
+        "  context: {cluster: test, user: test, namespace: default}\n"
+        "- name: stale-ctx\n"
+        "  context: {cluster: test, user: test, namespace: default}\n"
+        "current-context: test\n"
+    )
+os.environ["KUBECONFIG"] = _FAKE_KUBECONFIG
 
-from lakebench.config import LakebenchConfig
+# Unit tests must never run real cluster CLIs. Before this guard, destroy
+# tests ran `helm get values` (and could reach `helm upgrade`) against the
+# developer's live cluster. These stubs shadow helm/kubectl/oc on PATH and
+# fail loudly; tests that exercise those calls mock subprocess.run.
+_CLI_GUARD_DIR = tempfile.mkdtemp(prefix="lb-test-cli-guard-")
+for _tool in ("helm", "kubectl", "oc"):
+    _path = os.path.join(_CLI_GUARD_DIR, _tool)
+    with open(_path, "w") as _f:
+        _f.write(
+            "#!/bin/sh\n"
+            f'echo "{_tool} is blocked in unit tests (mock subprocess.run)" >&2\n'
+            "exit 97\n"
+        )
+    os.chmod(_path, 0o755)
+os.environ["PATH"] = _CLI_GUARD_DIR + os.pathsep + os.environ.get("PATH", "")
+
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+import pytest  # noqa: E402
+
+from lakebench.config import LakebenchConfig  # noqa: E402
 
 
 def make_config(**overrides) -> LakebenchConfig:

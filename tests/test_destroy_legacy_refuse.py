@@ -25,6 +25,23 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_live_namespace_listing():
+    """These tests exercise ownership logic that lists namespaces. Without
+    this they reached whatever cluster the developer's kubeconfig pointed at
+    (a live, read-only call); in CI they failed. An empty cluster is the
+    neutral answer; tests that need specific namespaces patch CoreV1Api
+    themselves (inner patches win)."""
+    # Also never run real helm: destroy's watch-list removal would otherwise
+    # call `helm get values` / `helm upgrade` on the developer's cluster.
+    with (
+        patch("kubernetes.client.CoreV1Api") as core,
+        patch("lakebench.spark.SparkOperatorManager"),
+    ):
+        core.return_value.list_namespace.return_value.items = []
+        yield core
+
+
 def _bare_engine() -> MagicMock:
     engine = MagicMock()
     cfg = engine.config
