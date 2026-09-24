@@ -13,6 +13,7 @@ from lakebench.deploy.garage import GarageDeployer, GarageDeployError
 from lakebench.runtime.container import (
     ContainerRuntime,
     ContainerRuntimeError,
+    _fingerprint_spec,
     detect_container_cli,
 )
 from lakebench.runtime.protocol import ComponentSpec, ContainerPort, Mount, Runtime, RuntimeKind
@@ -126,31 +127,114 @@ class TestApplyCommandConstruction:
 
 
 class TestApplyReuse:
-    """Recreating a container discards its state, so reuse is correctness."""
+    """Recreating a container discards its state, so reuse is correctness.
 
-    def test_reuses_running_container_with_same_image(self):
+    Identity is a fingerprint over (image, command, args, env, ports, mounts),
+    not just image (LB-092): a redeploy that changed only the S3 endpoint or
+    bucket used to keep the running Garage container with its old config and
+    quietly diverged.
+    """
+
+    def test_reuses_running_container_with_matching_fingerprint(self):
+        spec = ComponentSpec(name="g", image="img", env={"K": "V"})
         rt = ContainerRuntime(cli="podman", namespace="lb")
         rt._is_running = mock.Mock(return_value=True)  # type: ignore[method-assign]
-        rt._image_of = mock.Mock(return_value="img")  # type: ignore[method-assign]
+        rt._label_of = mock.Mock(return_value=_fingerprint_spec(spec))  # type: ignore[method-assign]
         with mock.patch("subprocess.run", return_value=_completed()) as run:
-            rt.apply(ComponentSpec(name="g", image="img"))
-        assert run.call_count == 0, "must not recreate a healthy matching container"
+            rt.apply(spec)
+        assert run.call_count == 0, "must not recreate a container whose spec matches"
 
     def test_recreates_when_image_differs(self):
+        old = ComponentSpec(name="g", image="old")
         rt = ContainerRuntime(cli="podman", namespace="lb")
         rt._is_running = mock.Mock(return_value=True)  # type: ignore[method-assign]
-        rt._image_of = mock.Mock(return_value="old")  # type: ignore[method-assign]
+        rt._label_of = mock.Mock(return_value=_fingerprint_spec(old))  # type: ignore[method-assign]
         with mock.patch("subprocess.run", return_value=_completed()) as run:
             rt.apply(ComponentSpec(name="g", image="new"))
         assert run.call_count > 0
 
-    def test_replace_forces_recreate(self):
+    def test_recreates_when_env_differs_even_with_same_image(self):
+        """LB-092: changing S3 endpoint/bucket in local mode must recreate."""
+        old = ComponentSpec(name="g", image="img", env={"S3_ENDPOINT": "http://old:80"})
+        new = ComponentSpec(name="g", image="img", env={"S3_ENDPOINT": "http://new:80"})
         rt = ContainerRuntime(cli="podman", namespace="lb")
         rt._is_running = mock.Mock(return_value=True)  # type: ignore[method-assign]
-        rt._image_of = mock.Mock(return_value="img")  # type: ignore[method-assign]
+        rt._label_of = mock.Mock(return_value=_fingerprint_spec(old))  # type: ignore[method-assign]
         with mock.patch("subprocess.run", return_value=_completed()) as run:
-            rt.apply(ComponentSpec(name="g", image="img"), replace=True)
+            rt.apply(new)
         assert run.call_count > 0
+
+    def test_recreates_when_mount_differs_even_with_same_image(self):
+        old = ComponentSpec(name="g", image="img", mounts=[Mount(source="/a", target="/x")])
+        new = ComponentSpec(name="g", image="img", mounts=[Mount(source="/b", target="/x")])
+        rt = ContainerRuntime(cli="podman", namespace="lb")
+        rt._is_running = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        rt._label_of = mock.Mock(return_value=_fingerprint_spec(old))  # type: ignore[method-assign]
+        with mock.patch("subprocess.run", return_value=_completed()) as run:
+            rt.apply(new)
+        assert run.call_count > 0
+
+    def test_recreates_when_port_differs_even_with_same_image(self):
+        old = ComponentSpec(name="g", image="img", ports=[ContainerPort(container_port=3900)])
+        new = ComponentSpec(name="g", image="img", ports=[ContainerPort(container_port=3901)])
+        rt = ContainerRuntime(cli="podman", namespace="lb")
+        rt._is_running = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        rt._label_of = mock.Mock(return_value=_fingerprint_spec(old))  # type: ignore[method-assign]
+        with mock.patch("subprocess.run", return_value=_completed()) as run:
+            rt.apply(new)
+        assert run.call_count > 0
+
+    def test_replace_forces_recreate(self):
+        spec = ComponentSpec(name="g", image="img")
+        rt = ContainerRuntime(cli="podman", namespace="lb")
+        rt._is_running = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        rt._label_of = mock.Mock(return_value=_fingerprint_spec(spec))  # type: ignore[method-assign]
+        with mock.patch("subprocess.run", return_value=_completed()) as run:
+            rt.apply(spec, replace=True)
+        assert run.call_count > 0
+
+    def test_recreates_when_no_fingerprint_label_present(self):
+        """A container from before LB-092 has no fingerprint label. Treat it
+        as unknown state and recreate rather than assume it matches."""
+        rt = ContainerRuntime(cli="podman", namespace="lb")
+        rt._is_running = mock.Mock(return_value=True)  # type: ignore[method-assign]
+        rt._label_of = mock.Mock(return_value="")  # type: ignore[method-assign]
+        with mock.patch("subprocess.run", return_value=_completed()) as run:
+            rt.apply(ComponentSpec(name="g", image="img"))
+        assert run.call_count > 0
+
+
+class TestFingerprint:
+    """The fingerprint is what makes LB-092's reuse decision correct."""
+
+    def test_stable_across_dict_ordering(self):
+        a = ComponentSpec(name="g", image="img", env={"A": "1", "B": "2"})
+        b = ComponentSpec(name="g", image="img", env={"B": "2", "A": "1"})
+        assert _fingerprint_spec(a) == _fingerprint_spec(b)
+
+    def test_ignores_spec_name(self):
+        # name is identity, tracked separately; changing name should not
+        # invalidate reuse of a running container with the same fingerprint.
+        a = ComponentSpec(name="one", image="img")
+        b = ComponentSpec(name="two", image="img")
+        assert _fingerprint_spec(a) == _fingerprint_spec(b)
+
+    def test_ignores_labels(self):
+        # Metadata only; relabeling a container is cheap and does not
+        # justify a recreate.
+        a = ComponentSpec(name="g", image="img", labels={"role": "old"})
+        b = ComponentSpec(name="g", image="img", labels={"role": "new"})
+        assert _fingerprint_spec(a) == _fingerprint_spec(b)
+
+    def test_differs_on_env_value_change(self):
+        a = ComponentSpec(name="g", image="img", env={"S3_ENDPOINT": "http://old:80"})
+        b = ComponentSpec(name="g", image="img", env={"S3_ENDPOINT": "http://new:80"})
+        assert _fingerprint_spec(a) != _fingerprint_spec(b)
+
+    def test_differs_on_command_change(self):
+        a = ComponentSpec(name="g", image="img", command=["/bin/a"])
+        b = ComponentSpec(name="g", image="img", command=["/bin/b"])
+        assert _fingerprint_spec(a) != _fingerprint_spec(b)
 
 
 class TestLifecycle:

@@ -858,12 +858,23 @@ def _run_sustained(
     timeout: int,
     skip_benchmark: bool,
     duration: int | None,
+    skip_generate: bool = False,
+    skip_maintenance: bool = False,
 ) -> None:
     """Run the sustained streaming pipeline.
 
     Starts datagen concurrently with bronze-ingest, silver-stream, and
     gold-refresh streaming SparkApplications. Monitors for the configured
     duration, then stops streaming jobs and optionally runs the benchmark.
+
+    Args:
+        skip_generate: If True, do not start a datagen deployment. Assumes
+            bronze already has data (or another process is populating it).
+        skip_maintenance: If True, do not run the periodic Iceberg
+            expire_snapshots / remove_orphan_files loop during monitoring.
+            The maintenance loop is on by default because unmaintained
+            streaming snapshots grow unbounded, but a run whose primary
+            goal is measuring raw freshness/throughput may want it off.
     """
     import uuid
 
@@ -951,20 +962,25 @@ def _run_sustained(
             raise typer.Exit(1)
         print_success("Spark scripts deployed")
 
-        # Start datagen first so the FAML preflight below has parquet
-        # data to infer a schema from. Datagen runs concurrently with
-        # every subsequent stage (streaming jobs consume the same
-        # prefix as it lands).
-        console.print()
-        console.print("[bold]Starting datagen...[/bold]")
+        # Start datagen before the stages below: the AML preflight needs parquet
+        # data to infer a schema from, and datagen then runs concurrently with
+        # the continuous jobs, which consume the same prefix as it lands.
+        # Skipping is only sensible when bronze is already being populated by
+        # another process; otherwise the continuous stages have no input.
         engine = DeploymentEngine(cfg)
-        datagen = DatagenDeployer(engine)
-        datagen_result = datagen.deploy()
-        if datagen_result.status != DeploymentStatus.SUCCESS:
-            print_error(f"Failed to start datagen: {datagen_result.message}")
-            pipeline_success = False
-            raise typer.Exit(1)
-        print_success("Datagen started (sustained mode)")
+        if skip_generate:
+            console.print()
+            print_info("Skipping datagen deploy (--skip-generate)")
+        else:
+            console.print()
+            console.print("[bold]Starting datagen...[/bold]")
+            datagen = DatagenDeployer(engine)
+            datagen_result = datagen.deploy()
+            if datagen_result.status != DeploymentStatus.SUCCESS:
+                print_error(f"Failed to start datagen: {datagen_result.message}")
+                pipeline_success = False
+                raise typer.Exit(1)
+            print_success("Datagen started (sustained mode)")
         dims = cfg.get_scale_dimensions()
         console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
@@ -1114,20 +1130,29 @@ def _run_sustained(
                 print_warning(f"Could not create benchmark runner: {e}")
                 can_run_rounds = False
 
-        # Iceberg retention scheduling
+        # Iceberg retention scheduling. --skip-maintenance disables both
+        # the expire_snapshots loop and periodic compaction; without
+        # skipping, mid-run maintenance would distort a raw
+        # freshness/throughput measurement.
         retention_interval = sustained_cfg.retention_interval
         retention_threshold = sustained_cfg.retention_threshold
-        next_maintenance_at = float(retention_interval)  # first run after one interval
-        print_info(
-            f"Iceberg retention: every {retention_interval}s (threshold: {retention_threshold})"
-        )
+        if skip_maintenance:
+            next_maintenance_at = float("inf")
+            print_info("Iceberg retention: disabled (--skip-maintenance)")
+        else:
+            next_maintenance_at = float(retention_interval)  # first run after one interval
+            print_info(
+                f"Iceberg retention: every {retention_interval}s (threshold: {retention_threshold})"
+            )
 
         # Iceberg compaction scheduling (v1.1.0)
-        compaction_enabled = sustained_cfg.compaction_enabled
+        compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
         compaction_interval = sustained_cfg.compaction_interval
         next_compaction_at = float(compaction_interval) if compaction_enabled else float("inf")
         if compaction_enabled:
             print_info(f"Iceberg compaction: every {compaction_interval}s")
+        elif sustained_cfg.compaction_enabled and skip_maintenance:
+            print_info("Iceberg compaction: disabled (--skip-maintenance)")
 
         start = time.time()
         check_interval = 30
@@ -1237,8 +1262,11 @@ def _run_sustained(
             dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
             if dg_info.size_bytes:
                 _datagen_output_gb = dg_info.size_bytes / (1024**3)
-            if dg_info.object_count:
-                _datagen_output_rows = cfg.architecture.workload.datagen.scale * 1_500_000
+            # datagen row count is not measurable from S3 metadata (would need
+            # to parse Parquet footers). Leaving _datagen_output_rows at 0
+            # correctly signals "unmeasurable" downstream -- ingest_ratio and
+            # pipeline_saturated become None rather than being computed against
+            # a fictional `scale * 1_500_000` denominator (LB-044 pattern).
         except Exception as e:
             logger.warning("Could not measure streaming bronze bucket size: %s", e)
 

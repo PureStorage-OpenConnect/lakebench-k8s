@@ -99,10 +99,26 @@ class TestBuildDeltaMaintenanceSql:
             table="lakehouse.bronze.events",
             retention_hours=168.0,
         )
+        # At >= 7-day default, no retention-check override is needed.
         assert len(stmts) == 1
         assert "VACUUM" in stmts[0]
         assert "lakehouse.bronze.events" in stmts[0]
         assert "168.0 HOURS" in stmts[0]
+
+    def test_spark_thrift_vacuum_short_retention_disables_check(self):
+        """Regression: retention_hours=0 (destroy path) previously threw
+        IllegalArgumentException, the caller swallowed the warning, and
+        DROP TABLE ran on top of the failed VACUUM leaving orphan S3 files.
+        The override must precede the VACUUM."""
+        stmts = build_delta_maintenance_sql(
+            engine="spark-thrift",
+            catalog="lakehouse",
+            table="lakehouse.bronze.events",
+            retention_hours=0.0,
+        )
+        assert len(stmts) == 2
+        assert "spark.databricks.delta.retentionDurationCheck.enabled=false" in stmts[0]
+        assert "VACUUM lakehouse.bronze.events RETAIN 0.0 HOURS" == stmts[1]
 
     def test_duckdb_returns_empty(self):
         stmts = build_delta_maintenance_sql(

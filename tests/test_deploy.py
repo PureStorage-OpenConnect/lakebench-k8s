@@ -18,7 +18,14 @@ from lakebench.deploy.engine import (
 
 
 def _make_config(**overrides) -> LakebenchConfig:
-    """Create a LakebenchConfig with sensible defaults for testing."""
+    """Create a LakebenchConfig with sensible defaults for testing.
+
+    LB-090: auto-fills the Polaris client_secret for tests whose
+    architecture selects the Polaris catalog, mirroring the top-level
+    conftest helper. Production configs must supply their own.
+    """
+    from lakebench.config.schema import CatalogType
+
     base = {
         "name": "test-deploy",
         "platform": {
@@ -32,7 +39,13 @@ def _make_config(**overrides) -> LakebenchConfig:
         },
     }
     base.update(overrides)
-    return LakebenchConfig(**base)
+    cfg = LakebenchConfig(**base)
+    if (
+        cfg.architecture.catalog.type == CatalogType.POLARIS
+        and not cfg.architecture.catalog.polaris.client_secret
+    ):
+        cfg.architecture.catalog.polaris.client_secret = "test-only-secret"
+    return cfg
 
 
 def _mock_k8s():

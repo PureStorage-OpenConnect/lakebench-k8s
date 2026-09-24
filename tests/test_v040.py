@@ -186,6 +186,19 @@ class TestFormatVersionResolution:
         assert hadoop_version == "3.4.2"
         assert aws_sdk == "1.12.720"
 
+    def test_hadoop_aws_compat_covers_every_supported_spark_minor(self):
+        """LB-069-shape gate: adding a Spark minor to _SUPPORTED_SPARK_VERSIONS
+        without adding a matching _HADOOP_AWS_COMPAT pin would silently pair
+        it with a wrong SDK. The import-time check in job.py already fires,
+        this test documents the invariant so a reviewer sees it explicitly."""
+        from lakebench.modules.pipeline_engines.spark.job import (
+            _HADOOP_AWS_COMPAT,
+            _SUPPORTED_SPARK_VERSIONS,
+        )
+
+        missing = set(_SUPPORTED_SPARK_VERSIONS) - set(_HADOOP_AWS_COMPAT)
+        assert not missing, f"Spark minors {sorted(missing)} lack a _HADOOP_AWS_COMPAT entry."
+
 
 class TestVersionConditionalResources:
     """Tests for version-conditional driver_memory and maxResultSize."""

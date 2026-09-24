@@ -187,10 +187,15 @@ def _print_report_summary(metrics) -> None:
         if pb.stage_latency_profile:
             lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
             scores.append(f"Latency (b/s/g): {lat}ms")
-        if pb.ingest_ratio > 0:
+        if pb.ingest_ratio is None:
+            scores.append("Completeness:    [dim]unmeasured[/dim]")
+        elif pb.ingest_ratio > 0:
             pct = pb.ingest_ratio * 100
             scores.append(f"Completeness:    {pct:>7.1f}%")
-        if pb.pipeline_saturated:
+        # pipeline_saturated is bool | None. None means unmeasurable and must
+        # not be silently coerced to "not saturated" -- that would suppress
+        # the warning under the same condition it was meant to fire.
+        if pb.pipeline_saturated is True:
             scores.append("[yellow]Pipeline saturated (completeness < 95%)[/yellow]")
     else:
         if pb.time_to_value_seconds > 0:
@@ -1442,11 +1447,18 @@ def info(
 
         full_g = _full_guidance(scale)
 
-        # Calculate requirements (simplified version of recommend's logic)
+        # Calculate requirements (simplified version of recommend's logic).
+        # _parse_cpu_millicores tolerates K8s-idiomatic CPU strings so a
+        # future guidance tier expressed in millicores does not crash here.
+        from lakebench.config.autosizer import _parse_cpu_millicores
+
         spark_cores = full_g.spark.recommended_executors * full_g.spark.recommended_cores
-        datagen_cores = full_g.datagen.parallelism * int(full_g.datagen.cpu)
-        trino_cores = int(full_g.trino.coordinator_cpu) + full_g.trino.worker_replicas * int(
-            full_g.trino.worker_cpu
+        datagen_cores = (
+            full_g.datagen.parallelism * _parse_cpu_millicores(full_g.datagen.cpu) // 1000
+        )
+        trino_cores = (
+            _parse_cpu_millicores(full_g.trino.coordinator_cpu) // 1000
+            + full_g.trino.worker_replicas * _parse_cpu_millicores(full_g.trino.worker_cpu) // 1000
         )
         if is_sustained:
             # Sustained: datagen + streaming spark + trino all run concurrently
@@ -2067,18 +2079,25 @@ def recommend(
 
     def compute_cluster_requirements(scale: int) -> dict:
         """Compute minimum cluster requirements for a given scale."""
+        from lakebench.config.autosizer import _parse_cpu_millicores
+
         dims = customer360_dimensions(scale)
         guidance = full_compute_guidance(scale)
 
         # Datagen
-        datagen_cores = guidance.datagen.parallelism * int(guidance.datagen.cpu)
+        datagen_cores = (
+            guidance.datagen.parallelism * _parse_cpu_millicores(guidance.datagen.cpu) // 1000
+        )
         datagen_mem_gi = guidance.datagen.parallelism * int(
             guidance.datagen.memory.rstrip("Gi").rstrip("gi")
         )
 
         # Trino (always running)
-        trino_cores = int(guidance.trino.coordinator_cpu) + guidance.trino.worker_replicas * int(
-            guidance.trino.worker_cpu
+        trino_cores = (
+            _parse_cpu_millicores(guidance.trino.coordinator_cpu) // 1000
+            + guidance.trino.worker_replicas
+            * _parse_cpu_millicores(guidance.trino.worker_cpu)
+            // 1000
         )
         trino_mem_gi = int(
             guidance.trino.coordinator_memory.rstrip("Gi")

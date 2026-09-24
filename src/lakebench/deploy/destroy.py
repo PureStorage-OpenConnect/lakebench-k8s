@@ -19,6 +19,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Cluster-scoped resources shared by every lakebench deployment (Stackable
+# SecretClass, the scratch StorageClass, etc.) must not be deleted while
+# another lakebench namespace still uses them. Deleting them out from under
+# a running parallel deploy has crashed other users' Hive Metastore pods
+# and killed other users' Spark PVC provisioning. See findings in the
+# deploy/destroy adversarial review.
+LAKEBENCH_NAMESPACE_LABEL = "app.kubernetes.io/managed-by=lakebench"
+
+
+def _is_last_lakebench_namespace(namespace_names: list[str], current: str) -> bool:
+    """Return True iff `current` is the only lakebench-labeled namespace left.
+
+    Extracted as a pure function so refcount behavior can be unit-tested
+    without a live cluster.
+    """
+    others = [n for n in namespace_names if n != current]
+    return not others
+
+
+def _other_lakebench_namespaces_exist(core_v1, current_namespace: str) -> bool:
+    """Return True if any lakebench-labeled namespace exists BESIDES the one
+    being destroyed. Fail-safe: on any listing error, return True (assume
+    others exist) so we don't delete a shared resource on flaky read.
+    """
+    try:
+        ns_list = core_v1.list_namespace(label_selector=LAKEBENCH_NAMESPACE_LABEL)
+        names = [ns.metadata.name for ns in ns_list.items]
+    except Exception as e:
+        logger.warning(
+            "Could not list lakebench namespaces (%s); assuming others exist "
+            "to avoid deleting a shared cluster-scoped resource.",
+            e,
+        )
+        return True
+    return not _is_last_lakebench_namespace(names, current_namespace)
+
+
 def destroy_all(
     engine: DeploymentEngine,
     progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
@@ -422,6 +459,8 @@ def destroy_all(
                 secret_key=s3_cfg.secret_key,
                 region=s3_cfg.region,
                 path_style=s3_cfg.path_style,
+                ca_cert=s3_cfg.ca_cert,
+                verify_ssl=s3_cfg.verify_ssl,
             )
             if s3._init_error:
                 bucket_names = (

@@ -164,6 +164,8 @@ class ConformanceRunner:
         path_style: bool = True,
         existing_bucket: str = "",
         allow_create_bucket: bool = True,
+        ca_cert: str = "",
+        verify_ssl: bool = True,
     ) -> None:
         self.endpoint = endpoint
         self.access_key = access_key
@@ -172,6 +174,12 @@ class ConformanceRunner:
         self.path_style = path_style
         self.existing_bucket = existing_bucket
         self.allow_create_bucket = allow_create_bucket
+        # ca_cert / verify_ssl mirror S3Client so an HTTPS endpoint with a
+        # private CA does not fail conformance at TLS handshake and get
+        # reported as "backend not usable by lakebench" -- the store may
+        # be fine, only the certificate trust chain needed to be passed.
+        self.ca_cert = ca_cert
+        self.verify_ssl = verify_ssl
         self._client: Any = None
         self._bucket: str = ""
         self._owns_bucket = False
@@ -182,12 +190,21 @@ class ConformanceRunner:
         import boto3
         from botocore.config import Config
 
+        verify: bool | str
+        if not self.verify_ssl:
+            verify = False
+        elif self.ca_cert:
+            verify = self.ca_cert
+        else:
+            verify = True
+
         return boto3.client(
             "s3",
             endpoint_url=self.endpoint,
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
             region_name=region or self.region,
+            verify=verify,
             config=Config(
                 signature_version="s3v4",
                 s3={"addressing_style": "path" if self.path_style else "virtual"},
@@ -627,6 +644,8 @@ def run_conformance(
     path_style: bool = True,
     existing_bucket: str = "",
     allow_create_bucket: bool = True,
+    ca_cert: str = "",
+    verify_ssl: bool = True,
 ) -> ConformanceReport:
     """Run the S3 conformance checks against a backend.
 
@@ -634,6 +653,9 @@ def run_conformance(
 
     Set ``allow_create_bucket=False`` to skip creating a temporary bucket and
     run read-only checks against ``existing_bucket`` instead.
+
+    ``ca_cert`` and ``verify_ssl`` mirror S3Client so HTTPS endpoints with
+    a private CA can be conformance-checked without spurious TLS failures.
     """
     return ConformanceRunner(
         endpoint=endpoint,
@@ -643,4 +665,6 @@ def run_conformance(
         path_style=path_style,
         existing_bucket=existing_bucket,
         allow_create_bucket=allow_create_bucket,
+        ca_cert=ca_cert,
+        verify_ssl=verify_ssl,
     ).run()

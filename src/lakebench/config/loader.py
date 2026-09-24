@@ -370,8 +370,6 @@ name: my-lakehouse
 #   prometheus: prom/prometheus:v2.48.0
 #   grafana: grafana/grafana:10.2.0
 #   pull_policy: Always               # Always | IfNotPresent | Never
-#   pull_secrets:                     # List of K8s imagePullSecret names
-#     - my-registry-secret
 
 # ============================================================================
 # LAYER 1: PLATFORM
@@ -588,13 +586,6 @@ architecture:
     # customer360:
     #   unique_customers: null       # Override: derived from scale if null
     #   date_range_days: null        # Override: defaults to 365 if null
-    #   channels: [web, mobile, store, call_center, social_media]
-    #   event_types: [purchase, browse, support, login, abandoned_cart]
-    #   quality_distribution:
-    #     clean: 0.92
-    #     duplicate_suspected: 0.02
-    #     incomplete: 0.03
-    #     format_inconsistent: 0.03
 
   ## Benchmark configuration
   ## Runs analytical SQL queries against silver/gold tables via the configured

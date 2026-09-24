@@ -164,7 +164,6 @@ class ImagesConfig(BaseModel):
     jmx_exporter: str = "bitnami/jmx-exporter:latest"
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
-    pull_secrets: list[str] = Field(default_factory=list)
 
     @field_validator("spark")
     @classmethod
@@ -411,11 +410,21 @@ class PolarisConfig(BaseModel):
     Polaris is an open-source Iceberg REST catalog (port 8181).
     Uses relational-jdbc persistence backed by the shared PostgreSQL.
     On FlashBlade: stsUnavailable=true, pathStyleAccess=true.
+
+    ``client_secret`` MUST be supplied by the user when catalog type is
+    polaris. Auto-generation across CLI calls does not work: `deploy`,
+    `run`, and `destroy` each load the config independently, so an
+    auto-generated secret would differ between invocations and Spark
+    jobs submitted by `run` would fail OAuth2 against the Polaris
+    instance bootstrapped by `deploy`. A hardcoded default (the
+    pre-LB-090 behaviour) would share one OAuth2 client secret across
+    every install. ``CatalogConfig`` validates and rejects the empty
+    value with a message that includes a generator command.
     """
 
     version: str = "1.6.0"
     port: int = 8181
-    client_secret: str = "lakebench-polaris-secret-2024"
+    client_secret: str = ""
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
 
@@ -439,6 +448,39 @@ class CatalogConfig(BaseModel):
     hive: HiveConfig = Field(default_factory=HiveConfig)
     polaris: PolarisConfig = Field(default_factory=PolarisConfig)
     unity: UnityConfig = Field(default_factory=UnityConfig)
+
+
+class PolarisClientSecretMissing(ValueError):
+    """Raised at deploy/run time when a Polaris config has no client secret.
+
+    Kept as a distinct exception type so ``lakebench validate`` and
+    ``lakebench info`` (which do not deploy) can load Polaris configs
+    without a secret -- the check runs where the secret is actually used
+    (deploy, spark-job submission), not at config load. See LB-090 for
+    why load-time auto-generation is unsafe: independent CLI invocations
+    would each generate a different value.
+    """
+
+
+def require_polaris_client_secret(cfg: Any) -> str:
+    """Return the Polaris client secret, or raise if missing.
+
+    ``cfg`` is the root ``LakebenchConfig``. Call this from every code
+    path that actually needs the secret to talk to Polaris (bootstrap
+    job template render, Spark job manifest build, Trino configmap
+    render), not from validators.
+    """
+    secret = cfg.architecture.catalog.polaris.client_secret
+    if not secret:
+        raise PolarisClientSecretMissing(
+            "architecture.catalog.polaris.client_secret is required "
+            "when catalog.type is 'polaris'. Generate one with:\n"
+            "  python3 -c 'import secrets; print(secrets.token_urlsafe(32))'\n"
+            "and set it in the config file (or via the "
+            "LAKEBENCH_POLARIS_CLIENT_SECRET environment variable if "
+            "you use the ${VAR} substitution)."
+        )
+    return secret
 
 
 class IcebergConfig(BaseModel):
@@ -533,14 +575,6 @@ class BronzeLayerConfig(BaseModel):
     path_template: str = "customer/interactions"
 
 
-class SilverStrategyConfig(BaseModel):
-    """Silver layer adaptive strategy configuration."""
-
-    simple_threshold: str = "100gb"
-    streaming_threshold: str = "5tb"
-    enable_salting: bool = True
-
-
 class SilverLayerConfig(BaseModel):
     """Silver layer configuration."""
 
@@ -556,7 +590,6 @@ class SilverLayerConfig(BaseModel):
             "quality_flags",
         ]
     )
-    strategy: SilverStrategyConfig = Field(default_factory=SilverStrategyConfig)
 
 
 class GoldTableConfig(BaseModel):
@@ -831,7 +864,7 @@ class DatagenConfig(BaseModel):
     )
 
     mode: DatagenMode = DatagenMode.AUTO
-    parallelism: int = 4
+    parallelism: int = Field(default=4, ge=1)
     file_size: str = "512mb"
     dirty_data_ratio: float = 0.08
     cpu: str = "2"
@@ -879,23 +912,6 @@ class DatagenConfig(BaseModel):
         return self.scale
 
 
-class QualityDistributionConfig(BaseModel):
-    """Data quality distribution configuration."""
-
-    clean: float = 0.92
-    duplicate_suspected: float = 0.02
-    incomplete: float = 0.03
-    format_inconsistent: float = 0.03
-
-    @model_validator(mode="after")
-    def validate_sum(self) -> QualityDistributionConfig:
-        """Ensure distribution sums to 1.0."""
-        total = self.clean + self.duplicate_suspected + self.incomplete + self.format_inconsistent
-        if abs(total - 1.0) > 0.001:
-            raise ValueError(f"Quality distribution must sum to 1.0, got {total}")
-        return self
-
-
 class Customer360Config(BaseModel):
     """Customer360 workload schema configuration.
 
@@ -911,15 +927,6 @@ class Customer360Config(BaseModel):
     date_range_days: int | None = Field(
         default=None,
         description="Override: date range in days. If None, defaults to 365.",
-    )
-    channels: list[str] = Field(
-        default_factory=lambda: ["web", "mobile", "store", "call_center", "social_media"]
-    )
-    event_types: list[str] = Field(
-        default_factory=lambda: ["purchase", "browse", "support", "login", "abandoned_cart"]
-    )
-    quality_distribution: QualityDistributionConfig = Field(
-        default_factory=QualityDistributionConfig
     )
 
 
@@ -1270,8 +1277,13 @@ class ObservabilityConfig(BaseModel):
 
     enabled: bool = False
     prometheus_stack_enabled: bool = True
-    s3_metrics_enabled: bool = True
-    spark_metrics_enabled: bool = True
+    # DEPRECATED: no consumer wires these to PodMonitor deployment.
+    # Default is None (not True) so a dump/load roundtrip does not carry
+    # a value that trips the deprecation warning below -- the warning
+    # is intended to fire only when a user explicitly writes the field
+    # in their YAML.
+    s3_metrics_enabled: bool | None = None
+    spark_metrics_enabled: bool | None = None
     dashboards_enabled: bool = True
     retention: str = "7d"
     storage: str = "10Gi"
@@ -1283,6 +1295,23 @@ class ObservabilityConfig(BaseModel):
     # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
     chart_version: str = "87.19.2"
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
+
+    @model_validator(mode="after")
+    def _warn_dead_metric_flags(self) -> ObservabilityConfig:
+        # Only warn when the user gave the field a real value. None is the
+        # sentinel default; a dump/load roundtrip that carries None back
+        # in must not re-trigger the warning.
+        for field in ("s3_metrics_enabled", "spark_metrics_enabled"):
+            if getattr(self, field) is not None:
+                import warnings
+
+                warnings.warn(
+                    f"observability.{field} is unwired -- setting it has no effect. "
+                    "PodMonitor deployment is not gated on this flag today.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+        return self
 
 
 # =============================================================================

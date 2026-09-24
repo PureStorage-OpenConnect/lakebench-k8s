@@ -247,13 +247,19 @@ class S3Client:
             if error_code in ("404", "NoSuchBucket"):
                 return False
             if error_code in ("403", "AccessDenied"):
-                logger.warning(
-                    "Access denied checking bucket %s (treating as non-existent)",
-                    bucket_name,
-                )
-                return False
+                # 403 is a permissions problem, not proof of non-existence.
+                # Treating it as False previously caused `empty_bucket` to
+                # short-circuit and destroy to report "cleaned 0 objects"
+                # forever on a bucket that was actually growing. Raise so
+                # the caller sees the permission failure.
+                raise S3BucketError(
+                    f"Access denied checking bucket {bucket_name}: "
+                    "credentials cannot HeadBucket, so existence cannot "
+                    "be confirmed. Fix credentials before assuming the "
+                    "bucket is absent."
+                ) from e
             # Re-raise other errors
-            raise S3BucketError(f"Error checking bucket {bucket_name}: {e}")  # noqa: B904
+            raise S3BucketError(f"Error checking bucket {bucket_name}: {e}") from e
 
     def create_bucket(self, bucket_name: str) -> bool:
         """Create a bucket if it doesn't exist.
@@ -416,11 +422,25 @@ class S3Client:
                     if not objects:
                         continue
                     delete_objects = [{"Key": obj["Key"]} for obj in objects]
-                    self._client.delete_objects(
+                    resp = self._client.delete_objects(
                         Bucket=bucket_name,
                         Delete={"Objects": delete_objects},
                     )
-                    batch_deleted += len(delete_objects)
+                    # Inspect per-key errors -- delete_objects returns 200
+                    # with an Errors[] array on partial failure (retention
+                    # locks, ACL conflicts). Without this check, one stuck
+                    # key would loop until max_wait and be reported as a
+                    # successful clean.
+                    errors = resp.get("Errors", [])
+                    if errors:
+                        keys = ", ".join(e.get("Key", "?") for e in errors[:5])
+                        code = errors[0].get("Code", "?")
+                        raise S3BucketError(
+                            f"delete_objects on {bucket_name} returned "
+                            f"{len(errors)} per-key error(s) (first: {code} "
+                            f"on {keys}); refusing to report bucket as cleaned."
+                        )
+                    batch_deleted += len(delete_objects) - len(errors)
 
                 # 2. Abort all incomplete multipart uploads
                 mp_paginator = self._client.get_paginator("list_multipart_uploads")
@@ -454,9 +474,20 @@ class S3Client:
                 if obj_count == 0 and mp_count == 0:
                     return deleted_count
 
-                # Not yet empty -- FlashBlade may need time to sync
+                # Not yet empty -- FlashBlade may need time to sync. Once
+                # the wait budget is exhausted, RAISE rather than returning
+                # the running deleted count as if the bucket were clean.
+                # A silent success here caused destroys to report success
+                # while ghost objects remained, and the next deploy then
+                # inherited stale bronze data with no signal at all.
                 if time.monotonic() - start > max_wait:
-                    return deleted_count
+                    raise S3BucketError(
+                        f"empty_bucket({bucket_name}) timed out after "
+                        f"{max_wait}s with {obj_count} object(s) and "
+                        f"{mp_count} multipart upload(s) still present. "
+                        f"Deleted {deleted_count} object(s) before giving "
+                        "up. Investigate before considering this bucket clean."
+                    )
 
                 time.sleep(3)
 
