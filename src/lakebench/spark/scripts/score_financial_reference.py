@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 
 from common import env, log
 from pyspark.sql import SparkSession
@@ -68,6 +70,12 @@ from pyspark.sql.functions import (
 from pyspark.sql.functions import (
     mean as mean_,
 )
+
+# numpy/pandas/scikit-learn (imported inside functions) are installed per job into this directory by an
+# init container (job.py REFERENCE_PY_DEPS); the Spark image has none of them.
+_PYDEPS = os.environ.get("LB_PYDEPS_DIR", "/opt/lb-pydeps")
+if os.path.isdir(_PYDEPS) and _PYDEPS not in sys.path:
+    sys.path.insert(0, _PYDEPS)
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TXNS", "silver.transactions")
