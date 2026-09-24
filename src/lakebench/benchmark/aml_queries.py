@@ -89,7 +89,10 @@ UNMAPPED_TYPOLOGIES: dict[str, str] = {
     ),
     "fan_in": (
         "Category W2_structuring in the manifest but no dedicated fan-in "
-        "detector; W1_connected_components co-detects some instances."
+        "detector. W2's beneficiary kind (structuring_beneficiary) co-detects "
+        "it, since fan_in plants structuring-band credits from many senders "
+        "into one account, and W1 co-detects some instances; neither is a "
+        "scored target, so those alerts count as W2 false positives."
     ),
     "fan_out": (
         "Category W2_structuring in the manifest but no dedicated fan-out "
