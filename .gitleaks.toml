@@ -1,0 +1,51 @@
+# Secret scanning config for gitleaks (https://github.com/gitleaks/gitleaks).
+# Extends the upstream default rule set with credential formats that the
+# defaults do not recognise.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "pure-flashblade-s3-access-key"
+description = "Pure Storage FlashBlade S3 access key id"
+regex = '''\bPSFB[A-Z]{38}\b'''
+keywords = ["psfb"]
+
+[[rules]]
+id = "s3-secret-key-assignment"
+description = "S3 / AWS secret access key assigned in config or manifests"
+regex = '''(?i)(aws_secret_access_key|secret_?key|secretAccessKey)["']?\s*[:=]\s*["']?([A-Za-z0-9+/]{30,})["']?'''
+secretGroup = 2
+entropy = 3.5
+keywords = ["secret"]
+
+[[rules]]
+id = "k8s-inline-env-secret"
+description = "High-entropy 40-char credential inlined as a Kubernetes env value (name and value sit on separate lines, so key-name rules miss it)"
+regex = '''value:\s*["']?([A-Za-z0-9+/]{40})["']?(?:\s|$)'''
+secretGroup = 1
+entropy = 3.8
+keywords = ["value:"]
+
+# ---------------------------------------------------------------------------
+# Allowlists. Every entry names why it is not a leak and, where it is a real
+# weakness, a bug id.
+#
+# Rules for adding one (learned the hard way, gitleaks 8.28):
+#   - Never use `paths`. On a global [[allowlists]] block gitleaks ignores
+#     `condition = "AND"`, so a path entry exempts that whole file from every
+#     rule, including a real secret added later.
+#   - Always anchor the regex (^...$). Unanchored regexes match substrings.
+#   - Allow the exact benign value, nothing broader.
+
+[[allowlists]]
+description = "Test fixture: fake Garage key id used by mocked exec output (tests/test_container_runtime.py)"
+regexes = ['''^GK1a2b3c4d5e6f7890abcdef12$''']
+
+[[allowlists]]
+description = "Garage rpc_secret for a single-node loopback-only local instance (src/lakebench/deploy/garage.py); fixed on purpose for reproducibility"
+regexes = ['''^(0123456789abcdef){1,4}$''']
+
+[[allowlists]]
+description = "KNOWN WEAKNESS, LB-140: shared default Polaris OAuth client secret. Remove this entry when the secret is generated per deployment."
+regexes = ['''^lakebench-polaris-secret-2024$''']

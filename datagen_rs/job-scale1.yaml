@@ -1,3 +1,10 @@
+# Manual datagen Job for local characterisation runs.
+# Requires the `lakebench-s3-credentials` Secret in the target namespace
+# (created by `lakebench deploy`), or create it by hand:
+#   kubectl -n <ns> create secret generic lakebench-s3-credentials \
+#     --from-literal=accessKey=... --from-literal=secretKey=...
+# Without it the pod sits in CreateContainerConfigError, which does not
+# count against backoffLimit; activeDeadlineSeconds bounds that.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -8,6 +15,7 @@ spec:
   completions: 4
   parallelism: 4
   backoffLimit: 2
+  activeDeadlineSeconds: 7200
   ttlSecondsAfterFinished: 3600
   template:
     metadata:
@@ -36,9 +44,15 @@ spec:
             - name: AWS_REGION
               value: "us-east-1"
             - name: AWS_ACCESS_KEY_ID
-              value: "PSFBSAZRNJDECALDJDHMGAFMOIMBAPECMKPDKBJNAH"
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: accessKey
             - name: AWS_SECRET_ACCESS_KEY
-              value: "C89B1A3FAc24f01c8+011a+A3F91E75477c1FJBM"
+              valueFrom:
+                secretKeyRef:
+                  name: lakebench-s3-credentials
+                  key: secretKey
           resources:
             requests:
               cpu: "8"
