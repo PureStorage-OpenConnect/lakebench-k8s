@@ -368,6 +368,8 @@ def generate_local(
         cfg.platform.storage.s3.buckets.bronze,
         "--target-tb",
         f"{target_tb:.6f}",
+        "--customer-id-max",
+        str(dims.customers),
         # Small files locally: one 512 MB part would be most of the dataset and
         # would leave Spark a single partition to work with.
         "--file-size-mb",
