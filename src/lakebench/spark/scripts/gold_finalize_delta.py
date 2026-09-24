@@ -21,6 +21,7 @@ from common import env, get_daily_kpi_aggregations, log, set_utc_session, write_
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
+    lit,
 )
 from pyspark.sql.functions import max as max_
 
@@ -217,6 +218,18 @@ def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
     return kpi_count
 
 
+def _merge_gold(existing_gold, new_kpis, last_date):
+    """Gold rows before ``last_date`` plus the recomputed rows, materialized.
+
+    Materialized (gold is a few hundred rows) so the overwrite does not read
+    the table it is replacing.
+    """
+    kept = existing_gold
+    if last_date is not None:  # an empty gold table has no watermark
+        kept = existing_gold.filter(col("interaction_date") < lit(last_date))
+    return kept.unionByName(new_kpis).coalesce(1).localCheckpoint(eager=True)
+
+
 def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
     """INCREMENTAL strategy: Process only new Silver data. For > 10TB or repeat runs."""
     log("Executing INCREMENTAL strategy...")
@@ -273,15 +286,14 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
             options=opts,
         )
     else:
+        # One commit: gold is one small table of daily rows, so rewrite it
+        # whole (rows before the watermark plus the recomputed ones).
+        # DELETE-then-append was two commits and a failure between them left
+        # gold missing days.
         log(f"Replacing gold rows from {last_date} on...")
-        if last_date is not None:  # an empty gold table has no watermark
-            spark.sql(f"DELETE FROM {gold_tbl} WHERE interaction_date >= DATE '{last_date}'")
+        merged = _merge_gold(existing_gold, new_kpis_consolidated, last_date)
         write_delta_table(
-            spark,
-            new_kpis_consolidated,
-            gold_tbl,
-            gold_bucket,
-            mode="append",
+            spark, merged, gold_tbl, gold_bucket, mode="overwrite", options=_delta_write_props()
         )
 
     total_count = spark.table(gold_tbl).count()

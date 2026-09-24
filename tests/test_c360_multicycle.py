@@ -29,7 +29,19 @@ def test_gold_incremental_matches_other_strategies_and_replaces_boundary():
     body = _func_src(SCRIPTS / "gold_finalize.py", "gold_incremental")
     assert "last_updated" not in body
     assert ">= last_date" in body
-    assert "DELETE FROM" in body
+    # Boundary days are replaced in one commit (whole-gold overwrite), not
+    # DELETE-then-append (two commits).
+    assert "DELETE FROM" not in body
+    assert "_merge_gold(existing_gold" in body
+    assert ".overwrite(lit(True))" in body
+
+
+def test_delta_gold_incremental_replaces_boundary_in_one_commit():
+    body = _func_src(SCRIPTS / "gold_finalize_delta.py", "gold_incremental")
+    assert "last_updated" not in body
+    assert ">= last_date" in body
+    assert "DELETE FROM" not in body
+    assert "_merge_gold(existing_gold" in body
 
 
 def test_silver_salted_is_gone():
