@@ -30,7 +30,11 @@ logger = logging.getLogger(__name__)
 # retries run out. Treating it as final gave up on jobs the operator was
 # about to resubmit, e.g. after a shared-Ivy-cache download race. Waiting is
 # bounded in case the operator never settles.
-_SUBMISSION_FAILED_GRACE_S = 900
+# The operator backs off linearly (interval x attempt): 5 retries at 60 s
+# start at 60, 180, 360, 600 and 900 s after the first failure, and the app
+# stays SUBMISSION_FAILED throughout, so the grace must outlast 900 s plus a
+# slow Ivy resolve.
+_SUBMISSION_FAILED_GRACE_S = 1800
 
 
 @dataclass
@@ -152,7 +156,7 @@ class SparkJobMonitor:
     def wait_until_running(
         self,
         job_name: str,
-        timeout_seconds: int = 900,
+        timeout_seconds: int = 1800,
         poll_interval: int = 10,
     ) -> JobResult:
         """Wait until a long-lived (continuous) job's driver is running.

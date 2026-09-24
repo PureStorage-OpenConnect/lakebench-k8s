@@ -1588,6 +1588,12 @@ class SparkJobManager:
                 "spark.hadoop.fs.s3a.endpoint.region": s3.region,
                 "spark.hadoop.fs.s3a.path.style.access": str(s3.path_style).lower(),
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
+                # REST catalogs (Polaris) hand out s3:// table locations.
+                # Iceberg's add_files stages manifests through Hadoop FS at
+                # that location, and with no s3:// implementation it failed
+                # ("Failed to get file system"), falling back to a full CTAS
+                # copy of bronze. S3A reads the same fs.s3a.* settings.
+                "spark.hadoop.fs.s3.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.s3a.aws.credentials.provider": "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider",
             }
         )

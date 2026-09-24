@@ -270,7 +270,9 @@ def clean(
                     state = ((app.get("status") or {}).get("applicationState") or {}).get(
                         "state", ""
                     )
-                    if state not in ("COMPLETED", "FAILED", "SUBMISSION_FAILED"):
+                    # SUBMISSION_FAILED is not final: the operator resubmits
+                    # it (restartPolicy), so the app may start writing.
+                    if state not in ("COMPLETED", "FAILED"):
                         active_writers.append(
                             f"Spark application {app['metadata']['name']} ({state or 'pending'})"
                         )

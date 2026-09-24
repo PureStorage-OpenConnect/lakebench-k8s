@@ -180,6 +180,23 @@ def _stop_leftover_streams(job_manager, namespace: str, timeout_s: int = 120) ->
             time.sleep(3)
 
 
+def _require_reset_ownership(cfg) -> None:
+    """typer.Exit unless this run provably owns the namespace and buckets."""
+    try:
+        problem = _reset_ownership_problem(cfg)
+    except Exception as e:  # noqa: BLE001
+        problem = f"ownership could not be verified: {e}"
+    if problem:
+        print_error(f"Refusing to reset continuous state: {problem}")
+        print_info(
+            "Continuous AML runs delete the previous run's checkpoints and raw "
+            "data, so they require proof of ownership: buckets tagged by "
+            "`lakebench deploy`, or on backends without bucket tagging, bucket "
+            "names prefixed with the deployment name."
+        )
+        raise typer.Exit(1)
+
+
 def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
     """Start a continuous AML run clean: delete the stream checkpoints and,
     when this run generates its own data, the previous raw datagen files.
@@ -191,10 +208,7 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
     """
     from lakebench.s3 import S3Client
 
-    problem = _reset_ownership_problem(cfg)
-    if problem:
-        print_error(f"Refusing to reset continuous state: {problem}")
-        raise typer.Exit(1)
+    _require_reset_ownership(cfg)
 
     s3_cfg = cfg.platform.storage.s3
     base = cfg.architecture.pipeline.sustained.checkpoint_base.strip("/")
@@ -1171,6 +1185,9 @@ def _run_sustained(
         if cfg.architecture.workload.schema_type.value == "financial":
             # Every continuous AML run starts clean; see _reset_continuous_state
             # and bronze_verify_financial CONTINUOUS_RESET.
+            # Ownership first: stopping streams in a namespace this run does
+            # not own would already be the damage the gate exists to prevent.
+            _require_reset_ownership(cfg)
             _stop_leftover_streams(job_manager, cfg.get_namespace())
             _reset_continuous_state(cfg, clear_raw=not skip_generate)
         if skip_generate:
