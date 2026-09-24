@@ -78,11 +78,18 @@ pub struct Instance {
     pub seed: i64,
     pub rows_per_instance: usize,
     /// Corpus bounds, kept per-instance so emit_instance can place
-    /// out-of-window rows (dormant_reactivation's early ping) at a real
-    /// corpus-start position without re-deriving it from the instance
-    /// window. Manifest builders should not surface these.
+    /// out-of-window rows (dormant_reactivation's pre-window anchor) at a real
+    /// corpus position without re-deriving it from the instance window.
+    /// Manifest builders should not surface these.
     pub corpus_start_us: i64,
     pub corpus_end_us: i64,
+    /// Dormancy suppression window [start, end) for dormant_reactivation (P3,
+    /// W8): the driver must emit NO base row and NO other-typology row for this
+    /// instance's dormant originator (participants[0]) inside this window, so
+    /// the originator's only post-anchor send is the burst and W8 sees a real
+    /// >90-day gap. (0, 0) for every non-dormant typology (no suppression).
+    pub suppress_start_us: i64,
+    pub suppress_end_us: i64,
 }
 
 #[derive(Clone)]
@@ -91,6 +98,15 @@ pub struct TxRow {
     pub bene: u64,
     pub ts_us: i64,
     pub structuring: bool,
+    /// Optional NATIVE-currency amount floor on the row (P3, W8). When set, the
+    /// driver draws from the originator's own persona log-normal and
+    /// rejection-samples into that account's upper tail until the amount clears
+    /// this floor, so a dormant-reactivation burst reliably trips W8. The floor
+    /// is NATIVE, not USD-converted: silver's txn_amount_usd == native for the
+    /// ~90% non-cross-currency rows W8 reads, so a native floor of 5200 clears
+    /// the 5000 rule threshold there (see amounts::floored_lognormal; the field
+    /// name is historical). None everywhere else.
+    pub min_amount_usd: Option<f64>,
 }
 
 fn person_pool(population: usize, seed: i64) -> Vec<u64> {
@@ -151,6 +167,13 @@ pub fn schedule(
     let span = (corpus_end_us - corpus_start_us).max(1);
     let mut instances = Vec::new();
     let mut warned_corridor_skip = false;
+    // Dormant originators already used, so no two dormant_reactivation instances
+    // share participants[0] (P3, W8 review finding 2): a second instance's burst
+    // rows are exempt from the base-loop suppression and would otherwise land in
+    // the first instance's dormancy window and shorten its gap, silently missing
+    // it. Uniqueness of the ORIGINATOR (participants[0]) is sufficient; a shared
+    // beneficiary is harmless (it creates no originator row for that account).
+    let mut used_dormant_orig: std::collections::HashSet<u64> = std::collections::HashSet::new();
     for spec in SPECS.iter() {
         // corridor_high_risk and cross_border_cycle select from the
         // high-risk country pool; every other typology uses the full
@@ -194,7 +217,22 @@ pub fn schedule(
         for j in 0..n_inst {
             let iseed = seed + 0xF100 + spec.tid as i64 * TID_SEED_STRIDE + j;
             let mut rng = Rng::new(iseed as u64);
-            let participants = pick_distinct(&mut rng, src_pool, spec.participants);
+            let mut participants = pick_distinct(&mut rng, src_pool, spec.participants);
+            // Dormant instances: re-draw until the originator is unused, so each
+            // dormant account owns exactly one dormancy window (see finding 2
+            // above). Bounded; a collision is rare (birthday over ~n_inst in the
+            // person pool) so this almost always accepts the first draw.
+            if spec.name == "dormant_reactivation" {
+                let mut retries = 0;
+                while used_dormant_orig.contains(&participants[0]) && retries < 10 {
+                    participants = pick_distinct(&mut rng, src_pool, spec.participants);
+                    retries += 1;
+                }
+                used_dormant_orig.insert(participants[0]);
+            }
+            // Dormancy suppression window, set only by the dormant_reactivation
+            // arm below; (0, 0) means "no suppression" for every other typology.
+            let mut suppress: (i64, i64) = (0, 0);
             // Duration model per typology name. Comments explain the intent.
             let (start, end) = match spec.name {
                 // rapid_layering: whole chain lands within one civil day.
@@ -213,29 +251,47 @@ pub fn schedule(
                     let e = (day_start + day_us).min(corpus_end_us);
                     (s, e)
                 }
-                // dormant_reactivation: the manifest injection window
-                // covers only the burst band (last ~2 days), not the early
-                // ping. A wide manifest window would attribute organic
-                // ring-driven activity between the same participants to
-                // this typology and inflate recall. The early ping's ts
-                // (pinned to corpus start via the seed) is derived in
-                // emit_instance and lives OUTSIDE the manifest window on
-                // purpose -- the "dormancy" signal is that the edge exists
-                // before the manifest window, not that the ping is part of
-                // the injection band.
+                // dormant_reactivation (P3, W8): a realistic single dormancy
+                // EPISODE in the corpus interior, not the old ping-at-5% /
+                // burst-at-98% shape. The account has normal history before and
+                // after; for a dormancy window D of 95-180 days its base sends
+                // are SUPPRESSED by the driver (see suppress below), so the
+                // account -- not just the edge -- goes quiet. The reactivation
+                // burst is placed at the window end so it is the first
+                // post-dormancy originator send, giving W8's per-originator LAG a
+                // real >90-day gap. Participant selection stays UNIFORM (no
+                // persona-rate weighting -> no leakage shortcut); a pre-window
+                // anchor send in emit_instance guarantees every instance has a
+                // defined pre-gap send regardless of the participant's rate. The
+                // manifest window [s, e] is the burst only (recall attribution);
+                // the anchor is out-of-window, matching emitted_per_instance =
+                // rows_per_instance + 1.
                 "dormant_reactivation" => {
-                    // Burst window is 7 days, not 2, to absorb up to five
-                    // days of weekend/holiday rollover that shape_fixed_day
-                    // in timing.rs applies to typology rows. Anchored to the
-                    // last ~2% of the corpus so the dormancy gap (ping at
-                    // corpus start, burst at corpus end) is 4+ years at a
-                    // 60-month corpus. Still ~1000x narrower than the
-                    // previous full-corpus window that was over-attributing
-                    // organic traffic to the injection.
-                    let burst_off = ((0.98 + rng.unit() * 0.02) * span as f64) as i64;
-                    let e = (corpus_start_us + burst_off).min(corpus_end_us);
-                    let s = e - (7 * 86_400_000_000).min(e - corpus_start_us);
-                    (s, e)
+                    let day = 86_400_000_000i64;
+                    let anchor_pad = 3 * day; // room before S for the anchor send
+                    let burst_span = 2 * day;
+                    // Cap the episode to what the corpus can hold so a short
+                    // corpus never produces a negative placement range; a corpus
+                    // shorter than ~90d then yields a sub-threshold gap that
+                    // simply never fires (honest, not a crash).
+                    let max_dur =
+                        (corpus_end_us - corpus_start_us - anchor_pad - burst_span).max(day);
+                    let d_days = 95 + (rng.unit() * 85.0) as i64; // 95..=179
+                    let dur = (d_days * day).min(max_dur);
+                    let lo = corpus_start_us + anchor_pad;
+                    let hi = corpus_end_us - dur - burst_span;
+                    let s_dorm = if hi > lo {
+                        lo + (rng.unit() * (hi - lo) as f64) as i64
+                    } else {
+                        lo.min(corpus_end_us)
+                    };
+                    let burst_start = (s_dorm + dur).min(corpus_end_us);
+                    let burst_end = (burst_start + burst_span).min(corpus_end_us);
+                    // Suppress the dormant originator's base + other-typology
+                    // sends across [S, burst_end) so the burst is its first
+                    // post-anchor send and the full gap survives.
+                    suppress = (s_dorm, burst_end);
+                    (burst_start, burst_end)
                 }
                 // corridor_high_risk: single-transaction pattern, so the
                 // window can be as small as one minute.
@@ -305,6 +361,8 @@ pub fn schedule(
                 rows_per_instance: spec.rows_per_instance,
                 corpus_start_us,
                 corpus_end_us,
+                suppress_start_us: suppress.0,
+                suppress_end_us: suppress.1,
             });
         }
     }
@@ -327,13 +385,13 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
         "fan_in" => {
             let bene = *p.last().unwrap();
             for &snd in &p[..p.len() - 1] {
-                rows.push(TxRow { orig: snd, bene, ts_us: uu(&mut rng, s, e), structuring: true });
+                rows.push(TxRow { orig: snd, bene, ts_us: uu(&mut rng, s, e), structuring: true, min_amount_usd: None });
             }
         }
         "fan_out" => {
             let orig = p[0];
             for &b in &p[1..] {
-                rows.push(TxRow { orig, bene: b, ts_us: uu(&mut rng, s, e), structuring: true });
+                rows.push(TxRow { orig, bene: b, ts_us: uu(&mut rng, s, e), structuring: true, min_amount_usd: None });
             }
         }
         "gather_scatter" => {
@@ -341,10 +399,10 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             let half = ((p.len() - 1) / 2).max(1);
             let third = (e - s) / 3;
             for &o in &p[1..1 + half] {
-                rows.push(TxRow { orig: o, bene: hub, ts_us: uu(&mut rng, s, s + third), structuring: false });
+                rows.push(TxRow { orig: o, bene: hub, ts_us: uu(&mut rng, s, s + third), structuring: false, min_amount_usd: None });
             }
             for &b in &p[1 + half..] {
-                rows.push(TxRow { orig: hub, bene: b, ts_us: uu(&mut rng, s + 2 * third, e), structuring: false });
+                rows.push(TxRow { orig: hub, bene: b, ts_us: uu(&mut rng, s + 2 * third, e), structuring: false, min_amount_usd: None });
             }
         }
         "scatter_gather" => {
@@ -352,8 +410,8 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             let bene = *p.last().unwrap();
             let half = (e - s) / 2;
             for &m in &p[1..p.len() - 1] {
-                rows.push(TxRow { orig, bene: m, ts_us: uu(&mut rng, s, s + half), structuring: false });
-                rows.push(TxRow { orig: m, bene, ts_us: uu(&mut rng, s + half, e), structuring: false });
+                rows.push(TxRow { orig, bene: m, ts_us: uu(&mut rng, s, s + half), structuring: false, min_amount_usd: None });
+                rows.push(TxRow { orig: m, bene, ts_us: uu(&mut rng, s + half, e), structuring: false, min_amount_usd: None });
             }
         }
         "cycle" => {
@@ -362,7 +420,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             for i in 0..n {
                 let base = s + step * i as i64;
                 let jit = (rng.unit() * step as f64 * 0.5) as i64;
-                rows.push(TxRow { orig: p[i], bene: p[(i + 1) % n], ts_us: base + jit, structuring: false });
+                rows.push(TxRow { orig: p[i], bene: p[(i + 1) % n], ts_us: base + jit, structuring: false, min_amount_usd: None });
             }
         }
         "stack" => {
@@ -370,17 +428,17 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             for i in 0..p.len() - 1 {
                 let base = s + step * i as i64;
                 let jit = (rng.unit() * step as f64 * 0.5) as i64;
-                rows.push(TxRow { orig: p[i], bene: p[i + 1], ts_us: base + jit, structuring: false });
+                rows.push(TxRow { orig: p[i], bene: p[i + 1], ts_us: base + jit, structuring: false, min_amount_usd: None });
             }
         }
         "random" => {
-            rows.push(TxRow { orig: p[0], bene: p[1], ts_us: uu(&mut rng, s, e), structuring: false });
+            rows.push(TxRow { orig: p[0], bene: p[1], ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
         }
         "bipartite" => {
             let half = (p.len() / 2).max(1);
             for &src in &p[..half] {
                 for &dst in &p[half..] {
-                    rows.push(TxRow { orig: src, bene: dst, ts_us: uu(&mut rng, s, e), structuring: false });
+                    rows.push(TxRow { orig: src, bene: dst, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
                 }
             }
         }
@@ -391,7 +449,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 if bb == a {
                     bb = p[(p.iter().position(|&x| x == a).unwrap() + 1) % p.len()];
                 }
-                rows.push(TxRow { orig: a, bene: bb, ts_us: uu(&mut rng, s, e), structuring: false });
+                rows.push(TxRow { orig: a, bene: bb, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
             }
         }
         // A -> mule -> B chain, both legs pinned to the SAME day. The
@@ -405,32 +463,40 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
         // forwards on the same business day.
         "rapid_layering" => {
             let (a, m, b) = (p[0], p[1], p[2]);
-            rows.push(TxRow { orig: a, bene: m, ts_us: uu(&mut rng, s, e), structuring: false });
-            rows.push(TxRow { orig: m, bene: b, ts_us: uu(&mut rng, s, e), structuring: false });
+            rows.push(TxRow { orig: a, bene: m, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
+            rows.push(TxRow { orig: m, bene: b, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
         }
-        // dormant_reactivation. The manifest injection window [s, e]
-        // covers only the burst band (last ~2 days of corpus). The early
-        // ping's ts is pinned to the first 5% of the corpus using the
-        // real corpus_start_us carried on the instance -- earlier code
-        // tried to derive it from (s, e) and picked the wrong side of a
-        // max()/min(), landing the ping only ~50 days before the burst.
-        // A gate that reconstructs typology rows as "activity on this
-        // edge inside the manifest window" picks up ONLY the burst; the
-        // ping is dormancy evidence outside the injection band.
+        // dormant_reactivation (P3, W8). One pre-window ANCHOR send (normal
+        // amount) 2 days before the dormancy start, then a reactivation BURST
+        // inside the manifest window [s, e] (= [burst_start, burst_end]) whose
+        // rows are floored to >= $5000-equivalent. The driver suppresses a's
+        // base + other-typology sends inside [suppress_start, suppress_end), so
+        // the anchor (or an earlier base send) is a's last send before the gap
+        // and the first burst row is its first send after it -- a real >90-day
+        // originator gap that W8's per-originator LAG fires on. The anchor is
+        // out of [s, e] (dormancy evidence), matching emitted_per_instance =
+        // rows_per_instance + 1. Recall attribution is by UETR (manifest
+        // participant_uetrs), not by the [s, e] window, so intraday shaping that
+        // rolls a burst row past burst_end does not drop it.
         "dormant_reactivation" => {
             let (a, b) = (p[0], p[1]);
-            let cs = inst.corpus_start_us;
-            let ce = inst.corpus_end_us;
-            let ping_end = cs + ((ce - cs) / 20).max(1); // first 5% of corpus
-            let early_ts = uu(&mut rng, cs, ping_end);
-            // One early ping (outside manifest window, dormancy evidence)
-            // plus `rows_per_instance` burst rows inside [s, e]. The
-            // manifest's rows_per_instance for this typology reflects
-            // only the in-window count, so downstream recall counters
-            // do not undercount.
-            rows.push(TxRow { orig: a, bene: b, ts_us: early_ts, structuring: false });
+            let day = 86_400_000_000i64;
+            let anchor_ts = (inst.suppress_start_us - 2 * day).max(inst.corpus_start_us);
+            rows.push(TxRow {
+                orig: a,
+                bene: b,
+                ts_us: anchor_ts,
+                structuring: false,
+                min_amount_usd: None,
+            });
             for _ in 0..inst.rows_per_instance {
-                rows.push(TxRow { orig: a, bene: b, ts_us: uu(&mut rng, s, e), structuring: false });
+                rows.push(TxRow {
+                    orig: a,
+                    bene: b,
+                    ts_us: uu(&mut rng, s, e),
+                    structuring: false,
+                    min_amount_usd: Some(5200.0),
+                });
             }
         }
         // Cycle across cross-border-likely participants (spec caller picks
@@ -442,7 +508,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             for i in 0..n {
                 let base = s + step * i as i64;
                 let jit = (rng.unit() * step as f64 * 0.5) as i64;
-                rows.push(TxRow { orig: p[i], bene: p[(i + 1) % n], ts_us: base + jit, structuring: false });
+                rows.push(TxRow { orig: p[i], bene: p[(i + 1) % n], ts_us: base + jit, structuring: false, min_amount_usd: None });
             }
         }
         // Many origs, one bene, structured amounts, 3-day window. Distinct
@@ -452,7 +518,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             let n = (inst.rows_per_instance).min(p.len() - 1);
             for i in 0..n {
                 let orig = p[i];
-                rows.push(TxRow { orig, bene, ts_us: uu(&mut rng, s, e), structuring: true });
+                rows.push(TxRow { orig, bene, ts_us: uu(&mut rng, s, e), structuring: true, min_amount_usd: None });
             }
         }
         // Repeated same-edge invoicing over one week. Signal: high amount
@@ -464,7 +530,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 // Not marked as structuring -- amounts come from the normal
                 // lognormal draw which spans four orders of magnitude, so
                 // the amount CV on this edge is high by construction.
-                rows.push(TxRow { orig: a, bene: b, ts_us: uu(&mut rng, s, e), structuring: false });
+                rows.push(TxRow { orig: a, bene: b, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
             }
         }
         // Single transaction between participants both drawn from the
@@ -478,7 +544,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             // instance without adding an extra rng draw.
             let flip = splitmix64(inst.seed as u64) & 1;
             let (a, b) = if flip == 0 { (p[0], p[1]) } else { (p[1], p[0]) };
-            rows.push(TxRow { orig: a, bene: b, ts_us: uu(&mut rng, s, e), structuring: false });
+            rows.push(TxRow { orig: a, bene: b, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
         }
         _ => {}
     }

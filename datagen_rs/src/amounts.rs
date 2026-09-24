@@ -77,6 +77,34 @@ pub fn lognormal_amount_shifted(rng: &mut Rng, mu_shift: f64) -> f64 {
     (amt * 100.0).round() / 100.0
 }
 
+/// Log-normal amount (with the per-account persona shift) rejection-sampled into
+/// the account's own upper tail until it clears `native_floor`, with a jittered
+/// fallback if the rejection budget is exhausted. Always returns a value
+/// >= native_floor. Used for the W8 dormant-reactivation burst.
+///
+/// The floor is on the NATIVE amount, not a USD-converted one: silver computes
+/// `txn_amount_usd = intr_bk_sttlm_amt * coalesce(xchg_rate, 1.0)` and xchg_rate
+/// is 1.0 for the ~90% of rows that are not flagged cross-currency, so for that
+/// dominant path the native amount IS what W8 compares against 5000. Flooring on
+/// native*fx_to_usd instead would leave a GBP/EUR/etc. burst below silver's USD
+/// value and silently miss W8. (The ~10% cross-currency rows remain subject to
+/// the pre-existing currency-scaling gap tracked as LB-137.) The jittered
+/// fallback avoids a fixed-constant amount spike (a leakage artifact) for
+/// deep-low-persona accounts that exhaust the rejection budget.
+pub fn floored_lognormal(rng: &mut Rng, mu_shift: f64, native_floor: f64) -> f64 {
+    let mut a = lognormal_amount_shifted(rng, mu_shift);
+    let mut tries = 0;
+    while a < native_floor && tries < 24 {
+        a = lognormal_amount_shifted(rng, mu_shift);
+        tries += 1;
+    }
+    if a < native_floor {
+        ((native_floor * (1.0 + 0.25 * rng.unit())) * 100.0).round() / 100.0
+    } else {
+        a
+    }
+}
+
 /// Amount tight against the local structuring band.
 pub fn structuring_amount(rng: &mut Rng, ccy: &str) -> f64 {
     let (lo, hi) = structuring_band(ccy);

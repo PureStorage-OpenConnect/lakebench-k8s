@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use parquet::arrow::ArrowWriter;
 
-use datagen_rs::amounts::{lognormal_amount_shifted, structuring_amount};
+use datagen_rs::amounts::{floored_lognormal, lognormal_amount_shifted, structuring_amount};
 use datagen_rs::customer360;
 use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::emit::{build_batch, Batch};
@@ -35,6 +35,26 @@ use datagen_rs::writer::{
 fn typology_uid(inst_seed: i64, row_idx: usize) -> u64 {
     let mixed = splitmix64((inst_seed as u64).wrapping_add((row_idx as u64) << 40));
     mixed | 0x8000_0000_0000_0000
+}
+
+/// True when originator `o` has a dormancy suppression window (P3, W8) that
+/// contains `ts`. Fast path: the bitmap is false for >99.9% of entities, so a
+/// non-participant costs one array read. Only dormant participants pay the
+/// small window scan.
+#[inline]
+fn in_suppress_window(
+    is_suppressed: &[bool],
+    windows: &HashMap<u64, Vec<(i64, i64)>>,
+    o: u64,
+    ts: i64,
+) -> bool {
+    if !is_suppressed[o as usize] {
+        return false;
+    }
+    windows
+        .get(&o)
+        .map(|ws| ws.iter().any(|&(s, e)| ts >= s && ts < e))
+        .unwrap_or(false)
 }
 
 const US_PER_DAY: i64 = 86_400_000_000;
@@ -285,16 +305,48 @@ fn pacs008_main() {
     // joins `manifest.participant_uetrs` against `gold.alerts.related_txn_ids`;
     // an empty list here was silently making recall = 0/0.
     let mut inst_uids: HashMap<String, Vec<u64>> = HashMap::new();
+    // Dormancy suppression (P3, W8): the dormant originator (participants[0]) of
+    // each dormant_reactivation instance must have NO base row and no
+    // other-typology row inside its [suppress_start, suppress_end) window, so its
+    // only post-anchor send is the burst and W8 sees a real >90-day gap. Built
+    // identically on every pod (schedule is deterministic). Fast-path bitmap +
+    // small per-participant window list.
+    let mut is_suppressed = vec![false; pop + 1];
+    let mut suppress_windows: HashMap<u64, Vec<(i64, i64)>> = HashMap::new();
+    for inst in &instances {
+        if inst.suppress_end_us > inst.suppress_start_us {
+            let a = inst.participants[0];
+            is_suppressed[a as usize] = true;
+            suppress_windows
+                .entry(a)
+                .or_default()
+                .push((inst.suppress_start_us, inst.suppress_end_us));
+        }
+    }
     let mut trng = Rng::new((seed as u64) ^ 0x7791);
     for inst in &instances {
+        let is_dormant = inst.typ == "dormant_reactivation";
         for (row_idx, r) in datagen_rs::typology::emit_instance(inst).into_iter().enumerate() {
+            // A NON-dormant typology row whose originator is a dormant
+            // participant inside its suppression window would fill the dormancy
+            // gap -- drop it. Dormant-instance rows (anchor + burst) are exempt.
+            if !is_dormant
+                && in_suppress_window(&is_suppressed, &suppress_windows, r.orig, r.ts_us)
+            {
+                continue;
+            }
             let ccy = w.ccy[r.orig as usize];
             // Typology rows carry the ORIGINATOR's persona amount shift, the
             // same as that account's baseline rows, so a typology participant's
             // amounts stay consistent with its own history and do not create a
             // marginal amount artifact that separates typology from baseline.
+            // A row with min_amount_usd (dormant burst) is rejection-sampled
+            // into the account's OWN upper tail until it clears the USD floor,
+            // so it reliably trips W8 without a fixed-constant amount artifact.
             let amount = if r.structuring {
                 structuring_amount(&mut trng, ccy)
+            } else if let Some(floor_native) = r.min_amount_usd {
+                floored_lognormal(&mut trng, w.amount_logshift[r.orig as usize], floor_native)
             } else {
                 lognormal_amount_shifted(&mut trng, w.amount_logshift[r.orig as usize])
             };
@@ -375,30 +427,49 @@ fn pacs008_main() {
         let base_uid_hi = (fid as u64) << 40;
 
         for base_idx in 0..n_base {
-            let o = sample_orig(&cum, total_w, pop, &mut rng);
-            // Beneficiary drawn from a bounded core counterparty set so that
-            // recurring-counterparty volume stays concentrated at any scale
-            // (uniform population draws never repeat once population is large,
-            // which collapsed the repeat-edge share at scale 1). The core is
-            // capped at CORE members; off-ring draws hit an extended band.
+            // Resample the whole row (originator, beneficiary, timestamp) if the
+            // sampled originator is a dormant participant inside its suppression
+            // window, so no base send fills the dormancy gap (P3, W8). Bounded
+            // retries; on exhaustion keep the last draw -- at most a handful per
+            // corpus, and a stray in-window base row can only SHORTEN one
+            // instance's gap (a missed instance), never create a false dormancy
+            // on another account. For a non-suppressed originator the loop runs
+            // once and the RNG draw order is identical to the pre-P3 stream.
             const CORE: u64 = 40;
-            let rs = w.ring_sz[o as usize].max(1) as u64;
-            let core = rs.min(CORE);
+            let mut o;
             let mut b;
-            if rng.unit() < w.ring_hit[o as usize] {
-                b = ring_member(o, rng.below(core), pop, seed);
-            } else {
-                // Extended band: still bounded per originator, so it repeats.
-                let ext = (rs.min(4 * CORE)).max(core + 1);
-                b = ring_member(o, core + rng.below(ext), pop, seed);
-            }
-            if b == o {
-                b = (b % pop as u64) + 1;
+            let mut t;
+            let mut tries = 0;
+            loop {
+                o = sample_orig(&cum, total_w, pop, &mut rng);
+                // Beneficiary drawn from a bounded core counterparty set so that
+                // recurring-counterparty volume stays concentrated at any scale
+                // (uniform population draws never repeat once population is
+                // large, which collapsed the repeat-edge share at scale 1). The
+                // core is capped at CORE members; off-ring draws hit an extended
+                // band.
+                let rs = w.ring_sz[o as usize].max(1) as u64;
+                let core = rs.min(CORE);
+                if rng.unit() < w.ring_hit[o as usize] {
+                    b = ring_member(o, rng.below(core), pop, seed);
+                } else {
+                    // Extended band: still bounded per originator, so it repeats.
+                    let ext = (rs.min(4 * CORE)).max(core + 1);
+                    b = ring_member(o, core + rng.below(ext), pop, seed);
+                }
+                if b == o {
+                    b = (b % pop as u64) + 1;
+                }
+                t = sample_ts(&mut rng, &cal, w.country[o as usize]);
+                tries += 1;
+                if tries >= 8 || !in_suppress_window(&is_suppressed, &suppress_windows, o, t) {
+                    break;
+                }
             }
             let cc = w.ccy[o as usize];
             orig.push(o);
             bene.push(b);
-            ts_us.push(sample_ts(&mut rng, &cal, w.country[o as usize]));
+            ts_us.push(t);
             amount.push(lognormal_amount_shifted(&mut rng, w.amount_logshift[o as usize]));
             ccy.push(cc);
             uid_pre.push(base_uid_hi | base_idx as u64);
