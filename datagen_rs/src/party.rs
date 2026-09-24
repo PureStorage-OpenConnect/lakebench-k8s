@@ -329,8 +329,9 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
     let mut home: Vec<String> = Vec::new();
     for id in lo as u64..=hi as u64 {
         let i = id as usize;
-        let cc = w.country[i];
+        let cc = kyc::account_country(kyc::is_customer(id, w.seed), w.country[i]);
         let cb = [cc.as_bytes()[0], cc.as_bytes()[1]];
+        let primary_od = kyc::primary_opened_day(id, w.seed, w.dims.corpus_months);
         for seq in 0..w.n_accounts[i] as u64 {
             let acc_seed = splitmix64(id ^ (seq << 20) ^ seed_u);
             acct_id.push((splitmix64(id ^ (seq << 30)) & 0x7FFF_FFFF_FFFF_FFFF) as i64);
@@ -348,9 +349,15 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
             bank_bic.push(w.bic[i].clone());
             home.push(kyc::home_fi(&w.bic[i]).to_string());
             currency.push(w.ccy[i].to_string());
-            let od = kyc::account_opened_day(id);
+            let od = if seq == 0 {
+                primary_od
+            } else {
+                kyc::account_opened_day(id, primary_od)
+            };
             opened.push(od);
-            let cm = (splitmix64(id ^ 0xC1) as f64 / 18446744073709551616.0) < 0.02;
+            // The payment account stays open: the entity pays from it until
+            // the corpus ends. Further accounts close at a 2% rate.
+            let cm = seq > 0 && (splitmix64(id ^ 0xC1) as f64 / 18446744073709551616.0) < 0.02;
             closed.push(if cm {
                 Some(od + (splitmix64(id) % 365) as i32 + 180)
             } else {

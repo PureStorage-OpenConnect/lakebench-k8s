@@ -169,7 +169,8 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
         Vec::new()
     } else {
         sentinel("_", &|i| {
-            let cc = country[i];
+            let cc =
+                crate::kyc::account_country(crate::kyc::is_customer(i as u64, seed), country[i]);
             iban_for(&[cc.as_bytes()[0], cc.as_bytes()[1]], i as u64)
         })
     };

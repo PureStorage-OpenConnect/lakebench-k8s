@@ -65,7 +65,14 @@ pub fn is_customer(id: u64, seed: i64) -> bool {
 /// party is a customer.
 #[inline]
 pub fn entity_bic_idx(id: u64, seed: i64, pool_len: usize) -> usize {
-    if is_customer(id, seed) {
+    bic_idx_for(id, is_customer(id, seed), pool_len)
+}
+
+/// `entity_bic_idx` with the customer flag already known (the emit hot path
+/// computes it once per party per row).
+#[inline]
+pub fn bic_idx_for(id: u64, customer: bool, pool_len: usize) -> usize {
+    if customer {
         return REPORTING_FI_POOL_IDX[(splitmix64(id ^ 0xB1C1) & 1) as usize];
     }
     own_bic_idx(id, pool_len)
@@ -80,6 +87,19 @@ pub fn own_bic_idx(id: u64, pool_len: usize) -> usize {
         (i + 1) % pool_len
     } else {
         i
+    }
+}
+
+/// Country of the entity's accounts, and so of its IBANs. A customer's
+/// accounts are held at the reporting FI, a US bank, so they are US accounts
+/// whatever the holder's residence (a foreign resident banking in the US);
+/// everyone else's accounts are in their home country.
+#[inline]
+pub fn account_country(customer: bool, home: &'static str) -> &'static str {
+    if customer {
+        DOMESTIC
+    } else {
+        home
     }
 }
 
@@ -108,21 +128,40 @@ pub fn corpus_start_day(corpus_months: i64) -> i64 {
     days_from_civil(start_year, start_month, 1)
 }
 
-/// Opening date of every account of `id` (days since epoch), 2020-01-01 plus
-/// up to six years. Shared by the account zone and `customer_since`.
-#[inline]
-pub fn account_opened_day(id: u64) -> i32 {
-    18262 + (splitmix64(id ^ 0x0DA7E) % 2191) as i32
+/// Days of an exponential tenure (mean TENURE_MEAN_YEARS, capped) from `u`.
+fn tenure_days(u: f64) -> i64 {
+    ((-(1.0 - u).ln() * TENURE_MEAN_YEARS).min(TENURE_CAP_YEARS) * 365.25) as i64
 }
 
-/// Onboarding date: an exponential tenure before the corpus starts, and never
-/// after the entity's account opening date. Every customer is on the book when
-/// the corpus begins, so no entity changes bank mid-corpus.
+/// Onboarding date: an exponential tenure before the corpus starts. Every
+/// customer is on the book when the corpus begins, so no entity changes bank
+/// mid-corpus.
 pub fn customer_since_day(id: u64, seed: i64, corpus_months: i64) -> i32 {
-    let u = hash_frac(id, seed + 1414);
-    let years = (-(1.0 - u).ln() * TENURE_MEAN_YEARS).min(TENURE_CAP_YEARS);
-    let d = corpus_start_day(corpus_months) - 1 - (years * 365.25) as i64;
-    (d as i32).min(account_opened_day(id))
+    let d = corpus_start_day(corpus_months) - 1 - tenure_days(hash_frac(id, seed + 1414));
+    d as i32
+}
+
+/// Opening date of the entity's payment account (its first account, the one
+/// the pacs.008 rows use). It is open before the corpus starts, so before the
+/// first payment. For a customer it is on or after customer_since (the
+/// account is opened at onboarding or later); for anyone else it is an
+/// exponential tenure before the corpus start.
+pub fn primary_opened_day(id: u64, seed: i64, corpus_months: i64) -> i32 {
+    let start = corpus_start_day(corpus_months);
+    let d = if is_customer(id, seed) {
+        let since = customer_since_day(id, seed, corpus_months) as i64;
+        since + (hash_frac(id, seed + 1515) * (start - since) as f64) as i64
+    } else {
+        start - 1 - tenure_days(hash_frac(id, seed + 1616))
+    };
+    (d.min(start - 1)) as i32
+}
+
+/// Opening date of a further account (seq > 0): 2020-01-01 plus up to six
+/// years, but never before the payment account.
+#[inline]
+pub fn account_opened_day(id: u64, primary_opened: i32) -> i32 {
+    (18262 + (splitmix64(id ^ 0x0DA7E) % 2191) as i32).max(primary_opened)
 }
 
 pub fn customer_type(ty: i8) -> &'static str {
