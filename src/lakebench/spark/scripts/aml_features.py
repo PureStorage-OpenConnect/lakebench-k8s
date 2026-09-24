@@ -685,8 +685,9 @@ def unkeyed_rows(txns: DataFrame) -> int:
 
 
 def gate_frame(features: DataFrame, labels: DataFrame, typologies):
-    """Customers only, one 0/1 label column per typology (``label:<name>``),
-    pulled to pandas for lakebench.aml.gate."""
+    """Customers only, one 0/1 label column per typology (``label:<name>``)
+    and the customer key as ``group``, pulled to pandas for
+    lakebench.aml.fidelity_gate."""
     cust = features.filter(col("is_customer"))
     lab = labels.filter(col("typology_type").isin(*list(typologies)))
     wide = lab.groupBy("key").pivot("typology_type", list(typologies)).agg(count_(lit(1)))
@@ -695,4 +696,5 @@ def gate_frame(features: DataFrame, labels: DataFrame, typologies):
         out = out.withColumn(
             f"label:{t}", (coalesce(col(f"`{t}`"), lit(0)) > lit(0)).cast("int")
         ).drop(t)
-    return out.drop("key").toPandas()
+    # The customer is the correlated unit the gate's CV and bootstrap group on.
+    return out.withColumnRenamed("key", "group").toPandas()

@@ -124,6 +124,7 @@ def test_fidelity_gate_over_silver(spark, tmp_path, monkeypatch):
     assert report["provenance"]["label_role"] == "participant"
     assert report["provenance"]["duplicate_ibans"] == 0
     assert report["provenance"]["corpus_seed_check"]["claimed_seed"] is None
+    assert report["n_groups"] == report["n_scored_customers"]
     assert len(report["provenance"]["aml_features_sha256"]) == 64
     assert report["passes"]["all"] is False
     assert report["provenance"]["model_versions"] == ["datagen-v2-rs-0.2"]

@@ -34,7 +34,10 @@ from typing import Any
 
 PREREG_FILENAME = "aml_preregistration.json"
 LABEL_PREFIX = "label:"
-
+#: Optional frame column naming the correlated unit (the customer). CV folds
+#: never split a group and the bootstrap resamples groups. Absent: each row is
+#: its own group.
+GROUP_COLUMN = "group"
 
 # ---------------------------------------------------------------------------
 # Pre-registration
@@ -106,14 +109,15 @@ def _shortcut_model(prereg: dict):
     return DecisionTreeClassifier(max_depth=spec["max_depth"], random_state=prereg["cv"]["seed"])
 
 
-def _folds(y, prereg: dict):
-    from sklearn.model_selection import StratifiedKFold
+def _folds(y, groups, prereg: dict):
+    """Stratified folds that never split a group (StratifiedGroupKFold)."""
+    from sklearn.model_selection import StratifiedGroupKFold
 
     cv = prereg["cv"]
     if not cv["stratified"]:
         raise ValueError("the pre-registered CV is stratified; stratified=false is not implemented")
-    skf = StratifiedKFold(n_splits=cv["folds"], shuffle=True, random_state=cv["seed"])
-    return list(skf.split(y.reshape(-1, 1), y))
+    skf = StratifiedGroupKFold(n_splits=cv["folds"], shuffle=True, random_state=cv["seed"])
+    return list(skf.split(y.reshape(-1, 1), y, groups))
 
 
 def _ap(y, score, w):
@@ -191,19 +195,47 @@ def _r_precision(y, score, w) -> float:
     return float((ws[top] * y[order][top]).sum() / ws[top].sum())
 
 
-def _bootstrap_ci(y, score, w, prereg: dict) -> tuple[float | None, float | None]:
+def _group_index(groups):
+    """(codes order, start, length) so the rows of group g are
+    order[start[g]:start[g] + length[g]]."""
+    import numpy as np
+    import pandas as pd
+
+    codes, uniq = pd.factorize(groups)
+    order = np.argsort(codes, kind="stable")
+    length = np.bincount(codes, minlength=len(uniq))
+    start = np.concatenate([[0], np.cumsum(length)[:-1]])
+    return order, start, length
+
+
+def _resample_rows(draw, order, start, length):
+    """Row indices for a resample of groups (``draw`` holds group codes)."""
+    import numpy as np
+
+    counts = length[draw]
+    total = int(counts.sum())
+    offsets = np.repeat(start[draw] - np.cumsum(counts) + counts, counts) + np.arange(total)
+    return order[offsets]
+
+
+def _bootstrap_ci(y, score, w, groups, prereg: dict) -> tuple[float | None, float | None]:
+    """Percentile CI of AP over resamples of groups (customers), not rows."""
     import numpy as np
 
     pw = prereg["power"]
     rng = np.random.default_rng(prereg["cv"]["seed"])
-    n = len(y)
+    order, start, length = _group_index(groups)
+    n_groups = len(length)
     # Draw in chunks of one resample per worker so memory stays bounded at a
     # million customers; the RNG order, and so every number, is unchanged.
     chunk = _jobs()
     vals = []
     left = pw["bootstrap_iterations"]
     while left > 0:
-        draws = [rng.integers(0, n, n) for _ in range(min(chunk, left))]
+        draws = [
+            _resample_rows(rng.integers(0, n_groups, n_groups), order, start, length)
+            for _ in range(min(chunk, left))
+        ]
         left -= len(draws)
         draws = [idx for idx in draws if y[idx].sum() > 0]
         vals += _parallel(lambda idx: _ap(y[idx], score[idx], w[idx]), draws)
@@ -218,7 +250,7 @@ def _bootstrap_ci(y, score, w, prereg: dict) -> tuple[float | None, float | None
 # ---------------------------------------------------------------------------
 
 
-def _evaluate_typology(name, X, y, w, features, prereg, kind) -> dict[str, Any]:
+def _evaluate_typology(name, X, y, w, groups, features, prereg, kind) -> dict[str, Any]:
     import numpy as np
 
     n_pos = int(y.sum())
@@ -235,10 +267,10 @@ def _evaluate_typology(name, X, y, w, features, prereg, kind) -> dict[str, Any]:
         out.update(status="insufficient_labels", ap=None, ap_ci=[None, None])
         return out
 
-    folds = _folds(y, prereg)
+    folds = _folds(y, groups, prereg)
     oof = _oof_scores(lambda: _reference_model(prereg), X, y, w, folds)
     ap = _ap(y, oof, w)
-    lo, hi = _bootstrap_ci(y, oof, w, prereg)
+    lo, hi = _bootstrap_ci(y, oof, w, groups, prereg)
     out.update(status="ok", ap=ap, ap_ci=[lo, hi], r_precision=_r_precision(y, oof, w))
 
     # D5 shortcuts: every single feature and every feature pair, out of fold
@@ -458,11 +490,15 @@ def evaluate_gate(
         if "weight" in frame.columns
         else np.ones(len(frame), dtype=float)
     )
+    groups = (
+        frame[GROUP_COLUMN].to_numpy() if GROUP_COLUMN in frame.columns else np.arange(len(frame))
+    )
+    report["n_groups"] = int(len(np.unique(groups)))
     per = {}
     for t in typologies:
         y = frame[LABEL_PREFIX + t].to_numpy(dtype=int)
         kind = "behavioural" if t in prereg["behavioural_subset"] else "definitional"
-        per[t] = _evaluate_typology(t, X, y, w, features, prereg, kind)
+        per[t] = _evaluate_typology(t, X, y, w, groups, features, prereg, kind)
     report["typologies"] = per
     report["level2"] = _level2(per, prereg)
     report["verdict"] = "ok"
