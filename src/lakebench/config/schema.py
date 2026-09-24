@@ -183,6 +183,10 @@ class ReportFormat(str, Enum):
 class ImagesConfig(ConfigModel):
     """Container image configuration for all Lakebench components."""
 
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "pull_secrets": "No deployer ever applied it; removed in v1.5.",
+    }
+
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
     # every datagen_rs change; :latest drifted from the code it claimed to be.
     datagen: str = "docker.io/sillidata/lb-datagen:d841bcc"
@@ -549,6 +553,10 @@ class DeltaConfig(ConfigModel):
 class TableFormatConfig(ConfigModel):
     """Table format configuration."""
 
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "hudi": "Hudi is not a supported table format; removed in v1.2.",
+    }
+
     type: TableFormatType = TableFormatType.ICEBERG
     iceberg: IcebergConfig = Field(default_factory=IcebergConfig)
     delta: DeltaConfig = Field(default_factory=DeltaConfig)
@@ -668,6 +676,10 @@ class BronzeLayerConfig(ConfigModel):
 
 class SilverLayerConfig(ConfigModel):
     """Silver layer configuration."""
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "strategy": "The silver build never read it; removed in v1.5.",
+    }
 
     format: str = "iceberg"
     table_name: str = "customer_interactions_enriched"
@@ -884,10 +896,14 @@ class ProcessingConfig(ConfigModel):
                 DeprecationWarning,
                 stacklevel=2,
             )
-            if "sustained" not in data:
-                data["sustained"] = data.pop("continuous")
-            else:
-                data.pop("continuous")
+            if "sustained" in data:
+                # Dropping one silently would lose settings without a trace.
+                raise ValueError(
+                    "both 'pipeline.continuous' (deprecated) and 'pipeline.sustained' are "
+                    "set; move the settings under 'sustained' and remove 'continuous'"
+                )
+            data = dict(data)
+            data["sustained"] = data.pop("continuous")
         return data
 
     @field_validator("mode", mode="before")
@@ -1015,6 +1031,12 @@ class Customer360Config(ConfigModel):
     advanced use cases.
     """
 
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "channels": "The customer360 generator never read it; removed in v1.5.",
+        "event_types": "The customer360 generator never read it; removed in v1.5.",
+        "quality_distribution": "The customer360 generator never read it; removed in v1.5.",
+    }
+
     unique_customers: int | None = Field(
         default=None,
         description="Override: unique customer count. If None, derived from scale.",
@@ -1027,6 +1049,17 @@ class Customer360Config(ConfigModel):
 
 class WorkloadConfig(ConfigModel):
     """Workload/data generation configuration."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _one_schema_spelling(cls, data: object) -> object:
+        # 'schema' is the documented key and 'schema_type' the field name;
+        # with both set pydantic reports the second as an unknown key.
+        if isinstance(data, dict) and "schema" in data and "schema_type" in data:
+            raise ValueError(
+                "both 'workload.schema' and 'workload.schema_type' are set; set only 'schema'"
+            )
+        return data
 
     schema_type: WorkloadSchema = Field(default=WorkloadSchema.CUSTOMER360, alias="schema")
     datagen: DatagenConfig = Field(default_factory=DatagenConfig)
@@ -1343,10 +1376,13 @@ class ArchitectureConfig(ConfigModel):
                 DeprecationWarning,
                 stacklevel=2,
             )
-            if "pipeline" not in data:
-                data["pipeline"] = data.pop("processing")
-            else:
-                data.pop("processing")  # pipeline takes precedence
+            if "pipeline" in data:
+                raise ValueError(
+                    "both 'architecture.processing' (deprecated) and 'architecture.pipeline' "
+                    "are set; move the settings under 'pipeline' and remove 'processing'"
+                )
+            data = dict(data)
+            data["pipeline"] = data.pop("processing")
         return data
 
     @model_validator(mode="after")
