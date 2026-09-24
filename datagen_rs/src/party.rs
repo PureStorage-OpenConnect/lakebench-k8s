@@ -382,7 +382,6 @@ pub fn build_manifest(
     let m = instances.len();
     let tid: Vec<String> = instances.iter().map(|i| i.id.clone()).collect();
     let ttype: Vec<String> = instances.iter().map(|i| i.typ.to_string()).collect();
-    let seed_u = seed as u64;
 
     // participant list<int64>
     let mut pvals = Vec::new();
@@ -407,8 +406,7 @@ pub fn build_manifest(
     for inst in instances {
         let uids = inst_uids.get(&inst.id).map(|v| v.as_slice()).unwrap_or(&[]);
         for &uid in uids {
-            let us = crate::hash::splitmix64(uid ^ seed_u ^ 0x0E7A);
-            let us2 = crate::hash::splitmix64(uid ^ seed_u ^ 0x5A1D);
+            let (us, us2) = crate::hash::uetr_seeds(uid, seed);
             buf.clear();
             uuid_v4_into(us, us2, &mut buf);
             uetr_vals.push(buf.clone());

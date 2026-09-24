@@ -15,12 +15,12 @@ use datagen_rs::amounts::{floored_lognormal, lognormal_amount_shifted, structuri
 use datagen_rs::customer360;
 use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::emit::{build_batch, Batch};
-use datagen_rs::hash::{splitmix64, Rng};
+use datagen_rs::hash::{hash_frac, splitmix64, Rng};
 use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_ex;
 use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
 use datagen_rs::s3sink::{S3Cfg, S3Sink};
-use datagen_rs::timing::{sample_ts, shape_fixed_day, DayCal};
+use datagen_rs::timing::{sample_ts_on_day, shape_fixed_day, DayCal};
 use datagen_rs::world::ring_member;
 use datagen_rs::writer::{
     customer360_bytes_per_row_default, pacs008_bytes_per_row_default, writer_properties,
@@ -294,13 +294,50 @@ fn pacs008_main() {
     let ideal = (total_txns as f64 * bytes_per_row / file_size as f64).round() as i64;
     let max_by_rows = (total_txns / 1000).max(1);
     let total_files = ideal.max(MIN_FILES).min(max_by_rows).max(1);
-    let rows_per_file = (total_txns / total_files).max(1);
-    let step_us = span_us / total_files;
+    // One calendar for the whole corpus. Files cover equal slices of
+    // day-weighted calendar MASS, not equal slices of time: with equal-time
+    // windows every file got the same row count, so weekends and holidays got
+    // weekday volume, and windows of fractional days dropped whole days (25%
+    // of days had no baseline rows at scale 10). Rows are placed by mass, so
+    // the day-of-week and salary-day shape is the same at every scale.
+    let gcal = DayCal::new(start_us, (span_us / US_PER_DAY).max(1) as usize);
 
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
-    let instances =
+    let mut instances =
         datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
+    // The schedule picks instance start days uniformly in time, while
+    // baseline volume follows the day-of-week and salary-day weights; weekend
+    // starts then rolled to Monday, so planted rows were 41% Mondays against
+    // 25% for baseline (a label leak, LB-103 class). Shift each instance, as
+    // a unit (window, suppression window, anchor offsets), so its start day
+    // is drawn from the same calendar mass as baseline rows.
+    for inst in instances.iter_mut() {
+        let p = ((inst.start_us - start_us) as f64 / span_us as f64).clamp(0.0, 0.999_999);
+        let want_day = gcal.day_for_mass(p) as i64;
+        let have_day = (inst.start_us - start_us) / US_PER_DAY;
+        let mut delta = (want_day - have_day) * US_PER_DAY;
+        // Keep the whole instance (including a pre-window anchor) in the corpus.
+        let has_suppress = inst.suppress_end_us > inst.suppress_start_us;
+        let earliest = if has_suppress {
+            inst.start_us.min(inst.suppress_start_us)
+        } else {
+            inst.start_us
+        };
+        let lo = earliest - 3 * US_PER_DAY;
+        if lo + delta < start_us {
+            delta = start_us - lo;
+        }
+        if inst.end_us + delta > end_us {
+            delta = end_us - inst.end_us;
+        }
+        inst.start_us += delta;
+        inst.end_us += delta;
+        if has_suppress {
+            inst.suppress_start_us += delta;
+            inst.suppress_end_us += delta;
+        }
+    }
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
     // Instance-id -> list of uids for the rows emitted for that instance.
     // Populated at typology-scheduling time so it's deterministic (both
@@ -331,10 +368,38 @@ fn pacs008_main() {
     let mut trng = Rng::new((seed as u64) ^ 0x7791);
     for inst in &instances {
         let is_dormant = inst.typ == "dormant_reactivation";
-        for (row_idx, r) in datagen_rs::typology::emit_instance(inst)
-            .into_iter()
-            .enumerate()
-        {
+        // Shape every row of the instance once, here, with an instance-keyed
+        // RNG: roll to the originator country's next business day and draw a
+        // business-hours time. Then hand the shaped times back in emit order
+        // (sorted), so a leg emitted after another never ends up earlier:
+        // shaping rows independently per file let about half of rapid-
+        // layering mules forward money before they received it.
+        let mut rows = datagen_rs::typology::emit_instance(inst);
+        let mut srng = Rng::new(splitmix64((inst.seed as u64) ^ 0x5A4E_0000_0000_0001));
+        // Rows inside the instance window get their day from the window's
+        // calendar mass (relative position preserved), so planted rows follow
+        // the same weekday/salary-day weights as baseline. Rows outside it
+        // (the dormancy anchor before the burst) keep their day.
+        let (ws, we) = (inst.start_us, inst.end_us.max(inst.start_us + 1));
+        let (ms, me) = (gcal.mass_at(ws), gcal.mass_at(we));
+        let mut shaped: Vec<i64> = rows
+            .iter()
+            .map(|r| {
+                let cc = w.country[r.orig as usize];
+                if r.ts_us >= ws && r.ts_us < we && me > ms {
+                    let frac = (r.ts_us - ws) as f64 / (we - ws) as f64;
+                    let day = gcal.day_for_mass((ms + frac * (me - ms)).min(0.999_999_999));
+                    sample_ts_on_day(&mut srng, &gcal, day, cc)
+                } else {
+                    shape_fixed_day(&mut srng, r.ts_us, cc)
+                }
+            })
+            .collect();
+        shaped.sort_unstable();
+        for (r, t) in rows.iter_mut().zip(shaped) {
+            r.ts_us = t;
+        }
+        for (row_idx, r) in rows.into_iter().enumerate() {
             // A NON-dormant typology row whose originator is a dormant
             // participant inside its suppression window would fill the dormancy
             // gap -- drop it. Dormant-instance rows (anchor + burst) are exempt.
@@ -357,7 +422,8 @@ fn pacs008_main() {
             } else {
                 lognormal_amount_shifted(&mut trng, w.amount_logshift[r.orig as usize])
             };
-            let fid = (((r.ts_us - start_us) / step_us).clamp(0, total_files - 1)) as usize;
+            let fid = ((gcal.mass_at(r.ts_us) * total_files as f64) as i64)
+                .clamp(0, total_files - 1) as usize;
             let uid = typology_uid(inst.seed, row_idx);
             typ_by_file[fid].push(TypRow {
                 orig: r.orig,
@@ -370,6 +436,37 @@ fn pacs008_main() {
             inst_uids.entry(inst.id.clone()).or_default().push(uid);
         }
     }
+
+    // Base rows are indexed globally, 0..n_base_total, so what a row contains
+    // depends only on (seed, its index), never on how many files there are
+    // (which depends on codec and file size). Row i sits at calendar mass
+    // (i + jitter) / n_base_total; file fid holds the contiguous rows whose
+    // mass falls in [fid/F, (fid+1)/F).
+    let n_typ_total: i64 = typ_by_file.iter().map(|v| v.len() as i64).sum();
+    let n_base_total: u64 = (total_txns - n_typ_total).max(0) as u64;
+    let base_seed = splitmix64((seed as u64) ^ 0xBA5E_0000_0000_0001);
+    let base_mass = move |i: u64| -> f64 {
+        (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
+    };
+    // First base row whose mass is >= fid/F.
+    let base_start = |fid: i64| -> u64 {
+        if fid <= 0 {
+            return 0;
+        }
+        if fid >= total_files {
+            return n_base_total;
+        }
+        let target = fid as f64 / total_files as f64;
+        let mut i = ((target * n_base_total as f64) as u64).min(n_base_total);
+        while i > 0 && base_mass(i - 1) >= target {
+            i -= 1;
+        }
+        while i < n_base_total && base_mass(i) < target {
+            i += 1;
+        }
+        i
+    };
+    let rows_per_file = (n_base_total as i64 / total_files).max(1);
 
     // Activity-weighted originator sampling: prefix sums.
     let mut cum = vec![0.0f64; pop + 1];
@@ -413,20 +510,11 @@ fn pacs008_main() {
         Vec::new()
     };
     my_files.par_iter().for_each(|&fid| {
-        let ws = start_us + step_us * fid;
-        // midnight-align file window start
-        let ws_day = ws / US_PER_DAY;
-        let start_aligned = ws_day * US_PER_DAY;
-        let we = start_us + step_us * (fid + 1);
-        let span_days = (((we - ws) / US_PER_DAY).max(1)) as usize;
-
         let typ = &typ_by_file[fid as usize];
         let n_typ = typ.len();
-        let n_base = (rows_per_file as usize).saturating_sub(n_typ);
-
-        let mut rng =
-            Rng::new((seed as u64).wrapping_add(1_000_003u64.wrapping_mul(fid as u64 + 1)));
-        let cal = DayCal::new(start_aligned, span_days);
+        let i0 = base_start(fid);
+        let i1 = base_start(fid + 1);
+        let n_base = (i1 - i0) as usize;
 
         let cap = n_base + n_typ;
         let mut orig = Vec::with_capacity(cap);
@@ -434,14 +522,17 @@ fn pacs008_main() {
         let mut ts_us = Vec::with_capacity(cap);
         let mut amount = Vec::with_capacity(cap);
         let mut ccy: Vec<&'static str> = Vec::with_capacity(cap);
-        // Pre-assigned uid per row: base rows use (fid<<40)|base_idx
-        // (top bit 0), typology rows carry their scheduling-time uid
-        // (top bit 1). Kept through the sort so bronze UETRs stay
-        // recoverable by the manifest builder.
+        // Pre-assigned uid per row: base rows use their global index (top
+        // bit 0), typology rows carry their scheduling-time uid (top bit 1).
+        // Kept through the sort so bronze UETRs stay recoverable by the
+        // manifest builder.
         let mut uid_pre = Vec::with_capacity(cap);
-        let base_uid_hi = (fid as u64) << 40;
 
-        for base_idx in 0..n_base {
+        for gi in i0..i1 {
+            // Per-row RNG keyed by the global index: row content does not
+            // depend on the file layout.
+            let mut rng = Rng::new(splitmix64(gi ^ base_seed));
+            let day = gcal.day_for_mass(base_mass(gi));
             // Resample the whole row (originator, beneficiary, timestamp) if the
             // sampled originator is a dormant participant inside its suppression
             // window, so no base send fills the dormancy gap (P3, W8). Bounded
@@ -475,7 +566,7 @@ fn pacs008_main() {
                 if b == o {
                     b = (b % pop as u64) + 1;
                 }
-                t = sample_ts(&mut rng, &cal, w.country[o as usize]);
+                t = sample_ts_on_day(&mut rng, &gcal, day, w.country[o as usize]);
                 tries += 1;
                 if tries >= 8 || !in_suppress_window(&is_suppressed, &suppress_windows, o, t) {
                     break;
@@ -490,17 +581,13 @@ fn pacs008_main() {
                 w.amount_logshift[o as usize],
             ));
             ccy.push(cc);
-            uid_pre.push(base_uid_hi | base_idx as u64);
+            uid_pre.push(gi);
         }
         for r in typ {
             orig.push(r.orig);
             bene.push(r.bene);
-            // keep typology ts as-is (already within window); shape intraday.
-            ts_us.push(shape_fixed_day(
-                &mut rng,
-                r.ts_us,
-                w.country[r.orig as usize],
-            ));
+            // Already shaped (business day + intraday) at scheduling time.
+            ts_us.push(r.ts_us);
             amount.push(r.amount);
             ccy.push(r.ccy);
             uid_pre.push(r.uid);

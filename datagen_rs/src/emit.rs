@@ -181,8 +181,7 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         // are collision-free regardless of (orig, ts) duplicates. splitmix64 is
         // a bijection, so distinct uids yield distinct id seeds.
         let uid = b.uid[i];
-        let us = splitmix64(uid ^ seed_u ^ 0x0E7A);
-        let us2 = splitmix64(uid ^ seed_u ^ 0x5A1D);
+        let (us, us2) = crate::hash::uetr_seeds(uid, w.seed);
         uuid_v4_into(us, us2, &mut su);
         b_uetr.append_value(&su);
         msg_id_into(us, us2, &mut sm);

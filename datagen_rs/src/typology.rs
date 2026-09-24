@@ -365,7 +365,7 @@ pub fn schedule(
                 // dormant_reactivation (P3, W8): a realistic single dormancy
                 // EPISODE in the corpus interior, not the old ping-at-5% /
                 // burst-at-98% shape. The account has normal history before and
-                // after; for a dormancy window D of 95-180 days its base sends
+                // after; for a dormancy window D of 60-365 days its base sends
                 // are SUPPRESSED by the driver (see suppress below), so the
                 // account -- not just the edge -- goes quiet. The reactivation
                 // burst is placed at the window end so it is the first
@@ -387,7 +387,12 @@ pub fn schedule(
                     // simply never fires (honest, not a crash).
                     let max_dur =
                         (corpus_end_us - corpus_start_us - anchor_pad - burst_span).max(day);
-                    let d_days = 95 + (rng.unit() * 85.0) as i64; // 95..=179
+                    // Dormancy length: log-uniform over 60..365 days. The old
+                    // 95..179 range was chosen to clear W8's 90-day threshold,
+                    // which made W8's dormancy recall partly built into the
+                    // data (LB-138, AML-GOALS R2). Some episodes are now too
+                    // short for an absolute 90-day rule; that miss is honest.
+                    let d_days = (60.0f64 * (365.0f64 / 60.0).powf(rng.unit())) as i64;
                     let dur = (d_days * day).min(max_dur);
                     let lo = corpus_start_us + anchor_pad;
                     let hi = corpus_end_us - dur - burst_span;
@@ -686,7 +691,9 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: b,
                     ts_us: uu(&mut rng, s, e),
                     structuring: false,
-                    min_amount_usd: Some(5200.0),
+                    // No rule-derived floor (LB-138): the burst is drawn from
+                    // the account's own amount distribution like any send.
+                    min_amount_usd: None,
                 });
             }
         }
