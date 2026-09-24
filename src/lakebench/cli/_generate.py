@@ -280,6 +280,21 @@ def generate(
                     print_info("Increase datagen memory or reduce parallelism")
                     _journal_safe(j.end_command, success=False, message="OOMKilled pods detected")
                     raise typer.Exit(1)
+                if prog.get("crash_pods"):
+                    # A crash-looping generator never finishes; waiting out the
+                    # timeout (hours at large scale) only hides the failure.
+                    progress_bar.stop()
+                    details = prog.get("crash_details", {})
+                    for pod in prog["crash_pods"]:
+                        print_error(f"Datagen pod crash-looping: {pod} {details.get(pod, '')}")
+                    ns = cfg.get_namespace()
+                    print_info(
+                        f"See why with: kubectl logs -n {ns} {prog['crash_pods'][0]} --previous"
+                    )
+                    _journal_safe(
+                        j.end_command, success=False, message="Datagen pods crash-looping"
+                    )
+                    raise typer.Exit(1)
                 if prog.get("pending_pods"):
                     progress_bar.console.print(
                         f"  [yellow]{len(prog['pending_pods'])} pod(s) pending[/yellow]"

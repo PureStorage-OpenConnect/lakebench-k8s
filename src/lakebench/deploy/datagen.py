@@ -413,6 +413,7 @@ class DatagenDeployer:
             pod_status = []
             oom_pods: list[str] = []
             crash_pods: list[str] = []
+            crash_details: dict[str, str] = {}
             pending_pods: list[str] = []
             for pod in pods.items:
                 pod_name = pod.metadata.name
@@ -433,6 +434,10 @@ class DatagenDeployer:
                             oom_pods.append(pod_name)
                         elif cs.restart_count and cs.restart_count >= 3:
                             crash_pods.append(pod_name)
+                            if terminated:
+                                crash_details[pod_name] = f"exit {terminated.exit_code}" + (
+                                    f" ({terminated.reason})" if terminated.reason else ""
+                                )
 
                 # Detect pending pods
                 if pod.status.phase == "Pending":
@@ -448,6 +453,7 @@ class DatagenDeployer:
                 "pods": pod_status,
                 "oom_pods": oom_pods,
                 "crash_pods": crash_pods,
+                "crash_details": crash_details,
                 "pending_pods": pending_pods,
             }
 

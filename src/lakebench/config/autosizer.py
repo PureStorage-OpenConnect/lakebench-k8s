@@ -94,6 +94,25 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
     return int(float(s) * 1000)
 
 
+def _datagen_memory_default(config: LakebenchConfig) -> str:
+    """Per-pod datagen memory default by schema and scale.
+
+    Financial pods build the entity world (about 175 B/entity at peak,
+    111,111 entities per scale unit) plus per-thread file buffers; c360 pods
+    hold only the buffers.
+    """
+    schema = getattr(config.architecture.workload.schema_type, "value", "")
+    scale = float(config.architecture.workload.datagen.scale or 1)
+    if schema == "financial":
+        if scale > 300:
+            return "24Gi"
+        if scale > 100:
+            return "16Gi"
+        if scale > 10:
+            return "12Gi"
+    return "8Gi"
+
+
 def _resolve_datagen_mode(config: LakebenchConfig) -> str:
     """Resolve the effective datagen mode from config.
 
@@ -136,7 +155,6 @@ def resolve_auto_sizing(
         config: The Lakebench configuration -- **mutated in place**.
         cluster_capacity: Optional snapshot of cluster node resources.
     """
-    from lakebench.config.schema import DatagenMode
 
     scale = config.architecture.workload.datagen.scale
     guidance = full_compute_guidance(scale)
@@ -185,47 +203,32 @@ def resolve_auto_sizing(
         changes.append(f"trino.worker.memory={guidance.trino.worker_memory}")
 
     # -- Datagen --
-    # CPU and memory per pod are hard-locked by mode. Sizing updated
-    # 2026-09-20 after the Rust c360 port + perf sweep: the Rust datagen
-    # uses <2 GiB memory typical (vs Python's ~8 GiB with per-worker
-    # process overhead), so the 24 GiB continuous-mode default from the
-    # Python era was 3-8x over-provisioned. New defaults target 4x safety
-    # headroom over actual measured usage.
+    # Per-pod sizing for the Rust generator (both schemas, both modes; the
+    # corpus is always pre-written, so continuous is a pipeline mode, not a
+    # datagen mode). Measured 2026-09-18..21: 8-core pods reached 338-600
+    # MB/s; per-node memory bandwidth, not the array, limits aggregate
+    # throughput past about 24 active generator cores per node, so 8 cores
+    # per pod packs well on 40-core workers.
     #
-    #   batch:      4 CPU,  4Gi   (unchanged -- single-process Python path)
-    #   continuous: 8 CPU,  8Gi   (was 24Gi -- Rust never approaches this)
+    # Earlier code hard-locked 4 CPU / 4Gi in batch and forced generators=1,
+    # which the entrypoint turned into a single rayon thread per pod (product
+    # path measured 36 MB/s/pod). Now: user-set cpu/memory are honoured, and
+    # generators stays 0 ("auto"), so the entrypoint sizes threads from the
+    # pod's CPU request.
     #
-    # These are always overridden regardless of user config to prevent
-    # OOMKill from mode/memory mismatches. Scaling is via parallelism.
-    #
-    # generators/uploaders are Python-legacy knobs the Rust image ignores
-    # (it uses rayon threads sized from cgroup CPU quota). Kept at the old
-    # continuous-mode values so a Python-image regression path still works.
+    # Memory: each worker thread buffers about file_size * 1.125 bytes, and
+    # the financial world model holds about 130-175 B per entity (111,111
+    # entities per scale unit), so large financial scales need more.
     datagen = config.architecture.workload.datagen
-
-    if effective_mode == DatagenMode.CONTINUOUS.value:
-        mode_cpu, mode_memory = "8", "8Gi"
-        mode_generators, mode_uploaders = 8, 2
-    else:
-        mode_cpu, mode_memory = "4", "4Gi"
-        mode_generators, mode_uploaders = 1, 1
+    dg_cpu = "8"
+    dg_memory = _datagen_memory_default(config)
+    if _set_if_default(datagen, "cpu", dg_cpu):
+        changes.append(f"datagen.cpu={dg_cpu}")
+    if _set_if_default(datagen, "memory", dg_memory):
+        changes.append(f"datagen.memory={dg_memory}")
 
     if _set_if_default(datagen, "parallelism", guidance.datagen.parallelism):
         changes.append(f"datagen.parallelism={guidance.datagen.parallelism}")
-
-    # Hard-lock CPU and memory -- always set to mode-correct values
-    if datagen.cpu != mode_cpu:
-        datagen.cpu = mode_cpu
-        changes.append(f"datagen.cpu={mode_cpu} (locked by {effective_mode} mode)")
-    if datagen.memory != mode_memory:
-        datagen.memory = mode_memory
-        changes.append(f"datagen.memory={mode_memory} (locked by {effective_mode} mode)")
-    if datagen.generators == 0 or datagen.generators != mode_generators:
-        datagen.generators = mode_generators
-        changes.append(f"datagen.generators={mode_generators}")
-    if datagen.uploaders == 0 or datagen.uploaders != mode_uploaders:
-        datagen.uploaders = mode_uploaders
-        changes.append(f"datagen.uploaders={mode_uploaders}")
 
     # -- Schema-specific overrides (ENG-2C.10) --
     # Workload schemas that differ from Customer360 on baseline resource shape
