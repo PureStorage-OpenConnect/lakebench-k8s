@@ -63,6 +63,9 @@ from pyspark.sql.functions import (
     log as spark_log,
 )
 from pyspark.sql.functions import (
+    max as max_,
+)
+from pyspark.sql.functions import (
     mean as mean_,
 )
 
@@ -165,12 +168,10 @@ def _build_reference_feature_frame(spark: SparkSession, silver_txns_name: str, m
 
     - ``log_amount_mean``, ``log_amount_std`` over the entity-day
     - ``mean_hour``, ``std_hour`` over the entity-day
-    - ``amount_pct_of_ceiling`` (log_amount / log(50_000_000)) -- a
-      *relative* amount signal that does NOT expose the raw amount
-      band the datagen writes into. Structuring rows in USD [9500,
-      9999] have amount_pct in [0.75, 0.76]; baseline log-normal
-      rows span [0.0, 1.0]; the band no longer uniquely identifies
-      the row.
+
+    ``amount_pct_of_ceiling`` was removed: it was log_amount_mean divided
+    by a constant, so it added no information and was not the relative
+    signal it was described as.
 
     Excluded on purpose, and NOT added to LEAKY_FEATURES because
     they are legitimate features in a real AML system that only
@@ -223,18 +224,24 @@ def _build_reference_feature_frame(spark: SparkSession, silver_txns_name: str, m
     # transactions and destroying the signal the model tries to
     # learn (P1 finding from PR-A adversarial review). FAML datagen
     # spans multi-week windows by design (CLAUDE.md gotcha 17).
+    # Group by entity-day ONLY. Grouping by the label as well split a planted
+    # entity-day into a typology-only row and a baseline-only row, so the
+    # features described the planted transactions in isolation: the model
+    # was scored on groups the label itself had formed (self-scoring). A
+    # real detector sees the account's day as a whole; the day is positive
+    # when any of its transactions is planted.
     per_entity_day = (
         labelled.withColumn("day", to_date(col("txn_timestamp")))
-        .groupBy("originator_id", "day", "label")
+        .groupBy("originator_id", "day")
         .agg(
             mean_(spark_log("txn_amount")).alias("log_amount_mean"),
             stddev(spark_log("txn_amount")).alias("log_amount_std"),
-            mean_(spark_log("txn_amount") / spark_log(lit(50_000_000.0))).alias(
-                "amount_pct_of_ceiling"
-            ),
             mean_(hour("txn_timestamp")).alias("mean_hour"),
             stddev(hour("txn_timestamp")).alias("std_hour"),
+            max_(col("typology_type")).alias("_typ"),
         )
+        .withColumn("label", when(col("_typ").isNull(), lit("baseline")).otherwise(col("_typ")))
+        .drop("_typ")
     )
 
     return per_entity_day
@@ -262,7 +269,7 @@ def _cap_and_pull(features_df, cap_rows: int):
     features_df = features_df.cache()
     total = features_df.count()
     if total <= cap_rows:
-        pdf = features_df.toPandas()
+        pdf = features_df.withColumn("sample_weight", lit(1.0)).toPandas()
         features_df.unpersist()
         return pdf
 
@@ -274,7 +281,7 @@ def _cap_and_pull(features_df, cap_rows: int):
     # situation (very small dataset with mostly typologies) -- fall
     # back to a proportional sample, still keeping all typologies.
     if typology_count >= cap_rows:
-        pdf = typology_df.toPandas()
+        pdf = typology_df.withColumn("sample_weight", lit(1.0)).toPandas()
         features_df.unpersist()
         return pdf
 
@@ -282,11 +289,17 @@ def _cap_and_pull(features_df, cap_rows: int):
     total_baseline = total - typology_count
     if total_baseline == 0:
         # No baseline rows at all -- just pull typology.
-        pdf = typology_df.toPandas()
+        pdf = typology_df.withColumn("sample_weight", lit(1.0)).toPandas()
     else:
         baseline_frac = min(1.0, float(baseline_budget) / float(total_baseline))
         baseline_sample = baseline_df.sample(withReplacement=False, fraction=baseline_frac, seed=0)
-        pdf = typology_df.union(baseline_sample).toPandas()
+        # Each kept baseline row stands for 1 / fraction real ones, so the
+        # evaluation counts false positives at the true prevalence.
+        pdf = (
+            typology_df.withColumn("sample_weight", lit(1.0))
+            .union(baseline_sample.withColumn("sample_weight", lit(1.0 / baseline_frac)))
+            .toPandas()
+        )
 
     features_df.unpersist()
     return pdf
@@ -400,7 +413,6 @@ def main() -> None:
     feature_cols = [
         "log_amount_mean",
         "log_amount_std",
-        "amount_pct_of_ceiling",
         "mean_hour",
         "std_hour",
     ]
@@ -420,7 +432,12 @@ def main() -> None:
             "script builds."
         )
 
-    report = train_reference_gbt(features, labels)
+    report = train_reference_gbt(
+        features,
+        labels,
+        groups=pdf["originator_id"],
+        sample_weight=pdf["sample_weight"],
+    )
     log(f"Reference model verdict: {report.verdict.value}")
     log(
         f"Overall: precision={report.overall_precision:.3f} "

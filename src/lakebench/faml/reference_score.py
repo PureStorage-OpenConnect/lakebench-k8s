@@ -304,6 +304,8 @@ def train_reference_gbt(
     random_state: int = 0,
     n_estimators: int = 100,
     max_depth: int = 3,
+    groups: pd.Series | None = None,
+    sample_weight: pd.Series | None = None,
 ) -> ReferenceModelReport:
     """Train a GBT reference detector and evaluate per typology.
 
@@ -329,6 +331,15 @@ def train_reference_gbt(
             the model does not memorise; the point is "can a
             canonical detector find signal in the data?", not
             "how well can we fit the data?".
+        groups: optional per-row group key (the entity). When given, the
+            split keeps every group on one side, so the model is scored
+            on accounts it never saw rather than on other days of an
+            account it memorised.
+        sample_weight: optional per-row weight used when COUNTING test
+            outcomes. The caller downsamples baseline rows to fit the
+            driver; weighting each kept baseline row by 1 / sampling
+            fraction makes false positives, and so precision, reflect
+            the real prevalence instead of the downsampled one.
 
     Returns:
         :class:`ReferenceModelReport` with per-typology precision /
@@ -370,6 +381,12 @@ def train_reference_gbt(
 
     y = labels.to_numpy()
     X = features.to_numpy()
+    w = (
+        sample_weight.to_numpy(dtype=float)
+        if sample_weight is not None
+        else np.ones(len(y), dtype=float)
+    )
+    idx = np.arange(len(y))
 
     # Multi-class GBT: baseline is one class; each typology is
     # another. Stratify so rare typologies aren't lost entirely to
@@ -377,13 +394,29 @@ def train_reference_gbt(
     # stratify to work; fall back to non-stratified if not.
     _, counts = np.unique(y, return_counts=True)
     can_stratify = counts.min() >= 2
-    X_train, X_test, y_train, y_test = train_test_split(
-        X,
-        y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=y if can_stratify else None,
-    )
+    if groups is not None:
+        from sklearn.model_selection import GroupShuffleSplit, StratifiedGroupKFold
+
+        g = groups.to_numpy()
+        n_splits = max(2, round(1 / test_size))
+        if can_stratify and counts.min() >= n_splits:
+            splitter = StratifiedGroupKFold(
+                n_splits=n_splits, shuffle=True, random_state=random_state
+            )
+            train_idx, test_idx = next(splitter.split(X, y, g))
+        else:
+            splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+            train_idx, test_idx = next(splitter.split(X, y, g))
+    else:
+        train_idx, test_idx = train_test_split(
+            idx,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=y if can_stratify else None,
+        )
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+    w_test = w[test_idx]
 
     clf = GradientBoostingClassifier(
         n_estimators=n_estimators,
@@ -407,9 +440,9 @@ def train_reference_gbt(
         # One-vs-rest metrics for this typology.
         y_test_pos = y_test == name
         y_pred_pos = y_pred == name
-        tp = int((y_test_pos & y_pred_pos).sum())
-        fp = int((~y_test_pos & y_pred_pos).sum())
-        fn = int((y_test_pos & ~y_pred_pos).sum())
+        tp = int(round(w_test[y_test_pos & y_pred_pos].sum()))
+        fp = int(round(w_test[~y_test_pos & y_pred_pos].sum()))
+        fn = int(round(w_test[y_test_pos & ~y_pred_pos].sum()))
         support = int(y_test_pos.sum())
         precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
         recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
