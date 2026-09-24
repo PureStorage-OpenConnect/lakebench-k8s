@@ -265,19 +265,28 @@ def test_rows_written_backfilled_from_old_logs():
 
 
 def test_fleet_reports_shared_customer_id_max():
-    logs = {
-        "pod-0": _emit_line(**_c360_pod(0, 100.0, 10_000_000_000)),
-        "pod-1": _emit_line(**_c360_pod(1, 100.0, 10_000_000_000)),
-    }
+    """The fleet value is whatever the pods agree on; derived here from the
+    pods' scale the way lakebench sizes it (100K customers per scale unit)."""
+    from lakebench.config.scale import customer360_dimensions
+
+    scale = 7.0
+    want = customer360_dimensions(scale).customers
+    pods = []
+    for node in (0, 1):
+        pod = _c360_pod(node, 100.0, 10_000_000_000)
+        pod["scale"] = scale
+        pod["customer_id_max"] = want
+        pods.append(pod)
+    logs = {f"pod-{i}": _emit_line(**p) for i, p in enumerate(pods)}
     fleet = collect_from_pod_logs(logs, expected_pods=2)
-    assert fleet.customer_id_max == 500_000
+    assert fleet.customer_id_max == want == 700_000
     assert fleet.mixed_params == []
-    assert fleet.to_dict()["customer_id_max"] == 500_000
+    assert fleet.to_dict()["customer_id_max"] == want
 
 
 def test_pods_with_different_id_spaces_are_not_one_corpus():
-    """E4: a pod on the old fixed 500K id space next to scale-10 pods (1M)
-    wrote a corpus whose customers do not line up; say so."""
+    """E4: a pod on a different id space (a stale image with the old fixed
+    500K next to a scale-10 pod with 1M) did not write the same corpus."""
     stale = _c360_pod(1, 100.0, 10_000_000_000)
     stale["customer_id_max"] = 1_000_000
     logs = {
