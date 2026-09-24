@@ -1556,3 +1556,31 @@ fn customer_accounts_are_us_accounts() {
     // Residence is unchanged: foreign residents bank with the US FI too.
     assert!(foreign_cust > 0 && foreign_non > 0);
 }
+
+#[test]
+fn account_ibans_and_ids_are_unique_at_scale_10() {
+    // Scale 10 = 1,111,110 entities, past the 2^20 id where the old
+    // id ^ (seq << 20) packing collided.
+    use datagen_rs::ids::iban_for;
+    use datagen_rs::party::account_keys;
+    use datagen_rs::world::{accounts_for, dimensions};
+    use std::collections::HashSet;
+    let pop = dimensions(10.0, 60).population as u64;
+    assert!(pop > 1 << 20);
+    let mut ibans: HashSet<String> = HashSet::with_capacity(2_000_000);
+    let mut ids: HashSet<i64> = HashSet::with_capacity(2_000_000);
+    let mut n = 0usize;
+    for id in 1..=pop {
+        for seq in 0..accounts_for(id, 42) as u64 {
+            let (aid, acc_seed) = account_keys(id, seq, 42);
+            // Seq 0 carries the entity's own IBAN; the country prefix does not
+            // enter the digits, so one prefix checks body uniqueness.
+            let body_of = if seq == 0 { id } else { acc_seed };
+            ibans.insert(iban_for(b"US", body_of));
+            ids.insert(aid);
+            n += 1;
+        }
+    }
+    assert_eq!(ibans.len(), n, "duplicate IBANs");
+    assert_eq!(ids.len(), n, "duplicate account ids");
+}

@@ -317,6 +317,18 @@ pub fn account_schema() -> SchemaRef {
     ]))
 }
 
+/// (account_id, IBAN seed) of account `seq` of entity `id`. id and seq are
+/// hashed separately and then combined: packing them as id ^ (seq << 20)
+/// (and id ^ (seq << 30) for the id) collided once ids passed 2^20 (scale
+/// ~9.4), giving two entities the same IBAN. The IBAN seed of seq 0 is not
+/// used (the payment account's IBAN is the entity's own, iban_for(id)).
+pub fn account_keys(id: u64, seq: u64, seed_u: u64) -> (i64, u64) {
+    let h = splitmix64(splitmix64(id) ^ splitmix64(seq.wrapping_add(0xACC7_0000_0000)));
+    let aid = (h & 0x7FFF_FFFF_FFFF_FFFF) as i64;
+    let iban_seed = splitmix64(h ^ splitmix64(seed_u ^ 0x1BA7_5EED));
+    (aid, iban_seed)
+}
+
 fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
     let seed_u = w.seed as u64;
     let mut acct_id = Vec::new();
@@ -333,8 +345,8 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
         let cb = [cc.as_bytes()[0], cc.as_bytes()[1]];
         let primary_od = kyc::primary_opened_day(id, w.seed, w.dims.corpus_months);
         for seq in 0..w.n_accounts[i] as u64 {
-            let acc_seed = splitmix64(id ^ (seq << 20) ^ seed_u);
-            acct_id.push((splitmix64(id ^ (seq << 30)) & 0x7FFF_FFFF_FFFF_FFFF) as i64);
+            let (aid, acc_seed) = account_keys(id, seq, seed_u);
+            acct_id.push(aid);
             // The first account is the one the entity's payments use: the
             // pacs.008 emit writes iban_for(country, id) as the debtor and
             // creditor account, so the account zone carries that same IBAN
