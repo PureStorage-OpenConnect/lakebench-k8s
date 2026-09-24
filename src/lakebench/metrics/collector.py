@@ -1633,13 +1633,16 @@ class MetricsCollector:
                     key, value = match.groups()
                     self._apply_metric(metrics, key, value)
 
-        # Parse timing from log timestamps
-        time_match = re.search(
-            r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*completed in (\d+\.?\d*)s",
-            logs,
-        )
-        if time_match:
-            metrics.elapsed_seconds = float(time_match.group(2))
+        # Fallback timing for scripts without a JOB METRICS block. The block's
+        # elapsed_seconds wins: this pattern is loose enough to match
+        # unrelated JVM log lines, so it must never override a measured value.
+        if metrics.elapsed_seconds <= 0:
+            time_match = re.search(
+                r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*completed? in (\d+\.?\d*)s",
+                logs,
+            )
+            if time_match:
+                metrics.elapsed_seconds = float(time_match.group(2))
 
         # LB-116: per-rule alert counts and per-rule errors, from the
         # driver log line ``[detection] {rule_id}: alerts=N ...``.

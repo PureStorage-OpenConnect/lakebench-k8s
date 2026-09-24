@@ -196,33 +196,35 @@ def iot_dimensions(scale: float) -> ScaleDimensions:
 
 
 def financial_dimensions(scale: float) -> ScaleDimensions:
-    """Map scale factor to Financial (FinServ-Crime / AML) domain dimensions.
+    """Map scale factor to Financial (AML) domain dimensions.
 
-    Scale 0.01 -> 5K accounts,     ~48 txns/account,  365 days, ~100 MB
-    Scale 1  -> 500K accounts,     ~48 txns/account,  365 days, ~10 GB
-    Scale 10 -> 5M accounts,       ~48 txns/account,  365 days, ~100 GB
-    Scale 100 -> 50M accounts,     ~48 txns/account,  365 days, ~1 TB
-    Scale 1000 -> 500M accounts,   ~48 txns/account,  365 days, ~10 TB
-    Scale 10000 -> 5B accounts,    ~48 txns/account,  365 days, ~100 TB
-      (tier-1 universal bank AML retention target, REQ-S-01)
+    Mirrors what datagen_rs writes (``world::dimensions``): 111,111 entities
+    per scale unit, 4 transactions per entity per month, over a 60-month
+    corpus (the entrypoint's ``--corpus-months`` default).
 
-    Scales linearly per REQ-S-02: accounts = scale * 500,000.
-    Row-size estimate is provisional and will be recalibrated when the
-    ISO 20022 generator (ENG-2C.3) publishes measured bytes/row per
-    REQ-S-03.
+    Scale 1   -> 111K entities, ~26.7M txns, ~8.4 GB pacs.008
+    Scale 10  -> 1.1M entities, ~267M txns,  ~84 GB
+    Scale 100 -> 11M entities,  ~2.7B txns,  ~840 GB
+
+    ``approx_bronze_gb`` is measured, not estimated: scale 1 with the default
+    64 MB files wrote 26,666,639 rows in 8.37 GB of pacs.008 Parquet
+    (2026-09-24). It feeds ``scale_ratio``, so a flat 10 GB/scale guess made
+    every complete AML run read as 84% "incomplete". The reference tables
+    (party, account) and the manifest are excluded, as bronze-verify
+    measures only the pacs.008 tree.
     """
-    accounts = _entity_count(scale, 500_000)
-    txns_per_account_per_month = 4
-    months = 12
-    approx_rows = accounts * txns_per_account_per_month * months
+    entities = _entity_count(scale, 111_111)
+    txns_per_entity_per_month = 4
+    months = 60
+    approx_rows = entities * txns_per_entity_per_month * months
 
     return ScaleDimensions(
         scale=scale,
-        customers=accounts,  # "customers" = accounts in financial context
-        events_per_customer=txns_per_account_per_month * months,
-        date_range_days=365,
+        customers=entities,  # "customers" = entities in the financial context
+        events_per_customer=txns_per_entity_per_month * months,
+        date_range_days=1826,
         approx_rows=approx_rows,
-        approx_bronze_gb=scale * 10.0,
+        approx_bronze_gb=scale * 8.4,
     )
 
 

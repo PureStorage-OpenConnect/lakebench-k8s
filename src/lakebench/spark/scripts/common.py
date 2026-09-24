@@ -60,6 +60,49 @@ def table_exists(spark, table_name):
         raise
 
 
+def path_size_gb(spark, uri):
+    """Total bytes under a Hadoop-FS path, in GiB; 0.0 if it cannot be measured."""
+    try:
+        jvm = spark._jvm
+        hconf = spark._jsc.hadoopConfiguration()
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(uri), hconf)
+        path = jvm.org.apache.hadoop.fs.Path(uri)
+        if not fs.exists(path):
+            return 0.0
+        return fs.getContentSummary(path).getLength() / (1024**3)
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] size of {uri} unavailable: {one_line(e)}")
+        return 0.0
+
+
+def iceberg_table_stats(spark, fq_table):
+    """(row_count, size_gb) of an Iceberg table from its ``files`` metadata.
+
+    Reads manifest metadata only, so it costs no data scan. Returns (0, 0.0)
+    when the metadata table is unavailable (non-Iceberg table, catalog
+    error); the collector treats zero input as unmeasured.
+    """
+    try:
+        r = spark.sql(
+            f"SELECT COALESCE(SUM(record_count), 0) AS n, "
+            f"COALESCE(SUM(file_size_in_bytes), 0) AS b FROM {fq_table}.files"
+        ).collect()[0]
+        return int(r["n"]), float(r["b"]) / (1024**3)
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] table stats for {fq_table} unavailable: {one_line(e)}")
+        return 0, 0.0
+
+
+def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seconds):
+    """Emit the ``=== JOB METRICS ===`` block the metrics collector parses."""
+    log(f"=== JOB METRICS: {job} ===")
+    log(f"input_size_gb: {input_size_gb:.3f}")
+    log(f"input_rows: {int(input_rows)}")
+    log(f"output_rows: {int(output_rows)}")
+    log(f"elapsed_seconds: {elapsed_seconds:.1f}")
+    log("=" * 60)
+
+
 def parse_size_gb(s):
     """Parse size string to GB."""
     return float(s)
