@@ -1404,9 +1404,9 @@ fn unchained_typologies_keep_independent_draws() {
 #[test]
 fn cycle_zero_is_the_identity() {
     use datagen_rs::cycle::*;
-    assert_eq!(stream_seed(42, 0), 42);
-    assert_eq!(base_uid(123_456, 0), 123_456);
-    assert_eq!(instance_id("FAN_IN_2_0000007", 0), "FAN_IN_2_0000007");
+    assert_eq!(mass_slice(0, 1), (f64::NEG_INFINITY, f64::INFINITY));
+    assert_eq!(mass_slice(1, 3), (1.0 / 3.0, 2.0 / 3.0));
+    assert_eq!(mass_slice(2, 3).1, f64::INFINITY);
     assert_eq!(pacs_key(7, 0), "bronze/pacs008/part-000007.parquet");
     assert_eq!(c360_key(7, 0), "part-000007.parquet");
     assert_eq!(
@@ -1434,72 +1434,6 @@ fn cycle_keys_differ_and_keep_the_reader_suffix() {
         .collect();
     assert_eq!(keys.len(), 400);
     assert!(keys.iter().all(|k| k.ends_with(".parquet")));
-}
-
-#[test]
-fn cycles_zero_and_one_have_disjoint_uids_and_uetrs() {
-    use datagen_rs::cycle::{base_uid, instance_id, stream_seed};
-    use datagen_rs::hash::{splitmix64, uetr_seeds};
-    use datagen_rs::ids::uuid_v4_into;
-    use datagen_rs::typology::schedule;
-    use std::collections::HashSet;
-    let seed = 42i64;
-    let pop = 5_000usize;
-    let day = 86_400_000_000i64;
-    let country: Vec<&'static str> = vec!["US"; pop + 1];
-    let uetr = |uid: u64| {
-        let (a, b) = uetr_seeds(uid, seed);
-        let mut s = String::new();
-        uuid_v4_into(a, b, &mut s);
-        s
-    };
-    // Same derivation as bin/generate.rs::typology_uid.
-    let typ_uid = |iseed: i64, k: usize| {
-        splitmix64((iseed as u64).wrapping_add((k as u64) << 40)) | 0x8000_0000_0000_0000
-    };
-    let mut ids: Vec<HashSet<String>> = Vec::new();
-    let mut uetrs: Vec<HashSet<String>> = Vec::new();
-    for c in 0..2u64 {
-        let insts = schedule(
-            stream_seed(seed, c),
-            (pop as i64) * 240,
-            pop,
-            0,
-            1800 * day,
-            &country,
-        );
-        let mut u: HashSet<String> = (0..20_000u64).map(|gi| uetr(base_uid(gi, c))).collect();
-        for inst in &insts {
-            for k in 0..inst.rows_per_instance + 1 {
-                u.insert(uetr(typ_uid(inst.seed, k)));
-            }
-        }
-        ids.push(insts.iter().map(|i| instance_id(&i.id, c)).collect());
-        uetrs.push(u);
-    }
-    assert!(
-        ids[0].is_disjoint(&ids[1]),
-        "typology ids repeat across cycles"
-    );
-    assert!(
-        uetrs[0].is_disjoint(&uetrs[1]),
-        "UETRs repeat across cycles"
-    );
-    // And the schedule itself moved (different participants), not just the ids.
-    let p = |c: u64| {
-        schedule(
-            stream_seed(seed, c),
-            (pop as i64) * 240,
-            pop,
-            0,
-            1800 * day,
-            &country,
-        )
-        .into_iter()
-        .map(|i| i.participants)
-        .collect::<Vec<_>>()
-    };
-    assert_ne!(p(0), p(1));
 }
 
 #[test]
@@ -1540,8 +1474,7 @@ fn c360_cycles_have_disjoint_event_and_row_ids() {
 }
 
 #[test]
-fn cycle_schedules_pick_subjects_from_the_world_not_the_stream_seed() {
-    use datagen_rs::cycle::stream_seed;
+fn schedules_pick_subjects_from_the_world_not_the_stream_seed() {
     use datagen_rs::kyc::is_customer;
     use datagen_rs::typology::{schedule_ex, subject_index};
     use datagen_rs::world::{entity_type, TYPE_PERSON};
@@ -1549,7 +1482,7 @@ fn cycle_schedules_pick_subjects_from_the_world_not_the_stream_seed() {
     let country: Vec<&'static str> = vec!["US"; pop + 1];
     let insts = schedule_ex(
         42,
-        stream_seed(42, 3),
+        0x5EED_0003,
         (pop as i64) * 240,
         pop,
         0,

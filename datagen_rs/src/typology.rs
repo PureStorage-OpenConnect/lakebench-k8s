@@ -173,6 +173,7 @@ const TID_SEED_STRIDE: i64 = 100_000_000;
 /// distribution.
 const HIGH_RISK_CC: [&str; 6] = ["AE", "CN", "SG", "HK", "MX", "IN"];
 
+#[derive(Clone)]
 pub struct Instance {
     pub id: String,
     pub typ: &'static str,
