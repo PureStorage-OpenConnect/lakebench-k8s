@@ -5,7 +5,7 @@ per-originator count can never see), and the originator form is unchanged."""
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -34,7 +34,7 @@ def spark():
 
 def _df(spark, rows):
     """rows: (uetr, originator, beneficiary, hours after t0, amount, currency)."""
-    t0 = datetime(2024, 3, 1)
+    t0 = datetime(2024, 3, 1, tzinfo=timezone.utc)
     return spark.createDataFrame(
         [(u, a, b, t0 + timedelta(hours=h), float(amt), c) for u, a, b, h, amt, c in rows],
         "uetr string, originator_id long, beneficiary_id long, "
