@@ -2391,6 +2391,10 @@ class SparkJobManager:
             # entry point but must be mounted alongside so the local
             # import resolves inside the driver pod).
             "detection_rules.py",
+            # Library module imported by score_financial_reference: the
+            # pre-registered AML gate features (shared with the local
+            # harness scripts/aml_gate.py).
+            "aml_features.py",
         ]
 
         # Build ConfigMap data
@@ -2412,10 +2416,14 @@ class SparkJobManager:
         # flat mount resolves with no lakebench package on the driver.
         from lakebench._resources import _package_dir
 
-        _ref_score_path = _package_dir() / "aml" / "reference_score.py"
-        if _ref_score_path.exists():
-            data["reference_score.py"] = _ref_score_path.read_text()
-            logger.info("Loaded script: reference_score.py (from lakebench.aml)")
+        # fidelity_gate.py (the pre-registered AML gate evaluation) ships the
+        # same way, for the same reason; it reads aml_preregistration.json,
+        # which the AML data loop below also mounts flat.
+        for _aml_mod in ("reference_score.py", "fidelity_gate.py"):
+            _mod_path = _package_dir() / "aml" / _aml_mod
+            if _mod_path.exists():
+                data[_aml_mod] = _mod_path.read_text()
+                logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
 
         # AML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via

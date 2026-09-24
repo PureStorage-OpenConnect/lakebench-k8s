@@ -1778,6 +1778,11 @@ class TestReferenceScoreWiring:
         # The packaged module must be the real thing, not an empty stub.
         assert "def compute_leakage_gate" in data["reference_score.py"]
         assert "def train_reference_gbt" in data["reference_score.py"]
+        # The fidelity gate (D9): its feature module, evaluation module and the
+        # pre-registration it reads all ship flat next to the entry point.
+        assert "def entity_features" in data["aml_features.py"]
+        assert "def evaluate_gate" in data["fidelity_gate.py"]
+        assert "aml_preregistration.json" in data
 
     def test_reference_spark_script_uses_bare_import(self):
         """score_financial_reference.py must import the module by its flat name,
@@ -1798,10 +1803,11 @@ class TestReferenceScoreWiring:
         no package around it)."""
         from lakebench._resources import _package_dir
 
-        src = (_package_dir() / "aml" / "reference_score.py").read_text()
-        assert "from lakebench" not in src and "import lakebench" not in src, (
-            "reference_score.py imports lakebench; it cannot ship as a flat driver module"
-        )
+        for mod in ("reference_score.py", "fidelity_gate.py"):
+            src = (_package_dir() / "aml" / mod).read_text()
+            assert "from lakebench" not in src and "import lakebench" not in src, (
+                f"{mod} imports lakebench; it cannot ship as a flat driver module"
+            )
 
     def test_reference_script_uses_real_silver_column(self):
         """The reference feature build must read silver's real timestamp column
@@ -1810,6 +1816,7 @@ class TestReferenceScoreWiring:
         from lakebench._resources import get_scripts_dir
 
         src = (get_scripts_dir() / "score_financial_reference.py").read_text()
+        src += (get_scripts_dir() / "aml_features.py").read_text()
         import re
 
         assert not re.search(r'"txn_ts"|\btxn_ts\b', src), (
