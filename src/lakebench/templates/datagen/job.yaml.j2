@@ -46,6 +46,10 @@ spec:
             {% endif %}
             - "--target-tb"
             - "{{ datagen_target_tb }}"
+            {% if datagen_customer_id_max is defined and datagen_schema | default('customer360') == 'customer360' %}
+            - "--customer-id-max"
+            - "{{ datagen_customer_id_max }}"
+            {% endif %}
             - "--mode"
             - "{{ datagen_mode | default('batch') }}"
             - "--file-size-mb"
@@ -71,6 +75,12 @@ spec:
             {% if datagen_timestamp_end %}
             - "--timestamp-end"
             - "{{ datagen_timestamp_end }}"
+            {% endif %}
+            {% if datagen_cycles is defined and datagen_cycles > 1 %}
+            - "--cycle"
+            - "{{ datagen_cycle }}"
+            - "--cycles"
+            - "{{ datagen_cycles }}"
             {% endif %}
             {% if datagen_resume %}- "--resume"{% endif %}
             {% if datagen_duration is defined and datagen_duration %}

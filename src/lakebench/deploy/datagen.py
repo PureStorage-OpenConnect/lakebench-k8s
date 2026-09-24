@@ -71,6 +71,10 @@ class DatagenDeployer:
                 # typology instance counts. Not derivable from target_tb
                 # inside the container without assuming ~10GB/scale.
                 "datagen_scale_factor": f"{datagen.get_effective_scale():.6f}",
+                # c360 customer id space: scale-derived (100K per scale unit)
+                # or customer360.unique_customers. From the TOTAL scale, so
+                # every multi-cycle cycle draws from the same customers.
+                "datagen_customer_id_max": dims.customers,
                 "datagen_file_size_mb": file_size_mb,
                 "datagen_payload_kb": self._PAYLOAD_SIZE_BYTES // 1024,
                 "datagen_path_prefix": path_prefix,
@@ -184,6 +188,11 @@ class DatagenDeployer:
             )
             context["datagen_timestamp_start"] = ts_start
             context["datagen_timestamp_end"] = ts_end
+            # Each cycle gets its own seed stream / time slice and object keys
+            # (WORKPLAN B4); without these every cycle rewrote cycle 0's files
+            # with the same seed.
+            context["datagen_cycle"] = cycle_index
+            context["datagen_cycles"] = total_cycles
 
             # Per-cycle scale (divide total evenly, minimum 1)
             total_scale = datagen.get_effective_scale()
