@@ -1603,3 +1603,16 @@ fn no_amount_rounds_to_zero() {
         }
     }
 }
+
+#[test]
+fn structuring_amounts_are_in_minor_units() {
+    use datagen_rs::amounts::structuring_amount;
+    use datagen_rs::hash::Rng;
+    let mut rng = Rng::new(11);
+    for _ in 0..10_000 {
+        for ccy in ["JPY", "KRW"] {
+            let v = structuring_amount(&mut rng, ccy);
+            assert_eq!(v, v.round(), "fractional {ccy} {v}");
+        }
+    }
+}
