@@ -964,6 +964,8 @@ def check_data_ownership(
     """
     caveat = ""
     try:
+        if core_v1 is None:
+            raise RuntimeError("the cluster could not be reached")
         for n in core_v1.list_namespace().items:
             name = n.metadata.name
             if name == namespace or getattr(n.metadata, "deletion_timestamp", None):
@@ -988,9 +990,23 @@ def check_data_ownership(
                     ),
                 )
     except Exception as e:  # noqa: BLE001
+        if not namespace_present or force_legacy:
+            # Without the namespace (or with the escape hatch that waives it),
+            # the shared-name check is the only protection left, so it must
+            # not silently disappear.
+            return DataOwnershipDecision(
+                allowed=False,
+                hint=(
+                    "Could not list namespaces to check whether another live "
+                    f"deployment is named {deployment_name!r} ({e}), and this "
+                    "destroy has no verified namespace to rely on instead. Tables "
+                    "and buckets were left untouched. Re-run with credentials that "
+                    "can list namespaces."
+                ),
+            )
         caveat = (
             "Could not list namespaces to check for another deployment with the "
-            f"same name ({e}); proceeding on the namespace identity alone."
+            f"same name ({e}); proceeding on the verified namespace identity alone."
         )
         logger.warning(caveat)
 

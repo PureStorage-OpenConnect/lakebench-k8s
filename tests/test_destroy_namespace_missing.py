@@ -64,7 +64,33 @@ def test_absent_namespace_leaves_tables_and_buckets_alone():
     assert s3 and all(r.status is DeploymentStatus.FAILED for r in s3)
     assert tables and all(r.status is DeploymentStatus.FAILED for r in tables)
     assert "stale-ctx" in s3[0].message and "--force-legacy" in s3[0].message
-    s3_cls.assert_not_called()
+    # A read-only look at the buckets is allowed; emptying them is not.
+    s3_cls.return_value.empty_bucket.assert_not_called()
+
+
+def test_absent_namespace_with_no_data_left_is_a_skip_not_a_failure():
+    """Idempotent destroy: re-running after a complete destroy (namespace and
+    buckets gone) must not exit non-zero."""
+    from lakebench.deploy.destroy import destroy_all
+
+    s3 = MagicMock()
+    s3._init_error = None
+    s3.bucket_exists.return_value = False
+    with (
+        patch("kubernetes.client.CoreV1Api") as core,
+        patch("kubernetes.client.CustomObjectsApi"),
+        patch("kubernetes.client.RbacAuthorizationV1Api"),
+        patch("kubernetes.client.StorageV1Api"),
+        patch("kubernetes.client.BatchV1Api"),
+        patch("lakebench.deploy.destroy.logger"),
+        patch("lakebench.s3.S3Client", return_value=s3),
+    ):
+        core.return_value.list_namespace.return_value.items = []
+        results = destroy_all(_engine(namespace_exists=False), clean_buckets=True)
+    s3_res = _by_component(results, "s3-buckets")
+    assert s3_res and all(r.status is DeploymentStatus.SKIPPED for r in s3_res)
+    assert "nothing to clean" in s3_res[0].message
+    s3.empty_bucket.assert_not_called()
 
 
 def test_absent_namespace_with_force_legacy_cleans_buckets():
