@@ -59,7 +59,7 @@ import sys
 import time
 import uuid
 
-from common import env, log
+from common import env, iceberg_table_stats, log, one_line
 from gold_finalize_financial import (
     DDL_ALERTS,
     DDL_CLUSTERS,
@@ -134,6 +134,18 @@ def _bootstrap_gold_tables(spark) -> None:
         log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
 
 
+def _last_commit_epoch_s(spark, fq_table):
+    """Commit time of the table's newest snapshot, in epoch seconds."""
+    try:
+        row = spark.sql(
+            f"SELECT unix_micros(MAX(committed_at)) AS t FROM {fq_table}.snapshots"
+        ).collect()[0]
+        return row["t"] / 1e6 if row["t"] is not None else None
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] snapshot time for {fq_table} unavailable: {one_line(e)}")
+        return None
+
+
 def main() -> None:
     _install_signal_handlers()
     spark = SparkSession.builder.appName("lb-gold-refresh-financial").getOrCreate()
@@ -149,10 +161,20 @@ def main() -> None:
     _bootstrap_gold_tables(spark)
 
     consecutive_failures = 0
+    cycle = 0
 
     while not _SHUTDOWN:
         tick = time.time()
+        cycle += 1
         try:
+            # Captured BEFORE the read, so the data this tick sees is at least
+            # this fresh and the reported freshness is an upper bound.
+            silver_commit_s = _last_commit_epoch_s(spark, f"{CATALOG}.{SILVER_TXNS}")
+            silver_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_TXNS}")
+            if silver_rows == 0:
+                log(f"Cycle {cycle}: Silver table is empty, skipping")
+            else:
+                log(f"Cycle {cycle}: aggregating {silver_rows:,} Silver records")
             txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
 
             # Baseline: overwrite ONLY rule_id='baseline' rows so the detection
@@ -179,6 +201,11 @@ def main() -> None:
             elapsed = time.time() - tick
             log(f"[detection] cumulative gold.alerts rows: {total_alerts}")
             log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")
+            # Collector line formats (LB-136). Freshness matches c360's
+            # definition: age of the newest silver data once gold reflects it.
+            log(f"Cycle {cycle}: refreshed {GOLD_ALERTS} in {elapsed:.1f}s")
+            if silver_rows > 0 and silver_commit_s is not None:
+                log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - silver_commit_s):.0f}s")
             consecutive_failures = 0
         except Exception as e:  # noqa: BLE001
             consecutive_failures += 1

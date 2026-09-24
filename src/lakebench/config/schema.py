@@ -951,7 +951,7 @@ class WorkloadConfig(BaseModel):
     retention_months: int = Field(default=60, ge=1, le=120)
 
     # W1 connected-components vertex cap for the Financial detection path.
-    # Default sits above the scale-10 vertex count (5M accounts) so W1 runs
+    # Default sits above the scale-10 vertex count (1.1M entities) so W1 runs
     # out of the box at scale 10; raise it for larger scales that have the
     # executor budget. Whether W1 completes in acceptable wall-clock above
     # the cap is a measured question (LB-120), not a config guarantee, so the

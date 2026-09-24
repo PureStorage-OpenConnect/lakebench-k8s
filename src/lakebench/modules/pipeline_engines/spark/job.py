@@ -315,6 +315,18 @@ def _scale_executor_count(profile: dict[str, Any], scale: float) -> int:
     return min(base + extra, profile["max_executors"])
 
 
+def bronze_ingest_checkpoint_uri(cfg) -> str:
+    """Checkpoint location of the continuous bronze-ingest stream.
+
+    Shared by the ingest job env and the AML continuous preflight, which
+    uses its existence to tell a restart (keep the bronze table) from a
+    fresh stream (the bronze table must start empty).
+    """
+    s3 = cfg.platform.storage.s3
+    base = cfg.architecture.pipeline.sustained.checkpoint_base
+    return f"s3a://{s3.buckets.bronze}/{base}/bronze-ingest/"
+
+
 def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, Any] | None:
     """Return the resource profile for a given job type.
 
@@ -2170,7 +2182,7 @@ class SparkJobManager:
             trigger_map = {
                 JobType.BRONZE_INGEST: (
                     sustained.bronze_trigger_interval,
-                    f"s3a://{s3.buckets.bronze}/{checkpoint_base}/bronze-ingest/",
+                    bronze_ingest_checkpoint_uri(cfg),
                 ),
                 JobType.SILVER_STREAM: (
                     sustained.silver_trigger_interval,

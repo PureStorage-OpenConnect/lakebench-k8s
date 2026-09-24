@@ -251,9 +251,10 @@ Two operator-facing subcommands cover the retention-workload scenarios:
 verbs load it, assert `workload.schema=financial`, and dispatch a
 SparkApplication.
 
-The scale factor sets bronze volume the same way it does for Customer
-360: scale 1 is ~10 GB of pacs.008 messages, scale 100 is ~1 TB, scale
-10000 is a tier-1 universal bank's AML retention target at ~100 TB.
+The scale factor sets bronze volume linearly: scale 1 is 8.4 GB of
+pacs.008 messages (26.7M transactions over 60 months), scale 100 is about
+840 GB, and scale 10000 is a tier-1 universal bank's AML retention target
+at about 84 TB.
 The Pydantic schema accepts up to scale 10000, but scale 500 (~50 TB)
 is the tested ceiling; runs above it have not been verified end-to-end
 and are on the user.

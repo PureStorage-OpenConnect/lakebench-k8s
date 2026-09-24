@@ -10,10 +10,11 @@ release's UAT run per the update procedure at the bottom of this file.
 
 ## How to read this table
 
-- **Scale.** Datagen `scale` factor. Scale 1 emits ~10 GB pacs.008
-  baseline (500K accounts * 4 txns/month * 12 months, per REQ-S-01 /
-  REQ-S-02). Linearly scales up: scale 100 ~= 1 TB, scale 10000 ~=
-  100 TB (tier-1 universal bank AML retention target).
+- **Scale.** Datagen `scale` factor. Scale 1 emits 8.4 GB of pacs.008
+  (111,111 entities * 4 txns/month * 60 months = 26.7M transactions,
+  measured 2026-09-24 with the default 64 MB files). It scales linearly:
+  scale 100 is about 840 GB, scale 10000 about 84 TB (tier-1 universal
+  bank AML retention target).
 - **Wall-clock p50 / p95.** Median and 95th-percentile wall-clock
   seconds across N independent runs at the same scale on the same
   reference cluster. p95 catches skew / warm-up effects.

@@ -55,7 +55,7 @@ GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 
 # W1 connected-components vertex cap. Defaults above the scale-10 vertex
-# count (5M accounts) so W1 runs cleanly at scale 10 out of the box;
+# count (1.1M entities) so W1 runs cleanly at scale 10 out of the box;
 # raise it via the `financial.w1_max_vertices` config field for larger
 # scales that have the executor budget. Whether W1 completes in
 # acceptable wall-clock above the cap is a measured question (LB-120),

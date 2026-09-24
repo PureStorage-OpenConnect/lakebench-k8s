@@ -76,16 +76,18 @@ def path_size_gb(spark, uri):
 
 
 def iceberg_table_stats(spark, fq_table):
-    """(row_count, size_gb) of an Iceberg table from its ``files`` metadata.
+    """(row_count, size_gb) of an Iceberg table from its ``data_files`` metadata.
 
-    Reads manifest metadata only, so it costs no data scan. Returns (0, 0.0)
+    Reads manifest metadata only, so it costs no data scan. ``data_files``
+    rather than ``files``: the latter includes delete files, which would
+    overcount a merge-on-read table. Returns (0, 0.0)
     when the metadata table is unavailable (non-Iceberg table, catalog
     error); the collector treats zero input as unmeasured.
     """
     try:
         r = spark.sql(
             f"SELECT COALESCE(SUM(record_count), 0) AS n, "
-            f"COALESCE(SUM(file_size_in_bytes), 0) AS b FROM {fq_table}.files"
+            f"COALESCE(SUM(file_size_in_bytes), 0) AS b FROM {fq_table}.data_files"
         ).collect()[0]
         return int(r["n"]), float(r["b"]) / (1024**3)
     except Exception as e:  # noqa: BLE001
@@ -101,6 +103,20 @@ def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seco
     log(f"output_rows: {int(output_rows)}")
     log(f"elapsed_seconds: {elapsed_seconds:.1f}")
     log("=" * 60)
+
+
+def stream_batch_lines(batch_id, rows, seconds, table):
+    """Per-micro-batch lines in the format ``parse_streaming_logs`` reads.
+
+    Empty batches produce nothing, matching c360's bronze_ingest: an idle
+    trigger is not a processed batch.
+    """
+    if rows <= 0:
+        return []
+    return [
+        f"Batch {batch_id}: writing {rows:,} rows to {table}",
+        f"Batch {batch_id}: committed in {seconds:.1f}s",
+    ]
 
 
 def parse_size_gb(s):

@@ -904,6 +904,7 @@ def _run_sustained(
     from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
     from lakebench.engine import get_engine
     from lakebench.metrics import MetricsCollector, MetricsStorage, StreamingJobMetrics
+    from lakebench.modules.pipeline_engines.spark.job import bronze_ingest_checkpoint_uri
     from lakebench.spark import SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import (
         JobState,
@@ -1045,7 +1046,13 @@ def _run_sustained(
             console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
             preflight_status = job_manager.submit_job(
                 JobType.BRONZE_VERIFY,
-                cycle_env={"LB_REGISTER_TABLE": "1"},
+                # Schema only: bronze-ingest streams every file under the
+                # prefix itself, so registering data here would ingest the
+                # early files twice. See bronze_verify_financial.SCHEMA_ONLY.
+                cycle_env={
+                    "LB_REGISTER_TABLE": "schema",
+                    "LB_FINANCIAL_BRONZE_CHECKPOINT": bronze_ingest_checkpoint_uri(cfg),
+                },
             )
             if preflight_status.state == JobState.FAILED:
                 print_error(f"bronze-verify preflight submit failed: {preflight_status.message}")
@@ -1293,6 +1300,22 @@ def _run_sustained(
             # a fictional `scale * 1_500_000` denominator (LB-044 pattern).
         except Exception as e:
             logger.warning("Could not measure streaming bronze bucket size: %s", e)
+
+        # LB-136: when every datagen pod has finished and reported, their
+        # summed rows_written IS the produced-row count. The AML corpus is
+        # finite and usually completes well inside the window; c360 datagen
+        # keeps generating, never reports, and stays unmeasured.
+        try:
+            from lakebench.metrics.datagen_aggregator import collect_from_k8s
+
+            _fleet = collect_from_k8s(
+                namespace=cfg.get_namespace(),
+                job_completions=cfg.architecture.workload.datagen.parallelism,
+            )
+            if _fleet.data_quality == "complete" and _fleet.total_rows_written > 0:
+                _datagen_output_rows = _fleet.total_rows_written
+        except Exception as e:
+            logger.warning("Could not read datagen row counts: %s", e)
 
         # Capture driver logs BEFORE stopping jobs (pods are deleted on stop)
         console.print()

@@ -5,8 +5,9 @@ to the bronze Iceberg table. maxFilesPerTrigger throttles per micro-batch to
 smooth downstream silver_stream load.
 
 Prerequisites:
-- bronze_verify_financial must have run first with LB_REGISTER_TABLE=1 to
-  create the target Iceberg table (schema inferred from the first parquet).
+- bronze_verify_financial must have run first with LB_REGISTER_TABLE=schema
+  (the continuous preflight) to create the empty target Iceberg table
+  (schema inferred from the first parquet).
   Structured Streaming's parquet source requires an explicit schema or a
   pre-existing table to sink into; we take the second route.
 - SIGTERM triggers a graceful stopQuery so an in-flight micro-batch commits
@@ -20,7 +21,7 @@ import signal
 import sys
 import time
 
-from common import env, log
+from common import env, log, stream_batch_lines
 from pyspark.sql import SparkSession
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
@@ -45,6 +46,25 @@ MAX_FILES = int(env("LB_FINANCIAL_BRONZE_MAX_FILES", "8"))
 TRIGGER_S = int(env("LB_FINANCIAL_BRONZE_TRIGGER_S", "10"))
 
 
+def _log_new_progress(query, logged_batch: int) -> int:
+    """Log each micro-batch once, in the line format the metrics collector
+    parses (LB-136: without these the continuous scorecard read zero rows
+    ingested for a healthy AML stream). Returns the last batch id logged."""
+    for p in query.recentProgress:
+        batch_id = int(p.get("batchId", -1))
+        if batch_id <= logged_batch:
+            continue
+        logged_batch = batch_id
+        for line in stream_batch_lines(
+            batch_id,
+            int(p.get("numInputRows") or 0),
+            (p.get("durationMs") or {}).get("triggerExecution", 0) / 1000.0,
+            f"{CATALOG}.{BRONZE_TABLE}",
+        ):
+            log(line)
+    return logged_batch
+
+
 def main() -> None:
     spark = SparkSession.builder.appName("lb-bronze-ingest-financial").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
@@ -66,10 +86,10 @@ def main() -> None:
     # was declared failed.
     try:
         target_schema = spark.table(f"{CATALOG}.{BRONZE_TABLE}").schema
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         log(
             f"ERROR: {CATALOG}.{BRONZE_TABLE} does not exist; run "
-            "bronze_verify_financial with LB_REGISTER_TABLE=1 first. ({e})"
+            f"bronze_verify_financial with LB_REGISTER_TABLE=1 or =schema first. ({e})"
         )
         sys.exit(2)
 
@@ -109,8 +129,11 @@ def main() -> None:
     # streaming exception and doesn't wake for signal.SIG* under some
     # Python versions. Polling every second checks for graceful stop
     # from the signal handler AND surfaces streaming exceptions promptly.
+    logged_batch = -1
     while query.isActive:
         time.sleep(1)
+        logged_batch = _log_new_progress(query, logged_batch)
+    _log_new_progress(query, logged_batch)
 
     # Re-raise any streaming exception so a jar-download stall / schema
     # mismatch / S3 auth failure surfaces as pod exit != 0. Without this,
