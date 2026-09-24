@@ -529,7 +529,8 @@ class PipelineBenchmark:
         "storage_reclaimed_mb": "MB of storage freed by maintenance operations",
         "pre_compaction_qph": "QpH measured before maintenance (on uncompacted data)",
         "post_compaction_qph": "QpH measured after maintenance (on compacted data) -- the primary QpH score",
-        "maintenance_value_pct": "QpH improvement from maintenance: (post - pre) / pre * 100",
+        "maintenance_value_pct": "QpH change from maintenance over the queries that succeeded in both runs: (post - pre) / pre * 100; null when not measurable",
+        "maintenance_paired_queries": "Queries that succeeded before and after maintenance (the base of maintenance_value_pct)",
     }
 
     run_id: str
@@ -595,7 +596,10 @@ class PipelineBenchmark:
     storage_reclaimed_mb: float = 0.0
     pre_compaction_qph: float = 0.0
     post_compaction_qph: float = 0.0
-    maintenance_value_pct: float = 0.0
+    # None when maintenance did not run or no query succeeded in both runs;
+    # 0.0 would read as "maintenance had no effect".
+    maintenance_value_pct: float | None = None
+    maintenance_paired_queries: int = 0
 
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     success: bool = False
@@ -879,7 +883,10 @@ class PipelineBenchmark:
         if self.pre_compaction_qph > 0:
             batch_scores["pre_compaction_qph"] = round(self.pre_compaction_qph, 1)
             batch_scores["post_compaction_qph"] = round(self.post_compaction_qph, 1)
-            batch_scores["maintenance_value_pct"] = round(self.maintenance_value_pct, 1)
+            batch_scores["maintenance_value_pct"] = (
+                None if self.maintenance_value_pct is None else round(self.maintenance_value_pct, 1)
+            )
+            batch_scores["maintenance_paired_queries"] = self.maintenance_paired_queries
         if self.snapshots_expired > 0:
             batch_scores["snapshots_expired"] = self.snapshots_expired
         if self.orphan_files_removed > 0:

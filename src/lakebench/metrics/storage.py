@@ -546,7 +546,7 @@ class MetricsStorage:
                 compaction_ratio=scores.get("compaction_ratio", 0.0),
                 pre_compaction_qph=scores.get("pre_compaction_qph", 0.0),
                 post_compaction_qph=scores.get("post_compaction_qph", 0.0),
-                maintenance_value_pct=scores.get("maintenance_value_pct", 0.0),
+                maintenance_value_pct=scores.get("maintenance_value_pct"),
             )
             if pb_data.get("end_time"):
                 metrics.pipeline_benchmark.end_time = datetime.fromisoformat(pb_data["end_time"])

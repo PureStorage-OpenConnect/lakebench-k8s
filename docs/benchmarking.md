@@ -133,8 +133,9 @@ The scorecard then reports:
 | Field | Description |
 |-------|-------------|
 | `pre_compaction_qph` | QpH before maintenance |
-| `post_compaction_qph` | QpH after maintenance (the final reported QpH) |
-| `maintenance_value_pct` | Percentage QpH improvement from maintenance |
+| `post_compaction_qph` | QpH after maintenance, over every query that succeeded in that run (this is the reported `composite_qph`) |
+| `maintenance_value_pct` | QpH change from maintenance, computed over only the queries that succeeded in both runs; null when maintenance did not run or no query succeeded twice. Each run is a single pass, so at scale below 5 a change under about 10% is within run-to-run noise |
+| `maintenance_paired_queries` | Number of queries in that comparison |
 | `maintenance_elapsed_seconds` | Wall-clock time spent on maintenance |
 | `maintenance_pct_of_pipeline` | Maintenance time as a fraction of total pipeline time |
 | `pre_compaction_file_count` | Data files before compaction |

@@ -1902,10 +1902,13 @@ def run(
                     if pre_compaction_qph > 0 and benchmark_qph:
                         pb.pre_compaction_qph = pre_compaction_qph
                         pb.post_compaction_qph = benchmark_qph
-                        if _paired:
+                        # Only a paired comparison after maintenance that ran
+                        # is a maintenance value; otherwise leave it null.
+                        if _paired and maint_elapsed > 0:
                             pb.maintenance_value_pct = (
                                 (_paired[1] - _paired[0]) / _paired[0]
                             ) * 100
+                            pb.maintenance_paired_queries = _paired[2]
                 except Exception:
                     pass  # Maintenance metrics are best-effort
 
