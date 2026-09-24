@@ -598,6 +598,11 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
     let (s, e) = (inst.start_us, inst.end_us);
     let mut rows = Vec::new();
     match inst.typ {
+        // fan_in / fan_out: the signal is the shape (many senders to one
+        // collector, or one payer to many), not the amount. Their amounts are
+        // each sender's own draw: pinning them to the structuring band made
+        // them sit just under W2's threshold by construction (AML-GOALS R2).
+        // Only micro_structuring keeps band amounts, its defining attribute.
         "fan_in" => {
             let bene = *p.last().unwrap();
             for &snd in &p[..p.len() - 1] {
@@ -605,7 +610,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     orig: snd,
                     bene,
                     ts_us: uu(&mut rng, s, e),
-                    structuring: true,
+                    structuring: false,
                 });
             }
         }
@@ -616,7 +621,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     orig,
                     bene: b,
                     ts_us: uu(&mut rng, s, e),
-                    structuring: true,
+                    structuring: false,
                 });
             }
         }

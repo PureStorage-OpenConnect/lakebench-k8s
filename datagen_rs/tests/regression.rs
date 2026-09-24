@@ -1510,3 +1510,13 @@ fn fi_entities_never_claim_the_reporting_fi_bic() {
         assert!(!REPORTING_FI_POOL_IDX.contains(&own_bic_idx(id, 500)));
     }
 }
+
+#[test]
+fn only_micro_structuring_draws_band_amounts() {
+    use datagen_rs::typology::emit_instance;
+    let (insts, _) = kyc_schedule(42);
+    for inst in &insts {
+        let banded = emit_instance(inst).iter().any(|r| r.structuring);
+        assert_eq!(banded, inst.typ == "micro_structuring", "{}", inst.id);
+    }
+}
