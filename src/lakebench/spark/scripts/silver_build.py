@@ -60,6 +60,10 @@ class DataProfile:
     hot_keys: list[str] | None = field(default=None)
 
 
+# Rows actually counted during the build (the profile only estimates them).
+_COUNTED: dict[str, int] = {}
+
+
 def get_path_size_gb(spark, path: str) -> float:
     """Get size of a path in GB using Hadoop FileSystem API."""
     try:
@@ -309,6 +313,7 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
     bronze_count = df_bronze.count()
     log(f"Bronze records: {bronze_count:,}")
+    _COUNTED["bronze_rows"] = bronze_count
     anchor = resolve_data_clock(df_bronze)
 
     silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
@@ -497,7 +502,11 @@ log("Partitioned by: interaction_date")
 log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
 log("=== JOB METRICS: silver-build ===")
 log(f"input_size_gb: {profile.total_size_gb:.3f}")
-log(f"estimated_rows: {profile.transaction_count}")
+if "bronze_rows" in _COUNTED:
+    log(f"input_rows: {_COUNTED['bronze_rows']}")
+else:
+    # STREAMING path: no full count is taken; this is the profile's estimate.
+    log(f"estimated_rows: {profile.transaction_count}")
 log(f"output_rows: {silver_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
 log("=" * 60)
