@@ -426,14 +426,15 @@ class TestScratchStorageConfig:
         """create_storage_class is a legacy field.
 
         StorageClass is Category 2 shared infrastructure; lakebench no
-        longer creates it. YAML that still carries the field loads
-        cleanly (pydantic's default is to ignore extras on this model),
-        but the field is not present on the resulting config.
+        longer creates it. Config models reject unknown keys, but this one
+        is listed in ScratchStorageConfig._removed_keys, so YAML that still
+        carries it loads with a DeprecationWarning and the field is dropped.
         """
-        config = LakebenchConfig(
-            name="test",
-            platform={"storage": {"scratch": {"create_storage_class": False}}},
-        )
+        with pytest.warns(DeprecationWarning, match="create_storage_class"):
+            config = LakebenchConfig(
+                name="test",
+                platform={"storage": {"scratch": {"create_storage_class": False}}},
+            )
         assert not hasattr(config.platform.storage.scratch, "create_storage_class")
 
     def test_scratch_override(self):
