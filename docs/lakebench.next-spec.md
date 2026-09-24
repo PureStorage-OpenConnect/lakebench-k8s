@@ -1355,16 +1355,16 @@ Phase 1 of the run flow is prerequisite detection (8-check engine per v1.3 CHANG
 Depends on: ENG-2C.1 (silver tables must exist), ENG-2C.3 (silver_build must produce silver.transactions and silver.entities), ENG-2C.4.1 (W1 output feeds graph features into W12).
 
 Files to create:
-- `src/lakebench/spark/scripts/features_financial.py` — feature engineering pipeline producing `silver.features` with columns per REQ-ML-01. Reads `silver.transactions`, `silver.entities`, `gold.synthetic_id_clusters` (W1 output). Uses windowed aggregations for velocity and diversity features; joins entity attributes; joins graph features. Output partitioned by `feature_window_end_date`.
-- `src/lakebench/spark/scripts/train_financial.py` — GBT training via `pyspark.ml.classification.GBTClassifier`. Reads `silver.features` and joins `bronze/manifest/manifest.parquet` for labels (typology-injected transactions are positives). Trains, evaluates, writes model artifact + metrics to `gold.models` and `gold.model_metrics` versioned by `(model_id, training_snapshot_ts)`.
-- `src/lakebench/spark/scripts/infer_financial.py` — batch inference. Reads model artifact by `model_id`, applies via Spark UDF or MLlib transformer, writes scored records to `gold.ml_scores` with reference to `model_id` and `inference_run_id`.
-- `src/lakebench/spark/scripts/champion_challenger_financial.py` — takes two model_ids and a test window; produces `gold.model_comparison` with delta metrics. **V-26 note:** the existing `lakebench compare` command (`cli/_compare.py`) already runs two configs sequentially with side-by-side scorecard output and supports `--format` and `--local`. Champion/challenger W15 is invoked via `lakebench compare config-champion.yaml config-challenger.yaml --skip-benchmark=false` when the two configs differ only in `financial.ml.model_id`; the `champion_challenger_financial.py` script is only needed when comparing two models within a single run's gold tables (post-hoc) rather than across two runs.
-- `src/lakebench/spark/scripts/drift_financial.py` — computes PSI (Population Stability Index) per feature between a reference distribution (training snapshot) and current distribution; produces `gold.feature_drift` with per-feature PSI values; flags features exceeding configurable threshold (default 0.2).
+- `src/lakebench/spark/scripts/features_financial.py` -- feature engineering pipeline producing `silver.features` with columns per REQ-ML-01. Reads `silver.transactions`, `silver.entities`, `gold.synthetic_id_clusters` (W1 output). Uses windowed aggregations for velocity and diversity features; joins entity attributes; joins graph features. Output partitioned by `feature_window_end_date`.
+- `src/lakebench/spark/scripts/train_financial.py` -- GBT training via `pyspark.ml.classification.GBTClassifier`. Reads `silver.features` and joins `bronze/manifest/manifest.parquet` for labels (typology-injected transactions are positives). Trains, evaluates, writes model artifact + metrics to `gold.models` and `gold.model_metrics` versioned by `(model_id, training_snapshot_ts)`.
+- `src/lakebench/spark/scripts/infer_financial.py` -- batch inference. Reads model artifact by `model_id`, applies via Spark UDF or MLlib transformer, writes scored records to `gold.ml_scores` with reference to `model_id` and `inference_run_id`.
+- `src/lakebench/spark/scripts/champion_challenger_financial.py` -- takes two model_ids and a test window; produces `gold.model_comparison` with delta metrics. **V-26 note:** the existing `lakebench compare` command (`cli/_compare.py`) already runs two configs sequentially with side-by-side scorecard output and supports `--format` and `--local`. Champion/challenger W15 is invoked via `lakebench compare config-champion.yaml config-challenger.yaml --skip-benchmark=false` when the two configs differ only in `financial.ml.model_id`; the `champion_challenger_financial.py` script is only needed when comparing two models within a single run's gold tables (post-hoc) rather than across two runs.
+- `src/lakebench/spark/scripts/drift_financial.py` -- computes PSI (Population Stability Index) per feature between a reference distribution (training snapshot) and current distribution; produces `gold.feature_drift` with per-feature PSI values; flags features exceeding configurable threshold (default 0.2).
 
 Files to modify:
-- `src/lakebench/config/schema.py` — add `WorkloadExtension.ml: bool = False` field to the workload config; when true, ML workloads run as part of the recipe.
-- `src/lakebench/spark/scripts/score_financial.py` (from ENG-2C.5) — extended to include ML metrics when `WorkloadExtension.ml` is true.
-- `src/lakebench/reports/generator.py` — extended to render ML scorecard block when present.
+- `src/lakebench/config/schema.py` -- add `WorkloadExtension.ml: bool = False` field to the workload config; when true, ML workloads run as part of the recipe.
+- `src/lakebench/spark/scripts/score_financial.py` (from ENG-2C.5) -- extended to include ML metrics when `WorkloadExtension.ml` is true.
+- `src/lakebench/reports/generator.py` -- extended to render ML scorecard block when present.
 
 Config additions (`architecture.workload.extensions.ml`):
 ```yaml
@@ -1516,28 +1516,28 @@ Not this task: alerting rules on Prometheus metrics (deferred; benchmark runs do
 Concrete test surface for Financial. The existing test suite has ~50 files; Financial adds the following.
 
 **Unit tests (fast, run in every CI job):**
-- `tests/test_financial_dimensions.py` — dimensions function edge cases, boundary scale factors
-- `tests/test_financial_config.py` — config validation, FinancialConfig defaults, invalid combinations
-- `tests/test_financial_generator.py` — deterministic output (same seed → same bytes), scale boundary correctness, typology injection density
-- `tests/test_financial_pacs008_schema.py` — bronze schema matches ISO 20022 XSD (mechanical check)
-- `tests/test_financial_typologies.py` — each of the 8 AMLworld primitives produces valid graph structure
-- `tests/test_financial_scoring.py` — recall calculation correctness on synthetic input
+- `tests/test_financial_dimensions.py` -- dimensions function edge cases, boundary scale factors
+- `tests/test_financial_config.py` -- config validation, FinancialConfig defaults, invalid combinations
+- `tests/test_financial_generator.py` -- deterministic output (same seed → same bytes), scale boundary correctness, typology injection density
+- `tests/test_financial_pacs008_schema.py` -- bronze schema matches ISO 20022 XSD (mechanical check)
+- `tests/test_financial_typologies.py` -- each of the 8 AMLworld primitives produces valid graph structure
+- `tests/test_financial_scoring.py` -- recall calculation correctness on synthetic input
 
 **Integration tests (slower, run on merge to main):**
-- `tests/test_financial_pipeline.py` — end-to-end batch pipeline at scale=1 on one recipe (`hive-iceberg-spark-none-financial`)
-- `tests/test_financial_workloads.py` — each of W1-W11 produces expected output shape at scale=1
-- `tests/test_financial_command_compat.py` — every CLI command works or refuses cleanly (see ENG-2C.18)
-- `tests/test_financial_multi_cycle.py` — 3-cycle run at scale=1 produces cycle-progression scorecard
+- `tests/test_financial_pipeline.py` -- end-to-end batch pipeline at scale=1 on one recipe (`hive-iceberg-spark-none-financial`)
+- `tests/test_financial_workloads.py` -- each of W1-W11 produces expected output shape at scale=1
+- `tests/test_financial_command_compat.py` -- every CLI command works or refuses cleanly (see ENG-2C.18)
+- `tests/test_financial_multi_cycle.py` -- 3-cycle run at scale=1 produces cycle-progression scorecard
 
 **E2E tests (slow, run against lab cluster, tagged `extended`):**
 - Extension of `tests/test_e2e.py::TestExtendedScales` to include Financial at scale 1, 10, 100
-- `tests/test_e2e.py::TestFinancialSustained` — sustained mode at scale=10 for 30 minutes
+- `tests/test_e2e.py::TestFinancialSustained` -- sustained mode at scale=10 for 30 minutes
 
 **Stress tests (very slow, tagged `stress`, on-demand):**
 - Scale 1000 and 10000 Financial runs; verify successful completion and scorecard shape
 
 **Regression tests (mandatory for every refactor PR):**
-- `tests/test_customer360_regression.py` — byte-identical scorecard, byte-identical Parquet output at scale=1 for the `hive-iceberg-spark-none` recipe
+- `tests/test_customer360_regression.py` -- byte-identical scorecard, byte-identical Parquet output at scale=1 for the `hive-iceberg-spark-none` recipe
 
 Total new tests: approximately 30 test files, 200-300 test cases. Total added CI time at each PR: fast tests <2 minutes, integration tests <15 minutes on the standard CI runner.
 
@@ -2026,16 +2026,16 @@ Full field mapping from ISO 20022 XSDs to bronze Iceberg schemas.
 Verified against the pacs.008.001.09 XSD (structurally identical at the analytical level; 001.14 adds three fields not exercised in Financial v1).
 
 **GroupHeader (per message, message-level fields duplicated onto each transaction row for analytical convenience):**
-- `msg_id STRING NOT NULL` — MessageIdentification (Max35Text)
-- `cre_dt_tm TIMESTAMP NOT NULL` — CreationDateTime (ISODateTime)
-- `nb_of_txs INT NOT NULL` — NumberOfTransactions
-- `ctrl_sum DECIMAL(18,5)` — ControlSum (sum of amounts, informational)
-- `ttl_intr_bk_sttlm_amt DECIMAL(18,5)` — TotalInterbankSettlementAmount
-- `intr_bk_sttlm_dt DATE` — InterbankSettlementDate
-- `sttlm_inf STRUCT<sttlm_mtd: STRING, ...>` — SettlementInstruction
-- `pmt_tp_inf STRUCT<instr_prty, clr_chanl, svc_lvl, lcl_instrm, ctgy_purp>` — PaymentTypeInformation
-- `instg_agt STRUCT<bicfi: STRING, lei: STRING, nm: STRING>` — InstructingAgent
-- `instd_agt STRUCT<bicfi: STRING, lei: STRING, nm: STRING>` — InstructedAgent
+- `msg_id STRING NOT NULL` -- MessageIdentification (Max35Text)
+- `cre_dt_tm TIMESTAMP NOT NULL` -- CreationDateTime (ISODateTime)
+- `nb_of_txs INT NOT NULL` -- NumberOfTransactions
+- `ctrl_sum DECIMAL(18,5)` -- ControlSum (sum of amounts, informational)
+- `ttl_intr_bk_sttlm_amt DECIMAL(18,5)` -- TotalInterbankSettlementAmount
+- `intr_bk_sttlm_dt DATE` -- InterbankSettlementDate
+- `sttlm_inf STRUCT<sttlm_mtd: STRING, ...>` -- SettlementInstruction
+- `pmt_tp_inf STRUCT<instr_prty, clr_chanl, svc_lvl, lcl_instrm, ctgy_purp>` -- PaymentTypeInformation
+- `instg_agt STRUCT<bicfi: STRING, lei: STRING, nm: STRING>` -- InstructingAgent
+- `instd_agt STRUCT<bicfi: STRING, lei: STRING, nm: STRING>` -- InstructedAgent
 
 **CreditTransferTransaction (per transaction, 1..N per message):**
 Payment identification: `txn_id`, `instr_id`, `end_to_end_id STRING NOT NULL`, `uetr STRING NOT NULL`, `clr_sys_ref`.
@@ -2051,23 +2051,23 @@ Remittance: `rmt_inf_ustrd ARRAY<STRING>`, `rmt_inf_strd ARRAY<STRUCT<ref_doc, a
 ### B.2 camt.053.001.13 (bank-to-customer account statement)
 
 **Statement (per statement, per account, per day):**
-- `stmt_id STRING NOT NULL` — Identification (Max35Text)
-- `elctrnc_seq_nb INT` — ElectronicSequenceNumber
-- `cre_dt_tm TIMESTAMP NOT NULL` — CreationDateTime
-- `fr_to_dt STRUCT<fr_dt_tm, to_dt_tm>` — FromToDate range
-- `acct STRUCT<id: STRUCT<iban, othr>, ccy, ownr STRUCT<nm, lei>, svcr STRUCT<bicfi, lei>>` — Account (holder and servicing bank)
-- `rltd_acct STRUCT<...>` — RelatedAccount (parent/child accounts)
-- `bal ARRAY<STRUCT<tp: STRING, amt DECIMAL(18,5), amt_ccy STRING, cdt_dbt_ind: STRING, dt DATE>>` — Balance (opening, closing, forward, available)
-- `txs_summry STRUCT<ttl_ntries STRUCT<nb_of_ntries: INT, sum: DECIMAL(18,5), ttl_net_ntry: STRUCT<amt, cdt_dbt_ind>>>` — TransactionsSummary
+- `stmt_id STRING NOT NULL` -- Identification (Max35Text)
+- `elctrnc_seq_nb INT` -- ElectronicSequenceNumber
+- `cre_dt_tm TIMESTAMP NOT NULL` -- CreationDateTime
+- `fr_to_dt STRUCT<fr_dt_tm, to_dt_tm>` -- FromToDate range
+- `acct STRUCT<id: STRUCT<iban, othr>, ccy, ownr STRUCT<nm, lei>, svcr STRUCT<bicfi, lei>>` -- Account (holder and servicing bank)
+- `rltd_acct STRUCT<...>` -- RelatedAccount (parent/child accounts)
+- `bal ARRAY<STRUCT<tp: STRING, amt DECIMAL(18,5), amt_ccy STRING, cdt_dbt_ind: STRING, dt DATE>>` -- Balance (opening, closing, forward, available)
+- `txs_summry STRUCT<ttl_ntries STRUCT<nb_of_ntries: INT, sum: DECIMAL(18,5), ttl_net_ntry: STRUCT<amt, cdt_dbt_ind>>>` -- TransactionsSummary
 
 **Entry (per transaction within statement, 0..N per statement):**
-- `ntry_ref STRING` — EntryReference
+- `ntry_ref STRING` -- EntryReference
 - `amt DECIMAL(18,5) NOT NULL`, `amt_ccy STRING NOT NULL`
-- `cdt_dbt_ind STRING NOT NULL` — CRDT or DBIT
-- `sts STRING NOT NULL` — Status (BOOK, PDNG, INFO)
+- `cdt_dbt_ind STRING NOT NULL` -- CRDT or DBIT
+- `sts STRING NOT NULL` -- Status (BOOK, PDNG, INFO)
 - `bookg_dt STRUCT<dt, dt_tm>`, `val_dt STRUCT<dt, dt_tm>`
-- `bk_tx_cd STRUCT<domn STRUCT<cd, fmly STRUCT<cd, sub_fmly_cd>>>` — BankTransactionCode
-- `ntry_dtls ARRAY<STRUCT<tx_dtls: ARRAY<STRUCT<refs, amt, amt_dtls, chrgs, rltd_pties, rltd_agts, purp, rltd_rmt_inf, rmt_inf, rtr_inf, tax, addtl_tx_inf>>>>` — EntryDetails (nested transaction details)
+- `bk_tx_cd STRUCT<domn STRUCT<cd, fmly STRUCT<cd, sub_fmly_cd>>>` -- BankTransactionCode
+- `ntry_dtls ARRAY<STRUCT<tx_dtls: ARRAY<STRUCT<refs, amt, amt_dtls, chrgs, rltd_pties, rltd_agts, purp, rltd_rmt_inf, rmt_inf, rtr_inf, tax, addtl_tx_inf>>>>` -- EntryDetails (nested transaction details)
 
 Bronze camt053 table partitioned by `days(cre_dt_tm)`; entries denormalised into a separate silver.account_movements table for analytical use.
 
@@ -2547,11 +2547,11 @@ Only after these steps, proceed to implementation. Reference the spec block by I
 
 **Recommended agent workflow per ENG block:**
 
-1. `cat <spec-block>` — read the block
-2. `read Part 0.2 files` — discovery
-3. `bash <verify-commands>` — verification
+1. `cat <spec-block>` -- read the block
+2. `read Part 0.2 files` -- discovery
+3. `bash <verify-commands>` -- verification
 4. Draft implementation
-5. `pytest <verification-test>` — local test
-6. `git diff --stat` — bounded scope check
+5. `pytest <verification-test>` -- local test
+6. `git diff --stat` -- bounded scope check
 7. Draft PR description including ENG ID, discovery findings, test output
 8. Human review at PR

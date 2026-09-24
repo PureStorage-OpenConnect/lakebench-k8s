@@ -76,6 +76,45 @@ def ensure_column(spark, fq_table, name, sql_type):
     return True
 
 
+def _partition_transforms(spark, fq_table):
+    """The table's partition transforms as DESCRIBE reports them, spaces
+    removed (for example ``days(txn_timestamp)``)."""
+    out, in_parts = [], False
+    for r in spark.sql(f"DESCRIBE TABLE {fq_table}").collect():
+        name = (r[0] or "").strip()
+        if name == "# Partitioning":
+            in_parts = True
+            continue
+        if in_parts:
+            if not name or name.startswith("#"):
+                break
+            out.append((r[1] or "").replace(" ", ""))
+    return out
+
+
+def ensure_partition_transform(spark, fq_table, old, new):
+    """Evolve a reused Iceberg table's partition field from ``old`` to ``new``.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op on a reused catalog, so a table
+    created under an older DDL keeps its old spec. Silver and gold AML tables
+    moved from ``days()`` to ``months()``: at scale 1 the daily layout left
+    silver in 1,339 files of 3 MB, one per day, which compaction could not
+    merge. Existing files keep their spec; the next full overwrite or
+    delete-and-insert rewrites them under the new one. Returns True when the
+    spec was changed; logs and returns False when it cannot be read or changed.
+    """
+    try:
+        parts = _partition_transforms(spark, fq_table)
+        if old.replace(" ", "") not in parts:
+            return False
+        spark.sql(f"ALTER TABLE {fq_table} REPLACE PARTITION FIELD {old} WITH {new}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[startup] could not evolve {fq_table} from {old} to {new}: {one_line(e)}")
+        return False
+    log(f"[startup] {fq_table}: partition field {old} -> {new} (reused-catalog upgrade)")
+    return True
+
+
 def path_size_gb(spark, uri):
     """Total bytes under a Hadoop-FS path, in GiB; 0.0 if it cannot be measured."""
     try:
