@@ -101,12 +101,12 @@ pub fn lei_for(id: u64) -> String {
 /// The 500-BIC pool, identical order to identifiers.bic_pool().
 pub fn bic_pool() -> Vec<String> {
     let inst = [
-        "MERI", "NRTH", "BLKW", "CAMB", "PINN", "KSTR", "HALC", "CRNR", "IRNB", "SLVR",
-        "ESTV", "RDWD", "ARCD", "BRWT", "LMBR", "STNM", "WLBK", "GRNF", "ASHF", "BRDG",
+        "MERI", "NRTH", "BLKW", "CAMB", "PINN", "KSTR", "HALC", "CRNR", "IRNB", "SLVR", "ESTV",
+        "RDWD", "ARCD", "BRWT", "LMBR", "STNM", "WLBK", "GRNF", "ASHF", "BRDG",
     ];
     let ctry = [
-        "US", "GB", "DE", "FR", "CA", "JP", "SG", "CH", "AE", "IN", "MX", "CN", "AU",
-        "HK", "KR", "NL",
+        "US", "GB", "DE", "FR", "CA", "JP", "SG", "CH", "AE", "IN", "MX", "CN", "AU", "HK", "KR",
+        "NL",
     ];
     let loc = ["2L", "3X", "XX", "A1", "B2"];
     let branch = ["XXX", "001", "002", "LDN", "NYC"];
@@ -202,5 +202,11 @@ pub fn msg_id_into(a: u64, b: u64, buf: &mut String) {
 /// TXN-{orig7}-{bene7}-{uetr8} into `buf`.
 pub fn txn_id_into(orig: u64, bene: u64, uetr8: &str, buf: &mut String) {
     buf.clear();
-    let _ = write!(buf, "TXN-{:07}-{:07}-{}", orig % 10_000_000, bene % 10_000_000, uetr8);
+    let _ = write!(
+        buf,
+        "TXN-{:07}-{:07}-{}",
+        orig % 10_000_000,
+        bene % 10_000_000,
+        uetr8
+    );
 }

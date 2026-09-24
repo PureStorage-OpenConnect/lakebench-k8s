@@ -58,7 +58,10 @@ impl ArenaCol {
         let b = self.offsets[i + 1] as usize;
         debug_assert!(b >= a && b <= self.data.len());
         let bytes = &self.data[a..b];
-        debug_assert!(std::str::from_utf8(bytes).is_ok(), "ArenaCol produced non-UTF-8 bytes");
+        debug_assert!(
+            std::str::from_utf8(bytes).is_ok(),
+            "ArenaCol produced non-UTF-8 bytes"
+        );
         unsafe { std::str::from_utf8_unchecked(bytes) }
     }
 
@@ -70,7 +73,10 @@ impl ArenaCol {
         // Callers follow the sentinel-at-0 convention: v has length n+1 for
         // a world with n real entities. An empty input would leave get(0)
         // with an out-of-bounds offsets[1] read, so refuse it in debug.
-        debug_assert!(!v.is_empty(), "ArenaCol::from_vec: empty input violates sentinel convention");
+        debug_assert!(
+            !v.is_empty(),
+            "ArenaCol::from_vec: empty input violates sentinel convention"
+        );
         let total: usize = v.iter().map(|s| s.len()).sum();
         assert!(total <= u32::MAX as usize, "ArenaCol >4 GiB not supported");
         let mut offsets = Vec::with_capacity(n + 1);

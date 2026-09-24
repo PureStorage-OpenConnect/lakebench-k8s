@@ -10,12 +10,12 @@ pub const TYPE_LABELS: [&str; 3] = ["Person", "Company", "FI"];
 
 // Entity type shares: Person 0.55, Company 0.40, FI 0.05 (cumulative 0.55, 0.95).
 pub const HOME_CODES: [&str; 18] = [
-    "US", "GB", "DE", "FR", "CA", "MX", "CN", "IN", "JP", "SG", "CH", "BR", "AE", "AU",
-    "HK", "KR", "NL", "ES",
+    "US", "GB", "DE", "FR", "CA", "MX", "CN", "IN", "JP", "SG", "CH", "BR", "AE", "AU", "HK", "KR",
+    "NL", "ES",
 ];
 const HOME_WEIGHTS: [f64; 18] = [
-    0.88, 0.015, 0.010, 0.010, 0.015, 0.010, 0.008, 0.008, 0.005, 0.005, 0.005, 0.005,
-    0.005, 0.003, 0.002, 0.002, 0.001, 0.001,
+    0.88, 0.015, 0.010, 0.010, 0.015, 0.010, 0.008, 0.008, 0.005, 0.005, 0.005, 0.005, 0.005,
+    0.003, 0.002, 0.002, 0.001, 0.001,
 ];
 
 // Ring size range by type (lo, hi).

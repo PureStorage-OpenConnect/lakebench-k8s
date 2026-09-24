@@ -34,7 +34,11 @@ fn splitmix64_avalanche() {
     let a = splitmix64(0);
     let b = splitmix64(1);
     let diff = (a ^ b).count_ones();
-    assert!(diff >= 20, "splitmix64 avalanche too weak: {} bits differ", diff);
+    assert!(
+        diff >= 20,
+        "splitmix64 avalanche too weak: {} bits differ",
+        diff
+    );
 }
 
 #[test]
@@ -42,7 +46,13 @@ fn hash_frac_in_unit_interval() {
     for id in 0u64..1000 {
         for salt in [0i64, 1, 42, -1, i64::MAX] {
             let x = hash_frac(id, salt);
-            assert!((0.0..1.0).contains(&x), "hash_frac({},{})={} out of [0,1)", id, salt, x);
+            assert!(
+                (0.0..1.0).contains(&x),
+                "hash_frac({},{})={} out of [0,1)",
+                id,
+                salt,
+                x
+            );
         }
     }
 }
@@ -67,7 +77,12 @@ fn rng_adjacent_seeds_independent() {
     let mut b = Rng::new(2);
     let n = 1000;
     let differ = (0..n).filter(|_| a.next_u64() != b.next_u64()).count();
-    assert!(differ > n / 2, "seed(1) and seed(2) streams too correlated: {}/{} differ", differ, n);
+    assert!(
+        differ > n / 2,
+        "seed(1) and seed(2) streams too correlated: {}/{} differ",
+        differ,
+        n
+    );
 }
 
 #[test]
@@ -98,7 +113,12 @@ fn iban_mod97_valid() {
     // ISO 13616: an IBAN is valid iff, when rearranged (country+check
     // moved to the end) and letters expanded to 2-digit numbers, the
     // resulting integer mod 97 == 1. Every IBAN we emit must satisfy that.
-    let cases = [(b"DE", 1u64), (b"GB", 42), (b"US", 999_999_999), (b"CN", u64::MAX)];
+    let cases = [
+        (b"DE", 1u64),
+        (b"GB", 42),
+        (b"US", 999_999_999),
+        (b"CN", u64::MAX),
+    ];
     for (country, id) in cases {
         let iban = iban_for(country, id);
         let rearranged: String = iban[4..].chars().chain(iban[..4].chars()).collect();
@@ -116,7 +136,11 @@ fn iban_mod97_valid() {
         for ch in expanded.chars() {
             r = (r * 10 + ch.to_digit(10).unwrap() as u64) % 97;
         }
-        assert_eq!(r, 1, "IBAN failed mod97: {} (country={:?}, id={})", iban, country, id);
+        assert_eq!(
+            r, 1,
+            "IBAN failed mod97: {} (country={:?}, id={})",
+            iban, country, id
+        );
     }
 }
 
@@ -130,7 +154,12 @@ fn iban_into_matches_iban_for() {
         let heap = iban_for(b"DE", id);
         let mut stack = [0u8; 22];
         iban_into(b"DE", id, &mut stack);
-        assert_eq!(heap.as_bytes(), &stack, "iban_into vs iban_for diverged at id={}", id);
+        assert_eq!(
+            heap.as_bytes(),
+            &stack,
+            "iban_into vs iban_for diverged at id={}",
+            id
+        );
     }
 }
 
@@ -149,7 +178,12 @@ fn lei_into_matches_lei_for() {
         let heap = lei_for(id);
         let mut stack = [0u8; 20];
         lei_into(id, &mut stack);
-        assert_eq!(heap.as_bytes(), &stack, "lei_into vs lei_for diverged at id={}", id);
+        assert_eq!(
+            heap.as_bytes(),
+            &stack,
+            "lei_into vs lei_for diverged at id={}",
+            id
+        );
     }
 }
 
@@ -183,11 +217,7 @@ fn arena_roundtrip() {
 #[test]
 fn arena_ordering_preserved() {
     // Same input order must produce same get() sequence.
-    let items = vec![
-        "alpha".to_string(),
-        "beta".to_string(),
-        "gamma".to_string(),
-    ];
+    let items = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
     let arena = ArenaCol::from_vec(items);
     assert_eq!(arena.get(0), "alpha");
     assert_eq!(arena.get(1), "beta");
@@ -230,7 +260,11 @@ fn compression_default_is_snappy() {
     use datagen_rs::writer::compression_from_env;
     use parquet::basic::Compression;
     let c = with_env("DG_COMPRESSION", None, compression_from_env);
-    assert!(matches!(c, Compression::SNAPPY), "default should be snappy, got {:?}", c);
+    assert!(
+        matches!(c, Compression::SNAPPY),
+        "default should be snappy, got {:?}",
+        c
+    );
 }
 
 #[test]
@@ -240,7 +274,11 @@ fn compression_zstd_level_parses() {
     for lvl in [1, 3, 5, 6, 9, 22] {
         let key = format!("zstd{}", lvl);
         let c = with_env("DG_COMPRESSION", Some(&key), compression_from_env);
-        assert!(matches!(c, Compression::ZSTD(_)), "zstd{} did not resolve", lvl);
+        assert!(
+            matches!(c, Compression::ZSTD(_)),
+            "zstd{} did not resolve",
+            lvl
+        );
     }
 }
 
@@ -295,8 +333,11 @@ fn uetr_derivation_stable_and_seed_sensitive() {
     let s = uetr(42, 100);
     assert_eq!(s.len(), 36, "UETR wrong length: {}", s);
     let bytes = s.as_bytes();
-    assert!(bytes[8] == b'-' && bytes[13] == b'-' && bytes[18] == b'-' && bytes[23] == b'-',
-        "UETR missing hyphens: {}", s);
+    assert!(
+        bytes[8] == b'-' && bytes[13] == b'-' && bytes[18] == b'-' && bytes[23] == b'-',
+        "UETR missing hyphens: {}",
+        s
+    );
 }
 
 #[test]
@@ -307,17 +348,46 @@ fn pacs008_bytes_per_row_default_is_codec_aware() {
     // files at UAT scale.
     use datagen_rs::writer::pacs008_bytes_per_row_default;
     // ZSTD-1 (default codec) -- ~227 bytes/row measured 2026-09-18.
-    let z = with_env("DG_COMPRESSION", Some("zstd1"), pacs008_bytes_per_row_default);
-    let s = with_env("DG_COMPRESSION", Some("snappy"), pacs008_bytes_per_row_default);
+    let z = with_env(
+        "DG_COMPRESSION",
+        Some("zstd1"),
+        pacs008_bytes_per_row_default,
+    );
+    let s = with_env(
+        "DG_COMPRESSION",
+        Some("snappy"),
+        pacs008_bytes_per_row_default,
+    );
     let l = with_env("DG_COMPRESSION", Some("lz4"), pacs008_bytes_per_row_default);
-    let n = with_env("DG_COMPRESSION", Some("none"), pacs008_bytes_per_row_default);
+    let n = with_env(
+        "DG_COMPRESSION",
+        Some("none"),
+        pacs008_bytes_per_row_default,
+    );
     // Ratios more than the absolute values: SNAPPY/LZ4 should be within 5%
     // of each other, and both should sit between ZSTD-1 and uncompressed.
     assert!(z > 100.0 && z < 300.0, "zstd default sanity: {}", z);
     assert!(n > 400.0 && n < 700.0, "none default sanity: {}", n);
-    assert!(s > z && s < n, "snappy {} should sit between zstd {} and none {}", s, z, n);
-    assert!(l > z && l < n, "lz4 {} should sit between zstd {} and none {}", l, z, n);
-    assert!((s - l).abs() / s.max(l) < 0.10, "snappy {} and lz4 {} should be within 10%", s, l);
+    assert!(
+        s > z && s < n,
+        "snappy {} should sit between zstd {} and none {}",
+        s,
+        z,
+        n
+    );
+    assert!(
+        l > z && l < n,
+        "lz4 {} should sit between zstd {} and none {}",
+        l,
+        z,
+        n
+    );
+    assert!(
+        (s - l).abs() / s.max(l) < 0.10,
+        "snappy {} and lz4 {} should be within 10%",
+        s,
+        l
+    );
 }
 
 #[test]
@@ -327,10 +397,26 @@ fn customer360_bytes_per_row_default_is_codec_aware() {
     // would produce c360 files ~10x too small, which the M1 review flagged as
     // the design-critical trap. Pin every codec's expected value.
     use datagen_rs::writer::customer360_bytes_per_row_default;
-    let z = with_env("DG_COMPRESSION", Some("zstd1"), customer360_bytes_per_row_default);
-    let s = with_env("DG_COMPRESSION", Some("snappy"), customer360_bytes_per_row_default);
-    let l = with_env("DG_COMPRESSION", Some("lz4"), customer360_bytes_per_row_default);
-    let n = with_env("DG_COMPRESSION", Some("none"), customer360_bytes_per_row_default);
+    let z = with_env(
+        "DG_COMPRESSION",
+        Some("zstd1"),
+        customer360_bytes_per_row_default,
+    );
+    let s = with_env(
+        "DG_COMPRESSION",
+        Some("snappy"),
+        customer360_bytes_per_row_default,
+    );
+    let l = with_env(
+        "DG_COMPRESSION",
+        Some("lz4"),
+        customer360_bytes_per_row_default,
+    );
+    let n = with_env(
+        "DG_COMPRESSION",
+        Some("none"),
+        customer360_bytes_per_row_default,
+    );
     // zstd cracks the hex payload well; snappy/lz4/none don't.
     assert_eq!(z, 2233.0);
     assert_eq!(s, 4332.0);
@@ -338,7 +424,11 @@ fn customer360_bytes_per_row_default_is_codec_aware() {
     assert_eq!(n, 4399.0);
     // c360 must not accidentally alias the pacs.008 default.
     use datagen_rs::writer::pacs008_bytes_per_row_default;
-    let pz = with_env("DG_COMPRESSION", Some("zstd1"), pacs008_bytes_per_row_default);
+    let pz = with_env(
+        "DG_COMPRESSION",
+        Some("zstd1"),
+        pacs008_bytes_per_row_default,
+    );
     assert!(
         z > pz * 5.0,
         "c360 zstd bytes/row {} should be much larger than pacs008 {}",
@@ -379,11 +469,11 @@ fn compression_snappy_lz4_none() {
 /// tracked `bytes_written()` accounting.
 #[test]
 fn mpu_writer_large_roundtrip() {
-    use std::io::Write;
     use datagen_rs::s3sink::MpuWriter;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use std::io::Write;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -426,8 +516,8 @@ fn mpu_writer_large_roundtrip() {
 
     // Read it back and compare byte-for-byte.
     let store_c = store.clone();
-    let got = handle
-        .block_on(async move { store_c.get(&path).await.unwrap().bytes().await.unwrap() });
+    let got =
+        handle.block_on(async move { store_c.get(&path).await.unwrap().bytes().await.unwrap() });
     assert_eq!(got.len(), TOTAL, "readback size");
     assert_eq!(&got[..], &expected[..], "readback content");
 }
@@ -439,11 +529,11 @@ fn mpu_writer_large_roundtrip() {
 /// separate from the completed-object namespace).
 #[test]
 fn mpu_writer_drop_without_finish_leaves_no_object() {
-    use std::io::Write;
     use datagen_rs::s3sink::MpuWriter;
     use object_store::memory::InMemory;
     use object_store::path::Path;
     use object_store::ObjectStore;
+    use std::io::Write;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -489,9 +579,7 @@ fn mpu_writer_drop_without_finish_leaves_no_object() {
 
 use datagen_rs::amounts::{lognormal_amount, lognormal_amount_shifted};
 use datagen_rs::model::build_world_ex;
-use datagen_rs::world::{
-    amount_log_shift, hash_normal, rate_mult, BASELINE_ACTIVITY, TYPE_PERSON,
-};
+use datagen_rs::world::{amount_log_shift, hash_normal, rate_mult, BASELINE_ACTIVITY, TYPE_PERSON};
 
 #[test]
 fn persona_deterministic() {
@@ -523,9 +611,15 @@ fn persona_rate_has_real_spread() {
     assert!(
         quiet > n as usize / 10,
         "too few quiet accounts ({}/{}): dormancy has nothing to show against",
-        quiet, n
+        quiet,
+        n
     );
-    assert!(busy > n as usize / 10, "too few busy accounts ({}/{})", busy, n);
+    assert!(
+        busy > n as usize / 10,
+        "too few busy accounts ({}/{})",
+        busy,
+        n
+    );
     // All strictly positive and finite.
     assert!(vals.iter().all(|&v| v.is_finite() && v > 0.0));
 }
@@ -537,16 +631,25 @@ fn persona_amount_shift_is_mean_preserving() {
     // over a large sample; it must sit close to 1.0.
     let seed = 42;
     let n = 200_000u64;
-    let mean_mult: f64 =
-        (1..=n).map(|id| amount_log_shift(id, seed).exp()).sum::<f64>() / n as f64;
+    let mean_mult: f64 = (1..=n)
+        .map(|id| amount_log_shift(id, seed).exp())
+        .sum::<f64>()
+        / n as f64;
     assert!(
         (mean_mult - 1.0).abs() < 0.03,
         "amount shift not mean-preserving: E[exp(shift)] = {}",
         mean_mult
     );
     // And it must actually spread amounts (not collapse to 1.0 everywhere).
-    let big = (1..=n).filter(|&id| amount_log_shift(id, seed).exp() > 1.5).count();
-    assert!(big > n as usize / 20, "amount shift has no spread ({}/{})", big, n);
+    let big = (1..=n)
+        .filter(|&id| amount_log_shift(id, seed).exp() > 1.5)
+        .count();
+    assert!(
+        big > n as usize / 20,
+        "amount shift has no spread ({}/{})",
+        big,
+        n
+    );
 }
 
 #[test]
@@ -556,7 +659,10 @@ fn lognormal_shifted_zero_matches_base() {
     let mut a = Rng::new(777);
     let mut b = Rng::new(777);
     for _ in 0..10_000 {
-        assert_eq!(lognormal_amount(&mut a), lognormal_amount_shifted(&mut b, 0.0));
+        assert_eq!(
+            lognormal_amount(&mut a),
+            lognormal_amount_shifted(&mut b, 0.0)
+        );
     }
 }
 
@@ -583,7 +689,10 @@ fn world_activity_is_per_entity_not_per_type() {
         s.dedup();
         s.len()
     };
-    assert!(distinct > persons.len() / 2, "activity not sufficiently heterogeneous");
+    assert!(
+        distinct > persons.len() / 2,
+        "activity not sufficiently heterogeneous"
+    );
     // amount_logshift column is built and non-trivial.
     assert_eq!(w.amount_logshift.len(), w.population + 1);
     assert!(w.amount_logshift[1..].iter().any(|&v| v.abs() > 0.01));
@@ -646,13 +755,28 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
     let total_rows = (pop as i64) * 4 * 60;
     let insts = schedule(42, total_rows, pop, corpus_start, corpus_end, &country);
 
-    let dorm: Vec<_> = insts.iter().filter(|i| i.typ == "dormant_reactivation").collect();
-    assert!(!dorm.is_empty(), "no dormant_reactivation instances scheduled");
+    let dorm: Vec<_> = insts
+        .iter()
+        .filter(|i| i.typ == "dormant_reactivation")
+        .collect();
+    assert!(
+        !dorm.is_empty(),
+        "no dormant_reactivation instances scheduled"
+    );
     for inst in &dorm {
         // Suppression window is set, precedes the burst, ends at the burst end.
-        assert!(inst.suppress_end_us > inst.suppress_start_us, "no suppress window");
-        assert_eq!(inst.suppress_end_us, inst.end_us, "suppress end must equal burst end");
-        assert!(inst.suppress_start_us < inst.start_us, "suppress must start before burst");
+        assert!(
+            inst.suppress_end_us > inst.suppress_start_us,
+            "no suppress window"
+        );
+        assert_eq!(
+            inst.suppress_end_us, inst.end_us,
+            "suppress end must equal burst end"
+        );
+        assert!(
+            inst.suppress_start_us < inst.start_us,
+            "suppress must start before burst"
+        );
         // Dormancy length (window start -> burst start) is at least 95 days.
         assert!(
             inst.start_us - inst.suppress_start_us >= 95 * day,
@@ -661,14 +785,30 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
         );
 
         let rows = emit_instance(inst);
-        assert_eq!(rows.len(), inst.rows_per_instance + 1, "anchor + burst count");
+        assert_eq!(
+            rows.len(),
+            inst.rows_per_instance + 1,
+            "anchor + burst count"
+        );
         // Row 0 is the pre-window anchor: a normal-amount send before the window.
-        assert!(rows[0].ts_us < inst.suppress_start_us, "anchor must precede the window");
-        assert!(rows[0].min_amount_usd.is_none(), "anchor must be a normal-amount send");
-        assert_eq!(rows[0].orig, inst.participants[0], "anchor orig = dormant account");
+        assert!(
+            rows[0].ts_us < inst.suppress_start_us,
+            "anchor must precede the window"
+        );
+        assert!(
+            rows[0].min_amount_usd.is_none(),
+            "anchor must be a normal-amount send"
+        );
+        assert_eq!(
+            rows[0].orig, inst.participants[0],
+            "anchor orig = dormant account"
+        );
         // Burst rows: floored, inside [start, end], originated by the dormant account.
         for r in &rows[1..] {
-            assert!(r.min_amount_usd.is_some(), "burst rows must carry the amount floor");
+            assert!(
+                r.min_amount_usd.is_some(),
+                "burst rows must carry the amount floor"
+            );
             assert!(
                 r.ts_us >= inst.start_us && r.ts_us <= inst.end_us,
                 "burst row outside the manifest window"
@@ -711,7 +851,12 @@ fn floored_lognormal_always_clears_floor_and_varies() {
     let mut fallback_vals = Vec::new();
     for _ in 0..2000 {
         let a = floored_lognormal(&mut r, -3.0, floor);
-        assert!(a >= floor, "floored_lognormal returned {} < floor {}", a, floor);
+        assert!(
+            a >= floor,
+            "floored_lognormal returned {} < floor {}",
+            a,
+            floor
+        );
         fallback_vals.push(a);
     }
     let distinct = {
@@ -720,7 +865,11 @@ fn floored_lognormal_always_clears_floor_and_varies() {
         b.dedup();
         b.len()
     };
-    assert!(distinct > 50, "fallback collapsed to a near-constant ({} distinct)", distinct);
+    assert!(
+        distinct > 50,
+        "fallback collapsed to a near-constant ({} distinct)",
+        distinct
+    );
     // Normal-persona account: mostly natural upper-tail draws, still >= floor.
     let mut r2 = Rng::new(99);
     for _ in 0..2000 {
@@ -730,6 +879,9 @@ fn floored_lognormal_always_clears_floor_and_varies() {
     let mut x = Rng::new(7);
     let mut y = Rng::new(7);
     for _ in 0..500 {
-        assert_eq!(floored_lognormal(&mut x, -0.5, floor), floored_lognormal(&mut y, -0.5, floor));
+        assert_eq!(
+            floored_lognormal(&mut x, -0.5, floor),
+            floored_lognormal(&mut y, -0.5, floor)
+        );
     }
 }

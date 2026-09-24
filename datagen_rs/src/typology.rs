@@ -31,26 +31,131 @@ pub struct Spec {
 // identical typology_id strings for the original nine. New typologies get
 // tids 9..=14 in alphabetical order among themselves.
 pub const SPECS: [Spec; 15] = [
-    Spec { tid: 0, name: "bipartite", participants: 8, workload: "W1_synthetic_id", severity: "strategic", rows_per_instance: 16 },
-    Spec { tid: 1, name: "cycle", participants: 4, workload: "W3_round_tripping", severity: "operational", rows_per_instance: 4 },
-    Spec { tid: 2, name: "fan_in", participants: 6, workload: "W2_structuring", severity: "operational", rows_per_instance: 5 },
-    Spec { tid: 3, name: "fan_out", participants: 6, workload: "W2_structuring", severity: "operational", rows_per_instance: 5 },
-    Spec { tid: 4, name: "gather_scatter", participants: 9, workload: "W2_structuring", severity: "strategic", rows_per_instance: 8 },
-    Spec { tid: 5, name: "random", participants: 2, workload: "W2_structuring", severity: "smoke", rows_per_instance: 1 },
-    Spec { tid: 6, name: "scatter_gather", participants: 7, workload: "W3_round_tripping", severity: "strategic", rows_per_instance: 10 },
-    Spec { tid: 7, name: "stack", participants: 5, workload: "W2_structuring", severity: "strategic", rows_per_instance: 4 },
-    Spec { tid: 8, name: "synthetic_identity", participants: 5, workload: "W1_synthetic_id", severity: "strategic", rows_per_instance: 3 },
-    Spec { tid: 9, name: "corridor_high_risk", participants: 2, workload: "W3_round_tripping", severity: "strategic", rows_per_instance: 1 },
-    Spec { tid: 10, name: "cross_border_cycle", participants: 5, workload: "W3_round_tripping", severity: "strategic", rows_per_instance: 5 },
+    Spec {
+        tid: 0,
+        name: "bipartite",
+        participants: 8,
+        workload: "W1_synthetic_id",
+        severity: "strategic",
+        rows_per_instance: 16,
+    },
+    Spec {
+        tid: 1,
+        name: "cycle",
+        participants: 4,
+        workload: "W3_round_tripping",
+        severity: "operational",
+        rows_per_instance: 4,
+    },
+    Spec {
+        tid: 2,
+        name: "fan_in",
+        participants: 6,
+        workload: "W2_structuring",
+        severity: "operational",
+        rows_per_instance: 5,
+    },
+    Spec {
+        tid: 3,
+        name: "fan_out",
+        participants: 6,
+        workload: "W2_structuring",
+        severity: "operational",
+        rows_per_instance: 5,
+    },
+    Spec {
+        tid: 4,
+        name: "gather_scatter",
+        participants: 9,
+        workload: "W2_structuring",
+        severity: "strategic",
+        rows_per_instance: 8,
+    },
+    Spec {
+        tid: 5,
+        name: "random",
+        participants: 2,
+        workload: "W2_structuring",
+        severity: "smoke",
+        rows_per_instance: 1,
+    },
+    Spec {
+        tid: 6,
+        name: "scatter_gather",
+        participants: 7,
+        workload: "W3_round_tripping",
+        severity: "strategic",
+        rows_per_instance: 10,
+    },
+    Spec {
+        tid: 7,
+        name: "stack",
+        participants: 5,
+        workload: "W2_structuring",
+        severity: "strategic",
+        rows_per_instance: 4,
+    },
+    Spec {
+        tid: 8,
+        name: "synthetic_identity",
+        participants: 5,
+        workload: "W1_synthetic_id",
+        severity: "strategic",
+        rows_per_instance: 3,
+    },
+    Spec {
+        tid: 9,
+        name: "corridor_high_risk",
+        participants: 2,
+        workload: "W3_round_tripping",
+        severity: "strategic",
+        rows_per_instance: 1,
+    },
+    Spec {
+        tid: 10,
+        name: "cross_border_cycle",
+        participants: 5,
+        workload: "W3_round_tripping",
+        severity: "strategic",
+        rows_per_instance: 5,
+    },
     // rows_per_instance for dormant_reactivation counts only rows inside
     // the manifest injection window (the burst). The early ping is
     // dormancy evidence outside the window and does NOT count toward
     // this number, so a downstream consumer reconstructing (participants,
     // [s,e], rows_per_instance) sees an accurate ground-truth count.
-    Spec { tid: 11, name: "dormant_reactivation", participants: 2, workload: "W2_structuring", severity: "strategic", rows_per_instance: 4 },
-    Spec { tid: 12, name: "micro_structuring", participants: 9, workload: "W2_structuring", severity: "operational", rows_per_instance: 8 },
-    Spec { tid: 13, name: "rapid_layering", participants: 3, workload: "W3_round_tripping", severity: "strategic", rows_per_instance: 2 },
-    Spec { tid: 14, name: "tbml_repeated_invoice", participants: 2, workload: "W2_structuring", severity: "strategic", rows_per_instance: 6 },
+    Spec {
+        tid: 11,
+        name: "dormant_reactivation",
+        participants: 2,
+        workload: "W2_structuring",
+        severity: "strategic",
+        rows_per_instance: 4,
+    },
+    Spec {
+        tid: 12,
+        name: "micro_structuring",
+        participants: 9,
+        workload: "W2_structuring",
+        severity: "operational",
+        rows_per_instance: 8,
+    },
+    Spec {
+        tid: 13,
+        name: "rapid_layering",
+        participants: 3,
+        workload: "W3_round_tripping",
+        severity: "strategic",
+        rows_per_instance: 2,
+    },
+    Spec {
+        tid: 14,
+        name: "tbml_repeated_invoice",
+        participants: 2,
+        workload: "W2_structuring",
+        severity: "strategic",
+        rows_per_instance: 6,
+    },
 ];
 
 /// Per-tid seed stride. Must be larger than the maximum n_inst any single
@@ -191,7 +296,9 @@ pub fn schedule(
         // cross_border_cycle at 4 corridor persons and produced self-loops
         // on 5-participant cycles).
         if src_pool.len() < spec.participants {
-            if matches!(spec.name, "corridor_high_risk" | "cross_border_cycle") && !warned_corridor_skip {
+            if matches!(spec.name, "corridor_high_risk" | "cross_border_cycle")
+                && !warned_corridor_skip
+            {
                 // In practice only cross_border_cycle (needs 5) trips this
                 // -- corridor_pool falls back to the full person pool when
                 // its natural size is < 4, so corridor.len() >= 4 always,
@@ -212,7 +319,11 @@ pub fn schedule(
         // other typology emits exactly `rows_per_instance` rows per
         // instance and divides budget by that.
         let emitted_per_instance = spec.rows_per_instance
-            + if spec.name == "dormant_reactivation" { 1 } else { 0 };
+            + if spec.name == "dormant_reactivation" {
+                1
+            } else {
+                0
+            };
         let n_inst = ((budget / emitted_per_instance as f64).round() as i64).max(1);
         for j in 0..n_inst {
             let iseed = seed + 0xF100 + spec.tid as i64 * TID_SEED_STRIDE + j;
@@ -342,7 +453,9 @@ pub fn schedule(
                             ((rng.unit() * 5.0 + 2.0) as i64) * 86_400_000_000
                         }
                         "bipartite" => ((rng.unit() * 23.0 + 7.0) as i64) * 86_400_000_000,
-                        "synthetic_identity" => ((rng.unit() * 150.0 + 30.0) as i64) * 86_400_000_000,
+                        "synthetic_identity" => {
+                            ((rng.unit() * 150.0 + 30.0) as i64) * 86_400_000_000
+                        }
                         _ => ((rng.unit() * 167.0 + 1.0) as i64) * 3_600_000_000,
                     };
                     let e = (s + dur_us).min(corpus_end_us);
@@ -385,13 +498,25 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
         "fan_in" => {
             let bene = *p.last().unwrap();
             for &snd in &p[..p.len() - 1] {
-                rows.push(TxRow { orig: snd, bene, ts_us: uu(&mut rng, s, e), structuring: true, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: snd,
+                    bene,
+                    ts_us: uu(&mut rng, s, e),
+                    structuring: true,
+                    min_amount_usd: None,
+                });
             }
         }
         "fan_out" => {
             let orig = p[0];
             for &b in &p[1..] {
-                rows.push(TxRow { orig, bene: b, ts_us: uu(&mut rng, s, e), structuring: true, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig,
+                    bene: b,
+                    ts_us: uu(&mut rng, s, e),
+                    structuring: true,
+                    min_amount_usd: None,
+                });
             }
         }
         "gather_scatter" => {
@@ -399,10 +524,22 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             let half = ((p.len() - 1) / 2).max(1);
             let third = (e - s) / 3;
             for &o in &p[1..1 + half] {
-                rows.push(TxRow { orig: o, bene: hub, ts_us: uu(&mut rng, s, s + third), structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: o,
+                    bene: hub,
+                    ts_us: uu(&mut rng, s, s + third),
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
             for &b in &p[1 + half..] {
-                rows.push(TxRow { orig: hub, bene: b, ts_us: uu(&mut rng, s + 2 * third, e), structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: hub,
+                    bene: b,
+                    ts_us: uu(&mut rng, s + 2 * third, e),
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
         }
         "scatter_gather" => {
@@ -410,8 +547,20 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             let bene = *p.last().unwrap();
             let half = (e - s) / 2;
             for &m in &p[1..p.len() - 1] {
-                rows.push(TxRow { orig, bene: m, ts_us: uu(&mut rng, s, s + half), structuring: false, min_amount_usd: None });
-                rows.push(TxRow { orig: m, bene, ts_us: uu(&mut rng, s + half, e), structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig,
+                    bene: m,
+                    ts_us: uu(&mut rng, s, s + half),
+                    structuring: false,
+                    min_amount_usd: None,
+                });
+                rows.push(TxRow {
+                    orig: m,
+                    bene,
+                    ts_us: uu(&mut rng, s + half, e),
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
         }
         "cycle" => {
@@ -420,7 +569,13 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             for i in 0..n {
                 let base = s + step * i as i64;
                 let jit = (rng.unit() * step as f64 * 0.5) as i64;
-                rows.push(TxRow { orig: p[i], bene: p[(i + 1) % n], ts_us: base + jit, structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: p[i],
+                    bene: p[(i + 1) % n],
+                    ts_us: base + jit,
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
         }
         "stack" => {
@@ -428,17 +583,35 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             for i in 0..p.len() - 1 {
                 let base = s + step * i as i64;
                 let jit = (rng.unit() * step as f64 * 0.5) as i64;
-                rows.push(TxRow { orig: p[i], bene: p[i + 1], ts_us: base + jit, structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: p[i],
+                    bene: p[i + 1],
+                    ts_us: base + jit,
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
         }
         "random" => {
-            rows.push(TxRow { orig: p[0], bene: p[1], ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
+            rows.push(TxRow {
+                orig: p[0],
+                bene: p[1],
+                ts_us: uu(&mut rng, s, e),
+                structuring: false,
+                min_amount_usd: None,
+            });
         }
         "bipartite" => {
             let half = (p.len() / 2).max(1);
             for &src in &p[..half] {
                 for &dst in &p[half..] {
-                    rows.push(TxRow { orig: src, bene: dst, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
+                    rows.push(TxRow {
+                        orig: src,
+                        bene: dst,
+                        ts_us: uu(&mut rng, s, e),
+                        structuring: false,
+                        min_amount_usd: None,
+                    });
                 }
             }
         }
@@ -449,7 +622,13 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 if bb == a {
                     bb = p[(p.iter().position(|&x| x == a).unwrap() + 1) % p.len()];
                 }
-                rows.push(TxRow { orig: a, bene: bb, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: a,
+                    bene: bb,
+                    ts_us: uu(&mut rng, s, e),
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
         }
         // A -> mule -> B chain, both legs pinned to the SAME day. The
@@ -463,8 +642,20 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
         // forwards on the same business day.
         "rapid_layering" => {
             let (a, m, b) = (p[0], p[1], p[2]);
-            rows.push(TxRow { orig: a, bene: m, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
-            rows.push(TxRow { orig: m, bene: b, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
+            rows.push(TxRow {
+                orig: a,
+                bene: m,
+                ts_us: uu(&mut rng, s, e),
+                structuring: false,
+                min_amount_usd: None,
+            });
+            rows.push(TxRow {
+                orig: m,
+                bene: b,
+                ts_us: uu(&mut rng, s, e),
+                structuring: false,
+                min_amount_usd: None,
+            });
         }
         // dormant_reactivation (P3, W8). One pre-window ANCHOR send (normal
         // amount) 2 days before the dormancy start, then a reactivation BURST
@@ -508,7 +699,13 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             for i in 0..n {
                 let base = s + step * i as i64;
                 let jit = (rng.unit() * step as f64 * 0.5) as i64;
-                rows.push(TxRow { orig: p[i], bene: p[(i + 1) % n], ts_us: base + jit, structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: p[i],
+                    bene: p[(i + 1) % n],
+                    ts_us: base + jit,
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
         }
         // Many origs, one bene, structured amounts, 3-day window. Distinct
@@ -518,7 +715,13 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             let n = (inst.rows_per_instance).min(p.len() - 1);
             for i in 0..n {
                 let orig = p[i];
-                rows.push(TxRow { orig, bene, ts_us: uu(&mut rng, s, e), structuring: true, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig,
+                    bene,
+                    ts_us: uu(&mut rng, s, e),
+                    structuring: true,
+                    min_amount_usd: None,
+                });
             }
         }
         // Repeated same-edge invoicing over one week. Signal: high amount
@@ -530,7 +733,13 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 // Not marked as structuring -- amounts come from the normal
                 // lognormal draw which spans four orders of magnitude, so
                 // the amount CV on this edge is high by construction.
-                rows.push(TxRow { orig: a, bene: b, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
+                rows.push(TxRow {
+                    orig: a,
+                    bene: b,
+                    ts_us: uu(&mut rng, s, e),
+                    structuring: false,
+                    min_amount_usd: None,
+                });
             }
         }
         // Single transaction between participants both drawn from the
@@ -543,8 +752,18 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             // splitmix64 to jitter which participant is orig vs bene per
             // instance without adding an extra rng draw.
             let flip = splitmix64(inst.seed as u64) & 1;
-            let (a, b) = if flip == 0 { (p[0], p[1]) } else { (p[1], p[0]) };
-            rows.push(TxRow { orig: a, bene: b, ts_us: uu(&mut rng, s, e), structuring: false, min_amount_usd: None });
+            let (a, b) = if flip == 0 {
+                (p[0], p[1])
+            } else {
+                (p[1], p[0])
+            };
+            rows.push(TxRow {
+                orig: a,
+                bene: b,
+                ts_us: uu(&mut rng, s, e),
+                structuring: false,
+                min_amount_usd: None,
+            });
         }
         _ => {}
     }

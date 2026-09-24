@@ -27,7 +27,10 @@ pub fn compression_from_env() -> Compression {
         "none" | "uncompressed" => Compression::UNCOMPRESSED,
         other if other.starts_with("zstd") => {
             let n: i32 = other[4..].parse().unwrap_or_else(|_| {
-                panic!("DG_COMPRESSION={:?}: could not parse level after 'zstd'", other)
+                panic!(
+                    "DG_COMPRESSION={:?}: could not parse level after 'zstd'",
+                    other
+                )
             });
             ZstdLevel::try_new(n)
                 .map(Compression::ZSTD)

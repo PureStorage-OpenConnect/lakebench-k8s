@@ -395,7 +395,10 @@ mod tests {
         };
         let v = parses_as_json(&m.to_json());
         if let serde_json_min::Value::Obj(o) = v {
-            assert_eq!(o.get("schema").unwrap(), &serde_json_min::Value::Str("financial".into()));
+            assert_eq!(
+                o.get("schema").unwrap(),
+                &serde_json_min::Value::Str("financial".into())
+            );
         } else {
             panic!("not object");
         }
@@ -500,8 +503,14 @@ mod tests {
         // Would explode our mini parser if unescaped.
         let v = parses_as_json(&m.to_json());
         if let serde_json_min::Value::Obj(o) = v {
-            assert_eq!(o.get("bucket").unwrap(), &serde_json_min::Value::Str("has\"quote".into()));
-            assert_eq!(o.get("prefix").unwrap(), &serde_json_min::Value::Str("line\nbreak".into()));
+            assert_eq!(
+                o.get("bucket").unwrap(),
+                &serde_json_min::Value::Str("has\"quote".into())
+            );
+            assert_eq!(
+                o.get("prefix").unwrap(),
+                &serde_json_min::Value::Str("line\nbreak".into())
+            );
         } else {
             panic!("not object");
         }

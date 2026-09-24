@@ -11,7 +11,7 @@ pub mod party;
 pub mod realism;
 pub mod s3sink;
 pub mod schema;
-pub mod writer;
 pub mod timing;
 pub mod typology;
 pub mod world;
+pub mod writer;

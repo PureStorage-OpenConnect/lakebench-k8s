@@ -12,8 +12,14 @@ use parquet::arrow::ArrowWriter;
 use datagen_rs::model::build_world;
 
 fn main() {
-    let scale: f64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0.01);
-    let seed: i64 = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(42);
+    let scale: f64 = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.01);
+    let seed: i64 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(42);
     let w = build_world(scale, seed, 60);
     let n = w.population;
     let idx = 1..=n;
