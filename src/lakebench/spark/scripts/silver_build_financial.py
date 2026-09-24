@@ -917,12 +917,22 @@ def build_entity_profiles(txns_df):
 
 
 def _read_reference(spark):
-    """(party, account) DataFrames, or (None, None) when either is missing."""
+    """(party, account) DataFrames, or (None, None) when either file is absent
+    (a corpus from before the KYC columns, or a bronze-only layout).
+
+    Only a missing path is tolerated. Any other read error (credentials, S3
+    outage, a corrupt file) raises: is_customer defines the monitored
+    population, so silently writing NULL KYC would turn every customer-scoped
+    rule into "ran, 0 alerts".
+    """
     try:
         return spark.read.parquet(PARTY_PATH), spark.read.parquet(ACCOUNT_PATH)
-    except Exception as e:  # noqa: BLE001 -- missing path surfaces as AnalysisException
-        log(f"reference zones unreadable: {str(e).splitlines()[0][:200]}")
-        return None, None
+    except Exception as e:
+        msg = str(e)
+        if "PATH_NOT_FOUND" in msg or "Path does not exist" in msg:
+            log(f"reference zones not found: {msg.splitlines()[0][:200]}")
+            return None, None
+        raise
 
 
 def main() -> None:

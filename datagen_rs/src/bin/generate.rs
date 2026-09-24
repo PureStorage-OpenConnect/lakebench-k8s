@@ -84,6 +84,27 @@ fn arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
     default
 }
 
+/// --cycle, strictly: absent means 0, but a present value that does not parse
+/// as a cycle number exits 2. The lenient `arg()` would turn `--cycle -1` or a
+/// typo into cycle 0 and overwrite cycle 0's objects.
+fn cycle_arg() -> u64 {
+    let args: Vec<String> = std::env::args().collect();
+    let Some(i) = args.iter().position(|a| a == "--cycle") else {
+        return 0;
+    };
+    match args.get(i + 1).map(|v| v.parse::<u64>()) {
+        Some(Ok(c)) if c <= cycle::MAX_CYCLE => c,
+        other => {
+            eprintln!(
+                "--cycle must be an integer in 0..={}; got {:?}",
+                cycle::MAX_CYCLE,
+                other.map(|_| args.get(i + 1))
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 struct TypRow {
     orig: u64,
     bene: u64,
@@ -150,7 +171,7 @@ fn pacs008_main() {
     // Multi-cycle runs (datagen_rs::cycle): cycle n > 0 draws its event
     // streams from a cycle-mixed seed and writes cycle-suffixed keys. The
     // world keeps --seed. 0 reproduces a run without --cycle byte for byte.
-    let cycle_n: u64 = arg("--cycle", 0u64);
+    let cycle_n: u64 = cycle_arg();
     let sseed: i64 = cycle::stream_seed(seed, cycle_n);
     let scale: f64 = arg("--scale", 0.01);
     let corpus_months: i64 = arg("--corpus-months", 60);
@@ -310,8 +331,9 @@ fn pacs008_main() {
 
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
-    let mut instances =
-        datagen_rs::typology::schedule(sseed, total_txns, pop, start_us, end_us, &w.country);
+    let mut instances = datagen_rs::typology::schedule_ex(
+        seed, sseed, total_txns, pop, start_us, end_us, &w.country,
+    );
     for inst in instances.iter_mut() {
         inst.id = cycle::instance_id(&inst.id, cycle_n);
     }
@@ -412,6 +434,12 @@ fn pacs008_main() {
     // mass falls in [fid/F, (fid+1)/F).
     let n_typ_total: i64 = typ_by_file.iter().map(|v| v.len() as i64).sum();
     let n_base_total: u64 = (total_txns - n_typ_total).max(0) as u64;
+    // base_uid packs the cycle above bit 40; the global row index must stay
+    // below it or cycles would share uids (and UETRs).
+    assert!(
+        n_base_total < 1 << 40,
+        "corpus too large for cycle uid packing"
+    );
     let base_seed = splitmix64((sseed as u64) ^ 0xBA5E_0000_0000_0001);
     let base_mass = move |i: u64| -> f64 {
         (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
@@ -761,7 +789,7 @@ fn customer360_main() {
     let seed: i64 = arg("--seed", 42);
     // See datagen_rs::cycle: n > 0 offsets the per-file stream and row ids and
     // suffixes the keys; 0 reproduces a run without --cycle.
-    let cycle_n: u64 = arg("--cycle", 0u64);
+    let cycle_n: u64 = cycle_arg();
     // Two sizing controls: --target-tb picks total file count, --file-size-mb
     // picks per-file size. --scale is accepted but ignored on the c360 path
     // (it's the Python-side abstraction and only informs row density; on the

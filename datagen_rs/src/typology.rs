@@ -268,35 +268,41 @@ pub fn subject_index(typ: &str, n: usize, inst_seed: i64) -> usize {
 }
 
 /// Make the subject role a customer while leaving every other participant a
-/// customer at the baseline rate. If the subject slot holds a non-customer it
-/// swaps with the first customer participant, so the instance keeps its drawn
-/// number of customers; only when no participant is a customer does it
-/// replace the subject with a uniform draw from the customer part of the same
-/// pool. Nothing but is_customer is conditioned (no PEP, tier, tenure or
-/// volume), which is what keeps KYC attributes from becoming labels.
+/// customer at the baseline rate. A non-customer subject is replaced by a
+/// uniform draw from the customer part of the same pool, excluding the other
+/// participants; the others are never touched, so they stay independent draws
+/// at the base rate. (Swapping with a customer participant instead would move
+/// customers out of the non-subject roles and make is_customer = 0 a label
+/// signal for them.) Nothing but is_customer is conditioned (no PEP, tier,
+/// tenure or volume), which is what keeps KYC attributes from becoming labels.
+/// `world_seed` is the seed of the world the entity attributes come from.
+/// Returns false when no customer could be placed (empty pool or 50
+/// collisions), so the caller can count it.
 fn enforce_subject(
     participants: &mut [u64],
     subject: usize,
     cust_pool: &[u64],
-    seed: i64,
+    world_seed: i64,
     rng: &mut Rng,
-) {
-    if is_customer(participants[subject], seed) || cust_pool.is_empty() {
-        return;
+) -> bool {
+    if is_customer(participants[subject], world_seed) {
+        return true;
     }
-    if let Some(j) = participants.iter().position(|&p| is_customer(p, seed)) {
-        participants.swap(subject, j);
-        return;
+    if cust_pool.is_empty() {
+        return false;
     }
     for _ in 0..50 {
         let cand = cust_pool[rng.below(cust_pool.len() as u64) as usize];
         if !participants.contains(&cand) {
             participants[subject] = cand;
-            return;
+            return true;
         }
     }
+    false
 }
 
+/// `schedule_ex` with one seed for both the world and the event stream (a
+/// single-cycle run).
 pub fn schedule(
     seed: i64,
     total_rows: i64,
@@ -305,14 +311,40 @@ pub fn schedule(
     corpus_end_us: i64,
     country: &[&'static str],
 ) -> Vec<Instance> {
-    let pool = person_pool(population, seed);
+    schedule_ex(
+        seed,
+        seed,
+        total_rows,
+        population,
+        corpus_start_us,
+        corpus_end_us,
+        country,
+    )
+}
+
+/// Schedule typology instances. Entity attributes (entity type, customer
+/// status) are looked up with `world_seed`, the seed the world was built
+/// with; instance draws use `seed`, which a multi-cycle run mixes per cycle
+/// (crate::cycle). Using the stream seed for the lookups would pick subjects
+/// that are customers of a different world.
+pub fn schedule_ex(
+    world_seed: i64,
+    seed: i64,
+    total_rows: i64,
+    population: usize,
+    corpus_start_us: i64,
+    corpus_end_us: i64,
+    country: &[&'static str],
+) -> Vec<Instance> {
+    let pool = person_pool(population, world_seed);
     let corridor = corridor_pool(&pool, country);
     let cust_of = |v: &[u64]| -> Vec<u64> {
         v.iter()
             .copied()
-            .filter(|&id| is_customer(id, seed))
+            .filter(|&id| is_customer(id, world_seed))
             .collect()
     };
+    let mut subject_misses = 0usize;
     let pool_cust = cust_of(&pool);
     let corridor_cust = cust_of(&corridor);
     let budget = 0.001 * total_rows as f64 / SPECS.len() as f64;
@@ -382,7 +414,8 @@ pub fn schedule(
             let mut rng = Rng::new(iseed as u64);
             let subject = subject_index(spec.name, spec.participants, iseed);
             let mut participants = pick_distinct(&mut rng, src_pool, spec.participants);
-            enforce_subject(&mut participants, subject, src_cust, seed, &mut rng);
+            let mut placed =
+                enforce_subject(&mut participants, subject, src_cust, world_seed, &mut rng);
             // Dormant instances: re-draw until the originator is unused, so each
             // dormant account owns exactly one dormancy window (see finding 2
             // above). Bounded; a collision is rare (birthday over ~n_inst in the
@@ -391,7 +424,8 @@ pub fn schedule(
                 let mut retries = 0;
                 while used_dormant_orig.contains(&participants[0]) && retries < 10 {
                     participants = pick_distinct(&mut rng, src_pool, spec.participants);
-                    enforce_subject(&mut participants, subject, src_cust, seed, &mut rng);
+                    placed =
+                        enforce_subject(&mut participants, subject, src_cust, world_seed, &mut rng);
                     retries += 1;
                 }
                 used_dormant_orig.insert(participants[0]);
@@ -522,6 +556,7 @@ pub fn schedule(
                     (s, e)
                 }
             };
+            subject_misses += (!placed) as usize;
             instances.push(Instance {
                 id: format!("{}_{}_{:07}", spec.name.to_uppercase(), spec.tid, j),
                 typ: spec.name,
@@ -538,6 +573,13 @@ pub fn schedule(
                 suppress_end_us: suppress.1,
             });
         }
+    }
+    if subject_misses > 0 {
+        eprintln!(
+            "note: {} typology instances have a non-customer subject (customer pool too small) \
+             -- expected only at tiny scales",
+            subject_misses
+        );
     }
     instances
 }

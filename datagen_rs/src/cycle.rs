@@ -19,6 +19,12 @@
 
 use crate::hash::splitmix64;
 
+/// Largest supported cycle: base_uid keeps it in bits 40..62, below the
+/// typology-uid bit 63. The c360 row ids (file_id * rows_per_file with
+/// file_id offset by cycle << 32) stay in i64 for rows_per_file < 2^31 / n,
+/// far above any cycle count a run uses.
+pub const MAX_CYCLE: u64 = (1 << 23) - 1;
+
 /// Seed for the cycle's event streams. Identity for cycle 0.
 #[inline]
 pub fn stream_seed(seed: i64, cycle: u64) -> i64 {
@@ -29,12 +35,12 @@ pub fn stream_seed(seed: i64, cycle: u64) -> i64 {
     }
 }
 
-/// Base-row uid: the global row index with the cycle in bits 40..63. Base
+/// Base-row uid: the global row index with the cycle in bits 40..62. Base
 /// uids keep the top bit clear (typology uids set it), and the global index
 /// stays below 2^40 at every supported scale, so cycles never share a uid.
 #[inline]
 pub fn base_uid(gi: u64, cycle: u64) -> u64 {
-    debug_assert!(gi < 1 << 40 && cycle < 1 << 23);
+    debug_assert!(gi < 1 << 40 && cycle <= MAX_CYCLE);
     gi | (cycle << 40)
 }
 

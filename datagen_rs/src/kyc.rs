@@ -68,6 +68,13 @@ pub fn entity_bic_idx(id: u64, seed: i64, pool_len: usize) -> usize {
     if is_customer(id, seed) {
         return REPORTING_FI_POOL_IDX[(splitmix64(id ^ 0xB1C1) & 1) as usize];
     }
+    own_bic_idx(id, pool_len)
+}
+
+/// Pool index of an FI entity's own BIC (its identity as an institution),
+/// never a reporting-FI entry.
+#[inline]
+pub fn own_bic_idx(id: u64, pool_len: usize) -> usize {
     let i = crate::ids::bic_idx(id, pool_len);
     if REPORTING_FI_POOL_IDX.contains(&i) {
         (i + 1) % pool_len

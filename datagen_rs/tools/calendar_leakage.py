@@ -84,7 +84,8 @@ def chi2_sim(base: dict, cells: dict, n: float, seed: int = 0):
 def main(root: str) -> int:
     base = Path(root)
     pacs = next(base.rglob("bronze/pacs008"))
-    manifest = next(base.rglob("manifest/manifest.parquet"))
+    # Every cycle's manifest (manifest.parquet, manifest-c001.parquet, ...).
+    manifest = next(base.rglob("manifest/manifest.parquet")).parent / "manifest*.parquet"
     c = duckdb.connect()
     c.sql(f"""
         CREATE VIEW m AS SELECT * FROM '{manifest}';
