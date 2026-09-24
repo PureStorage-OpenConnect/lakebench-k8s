@@ -251,6 +251,10 @@ def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
         )
 
     rows = [row("u12", 1, 2, 0), row("u23", 2, 3, 5), row("u45", 4, 5, 9), row("u56", 5, 6, 12)]
+    # A payment whose creditor IBAN is not in the account master.
+    stray = list(row("u99", 1, 2, 20))
+    stray[7] = {"iban": "IB-unknown"}
+    rows.append(tuple(stray))
     pacs = _write(spark, rows, pacs_schema, tmp_path / "pacs")
     party_path = _write(
         spark,
@@ -268,7 +272,8 @@ def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
     )
     assert dict(id_map.select("dg_id", "key").collect()) == {i: i for i in range(1, 7)}
     keys = {r["orig_key"] for r in txns.collect()} | {r["bene_key"] for r in txns.collect()}
-    assert keys == {1, 2, 3, 4, 5, 6}
+    assert keys == {1, 2, 3, 4, 5, 6, None}
+    assert af.unkeyed_rows(txns) == 1
     from pyspark.sql.functions import hour
 
     # TIMESTAMP_NTZ wall clock 10:00 becomes the 10:00 UTC instant.
@@ -388,10 +393,47 @@ def test_subject_index_mirrors_generator():
     assert af.subject_index("corridor_high_risk", 2, -1) == af._splitmix64((1 << 64) - 1) & 1
 
 
-def test_manifest_glob_covers_every_cycle():
+def test_manifest_glob_reads_every_cycle_and_nothing_else(spark, tmp_path):
     import aml_features as af
 
-    assert af.manifest_glob("s3a://b/p/manifest/manifest.parquet") == (
-        "s3a://b/p/manifest/manifest*.parquet"
-    )
+    d = tmp_path / "manifest"
+    schema = "typology_id string, typology_type string, seed long"
+    for name, tid in (
+        ("manifest.parquet", "STACK_7_0000000"),
+        ("manifest-c001.parquet", "STACK_7_0000001"),
+        ("manifest-backup.parquet", "STACK_7_0000002"),
+    ):
+        spark.createDataFrame([(tid, "stack", 1)], schema).write.parquet(str(d / name))
+    got = spark.read.parquet(af.manifest_glob(str(d / "manifest.parquet")))
+    assert sorted(r["typology_id"] for r in got.collect()) == ["STACK_7_0000000", "STACK_7_0000001"]
+    af.check_manifest(got)
+    with pytest.raises(ValueError, match="repeat typology_id"):
+        af.check_manifest(got.unionByName(got))
     assert af.manifest_glob("/x/other.parquet") == "/x/other.parquet"
+
+
+def test_corpus_seed_check(spark):
+    import aml_features as af
+
+    def iseed(seed, tid, j):
+        inner = af._splitmix64(0xF100 + tid * 100_000_000 + j)
+        v = af._splitmix64((seed & ((1 << 64) - 1)) ^ inner)
+        return v - (1 << 64) if v >= 1 << 63 else v  # stored as i64
+
+    rows = [(f"DORMANT_REACTIVATION_11_{j:07d}", iseed(42, 11, j)) for j in range(5)]
+    m = spark.createDataFrame(rows, "typology_id string, seed long")
+    assert af.corpus_seed_check(m, 42)["matched_share"] == 1.0
+    assert af.corpus_seed_check(m, 50000042)["matched_share"] == 0.0
+    assert af.corpus_seed_check(m, None)["matched_share"] is None
+
+
+def test_subject_labels_refuse_a_missing_seed(spark):
+    import aml_features as af
+
+    m = spark.createDataFrame(
+        [("stack", [1, 2, 3], None)],
+        "typology_type string, participant_entity_ids array<long>, seed long",
+    )
+    ids = spark.createDataFrame([(1, 1)], "dg_id long, key long")
+    with pytest.raises(ValueError, match="instance seed"):
+        af.labels_from_subjects(spark, m, ids)

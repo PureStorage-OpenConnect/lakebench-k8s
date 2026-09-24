@@ -82,6 +82,7 @@ def main(argv=None) -> int:
     from pyspark.sql.functions import col
 
     from lakebench.aml.fidelity_gate import (
+        add_pass,
         evaluate_gate,
         in_scope_typologies,
         load_preregistration,
@@ -104,6 +105,8 @@ def main(argv=None) -> int:
     try:
         manifest_src = af.manifest_glob(str(corpus / "manifest/manifest.parquet"))
         manifest = spark.read.parquet(manifest_src)
+        af.check_manifest(manifest)
+        seed_check = af.corpus_seed_check(manifest, args.seed)
         txns, ents, id_map = af.bronze_frames(
             spark,
             pacs_path=str(corpus / "bronze/pacs008"),
@@ -124,6 +127,7 @@ def main(argv=None) -> int:
             high_cv_edge=tm["high_cv_edge"],
         )
         density = af.typology_density(txns, manifest)
+        unkeyed = af.unkeyed_rows(txns)
         cust_keys = features.filter(col("is_customer")).select("key")
         agreement = af.label_agreement(
             by_participant.join(cust_keys, "key", "left_semi"),
@@ -135,6 +139,8 @@ def main(argv=None) -> int:
             "manifest": manifest_src,
             "label_role": role,
             "label_role_overridden": role != registered_role,
+            "unkeyed_rows": unkeyed,
+            "corpus_seed_check": seed_check,
             "aml_features_sha256": af.source_sha256(),
             "corpus": str(corpus),
             "corpus_seed": args.seed,
@@ -156,6 +162,12 @@ def main(argv=None) -> int:
         provenance={**prov, "spark_seconds": round(t_spark, 1)},
     )
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
+    if args.seed is not None and not seed_check["matched_share"]:
+        report["corpus_role"] = "unverified"
+    if report.get("verdict") == "ok":
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0)
+        # A diagnostic run under another label role is never a pass.
+        add_pass(report, "registered_label_role", role == registered_role)
     for line in summary_lines(report):
         print(line)
     text = json.dumps(report, indent=2, default=str)
