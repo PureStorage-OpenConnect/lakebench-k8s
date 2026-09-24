@@ -183,3 +183,33 @@ def test_reference_read_tolerates_only_a_missing_path(spark, tmp_path, monkeypat
     monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "p.parquet"))
     with pytest.raises(RuntimeError, match="only one KYC reference file"):
         sb._read_reference(spark)
+
+
+def test_missing_kyc_raises_for_a_kyc_era_corpus(spark, tmp_path, monkeypatch):
+    import silver_build_financial as sb
+
+    monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "nope/party.parquet"))
+    monkeypatch.setattr(sb, "ACCOUNT_PATH", str(tmp_path / "nope/account.parquet"))
+    man = tmp_path / "manifest"
+    monkeypatch.setattr(sb, "MANIFEST_GLOB", str(man / "manifest*.parquet"))
+    # No manifest at all: tolerated (older layout), NULL KYC.
+    assert sb._read_reference(spark) == (None, None)
+    # A pre-KYC manifest: tolerated.
+    spark.createDataFrame([("datagen-v2-rs-0.1",)], "model_version string").write.parquet(
+        str(man / "manifest.parquet")
+    )
+    assert sb._read_reference(spark) == (None, None)
+    # A KYC-era cycle manifest next to it: missing KYC now raises.
+    spark.createDataFrame([("datagen-v2-rs-0.2",)], "model_version string").write.parquet(
+        str(man / "manifest-c001.parquet")
+    )
+    with pytest.raises(RuntimeError, match="KYC-capable"):
+        sb._read_reference(spark)
+
+
+def test_kyc_capable_versions():
+    from silver_build_financial import kyc_capable
+
+    assert not kyc_capable("datagen-v2-rs-0.1")
+    assert kyc_capable("datagen-v2-rs-0.2") and kyc_capable("datagen-v2-rs-1.0")
+    assert not kyc_capable(None) and not kyc_capable("something-else")

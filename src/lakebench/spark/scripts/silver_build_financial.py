@@ -90,6 +90,15 @@ PARTY_PATH = env("LB_FINANCIAL_PARTY_PATH", f"{_BRONZE_URI}{_BRONZE_ROOT}/bronze
 ACCOUNT_PATH = env(
     "LB_FINANCIAL_ACCOUNT_PATH", f"{_BRONZE_URI}{_BRONZE_ROOT}/bronze/account.parquet"
 )
+# Every cycle's manifest; its model_version says whether the corpus has KYC.
+# party.parquet and account.parquet are written once, by cycle 0 of a
+# multi-cycle run (they are the same for every cycle), so the plain names
+# cover cycle n > 0 runs too.
+MANIFEST_GLOB = env(
+    "LB_FINANCIAL_MANIFEST_GLOB", f"{_BRONZE_URI}{_BRONZE_ROOT}/manifest/manifest*.parquet"
+)
+# First datagen model_version that writes the KYC reference columns.
+KYC_MODEL_VERSION = (0, 2)
 
 # Columns silver.entities takes from the party master (GOALS P10 stages 0 and
 # 2). The KYC columns are NULL for non-customers: the reporting FI holds no
@@ -935,16 +944,43 @@ def _read_reference(spark):
                 raise
             log(f"reference file not found: {msg.splitlines()[0][:200]}")
             frames.append(None)
-    # Both absent is an older or bronze-only layout. Exactly one absent is a
-    # broken reference write (a pod that died between the two uploads, or a
-    # mistyped path) and must not produce a green job with NULL KYC.
+    # Exactly one absent is a broken reference write (a pod that died between
+    # the two uploads, or a mistyped path) and must not produce a green job
+    # with NULL KYC. Both absent is fine only for a corpus that predates KYC.
     if (frames[0] is None) != (frames[1] is None):
         raise RuntimeError(
             f"only one KYC reference file is readable: party={PARTY_PATH} "
             f"({'missing' if frames[0] is None else 'ok'}), account={ACCOUNT_PATH} "
             f"({'missing' if frames[1] is None else 'ok'})"
         )
+    if frames[0] is None and _corpus_has_kyc(spark):
+        raise RuntimeError(
+            f"KYC reference files missing ({PARTY_PATH}, {ACCOUNT_PATH}) but the "
+            f"manifest ({MANIFEST_GLOB}) is from a KYC-capable datagen"
+        )
     return frames[0], frames[1]
+
+
+def kyc_capable(model_version) -> bool:
+    """True when a datagen model_version string writes KYC (0.2 and later)."""
+    import re
+
+    m = re.search(r"datagen-v2-rs-(\d+)\.(\d+)", model_version or "")
+    return bool(m) and (int(m.group(1)), int(m.group(2))) >= KYC_MODEL_VERSION
+
+
+def _corpus_has_kyc(spark) -> bool:
+    """Whether the corpus manifest says its datagen writes KYC. An unreadable
+    manifest is not proof either way, so it logs and returns False."""
+    try:
+        versions = [
+            r[0]
+            for r in spark.read.parquet(MANIFEST_GLOB).select("model_version").distinct().collect()
+        ]
+    except Exception as e:
+        log(f"manifest unreadable for the KYC version check: {str(e).splitlines()[0][:200]}")
+        return False
+    return any(kyc_capable(v) for v in versions)
 
 
 def main() -> None:
