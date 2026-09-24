@@ -110,3 +110,28 @@ def test_await_stream_stops_from_the_loop_not_the_signal_handler():
     assert q.active is False
     assert "await_stream" in q.stop_frames
     assert "_shutdown_handler" not in q.stop_frames
+
+
+def test_replay_check_runs_once_per_query_run():
+    """Only a run's first micro-batch pays the replay check; a restart (new
+    run id) checks again; an unreadable run id checks every batch."""
+    from common import replay_possible
+
+    class Ctx:
+        def __init__(self, run):
+            self.run = run
+
+        def getLocalProperty(self, key):  # noqa: N802 -- mirrors SparkContext
+            return self.run if key == "spark.jobGroup.id" else None
+
+    class Spark:
+        def __init__(self, run):
+            self.sparkContext = Ctx(run)
+
+    first, later = Spark("run-a"), Spark("run-a")
+    assert replay_possible(first) is True
+    assert replay_possible(later) is False
+    assert replay_possible(later) is False
+    assert replay_possible(Spark("run-b")) is True
+    assert replay_possible(Spark(None)) is True
+    assert replay_possible(Spark(None)) is True

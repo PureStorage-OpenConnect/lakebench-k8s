@@ -289,9 +289,11 @@ def rows_added_by_last_commit(spark, silver_tbl):
     which overstated output_rows.
     """
     try:
+        # The snapshot main points at, not the latest committed_at (a
+        # writer's clock), so the answer is exact.
         r = spark.sql(
-            f"SELECT summary['added-records'] AS n FROM {silver_tbl}.snapshots "
-            "ORDER BY committed_at DESC LIMIT 1"
+            f"SELECT s.summary['added-records'] AS n FROM {silver_tbl}.snapshots s "
+            f"JOIN {silver_tbl}.refs r ON s.snapshot_id = r.snapshot_id WHERE r.name = 'main'"
         ).collect()
         if r and r[0]["n"] is not None:
             return int(r[0]["n"])
