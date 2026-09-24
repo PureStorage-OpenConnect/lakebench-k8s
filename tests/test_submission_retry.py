@@ -1,84 +1,65 @@
-"""Dependency-download submission failures are retried (2026-09-24 live runs:
-two deployments submitting at the same second both failed with FAILED
-DOWNLOADS from the shared operator's Ivy cache, SPARK-10878)."""
+"""SUBMISSION_FAILED is waited through, not treated as final (2026-09-24 live
+runs: two deployments submitting together both failed FAILED DOWNLOADS in the
+shared operator's Ivy cache, SPARK-10878, and lakebench gave up before the
+operator's own resubmission)."""
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
 from lakebench.modules.pipeline_engines.spark import monitor as mon
-from lakebench.modules.pipeline_engines.spark.job import (
-    JobState,
-    JobStatus,
-    is_transient_submission_failure,
-)
-
-IVY = (
-    "failed to submit spark application: failed to run spark-submit: ... "
-    ":: FAILED DOWNLOADS :: software.amazon.awssdk#bundle;2.24.6!bundle.jar"
-)
-
-
-def test_classifier():
-    assert is_transient_submission_failure(IVY)
-    assert not is_transient_submission_failure("Driver exited with code 1")
-    # A download word outside a submission failure is not a submission race.
-    assert not is_transient_submission_failure("FAILED DOWNLOADS in driver log")
+from lakebench.modules.pipeline_engines.spark.job import JobState, JobStatus
 
 
 def _monitor(states):
     jm = MagicMock()
-    jm.get_job_status.side_effect = [JobStatus(name="j", state=s, message=m) for s, m in states]
-    jm.resubmit.return_value = JobStatus(name="j", state=JobState.SUBMITTED, message="")
+    jm.get_job_status.side_effect = [JobStatus(name="j", state=s, message="m") for s in states]
     m = mon.SparkJobMonitor.__new__(mon.SparkJobMonitor)
     m.job_manager = jm
     m.namespace = "ns"
     m._get_driver_logs = MagicMock(return_value="")
-    return m, jm
+    return m
 
 
 @patch.object(mon.time, "sleep", lambda s: None)
-def test_wait_for_completion_resubmits_then_succeeds():
-    m, jm = _monitor([(JobState.SUBMISSION_FAILED, IVY), (JobState.COMPLETED, "")])
-    r = m.wait_for_completion("j", timeout_seconds=100, poll_interval=0)
-    assert r.success
-    jm.resubmit.assert_called_once_with("j")
+def test_operator_retry_after_submission_failure_succeeds():
+    m = _monitor(
+        [JobState.SUBMISSION_FAILED, JobState.SUBMITTED, JobState.RUNNING, JobState.COMPLETED]
+    )
+    assert m.wait_for_completion("j", timeout_seconds=100, poll_interval=0).success
 
 
 @patch.object(mon.time, "sleep", lambda s: None)
-def test_non_transient_failure_is_not_retried():
-    m, jm = _monitor([(JobState.FAILED, "Driver exited with code 1")])
-    r = m.wait_for_completion("j", timeout_seconds=100, poll_interval=0)
+def test_settled_failure_after_retries_is_final():
+    m = _monitor([JobState.SUBMISSION_FAILED, JobState.FAILED])
+    assert not m.wait_for_completion("j", timeout_seconds=100, poll_interval=0).success
+
+
+def test_submission_failed_forever_is_bounded():
+    clock = iter(range(0, 100_000, 60))
+    m = _monitor([JobState.SUBMISSION_FAILED] * 1000)
+    with patch.object(mon.time, "time", lambda: next(clock)), patch.object(mon.time, "sleep"):
+        r = m.wait_for_completion("j", timeout_seconds=10**6, poll_interval=0)
     assert not r.success
-    jm.resubmit.assert_not_called()
-
-
-@patch.object(mon.time, "sleep", lambda s: None)
-def test_retries_are_bounded():
-    m, jm = _monitor([(JobState.SUBMISSION_FAILED, IVY)] * 5)
-    r = m.wait_for_completion("j", timeout_seconds=100, poll_interval=0)
-    assert not r.success
-    assert jm.resubmit.call_count == mon._MAX_SUBMISSION_RETRIES
 
 
 @patch.object(mon.time, "sleep", lambda s: None)
 def test_wait_until_running():
-    m, jm = _monitor(
-        [(JobState.SUBMISSION_FAILED, IVY), (JobState.SUBMITTED, ""), (JobState.RUNNING, "")]
-    )
+    m = _monitor([JobState.SUBMISSION_FAILED, JobState.SUBMITTED, JobState.RUNNING])
     assert m.wait_until_running("j", timeout_seconds=100, poll_interval=0).success
-    m2, _ = _monitor([(JobState.FAILED, "OOMKilled")])
+    m2 = _monitor([JobState.FAILED])
     assert not m2.wait_until_running("j", timeout_seconds=100, poll_interval=0).success
 
 
-def test_resubmit_replays_the_last_submission():
+def test_operator_submission_retries_configured():
     from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+    from tests.conftest import make_config
 
-    jm = SparkJobManager.__new__(SparkJobManager)
-    jm._submit_args = {"lakebench-bronze-verify": (JobType.BRONZE_VERIFY, None, {"A": "1"}, None)}
-    with patch.object(SparkJobManager, "submit_job", return_value="ok") as sj:
-        assert jm.resubmit("lakebench-bronze-verify") == "ok"
-        sj.assert_called_once_with(
-            JobType.BRONZE_VERIFY, None, cycle_env={"A": "1"}, arguments=None
-        )
-    assert jm.resubmit("lakebench-unknown") is None
+    k8s = MagicMock()
+    k8s.get_cluster_capacity.return_value = None
+    mgr = SparkJobManager(make_config(), k8s)
+    batch = mgr._build_manifest(JobType.BRONZE_VERIFY)["spec"]["restartPolicy"]
+    assert batch["onSubmissionFailureRetries"] >= 5
+    assert batch["onSubmissionFailureRetryInterval"] >= 60
+    stream = mgr._build_manifest(JobType.BRONZE_INGEST)["spec"]["restartPolicy"]
+    assert stream["type"] == "Always" and stream["onSubmissionFailureRetryInterval"] >= 60

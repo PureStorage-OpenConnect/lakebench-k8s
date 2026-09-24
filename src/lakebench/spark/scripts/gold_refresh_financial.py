@@ -59,7 +59,8 @@ import sys
 import time
 import uuid
 
-from common import env, iceberg_table_stats, log, one_line
+from bronze_verify_financial import MANIFEST_TABLE, register_manifest
+from common import env, iceberg_table_stats, log, one_line, table_exists
 from gold_finalize_financial import (
     DDL_ALERTS,
     DDL_CLUSTERS,
@@ -165,6 +166,7 @@ def main() -> None:
     _bootstrap_gold_tables(spark)
 
     consecutive_failures = 0
+    manifest_ready = table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}")
     cycle = 0
     last_ingest_s = 0.0
 
@@ -172,6 +174,10 @@ def main() -> None:
         tick = time.time()
         cycle += 1
         try:
+            # The continuous reset drops the previous run's manifest table;
+            # register this run's once datagen has written it.
+            if not manifest_ready:
+                manifest_ready = register_manifest(spark)
             # Captured BEFORE the read, so the data this tick sees is at least
             # this fresh and the reported freshness is an upper bound.
             newest_ingest_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{SILVER_TXNS}")
