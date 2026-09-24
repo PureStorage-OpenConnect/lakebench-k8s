@@ -1325,3 +1325,76 @@ fn party_and_account_zones_carry_kyc_and_join_to_payments() {
     // Every entity's payment IBAN appears exactly once in the account zone.
     assert_eq!(seen_primary, w.population);
 }
+
+// ---------------------------------------------------------------------------
+// Amount continuity for chained typologies (amounts::instance_amounts)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chained_typologies_forward_the_previous_leg_less_a_skim() {
+    use datagen_rs::amounts::{fx_to_usd, instance_amounts, is_chained, SKIM_MAX, SKIM_MIN};
+    use datagen_rs::hash::Rng;
+    use datagen_rs::typology::emit_instance;
+    let (insts, _) = kyc_schedule(42);
+    let ccys = ["USD", "EUR", "JPY", "INR", "GBP"];
+    let ccy_of = |o: u64| ccys[(o % 5) as usize];
+    let mut rng = Rng::new(9);
+    let mut checked = 0;
+    for inst in &insts {
+        let rows = emit_instance(inst);
+        let amts = instance_amounts(inst.typ, &rows, ccy_of, |_| 0.0, &mut rng);
+        assert_eq!(amts.len(), rows.len());
+        if !is_chained(inst.typ) {
+            continue;
+        }
+        for k in 1..rows.len() {
+            // Emit order is chain order: each leg starts where the last ended.
+            assert_eq!(rows[k].orig, rows[k - 1].bene, "{} leg {k}", inst.id);
+            assert!(
+                rows[k].ts_us >= rows[k - 1].ts_us,
+                "{} leg {k} time",
+                inst.id
+            );
+            let prev = amts[k - 1] * fx_to_usd(ccy_of(rows[k - 1].orig));
+            let cur = amts[k] * fx_to_usd(ccy_of(rows[k].orig));
+            let ratio = cur / prev;
+            // Minor-unit rounding in JPY/INR moves the ratio by < 1e-3 at
+            // these amounts; allow that on both edges.
+            assert!(
+                (1.0 - SKIM_MAX - 1e-3..=1.0 - SKIM_MIN + 1e-3).contains(&ratio),
+                "{} leg {k}: forwarded {ratio}",
+                inst.id
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "only {checked} forwarding legs checked");
+}
+
+#[test]
+fn unchained_typologies_keep_independent_draws() {
+    use datagen_rs::amounts::{instance_amounts, native_amount, structuring_amount};
+    use datagen_rs::hash::Rng;
+    use datagen_rs::typology::TxRow;
+    let rows: Vec<TxRow> = (0..4)
+        .map(|i| TxRow {
+            orig: i + 1,
+            bene: 9,
+            ts_us: i as i64,
+            structuring: i % 2 == 0,
+        })
+        .collect();
+    let got = instance_amounts("fan_in", &rows, |_| "USD", |_| 0.3, &mut Rng::new(5));
+    let mut rng = Rng::new(5);
+    let want: Vec<f64> = rows
+        .iter()
+        .map(|r| {
+            if r.structuring {
+                structuring_amount(&mut rng, "USD")
+            } else {
+                native_amount(&mut rng, 0.3, "USD")
+            }
+        })
+        .collect();
+    assert_eq!(got, want);
+}
