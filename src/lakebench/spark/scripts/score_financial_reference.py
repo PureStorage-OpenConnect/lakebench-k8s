@@ -85,7 +85,7 @@ _STRUCTURING_BANDS = {
 #: row_kind, typology_type, verdict, precision, recall, f1).
 _METRIC_SCHEMA = (
     "row_kind string, typology_type string, verdict string, precision double, "
-    "recall double, f1 double, support long, ap double, ap_ci_lo double, "
+    "recall double, f1 double, support long, r_precision double, ap double, ap_ci_lo double, "
     "ap_ci_hi double, n_positives long, in_band boolean, leakage_pass boolean, "
     "note string, feature_names_json string, excluded_features_json string"
 )
@@ -192,6 +192,7 @@ def _metric_rows(report: dict) -> list[dict]:
         "recall": None,
         "f1": None,
         "support": report.get("n_scored_customers"),
+        "r_precision": None,
         "ap": None,
         "ap_ci_lo": None,
         "ap_ci_hi": None,
@@ -199,26 +200,27 @@ def _metric_rows(report: dict) -> list[dict]:
         "in_band": None,
         "leakage_pass": (report.get("level2") or {}).get("all_pass_leakage"),
         "note": (
-            "AML fidelity gate (prereg v{}); precision/recall/f1 per typology are "
-            "R-precision: the cut that alerts on as many customers as there are "
-            "positives".format(report.get("prereg_version"))
+            "AML fidelity gate (prereg v{}). precision/recall/f1 are NULL: the "
+            "gate scores customers by AP, which is not comparable to rule "
+            "instance recall; r_precision is the customer-level cut that alerts "
+            "on as many customers as there are positives".format(report.get("prereg_version"))
         ),
         "feature_names_json": feats,
         "excluded_features_json": json.dumps(["is_customer"]),
     }
     rows = [header]
     for t, r in (report.get("typologies") or {}).items():
-        rp = r.get("r_precision")
         lo, hi = r.get("ap_ci") or [None, None]
         rows.append(
             {
                 "row_kind": "typology",
                 "typology_type": t,
                 "verdict": r.get("status"),
-                "precision": rp,
-                "recall": rp,
-                "f1": rp,
+                "precision": None,
+                "recall": None,
+                "f1": None,
                 "support": r.get("n_positives"),
+                "r_precision": r.get("r_precision"),
                 "ap": r.get("ap"),
                 "ap_ci_lo": lo,
                 "ap_ci_hi": hi,
@@ -240,7 +242,9 @@ def _write_metrics(spark, output_prefix: str, rows: list[dict]) -> None:
     log(f"Wrote {out}")
 
 
-def run_fidelity_gate(spark, manifest, *, cap_rows: int, provenance: dict) -> dict:
+def run_fidelity_gate(
+    spark, manifest, *, cap_rows: int, provenance: dict, silver_txns: str | None = None
+) -> dict:
     """Build silver features and evaluate the gate. Returns the report dict."""
     import aml_features as af
     from fidelity_gate import evaluate_gate, in_scope_typologies, load_preregistration
@@ -250,14 +254,15 @@ def run_fidelity_gate(spark, manifest, *, cap_rows: int, provenance: dict) -> di
     txns, ents, id_map = af.silver_frames(
         spark,
         catalog=CATALOG,
-        txns_table=SILVER_TXNS,
+        txns_table=silver_txns or SILVER_TXNS,
         entities_table=SILVER_ENTITIES,
         accounts_table=SILVER_ACCOUNTS,
         account_path=ACCOUNT_PATH,
     )
     txns = txns.cache()
     features = af.entity_features(txns, ents).cache()
-    labels = af.labels_from_participants(manifest, id_map).cache()
+    role = prereg["unit_of_scoring"]["label_role"]
+    labels = af.labels_for_role(spark, manifest, id_map, role).cache()
     tm = prereg["timing_mixture"]
     timing = af.timing_mixture_counts(
         features,
@@ -267,7 +272,9 @@ def run_fidelity_gate(spark, manifest, *, cap_rows: int, provenance: dict) -> di
     )
     density = af.typology_density(txns, manifest)
     agreement = af.label_agreement(
-        labels.join(features.filter(col("is_customer")).select("key"), "key", "left_semi"),
+        af.labels_from_participants(manifest, id_map).join(
+            features.filter(col("is_customer")).select("key"), "key", "left_semi"
+        ),
         af.labels_from_uetrs(manifest, txns).join(
             features.filter(col("is_customer")).select("key"), "key", "left_semi"
         ),
@@ -284,6 +291,8 @@ def run_fidelity_gate(spark, manifest, *, cap_rows: int, provenance: dict) -> di
             **provenance,
             **af.manifest_provenance(manifest),
             "adapter": "silver",
+            "label_role": role,
+            "aml_features_sha256": af.source_sha256(),
             "n_customers": n_customers,
             "negative_sample_fraction": frac,
             "label_route_agreement_customers": agreement,
@@ -323,6 +332,9 @@ def main() -> None:
     args = parser.parse_args()
 
     spark = SparkSession.builder.appName("lb-score-financial-reference").getOrCreate()
+    # hour/dayofweek/to_date features follow the session zone; the other
+    # financial scripts and the local harness all run in UTC (A6).
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
     prefix = args.output_prefix.rstrip("/")
     log("=" * 60)
     log("AML band leakage gate + fidelity gate")
@@ -331,14 +343,17 @@ def main() -> None:
     log(f"Silver table:    {CATALOG}.{args.silver_txns}")
     log("=" * 60)
 
-    manifest = spark.read.parquet(args.manifest)
+    import aml_features as af
+
+    manifest_src = af.manifest_glob(args.manifest)
+    manifest = spark.read.parquet(manifest_src)
     manifest_n = manifest.count()
     if manifest_n == 0:
         raise SystemExit(
             f"Manifest {args.manifest} empty; run datagen first. Without "
             "ground truth the reference detector cannot label rows."
         )
-    log(f"Manifest instances: {manifest_n:,}")
+    log(f"Manifest instances: {manifest_n:,} ({manifest_src})")
 
     # ---------- Band leakage gate ----------
     from reference_score import compute_leakage_gate
@@ -360,12 +375,16 @@ def main() -> None:
     provenance = {
         "git_sha": os.environ.get("LB_GIT_SHA", "unknown"),
         "corpus_seed": os.environ.get("LB_DATAGEN_SEED"),
-        "manifest": args.manifest,
-        "silver_txns": f"{CATALOG}.{SILVER_TXNS}",
+        "manifest": manifest_src,
+        "silver_txns": f"{CATALOG}.{args.silver_txns}",
     }
     try:
         report = run_fidelity_gate(
-            spark, manifest, cap_rows=args.driver_sample_cap, provenance=provenance
+            spark,
+            manifest,
+            cap_rows=args.driver_sample_cap,
+            provenance=provenance,
+            silver_txns=args.silver_txns,
         )
     except Exception as e:  # noqa: BLE001 -- the band gate has shipped; record why this did not
         log(f"WARN: fidelity gate failed: {e}")
@@ -390,6 +409,9 @@ def main() -> None:
             "The band leakage gate still ran."
         )
     spark.stop()
+    if report.get("verdict") == "error":
+        # Outputs are written, but a crashed gate must not read as a pass (R6).
+        raise SystemExit("fidelity gate failed; see aml_gate_report.json")
 
 
 if __name__ == "__main__":

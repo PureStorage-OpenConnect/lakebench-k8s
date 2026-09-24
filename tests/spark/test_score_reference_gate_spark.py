@@ -121,6 +121,9 @@ def test_fidelity_gate_over_silver(spark, tmp_path, monkeypatch):
         )
     assert report["verdict"] == "ok"
     assert report["provenance"]["adapter"] == "silver"
+    assert report["provenance"]["label_role"] == "participant"
+    assert len(report["provenance"]["aml_features_sha256"]) == 64
+    assert report["passes"]["all"] is False
     assert report["provenance"]["model_versions"] == ["datagen-v2-rs-0.2"]
     assert report["n_scored_customers"] == 120
     for t, r in report["typologies"].items():
@@ -136,6 +139,11 @@ def test_fidelity_gate_over_silver(spark, tmp_path, monkeypatch):
     assert got[None]["row_kind"] == "aggregate"
     assert got["stack"]["ap"] == pytest.approx(report["typologies"]["stack"]["ap"])
     assert got["stack"]["n_positives"] == 12
+    # Customer AP is not rule instance recall: the rule-vs-reference columns stay NULL.
+    assert got["stack"]["recall"] is None
+    assert got["stack"]["r_precision"] == pytest.approx(
+        report["typologies"]["stack"]["r_precision"]
+    )
 
     out = tmp_path / "aml_gate_report.json"
     ref._write_text(spark, f"file://{out}", json.dumps(report, default=str))
