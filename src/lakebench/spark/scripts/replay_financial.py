@@ -133,7 +133,7 @@ def main() -> None:
 
     # Rule dispatch. Rule functions in detection_rules.py accept a silver
     # DataFrame + params and return a gold.alerts-shaped DataFrame.
-    from detection_rules import RuleSkipped, get_rule, known_rules
+    from detection_rules import RuleSkipped, cleanup_w1_checkpoints, get_rule, known_rules
 
     rule_fn = get_rule(args.rule)
     if rule_fn is None:
@@ -169,6 +169,7 @@ def main() -> None:
         # distinguishably and exit 0 so the K8s Job is not marked failed;
         # the target table keeps whatever rows it already had for this rule.
         log(f"Rule skipped: reason={skip.reason} detail={skip.detail}")
+        cleanup_w1_checkpoints(spark)
         spark.stop()
         sys.exit(0)
     except Exception as e:  # noqa: BLE001
@@ -223,6 +224,7 @@ def main() -> None:
     if alert_count > 0:
         alerts.writeTo(args.output_alerts).append()
     log(f"Wrote {args.output_alerts} (rule={args.rule} rows={alert_count})")
+    cleanup_w1_checkpoints(spark)
     spark.stop()
 
 

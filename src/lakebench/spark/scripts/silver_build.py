@@ -21,17 +21,10 @@ from pyspark.sql.functions import (
     approx_count_distinct,
     avg,
     col,
-    concat_ws,
-    floor,
-    lit,
-    rand,
     to_date,
-    udf,
-    when,
 )
 from pyspark.sql.functions import max as max_
 from pyspark.sql.functions import min as min_
-from pyspark.sql.types import BooleanType
 
 # ============================================================
 # STRATEGY FRAMEWORK
@@ -213,10 +206,6 @@ def select_silver_strategy(profile: DataProfile) -> SilverStrategy:
     if profile.total_size_gb >= 100:
         return SilverStrategy.STREAMING
 
-    # Small datasets: check skew for SALTED vs SIMPLE
-    if profile.skew_factor > 100:
-        return SilverStrategy.SALTED
-
     return SilverStrategy.SIMPLE
 
 
@@ -371,56 +360,6 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
     return silver_count
 
 
-def silver_salted(spark, bronze_uri, silver_tbl, catalog, profile):
-    """SALTED strategy: Salt hot keys for skewed data. For skew > 100x."""
-    log("Executing SALTED strategy...")
-    log(f"Hot keys detected: {len(profile.hot_keys)}")
-
-    SALT_BUCKETS = 10
-
-    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
-    bronze_count = df_bronze.count()
-    log(f"Bronze records: {bronze_count:,}")
-
-    # Broadcast hot keys for UDF
-    hot_keys_set = set(profile.hot_keys)
-    hot_keys_bc = spark.sparkContext.broadcast(hot_keys_set)
-
-    @udf(BooleanType())
-    def is_hot_key(customer_id):
-        return customer_id in hot_keys_bc.value
-
-    # Add salt to hot customer IDs
-    df_salted = df_bronze.withColumn(
-        "salt",
-        when(is_hot_key(col("customer_id")), floor(rand() * SALT_BUCKETS).cast("string")).otherwise(
-            lit("0")
-        ),
-    ).withColumn("salted_customer_id", concat_ws("_", col("customer_id"), col("salt")))
-
-    # Apply transformations
-    silver_df = apply_silver_transformations(df_salted).drop("salt", "salted_customer_id")
-
-    # Repartition to balance load
-    output_partitions = calculate_output_partitions(profile.total_size_gb)
-    silver_df = silver_df.repartition(output_partitions, "customer_id")
-
-    silver_count = silver_df.count()
-
-    log(f"Writing {silver_count:,} records to {silver_tbl}")
-    (
-        silver_df.writeTo(silver_tbl)
-        .tableProperty("write.format.default", "parquet")
-        .tableProperty("write.parquet.compression-codec", "snappy")
-        .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
-        .tableProperty("write.distribution-mode", "hash")
-        .partitionedBy("interaction_date")
-        .createOrReplace()
-    )
-
-    return silver_count
-
-
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -501,7 +440,14 @@ elif strategy == SilverStrategy.STREAMING:
         spark, bronze_uri, silver_tbl, catalog, profile, incremental=incremental_mode
     )
 elif strategy == SilverStrategy.SALTED:
-    silver_count = silver_salted(spark, bronze_uri, silver_tbl, catalog, profile)
+    # SALTED is retired: silver-build is row-independent column transforms,
+    # and the salt column was dropped before repartitioning by customer_id,
+    # so salting did nothing. It also wrote with createOrReplace regardless of
+    # incremental mode, wiping earlier cycles' silver in multi-cycle runs.
+    log("SALTED strategy is a no-op for row transforms; running SIMPLE")
+    silver_count = silver_simple(
+        spark, bronze_uri, silver_tbl, catalog, incremental=incremental_mode
+    )
 else:
     log(f"ERROR: Unknown strategy {strategy}")
     spark.stop()

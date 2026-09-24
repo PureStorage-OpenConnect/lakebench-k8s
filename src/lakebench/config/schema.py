@@ -532,11 +532,39 @@ class TrinoWorkerConfig(BaseModel):
 
     @model_validator(mode="after")
     def spill_fits_storage(self) -> TrinoWorkerConfig:
-        """The spill cap must fit the worker's storage volume: a worker that
-        spills past it is evicted by the kubelet mid-query. Also require Gi,
-        the only unit the Trino config template converts."""
+        """The spill cap must fit the worker's storage volume with headroom: a
+        worker that fills it is evicted by the kubelet mid-query. The spill
+        cap must be in Gi, the only unit the Trino config template converts;
+        storage may be any Kubernetes quantity."""
         if not self.spill_enabled:
             return self
+        if not str(self.spill_max_per_node).endswith("Gi"):
+            raise ValueError(
+                f"trino.worker.spill_max_per_node must be in Gi (got {self.spill_max_per_node!r})"
+            )
+        units = {
+            "Ki": 2**-20,
+            "Mi": 2**-10,
+            "Gi": 1.0,
+            "Ti": 2**10,
+            "K": 1e3 / 2**30,
+            "M": 1e6 / 2**30,
+            "G": 1e9 / 2**30,
+            "T": 1e12 / 2**30,
+        }
+        storage = str(self.storage)
+        unit = next((u for u in sorted(units, key=len, reverse=True) if storage.endswith(u)), None)
+        if unit is None:
+            return self  # plain bytes or an unusual quantity: leave it to Kubernetes
+        storage_gib = float(storage[: -len(unit)]) * units[unit]
+        # The volume also holds /data/trino; keep 10% headroom.
+        if float(self.spill_max_per_node[:-2]) > 0.9 * storage_gib:
+            raise ValueError(
+                f"trino.worker.spill_max_per_node ({self.spill_max_per_node}) leaves less "
+                f"than 10% of trino.worker.storage ({self.storage}); a spilling worker "
+                "would be evicted"
+            )
+        return self
         for field in ("spill_max_per_node", "storage"):
             if not str(getattr(self, field)).endswith("Gi"):
                 raise ValueError(

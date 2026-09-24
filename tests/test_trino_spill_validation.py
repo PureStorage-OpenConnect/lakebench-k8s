@@ -13,13 +13,23 @@ def test_defaults_valid():
 
 
 def test_spill_above_storage_rejected():
-    with pytest.raises(ValidationError, match="exceeds"):
+    with pytest.raises(ValidationError, match="10%"):
         TrinoWorkerConfig(spill_max_per_node="60Gi", storage="50Gi")
 
 
-def test_non_gi_rejected():
+def test_non_gi_spill_rejected():
     with pytest.raises(ValidationError, match="Gi"):
         TrinoWorkerConfig(spill_max_per_node="40000Mi")
+
+
+def test_other_storage_units_accepted():
+    TrinoWorkerConfig(storage="1Ti")
+    TrinoWorkerConfig(storage="500G")
+
+
+def test_spill_equal_to_storage_rejected():
+    with pytest.raises(ValidationError, match="10%"):
+        TrinoWorkerConfig(spill_max_per_node="50Gi", storage="50Gi")
 
 
 def test_spill_disabled_skips_check():

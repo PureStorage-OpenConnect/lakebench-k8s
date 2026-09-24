@@ -833,7 +833,7 @@ def _run_benchmark_round(
     # 4. Check Q9 for contention (gold-table query)
     q9_failed = False
     for qr in bench_result.queries:
-        if qr.query.name == "q9" and not qr.success:
+        if qr.query.name.startswith("Q9") and not qr.success:
             q9_failed = True
             break
 
@@ -841,7 +841,7 @@ def _run_benchmark_round(
         round_meta.q9_contention_observed = True
         q9_query = None
         for qr in bench_result.queries:
-            if qr.query.name == "q9":
+            if qr.query.name.startswith("Q9"):
                 q9_query = qr.query
                 break
         if q9_query is not None:
@@ -859,7 +859,7 @@ def _run_benchmark_round(
                     round_meta.q9_retry_used = True
                     # Replace Q9 in results
                     for i, qr in enumerate(bench_result.queries):
-                        if qr.query.name == "q9":
+                        if qr.query.name.startswith("Q9"):
                             bench_result.queries[i] = retry_result
                             break
                     # Recompute total_seconds and qph
@@ -1710,10 +1710,29 @@ def _run_sustained(
                     # a score (QpH counts only the queries that passed).
                     from lakebench.cli._run import _benchmark_gate_problems
 
+                    # Q9 reads the c360 gold table that gold-refresh replaces
+                    # while rounds run; after its retries a Q9 failure is
+                    # expected contention, reported but not a run failure.
                     for idx, rnd in enumerate(rounds, 1):
-                        for problem in _benchmark_gate_problems(cfg, rnd.queries):
+                        q9 = [
+                            q
+                            for q in rnd.queries
+                            if str(q.get("name", "")).startswith("Q9") and not q.get("success")
+                        ]
+                        for q in q9:
+                            print_warning(
+                                f"Round {idx}: {q['name']} failed after contention retries "
+                                "(gold refresh replaces the table it reads)"
+                            )
+                        rest = [q for q in rnd.queries if q not in q9]
+                        for problem in _benchmark_gate_problems(cfg, rest):
                             print_error(f"Round {idx}: {problem}")
                             pipeline_success = False
+                    if not pipeline_success and collector.current_run:
+                        # The stage records were written before this gate;
+                        # keep them consistent with the run's verdict.
+                        for sm in collector.current_run.streaming:
+                            sm.success = False
             except Exception as e:
                 print_warning(f"Benchmark aggregation failed: {e}")
 

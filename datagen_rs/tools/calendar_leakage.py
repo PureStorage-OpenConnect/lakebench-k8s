@@ -55,7 +55,7 @@ def chi2_sim(base: dict, cells: dict, n: float, seed: int = 0):
     """
     import numpy as np
 
-    keys = sorted(set(base) | set(cells))
+    keys = sorted(k for k in set(base) | set(cells) if k is not None)
     if any(cells.get(k, 0.0) > 0 and base.get(k, 0.0) == 0 for k in keys):
         return float("inf"), 0.0
     keys = [k for k in keys if base.get(k, 0.0) > 0]

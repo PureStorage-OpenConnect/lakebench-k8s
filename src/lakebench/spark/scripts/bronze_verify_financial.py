@@ -41,7 +41,7 @@ PACS_PREFIX = env(
 # all read `{catalog}.bronze.manifest`; without a registration here the
 # whole scoring stack fails at Trino with 'Table does not exist'.
 # LB-089 round 1 fixed only the pacs.008 read; round 2 (this) adds the
-# manifest registration so a AML benchmark actually produces recall.
+# manifest registration so an AML benchmark actually produces recall.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
     BRONZE_ROOT_PREFIX.rstrip("/") + "/manifest/manifest.parquet",

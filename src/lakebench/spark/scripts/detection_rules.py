@@ -518,7 +518,12 @@ def cleanup_w1_checkpoints(spark) -> None:
     checkpoints by default), and left in place it grew with every run and
     was counted in the measured gold size.
     """
-    path = _w1_checkpoint_dir()
+    if not _w1_checkpoint_dir():
+        return
+    # Only this driver's directory: setCheckpointDir writes under a random
+    # per-context subdirectory, and another driver of the same deployment
+    # (a replay running W1) may be using a sibling right now.
+    path = spark.sparkContext.getCheckpointDir()
     if not path:
         return
     try:

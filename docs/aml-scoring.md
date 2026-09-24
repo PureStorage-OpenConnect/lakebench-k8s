@@ -215,7 +215,7 @@ Precision and recall for AML themselves are honest measurements of
 what they say -- rule alerts joined against manifest rows -- with the
 label-proxy risks the leakage gate now catches.
 
-## Running a AML pipeline
+## Running an AML pipeline
 
 The full loop is `deploy -> generate -> run -> financial score`. Every
 AML config points to a `workload.schema=financial` config; the

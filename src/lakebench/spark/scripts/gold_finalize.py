@@ -18,7 +18,6 @@ from common import env, get_daily_kpi_aggregations, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
-    current_timestamp,
 )
 from pyspark.sql.functions import max as max_
 from pyspark.sql.functions import sum as sum_
@@ -196,10 +195,12 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
         last_date = None
         existing_gold = None
 
-    # Read Silver, filter to new data if watermark exists
+    # Recompute from the watermark date INCLUSIVE and replace those gold rows.
+    # A strict > dropped any silver rows that landed on the last processed
+    # date (a cycle boundary day), silently leaving that day's KPIs short.
     silver_df = spark.table(silver_tbl)
     if last_date:
-        silver_df = silver_df.filter(col("interaction_date") > last_date)
+        silver_df = silver_df.filter(col("interaction_date") >= last_date)
 
     new_count = silver_df.count()
     if new_count == 0:
@@ -211,11 +212,10 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
     log(f"Processing {new_count:,} new records")
 
     # Aggregate new data
-    new_kpis = (
-        silver_df.groupBy("interaction_date")
-        .agg(*get_daily_kpi_aggregations())
-        .withColumn("last_updated", current_timestamp())
-    )
+    # Same columns as SIMPLE_AGG / TWO_PHASE_AGG. An extra update-time column
+    # here made the append fail on cycle 2 of every multi-cycle run (schema
+    # mismatch against a gold table the other strategies created).
+    new_kpis = silver_df.groupBy("interaction_date").agg(*get_daily_kpi_aggregations())
 
     new_kpi_count = new_kpis.count()
     log(f"Generated {new_kpi_count:,} new KPI records")
@@ -234,8 +234,8 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
             .create()
         )
     else:
-        # Append new records (dates don't overlap due to filter)
-        log("Appending to existing Gold table...")
+        log(f"Replacing gold rows from {last_date} on...")
+        spark.sql(f"DELETE FROM {gold_tbl} WHERE interaction_date >= DATE '{last_date}'")
         new_kpis_consolidated.writeTo(gold_tbl).append()
 
     total_count = spark.table(gold_tbl).count()
