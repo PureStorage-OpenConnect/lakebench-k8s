@@ -86,6 +86,20 @@ def print_warning(message: str) -> None:
     console.print(f"[yellow]WARN[/yellow] {message}")
 
 
+# ``-f`` means ``--file`` (the config path) on every command. Commands where it
+# used to mean something else keep the old meaning for one release behind a
+# hidden option and call this, so scripts keep working and users see the move.
+DEPRECATED_SHORT_F_HELP = "Deprecated short flag; see the warning it prints."
+
+
+def warn_deprecated_short_f(new_spelling: str) -> None:
+    """Warn that this command's ``-f`` is deprecated in favour of *new_spelling*."""
+    print_warning(
+        f"'-f' here is deprecated: use {new_spelling}. In a future release '-f' will "
+        "mean --file (the config path), as it does on every other command."
+    )
+
+
 def print_info(message: str) -> None:
     """Print an info message."""
     console.print(f"[blue]...[/blue] {message}")
