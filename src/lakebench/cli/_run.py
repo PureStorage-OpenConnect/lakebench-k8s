@@ -1266,6 +1266,14 @@ def run(
         # Multi-cycle batch support (v1.1.0)
         total_cycles = cfg.architecture.pipeline.cycles
 
+        # A continuous gold-refresh left by an aborted run restarts forever
+        # (restartPolicy Always) with a fresh run id, and each restart deletes
+        # every other run's rows from gold.alerts, including this run's.
+        if cfg.architecture.workload.schema_type.value == "financial":
+            from lakebench.cli._sustained import _stop_leftover_streams
+
+            _stop_leftover_streams(job_manager, cfg.get_namespace())
+
         for cycle_idx in range(total_cycles):
             # Track per-cycle metrics (v1.1.0)
             _cycle_start = datetime.now()
@@ -1320,12 +1328,16 @@ def run(
                     break
 
             # Cycle env vars for incremental mode (cycles 2+)
-            cycle_env: dict[str, str] | None = None
+            # LB_RUN_ID ties gold.alerts / gold.detection_status rows to this
+            # run's metrics.json; without it every pod drew its own uuid.
+            cycle_env: dict[str, str] = {"LB_RUN_ID": f"{run_id}-c{cycle_idx + 1}"}
             if cycle_idx > 0:
-                cycle_env = {
-                    "LB_SILVER_INCREMENTAL": "true",
-                    "LB_GOLD_INCREMENTAL": "true",
-                }
+                cycle_env.update(
+                    {
+                        "LB_SILVER_INCREMENTAL": "true",
+                        "LB_GOLD_INCREMENTAL": "true",
+                    }
+                )
 
             # Run each stage
             for job_type, stage_name, description in stages:
