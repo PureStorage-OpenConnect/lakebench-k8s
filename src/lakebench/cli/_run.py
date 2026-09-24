@@ -1274,9 +1274,14 @@ def run(
                     _cycle_datagen = DatagenDeployer(_cycle_engine)
                     datagen_result = _cycle_datagen.deploy_cycle(cycle_idx, total_cycles)
                     if datagen_result.status != DeploymentStatus.SUCCESS:
-                        print_warning(
+                        # Fatal: continuing would rebuild this cycle from the
+                        # previous cycle's bronze, and incremental silver would
+                        # append it a second time.
+                        print_error(
                             f"Datagen cycle {cycle_idx + 1} failed: {datagen_result.message}"
                         )
+                        pipeline_success = False
+                        break
                     else:
                         ts_start = datagen_result.details.get("timestamp_start", "")
                         ts_end = datagen_result.details.get("timestamp_end", "")
@@ -1289,9 +1294,13 @@ def run(
                         dg_wait = _cycle_datagen.wait_for_completion(timeout_seconds=timeout)
                         _cycle_dg_elapsed = _time.time() - _dg_start
                         if dg_wait.status != DeploymentStatus.SUCCESS:
-                            print_warning(f"Datagen did not complete: {dg_wait.message}")
+                            print_error(f"Datagen did not complete: {dg_wait.message}")
+                            pipeline_success = False
+                            break
                 except Exception as e:
-                    print_warning(f"Cycle datagen failed: {e}")
+                    print_error(f"Cycle datagen failed: {e}")
+                    pipeline_success = False
+                    break
 
             # Cycle env vars for incremental mode (cycles 2+)
             cycle_env: dict[str, str] | None = None

@@ -2,7 +2,7 @@
 
 The continuous gold stage (gold_refresh_financial) re-runs detection over the
 full silver corpus each tick, reusing the batch DELETE-per-rule + INSERT
-driver (run_detection_rules), and the sustained runner fails a AML run that
+driver (run_detection_rules), and the sustained runner fails an AML run that
 produced zero alerts (closes LB-044 for AML). These scripts execute inside a
 Spark driver and cannot import pyspark in the test env, so the driver-side
 assertions are source/AST-based. The sustained-runner helper is pure Python
