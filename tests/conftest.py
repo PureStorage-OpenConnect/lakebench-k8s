@@ -47,6 +47,15 @@ for _tool in ("helm", "kubectl", "oc"):
     os.chmod(_path, 0o755)
 os.environ["PATH"] = _CLI_GUARD_DIR + os.pathsep + os.environ.get("PATH", "")
 
+# Rich forces coloured output under GitHub Actions; ANSI codes then split
+# words in captured CLI help (e.g. "--force-legacy") and assertions that pass
+# locally fail in CI. Plain text everywhere.
+os.environ["NO_COLOR"] = "1"
+os.environ.pop("FORCE_COLOR", None)
+# Typer forces a terminal when GITHUB_ACTIONS is set (read at import time);
+# this is its documented off switch.
+os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
+
 from unittest.mock import MagicMock, patch  # noqa: E402
 
 import pytest  # noqa: E402
