@@ -45,6 +45,17 @@ def test_thresholds_come_from_the_rule_source():
     assert th["w8_amount_usd"] == 5000.0 and th["w8_gap_days"] == 90.0
     assert 10000.0 in th["w6_amount_usd"]
     assert th["fx"]["USD"] == 1.0 and th["window_rel"] == 0.1 and th["max_ratio"] == 2.0
+    assert th["w2_floor_factor"] == 0.9
+
+
+def test_a_rule_the_tool_cannot_read_fails_loudly():
+    t = _tool()
+    src = t.RULES.read_text().replace(
+        'coalesce(txn_amount_usd, txn_amount) >= 10000"',
+        'coalesce(txn_amount_usd, txn_amount) > 10000"',
+    )
+    with pytest.raises(ValueError, match="w6"):
+        t.load_thresholds(src, t.SILVER.read_text(), json.loads(t.PREREG.read_text()))
 
 
 def test_thresholds_follow_a_changed_rule():
@@ -137,3 +148,34 @@ def test_end_to_end_on_a_tiny_corpus(tmp_path, capsys):
     assert w8.endswith("FAIL")
     usd_floor = next(ln for ln in out.splitlines() if "W2 USD band floor" in ln)
     assert usd_floor.endswith("PASS")
+
+
+def test_planted_rows_pinned_exactly_at_the_threshold_fail():
+    t = _tool()
+    # Every burst at exactly $5000: the windows are empty, the atom is not.
+    assert t.atom_verdict(40, 40, 900, 60_000, 2.0) == "FAIL"
+    # Planted rows sharing the baseline's round-number atom pass.
+    assert t.atom_verdict(15, 1000, 900, 60_000, 2.0) == "PASS"
+    assert t.atom_verdict(3, 3, 900, 60_000, 2.0) == "PASS"  # too few to matter
+
+
+def test_an_underpowered_corpus_is_inconclusive_not_pass(tmp_path, capsys):
+    duckdb = pytest.importorskip("duckdb")
+    t = _tool()
+    pacs = tmp_path / "bronze/pacs008"
+    pacs.mkdir(parents=True)
+    (tmp_path / "manifest").mkdir()
+    c = duckdb.connect()
+    c.sql(f"""
+        COPY (SELECT 'u' || i AS uetr, {{'iban': 'IB' || (i % 50)}} AS dbtr_acct,
+                     TIMESTAMP '2021-01-01' + to_seconds(i * 86400) AS cre_dt_tm,
+                     'USD' AS intr_bk_sttlm_ccy, 100.0 + i AS intr_bk_sttlm_amt
+              FROM range(200) r(i))
+        TO '{pacs}/part-000000.parquet' (FORMAT parquet)
+    """)
+    c.sql(f"""
+        COPY (SELECT 'X_0' AS typology_id, 'fan_in' AS typology_type, ['u1'] AS participant_uetrs)
+        TO '{tmp_path}/manifest/manifest.parquet' (FORMAT parquet)
+    """)
+    assert t.main(str(tmp_path)) == 2
+    assert "INCONCLUSIVE" in capsys.readouterr().out

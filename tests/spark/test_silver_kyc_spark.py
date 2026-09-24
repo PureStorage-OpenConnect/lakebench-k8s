@@ -159,3 +159,20 @@ def test_missing_or_old_reference_files_give_null_kyc(spark):
     ents = build_entities(_txns(bronze), bronze, None).collect()
     assert all(r["is_customer"] is None and r["pep_status"] is False for r in ents)
     assert all(r["home_fi"] is None for r in build_accounts(bronze, None).collect())
+
+
+def test_reference_read_tolerates_only_a_missing_path(spark, tmp_path, monkeypatch):
+    import silver_build_financial as sb
+
+    monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "nope/party.parquet"))
+    monkeypatch.setattr(sb, "ACCOUNT_PATH", str(tmp_path / "nope/account.parquet"))
+    assert sb._read_reference(spark) == (None, None)
+
+    class Boom:
+        class read:  # noqa: N801 -- mimics spark.read
+            @staticmethod
+            def parquet(_path):
+                raise RuntimeError("403 Forbidden: InvalidAccessKeyId")
+
+    with pytest.raises(RuntimeError, match="Forbidden"):
+        sb._read_reference(Boom())

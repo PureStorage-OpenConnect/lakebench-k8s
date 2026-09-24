@@ -7,7 +7,8 @@ threshold t this compares the row count in [t(1-w), t) with the count in
 
     python3.11 datagen_rs/tools/threshold_cliff.py <dir containing bronze/pacs008 and manifest/>
 
-Exit status 1 when any threshold FAILs. Needs duckdb.
+Exit status 1 when any threshold FAILs, 2 when none fails but some check is
+INSUFFICIENT (INCONCLUSIVE), 0 on a full PASS. Needs duckdb.
 
 Thresholds are read from the rule source, never copied (ast.literal_eval of
 the constants and of the rule functions' keyword defaults), so the check
@@ -53,9 +54,16 @@ tuning.
 
 Rows exactly equal to t are left out of both windows and reported as the
 atom at t. The generator snaps 15% of amounts to round numbers (people pay
-round sums), and every threshold here is a round number, so an atom at t is
-the same point mass every round value carries, not a density cliff. It is
-printed so a reader can see it; it does not gate.
+round sums), and every threshold here is a round number, so the baseline has
+a real point mass at t, and the snap grid coarsens at decade boundaries, so
+that mass is large at $10,000. It does not gate for all rows. A planted
+population, though, must not concentrate on t more than baseline rows do:
+
+3. Atom share s = atom / (window rows + atom). For a planted population,
+   FAIL when s_planted > max_density_ratio x s_baseline, with at least
+   MIN_ATOM planted rows at t and the difference significant (two-proportion
+   z > 3). This is what catches a typology pinned to exactly t, which the
+   windows alone would read as empty.
 
 "Significant" means |ln ratio| exceeds 3 standard errors, with the Poisson
 approximation se = sqrt(1/n1 + 1/n2); a large but noisy ratio is
@@ -81,6 +89,7 @@ PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
 ADJACENT_BIN = 0.02
 ADJACENT_MAX = 1.5
 MIN_COUNT = 30
+MIN_ATOM = 10
 Z_SIGNIFICANT = 3.0
 EXEMPT_W2 = ("micro_structuring",)
 
@@ -142,6 +151,19 @@ def load_thresholds(rules_src: str, silver_src: str, prereg: dict) -> dict:
         if isinstance(v, (int, float)) and ("amount" in k or "threshold" in k)
     ] + _ge_literals(w7_fn)
     w6 = _ge_literals(_function(rules, "w6_pep_counterparty"))
+    if not w6:
+        raise ValueError("no '>= N' USD threshold found in w6_pep_counterparty")
+    band = [
+        n.value.right.value
+        for n in ast.walk(_function(rules, "_suspicious_amount_expr"))
+        if isinstance(n, ast.Assign)
+        and getattr(n.targets[0], "id", "") == "floor"
+        and isinstance(n.value, ast.BinOp)
+        and isinstance(n.value.op, ast.Mult)
+        and isinstance(n.value.right, ast.Constant)
+    ]
+    if len(band) != 1:
+        raise ValueError("could not read the W2 band floor factor from _suspicious_amount_expr")
     cliff = prereg["threshold_cliff"]
     return {
         "w8_amount_usd": float(w8["amount_threshold_usd"]),
@@ -149,6 +171,7 @@ def load_thresholds(rules_src: str, silver_src: str, prereg: dict) -> dict:
         "w2": {k: float(v) for k, v in _module_constant(rules, "_STRUCTURING_THRESHOLDS").items()},
         "w7_amount_usd": sorted(set(w7)),
         "w6_amount_usd": sorted(set(w6)),
+        "w2_floor_factor": float(band[0]),
         "fx": _module_constant(ast.parse(silver_src), "_FX_TO_USD"),
         "window_rel": float(cliff["window_rel"]),
         "max_ratio": float(cliff["max_density_ratio"]),
@@ -190,12 +213,26 @@ def cliff(count, t: float, w: float, max_ratio: float) -> dict:
     }
 
 
+def atom_verdict(atom_p: int, n_p: int, atom_b: int, n_b: int, max_ratio: float) -> str:
+    """Statistic 3: does a planted population sit on t more than baseline?
+    n_p and n_b are window rows plus the atom."""
+    if atom_p < MIN_ATOM or n_p == 0 or n_b == 0:
+        return "PASS" if atom_p < MIN_ATOM else "INSUFFICIENT"
+    sp, sb = atom_p / n_p, atom_b / n_b
+    if sp <= max_ratio * sb:
+        return "PASS"
+    pool = (atom_p + atom_b) / (n_p + n_b)
+    se = math.sqrt(pool * (1 - pool) * (1 / n_p + 1 / n_b)) or 1e-12
+    return "FAIL" if (sp - sb) / se > Z_SIGNIFICANT else "INSUFFICIENT"
+
+
 def main(root: str) -> int:
     import duckdb
 
     base = Path(root)
     pacs = next(base.rglob("bronze/pacs008"))
-    manifest = next(base.rglob("manifest/manifest.parquet"))
+    # Every cycle's manifest (manifest.parquet, manifest-c001.parquet, ...).
+    manifest = next(base.rglob("manifest/manifest.parquet")).parent / "manifest*.parquet"
     th = load_thresholds(RULES.read_text(), SILVER.read_text(), json.loads(PREREG.read_text()))
     fx_case = " ".join(f"WHEN '{k}' THEN {v}" for k, v in th["fx"].items())
     c = duckdb.connect()
@@ -220,56 +257,99 @@ def main(root: str) -> int:
     w, rmax = th["window_rel"], th["max_ratio"]
     results: list[tuple[str, str, dict]] = []
 
-    def run(label: str, pop: str, table: str, col: str, where: str, t: float) -> None:
+    def counter(table: str, col: str, where: str):
         def count(lo: float, hi: float, exact: bool = False) -> int:
-            rng = f"{col} = {lo!r}" if exact else f"{col} >= {lo!r} AND {col} < {hi!r}"
+            # Amounts are cents; compare exact values at cent resolution so a
+            # float product never misses an atom.
+            if exact:
+                rng = f"round({col}, 2) = round({lo!r}, 2)"
+            else:
+                rng = f"{col} >= {lo!r} AND {col} < {hi!r}"
             (n,) = c.sql(f"SELECT COUNT(*) FROM {table} WHERE ({where}) AND {rng}").fetchone()
             return int(n)
 
-        results.append((label, pop, cliff(count, t, w, rmax)))
+        return count
+
+    def run(
+        label: str, pop: str, table: str, col: str, where: str, t: float, base: str | None = None
+    ) -> None:
+        res = cliff(counter(table, col, where), t, w, rmax)
+        res["atom_verdict"] = "-"
+        if base is not None:
+            cb = counter(table, col, base)
+            n_b = cb(t * (1 - w), t * (1 + w))
+            n_p = res["window"][0] + res["window"][1] + res["atom"]
+            av = atom_verdict(res["atom"], n_p, cb(t, t, exact=True), n_b, rmax)
+            res["atom_verdict"] = av
+            order = {"FAIL": 2, "INSUFFICIENT": 1, "PASS": 0}
+            res["verdict"] = max((res["verdict"], av), key=order.get)
+        results.append((label, pop, res))
 
     t8 = th["w8_amount_usd"]
     # Dormancy burst rows are every row after the out-of-window anchor (pos 1).
     burst = "typ = 'dormant_reactivation' AND pos > 1"
-    for pop, where in (("all rows", "TRUE"), ("planted", "typ IS NOT NULL"), ("bursts", burst)):
-        run(f"W8 amount ${t8:,.0f}", pop, "r", "usd", where, t8)
+    baseline = "typ IS NULL"
+    run(f"W8 amount ${t8:,.0f}", "all rows", "r", "usd", "TRUE", t8)
+    for pop, where in (("planted", "typ IS NOT NULL"), ("bursts", burst)):
+        run(f"W8 amount ${t8:,.0f}", pop, "r", "usd", where, t8, base=baseline)
     tg = th["w8_gap_days"]
     run(f"W8 gap {tg:g} d", "all gaps", "g", "gap_days", "gap_days IS NOT NULL", tg)
     # The gap that ends in a dormancy burst's first row is the dormancy length.
     run(f"W8 gap {tg:g} d", "dormancy", "g", "gap_days", f"{burst} AND pos = 2", tg)
     exempt = ", ".join(f"'{x}'" for x in EXEMPT_W2)
+    ff = th["w2_floor_factor"]
     for ccy, t in th["w2"].items():
         where = f"ccy = '{ccy}' AND (typ IS NULL OR typ NOT IN ({exempt}))"
-        run(f"W2 {ccy} threshold {t:,.0f}", "all rows", "r", "amt", where, t)
-        run(f"W2 {ccy} band floor {0.9 * t:,.0f}", "all rows", "r", "amt", where, 0.9 * t)
+        planted = f"ccy = '{ccy}' AND typ IS NOT NULL AND typ NOT IN ({exempt})"
+        base_c = f"ccy = '{ccy}' AND typ IS NULL"
+        for name, edge in (("threshold", t), ("band floor", ff * t)):
+            run(f"W2 {ccy} {name} {edge:,.0f}", "all rows", "r", "amt", where, edge)
+            run(f"W2 {ccy} {name} {edge:,.0f}", "planted", "r", "amt", planted, edge, base=base_c)
     for label, key in (("W7", "w7_amount_usd"), ("W6", "w6_amount_usd")):
         if not th[key]:
-            print(f"{label}: no USD amount threshold in detection_rules.py; nothing to check")
+            print(f"WARNING {label}: no USD amount threshold found in detection_rules.py")
         for t in th[key]:
             run(f"{label} amount ${t:,.0f}", "all rows", "r", "usd", "TRUE", t)
+            run(
+                f"{label} amount ${t:,.0f}",
+                "planted",
+                "r",
+                "usd",
+                "typ IS NOT NULL",
+                t,
+                base=baseline,
+            )
 
     print(
         f"window +/-{w:.0%} limit {rmax:g}; adjacent {ADJACENT_BIN:.0%} bins limit {ADJACENT_MAX:g}"
     )
     print(
-        f"{'threshold':32s} {'population':10s} {'window lo/hi ratio':>26s} {'adjacent lo/hi ratio':>24s} {'atom':>6s}  verdict"
+        f"{'threshold':32s} {'population':10s} {'window lo/hi ratio':>26s} {'adjacent lo/hi ratio':>24s} {'atom':>6s} {'atom v.':>12s}  verdict"
     )
-    fails = 0
+    fails = inconclusive = 0
     for label, pop, res in results:
         wl, wh, wr, _ = res["window"]
         al, ah, ar, _ = res["adjacent"]
         print(
-            f"{label:32s} {pop:10s} {wl:>9}/{wh:<9} {wr:6.2f} {al:>8}/{ah:<8} {ar:6.2f} {res['atom']:>6}  {res['verdict']}"
+            f"{label:32s} {pop:10s} {wl:>9}/{wh:<9} {wr:6.2f} {al:>8}/{ah:<8} {ar:6.2f} {res['atom']:>6} {res['atom_verdict']:>12s}  {res['verdict']}"
         )
         fails += res["verdict"] == "FAIL"
+        inconclusive += res["verdict"] == "INSUFFICIENT"
     lo, hi = int(tg * (1 - w)), int(math.ceil(tg * (1 + w)))
     hist = c.sql(f"""
         SELECT floor(gap_days)::INT AS d, COUNT(*) FROM g
         WHERE gap_days >= {lo} AND gap_days < {hi} GROUP BY 1 ORDER BY 1
     """).fetchall()
     print(f"\nper-originator gaps by day, {lo}-{hi - 1}: " + " ".join(f"{d}:{n}" for d, n in hist))
-    print(f"\n{'FAIL' if fails else 'PASS'}: {fails} thresholds with a cliff")
-    return 1 if fails else 0
+    if fails:
+        print(f"\nFAIL: {fails} thresholds with a cliff ({inconclusive} inconclusive)")
+        return 1
+    if inconclusive:
+        # INSUFFICIENT is not a pass: the corpus is too small to test them.
+        print(f"\nINCONCLUSIVE: no cliff found, but {inconclusive} checks lack the rows to test")
+        return 2
+    print("\nPASS: no threshold shows a cliff")
+    return 0
 
 
 if __name__ == "__main__":

@@ -1098,11 +1098,9 @@ fn every_typology_subject_is_a_customer_and_others_are_at_base_rate() {
             }
         }
     }
-    // Swapping keeps each instance's drawn customer count, so the non-subject
-    // share sits below 0.5 (the subject took a customer when one was drawn).
-    // It must stay a population-like mix, not all customers or none.
+    // Non-subject roles are never touched, so they stay at the base rate.
     let f = others_c as f64 / others as f64;
-    assert!((0.30..=0.55).contains(&f), "non-subject customer share {f}");
+    assert!((0.47..=0.53).contains(&f), "non-subject customer share {f}");
 }
 
 #[test]
@@ -1539,4 +1537,43 @@ fn c360_cycles_have_disjoint_event_and_row_ids() {
         rows[0].is_disjoint(&rows[1]),
         "c360 row ids repeat across cycles"
     );
+}
+
+#[test]
+fn cycle_schedules_pick_subjects_from_the_world_not_the_stream_seed() {
+    use datagen_rs::cycle::stream_seed;
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::typology::{schedule_ex, subject_index};
+    use datagen_rs::world::{entity_type, TYPE_PERSON};
+    let pop = 5_000usize;
+    let country: Vec<&'static str> = vec!["US"; pop + 1];
+    let insts = schedule_ex(
+        42,
+        stream_seed(42, 3),
+        (pop as i64) * 240,
+        pop,
+        0,
+        1 << 50,
+        &country,
+    );
+    for inst in &insts {
+        let s = inst.participants[subject_index(inst.typ, inst.participants.len(), inst.seed)];
+        assert!(
+            is_customer(s, 42),
+            "{}: subject not a customer of the world",
+            inst.id
+        );
+        assert!(inst
+            .participants
+            .iter()
+            .all(|&p| entity_type(p, 42) == TYPE_PERSON));
+    }
+}
+
+#[test]
+fn fi_entities_never_claim_the_reporting_fi_bic() {
+    use datagen_rs::kyc::{own_bic_idx, REPORTING_FI_POOL_IDX};
+    for id in 1..=100_000u64 {
+        assert!(!REPORTING_FI_POOL_IDX.contains(&own_bic_idx(id, 500)));
+    }
 }

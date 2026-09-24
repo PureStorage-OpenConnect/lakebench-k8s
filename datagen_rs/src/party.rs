@@ -218,8 +218,11 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
         } else {
             Some(w.lei[i].clone())
         });
+        // An FI's own identifier: a pool BIC that is never the reporting
+        // FI's, even when the FI banks with the reporting FI (then w.bic, its
+        // account-holding bank, is the reporting FI's BIC).
         bic.push(if w.ty[i] == TYPE_FI {
-            Some(w.bic[i].clone())
+            Some(w.bic_pool[kyc::own_bic_idx(i as u64, w.bic_pool.len())].clone())
         } else {
             None
         });
