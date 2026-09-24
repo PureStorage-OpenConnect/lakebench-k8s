@@ -34,7 +34,11 @@ from pyspark.sql.functions import (
     coalesce,
     col,
     concat_ws,
+    current_timestamp,
     date_format,
+    datediff,
+    greatest,
+    least,
     lit,
     row_number,
     size,
@@ -45,13 +49,22 @@ from pyspark.sql.functions import (
     xxhash64,
 )
 from pyspark.sql.functions import (
+    avg as avg_,
+)
+from pyspark.sql.functions import (
     count as count_,
+)
+from pyspark.sql.functions import (
+    countDistinct as count_distinct_,
 )
 from pyspark.sql.functions import (
     max as max_,
 )
 from pyspark.sql.functions import (
     min as min_,
+)
+from pyspark.sql.functions import (
+    stddev as stddev_,
 )
 from pyspark.sql.functions import (
     sum as sum_,
@@ -64,6 +77,7 @@ SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
+SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
 STRATEGY = env("spark.lb.silver.strategy", "simple")
 
 
@@ -174,14 +188,35 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_EDGES} (
 ) USING iceberg PARTITIONED BY (bucket(64, source_entity_id))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
-# LB-109: `_batch_id` lets silver_stream tag per-batch aggregates so a
-# streaming retry can DELETE WHERE _batch_id = X + reinsert without
-# double-adding. Rows in this table are now per-(source, target, batch),
-# not the previous per-(source, target) cumulative. Downstream analytical
-# queries (e.g. benchmark FQ3) already SUM(cumulative_amount_usd) and
-# SUM(txn_count) grouped by source_entity_id, so per-batch storage is
-# transparent to them. Batch-mode silver_build writes with _batch_id = NULL
-# (one row per pair, same as before).
+
+# C-PROFILES (LB-130): per-entity behavioural baseline. Kept in lock-step with
+# SILVER_ENTITY_PROFILES_DDL in deploy/financial_ddl.py.
+DDL_PROFILES = f"""
+CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_PROFILES} (
+    entity_id                   BIGINT NOT NULL,
+    first_seen_ts               TIMESTAMP,
+    last_seen_ts                TIMESTAMP,
+    active_span_days            DOUBLE,
+    txn_count_out               BIGINT NOT NULL,
+    txn_count_in                BIGINT NOT NULL,
+    txn_count_total             BIGINT NOT NULL,
+    total_sent_usd              DECIMAL(38, 2),
+    total_received_usd          DECIMAL(38, 2),
+    avg_amount_usd              DOUBLE,
+    stddev_amount_usd           DOUBLE,
+    avg_gap_days                DOUBLE,
+    distinct_counterparties_out BIGINT NOT NULL,
+    distinct_counterparties_in  BIGINT NOT NULL,
+    passthrough_ratio           DOUBLE,
+    profile_updated_ts          TIMESTAMP,
+    _batch_id                   BIGINT
+) USING iceberg PARTITIONED BY (bucket(64, entity_id))
+TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+"""
+# `_batch_id` is reserved for the continuous profile-maintenance path (not yet
+# built -- silver_stream does not refresh profiles today; C-PROFILES continuous
+# MERGE is the follow-up before W4/W8 read this table in continuous mode).
+# Batch silver_build writes one row per entity with _batch_id = NULL.
 
 
 # ---------------------------------------------------------------------------
@@ -604,6 +639,102 @@ def build_edges(txns_df):
     )
 
 
+def build_entity_profiles(txns_df):
+    """Per-entity behavioural baseline (C-PROFILES, LB-130).
+
+    One row per entity_id, aggregating the originator side and the beneficiary
+    side separately then full-outer-joining, so a rule can compare an event
+    against the entity's OWN history instead of a population-wide constant.
+
+    Design choices:
+    - ``avg_gap_days = active_span_days / (txn_count_out - 1)`` is the MEAN
+      inter-transaction gap on the originator side. This is exactly the
+      baseline W8 needs: a >=90-day reactivation gap is only anomalous if the
+      entity's typical gap is much smaller. It is NULL when txn_count_out < 2
+      (no gap is defined for a single send; W8 already declines first-ever
+      activity). A cheap span/(n-1) proxy is used deliberately -- the exact
+      mean of consecutive gaps equals span/(n-1) by telescoping, so this is not
+      an approximation, and it avoids a per-entity ordered window over the whole
+      corpus.
+    - ``passthrough_ratio = total_sent_usd / total_received_usd`` is W4's
+      baseline for "does this entity normally forward what it receives". NULL
+      when the entity never received (ratio undefined) -- a pure originator is
+      not a pass-through.
+    - amount stats are over the originator side (money the entity sends), which
+      is what the velocity/structuring rules reason about.
+    - _batch_id is NULL in batch mode (mirrors the other silver tables); the
+      continuous MERGE path sets it.
+    """
+    amt = col("txn_amount_usd").cast("double")
+    out_side = txns_df.groupBy(col("originator_id").alias("entity_id")).agg(
+        min_(col("txn_timestamp")).alias("first_seen_ts"),
+        max_(col("txn_timestamp")).alias("last_seen_ts"),
+        count_(lit(1)).alias("txn_count_out"),
+        sum_(col("txn_amount_usd")).cast("decimal(38,2)").alias("total_sent_usd"),
+        avg_(amt).alias("avg_amount_usd"),
+        stddev_(amt).alias("stddev_amount_usd"),
+        count_distinct_(col("beneficiary_id")).alias("distinct_counterparties_out"),
+    )
+    in_side = txns_df.groupBy(col("beneficiary_id").alias("entity_id")).agg(
+        min_(col("txn_timestamp")).alias("first_seen_in_ts"),
+        max_(col("txn_timestamp")).alias("last_seen_in_ts"),
+        count_(lit(1)).alias("txn_count_in"),
+        sum_(col("txn_amount_usd")).cast("decimal(38,2)").alias("total_received_usd"),
+        count_distinct_(col("originator_id")).alias("distinct_counterparties_in"),
+    )
+    joined = out_side.join(in_side, on="entity_id", how="fullouter")
+    # coalesce counts to 0 so the NOT NULL columns are satisfied for entities
+    # that only ever appear on one side.
+    c_out = coalesce(col("txn_count_out"), lit(0))
+    c_in = coalesce(col("txn_count_in"), lit(0))
+    # Profile-level first/last span across BOTH sides. greatest/least skip NULLs
+    # in Spark, so an entity present on only one side still resolves correctly --
+    # and when present on both, first_seen is the EARLIEST of the two sides and
+    # last_seen the LATEST (coalesce would wrongly keep the originator side even
+    # when the beneficiary side is earlier/later).
+    profile_first = least(col("first_seen_ts"), col("first_seen_in_ts"))
+    profile_last = greatest(col("last_seen_ts"), col("last_seen_in_ts"))
+    span_days = datediff(profile_last, profile_first).cast("double")
+    # W8 baseline: mean gap between consecutive SENDS = originator-side span
+    # (last send - first send) / (sends - 1). Uses the ORIGINATOR span only, not
+    # the combined in+out span, so receive activity does not inflate the gap.
+    out_span_days = datediff(col("last_seen_ts"), col("first_seen_ts")).cast("double")
+    return joined.select(
+        col("entity_id"),
+        profile_first.alias("first_seen_ts"),
+        profile_last.alias("last_seen_ts"),
+        span_days.alias("active_span_days"),
+        c_out.alias("txn_count_out"),
+        c_in.alias("txn_count_in"),
+        (c_out + c_in).alias("txn_count_total"),
+        col("total_sent_usd"),
+        col("total_received_usd"),
+        col("avg_amount_usd"),
+        col("stddev_amount_usd"),
+        # mean inter-send gap on the originator side; NULL when < 2 sends.
+        when(c_out >= lit(2), out_span_days / (c_out - lit(1)))
+        .otherwise(lit(None).cast("double"))
+        .alias("avg_gap_days"),
+        coalesce(col("distinct_counterparties_out"), lit(0)).alias("distinct_counterparties_out"),
+        coalesce(col("distinct_counterparties_in"), lit(0)).alias("distinct_counterparties_in"),
+        # pass-through ratio = sent / received. A receive-only "hoarder"
+        # (received > 0, sent NULL) gets 0.0, a real low baseline -- so W4 can
+        # flag the mule-onboarding case (historically hoards, then suddenly
+        # forwards) as a deviation from ~0. NULL only when the entity NEVER
+        # received (ratio genuinely undefined; a pure originator is not a
+        # pass-through subject).
+        when(
+            coalesce(col("total_received_usd"), lit(0)) > lit(0),
+            coalesce(col("total_sent_usd"), lit(0)).cast("double")
+            / col("total_received_usd").cast("double"),
+        )
+        .otherwise(lit(None).cast("double"))
+        .alias("passthrough_ratio"),
+        current_timestamp().alias("profile_updated_ts"),
+        lit(None).cast("bigint").alias("_batch_id"),
+    )
+
+
 def main() -> None:
     spark = SparkSession.builder.appName("lb-silver-build-financial").getOrCreate()
     start = time.time()
@@ -651,6 +782,7 @@ def main() -> None:
         ("accounts", DDL_ACCOUNTS),
         ("account_statements", DDL_STATEMENTS),
         ("edges", DDL_EDGES),
+        ("entity_profiles", DDL_PROFILES),
     ):
         spark.sql(ddl)
         log(f"Bootstrapped silver.{name}")
@@ -715,6 +847,11 @@ def main() -> None:
 
     _replace_data(build_edges(txns), SILVER_EDGES)
     log("Wrote silver.counterparty_edges")
+
+    # C-PROFILES (LB-130): per-entity behavioural baseline for relative-anomaly
+    # detection (W4/W8 over-firing). Full rebuild from the transaction frame.
+    _replace_data(build_entity_profiles(txns), SILVER_PROFILES)
+    log("Wrote silver.entity_profiles")
 
     # Guard against ruff unused-import warnings for symbols kept for clarity.
     _ = (date_format,)
