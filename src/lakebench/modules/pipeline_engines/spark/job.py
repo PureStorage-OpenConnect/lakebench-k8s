@@ -2157,6 +2157,13 @@ class SparkJobManager:
             {"name": "LB_GOLD_TABLE", "value": cfg.architecture.tables.gold},
         ]
 
+        # c360 recency data clock (E4): the configured datagen end (exclusive),
+        # so batch, every cycle and every micro-batch share one anchor. Unset,
+        # the scripts measure max(event_timestamp) instead.
+        _ts_end = cfg.architecture.workload.datagen.timestamp_end
+        if _ts_end:
+            env.append({"name": "LB_DATA_CLOCK", "value": str(_ts_end)})
+
         # Financial workload: point bronze_verify_financial / silver_build_financial
         # at the same S3 prefix the datagen K8s Job wrote to. Datagen picks
         # `pacs008` when path_template is at its C360 default; mirror that here.

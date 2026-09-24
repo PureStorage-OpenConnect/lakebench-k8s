@@ -11,12 +11,22 @@ as they arrive.
 Replay idempotency (E3): a micro-batch replayed after a driver restart (the
 table commit landed, the checkpoint commit did not) appended its rows a
 second time, and silver-stream then carried the duplicate forward. Each
-append now tags its Iceberg snapshot with the streaming query id and batch
-id (``snapshot-property.lb.*``); a batch whose tag is already in the table's
-snapshots is skipped. Only this stream writes bronze_raw, so nothing commits
-between the check and the append, and the batch that can be replayed is the
-last one committed, whose snapshot is the table's current snapshot and so
-survives expire_snapshots.
+append tags its Iceberg snapshot with the streaming query id and batch id
+(``snapshot-property.lb.*``). Only the first micro-batch of a query run can
+be a replay, so only that batch looks the tag up in the table's snapshots
+and, when found, is skipped and logged as "skipped (already committed)", a
+line the metrics collector does not count as rows. Only this stream appends
+to bronze_raw, so nothing it needs commits between the lookup and the append.
+
+What the lookup relies on: the replayed batch's snapshot is still in the
+snapshot history. Compaction (rewrite_data_files) may add a replace snapshot
+on top of it, which does not remove it from history, but expire_snapshots
+does once it is older than the retention threshold. A driver that stays
+down longer than the retention (sustained.retention_threshold, 30m by
+default) and then replays would append the batch again.
+
+Startup refuses a fresh checkpoint over a non-empty bronze_raw: the new
+query would re-read the whole landing zone into it.
 
 Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
@@ -34,6 +44,8 @@ from common import (
     await_stream,
     env,
     log,
+    refuse_fresh_checkpoint_over_data,
+    replay_possible,
     set_utc_session,
     streaming_query_id,
     table_exists,
@@ -82,6 +94,7 @@ def write_bronze_batch(
     Returns the rows written, 0 for an empty or already-committed batch.
     """
     spark = batch_df.sparkSession
+    check_replay = replay_possible(spark)
     batch_start = time.time()
     count = batch_df.count()
     if count == 0:
@@ -95,14 +108,12 @@ def write_bronze_batch(
     }
 
     exists = table_exists(spark, table_name)
-    # Logged before the replay check, like the silver streams: a restarted
-    # driver is a new pod whose log is all the collector reads, so the
-    # replayed batch is counted there once.
-    log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
-    if exists and batch_already_committed(spark, table_name, query_id, batch_id):
-        log(f"Batch {batch_id}: already committed to {table_name}, skipping replay")
+    if check_replay and exists and batch_already_committed(spark, table_name, query_id, batch_id):
+        # Not a "writing" line: the collector counts those as ingested rows.
+        log(f"Batch {batch_id}: skipped (already committed to {table_name})")
         return 0
 
+    log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
     writer = batch_df.writeTo(table_name).options(**props)
     if exists:
         writer.append()
@@ -178,6 +189,7 @@ def main() -> None:
         time.sleep(_LANDING_WAIT_INTERVAL)
         waited += _LANDING_WAIT_INTERVAL
 
+    refuse_fresh_checkpoint_over_data(spark, checkpoint_location, table_name)
     table_location = _table_location(bronze_uri, bronze_table_path)
     stream = (
         spark.readStream.schema(inferred_schema)

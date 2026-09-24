@@ -726,9 +726,13 @@ hours. This degrades Iceberg metadata operations and query planning.
 **In batch mode, wider ranges are fine.** Compaction runs once after the
 pipeline completes, consolidating small files.
 
-The range also affects the `customer_recency_score` derived column, which
-is computed as `30 - datediff(current_date(), event_timestamp)`. Timestamps
-far from today produce meaningless negative or inflated scores.
+The range also sets the data clock for the `customer_recency_score` derived
+column: `30 - days between the event date and the last day of the range`.
+The last day is the day before `timestamp_end` (the end is exclusive), so
+an event on the newest day scores 30 and one 30 days older scores 0. When
+`timestamp_end` is unset, the clock is the newest event date in the data.
+The score no longer depends on the date the pipeline runs, so reruns of the
+same corpus reproduce it.
 
 | Mode | Recommended Range | Reason |
 |------|-------------------|--------|

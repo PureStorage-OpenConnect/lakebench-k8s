@@ -9,15 +9,28 @@ This is the continuous-pipeline equivalent of silver_build.py. Where
 silver_build processes all data in a single batch pass, silver_stream
 processes micro-batches as new rows arrive in bronze_raw.
 
-Replay idempotency (E3, same protocol as silver_stream_financial, LB-109):
-Structured Streaming re-runs a micro-batch with the same batchId when the
-driver dies after the table commit but before the checkpoint commit. A plain
-append then wrote the batch twice. Every silver row now carries
-`_batch_id BIGINT`; each batch first deletes rows tagged with its id, then
-appends. The delete is a no-op the first time and removes the earlier
-attempt on a replay, so a replayed batch leaves exactly one copy. Batch-mode
-silver_build writes no `_batch_id`; the column is added on startup when a
-reused table lacks it. Batch and continuous modes do not share a table.
+Replay idempotency (E3, the LB-109 protocol of silver_stream_financial,
+scoped to the stream): Structured Streaming re-runs a micro-batch with the
+same batchId when the driver dies after the table commit but before the
+checkpoint commit, and a plain append wrote it twice. Every silver row
+carries `_stream_id` (the streaming query id) and `_batch_id`. Only the
+first micro-batch of a query run can be such a replay (a failed batch stops
+the query and the driver), so only that batch probes for rows with its
+(stream, batch) key and deletes them before appending. Later batches just
+append, so the table gets no empty delete snapshot per trigger. The key
+includes the query id: a new checkpoint restarts batch ids at 0, and a bare
+batch id would delete the previous stream's batch 0.
+
+Batch silver_build writes the same table. Its full rebuild (createOrReplace)
+replaces the table, stream columns included; on startup this job adds the
+two columns to a table that lacks them (ensure_column), and rows without a
+stream id are never matched by the replay delete. Startup refuses a fresh
+checkpoint over a non-empty silver table, which would re-read all of bronze
+into it a second time.
+
+Recency is anchored to LB_DATA_CLOCK (the configured datagen end) when set,
+so every micro-batch uses one clock; otherwise to each micro-batch's newest
+event.
 
 Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
@@ -35,11 +48,15 @@ import time
 from common import (
     apply_silver_transformations_anchored,
     await_stream,
+    configured_data_clock,
     data_clock_date,
     ensure_column,
     env,
     log,
+    refuse_fresh_checkpoint_over_data,
+    replay_possible,
     set_utc_session,
+    streaming_query_id,
     table_exists,
 )
 from pyspark.sql import SparkSession
@@ -49,12 +66,16 @@ _TABLE_WAIT_INTERVAL = 15  # seconds between checks
 _TABLE_WAIT_MAX = 1800  # 30 minutes -- generous for large datagen
 
 
-def write_silver_batch(batch_df, batch_id, silver_tbl, target_file_size_bytes="536870912"):
+def write_silver_batch(
+    batch_df, batch_id, silver_tbl, target_file_size_bytes="536870912", data_clock=None
+):
     """Transform one micro-batch and write it to Silver exactly once.
 
-    Returns the number of silver rows the batch holds after the write.
+    ``data_clock`` is the recency anchor; None measures it from the batch.
+    Returns the number of silver rows the batch wrote.
     """
     spark = batch_df.sparkSession
+    check_replay = replay_possible(spark)
     batch_start = time.time()
     count = batch_df.count()
     if count == 0:
@@ -63,11 +84,11 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, target_file_size_bytes="5
 
     log(f"Batch {batch_id}: transforming {count:,} rows")
 
-    # Recency is measured from the newest event in this batch. A pure
-    # function of the batch contents, so a replay writes identical scores.
-    anchor = data_clock_date(batch_df)
+    stream_id = streaming_query_id(spark)
+    anchor = data_clock if data_clock is not None else data_clock_date(batch_df)
     enriched = (
         apply_silver_transformations_anchored(batch_df, anchor)
+        .withColumn("_stream_id", lit(stream_id))
         .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
         .cache()
     )
@@ -79,9 +100,8 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, target_file_size_bytes="5
         )
 
         if table_exists(spark, silver_tbl):
-            # DELETE first: removes the rows of an earlier attempt of this
-            # batch (replay after a driver restart); no-op otherwise.
-            spark.sql(f"DELETE FROM {silver_tbl} WHERE _batch_id = {int(batch_id)}")
+            if check_replay:
+                _delete_earlier_attempt(spark, silver_tbl, stream_id, batch_id)
             enriched.writeTo(silver_tbl).append()
         else:
             log(f"Batch {batch_id}: creating Silver table with partitioning")
@@ -99,6 +119,20 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, target_file_size_bytes="5
     batch_time = time.time() - batch_start
     log(f"Batch {batch_id}: committed to {silver_tbl} in {batch_time:.1f}s")
     return enriched_count
+
+
+def _delete_earlier_attempt(spark, silver_tbl, stream_id, batch_id):
+    """Remove rows an earlier attempt of this (stream, batch) committed.
+
+    Probes first so a first attempt commits no empty delete snapshot; file
+    statistics on the two key columns prune the probe to the batch's files.
+    Delete-then-append is two commits: a failure between them leaves the
+    batch missing until the next replay, never duplicated.
+    """
+    key = f"_stream_id = '{stream_id}' AND _batch_id = {int(batch_id)}"
+    if spark.sql(f"SELECT 1 FROM {silver_tbl} WHERE {key} LIMIT 1").collect():
+        log(f"Batch {batch_id}: replay; removing the earlier attempt's rows")
+        spark.sql(f"DELETE FROM {silver_tbl} WHERE {key}")
 
 
 def _exists_or_false(spark, table):
@@ -138,10 +172,19 @@ def main() -> None:
     except Exception as e:
         log(f"Namespace creation note: {str(e)}")
 
-    # Reused table from before the idempotency key: add it before the first
-    # micro-batch, whose DELETE references it.
+    # Reused table without the idempotency key (batch-built, or an older
+    # release): add it before the first micro-batch references it.
     if table_exists(spark, silver_tbl):
+        ensure_column(spark, silver_tbl, "_stream_id", "STRING")
         ensure_column(spark, silver_tbl, "_batch_id", "BIGINT")
+    refuse_fresh_checkpoint_over_data(spark, checkpoint_location, silver_tbl)
+
+    data_clock = configured_data_clock()
+    log(
+        f"Data clock (recency anchor): {data_clock} from LB_DATA_CLOCK"
+        if data_clock is not None
+        else "Data clock: LB_DATA_CLOCK unset; recency anchored per micro-batch"
+    )
 
     # Bronze-ingest creates bronze_raw on its first batch; silver-stream
     # starts concurrently and would crash with NoSuchTableException.
@@ -161,7 +204,9 @@ def main() -> None:
     stream = spark.readStream.format("iceberg").load(bronze_tbl)
     query = (
         stream.writeStream.foreachBatch(
-            lambda df, bid: write_silver_batch(df, bid, silver_tbl, target_file_size_bytes)
+            lambda df, bid: write_silver_batch(
+                df, bid, silver_tbl, target_file_size_bytes, data_clock
+            )
         )
         .option("checkpointLocation", checkpoint_location)
         .trigger(processingTime=trigger_interval)

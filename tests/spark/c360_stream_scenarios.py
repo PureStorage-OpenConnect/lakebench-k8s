@@ -22,6 +22,7 @@ import glob
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -32,10 +33,10 @@ class SimulatedCrash(RuntimeError):
     pass
 
 
-def bronze_rows(n, day0=datetime(2024, 6, 1)):
+def bronze_rows(n, day0=datetime(2024, 6, 1), start=0):
     """Bronze-shaped rows: every column silver and gold read."""
     rows = []
-    for i in range(n):
+    for i in range(start, start + n):
         rows.append(
             {
                 "id": i,
@@ -90,9 +91,10 @@ BRONZE_DDL = (
 )
 
 
-def bronze_df(spark, n):
+def bronze_df(spark, n, start=0):
     cols = [c.split()[0] for c in BRONZE_DDL.split(", ")]
-    return spark.createDataFrame([tuple(r[c] for c in cols) for r in bronze_rows(n)], BRONZE_DDL)
+    rows = bronze_rows(n, start=start)
+    return spark.createDataFrame([tuple(r[c] for c in cols) for r in rows], BRONZE_DDL)
 
 
 def session(jar_dir, work):
@@ -124,48 +126,86 @@ def session(jar_dir, work):
     )
 
 
-def stage_source(spark, work, name, n):
-    """Write n bronze rows as Parquet files for a file-source stream."""
+def stage_files(spark, work, name, files, rows_per_file, start=0):
+    """Write ``files`` Parquet files of bronze rows, one micro-batch each."""
     src = f"{work}/src-{name}"
-    bronze_df(spark, n).repartition(1).write.parquet(src)
+    for k in range(files):
+        bronze_df(spark, rows_per_file, start + k * rows_per_file).coalesce(1).write.mode(
+            "append"
+        ).parquet(src)
+        time.sleep(0.05)  # distinct mtimes keep the file source's order stable
     return src
 
 
-def crash_then_replay(spark, work, name, n, write):
-    """Run ``write(df, batch_id)`` under a crash-after-commit, then restart.
+def run_stream(spark, src, ckpt, write, crash_at=None, log=None):
+    """One query run over ``src``: one file per micro-batch, until caught up.
 
-    Returns the batch ids foreachBatch saw, in order.
+    With ``crash_at``, foreachBatch raises right after ``write`` commits that
+    batch, the state a driver killed before its checkpoint commit leaves.
+    ``log`` collects (batch_id, write's return value). Returns the query id.
     """
-    src = stage_source(spark, work, name, n)
     schema = spark.read.parquet(src).schema
+
+    def fb(df, bid):
+        ret = write(df, bid)
+        if log is not None:
+            log.append([int(bid), ret])
+        if crash_at is not None and int(bid) == crash_at:
+            raise SimulatedCrash("driver died after the table commit")
+
+    q = (
+        spark.readStream.schema(schema)
+        .option("maxFilesPerTrigger", 1)
+        .parquet(src)
+        .writeStream.foreachBatch(fb)
+        .option("checkpointLocation", ckpt)
+        .trigger(availableNow=True)
+        .start()
+    )
+    try:
+        q.awaitTermination()
+    except Exception as e:  # noqa: BLE001
+        if "driver died" not in str(e):
+            raise
+    return str(q.id)
+
+
+def crash_then_replay(spark, work, name, write, files=3, rows_per_file=10, crash_at=1):
+    """Crash after committing batch ``crash_at``, restart from the checkpoint.
+
+    Batch 0 creates the table, so ``crash_at=1`` replays onto an existing
+    table. Returns (log of (batch_id, return value), first query id, second).
+    """
+    src = stage_files(spark, work, name, files, rows_per_file)
     ckpt = f"{work}/ckpt-{name}"
-    seen = []
+    log = []
+    q1 = run_stream(spark, src, ckpt, write, crash_at=crash_at, log=log)
+    q2 = run_stream(spark, src, ckpt, write, log=log)
+    return log, q1, q2
 
-    def run(crash):
-        def fb(df, bid):
-            seen.append(int(bid))
-            write(df, bid)
-            if crash:
-                raise SimulatedCrash("driver died after the table commit")
 
-        q = (
-            spark.readStream.schema(schema)
-            .parquet(src)
-            .writeStream.foreachBatch(fb)
-            .option("checkpointLocation", ckpt)
-            .trigger(availableNow=True)
-            .start()
-        )
-        try:
-            q.awaitTermination()
-        except Exception as e:  # noqa: BLE001
-            if "SimulatedCrash" not in str(e) and "driver died" not in str(e):
-                raise
-        return q.id
+def _merge_gold_from(script):
+    """``_merge_gold`` from a gold script, which runs a job at import."""
+    import ast
 
-    qid1 = run(crash=True)
-    qid2 = run(crash=False)
-    return seen, str(qid1), str(qid2)
+    from pyspark.sql.functions import col, lit
+
+    path = Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts" / script
+    tree = ast.parse(path.read_text())
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_merge_gold")
+    ns = {"col": col, "lit": lit}
+    exec(compile(ast.Module([fn], []), str(path), "exec"), ns)  # noqa: S102
+    return ns["_merge_gold"]
+
+
+def gold_merge(spark, script):
+    """Five gold days, recompute from day 4 with three days: one commit."""
+    from datetime import date
+
+    days = [date(2024, 6, d) for d in range(1, 7)]
+    old = spark.createDataFrame([(d, 1) for d in days[:5]], "interaction_date date, v int")
+    new = spark.createDataFrame([(d, 2) for d in days[3:]], "interaction_date date, v int")
+    return old, new, days, _merge_gold_from(script)
 
 
 def main():
@@ -176,103 +216,111 @@ def main():
 
     set_utc_session(spark)
     out = {}
-    n = 40
-    expected_silver = sum(
-        1 for r in bronze_rows(n) if r["data_quality_flag"] != "duplicate_suspected"
-    )
-    out["n"] = n
-    out["expected_silver"] = expected_silver
+    from common import refuse_fresh_checkpoint_over_data
 
-    # Control: a naive append duplicates the replayed batch.
+    # 3 files x 10 rows; silver drops id % 10 == 9, so 9 per file survive.
+    out["bronze_rows"] = 30
+    out["silver_rows"] = 27
+
+    # Control: a naive append duplicates the replayed batch (batch 1).
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.ctl")
     spark.sql("CREATE TABLE ice.ctl.t (id BIGINT) USING iceberg")
-    seen, _, _ = crash_then_replay(
-        spark, work, "control", n, lambda df, bid: df.select("id").writeTo("ice.ctl.t").append()
+    log, _, _ = crash_then_replay(
+        spark, work, "control", lambda df, bid: df.select("id").writeTo("ice.ctl.t").append()
     )
-    out["control_batches"] = seen
+    out["control_batches"] = [b for b, _ in log]
     out["control_rows"] = spark.table("ice.ctl.t").count()
 
-    # Iceberg silver stream: _batch_id delete-then-append.
+    # Iceberg silver stream.
     import silver_stream
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.silver")
     tbl = "ice.silver.customer_interactions_enriched"
-    seen, _, _ = crash_then_replay(
-        spark, work, "ice-silver", n, lambda df, bid: silver_stream.write_silver_batch(df, bid, tbl)
-    )
-    out["ice_silver_batches"] = seen
-    out["ice_silver_rows"] = spark.table(tbl).count()
-    out["ice_silver_distinct_ids"] = spark.table(tbl).select("id").distinct().count()
-    out["ice_silver_batch_ids"] = sorted(
-        r[0] for r in spark.table(tbl).select("_batch_id").distinct().collect()
-    )
-    out["ice_silver_recency_max"] = (
-        spark.table(tbl).agg({"customer_recency_score": "max"}).first()[0]
-    )
+    w = lambda df, bid: silver_stream.write_silver_batch(df, bid, tbl)  # noqa: E731
+    log, q1, q2 = crash_then_replay(spark, work, "ice-silver", w)
+    t = spark.table(tbl)
+    out["ice_silver_batches"] = [b for b, _ in log]
+    out["ice_silver_rows"] = t.count()
+    out["ice_silver_distinct_ids"] = t.select("id").distinct().count()
+    out["ice_silver_same_query"] = q1 == q2
+    out["ice_silver_recency_max"] = t.agg({"customer_recency_score": "max"}).first()[0]
 
-    # Upgrade path: a silver table created without _batch_id (batch mode or
-    # an older release) gains it through ensure_column, then accepts batches.
+    def deletes(table):
+        return spark.sql(
+            f"SELECT count(*) FROM {table}.snapshots WHERE operation IN ('delete', 'overwrite')"
+        ).first()[0]
+
+    out["ice_silver_delete_snapshots"] = deletes(tbl)
+
+    # A fresh checkpoint (new query id, batch ids from 0) over the reused
+    # table: three one-row batches. The earlier stream's batch 0 must survive
+    # and no batch after the first may commit a delete snapshot.
+    src = stage_files(spark, work, "ice-silver-fresh", 3, 1, start=1000)
+    ckpt_fresh = f"{work}/ckpt-ice-silver-fresh"
+    q3 = run_stream(spark, src, ckpt_fresh, w)
+    t = spark.table(tbl)
+    out["ice_silver_rows_after_fresh"] = t.count()
+    out["ice_silver_old_batch0_rows"] = t.where(f"_stream_id = '{q1}' AND _batch_id = 0").count()
+    out["ice_silver_new_stream_rows"] = t.where(f"_stream_id = '{q3}'").count()
+    out["ice_silver_delete_snapshots_after_fresh"] = deletes(tbl)
+
+    # Startup guard: an empty checkpoint over a non-empty table is refused;
+    # a used checkpoint, or an empty table, is not.
+    try:
+        refuse_fresh_checkpoint_over_data(spark, f"{work}/ckpt-never-used", tbl)
+        out["refuse_fresh"] = False
+    except SystemExit:
+        out["refuse_fresh"] = True
+    refuse_fresh_checkpoint_over_data(spark, ckpt_fresh, tbl)
+    spark.sql("CREATE TABLE ice.silver.empty_t (id BIGINT) USING iceberg")
+    refuse_fresh_checkpoint_over_data(spark, f"{work}/ckpt-never-used", "ice.silver.empty_t")
+    out["refuse_allows_used_or_empty"] = True
+
+    # Upgrade path: a silver table created without the key columns (batch
+    # mode or an older release) gains them, then a replay is still exact.
     from common import apply_silver_transformations, ensure_column
 
     old = "ice.silver.legacy"
     apply_silver_transformations(bronze_df(spark, 5)).writeTo(old).partitionedBy(
         "interaction_date"
     ).create()
-    added = ensure_column(spark, old, "_batch_id", "BIGINT")
+    added = [
+        ensure_column(spark, old, c, t)
+        for c, t in (("_stream_id", "STRING"), ("_batch_id", "BIGINT"))
+    ]
     again = ensure_column(spark, old, "_batch_id", "BIGINT")
-    silver_stream.write_silver_batch(bronze_df(spark, 10), 3, old)
-    silver_stream.write_silver_batch(bronze_df(spark, 10), 3, old)
-    out["legacy_added"], out["legacy_added_again"] = added, again
+    wl = lambda df, bid: silver_stream.write_silver_batch(df, bid, old)  # noqa: E731
+    crash_then_replay(spark, work, "legacy", wl, files=1, crash_at=0)
+    out["legacy_added"], out["legacy_added_again"] = all(added), again
     out["legacy_rows"] = spark.table(old).count()
-    out["legacy_rows_batch3"] = spark.table(old).where("_batch_id = 3").count()
 
-    # Iceberg bronze ingest: snapshot tag check.
+    # Iceberg bronze ingest: snapshot tag check on the replayed batch 1.
     import bronze_ingest
 
     spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.default")
     btbl = "ice.default.bronze_raw"
-    seen, q1, q2 = crash_then_replay(
-        spark,
-        work,
-        "ice-bronze",
-        n,
-        lambda df, bid: bronze_ingest.write_bronze_batch(df, bid, btbl),
-    )
-    out["ice_bronze_batches"] = seen
+    wb = lambda df, bid: bronze_ingest.write_bronze_batch(df, bid, btbl)  # noqa: E731
+    log, q1, q2 = crash_then_replay(spark, work, "ice-bronze", wb)
+    out["ice_bronze_log"] = log
     out["ice_bronze_rows"] = spark.table(btbl).count()
     out["ice_bronze_same_query_id"] = q1 == q2
-    # A fresh checkpoint is a new query id: its batch 0 must be written, not
-    # mistaken for the earlier query's batch 0.
-    ckpt_seen, _, _ = crash_then_replay(
-        spark,
-        work,
-        "ice-bronze-fresh",
-        10,
-        lambda df, bid: bronze_ingest.write_bronze_batch(df, bid, btbl),
-    )
+    src = stage_files(spark, work, "ice-bronze-fresh", 1, 10, start=500)
+    run_stream(spark, src, f"{work}/ckpt-ice-bronze-fresh", wb)
     out["ice_bronze_rows_after_fresh"] = spark.table(btbl).count()
 
-    # Delta silver stream: txnAppId/txnVersion.
+    # Delta silver stream: txnAppId/txnVersion, skip detected by version.
     import silver_stream_delta
 
     spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.silver")
     dtbl = "spark_catalog.silver.customer_interactions_enriched"
-    seen, _, _ = crash_then_replay(
-        spark,
-        work,
-        "delta-silver",
-        n,
-        lambda df, bid: silver_stream_delta.write_silver_batch(df, bid, dtbl, f"file://{work}/"),
+    wd = lambda df, bid: silver_stream_delta.write_silver_batch(  # noqa: E731
+        df, bid, dtbl, f"file://{work}/"
     )
-    out["delta_silver_batches"] = seen
+    log, _, _ = crash_then_replay(spark, work, "delta-silver", wd)
+    out["delta_silver_log"] = log
     out["delta_silver_rows"] = spark.table(dtbl).count()
-    crash_then_replay(
-        spark,
-        work,
-        "delta-silver-fresh",
-        10,
-        lambda df, bid: silver_stream_delta.write_silver_batch(df, bid, dtbl, f"file://{work}/"),
-    )
+    src = stage_files(spark, work, "delta-silver-fresh", 1, 10, start=2000)
+    run_stream(spark, src, f"{work}/ckpt-delta-silver-fresh", wd)
     out["delta_silver_rows_after_fresh"] = spark.table(dtbl).count()
 
     # Delta bronze ingest.
@@ -280,15 +328,36 @@ def main():
 
     spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.default")
     dbtbl = "spark_catalog.default.bronze_raw"
-    seen, _, _ = crash_then_replay(
-        spark,
-        work,
-        "delta-bronze",
-        n,
-        lambda df, bid: bronze_ingest_delta.write_bronze_batch(df, bid, dbtbl, f"file://{work}/"),
+    wdb = lambda df, bid: bronze_ingest_delta.write_bronze_batch(  # noqa: E731
+        df, bid, dbtbl, f"file://{work}/"
     )
-    out["delta_bronze_batches"] = seen
+    log, _, _ = crash_then_replay(spark, work, "delta-bronze", wdb)
+    out["delta_bronze_log"] = log
     out["delta_bronze_rows"] = spark.table(dbtbl).count()
+
+    # Gold INCREMENTAL boundary replace: one commit, earlier days kept.
+    from pyspark.sql.functions import lit
+
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS ice.gold")
+    g = "ice.gold.dash"
+    old_g, new_g, days, merge = gold_merge(spark, "gold_finalize.py")
+    old_g.writeTo(g).create()
+    before = spark.sql(f"SELECT count(*) FROM {g}.snapshots").first()[0]
+    merge(spark.table(g), new_g, days[3]).writeTo(g).overwrite(lit(True))
+    out["ice_gold"] = sorted([str(r[0]), r[1]] for r in spark.table(g).collect())
+    out["ice_gold_commits"] = spark.sql(f"SELECT count(*) FROM {g}.snapshots").first()[0] - before
+
+    from common import delta_table_version, write_delta_table
+
+    spark.sql("CREATE SCHEMA IF NOT EXISTS spark_catalog.gold")
+    dg = "spark_catalog.gold.dash"
+    old_g, new_g, days, merge = gold_merge(spark, "gold_finalize_delta.py")
+    write_delta_table(spark, old_g, dg, f"file://{work}/", mode="append")
+    v0 = delta_table_version(spark, dg)
+    merged = merge(spark.table(dg), new_g, days[3])
+    write_delta_table(spark, merged, dg, f"file://{work}/", mode="overwrite")
+    out["delta_gold"] = sorted([str(r[0]), r[1]] for r in spark.table(dg).collect())
+    out["delta_gold_commits"] = delta_table_version(spark, dg) - v0
 
     spark.stop()
     print(json.dumps(out, default=str))
