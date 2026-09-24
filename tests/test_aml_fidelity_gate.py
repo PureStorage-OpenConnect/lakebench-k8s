@@ -349,3 +349,29 @@ def test_rank_shortcut_is_out_of_fold():
     ap_oof = fg._ap(y, oof, w)
     in_sample = max(fg._ap(y, x, w), fg._ap(y, -x, w))
     assert ap_oof < 0.2 < in_sample
+
+
+def test_cv_never_splits_a_group():
+    rng = np.random.default_rng(0)
+    groups = np.repeat(np.arange(300), 4)
+    y = np.repeat((rng.random(300) < 0.2).astype(int), 4)
+    for train, test in fg._folds(y, groups, _prereg()):
+        assert not set(groups[train]) & set(groups[test])
+
+
+def test_bootstrap_resamples_groups():
+    order, start, length = fg._group_index(np.array(["b", "a", "b", "c", "a", "b"]))
+    # Group codes follow first appearance: b=0, a=1, c=2.
+    rows = fg._resample_rows(np.array([0, 2, 0]), order, start, length)
+    assert sorted(rows.tolist()) == [0, 0, 2, 2, 3, 5, 5]
+    # One row per group: the resample is the draw itself (same numbers as a
+    # row bootstrap).
+    order, start, length = fg._group_index(np.arange(5))
+    assert fg._resample_rows(np.array([4, 4, 1]), order, start, length).tolist() == [4, 4, 1]
+
+
+def test_report_records_groups():
+    df = _frame()
+    df["group"] = np.arange(len(df)) // 3
+    rep = fg.evaluate_gate(df, _prereg())
+    assert rep["n_groups"] == len(df) // 3

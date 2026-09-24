@@ -312,7 +312,7 @@ def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
     # Customers only: entity 3 (non-customer participant) is not scored.
     assert len(pdf) == 5
     assert pdf["label:stack"].sum() == 2 and pdf["label:dormant_reactivation"].sum() == 2
-    assert "key" not in pdf.columns
+    assert "key" not in pdf.columns and sorted(pdf["group"]) == [1, 2, 4, 5, 6]
 
 
 def test_silver_adapter_maps_participants_to_silver_ids(spark, tmp_path):
