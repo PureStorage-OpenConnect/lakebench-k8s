@@ -16,7 +16,7 @@ review before it is called complete. Not "please review this" -- the
 prompt asks the reviewer to attack the change, find silent-corruption
 defects ranked by blast radius, and give a concrete failure scenario
 for each finding. Cheerleading reviews miss the class of bugs that
-matters. See `dev-artifacts/CONTROL-FAML-C360.md` for the pattern in
+matters. See `dev-artifacts/CONTROL-AML-C360.md` for the pattern in
 practice.
 
 Every change touching >200 LOC, multiple modules, or the profile /
@@ -172,7 +172,7 @@ explicitly asked. If a hook fails, fix the underlying issue.
 - `datagen_rs/tests/` -- Rust regression tests
 - `examples/` -- hardened example configs per recipe
 
-If you are new here, `dev-artifacts/PLAN-FAML-C360-HARDENING.md` and
+If you are new here, `dev-artifacts/PLAN-AML-C360-HARDENING.md` and
 `CLAUDE.md` in the repo root are the fastest way to load context.
 
 ## What NOT to do

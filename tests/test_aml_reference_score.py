@@ -1,11 +1,11 @@
-"""Tests for the FAML leakage gate and reference-detector library.
+"""Tests for the AML leakage gate and reference-detector library.
 
 These are pure-Python; no Spark, no live model training beyond
 scikit-learn's smallest usable case. The point is to lock the
 contract the standing rule requires:
 
 - The gate correctly names a leaking band and correctly clears a
-  non-leaking one, per the FAML audit's 10 % threshold.
+  non-leaking one, per the AML audit's 10 % threshold.
 - Bands with no typology transactions produce ``NO_TYPOLOGY`` and
   do not sway the overall verdict.
 - The reference model REFUSES to train on features known to encode
@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from lakebench.faml.reference_score import (
+from lakebench.aml.reference_score import (
     DEFAULT_LEAKAGE_RATIO,
     LEAKY_FEATURES,
     LeakageVerdict,
@@ -37,7 +37,7 @@ _HAS_SKLEARN = importlib.util.find_spec("sklearn") is not None
 
 class TestLeakageGate:
     def test_leaking_band_flagged(self):
-        """FAML audit's structuring-band example: baseline count is
+        """AML audit's structuring-band example: baseline count is
         very small relative to typology in the USD 9500..9999 band."""
         report = compute_leakage_gate(
             [

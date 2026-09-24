@@ -219,7 +219,7 @@ class TestSparkJobManager:
         """Spark conf must set ``spark.jars.repositories`` to a Central
         mirror so Ivy falls to it when the cluster's egress hits an
         HTTP 429 rate-limit on repo1.maven.org. Live-verified 2026-09-22
-        on faml-baseline-s1 where a fresh Central 429 blocked
+        on aml-baseline-s1 where a fresh Central 429 blocked
         bronze-verify; adding this fallback let the same run finish.
         """
         from lakebench.spark.job import _MAVEN_MIRROR_REPOS
@@ -1782,13 +1782,13 @@ class TestReferenceScoreWiring:
 
     def test_reference_spark_script_uses_bare_import(self):
         """score_financial_reference.py must import the module by its flat name,
-        never `from lakebench.faml...` -- the lakebench package is not on the
+        never `from lakebench.aml...` -- the lakebench package is not on the
         apache/spark driver image."""
         from lakebench._resources import get_scripts_dir
 
         src = (get_scripts_dir() / "score_financial_reference.py").read_text()
-        assert "from lakebench.faml" not in src, (
-            "reference script imports from lakebench.faml, which is absent on the driver"
+        assert "from lakebench.aml" not in src, (
+            "reference script imports from lakebench.aml, which is absent on the driver"
         )
         assert "from reference_score import" in src, (
             "reference script no longer imports the flat-packaged reference_score module"
@@ -1799,7 +1799,7 @@ class TestReferenceScoreWiring:
         no package around it)."""
         from lakebench._resources import _package_dir
 
-        src = (_package_dir() / "faml" / "reference_score.py").read_text()
+        src = (_package_dir() / "aml" / "reference_score.py").read_text()
         assert "from lakebench" not in src and "import lakebench" not in src, (
             "reference_score.py imports lakebench; it cannot ship as a flat driver module"
         )
@@ -1820,7 +1820,7 @@ class TestReferenceScoreWiring:
 
 
 class TestSchemaProfileOverrides:
-    """LB-118: FAML bronze-verify needs a bigger scratch PVC than c360's
+    """LB-118: AML bronze-verify needs a bigger scratch PVC than c360's
     50Gi baseline because the CTAS fallback path rewrites the full pacs.008
     dataset through Iceberg and its per-executor spill overwhelms 50Gi at
     scale >= 5. Live at scale 10 this hit ``No space left on device`` after
@@ -1845,7 +1845,7 @@ class TestSchemaProfileOverrides:
         blob["platform"]["storage"]["scratch"]["storage_class"] = "px-csi-scratch"
         return LakebenchConfig(**blob)
 
-    def test_faml_bronze_verify_gets_500gi_scratch(self):
+    def test_aml_bronze_verify_gets_500gi_scratch(self):
         from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 
         cfg = self._make_config("financial")
@@ -1861,8 +1861,8 @@ class TestSchemaProfileOverrides:
         manifest = mgr._build_manifest(JobType.BRONZE_VERIFY)
         assert self._find_pvc_size_limit(manifest) == "50Gi"
 
-    def test_faml_silver_build_scratch_unchanged(self):
-        """FAML overrides scoped to bronze-verify only; silver-build stays at c360."""
+    def test_aml_silver_build_scratch_unchanged(self):
+        """AML overrides scoped to bronze-verify only; silver-build stays at c360."""
         from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 
         cfg = self._make_config("financial")
@@ -1902,35 +1902,35 @@ class TestSchemaProfileOverrides:
         assert prof["scratch_size"] == "50Gi"
         assert prof["max_executors"] <= 10
 
-    def test_compute_peak_requirements_faml_bumps_bronze_scratch(self):
-        """compute_peak_requirements is the docs source of truth; FAML
+    def test_compute_peak_requirements_aml_bumps_bronze_scratch(self):
+        """compute_peak_requirements is the docs source of truth; AML
         peaks must reflect the bronze-verify override."""
         from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
         c360 = compute_peak_requirements(1, "batch", "customer360")
-        faml = compute_peak_requirements(1, "batch", "financial")
+        aml = compute_peak_requirements(1, "batch", "financial")
         c360_bronze = next(r for r in c360.per_job if r.job_type == "bronze-verify")
-        faml_bronze = next(r for r in faml.per_job if r.job_type == "bronze-verify")
-        assert faml_bronze.scratch_gb == 10 * c360_bronze.scratch_gb  # 500 / 50
+        aml_bronze = next(r for r in aml.per_job if r.job_type == "bronze-verify")
+        assert aml_bronze.scratch_gb == 10 * c360_bronze.scratch_gb  # 500 / 50
 
-    def test_faml_bronze_verify_scales_executors_at_scale_100(self):
+    def test_aml_bronze_verify_scales_executors_at_scale_100(self):
         """LB-118 review finding: at scale 100 the base bronze-verify
-        profile gives 7 executors (~143 GB input/executor for FAML),
-        which projects to CTAS spill above 200 Gi. The FAML override
+        profile gives 7 executors (~143 GB input/executor for AML),
+        which projects to CTAS spill above 200 Gi. The AML override
         bumps ``executors_per_100_scale`` 4 -> 8 and ``max_executors``
         20 -> 28 so per-executor load at scale 100 stays under 100 GB."""
         from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
 
         c360 = compute_peak_requirements(100, "batch", "customer360")
-        faml = compute_peak_requirements(100, "batch", "financial")
+        aml = compute_peak_requirements(100, "batch", "financial")
         c360_bronze = next(r for r in c360.per_job if r.job_type == "bronze-verify")
-        faml_bronze = next(r for r in faml.per_job if r.job_type == "bronze-verify")
-        # FAML must have more executors than c360 at s100+.
-        assert faml_bronze.executors > c360_bronze.executors
+        aml_bronze = next(r for r in aml.per_job if r.job_type == "bronze-verify")
+        # AML must have more executors than c360 at s100+.
+        assert aml_bronze.executors > c360_bronze.executors
         # And scale toward the fabric8 ceiling by scale 500.
-        faml_500 = compute_peak_requirements(500, "batch", "financial")
-        faml_500_bronze = next(r for r in faml_500.per_job if r.job_type == "bronze-verify")
-        assert faml_500_bronze.executors == 28  # matches silver/gold ceiling
+        aml_500 = compute_peak_requirements(500, "batch", "financial")
+        aml_500_bronze = next(r for r in aml_500.per_job if r.job_type == "bronze-verify")
+        assert aml_500_bronze.executors == 28  # matches silver/gold ceiling
 
     def test_compute_peak_requirements_defaults_to_c360(self):
         """Backward compat: no schema arg == c360 baseline."""
@@ -1942,7 +1942,7 @@ class TestSchemaProfileOverrides:
 
     def test_get_job_profile_is_schema_aware(self):
         """LB-135 review Finding 2: the metrics/scorecard path must be able to
-        get schema-resolved profiles, else FAML bronze-verify is reported at the
+        get schema-resolved profiles, else AML bronze-verify is reported at the
         c360 base (6Gi) instead of the deployed 20Gi -- an honest-scorecard bug."""
         from lakebench.modules.pipeline_engines.spark.job import (
             get_executor_count,
@@ -1952,19 +1952,19 @@ class TestSchemaProfileOverrides:
         # No schema == c360 base (backward compat).
         base = get_job_profile("bronze-verify")
         assert base["executor_memory"] == "4g"
-        # Schema-aware == deployed FAML profile.
-        faml = get_job_profile("bronze-verify", "financial")
-        assert faml["executor_memory"] == "8g"
-        assert faml["executor_memory_overhead"] == "12g"
-        # Executor count also schema-aware at scale > 10 (FAML 8-per-100 vs base 4).
+        # Schema-aware == deployed AML profile.
+        aml = get_job_profile("bronze-verify", "financial")
+        assert aml["executor_memory"] == "8g"
+        assert aml["executor_memory_overhead"] == "12g"
+        # Executor count also schema-aware at scale > 10 (AML 8-per-100 vs base 4).
         assert get_executor_count("bronze-verify", 100, "financial") > get_executor_count(
             "bronze-verify", 100
         )
 
-    def test_faml_bronze_verify_has_memory_headroom_over_c360(self):
+    def test_aml_bronze_verify_has_memory_headroom_over_c360(self):
         """LB-135: c360's 4g+2g bronze-verify (a thin add_files register) is too
-        small for FAML's full-corpus CTAS DISTINCT/ORDER BY -- executors
-        OOMKilled on the 6Gi container limit at scale 10. The FAML override must
+        small for AML's full-corpus CTAS DISTINCT/ORDER BY -- executors
+        OOMKilled on the 6Gi container limit at scale 10. The AML override must
         give real per-executor memory headroom, in both modes (OOMKilled is a
         container-limit hit, not node contention)."""
         from lakebench.modules.pipeline_engines.spark.job import (
@@ -1973,14 +1973,14 @@ class TestSchemaProfileOverrides:
         )
 
         base = _JOB_PROFILES["bronze-verify"]
-        faml = _resolve_job_profile("bronze-verify", "financial")
-        assert faml is not None
+        aml = _resolve_job_profile("bronze-verify", "financial")
+        assert aml is not None
         # The OOM is OFF-HEAP (partitioned Iceberg write shuffle + S3A bytebuffer
         # uploads), so the bump goes into OVERHEAD, not heap. Total 20Gi.
-        assert faml["executor_memory"] == "8g"
-        assert faml["executor_memory_overhead"] == "12g"
-        heap = int(faml["executor_memory"].rstrip("g"))
-        overhead = int(faml["executor_memory_overhead"].rstrip("g"))
+        assert aml["executor_memory"] == "8g"
+        assert aml["executor_memory_overhead"] == "12g"
+        heap = int(aml["executor_memory"].rstrip("g"))
+        overhead = int(aml["executor_memory_overhead"].rstrip("g"))
         assert heap + overhead == 20  # total container
         # Overhead must exceed heap -- the pressure is off-heap, not heap. A
         # regression that pours the bump back into heap (the original mistake)
@@ -1991,7 +1991,7 @@ class TestSchemaProfileOverrides:
         assert heap + overhead < int(
             _JOB_PROFILES["silver-build"]["executor_memory"].rstrip("g")
         ) + int(_JOB_PROFILES["silver-build"]["executor_memory_overhead"].rstrip("g"))
-        # c360 bronze-verify must stay register-sized (no FAML cost leak).
+        # c360 bronze-verify must stay register-sized (no AML cost leak).
         c360 = _resolve_job_profile("bronze-verify", "customer360")
         assert c360["executor_memory"] == base["executor_memory"]
         assert c360["executor_memory_overhead"] == base["executor_memory_overhead"]

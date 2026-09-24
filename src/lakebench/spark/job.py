@@ -21,7 +21,7 @@ from lakebench.modules.pipeline_engines.spark.job import (  # noqa: F401
     _scale_partitions,
     _spark_compat,
     _streaming_concurrent_budget,
-    faml_bronze_verify_timeout_budget,
+    aml_bronze_verify_timeout_budget,
     get_executor_count,
     get_job_profile,
     resolve_format_version,

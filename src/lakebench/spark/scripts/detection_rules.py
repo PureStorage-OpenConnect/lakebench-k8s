@@ -89,10 +89,10 @@ MODEL_ID = "lb-rules"
 MODEL_VERSION = "1.0.0"
 
 # Driver-side rule -> planted-typology-target map. This MUST stay in lock-step
-# with RULE_TARGETS in src/lakebench/benchmark/faml_queries.py (the
+# with RULE_TARGETS in src/lakebench/benchmark/aml_queries.py (the
 # orchestrator-side authority); a consistency test asserts they match, because
 # the two live on opposite sides of the package boundary (this module ships to
-# the Spark driver under /opt/spark/scripts; faml_queries does not). It exists
+# the Spark driver under /opt/spark/scripts; aml_queries does not). It exists
 # here so score_financial can attribute a rule SKIP to the typologies that rule
 # was the sole detector for, and mark their recall "not run" instead of 0%
 # (LB-119 review F1). A None target means the rule has no planted typology.
@@ -637,7 +637,7 @@ def w1_connected_components(
         # attribute IDs in Catalyst. Without aliases, ``labels["id"]`` and
         # ``edges_u["src"]`` resolve to ambiguous attributes and Spark raises
         # ``AnalysisException: Column dst#NNN are ambiguous`` (surfaced by
-        # the first live S1 run of the FAML batch pipeline). Aliases give
+        # the first live S1 run of the AML batch pipeline). Aliases give
         # each side its own attribute namespace so column resolution is
         # unambiguous every iteration.
         lbl = labels.alias("lbl")
@@ -836,10 +836,10 @@ def w1_connected_components(
 # ---------------------------------------------------------------------------
 
 
-def _faml_data_candidates() -> list[str]:
-    """Candidate directories for FAML reference JSON files.
+def _aml_data_candidates() -> list[str]:
+    """Candidate directories for AML reference JSON files.
 
-    When ``LB_FAML_DATA_DIR`` is set it is the ONLY candidate --
+    When ``LB_AML_DATA_DIR`` is set it is the ONLY candidate --
     tests and operators use the env var to pin a specific reference
     directory, and falling through to other candidates on a per-file
     miss would silently mix stale + current reference data (a partial
@@ -849,9 +849,9 @@ def _faml_data_candidates() -> list[str]:
 
     Otherwise:
 
-    1. ``lakebench.spark.data.faml`` under an installed lakebench pkg
+    1. ``lakebench.spark.data.aml`` under an installed lakebench pkg
        (dev environment).
-    2. ``faml/`` subdirectory next to this script (cluster fallback
+    2. ``aml/`` subdirectory next to this script (cluster fallback
        when the ConfigMap ships JSONs under a subdir mount).
     3. The directory containing this script itself (cluster fallback
        when the ConfigMap ships JSONs as flat top-level keys, which
@@ -859,7 +859,7 @@ def _faml_data_candidates() -> list[str]:
     """
     import os
 
-    override = os.environ.get("LB_FAML_DATA_DIR")
+    override = os.environ.get("LB_AML_DATA_DIR")
     if override:
         return [override]
 
@@ -867,24 +867,24 @@ def _faml_data_candidates() -> list[str]:
     try:
         pkg = __import__("lakebench.spark.data", fromlist=["_"])
         pkg_dir = os.path.dirname(os.path.abspath(pkg.__file__))
-        candidates.append(os.path.join(pkg_dir, "faml"))
+        candidates.append(os.path.join(pkg_dir, "aml"))
     except ImportError:
         pass
     here = os.path.dirname(os.path.abspath(__file__))
-    candidates.append(os.path.join(here, "faml"))
+    candidates.append(os.path.join(here, "aml"))
     candidates.append(here)
     return candidates
 
 
-def _faml_data_path() -> str:
-    """First existing FAML data directory, or the last candidate as a
+def _aml_data_path() -> str:
+    """First existing AML data directory, or the last candidate as a
     stable string. Kept for tests that patched the singular helper."""
     import os
 
-    for c in _faml_data_candidates():
+    for c in _aml_data_candidates():
         if os.path.isdir(c):
             return c
-    return _faml_data_candidates()[-1]
+    return _aml_data_candidates()[-1]
 
 
 def _load_reference(spark, filename: str, schema_ddl: str) -> DataFrame | None:
@@ -893,12 +893,12 @@ def _load_reference(spark, filename: str, schema_ddl: str) -> DataFrame | None:
     Returns None when the entries list is empty OR the file is not
     present in any candidate directory. The latter is expected inside
     the cluster driver when the scripts ConfigMap has not shipped the
-    FAML sidecar files -- callers already treat None as "reference-list
+    AML sidecar files -- callers already treat None as "reference-list
     rule cannot run here" and return the empty alerts DF, which is the
     correct silent degrade for a benchmark whose W5/W6/W7 signal is
     optional.
 
-    When ``LB_FAML_DATA_DIR`` is set as the exclusive candidate and
+    When ``LB_AML_DATA_DIR`` is set as the exclusive candidate and
     it does NOT contain ``filename``, we emit a stderr note so a
     partial override does not silently degrade to empty (round-2
     finding: an operator setting the env var to a scratch dir with
@@ -915,16 +915,16 @@ def _load_reference(spark, filename: str, schema_ddl: str) -> DataFrame | None:
     import os
 
     path: str | None = None
-    for cand in _faml_data_candidates():
+    for cand in _aml_data_candidates():
         candidate_path = os.path.join(cand, filename)
         if os.path.isfile(candidate_path):
             path = candidate_path
             break
     if path is None:
-        override = os.environ.get("LB_FAML_DATA_DIR")
+        override = os.environ.get("LB_AML_DATA_DIR")
         if override:
             print(
-                f"[faml] LB_FAML_DATA_DIR={override!r} does not contain "
+                f"[aml] LB_AML_DATA_DIR={override!r} does not contain "
                 f"{filename!r}; rule dependent on this reference will "
                 "return empty alerts."
             )

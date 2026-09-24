@@ -52,7 +52,7 @@ dev = [
     "types-PyYAML>=6.0.0",
     "types-boto3>=1.34.0",
     "moto>=5.0.0",  # AWS mocking for tests
-    # The AML reference detector (lakebench.faml.reference_score) and its tests
+    # The AML reference detector (lakebench.aml.reference_score) and its tests
     # need these; they were only installed by accident on dev machines, so CI
     # failed to import the test module.
     "numpy>=1.26",

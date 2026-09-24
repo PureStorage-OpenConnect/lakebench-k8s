@@ -36,10 +36,10 @@ def get_scripts_dir() -> Path:
     return _package_dir() / "spark" / "scripts"
 
 
-def get_faml_data_dir() -> Path | None:
-    """Return path to packaged FAML reference data (JSON sidecars for
+def get_aml_data_dir() -> Path | None:
+    """Return path to packaged AML reference data (JSON sidecars for
     sanctions / PEP / high-risk jurisdictions). None when the tree
     does not ship the data directory (older installs, PyInstaller
     bundles that excluded it, etc.)."""
-    candidate = _package_dir() / "spark" / "data" / "faml"
+    candidate = _package_dir() / "spark" / "data" / "aml"
     return candidate if candidate.exists() else None

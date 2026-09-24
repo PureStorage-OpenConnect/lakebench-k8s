@@ -162,9 +162,9 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 # rather than owning a full parallel profile tree. Fields not listed stay at
 # the base value.
 #
-# Financial (FAML / FinServ-Crime) bronze-verify: c360's bronze_verify does a
+# Financial (AML / FinServ-Crime) bronze-verify: c360's bronze_verify does a
 # thin schema/row-count check and hands off to Iceberg add_files (zero-copy
-# register). FAML's bronze source (pacs.008) routinely exceeds ADD_FILES_MAX
+# register). AML's bronze source (pacs.008) routinely exceeds ADD_FILES_MAX
 # thresholds at scale >= 5, tripping the CTAS fallback in
 # bronze_verify_financial.py -- a full parquet rewrite through an Iceberg
 # write, whose per-executor staging + shuffle spill overwhelms the 50 Gi
@@ -184,7 +184,7 @@ _JOB_PROFILES: dict[str, dict[str, Any]] = {
 # Fields not listed here stay at the c360 base value.
 #
 # Memory: the c360 base (4g heap + 2g overhead = 6Gi) is sized for a thin
-# add_files register. FAML's CTAS fallback runs a partitioned Iceberg write --
+# add_files register. AML's CTAS fallback runs a partitioned Iceberg write --
 # `CREATE TABLE ... PARTITIONED BY (days(intr_bk_sttlm_dt)) AS SELECT * FROM
 # parquet` over the whole pacs.008 corpus (266M rows / ~94 GB at scale 10) --
 # and executors were OOMKilled (ExitCode 137, container cgroup limit) on 6Gi:
@@ -336,7 +336,7 @@ def get_job_profile(job_type: str, schema_type: str | None = None) -> dict[str, 
             schema's ``_SCHEMA_PROFILE_OVERRIDES`` are merged on top of the base
             profile, so the returned memory/scratch/executor fields match what
             the job actually deploys. The metrics/scorecard path MUST pass this
-            or it under-reports FAML resources (e.g. bronze-verify as 6Gi when
+            or it under-reports AML resources (e.g. bronze-verify as 6Gi when
             the pod requests 20Gi -- LB-135 review finding). Omitting it keeps
             the c360 base for backward compatibility.
 
@@ -357,7 +357,7 @@ def get_executor_count(job_type: str, scale: float, schema_type: str | None = No
         scale: Scale factor from config.
         schema_type: Workload schema. When given, schema overrides to
             ``base_executors`` / ``executors_per_100_scale`` / ``max_executors``
-            are applied (FAML bronze-verify scales 8-per-100 to a 28 cap, vs the
+            are applied (AML bronze-verify scales 8-per-100 to a 28 cap, vs the
             c360 base 4-per-100 / 20 cap). The metrics path must pass this so the
             scorecard's executor count matches the deployed job at scale > 10.
 
@@ -374,10 +374,10 @@ def get_executor_count(job_type: str, scale: float, schema_type: str | None = No
     return _scale_executor_count(profile, scale)
 
 
-def faml_bronze_verify_timeout_budget(scale: float) -> int:
-    """Wall-clock kill-switch budget (seconds) for a single FAML bronze-verify.
+def aml_bronze_verify_timeout_budget(scale: float) -> int:
+    """Wall-clock kill-switch budget (seconds) for a single AML bronze-verify.
 
-    FAML bronze-verify is NOT the thin add_files register c360 uses. It trips
+    AML bronze-verify is NOT the thin add_files register c360 uses. It trips
     the CTAS fallback in bronze_verify_financial.py that rewrites the full
     pacs.008 corpus through Iceberg and spills ~2x the input per executor.
     Measured live at 4278s at scale 10 (run-20260923-120258-b71af2, 7
@@ -496,7 +496,7 @@ def compute_peak_requirements(
         mode: Pipeline mode, ``"batch"`` or ``"sustained"``.
         schema_type: Workload schema (``"c360"``, ``"financial"``). Selects
             per-workload profile overrides; ``None`` uses the Customer360
-            baseline. FAML at scale >= 5 needs a larger bronze-verify PVC
+            baseline. AML at scale >= 5 needs a larger bronze-verify PVC
             than c360 (LB-118).
 
     Returns:
@@ -717,7 +717,7 @@ def _spark_interval_to_seconds(interval: str) -> int:
     """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
     ``"1 hour"``) to an integer seconds value. Returns 10 on unparseable
     input rather than raising, since this feeds a env-var value that the
-    FAML sustained scripts use as a trigger period; a bad parse should
+    AML sustained scripts use as a trigger period; a bad parse should
     default to their previous hard-coded fallback rather than blow up
     the manifest build. Kept alongside the mirror constant so the two
     small stringy helpers live together instead of drifting into
@@ -1328,7 +1328,7 @@ class SparkJobManager:
         spark_major = _parse_spark_major(cfg.images.spark)
 
         # Per-job resource profile (proven at 1TB+ scale). Schema-aware:
-        # FAML bronze-verify needs a bigger scratch PVC than c360 to survive
+        # AML bronze-verify needs a bigger scratch PVC than c360 to survive
         # the CTAS fallback path (LB-118).
         _schema = getattr(getattr(cfg.architecture.workload, "schema_type", None), "value", None)
         profile = _resolve_job_profile(job_type.value, _schema) or _resolve_job_profile(
@@ -2232,12 +2232,12 @@ class SparkJobManager:
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
             )
-            # LB-090: FAML sustained scripts read a different set of env
+            # LB-090: AML sustained scripts read a different set of env
             # var names than the schema-agnostic C360 scripts do.
             # Rather than rename either side (both have callers), set
             # BOTH spellings under financial so bronze_ingest_financial,
             # silver_stream_financial, and gold_refresh_financial pick up
-            # the configured values. Without these, the FAML scripts
+            # the configured values. Without these, the AML scripts
             # fall back to hard-coded defaults that write checkpoints
             # to ``s3a://lb-bronze/_checkpoints/...`` -- a bucket that
             # is NOT part of the current deployment on any non-default
@@ -2345,8 +2345,8 @@ class SparkJobManager:
                 logger.info(f"Loaded script: {script_file}")
 
         # reference_score.py is the single source of truth for the leakage
-        # gate + reference-detector logic and lives in the lakebench.faml
-        # package (unit-tested there as lakebench.faml.reference_score). The
+        # gate + reference-detector logic and lives in the lakebench.aml
+        # package (unit-tested there as lakebench.aml.reference_score). The
         # apache/spark image has no lakebench install, so it is packaged flat
         # into the ConfigMap next to the scripts and imported by
         # score_financial_reference.py as a bare `from reference_score import`
@@ -2355,12 +2355,12 @@ class SparkJobManager:
         # flat mount resolves with no lakebench package on the driver.
         from lakebench._resources import _package_dir
 
-        _ref_score_path = _package_dir() / "faml" / "reference_score.py"
+        _ref_score_path = _package_dir() / "aml" / "reference_score.py"
         if _ref_score_path.exists():
             data["reference_score.py"] = _ref_score_path.read_text()
-            logger.info("Loaded script: reference_score.py (from lakebench.faml)")
+            logger.info("Loaded script: reference_score.py (from lakebench.aml)")
 
-        # FAML reference JSON sidecars (sanctions, PEP, high-risk
+        # AML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via
         # ``_load_reference`` in detection_rules.py; without them
         # inside the driver, W5/W6/W7 silently return zero alerts,
@@ -2372,13 +2372,13 @@ class SparkJobManager:
         # the files land flat next to the scripts under
         # /opt/spark/scripts/; the reader's candidate-directory search
         # finds them there.
-        from lakebench._resources import get_faml_data_dir
+        from lakebench._resources import get_aml_data_dir
 
-        faml_data_dir = get_faml_data_dir()
-        if faml_data_dir is not None and faml_data_dir.is_dir():
-            for json_path in sorted(faml_data_dir.glob("*.json")):
+        aml_data_dir = get_aml_data_dir()
+        if aml_data_dir is not None and aml_data_dir.is_dir():
+            for json_path in sorted(aml_data_dir.glob("*.json")):
                 data[json_path.name] = json_path.read_text()
-                logger.info(f"Loaded FAML reference: {json_path.name}")
+                logger.info(f"Loaded AML reference: {json_path.name}")
 
         if not data:
             logger.warning("No Spark scripts found")

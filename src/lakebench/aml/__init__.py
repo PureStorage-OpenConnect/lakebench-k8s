@@ -1,4 +1,4 @@
-"""FAML (Financial-crime / AML) library.
+"""AML (Financial-crime / AML) library.
 
 Pure-Python helpers used by the Spark scoring scripts. Kept out of
 ``spark/scripts/`` because those live inside the Spark image and are
@@ -10,5 +10,5 @@ Current members:
 - :mod:`reference_score` -- leakage-gate computation and reference-
   detector (scikit-learn GBT) training/evaluation. Used by
   ``spark/scripts/score_financial_reference.py`` and directly tested
-  in ``tests/test_faml_reference_score.py``.
+  in ``tests/test_aml_reference_score.py``.
 """

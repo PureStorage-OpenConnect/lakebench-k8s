@@ -462,7 +462,7 @@ class TestMetricsStorage:
         storage = MetricsStorage(tmp_path / "metrics")
         now = datetime.now()
         metrics = PipelineMetrics(
-            run_id="faml-001",
+            run_id="aml-001",
             deployment_name="test",
             start_time=now,
             success=True,
@@ -488,11 +488,11 @@ class TestMetricsStorage:
                 "total_alerts": 17,
                 "fp_alerts": 2,
                 "fp_rate": 0.1176,
-                "run_id": "faml-001",
+                "run_id": "aml-001",
             },
         )
         storage.save_run(metrics)
-        loaded = storage.load_run("faml-001")
+        loaded = storage.load_run("aml-001")
         assert loaded is not None
         # financial_scoring round-trips.
         assert loaded.financial_scoring is not None
@@ -1657,7 +1657,7 @@ class TestDriverLogParsingWithLbPrefix:
 
 
 class TestDetectionRulesMetrics:
-    """LB-116: per-rule FAML alert counts surfaced from the driver log
+    """LB-116: per-rule AML alert counts surfaced from the driver log
     into JobMetrics.alerts_by_rule / rule_errors so a metrics parser
     sees one row per rule attempted, not a single total."""
 

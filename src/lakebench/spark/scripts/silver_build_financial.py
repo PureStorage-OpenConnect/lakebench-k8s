@@ -795,7 +795,7 @@ def main() -> None:
     # Multi-cycle mode contract (LB-121). The orchestrator sets
     # LB_SILVER_INCREMENTAL=true for cycles 2+ of a multi-cycle batch run.
     # Customer 360's silver_build honours that by APPENDING the cycle's
-    # bronze read. FAML must NOT: its bronze is CUMULATIVE across cycles
+    # bronze read. AML must NOT: its bronze is CUMULATIVE across cycles
     # (the datagen writes every cycle to the same pacs008 prefix, and
     # bronze_verify_financial DROPs and re-registers the whole prefix each
     # cycle), so silver_build already reads the full corpus 1..N. Appending
@@ -815,7 +815,7 @@ def main() -> None:
     log(f"Strategy: {STRATEGY}")
     if incremental_flag:
         log(
-            "Multi-cycle: LB_SILVER_INCREMENTAL=true -- FAML does a FULL "
+            "Multi-cycle: LB_SILVER_INCREMENTAL=true -- AML does a FULL "
             "rebuild from cumulative bronze (append would double-count; see "
             "the mode-contract note in main())."
         )

@@ -171,7 +171,7 @@ class TestClusterCapacityCheck:
         _check_cluster_capacity actually passes the workload schema down
         to compute_peak_requirements. A refactor that drops the schema
         arg would leave every unit test green while silently reverting
-        FAML sizing to c360."""
+        AML sizing to c360."""
         cfg = _cfg()
         cfg.architecture.workload.schema_type.value = "financial"
         with (

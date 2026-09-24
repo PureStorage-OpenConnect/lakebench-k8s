@@ -2103,7 +2103,7 @@ class ReportGenerator:
                         <th>Status</th>"""
             detail_cards = ""
 
-        # Per-domain detail (e.g. the FAML detection scorecard). Empty string
+        # Per-domain detail (e.g. the AML detection scorecard). Empty string
         # for domains without extra rows. Rendered after the stage table.
         from lakebench.reports.scorecard import get_scorecard_block
 

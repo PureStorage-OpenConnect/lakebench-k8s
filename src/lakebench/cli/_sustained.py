@@ -987,7 +987,7 @@ def _print_rounds_summary(console, rounds: list) -> None:
 def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     """Poll the bronze bucket for the first ``.parquet`` file to land.
 
-    Called before the FAML bronze-verify preflight so
+    Called before the AML bronze-verify preflight so
     ``spark.read.parquet(prefix)`` does not hit AnalysisException on
     an empty prefix. Returns True when a parquet is visible, False
     on timeout. Best-effort: falls through (returns True) if the S3
@@ -1042,7 +1042,7 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     return False
 
 
-def _faml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
+def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
     """Return the peak gold.alerts row count reported by the continuous gold
     stage, or None if the logs show no detection activity.
 
@@ -1099,7 +1099,7 @@ def _run_sustained(
         JobState,
         JobType,
         SparkJobManager,
-        faml_bronze_verify_timeout_budget,
+        aml_bronze_verify_timeout_budget,
     )
 
     run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
@@ -1217,7 +1217,7 @@ def _run_sustained(
             },
         )
 
-        # LB-091: FAML sustained mode needs the bronze Iceberg table to
+        # LB-091: AML sustained mode needs the bronze Iceberg table to
         # exist before bronze_ingest_financial starts -- the streaming
         # source cannot infer a schema from parquet files, so it hard-
         # exits with `sys.exit(2)` when the table is missing. Only
@@ -1259,12 +1259,12 @@ def _run_sustained(
             # trips the CTAS fallback on it, so the old fixed 1200s cap could
             # never pass at scale >= 10 -- it timed out with the job still
             # legitimately RUNNING. The budget is shared with the batch path via
-            # faml_bronze_verify_timeout_budget so the two cannot diverge for
+            # aml_bronze_verify_timeout_budget so the two cannot diverge for
             # the same job. Using the CLI's sustained ``timeout`` here would be
             # wrong -- that's the streaming window, not a preflight step, and
             # the streaming clock only starts after preflight returns.
             _preflight_scale = cfg.architecture.workload.datagen.get_effective_scale()
-            _preflight_timeout = faml_bronze_verify_timeout_budget(_preflight_scale)
+            _preflight_timeout = aml_bronze_verify_timeout_budget(_preflight_scale)
             preflight_result = monitor.wait_for_completion(
                 "lakebench-bronze-verify",
                 timeout_seconds=_preflight_timeout,
@@ -1574,13 +1574,13 @@ def _run_sustained(
             details={"duration_seconds": run_duration},
         )
 
-        # LB-127 honest continuous runner (closes LB-044 for FAML). A
-        # continuous FAML run whose gold stage produced ZERO alerts is a
+        # LB-127 honest continuous runner (closes LB-044 for AML). A
+        # continuous AML run whose gold stage produced ZERO alerts is a
         # FAILURE, not a PASS: it means detection never fired (empty silver,
         # a data-clock/window miss, or a broken rule), and the whole point of
         # the run -- measuring detection under a sustained trickle -- did not
         # happen. Exit-code-only success let this masquerade as PASS for two
-        # UAT rounds on the C360 side (LB-044); FAML asserts on real output.
+        # UAT rounds on the C360 side (LB-044); AML asserts on real output.
         # Evaluated BEFORE the per-stage record loop so streaming_metrics.success
         # is recorded consistent with the run-level verdict, and it only sets
         # the flag here -- the non-zero exit is raised at the end of the try so
@@ -1592,23 +1592,23 @@ def _run_sustained(
         # run, which is preferred over silently passing an unverifiable run.
         if cfg.architecture.workload.schema_type.value == "financial":
             gold_logs = driver_logs.get("gold-refresh")
-            alert_count = _faml_cumulative_alerts(gold_logs)
+            alert_count = _aml_cumulative_alerts(gold_logs)
             if gold_logs is None:
                 print_error(
-                    "FAML continuous gate: no gold-refresh driver logs captured; "
+                    "AML continuous gate: no gold-refresh driver logs captured; "
                     "cannot confirm detection ran. Marking FAILURE."
                 )
                 pipeline_success = False
             elif alert_count is None:
                 print_error(
-                    "FAML continuous gate: gold-refresh logs show no detection "
+                    "AML continuous gate: gold-refresh logs show no detection "
                     "activity (no '[detection] cumulative gold.alerts rows:' line). "
                     "Detection did not run. Marking FAILURE."
                 )
                 pipeline_success = False
             elif alert_count == 0:
                 print_error(
-                    "FAML continuous gate: detection ran but produced 0 alerts over "
+                    "AML continuous gate: detection ran but produced 0 alerts over "
                     "the whole run. Either silver stayed empty, or every detection "
                     "rule errored. Marking FAILURE (a real continuous run must "
                     "detect something)."
@@ -1616,11 +1616,11 @@ def _run_sustained(
                 pipeline_success = False
             else:
                 print_success(
-                    f"FAML continuous gate: detection produced {alert_count:,} "
+                    f"AML continuous gate: detection produced {alert_count:,} "
                     "alerts over the window."
                 )
 
-        # c360 honest continuous gate (LB-044 for c360; FAML has its own above).
+        # c360 honest continuous gate (LB-044 for c360; AML has its own above).
         # A continuous run whose bronze or silver stream processed zero rows
         # moved no data, whatever the exit codes say.
         if cfg.architecture.workload.schema_type.value != "financial":

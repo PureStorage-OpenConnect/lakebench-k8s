@@ -1,6 +1,6 @@
 """Gold Refresh (Financial, continuous) -- baseline rollup + periodic detection.
 
-Runs the gold stage of the continuous FAML pipeline (bronze_ingest ->
+Runs the gold stage of the continuous AML pipeline (bronze_ingest ->
 silver_stream -> this) on a periodic timer (LB_FINANCIAL_GOLD_REFRESH_S
 seconds). Each tick does two things against the moving silver corpus:
 
@@ -9,7 +9,7 @@ seconds). Each tick does two things against the moving silver corpus:
    alerts into gold.alerts.
 
 Before LB-127 this script refreshed only the baseline dashboard and ran NO
-detection: a continuous FAML run produced zero alerts, nothing to score, and
+detection: a continuous AML run produced zero alerts, nothing to score, and
 (with the LB-044 honest-runner gap) could still report PASS. This is the
 continuous half of the detection spine.
 

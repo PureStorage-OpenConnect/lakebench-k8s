@@ -1,11 +1,11 @@
-"""FAML benchmark query set.
+"""AML benchmark query set.
 
 Ships four SQL templates (detect / precision / recall / pattern_span)
 that are
 instantiated once per W-rule, plus three aggregate queries that run
 as-is. This lands 30 executable queries with 8 source files -- a
 readable version of the design in
-`dev-artifacts/FAML-SCORING-QUERIES.md`.
+`dev-artifacts/AML-SCORING-QUERIES.md`.
 
 Precision, recall, and pattern-span all need to know which planted
 typology TYPE a rule targets. That mapping lives here as the single
@@ -120,12 +120,12 @@ UNMAPPED_TYPOLOGIES: dict[str, str] = {
 }
 
 
-_TEMPLATE_DIR = Path(__file__).resolve().parent / "queries" / "faml" / "trino"
+_TEMPLATE_DIR = Path(__file__).resolve().parent / "queries" / "aml" / "trino"
 
 
 @dataclass(frozen=True)
-class FamlQuery:
-    """One expanded FAML query, ready to execute."""
+class AmlQuery:
+    """One expanded AML query, ready to execute."""
 
     query_id: str  # e.g. "W2_structuring_precision"
     sql: str
@@ -138,8 +138,8 @@ def _read_template(name: str) -> str:
     return path.read_text()
 
 
-def load_faml_queries(catalog: str) -> list[FamlQuery]:
-    """Return the full FAML query set instantiated for `catalog`.
+def load_aml_queries(catalog: str) -> list[AmlQuery]:
+    """Return the full AML query set instantiated for `catalog`.
 
     26 rule queries (8 detect + 6 targeted rules x 3 kinds) + 4 aggregate
     queries = 30 total.
@@ -161,12 +161,12 @@ def load_faml_queries(catalog: str) -> list[FamlQuery]:
     recall_tmpl = _read_template("rule_recall.sql.tmpl")
     pattern_span_tmpl = _read_template("rule_pattern_span.sql.tmpl")
 
-    queries: list[FamlQuery] = []
+    queries: list[AmlQuery] = []
     for rule_id, typology_type in RULE_TARGETS.items():
         # Detect always emits; volume rule is inspectable regardless of
         # whether there's a planted typology.
         queries.append(
-            FamlQuery(
+            AmlQuery(
                 query_id=f"{rule_id}_detect",
                 sql=detect_tmpl.format(catalog=catalog, rule_id=rule_id),
                 rule_id=rule_id,
@@ -184,7 +184,7 @@ def load_faml_queries(catalog: str) -> list[FamlQuery]:
             ("pattern_span", pattern_span_tmpl),
         ):
             queries.append(
-                FamlQuery(
+                AmlQuery(
                     query_id=f"{rule_id}_{kind}",
                     sql=tmpl.format(
                         catalog=catalog,
@@ -206,7 +206,7 @@ def load_faml_queries(catalog: str) -> list[FamlQuery]:
     ):
         sql = _read_template(filename).format(catalog=catalog)
         queries.append(
-            FamlQuery(
+            AmlQuery(
                 query_id=qid,
                 sql=sql,
                 rule_id=None,
@@ -245,10 +245,10 @@ def _self_check() -> None:
     ):
         if not (_TEMPLATE_DIR / name).exists():
             raise ImportError(
-                f"FAML query template missing: {_TEMPLATE_DIR / name}. "
+                f"AML query template missing: {_TEMPLATE_DIR / name}. "
                 "Reinstall the package or check the wheel build."
             )
 
 
-if os.environ.get("LB_FAML_SKIP_SELF_CHECK") != "1":
+if os.environ.get("LB_AML_SKIP_SELF_CHECK") != "1":
     _self_check()

@@ -1,7 +1,7 @@
 {
   "source": "Synthetic sanctions list. Real name-alias structure modelled after OFAC SDN. NOT the real SDN. Real deployments should replace this file with the current SDN download from https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.CSV",
   "license": "Synthetic, no restriction.",
-  "note": "The synthetic entries below are constructed to trigger W5 detection at a documented rate against our synthetic transaction generator. They do NOT represent real sanctioned entities. See dev-artifacts/FAML-PUBLIC-REFERENCE.md for the trade-off between real SDN and synthetic list.",
+  "note": "The synthetic entries below are constructed to trigger W5 detection at a documented rate against our synthetic transaction generator. They do NOT represent real sanctioned entities. See dev-artifacts/AML-PUBLIC-REFERENCE.md for the trade-off between real SDN and synthetic list.",
   "entries": [
     {"sdn_id": "SDN-000001", "entity_name": "GLOBAL COMMODITY TRADING LLC", "entity_type": "corp", "program": "SDGT"},
     {"sdn_id": "SDN-000002", "entity_name": "PACIFIC HOLDINGS INTERNATIONAL", "entity_type": "corp", "program": "SDGT"},
