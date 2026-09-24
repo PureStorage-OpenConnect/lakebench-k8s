@@ -9,7 +9,11 @@ use crate::kyc::entity_bic_idx;
 use crate::realism as R;
 use crate::world as W;
 
-pub const MODEL_VERSION: &str = "datagen-v2-rs-0.1";
+/// Stamped on every party, account and manifest row. 0.2 is the first
+/// version with the monitored population and KYC (party.is_customer etc.):
+/// silver_build_financial refuses to write NULL KYC for a 0.2+ corpus whose
+/// party/account files are missing. Bump on any change readers must detect.
+pub const MODEL_VERSION: &str = "datagen-v2-rs-0.2";
 
 pub struct World {
     pub seed: i64,
