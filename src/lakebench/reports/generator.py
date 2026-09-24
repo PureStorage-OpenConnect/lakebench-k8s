@@ -143,6 +143,12 @@ class ReportGenerator:
                     f"({freshness_pct:.0%} of run duration -- gold was stale for most of the run)"
                 )
 
+        if is_sustained and pb and pb.corpus_drained:
+            warnings.append(
+                "Corpus fully ingested before the window ended: freshness covers only gold "
+                "cycles that saw new data, and rows/s is a lower bound set by corpus size (LB-145)"
+            )
+
         # Job / streaming success
         if is_sustained and metrics.streaming:
             failed = [s.job_name for s in metrics.streaming if not s.success]

@@ -184,7 +184,12 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
     freshness = getattr(pb, "data_freshness_seconds", None)
     if freshness is not None:
         numbers["data_freshness_seconds"] = float(freshness)
+    # A drained corpus (LB-145) caps rows/s at corpus size / window, so it is
+    # not a throughput and is left out of the comparison.
+    drained = getattr(pb, "corpus_drained", None) is True
     for attr in ("sustained_throughput_rps", "ingest_ratio"):
+        if drained and attr == "sustained_throughput_rps":
+            continue
         value = getattr(pb, attr, None)
         if value is not None and value > 0:
             numbers[attr] = float(value)

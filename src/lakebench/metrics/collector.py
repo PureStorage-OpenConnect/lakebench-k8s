@@ -77,6 +77,16 @@ class StreamingJobMetrics:
     job_type: str  # bronze-ingest, silver-stream, gold-refresh
     throughput_rps: float = 0.0
     freshness_seconds: float = 0.0
+    # LB-145. Gold cycles tagged "(silver idle)" saw no new silver data. Only
+    # the TRAILING run of idle cycles (after the last cycle that saw data) can
+    # be a drained corpus; an idle stretch followed by new data is a stall and
+    # stays in freshness_active_seconds. None when no cycle is outside the
+    # trailing run.
+    freshness_active_seconds: float | None = None
+    trailing_idle_cycles: int = 0
+    # Silver only: rows of micro-batches that logged a commit. None when no
+    # commit line was seen (unknown, so a run cannot count as drained).
+    committed_rows: int | None = None
     micro_batch_duration_ms: float = 0.0
     batch_size: int = 0
     total_batches: int = 0
@@ -368,6 +378,9 @@ class StageMetrics:
     # Streaming-specific (None = unmeasurable, 0.0 = measured-and-zero)
     latency_ms: float | None = None
     freshness_seconds: float | None = None
+    freshness_active_seconds: float | None = None  # all but the trailing idle run (LB-145)
+    trailing_idle_cycles: int = 0  # gold cycles after silver last moved
+    committed_rows: int | None = None  # silver: rows in committed micro-batches
     total_batches: int = 0
     batch_size: int = 0
     unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
@@ -508,6 +521,7 @@ class PipelineBenchmark:
         "ingest_ratio": "Bronze rows ingested / datagen rows produced (1.0 = all data consumed)",
         "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
         "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input",
+        "corpus_drained": "True when the finite corpus was fully ingested before the window ended: freshness covers only cycles that saw new data, and sustained_throughput_rps is a lower bound",
         "total_rows_processed": "Cumulative rows processed across all streaming stages",
         "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
         "query_time_freshness_seconds": "Diagnostic. Median gold staleness measured at benchmark query time (lower is better). Gap between this and data_freshness_seconds indicates freshness variability.",
@@ -566,6 +580,12 @@ class PipelineBenchmark:
     # unmeasurable case must be explicit.
     ingest_ratio: float | None = None
     pipeline_saturated: bool | None = None
+    # True when the finite corpus was fully ingested and silver had caught up
+    # before the window ended, so later gold cycles had nothing new to read.
+    # Freshness then covers only the cycles that saw data, and
+    # sustained_throughput_rps is corpus rows / window, a lower bound on what
+    # the pipeline could sustain (LB-145). None when ingest_ratio is unknown.
+    corpus_drained: bool | None = None
 
     # Trino detail (preserved for drill-down)
     query_benchmark: BenchmarkMetrics | None = None
@@ -690,17 +710,6 @@ class PipelineBenchmark:
         # Total data processed (shared with batch -- needed for GB/s and report)
         self.total_data_processed_gb = sum(s.input_size_gb for s in self.stages)
 
-        # Worst-case freshness (max = most stale stage).
-        # None means unmeasurable (< 2 gold cycles or parse failed).
-        freshness_vals = [
-            s.freshness_seconds
-            for s in streaming
-            if s.freshness_seconds is not None and s.freshness_seconds > 0
-        ]
-        if freshness_vals:
-            self.data_freshness_seconds = max(freshness_vals)
-        # else: stays None (unmeasurable)
-
         # Sustained throughput: unique rows entering bronze / run duration
         bronze_stages = [s for s in streaming if s.stage_name == "bronze"]
         total_bronze_rows = sum(s.input_rows for s in bronze_stages)
@@ -734,6 +743,40 @@ class PipelineBenchmark:
         else:
             self.ingest_ratio = None
             self.pipeline_saturated = None
+
+        # Drained: every datagen row reached bronze and silver COMMITTED all
+        # of it, so the trailing idle gold cycles measured an empty feed, not a
+        # slow pipeline (LB-145). A stall (rows missing, silver behind or its
+        # last commit unlogged) is not drained and keeps its full staleness.
+        silver = [s for s in streaming if s.stage_name == "silver"]
+        silver_committed = (
+            sum(s.committed_rows for s in silver)
+            if silver and all(s.committed_rows is not None for s in silver)
+            else None
+        )
+        if self.ingest_ratio is None:
+            self.corpus_drained = None
+        else:
+            # Exact counts, no slack: a bronze stall that leaves even a few
+            # files unread is a stall. Two trailing idle cycles, so a healthy
+            # run whose window ends between two silver batches is not drained.
+            self.corpus_drained = (
+                total_bronze_rows >= datagen_rows
+                and silver_committed is not None
+                and silver_committed >= total_bronze_rows
+                and any(s.trailing_idle_cycles >= 2 for s in streaming)
+            )
+
+        # Worst-case freshness (max = most stale stage). None means
+        # unmeasurable (< 2 gold cycles, parse failed, or a drained run whose
+        # every cycle was idle).
+        freshness_vals = []
+        for st in streaming:
+            val = st.freshness_active_seconds if self.corpus_drained else st.freshness_seconds
+            if val is not None and val > 0:
+                freshness_vals.append(val)
+        if freshness_vals:
+            self.data_freshness_seconds = max(freshness_vals)
 
         # Override total_elapsed_seconds for sustained mode.
         # Streaming stages run concurrently -- use wall-clock, not sum.
@@ -822,6 +865,7 @@ class PipelineBenchmark:
                 "stage_latency_profile": slp,
                 "composite_qph": composite_qph,
                 "pipeline_saturated": self.pipeline_saturated,
+                "corpus_drained": self.corpus_drained,
                 "total_rows_processed": self.total_rows_processed,
                 "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
                 "total_s3_objects": self.total_s3_objects,
@@ -946,6 +990,7 @@ class PipelineBenchmark:
                 round(self.ingest_ratio, 4) if self.ingest_ratio is not None else None
             )
             d["pipeline_saturated"] = self.pipeline_saturated
+            d["corpus_drained"] = self.corpus_drained
         if self.query_benchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
         if self.benchmark_rounds:
@@ -1200,6 +1245,9 @@ def build_pipeline_benchmark(
             throughput_rows_per_second=sj.throughput_rps,
             latency_ms=sj.micro_batch_duration_ms or None,
             freshness_seconds=sj.freshness_seconds or None,
+            freshness_active_seconds=sj.freshness_active_seconds,
+            trailing_idle_cycles=sj.trailing_idle_cycles,
+            committed_rows=sj.committed_rows,
             total_batches=sj.total_batches,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
@@ -1766,6 +1814,11 @@ class MetricsCollector:
         batch_ids: set[int] = set()
         batch_durations: list[float] = []
         freshness_values: list[float] = []
+        # (value, idle) per gold cycle, in log order (LB-145).
+        freshness_cycles: list[tuple[float, bool]] = []
+        # Silver: rows per batch id, and the batch ids that logged a commit.
+        batch_rows: dict[int, int] = {}
+        committed_batches: set[int] = set()
 
         for line in logs.split("\n"):
             # Bronze: "Batch N: writing X rows to ..."
@@ -1780,6 +1833,7 @@ class MetricsCollector:
             if m:
                 batch_ids.add(int(m.group(1)))
                 total_rows += int(m.group(2).replace(",", ""))
+                batch_rows[int(m.group(1))] = int(m.group(2).replace(",", ""))
                 continue
 
             # Silver: "Batch N: empty, skipping" (no data in micro-batch).
@@ -1821,12 +1875,15 @@ class MetricsCollector:
             m = re.search(r"Batch (\d+): committed to .+ in (\d+\.?\d*)s", line)
             if m:
                 batch_durations.append(float(m.group(2)))
+                committed_batches.add(int(m.group(1)))
                 continue
 
-            # Gold: "Cycle N: data freshness Xs"
-            m = re.search(r"Cycle \d+: data freshness ([\d.]+)s", line)
+            # Gold: "Cycle N: data freshness Xs", optionally tagged
+            # " (silver idle)" when silver had not moved since the last cycle.
+            m = re.search(r"Cycle \d+: data freshness ([\d.]+)s( \(silver idle\))?", line)
             if m:
                 freshness_values.append(float(m.group(1)))
+                freshness_cycles.append((float(m.group(1)), bool(m.group(2))))
                 continue
 
         metrics.total_batches = len(batch_ids)
@@ -1837,6 +1894,15 @@ class MetricsCollector:
 
         if freshness_values:
             metrics.freshness_seconds = max(freshness_values)
+        # Split off the trailing idle run: cycles after silver last moved.
+        cut = len(freshness_cycles)
+        while cut > 0 and freshness_cycles[cut - 1][1]:
+            cut -= 1
+        metrics.trailing_idle_cycles = len(freshness_cycles) - cut
+        if cut > 0:
+            metrics.freshness_active_seconds = max(v for v, _ in freshness_cycles[:cut])
+        if job_type == "silver-stream" and committed_batches:
+            metrics.committed_rows = sum(batch_rows.get(b, 0) for b in committed_batches)
 
         if metrics.total_batches > 0:
             metrics.batch_size = total_rows // metrics.total_batches

@@ -469,6 +469,9 @@ class MetricsStorage:
                     executor_memory_gb=s_data.get("executor_memory_gb", 0.0),
                     latency_ms=s_data.get("latency_ms"),
                     freshness_seconds=s_data.get("freshness_seconds"),
+                    freshness_active_seconds=s_data.get("freshness_active_seconds"),
+                    trailing_idle_cycles=s_data.get("trailing_idle_cycles", 0),
+                    committed_rows=s_data.get("committed_rows"),
                     total_batches=s_data.get("total_batches", 0),
                     batch_size=s_data.get("batch_size", 0),
                     unique_rows_processed=s_data.get("unique_rows_processed"),
@@ -531,6 +534,7 @@ class MetricsStorage:
                     "ingest_ratio", scores.get("ingestion_completeness_ratio", 0.0)
                 ),
                 pipeline_saturated=scores.get("pipeline_saturated", False),
+                corpus_drained=scores.get("corpus_drained"),
                 total_s3_objects=scores.get("total_s3_objects", 0),
                 query_benchmark=query_benchmark,
                 config_snapshot=pb_data.get("config_snapshot", {}),
