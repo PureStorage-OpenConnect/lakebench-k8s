@@ -29,7 +29,7 @@ ingestion. It is more expensive per tick (bounded by the batch detection
 cost), which is the honest cost of keeping gold fresh under a growing corpus.
 
 Rule set in continuous mode:
-- RUN: W2/W3/W4/W9 -- they need only silver.transactions, which silver_stream
+- RUN: W2/W3/W4/W17 -- they need only silver.transactions, which silver_stream
   maintains.
 - SKIPPED (recorded as status='skipped' so score renders "not run", not a
   false 0%): W1 (per-tick connected-components recompute is too costly; the
@@ -87,7 +87,7 @@ CONTINUOUS_RULES = (
     "W2_structuring",
     "W3_round_tripping",
     "W4_risk_propagation",
-    "W9_layering_chain",
+    "W17_layering_chain",
 )
 # Rules deliberately not run in continuous mode, recorded as 'skipped' so
 # their typologies render "not run" rather than a false 0% recall.
