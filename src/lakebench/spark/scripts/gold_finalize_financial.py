@@ -26,7 +26,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from common import env, log
+from common import env, log, one_line
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     array,
@@ -444,7 +444,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             elapsed = time.time() - rule_start
             log(
                 f"[detection] {rule_id}: skipped={skip.reason} "
-                f"detail={skip.detail} elapsed={elapsed:.1f}s"
+                f"detail={one_line(skip.detail)} elapsed={elapsed:.1f}s"
             )
             status_rows.append((rule_id, "skipped", skip.reason, target_typology, None))
         except Exception as e:  # noqa: BLE001 -- one rule cannot fail the pipeline
@@ -457,7 +457,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # is now missing this rule's prior rows -- the operator
             # sees this as a delta from prior_count on the next
             # successful run.
-            err = f"{type(e).__name__}: {e}"[:200]
+            err = one_line(f"{type(e).__name__}: {e}")
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
             status_rows.append((rule_id, "error", err, target_typology, None))
     log(f"[detection] total alerts written: {total_alerts}")
