@@ -1,6 +1,10 @@
 -- Q_top_entities: top 100 entities by aggregate alert score (30d
 -- window). Also reports rule diversity so an entity that trips many
 -- different rules surfaces above one that trips one rule many times.
+-- The 30-day window is anchored on the corpus's own data clock (the latest
+-- alert), not the wall clock: the synthetic corpus ends before today, so a
+-- CURRENT_TIMESTAMP window scanned nothing and the query timed as trivially
+-- fast, inflating QpH.
 WITH entity_scores AS (
   SELECT
     entity_id,
@@ -8,7 +12,8 @@ WITH entity_scores AS (
     COUNT(*) AS alert_count,
     COUNT(DISTINCT rule_id) AS distinct_rules
   FROM {catalog}.gold.alerts
-  WHERE alert_ts BETWEEN CURRENT_TIMESTAMP - INTERVAL '30' DAY AND CURRENT_TIMESTAMP
+  WHERE alert_ts BETWEEN (SELECT MAX(alert_ts) FROM {catalog}.gold.alerts) - INTERVAL '30' DAY
+                   AND (SELECT MAX(alert_ts) FROM {catalog}.gold.alerts)
   GROUP BY entity_id
 )
 SELECT
