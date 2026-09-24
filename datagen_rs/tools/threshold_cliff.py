@@ -1,0 +1,276 @@
+"""Threshold-cliff check for a generated financial corpus (AML-GOALS R2, LB-138).
+
+R2: the datagen is never tuned to a rule. The behavioural test is that no
+generated distribution shows a density cliff at a rule threshold. For every
+threshold t this compares the row count in [t(1-w), t) with the count in
+[t, t(1+w)], and the counts in the two 2% bins either side of t.
+
+    python3.11 datagen_rs/tools/threshold_cliff.py <dir containing bronze/pacs008 and manifest/>
+
+Exit status 1 when any threshold FAILs. Needs duckdb.
+
+Thresholds are read from the rule source, never copied (ast.literal_eval of
+the constants and of the rule functions' keyword defaults), so the check
+cannot drift from the rules:
+
+- W8 amount (``w8_dormant_reactivation(amount_threshold_usd=...)``) on the
+  USD amount, over all rows, all planted rows, and dormancy burst rows;
+- W8 gap (``dormant_days``) on per-originator inter-send gaps, over all
+  gaps and the gap that ends in a dormancy burst;
+- W2 band edges per currency (``_STRUCTURING_THRESHOLDS``: the threshold t
+  and the band floor 0.9 t that ``_suspicious_amount_expr`` uses) on the
+  native amount;
+- any USD amount threshold in the W7 rule (keyword default or a literal
+  ``>= N`` in its body), and W6's ``>= N`` USD literal.
+
+USD amounts use ``silver_build_financial._FX_TO_USD``, the reference rates
+silver applies. w (window_rel) and the window ratio limit
+(max_density_ratio) come from the pre-registration JSON (threshold_cliff).
+
+Exemption (R2): a declared definitional typology is exempt on its defining
+attribute only. micro_structuring's defining attribute is the structuring
+band, so its rows are left out of the W2 band checks and nowhere else.
+
+The statistic and its limits, declared before any run:
+
+1. Window ratio r = n[t, t(1+w)] / n[t(1-w), t). FAIL when max(r, 1/r)
+   exceeds max_density_ratio (2.0) and the excess is significant.
+2. Adjacent-bin ratio a = n[t, 1.02 t) / n[0.98 t, t). FAIL when max(a, 1/a)
+   exceeds ADJACENT_MAX (1.5) and the excess is significant.
+
+Why these limits: the baseline amount is log-normal (sigma 1.4 in log USD).
+Its log density has slope -(1 + (ln x - mu) / sigma^2) in ln x, so within
+3 sigma of the median |slope| <= 3.1. The two window centres are 0.10 apart
+in ln x and the two adjacent bins 0.02 apart, so a smooth log-normal gives
+at most exp(0.31) = 1.37 and exp(0.062) = 1.06. The limits 2.0 and 1.5 sit
+well above that and well below what a floor or a band edge gives (a floor
+at t makes the lower count near zero, an unbounded ratio). Gaps are not
+log-normal, and they are not smooth either: the day-of-week calendar gives
+per-account gaps a weekly ripple of about 1.3x, and 13 weeks (91 days) sits
+next to W8's 90. The same limits apply, so a gap FAIL must be read against
+the day histogram (printed below the table) before it is called rule
+tuning.
+
+Rows exactly equal to t are left out of both windows and reported as the
+atom at t. The generator snaps 15% of amounts to round numbers (people pay
+round sums), and every threshold here is a round number, so an atom at t is
+the same point mass every round value carries, not a density cliff. It is
+printed so a reader can see it; it does not gate.
+
+"Significant" means |ln ratio| exceeds 3 standard errors, with the Poisson
+approximation se = sqrt(1/n1 + 1/n2); a large but noisy ratio is
+INSUFFICIENT, as is any window with fewer than MIN_COUNT rows on a side.
+INSUFFICIENT is not a pass: it says the corpus is too small to test that
+threshold, so run at a larger scale for a claim.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+RULES = ROOT / "src/lakebench/spark/scripts/detection_rules.py"
+SILVER = ROOT / "src/lakebench/spark/scripts/silver_build_financial.py"
+PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
+
+ADJACENT_BIN = 0.02
+ADJACENT_MAX = 1.5
+MIN_COUNT = 30
+Z_SIGNIFICANT = 3.0
+EXEMPT_W2 = ("micro_structuring",)
+
+
+def _module_constant(tree: ast.Module, name: str):
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        for tgt in targets:
+            if isinstance(tgt, ast.Name) and tgt.id == name:
+                return ast.literal_eval(node.value)
+    raise KeyError(name)
+
+
+def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise KeyError(name)
+
+
+def _defaults(fn: ast.FunctionDef) -> dict:
+    """Keyword defaults of a function, literal values only."""
+    args = fn.args.args[len(fn.args.args) - len(fn.args.defaults) :]
+    out = {}
+    for a, d in zip(args, fn.args.defaults, strict=True):
+        try:
+            out[a.arg] = ast.literal_eval(d)
+        except ValueError:
+            pass
+    for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults, strict=True):
+        if d is not None:
+            try:
+                out[a.arg] = ast.literal_eval(d)
+            except ValueError:
+                pass
+    return out
+
+
+def _ge_literals(fn: ast.FunctionDef) -> list[float]:
+    """Numbers N in ``>= N`` inside string literals of a function body (the
+    rules build some filters as SQL strings)."""
+    found = []
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            found += [float(x) for x in re.findall(r">=\s*([0-9][0-9_]*(?:\.[0-9]+)?)", node.value)]
+    return found
+
+
+def load_thresholds(rules_src: str, silver_src: str, prereg: dict) -> dict:
+    """Every rule threshold the check covers, read from the sources."""
+    rules = ast.parse(rules_src)
+    w8 = _defaults(_function(rules, "w8_dormant_reactivation"))
+    w7_fn = _function(rules, "w7_cross_border_high_risk")
+    w7 = [
+        float(v)
+        for k, v in _defaults(w7_fn).items()
+        if isinstance(v, (int, float)) and ("amount" in k or "threshold" in k)
+    ] + _ge_literals(w7_fn)
+    w6 = _ge_literals(_function(rules, "w6_pep_counterparty"))
+    cliff = prereg["threshold_cliff"]
+    return {
+        "w8_amount_usd": float(w8["amount_threshold_usd"]),
+        "w8_gap_days": float(w8["dormant_days"]),
+        "w2": {k: float(v) for k, v in _module_constant(rules, "_STRUCTURING_THRESHOLDS").items()},
+        "w7_amount_usd": sorted(set(w7)),
+        "w6_amount_usd": sorted(set(w6)),
+        "fx": _module_constant(ast.parse(silver_src), "_FX_TO_USD"),
+        "window_rel": float(cliff["window_rel"]),
+        "max_ratio": float(cliff["max_density_ratio"]),
+    }
+
+
+def _ratio_verdict(n_lo: int, n_hi: int, limit: float) -> tuple[str, float]:
+    if min(n_lo, n_hi) < MIN_COUNT:
+        if max(n_lo, n_hi) >= MIN_COUNT and min(n_lo, n_hi) == 0:
+            return "FAIL", math.inf
+        return "INSUFFICIENT", float("nan")
+    r = n_hi / n_lo
+    lr = abs(math.log(r))
+    if lr <= math.log(limit):
+        return "PASS", r
+    se = math.sqrt(1 / n_lo + 1 / n_hi)
+    return ("FAIL" if lr / se > Z_SIGNIFICANT else "INSUFFICIENT"), r
+
+
+def cliff(count, t: float, w: float, max_ratio: float) -> dict:
+    """Verdict for one threshold. ``count(lo, hi)`` returns rows in [lo, hi);
+    ``count(t, t, exact=True)`` returns rows equal to t.
+
+    The upper window is closed at t(1+w) in the goal's wording; the half-open
+    form differs by the rows exactly on that edge, which is immaterial.
+    """
+    atom = count(t, t, exact=True)
+    n_lo, n_hi = count(t * (1 - w), t), count(t, t * (1 + w)) - atom
+    b_lo, b_hi = count(t * (1 - ADJACENT_BIN), t), count(t, t * (1 + ADJACENT_BIN)) - atom
+    v1, r1 = _ratio_verdict(n_lo, n_hi, max_ratio)
+    v2, r2 = _ratio_verdict(b_lo, b_hi, ADJACENT_MAX)
+    order = {"FAIL": 2, "INSUFFICIENT": 1, "PASS": 0}
+    verdict = max((v1, v2), key=order.get)
+    return {
+        "verdict": verdict,
+        "atom": atom,
+        "window": (n_lo, n_hi, r1, v1),
+        "adjacent": (b_lo, b_hi, r2, v2),
+    }
+
+
+def main(root: str) -> int:
+    import duckdb
+
+    base = Path(root)
+    pacs = next(base.rglob("bronze/pacs008"))
+    manifest = next(base.rglob("manifest/manifest.parquet"))
+    th = load_thresholds(RULES.read_text(), SILVER.read_text(), json.loads(PREREG.read_text()))
+    fx_case = " ".join(f"WHEN '{k}' THEN {v}" for k, v in th["fx"].items())
+    c = duckdb.connect()
+    c.sql(f"""
+        CREATE TABLE planted AS
+          SELECT typology_type, u.uetr, u.pos
+          FROM '{manifest}', UNNEST(participant_uetrs) WITH ORDINALITY AS u(uetr, pos);
+        CREATE TABLE r AS
+          SELECT b.uetr, b.dbtr_acct.iban AS orig, b.cre_dt_tm AS ts,
+                 b.intr_bk_sttlm_ccy AS ccy,
+                 CAST(b.intr_bk_sttlm_amt AS DOUBLE) AS amt,
+                 CAST(b.intr_bk_sttlm_amt AS DOUBLE)
+                   * CASE b.intr_bk_sttlm_ccy {fx_case} ELSE 1.0 END AS usd,
+                 p.typology_type AS typ, p.pos
+          FROM '{pacs}/*.parquet' b LEFT JOIN planted p USING (uetr);
+        CREATE TABLE g AS
+          SELECT typ, pos,
+                 date_diff('second', LAG(ts) OVER (PARTITION BY orig ORDER BY ts, uetr), ts)
+                   / 86400.0 AS gap_days
+          FROM r;
+    """)
+    w, rmax = th["window_rel"], th["max_ratio"]
+    results: list[tuple[str, str, dict]] = []
+
+    def run(label: str, pop: str, table: str, col: str, where: str, t: float) -> None:
+        def count(lo: float, hi: float, exact: bool = False) -> int:
+            rng = f"{col} = {lo!r}" if exact else f"{col} >= {lo!r} AND {col} < {hi!r}"
+            (n,) = c.sql(f"SELECT COUNT(*) FROM {table} WHERE ({where}) AND {rng}").fetchone()
+            return int(n)
+
+        results.append((label, pop, cliff(count, t, w, rmax)))
+
+    t8 = th["w8_amount_usd"]
+    # Dormancy burst rows are every row after the out-of-window anchor (pos 1).
+    burst = "typ = 'dormant_reactivation' AND pos > 1"
+    for pop, where in (("all rows", "TRUE"), ("planted", "typ IS NOT NULL"), ("bursts", burst)):
+        run(f"W8 amount ${t8:,.0f}", pop, "r", "usd", where, t8)
+    tg = th["w8_gap_days"]
+    run(f"W8 gap {tg:g} d", "all gaps", "g", "gap_days", "gap_days IS NOT NULL", tg)
+    # The gap that ends in a dormancy burst's first row is the dormancy length.
+    run(f"W8 gap {tg:g} d", "dormancy", "g", "gap_days", f"{burst} AND pos = 2", tg)
+    exempt = ", ".join(f"'{x}'" for x in EXEMPT_W2)
+    for ccy, t in th["w2"].items():
+        where = f"ccy = '{ccy}' AND (typ IS NULL OR typ NOT IN ({exempt}))"
+        run(f"W2 {ccy} threshold {t:,.0f}", "all rows", "r", "amt", where, t)
+        run(f"W2 {ccy} band floor {0.9 * t:,.0f}", "all rows", "r", "amt", where, 0.9 * t)
+    for label, key in (("W7", "w7_amount_usd"), ("W6", "w6_amount_usd")):
+        if not th[key]:
+            print(f"{label}: no USD amount threshold in detection_rules.py; nothing to check")
+        for t in th[key]:
+            run(f"{label} amount ${t:,.0f}", "all rows", "r", "usd", "TRUE", t)
+
+    print(
+        f"window +/-{w:.0%} limit {rmax:g}; adjacent {ADJACENT_BIN:.0%} bins limit {ADJACENT_MAX:g}"
+    )
+    print(
+        f"{'threshold':32s} {'population':10s} {'window lo/hi ratio':>26s} {'adjacent lo/hi ratio':>24s} {'atom':>6s}  verdict"
+    )
+    fails = 0
+    for label, pop, res in results:
+        wl, wh, wr, _ = res["window"]
+        al, ah, ar, _ = res["adjacent"]
+        print(
+            f"{label:32s} {pop:10s} {wl:>9}/{wh:<9} {wr:6.2f} {al:>8}/{ah:<8} {ar:6.2f} {res['atom']:>6}  {res['verdict']}"
+        )
+        fails += res["verdict"] == "FAIL"
+    lo, hi = int(tg * (1 - w)), int(math.ceil(tg * (1 + w)))
+    hist = c.sql(f"""
+        SELECT floor(gap_days)::INT AS d, COUNT(*) FROM g
+        WHERE gap_days >= {lo} AND gap_days < {hi} GROUP BY 1 ORDER BY 1
+    """).fetchall()
+    print(f"\nper-originator gaps by day, {lo}-{hi - 1}: " + " ".join(f"{d}:{n}" for d, n in hist))
+    print(f"\n{'FAIL' if fails else 'PASS'}: {fails} thresholds with a cliff")
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1]))
