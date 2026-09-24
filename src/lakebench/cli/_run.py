@@ -1092,7 +1092,7 @@ def run(
         )
 
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
-        monitor = SparkJobMonitor(cfg, k8s)
+        monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
         # Deploy scripts ConfigMap -- must succeed or pipeline jobs will fail
         print_info("Deploying Spark scripts...")

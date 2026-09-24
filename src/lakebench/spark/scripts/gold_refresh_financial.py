@@ -74,6 +74,7 @@ from pyspark.sql.functions import col
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
+BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 REFRESH_S = int(env("LB_FINANCIAL_GOLD_REFRESH_S", "60"))
@@ -174,6 +175,7 @@ def main() -> None:
             # Captured BEFORE the read, so the data this tick sees is at least
             # this fresh and the reported freshness is an upper bound.
             newest_ingest_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{SILVER_TXNS}")
+            newest_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
             silver_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_TXNS}")
             if silver_rows == 0:
                 log(f"Cycle {cycle}: Silver table is empty, skipping")
@@ -212,12 +214,20 @@ def main() -> None:
             log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")
             # Collector line formats (LB-136). Freshness: how long ago the
             # newest row this tick's detection saw entered bronze, i.e. how
-            # stale the alerts are against the input. A silver backlog shows
-            # up because the newest silver row was ingested long ago. Ticks
-            # that saw no new data are not reported, so idle time after the
-            # finite corpus drains does not read as staleness.
+            # stale the alerts are against the input. Reported when silver
+            # moved on, and also whenever bronze holds rows silver has not
+            # seen: a stalled silver-stream then shows staleness growing tick
+            # by tick instead of going quiet and leaving the last good value
+            # as the score. Ticks with nothing new anywhere (the finite corpus
+            # has drained) are not reported. A stall before bronze is caught
+            # by the ingest-ratio and zero-row gates, not here.
             log(f"Cycle {cycle}: refreshed {GOLD_ALERTS} in {elapsed:.1f}s")
-            if newest_ingest_s is not None and newest_ingest_s > last_ingest_s:
+            backlog = (
+                newest_bronze_s is not None
+                and newest_ingest_s is not None
+                and newest_bronze_s > newest_ingest_s
+            )
+            if newest_ingest_s is not None and (newest_ingest_s > last_ingest_s or backlog):
                 log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
                 last_ingest_s = newest_ingest_s
             consecutive_failures = 0

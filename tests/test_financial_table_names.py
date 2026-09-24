@@ -27,13 +27,21 @@ def _fin(**tables):
 def test_financial_defaults_point_at_the_financial_tables():
     t = _fin().architecture.tables
     assert t.silver == "silver.transactions"
-    assert t.gold == "gold.alerts"
+    assert t.gold == "gold.daily_dashboards"  # matches the shipped financial examples
+    assert "silver" not in t.model_fields_set
 
 
 def test_c360_defaults_unchanged():
     t = make_config().architecture.tables
     assert t.silver == "silver.customer_interactions_enriched"
     assert t.gold == "gold.customer_executive_dashboard"
+
+
+def test_saved_c360_names_still_resolve_for_financial():
+    t = _fin(
+        silver="silver.customer_interactions_enriched", gold="gold.customer_executive_dashboard"
+    ).architecture.tables
+    assert (t.silver, t.gold) == ("silver.transactions", "gold.daily_dashboards")
 
 
 def test_explicit_names_win():
@@ -95,7 +103,23 @@ def test_delete_prefix_scopes_to_the_prefix():
     c._client.get_paginator.return_value.paginate.return_value = [
         {"Contents": [{"Key": "checkpoints/bronze-ingest/commits/0"}]}
     ]
+    c._client.delete_objects.return_value = {}
     assert c.delete_prefix("b", "checkpoints/bronze-ingest") == 1
     c._client.get_paginator.return_value.paginate.assert_called_once_with(
         Bucket="b", Prefix="checkpoints/bronze-ingest/"
     )
+
+
+def test_delete_prefix_raises_on_per_key_errors():
+    """Quiet-mode delete_objects reports failures per key with HTTP 200; they
+    must not count as deleted (a stale checkpoint would survive the reset)."""
+    from lakebench.s3.client import S3BucketError, S3Client
+
+    c = S3Client.__new__(S3Client)
+    c._client = MagicMock()
+    c._client.get_paginator.return_value.paginate.return_value = [{"Contents": [{"Key": "p/a"}]}]
+    c._client.delete_objects.return_value = {
+        "Errors": [{"Key": "p/a", "Code": "AccessDenied", "Message": "no"}]
+    }
+    with pytest.raises(S3BucketError, match="AccessDenied"):
+        c.delete_prefix("b", "p")

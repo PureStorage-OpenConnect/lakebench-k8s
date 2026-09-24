@@ -1069,6 +1069,25 @@ SUCCESS_STATES = frozenset({JobState.SUCCEEDING, JobState.COMPLETED})
 #: States meaning the job will not produce a result.
 FAILURE_STATES = frozenset({JobState.FAILING, JobState.FAILED, JobState.SUBMISSION_FAILED})
 
+# Markers of a dependency-resolution failure inside the operator's
+# spark-submit. The operator resolves spark.jars.packages client-side into one
+# Ivy cache shared by every submission on the cluster; concurrent resolutions
+# of the same cold artifact race there (SPARK-10878) and one of them fails
+# with FAILED DOWNLOADS. Once any submission fills the cache the next
+# attempt succeeds, so these are retried. Nothing else is.
+_TRANSIENT_SUBMISSION_MARKERS = (
+    "FAILED DOWNLOADS",
+    "unresolved dependency",
+    "download failed",
+)
+
+
+def is_transient_submission_failure(message: str) -> bool:
+    """True for a spark-submit failure caused by dependency download."""
+    if "spark-submit" not in message and "submit spark application" not in message:
+        return False
+    return any(m in message for m in _TRANSIENT_SUBMISSION_MARKERS)
+
 
 def is_terminal(state: JobState) -> bool:
     """Whether a state means the job has stopped producing work.
@@ -1121,6 +1140,17 @@ class SparkJobManager:
             logger.warning("Could not get cluster capacity for streaming budget: %s", e)
             self._cluster_cpu_m = None
 
+    def resubmit(self, job_name: str) -> JobStatus | None:
+        """Submit ``job_name`` again with the inputs of its last submission.
+
+        Returns None when this manager never submitted that job.
+        """
+        args = getattr(self, "_submit_args", {}).get(job_name)
+        if args is None:
+            return None
+        job_type, extra_conf, cycle_env, arguments = args
+        return self.submit_job(job_type, extra_conf, cycle_env=cycle_env, arguments=arguments)
+
     def submit_job(
         self,
         job_type: JobType,
@@ -1143,6 +1173,11 @@ class SparkJobManager:
             Initial JobStatus
         """
         job_name = f"lakebench-{job_type.value}"
+        # Remembered so a submission that fails transiently can be resubmitted
+        # with identical inputs (see resubmit / is_transient_submission_failure).
+        if not hasattr(self, "_submit_args"):
+            self._submit_args: dict[str, tuple] = {}
+        self._submit_args[job_name] = (job_type, extra_conf, cycle_env, arguments)
 
         # Delete existing job if present
         self._delete_job(job_name)

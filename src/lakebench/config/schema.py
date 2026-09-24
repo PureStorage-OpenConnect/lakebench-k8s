@@ -1263,13 +1263,27 @@ class ArchitectureConfig(BaseModel):
         """Point ``tables.silver``/``tables.gold`` at the financial tables.
 
         Their defaults are the Customer 360 names. The financial scripts
-        write ``silver.transactions`` and ``gold.alerts``, so on an AML run
+        write ``silver.transactions`` and the dashboards, so on an AML run
         the benchmark queried ``silver.customer_interactions_enriched`` (7 of
         8 queries failed TABLE_NOT_FOUND) and maintenance, compaction and
-        destroy targeted tables that did not exist. Explicit values win.
+        destroy targeted tables that did not exist.
+
+        A value equal to the Customer 360 default counts as unset: a config
+        saved with every field and later switched to ``schema: financial``
+        still resolves to the financial tables. Other explicit values win.
+        The fields are not marked as explicitly set, so dumping with
+        ``exclude_unset`` and switching the schema back both behave.
         """
         if self.workload.schema_type.value != "financial":
             return self
+        t = self.tables
+        c360 = TableNamesConfig()
+        swaps = {"silver": "silver.transactions", "gold": t.gold_daily_dashboards}
+        for field, value in swaps.items():
+            if getattr(t, field) == getattr(c360, field):
+                setattr(t, field, value)
+                t.__pydantic_fields_set__.discard(field)
+        return self
         explicit = self.tables.model_fields_set
         if "silver" not in explicit:
             self.tables.silver = "silver.transactions"

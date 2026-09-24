@@ -400,9 +400,18 @@ class S3Client:
                 keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
                 for i in range(0, len(keys), 1000):
                     chunk = keys[i : i + 1000]
-                    self._client.delete_objects(
+                    resp = self._client.delete_objects(
                         Bucket=bucket_name, Delete={"Objects": chunk, "Quiet": True}
                     )
+                    # Quiet mode reports only failures, per key, with HTTP 200.
+                    errors = (resp or {}).get("Errors") or []
+                    if errors:
+                        first = errors[0]
+                        raise S3BucketError(
+                            f"Failed to delete {len(errors)} of {len(chunk)} objects under "
+                            f"{bucket_name}/{prefix} (first: {first.get('Key')}: "
+                            f"{first.get('Code')} {first.get('Message')})"
+                        )
                     deleted += len(chunk)
         except ClientError as e:
             raise S3BucketError(  # noqa: B904

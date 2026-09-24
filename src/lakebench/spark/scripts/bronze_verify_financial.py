@@ -110,12 +110,49 @@ REQUIRED_FLAT_COLS = (
 )
 
 
+def _table_location(spark, fq_table):
+    """The table's storage location, or None if it does not exist."""
+    try:
+        for row in spark.sql(f"DESCRIBE TABLE EXTENDED {fq_table}").collect():
+            if (row["col_name"] or "").strip() == "Location":
+                return (row["data_type"] or "").strip() or None
+    except Exception as e:  # noqa: BLE001
+        log(f"Continuous reset: no location for {fq_table} ({e})")
+    return None
+
+
+def _norm(uri):
+    return uri.replace("s3a://", "s3://").rstrip("/") + "/"
+
+
+def _delete_dir_if_disjoint(spark, location, raw_uri):
+    """Recursively delete ``location`` unless it overlaps ``raw_uri``."""
+    loc, raw = _norm(location), _norm(raw_uri)
+    if raw.startswith(loc) or loc.startswith(raw):
+        log(f"Continuous reset: kept {location} (overlaps the raw datagen path)")
+        return
+    jvm = spark._jvm  # type: ignore[attr-defined]
+    hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+    target = location.replace("s3://", "s3a://", 1)
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(target), hconf)
+    path = jvm.org.apache.hadoop.fs.Path(target)
+    if fs.exists(path):
+        fs.delete(path, True)
+        log(f"Continuous reset: deleted old bronze data at {location}")
+
+
 def _continuous_reset(spark, df):
     """Drop the stream-written tables and create an empty bronze table."""
     # Bronze: plain DROP, never PURGE. After a batch run it may hold
     # add_files-registered datagen files, and PURGE would delete the corpus
-    # the stream is about to read.
+    # the stream is about to read. The table's own directory (data files a
+    # previous stream wrote) is removed separately, and only when it cannot
+    # contain the raw datagen files; left behind, it inflated the measured
+    # bronze size that continuous throughput is computed from.
+    location = _table_location(spark, f"{CATALOG}.{BRONZE_TABLE}")
     spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
+    if location:
+        _delete_dir_if_disjoint(spark, location, BRONZE_URI + PACS_PREFIX)
     # Silver stream tables own their files, so PURGE them rather than leave
     # orphaned data in the silver bucket on every rerun.
     for t in (SILVER_TXNS, SILVER_EDGES):
