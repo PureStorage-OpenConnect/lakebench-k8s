@@ -925,14 +925,26 @@ def _read_reference(spark):
     population, so silently writing NULL KYC would turn every customer-scoped
     rule into "ran, 0 alerts".
     """
-    try:
-        return spark.read.parquet(PARTY_PATH), spark.read.parquet(ACCOUNT_PATH)
-    except Exception as e:
-        msg = str(e)
-        if "PATH_NOT_FOUND" in msg or "Path does not exist" in msg:
-            log(f"reference zones not found: {msg.splitlines()[0][:200]}")
-            return None, None
-        raise
+    frames = []
+    for path in (PARTY_PATH, ACCOUNT_PATH):
+        try:
+            frames.append(spark.read.parquet(path))
+        except Exception as e:
+            msg = str(e)
+            if "PATH_NOT_FOUND" not in msg and "Path does not exist" not in msg:
+                raise
+            log(f"reference file not found: {msg.splitlines()[0][:200]}")
+            frames.append(None)
+    # Both absent is an older or bronze-only layout. Exactly one absent is a
+    # broken reference write (a pod that died between the two uploads, or a
+    # mistyped path) and must not produce a green job with NULL KYC.
+    if (frames[0] is None) != (frames[1] is None):
+        raise RuntimeError(
+            f"only one KYC reference file is readable: party={PARTY_PATH} "
+            f"({'missing' if frames[0] is None else 'ok'}), account={ACCOUNT_PATH} "
+            f"({'missing' if frames[1] is None else 'ok'})"
+        )
+    return frames[0], frames[1]
 
 
 def main() -> None:

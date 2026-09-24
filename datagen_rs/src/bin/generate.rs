@@ -89,16 +89,25 @@ fn arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
 /// typo into cycle 0 and overwrite cycle 0's objects.
 fn cycle_arg() -> u64 {
     let args: Vec<String> = std::env::args().collect();
-    let Some(i) = args.iter().position(|a| a == "--cycle") else {
+    // Accept `--cycle N` and `--cycle=N`; anything else that names the flag
+    // but does not parse is an error, never a silent cycle 0.
+    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
+        if a == "--cycle" {
+            Some(args.get(i + 1).cloned().unwrap_or_default())
+        } else {
+            a.strip_prefix("--cycle=").map(str::to_string)
+        }
+    });
+    let Some(raw) = raw else {
         return 0;
     };
-    match args.get(i + 1).map(|v| v.parse::<u64>()) {
-        Some(Ok(c)) if c <= cycle::MAX_CYCLE => c,
-        other => {
+    match raw.parse::<u64>() {
+        Ok(c) if c <= cycle::MAX_CYCLE => c,
+        _ => {
             eprintln!(
                 "--cycle must be an integer in 0..={}; got {:?}",
                 cycle::MAX_CYCLE,
-                other.map(|_| args.get(i + 1))
+                raw
             );
             std::process::exit(2);
         }
@@ -904,6 +913,18 @@ fn customer360_main() {
     // datagen/generate.py:271. Very small target_tb still gets at least 1
     // file so the run isn't a no-op.
     let total_files: i64 = (target_bytes / file_size_bytes as u64).max(1) as i64;
+    // c360 row ids are file_id * rows_per_file with the cycle in file_id's
+    // high bits (cycle::c360_file_id); refuse a cycle whose ids leave i64
+    // rather than let them wrap and collide.
+    if (cycle::c360_file_id(total_files as u64, cycle_n) as i128) * (rows_per_file as i128)
+        > i64::MAX as i128
+    {
+        eprintln!(
+            "--cycle {} with {} rows per file overflows c360 row ids",
+            cycle_n, rows_per_file
+        );
+        std::process::exit(2);
+    }
 
     // Build the loyalty lookup + customer_id sampler ONCE, then share via Arc
     // across rayon workers. Same lookup used by every file so
