@@ -21,11 +21,9 @@ EXEMPT = {"docs/lakebench.next-spec.md"}
 
 # Known doc defects owned elsewhere. strict=True: once the doc is fixed the
 # xfail fails, so the entry gets removed.
-KNOWN_BAD = {
-    "docs/component-observability.md:11": (
-        "documents the unwired s3_metrics_enabled/spark_metrics_enabled as live settings"
-    ),
-}
+# Doc blocks known not to load, with the reason; each entry is a strict
+# xfail so the fix of the doc forces its removal here.
+KNOWN_BAD: dict[str, str] = {}
 
 _TOP = {
     "name", "recipe", "platform", "architecture", "images", "observability", "spark",

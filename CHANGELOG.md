@@ -24,6 +24,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `-y` (old `-f` refuses at a terminal, still forces in scripts with a
   warning). `init`: `--force`. `results`: `--format` / `-o`. `logs`:
   `--follow` / `-F`. Admin commands gain `-f/--file`.
+- **`-f` on `destroy` and `clean` exits 2 in every context** and names
+  `--force` / `-y`; `LAKEBENCH_LEGACY_SHORT_F=1` restores the old meaning
+  with a warning. `results` rejects a `--format` that conflicts with `-f`.
 - **`results -o json|csv`** prints plain stdout.
 - **AML rule targets changed.** W3 now searches 2-5 hop cycles and is
   scored against `cycle`; W4 is scored against `rapid_layering`; a new
@@ -36,7 +39,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   silver-build `output_rows` in incremental mode is per cycle.
 - **Release process (maintainers):** one `release.yml`; PyPI uploads after
   the GitHub Release; tags must be the normalised version and on `main`;
-  `uat/results-<version>.md` is required. See `docs/releasing.md` for the
+  `uat/results-<version>.md` with a `# UAT results <version>` heading and a
+  results table is required; pre-release and dev versions are refused. See `docs/releasing.md` for the
   repository settings the gates depend on.
 
 ### Added
