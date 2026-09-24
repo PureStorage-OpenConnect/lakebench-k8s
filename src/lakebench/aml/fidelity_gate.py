@@ -156,19 +156,24 @@ def _oof_scores(make_model, X, y, w, folds):
     return oof
 
 
-def _rank_ap(x, y, w):
-    """AP of the raw feature as a score, best of both directions; NaN ranks
-    lowest in either direction."""
+def _oof_rank_scores(x, y, w, folds):
+    """The raw feature as a score, out of fold: each fold's direction is the
+    better one on its training folds, applied to its test fold. NaN ranks
+    lowest in either direction (the fill uses feature values only, no labels)."""
     import numpy as np
 
     finite = np.isfinite(x)
     if not finite.any():
-        return 0.0
+        return np.zeros(len(x), dtype=float)
     lo = np.nanmin(x[finite]) - 1
     hi = np.nanmax(x[finite]) + 1
     up = np.where(finite, x, lo)
     down = np.where(finite, -x, -hi)
-    return max(_ap(y, up, w), _ap(y, down, w))
+    oof = np.zeros(len(x), dtype=float)
+    for train, test in folds:
+        better_up = _ap(y[train], up[train], w[train]) >= _ap(y[train], down[train], w[train])
+        oof[test] = up[test] if better_up else down[test]
+    return oof
 
 
 def _r_precision(y, score, w) -> float:
@@ -236,7 +241,8 @@ def _evaluate_typology(name, X, y, w, features, prereg, kind) -> dict[str, Any]:
     lo, hi = _bootstrap_ci(y, oof, w, prereg)
     out.update(status="ok", ap=ap, ap_ci=[lo, hi], r_precision=_r_precision(y, oof, w))
 
-    # D5 shortcuts: every single feature and every feature pair, same folds.
+    # D5 shortcuts: every single feature and every feature pair, out of fold
+    # on the reference model's folds.
     use_rank = prereg["shortcut_model"].get("single_feature_also_scores_raw_rank")
 
     def shortcut_ap(cols):
@@ -244,7 +250,7 @@ def _evaluate_typology(name, X, y, w, features, prereg, kind) -> dict[str, Any]:
 
     def one(j):
         tree = shortcut_ap([j])
-        rank = _rank_ap(X[:, j], y, w) if use_rank else 0.0
+        rank = _ap(y, _oof_rank_scores(X[:, j], y, w, folds), w) if use_rank else 0.0
         return {"feature": features[j], "ap": max(tree, rank), "tree_ap": tree, "rank_ap": rank}
 
     single = _parallel(one, range(len(features)))

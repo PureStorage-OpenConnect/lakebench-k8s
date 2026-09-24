@@ -332,3 +332,20 @@ def test_add_pass_folds_into_all():
     assert rep["passes"]["all"] is True
     fg.add_pass(rep, "registered_label_role", False)
     assert rep["passes"]["registered_label_role"] is False and rep["passes"]["all"] is False
+
+
+def test_rank_shortcut_is_out_of_fold():
+    """A feature whose direction flips between folds scores well in sample
+    (best direction chosen on all data) but not out of fold."""
+    n = 400
+    y = np.zeros(n, dtype=int)
+    y[::10] = 1
+    x = np.where(y == 1, 1.0, 0.0)
+    x[n // 2 :] = -x[n // 2 :]  # second half: the relation reverses
+    w = np.ones(n)
+    idx = np.arange(n)
+    folds = [(idx[n // 2 :], idx[: n // 2]), (idx[: n // 2], idx[n // 2 :])]
+    oof = fg._oof_rank_scores(x, y, w, folds)
+    ap_oof = fg._ap(y, oof, w)
+    in_sample = max(fg._ap(y, x, w), fg._ap(y, -x, w))
+    assert ap_oof < 0.2 < in_sample
