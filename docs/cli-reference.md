@@ -372,6 +372,10 @@ lakebench clean TARGET [CONFIG_FILE] [OPTIONS]
 | `--force` / `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--metrics-dir` | `-m` | `./lakebench-output/runs` | Metrics directory (for `metrics` target) |
 
+`-f` is not accepted on `destroy` or `clean`: it exits 2 and names `--force` / `-y`,
+because `-f` means `--file` everywhere else. `LAKEBENCH_LEGACY_SHORT_F=1` restores the old
+meaning (force) with a warning for this release only.
+
 Valid targets:
 
 | Target | Action |
