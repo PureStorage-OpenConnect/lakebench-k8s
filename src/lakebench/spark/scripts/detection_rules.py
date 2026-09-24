@@ -165,26 +165,36 @@ def w2_structuring(
     silver_txns: DataFrame,
     threshold_count: int = 3,
     window_hours: int = 24,
+    per_beneficiary: bool = True,
     run_id: str = "unknown",
 ) -> DataFrame:
-    """Detect entities that made N>=threshold_count structuring-band txns
-    within a rolling window_hours-hour window.
+    """Structuring: N>=threshold_count structuring-band transactions within
+    one window_hours window, aggregated two ways.
 
-    Emits one alert per (entity, window) with related_txn_ids populated
-    with the UETRs of the triggering transactions.
+    - originator (alert_type ``structuring``): one account making the
+      transactions. Grouped by (originator, currency, window).
+    - beneficiary (alert_type ``structuring_beneficiary``): one account
+      receiving them from any senders, the classic multiple-depositor
+      (smurfing) scenario. Grouped by (beneficiary, window) without the
+      currency: each sender pays in its own account currency, so a
+      currency split would let smurfs in different currencies evade. Each
+      credit is still tested against its own currency's band.
 
-    Uses a rolling window via `window()` function (Spark) so overlapping
-    24-hour spans are handled naturally. Group by (entity, window,
-    currency) so a mixed-currency actor doesn't dilute.
+    Both kinds share the band, count and window, and both are
+    W2_structuring alerts; ``evidence['aggregation']`` names the kind.
+
+    Windows are tumbling ``window()`` buckets of window_hours. Emits one
+    alert per (entity, window) with related_txn_ids populated with the
+    UETRs of the triggering transactions.
 
     Args:
         silver_txns: DataFrame of silver.transactions schema.
         threshold_count: minimum count of structuring-band txns in the
-            window to trigger an alert. Default 3, matches the datagen
-            micro_structuring instance's typical (participants=9,
-            rows_per_instance=8) pattern.
-        window_hours: rolling window size. Default 24 (typical AML
-            interpretation of "same day").
+            window to trigger an alert. Default 3, the conventional
+            "several transactions just under the threshold" count.
+        window_hours: window size. Default 24 (typical AML interpretation
+            of "same day").
+        per_beneficiary: also emit the beneficiary aggregation.
         run_id: opaque id for the detection run, written into every
             alert row.
 
@@ -195,29 +205,53 @@ def w2_structuring(
 
     suspicious = silver_txns.filter(_suspicious_amount_expr()).select(
         col("uetr"),
-        col("originator_id").alias("entity_id"),
+        col("originator_id"),
         col("beneficiary_id"),
         col("txn_timestamp"),
-        col("txn_amount").cast("double").alias("amount"),
         col("txn_currency"),
     )
+    win = window_(col("txn_timestamp"), f"{window_hours} hours")
 
-    windowed = (
-        suspicious.groupBy(
-            col("entity_id"),
-            col("txn_currency"),
-            window_(col("txn_timestamp"), f"{window_hours} hours"),
-        )
-        .agg(
+    def _agg(grouped, counterparty: str):
+        return grouped.agg(
             count(lit(1)).alias("suspicious_count"),
             collect_list("uetr").alias("related_txn_ids"),
-            collect_set("beneficiary_id").alias("_related_entity_ids"),
-            max_("amount").alias("max_amount"),
+            collect_set(counterparty).alias("_related_entity_ids"),
             min_("txn_timestamp").alias("first_ts"),
             max_("txn_timestamp").alias("last_ts"),
-        )
-        .filter(col("suspicious_count") >= threshold_count)
+        ).filter(col("suspicious_count") >= threshold_count)
+
+    by_orig = _agg(
+        suspicious.groupBy(col("originator_id").alias("entity_id"), col("txn_currency"), win),
+        "beneficiary_id",
+    ).select(
+        "*",
+        lit("structuring").alias("_type"),
+        lit("originator").alias("_aggregation"),
+        expr(
+            "concat('Entity ', cast(entity_id as string), ' made ', "
+            "cast(suspicious_count as string), ' structuring-band ', txn_currency, "
+            "' transactions between ', cast(first_ts as string), ' and ', "
+            "cast(last_ts as string))"
+        ).alias("_narrative"),
     )
+    windowed = by_orig.drop("txn_currency", "window")
+    if per_beneficiary:
+        by_bene = _agg(
+            suspicious.groupBy(col("beneficiary_id").alias("entity_id"), win),
+            "originator_id",
+        ).select(
+            "*",
+            lit("structuring_beneficiary").alias("_type"),
+            lit("beneficiary").alias("_aggregation"),
+            expr(
+                "concat('Entity ', cast(entity_id as string), ' received ', "
+                "cast(suspicious_count as string), ' structuring-band transactions from ', "
+                "cast(size(_related_entity_ids) as string), ' senders between ', "
+                "cast(first_ts as string), ' and ', cast(last_ts as string))"
+            ).alias("_narrative"),
+        )
+        windowed = windowed.unionByName(by_bene.drop("window"))
 
     alerts = windowed.select(
         expr("uuid()").alias("alert_id"),
@@ -232,7 +266,7 @@ def w2_structuring(
         expr("cast(_related_entity_ids as array<bigint>)").alias("related_entity_ids"),
         col("last_ts").alias("alert_ts"),
         # Alert score: 0.5 baseline + 0.05 * (count - threshold), capped 0.95.
-        (lit(0.5) + (col("suspicious_count") - lit(threshold_count)) * lit(0.05))
+        expr(f"least(0.95, 0.5 + (suspicious_count - {int(threshold_count)}) * 0.05)")
         .cast("double")
         .alias("alert_score"),
         when(col("suspicious_count") >= 6, lit("HIGH"))
@@ -241,17 +275,17 @@ def w2_structuring(
         .alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
-        lit("structuring").alias("alert_type"),
+        col("_type").alias("alert_type"),
         lit(run_id).alias("run_id"),
-        expr(
-            "concat('Entity ', cast(entity_id as string), ' made ', "
-            "cast(suspicious_count as string), ' structuring-band ', txn_currency, "
-            "' transactions between ', cast(first_ts as string), ' and ', "
-            "cast(last_ts as string))"
-        ).alias("narrative"),
+        col("_narrative").alias("narrative"),
         map_from_arrays(
-            array(lit("rule"), lit("threshold"), lit("window_hours")),
-            array(lit("W2_structuring"), lit(str(threshold_count)), lit(str(window_hours))),
+            array(lit("rule"), lit("threshold"), lit("window_hours"), lit("aggregation")),
+            array(
+                lit("W2_structuring"),
+                lit(str(threshold_count)),
+                lit(str(window_hours)),
+                col("_aggregation"),
+            ),
         ).alias("evidence"),
         # LB-125: wall-clock at rule execution. Batch = detection time;
         # continuous = the far end of detected_ts - ingest_ts (freshness /
