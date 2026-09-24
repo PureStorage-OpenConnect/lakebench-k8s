@@ -35,12 +35,19 @@ The rule set:
 | Rule | Targets typology | What it detects |
 |---|---|---|
 | W1_connected_components | gather_scatter | multi-entity graph clusters |
-| W2_structuring | micro_structuring | high-frequency structuring under CTR |
-| W3_round_tripping | rapid_layering | round-trip sequences |
-| W4_risk_propagation | stack | high-velocity chains |
+| W2_structuring | micro_structuring | 3+ structuring-band transactions in 24 h, two kinds: per originator (`structuring`, tumbling day) and per beneficiary from 2+ senders (`structuring_beneficiary`, sliding 24 h) |
+| W3_round_tripping | cycle | funds returning to the originator through 2-5 transfers within 30 days |
+| W4_risk_propagation | rapid_layering | pass-through of 80%+ within 6 h |
+| W17_layering_chain | stack | open chains of 3+ transfers, each forwarding 80-100% of the previous within 7 days |
 | W7_cross_border_high_risk | corridor_high_risk | corridors to FATF grey / high-risk jurisdictions |
 | W8_dormant_reactivation | dormant_reactivation | inactive account, sudden large flow |
 | W5_sanctions_match, W6_pep_counterparty | -- | detect-only; no planted typology today (party-flag targets are datagen follow-up) |
+
+W9-W16 are workload ids the spec reserves (writeback, reproduce, ingest, the
+ML workloads), which is why the layering-chain rule is W17. W3 and W17 skip
+with "not run" (`path-cap`) when their path search would not fit the job's
+scratch; the budget is read from `LB_PATH_SEARCH_MAX_ROWS` or derived from
+the executor count and scratch size.
 
 Every planted typology that no shipped rule targets is documented in
 `UNMAPPED_TYPOLOGIES` in `aml_queries.py` with a one-line reason. That

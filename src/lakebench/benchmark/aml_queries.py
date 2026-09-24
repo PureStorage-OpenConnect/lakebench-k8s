@@ -2,8 +2,8 @@
 
 Ships four SQL templates (detect / precision / recall / pattern_span)
 that are
-instantiated once per W-rule, plus three aggregate queries that run
-as-is. This lands 30 executable queries with 8 source files -- a
+instantiated once per W-rule, plus four aggregate queries that run
+as-is. This lands 34 executable queries with 8 source files -- a
 readable version of the design in
 `dev-artifacts/AML-SCORING-QUERIES.md`.
 
@@ -23,9 +23,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Map each W-rule to the typology_type in `bronze.manifest` that the
-# rule is supposed to detect. Multiple rules can target the same type
-# (W1 connected_components and W3 round_tripping both hit round-trip
-# chains). A rule with no planted-typology target reports N/A for
+# rule is supposed to detect. Several rules may target the same type;
+# each rule targets exactly one. A rule with no planted-typology target reports N/A for
 # precision/recall and only contributes a detect + volume query.
 #
 # **Semantic contract for downstream consumers:** RULE_TARGETS is the
@@ -59,6 +58,8 @@ RULE_TARGETS: dict[str, str | None] = {
     # earlier draft used and it silently matched zero manifest rows).
     "W7_cross_border_high_risk": "corridor_high_risk",
     "W8_dormant_reactivation": "dormant_reactivation",
+    # Open multi-day chain forwarding 80-100% per hop (not a return).
+    "W17_layering_chain": "stack",
 }
 
 
@@ -82,19 +83,16 @@ UNMAPPED_TYPOLOGIES: dict[str, str] = {
         "W1_connected_components co-detects some instances via graph "
         "closure but that is not a scored precision/recall target."
     ),
-    "stack": (
-        "Multi-day layering chain (hops hours to days apart). W4 only sees "
-        "pass-through within 6 h and W3 needs a return to the originator; "
-        "an aggregate pass-through rule (in/out balance over days) is the "
-        "planned detector. Until then stack has no designated rule."
-    ),
     "cross_border_cycle": (
         "Cross-border variant of `cycle`; same gap -- W7 targets "
         "`corridor_high_risk`, not this multi-hop cross-border form."
     ),
     "fan_in": (
         "Category W2_structuring in the manifest but no dedicated fan-in "
-        "detector; W1_connected_components co-detects some instances."
+        "detector. W2's beneficiary kind (structuring_beneficiary) co-detects "
+        "it, since fan_in plants structuring-band credits from many senders "
+        "into one account, and W1 co-detects some instances; neither is a "
+        "scored target, so those alerts count as W2 false positives."
     ),
     "fan_out": (
         "Category W2_structuring in the manifest but no dedicated fan-out "
@@ -105,8 +103,9 @@ UNMAPPED_TYPOLOGIES: dict[str, str] = {
         "targeted -- its recall would be meaningless."
     ),
     "scatter_gather": (
-        "Category W3_round_tripping but W3_round_tripping targets "
-        "`rapid_layering`. scatter_gather recall is untestable today."
+        "Category W3_round_tripping in the manifest, but W3 targets "
+        "`cycle` and scatter_gather does not return funds to its start. "
+        "scatter_gather recall is untestable today."
     ),
     "synthetic_identity": (
         "No dedicated synthetic-identity detector shipped yet; the "
@@ -142,8 +141,8 @@ def _read_template(name: str) -> str:
 def load_aml_queries(catalog: str) -> list[AmlQuery]:
     """Return the full AML query set instantiated for `catalog`.
 
-    26 rule queries (8 detect + 6 targeted rules x 3 kinds) + 4 aggregate
-    queries = 30 total.
+    30 rule queries (9 detect + 7 targeted rules x 3 kinds) + 4 aggregate
+    queries = 34 total.
     Query text uses `{catalog}` as a placeholder; the caller has
     already picked the catalog name (varies per config: iceberg,
     spark_catalog, polaris, etc.).

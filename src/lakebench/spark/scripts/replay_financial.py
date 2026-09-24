@@ -176,6 +176,11 @@ def main() -> None:
         log(f"Rule execution failed: {e}")
         sys.exit(4)
 
+    # Persisted so the count and the append below share one computation of
+    # the rule (without it the rule ran twice).
+    from pyspark import StorageLevel
+
+    alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
     alert_count = alerts.count()
     log(f"Rule produced {alert_count} alert rows")
     # Bootstrap the target with the full alerts schema + partition spec
