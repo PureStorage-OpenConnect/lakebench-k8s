@@ -331,6 +331,115 @@ def apply_silver_transformations(df_bronze):
     )
 
 
+def set_utc_session(spark):
+    """Pin the Spark session time zone to UTC.
+
+    Datagen writes ``event_timestamp`` as a UTC-adjusted instant, and every
+    derived calendar field (``interaction_date``, hour, weekday, week, month,
+    year) is computed in the session time zone. Left at the JVM default, the
+    same data lands on different dates on a pod whose TZ is not UTC.
+    """
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+
+
+def data_clock_date(df, ts_col="event_timestamp"):
+    """Latest event date in ``df`` (UTC), or None when it has no timestamps.
+
+    The c360 data clock: recency is measured from the newest event in the
+    data, not from the day the job happens to run, so a rerun of the same
+    corpus reproduces the same scores (GOALS P4.2). Call with the session
+    already pinned to UTC (``set_utc_session``).
+    """
+    from pyspark.sql.functions import col, to_date
+    from pyspark.sql.functions import max as max_
+
+    return df.agg(max_(to_date(col(ts_col))).alias("d")).collect()[0]["d"]
+
+
+def apply_silver_transformations_anchored(df_bronze, anchor_date):
+    """``apply_silver_transformations`` with recency anchored to the data clock.
+
+    ``customer_recency_score`` is ``30 - days between the event date and
+    anchor_date``: 30 for an event on the newest day of the data, 0 for one
+    30 days older, negative beyond. The shared transform measures from
+    ``current_date()``, which made the score a function of the run date
+    (CLAUDE.md gotcha 17). ``anchor_date`` is a ``datetime.date``; when it is
+    None (no timestamps at all) the score is NULL rather than run-dated.
+    """
+    from pyspark.sql.functions import col, datediff, lit
+
+    out = apply_silver_transformations(df_bronze)
+    if anchor_date is None:
+        score = lit(None).cast("int")
+    else:
+        score = lit(30) - datediff(lit(anchor_date), col("interaction_date"))
+    return out.withColumn("customer_recency_score", score)
+
+
+def streaming_query_id(spark):
+    """Id of the streaming query running the current ``foreachBatch`` call.
+
+    Stable across driver restarts from the same checkpoint and new for a
+    fresh checkpoint, so it scopes a batch id to one logical stream. Spark
+    sets it as a local property on the micro-batch thread. Raises when it is
+    absent: an idempotency key without it would be unsound.
+    """
+    qid = spark.sparkContext.getLocalProperty("sql.streaming.queryId")
+    if not qid:
+        raise RuntimeError("sql.streaming.queryId is not set; call from inside foreachBatch")
+    return qid
+
+
+def delta_idempotent_options(spark, app, batch_id):
+    """Delta writer options that make a ``foreachBatch`` write exactly-once.
+
+    Delta records (txnAppId, txnVersion) in the commit and skips any later
+    write whose txnVersion is not greater than the recorded one, so a
+    micro-batch replayed after a driver restart commits nothing the second
+    time. The app id includes the streaming query id: with a fixed app id a
+    fresh checkpoint (batch ids restart at 0) would have every write skipped,
+    a silent zero-row run.
+    """
+    return {
+        "txnAppId": f"{app}-{streaming_query_id(spark)}",
+        "txnVersion": str(int(batch_id)),
+    }
+
+
+def await_stream(spark, query):
+    """Block until ``query`` stops; re-raise its failure.
+
+    SIGTERM and SIGINT stop the query cleanly. A query that died with an
+    exception fails the driver, so the Kubernetes job reports the real
+    outcome instead of a pass with no data (LB-044).
+    """
+    import signal
+    import time
+
+    def _shutdown_handler(signum, frame):  # noqa: ARG001
+        log(f"Signal {signum} received; stopping stream cleanly")
+        try:
+            query.stop()
+        except Exception as e:  # noqa: BLE001
+            log(f"query.stop failed: {e}")
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _shutdown_handler)
+        except ValueError:
+            pass
+
+    while query.isActive:
+        time.sleep(1)
+
+    exc = query.exception()
+    if exc is not None:
+        log(f"Streaming query failed: {one_line(exc, 2000)}")
+        spark.stop()
+        raise exc
+    log("Streaming query stopped")
+
+
 def get_daily_kpi_aggregations():
     """Return the list of aggregation expressions for daily KPIs.
 

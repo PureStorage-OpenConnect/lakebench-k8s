@@ -14,7 +14,7 @@ import sys
 import time
 from enum import Enum
 
-from common import env, get_daily_kpi_aggregations, log
+from common import env, get_daily_kpi_aggregations, log, set_utc_session
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
@@ -235,7 +235,8 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
         )
     else:
         log(f"Replacing gold rows from {last_date} on...")
-        spark.sql(f"DELETE FROM {gold_tbl} WHERE interaction_date >= DATE '{last_date}'")
+        if last_date is not None:  # an empty gold table has no watermark
+            spark.sql(f"DELETE FROM {gold_tbl} WHERE interaction_date >= DATE '{last_date}'")
         new_kpis_consolidated.writeTo(gold_tbl).append()
 
     total_count = spark.table(gold_tbl).count()
@@ -253,6 +254,7 @@ log("Customer 360 Gold Finalize - Adaptive Aggregation Pipeline")
 log("=" * 60)
 
 spark = SparkSession.builder.appName("lb-gold-finalize").getOrCreate()
+set_utc_session(spark)
 
 start_time = time.time()
 

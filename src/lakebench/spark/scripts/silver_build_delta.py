@@ -18,23 +18,25 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from common import apply_silver_transformations, env, log, table_exists, write_delta_table
+from common import (
+    apply_silver_transformations_anchored,
+    data_clock_date,
+    env,
+    log,
+    set_utc_session,
+    table_exists,
+    write_delta_table,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     approx_count_distinct,
     avg,
     col,
-    concat_ws,
-    floor,
     lit,
-    rand,
     to_date,
-    udf,
-    when,
 )
 from pyspark.sql.functions import max as max_
 from pyspark.sql.functions import min as min_
-from pyspark.sql.types import BooleanType
 
 # ============================================================
 # STRATEGY FRAMEWORK
@@ -193,17 +195,14 @@ def select_silver_strategy(profile: DataProfile) -> SilverStrategy:
     These are skew-agnostic -- each row is processed independently regardless
     of its customer_id distribution.
 
-    SALTED is only used for SIMPLE-range datasets (<100GB) with extreme skew,
-    where the count() and hash distribution write could be affected.
+    SALTED is never auto-selected (retired, see the dispatch below). It was
+    picked for any small dataset with skew over 100x, which the Zipf
+    customer distribution always has.
     """
     # STREAMING for all datasets >= 100 GB -- single pass, no shuffle.
     # Column transforms are row-independent; Delta handles file layout.
     if profile.total_size_gb >= 100:
         return SilverStrategy.STREAMING
-
-    # Small datasets: check skew for SALTED vs SIMPLE
-    if profile.skew_factor > 100:
-        return SilverStrategy.SALTED
 
     return SilverStrategy.SIMPLE
 
@@ -257,8 +256,8 @@ def apply_dynamic_config(spark, profile: DataProfile):
 # ============================================================
 # TRANSFORMATION LOGIC
 # ============================================================
-# apply_silver_transformations() is imported from common.py
-# (shared between batch silver_build.py and streaming silver_stream.py)
+# apply_silver_transformations_anchored() is imported from common.py
+# (shared between batch silver_build.py and continuous silver_stream.py)
 
 # ============================================================
 # STRATEGY IMPLEMENTATIONS
@@ -278,15 +277,26 @@ def _delta_write_props() -> dict[str, str]:
     }
 
 
+def bronze_count_and_clock(df_bronze):
+    """(row count, data-clock date) of bronze in one pass."""
+    from pyspark.sql.functions import count
+
+    r = df_bronze.agg(
+        count(lit(1)).alias("n"), max_(to_date(col("event_timestamp"))).alias("d")
+    ).collect()[0]
+    return int(r["n"]), r["d"]
+
+
 def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
 
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
-    bronze_count = df_bronze.count()
+    bronze_count, anchor = bronze_count_and_clock(df_bronze)
     log(f"Bronze records: {bronze_count:,}")
+    log(f"Data clock (recency anchor): {anchor}")
 
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
     silver_count = silver_df.count()
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
@@ -329,8 +339,13 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
 
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
 
+    # One extra pass over a single column: recency needs the data clock
+    # before the transform is planned.
+    anchor = data_clock_date(df_bronze)
+    log(f"Data clock (recency anchor): {anchor}")
+
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
 
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
@@ -358,61 +373,6 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
     return silver_count
 
 
-def silver_salted(spark, bronze_uri, silver_tbl, catalog, profile):
-    """SALTED strategy: Salt hot keys for skewed data. For skew > 100x."""
-    log("Executing SALTED strategy...")
-    log(f"Hot keys detected: {len(profile.hot_keys)}")
-
-    SALT_BUCKETS = 10
-
-    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
-    bronze_count = df_bronze.count()
-    log(f"Bronze records: {bronze_count:,}")
-
-    # Broadcast hot keys for UDF
-    hot_keys_set = set(profile.hot_keys)
-    hot_keys_bc = spark.sparkContext.broadcast(hot_keys_set)
-
-    @udf(BooleanType())
-    def is_hot_key(customer_id):
-        return customer_id in hot_keys_bc.value
-
-    # Add salt to hot customer IDs
-    df_salted = df_bronze.withColumn(
-        "salt",
-        when(is_hot_key(col("customer_id")), floor(rand() * SALT_BUCKETS).cast("string")).otherwise(
-            lit("0")
-        ),
-    ).withColumn("salted_customer_id", concat_ws("_", col("customer_id"), col("salt")))
-
-    # Apply transformations
-    silver_df = apply_silver_transformations(df_salted).drop("salt", "salted_customer_id")
-
-    # Repartition to balance load
-    output_partitions = calculate_output_partitions(profile.total_size_gb)
-    silver_df = silver_df.repartition(output_partitions, "customer_id")
-
-    silver_count = silver_df.count()
-
-    log(f"Writing {silver_count:,} records to {silver_tbl}")
-    silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
-    table_exists = _table_exists(spark, silver_tbl)
-    write_mode = "overwrite" if table_exists else "append"
-    opts = {"overwriteSchema": "true", "compression": "snappy"}
-    opts.update(_delta_write_props())
-    write_delta_table(
-        spark,
-        silver_df,
-        silver_tbl,
-        silver_bucket,
-        mode=write_mode,
-        partition_cols=["interaction_date"],
-        options=opts,
-    )
-
-    return silver_count
-
-
 # ============================================================
 # MAIN EXECUTION
 # ============================================================
@@ -426,6 +386,7 @@ log("Customer 360 Silver Build (Delta) - Adaptive Transformation Pipeline")
 log("=" * 60)
 
 spark = SparkSession.builder.appName("lb-silver-build-delta").getOrCreate()
+set_utc_session(spark)
 
 # Check for legacy shuffle partition override
 shuffle_override = os.getenv("LB_SILVER_SHUFFLE_PARTITIONS")
@@ -493,7 +454,13 @@ elif strategy == SilverStrategy.STREAMING:
         spark, bronze_uri, silver_tbl, catalog, profile, incremental=incremental_mode
     )
 elif strategy == SilverStrategy.SALTED:
-    silver_count = silver_salted(spark, bronze_uri, silver_tbl, catalog, profile)
+    # SALTED is retired, as in silver_build.py: silver-build is row-independent
+    # column transforms, so salting did nothing, and it overwrote the table
+    # regardless of incremental mode, wiping earlier cycles' silver.
+    log("SALTED strategy is a no-op for row transforms; running SIMPLE")
+    silver_count = silver_simple(
+        spark, bronze_uri, silver_tbl, catalog, incremental=incremental_mode
+    )
 else:
     log(f"ERROR: Unknown strategy {strategy}")
     spark.stop()

@@ -15,7 +15,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from common import apply_silver_transformations, env, log
+from common import (
+    apply_silver_transformations_anchored,
+    data_clock_date,
+    env,
+    log,
+    set_utc_session,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     approx_count_distinct,
@@ -258,8 +264,8 @@ def apply_dynamic_config(spark, profile: DataProfile):
 # ============================================================
 # TRANSFORMATION LOGIC
 # ============================================================
-# apply_silver_transformations() is imported from common.py
-# (shared between batch silver_build.py and streaming silver_stream.py)
+# apply_silver_transformations_anchored() is imported from common.py
+# (shared between batch silver_build.py and continuous silver_stream.py)
 
 # ============================================================
 # STRATEGY IMPLEMENTATIONS
@@ -275,15 +281,26 @@ def _table_exists(spark, table_name: str) -> bool:
         return False
 
 
+def bronze_count_and_clock(df_bronze):
+    """(row count, data-clock date) of bronze in one pass."""
+    from pyspark.sql.functions import count, lit
+
+    r = df_bronze.agg(
+        count(lit(1)).alias("n"), max_(to_date(col("event_timestamp"))).alias("d")
+    ).collect()[0]
+    return int(r["n"]), r["d"]
+
+
 def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
 
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
-    bronze_count = df_bronze.count()
+    bronze_count, anchor = bronze_count_and_clock(df_bronze)
     log(f"Bronze records: {bronze_count:,}")
+    log(f"Data clock (recency anchor): {anchor}")
 
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
     silver_count = silver_df.count()
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
@@ -329,8 +346,13 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
 
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
 
+    # One extra pass over a single column: recency needs the data clock
+    # before the transform is planned.
+    anchor = data_clock_date(df_bronze)
+    log(f"Data clock (recency anchor): {anchor}")
+
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
 
     # LB-049: distribution-mode is overridable via Spark conf for scale
     # testing. Default changed from "none" to "hash" -- see docstring.
@@ -373,6 +395,7 @@ log("Customer 360 Silver Build - Adaptive Transformation Pipeline")
 log("=" * 60)
 
 spark = SparkSession.builder.appName("lb-silver-build").getOrCreate()
+set_utc_session(spark)
 
 # Check for legacy shuffle partition override
 shuffle_override = os.getenv("LB_SILVER_SHUFFLE_PARTITIONS")
