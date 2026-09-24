@@ -156,7 +156,28 @@ def test_planted_rows_pinned_exactly_at_the_threshold_fail():
     assert t.atom_verdict(40, 40, 900, 60_000, 2.0) == "FAIL"
     # Planted rows sharing the baseline's round-number atom pass.
     assert t.atom_verdict(15, 1000, 900, 60_000, 2.0) == "PASS"
-    assert t.atom_verdict(3, 3, 900, 60_000, 2.0) == "PASS"  # too few to matter
+    # Too few planted rows to see a pin is INSUFFICIENT, not PASS ...
+    assert t.atom_verdict(3, 3, 900, 60_000, 2.0) == "INSUFFICIENT"
+    # ... unless the baseline share predicts a visible atom and there is none.
+    assert t.atom_verdict(2, 2000, 900, 60_000, 2.0) == "PASS"
+
+
+def test_day_of_week_matched_gaps_cancel_the_weekly_ripple():
+    t = _tool()
+    # Baseline gaps: 1.6x more mass just above 90 d (13 weeks) than below.
+    base = (4000, 6400)
+    # A dormancy population with the same ripple passes when matched ...
+    assert t._ratio_verdict(400, 640, 1.5, base)[0] == "PASS"
+    # ... and would have failed unmatched at this size.
+    assert t._ratio_verdict(4000, 6400, 1.5)[0] == "FAIL"
+    # A real cliff still fails when matched.
+    assert t._ratio_verdict(50, 600, 1.5, base)[0] == "FAIL"
+
+
+def test_w7_is_listed_as_having_no_amount_threshold():
+    t = _tool()
+    assert "W7 amount" in t.NO_THRESHOLD
+    assert "no such threshold" in t.NO_THRESHOLD["W7 amount"]
 
 
 def test_an_underpowered_corpus_is_inconclusive_not_pass(tmp_path, capsys):

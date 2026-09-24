@@ -29,8 +29,10 @@ silver applies. w (window_rel) and the window ratio limit
 (max_density_ratio) come from the pre-registration JSON (threshold_cliff).
 
 Exemption (R2): a declared definitional typology is exempt on its defining
-attribute only. micro_structuring's defining attribute is the structuring
-band, so its rows are left out of the W2 band checks and nowhere else.
+attribute only. micro_structuring's defining attribute is its amount (the
+structuring band), so its rows are left out of the amount checks (W2 band
+edges and the USD amount thresholds it sits under, W6 and W7's $10,000) and
+kept in the gap checks.
 
 The statistic and its limits, declared before any run:
 
@@ -38,6 +40,13 @@ The statistic and its limits, declared before any run:
    exceeds max_density_ratio (2.0) and the excess is significant.
 2. Adjacent-bin ratio a = n[t, 1.02 t) / n[0.98 t, t). FAIL when max(a, 1/a)
    exceeds ADJACENT_MAX (1.5) and the excess is significant.
+
+Gaps: the dormancy population (the gap ending at each instance's earliest
+burst row) is compared day-of-week matched, i.e. both ratios are divided by
+the baseline gaps' ratios over the same bins, so the calendar's weekly
+ripple cancels. The baseline gap population itself is EXEMPT and printed
+with its reason (AML-GOALS section 9 #28). A threshold the tool cannot find
+FAILs unless NO_THRESHOLD lists it ("rule has no such threshold").
 
 Why these limits: the baseline amount is log-normal (sigma 1.4 in log USD).
 Its log density has slope -(1 + (ln x - mu) / sigma^2) in ln x, so within
@@ -94,6 +103,19 @@ MIN_COUNT = 30
 MIN_ATOM = 10
 Z_SIGNIFICANT = 3.0
 EXEMPT_W2 = ("micro_structuring",)
+
+# Rules the tool expects no threshold of a given kind in. A missing threshold
+# FAILs unless it is listed here with the reason.
+NO_THRESHOLD = {
+    "W7 amount": "rule has no such threshold: W7 filters on cross_border and the "
+    "beneficiary's FATF-listed country, with no amount filter",
+}
+
+# Baseline gap populations exempt from the gap check, with the recorded reason.
+GAP_EXEMPT_REASON = (
+    "EXEMPT (calendar realism, AML-GOALS section 9 #28): per-account gaps carry the "
+    "day-of-week calendar's weekly ripple, and 13 weeks = 91 days sits next to W8's 90"
+)
 
 
 def _module_constant(tree: ast.Module, name: str):
@@ -180,7 +202,9 @@ def load_thresholds(rules_src: str, silver_src: str, prereg: dict) -> dict:
     }
 
 
-def _ratio_verdict(n_lo: int, n_hi: int, limit: float) -> tuple[str, float]:
+def _ratio_verdict(
+    n_lo: int, n_hi: int, limit: float, base: tuple[int, int] | None = None
+) -> tuple[str, float]:
     """FAIL on a significant excess over the limit even in a thin window (266
     rows below t against 11 above is a cliff whatever MIN_COUNT says); PASS
     needs MIN_COUNT rows on each side. Zero counts get a 0.5 continuity
@@ -189,8 +213,15 @@ def _ratio_verdict(n_lo: int, n_hi: int, limit: float) -> tuple[str, float]:
         return "INSUFFICIENT", float("nan")
     a, b = max(n_lo, 0.5), max(n_hi, 0.5)
     r = b / a
+    var = 1 / a + 1 / b
+    if base is not None:
+        # Day-of-week matched: divide by the baseline's ratio over the same
+        # bins, so the calendar's own ripple cancels.
+        bl, bh = max(base[0], 0.5), max(base[1], 0.5)
+        r = r / (bh / bl)
+        var += 1 / bl + 1 / bh
     lr = abs(math.log(r))
-    se = math.sqrt(1 / a + 1 / b)
+    se = math.sqrt(var)
     if lr > math.log(limit) and lr / se > Z_SIGNIFICANT:
         return "FAIL", r
     if min(n_lo, n_hi) < MIN_COUNT:
@@ -198,7 +229,7 @@ def _ratio_verdict(n_lo: int, n_hi: int, limit: float) -> tuple[str, float]:
     return ("PASS" if lr <= math.log(limit) else "INSUFFICIENT"), r
 
 
-def cliff(count, t: float, w: float, max_ratio: float) -> dict:
+def cliff(count, t: float, w: float, max_ratio: float, base_count=None) -> dict:
     """Verdict for one threshold. ``count(lo, hi)`` returns rows in [lo, hi);
     ``count(t, t, exact=True)`` returns rows equal to t.
 
@@ -208,8 +239,16 @@ def cliff(count, t: float, w: float, max_ratio: float) -> dict:
     atom = count(t, t, exact=True)
     n_lo, n_hi = count(t * (1 - w), t), count(t, t * (1 + w)) - atom
     b_lo, b_hi = count(t * (1 - ADJACENT_BIN), t), count(t, t * (1 + ADJACENT_BIN)) - atom
-    v1, r1 = _ratio_verdict(n_lo, n_hi, max_ratio)
-    v2, r2 = _ratio_verdict(b_lo, b_hi, ADJACENT_MAX)
+    bw = ba = None
+    if base_count is not None:
+        b_atom = base_count(t, t, exact=True)
+        bw = (base_count(t * (1 - w), t), base_count(t, t * (1 + w)) - b_atom)
+        ba = (
+            base_count(t * (1 - ADJACENT_BIN), t),
+            base_count(t, t * (1 + ADJACENT_BIN)) - b_atom,
+        )
+    v1, r1 = _ratio_verdict(n_lo, n_hi, max_ratio, bw)
+    v2, r2 = _ratio_verdict(b_lo, b_hi, ADJACENT_MAX, ba)
     order = {"FAIL": 2, "INSUFFICIENT": 1, "PASS": 0}
     verdict = max((v1, v2), key=order.get)
     return {
@@ -222,9 +261,14 @@ def cliff(count, t: float, w: float, max_ratio: float) -> dict:
 
 def atom_verdict(atom_p: int, n_p: int, atom_b: int, n_b: int, max_ratio: float) -> str:
     """Statistic 3: does a planted population sit on t more than baseline?
-    n_p and n_b are window rows plus the atom."""
+    n_p and n_b are window rows plus the atom.
+
+    Too few planted rows at t to see a pin is INSUFFICIENT, never PASS, unless
+    the baseline share predicts at least MIN_ATOM there (then a small atom is
+    evidence against a pin, a PASS)."""
     if atom_p < MIN_ATOM:
-        return "PASS"
+        expected = atom_b / n_b * n_p if n_b else 0.0
+        return "PASS" if expected >= MIN_ATOM else "INSUFFICIENT"
     if n_b == 0:
         return "FAIL"  # planted rows sit on t where baseline has nothing at all
     sp, sb = atom_p / n_p, atom_b / n_b
@@ -241,13 +285,14 @@ def main(root: str) -> int:
     base = Path(root)
     pacs = next(base.rglob("bronze/pacs008"))
     # Every cycle's manifest (manifest.parquet, manifest-c001.parquet, ...).
-    manifest = next(base.rglob("manifest/manifest.parquet")).parent / "manifest*.parquet"
+    manifest = next(base.rglob("manifest"))
+    manifest = manifest / "manifest*.parquet"
     th = load_thresholds(RULES.read_text(), SILVER.read_text(), json.loads(PREREG.read_text()))
     fx_case = " ".join(f"WHEN '{k}' THEN {v}" for k, v in th["fx"].items())
     c = duckdb.connect()
     c.sql(f"""
         CREATE TABLE planted AS
-          SELECT typology_type, u.uetr, u.pos
+          SELECT typology_id, typology_type, u.uetr, u.pos
           FROM '{manifest}', UNNEST(participant_uetrs) WITH ORDINALITY AS u(uetr, pos);
         CREATE TABLE r AS
           SELECT b.uetr, b.dbtr_acct.iban AS orig, b.cre_dt_tm AS ts,
@@ -255,10 +300,10 @@ def main(root: str) -> int:
                  CAST(b.intr_bk_sttlm_amt AS DOUBLE) AS amt,
                  CAST(b.intr_bk_sttlm_amt AS DOUBLE)
                    * CASE b.intr_bk_sttlm_ccy {fx_case} ELSE 1.0 END AS usd,
-                 p.typology_type AS typ, p.pos
+                 p.typology_type AS typ, p.pos, p.typology_id AS tid
           FROM '{pacs}/*.parquet' b LEFT JOIN planted p USING (uetr);
         CREATE TABLE g AS
-          SELECT typ, pos,
+          SELECT typ, pos, tid, ts,
                  date_diff('second', LAG(ts) OVER (PARTITION BY orig ORDER BY ts, uetr), ts)
                    / 86400.0 AS gap_days
           FROM r;
@@ -280,10 +325,25 @@ def main(root: str) -> int:
         return count
 
     def run(
-        label: str, pop: str, table: str, col: str, where: str, t: float, base: str | None = None
+        label: str,
+        pop: str,
+        table: str,
+        col: str,
+        where: str,
+        t: float,
+        base: str | None = None,
+        norm: str | None = None,
+        exempt_reason: str | None = None,
     ) -> None:
-        res = cliff(counter(table, col, where), t, w, rmax)
+        """``base``: planted-vs-baseline atom check. ``norm``: divide the
+        ratios by this population's ratios over the same bins (day-of-week
+        matched gaps). ``exempt_reason``: report, do not gate."""
+        nc = counter(table, col, norm) if norm is not None else None
+        res = cliff(counter(table, col, where), t, w, rmax, nc)
         res["atom_verdict"] = "-"
+        if exempt_reason is not None:
+            res["verdict"] = "EXEMPT"
+            res["reason"] = exempt_reason
         if base is not None:
             cb = counter(table, col, base)
             n_b = cb(t * (1 - w), t * (1 + w))
@@ -302,13 +362,29 @@ def main(root: str) -> int:
     # the payment currency), so the planted-vs-baseline atom comparison uses
     # USD rows on both sides; a different currency mix would otherwise move it.
     usd_base = "typ IS NULL AND ccy = 'USD'"
-    for pop, where in (("planted $", "typ IS NOT NULL AND ccy = 'USD'"), ("bursts", burst)):
+    exempt = ", ".join(f"'{x}'" for x in EXEMPT_W2)
+    planted_usd = f"typ IS NOT NULL AND typ NOT IN ({exempt}) AND ccy = 'USD'"
+    for pop, where in (("planted $", planted_usd), ("bursts", burst)):
         run(f"W8 amount ${t8:,.0f}", pop, "r", "usd", where, t8, base=usd_base)
     tg = th["w8_gap_days"]
-    run(f"W8 gap {tg:g} d", "all gaps", "g", "gap_days", "gap_days IS NOT NULL", tg)
-    # The gap that ends in a dormancy burst's first row is the dormancy length.
-    run(f"W8 gap {tg:g} d", "dormancy", "g", "gap_days", f"{burst} AND pos = 2", tg)
-    exempt = ", ".join(f"'{x}'" for x in EXEMPT_W2)
+    base_gaps = "gap_days IS NOT NULL AND typ IS NULL"
+    run(
+        f"W8 gap {tg:g} d",
+        "all gaps",
+        "g",
+        "gap_days",
+        "gap_days IS NOT NULL",
+        tg,
+        exempt_reason=GAP_EXEMPT_REASON,
+    )
+    # The dormancy length is the gap that ends at the instance's earliest
+    # burst row (arg_min of ts over pos > 1), compared with baseline gaps over
+    # the same bins so the weekly ripple cancels.
+    first_burst = (
+        "(tid, ts) IN (SELECT tid, min(ts) FROM g "
+        "WHERE typ = 'dormant_reactivation' AND pos > 1 GROUP BY tid)"
+    )
+    run(f"W8 gap {tg:g} d", "dormancy", "g", "gap_days", first_burst, tg, norm=base_gaps)
     ff = th["w2_floor_factor"]
     for ccy, t in th["w2"].items():
         where = f"ccy = '{ccy}' AND (typ IS NULL OR typ NOT IN ({exempt}))"
@@ -317,9 +393,15 @@ def main(root: str) -> int:
         for name, edge in (("threshold", t), ("band floor", ff * t)):
             run(f"W2 {ccy} {name} {edge:,.0f}", "all rows", "r", "amt", where, edge)
             run(f"W2 {ccy} {name} {edge:,.0f}", "planted", "r", "amt", planted, edge, base=base_c)
+    missing: list[str] = []
     for label, key in (("W7", "w7_amount_usd"), ("W6", "w6_amount_usd")):
         if not th[key]:
-            print(f"WARNING {label}: no USD amount threshold found in detection_rules.py")
+            reason = NO_THRESHOLD.get(f"{label} amount")
+            if reason:
+                print(f"{label} amount: {reason}")
+            else:
+                print(f"FAIL {label} amount: no threshold found in detection_rules.py")
+                missing.append(label)
         for t in th[key]:
             run(f"{label} amount ${t:,.0f}", "all rows", "r", "usd", "TRUE", t)
             run(
@@ -327,7 +409,7 @@ def main(root: str) -> int:
                 "planted $",
                 "r",
                 "usd",
-                "typ IS NOT NULL AND ccy = 'USD'",
+                planted_usd,
                 t,
                 base=usd_base,
             )
@@ -345,8 +427,11 @@ def main(root: str) -> int:
         print(
             f"{label:32s} {pop:10s} {wl:>9}/{wh:<9} {wr:6.2f} {al:>8}/{ah:<8} {ar:6.2f} {res['atom']:>6} {res['atom_verdict']:>12s}  {res['verdict']}"
         )
+        if "reason" in res:
+            print(f"    {res['reason']}")
         fails += res["verdict"] == "FAIL"
         inconclusive += res["verdict"] == "INSUFFICIENT"
+    fails += len(missing)
     lo, hi = int(tg * (1 - w)), int(math.ceil(tg * (1 + w)))
     hist = c.sql(f"""
         SELECT floor(gap_days)::INT AS d, COUNT(*) FROM g
