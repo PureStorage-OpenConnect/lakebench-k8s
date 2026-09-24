@@ -1648,6 +1648,9 @@ def results(
     """
     if format_short_f is not None:
         warn_deprecated_short_f("--format / -o")
+        if output_format != "table" and output_format != format_short_f:
+            print_error(f"both --format {output_format} and -f {format_short_f} given")
+            raise typer.Exit(2)
         output_format = format_short_f
     import json as _json
 
@@ -1671,8 +1674,10 @@ def results(
         print_info("Pipeline benchmark is generated for runs after this feature was added.")
         raise typer.Exit(1)
 
+    # Machine-readable formats go to stdout with plain print: Rich wraps long
+    # lines at the terminal width and inserts markup, which breaks parsers.
     if output_format == "json":
-        console.print(_json.dumps(pb.to_dict(), indent=2))
+        print(_json.dumps(pb.to_dict(), indent=2))
         return
 
     if output_format == "csv":
@@ -1691,7 +1696,7 @@ def results(
         for key in metric_keys:
             row = [key] + [matrix[stage].get(key, "") for stage in matrix]
             writer.writerow(row)
-        console.print(buf.getvalue())
+        print(buf.getvalue(), end="")
         return
 
     # Table format (default)

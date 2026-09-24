@@ -25,12 +25,12 @@ from ._helpers import (
     DEPRECATED_SHORT_F_HELP,
     _journal_safe,
     console,
+    deprecated_short_f_force,
     journal_open,
     print_error,
     print_info,
     print_success,
     resolve_config_path,
-    warn_deprecated_short_f,
 )
 
 
@@ -182,7 +182,7 @@ def destroy(
     Removes all Lakebench resources from the cluster.
     """
     if force_short_f:
-        warn_deprecated_short_f("--yes / -y (or --force)")
+        deprecated_short_f_force("--force or -y")
         force = True
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 

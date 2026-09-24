@@ -13,13 +13,13 @@ from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
     _journal_safe,
     console,
+    deprecated_short_f_force,
     journal_open,
     print_error,
     print_info,
     print_success,
     print_warning,
     resolve_config_path,
-    warn_deprecated_short_f,
 )
 from lakebench.config import (
     ConfigError,
@@ -111,7 +111,7 @@ def clean(
       journal - Delete all journal session files
     """
     if force_short_f:
-        warn_deprecated_short_f("--yes / -y (or --force)")
+        deprecated_short_f_force("--force or -y")
         force = True
     target = target.lower().strip()
     if target not in CLEAN_TARGETS:
