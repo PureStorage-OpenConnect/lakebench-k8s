@@ -85,4 +85,6 @@ def test_every_package_data_file_is_shipped():
 def test_source_shipped_python_is_in_spec():
     # reference_score.py is read as text into the driver ConfigMap, so it
     # must exist as a file in the binary, not only as bytecode.
-    assert "src/lakebench/aml/reference_score.py" in [s for s, _ in _spec_datas()]
+    shipped = [s for s, _ in _spec_datas()]
+    assert "src/lakebench/aml/reference_score.py" in shipped
+    assert "src/lakebench/aml/fidelity_gate.py" in shipped

@@ -1,43 +1,29 @@
-"""Score (Financial, reference) -- leakage gate + optional GBT model.
+"""Score (Financial, reference) -- leakage gate + the pre-registered AML fidelity gate.
 
-Closes the standing rule "distribution checks do not prove semantics
--- must run reference detector + leakage check" that came out of a
-prior review pass and was reaffirmed by the AML audit in
-``dev-artifacts/roleplay/COLLATED.md``.
+The cluster half of the AML fidelity gate (AML-GOALS D9, and A6 against the
+local harness scripts/aml_gate.py). Two independent things this script does:
 
-Two independent things this script does:
+1. **Band leakage gate** -- compares baseline transaction density against
+   typology density inside each currency-specific structuring band. If
+   baseline density is < 10 % of typology density in a band, the band
+   effectively IS the label. Emits ``leakage_report.parquet`` with a row per
+   (currency, band).
 
-1. **Leakage gate** -- compares baseline (log-normal) transaction
-   density against typology density inside each currency-specific
-   structuring band. If baseline density is < 10 % of typology
-   density in a band, the band effectively IS the label: a rule
-   that filters on the band, or a model that sees the raw amount,
-   scores recall by construction rather than by detector skill.
-   Emits ``leakage_report.parquet`` with a row per (currency, band)
-   and a top-level pass/fail.
+2. **Fidelity gate** -- builds the pre-registered per-entity features from
+   silver (``aml_features.silver_frames`` + ``entity_features``, the same
+   feature code the local harness runs over bronze), labels each customer by
+   manifest participation, and runs ``gate.evaluate_gate``: out-of-fold AP per
+   in-scope typology with a bootstrap CI and n_positives, the D5 single and
+   pair shortcuts against the leakage caps, the definitional check, the D7
+   band and K-of-N summary, D2 timing mixture and D11 density. Every constant
+   comes from ``aml_preregistration.json`` (packaged flat next to this script).
+   Emits ``aml_gate_report.json`` (the full report) and
+   ``reference_metrics.parquet`` (one aggregate row plus one row per typology,
+   the table ``aggregate_reference_vs_rule.sql`` joins against rule recall).
 
-2. **Reference detector** (best-effort) -- pulls a labelled
-   per-entity-per-day feature frame down to the driver, trains a
-   scikit-learn Gradient Boosted Classifier on features that
-   EXCLUDE the amount-band membership, and evaluates per-typology
-   recall/precision on a held-out split. Emits
-   ``reference_metrics.parquet``. Verdict is ``no_sklearn`` when
-   scikit-learn isn't on the driver image; the leakage gate still
-   ran.
-
-Both outputs land alongside ``recall.parquet`` (from
-``score_financial.py``) under the run's output prefix. Downstream
-aggregation joins them so a report shows rule F1 next to the
-reference F1 -- when they diverge sharply, the rule's advantage
-is coming from label knowledge the rule shouldn't have, and the
-band-leakage row will name which currency to fix in the datagen.
-
-Not this script: full feature engineering. The feature set here is
-deliberately small (log_amount, txn_count, unique_counterparties,
-mean_hour, std_hour, high_risk_country) so the model result is a
-"can any signal be learned" check, not a competition submission. A
-future PR can add richer graph/velocity features once the
-plumbing is proven under UAT.
+scikit-learn is not on the Spark image; job.py installs it per job
+(REFERENCE_PY_DEPS). Without it the report carries verdict ``no_sklearn`` and
+the band leakage gate still runs.
 """
 
 from __future__ import annotations
@@ -49,27 +35,8 @@ import sys
 
 from common import env, log
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import (
-    col,
-    explode,
-    hour,
-    lit,
-    stddev,
-    to_date,
-    when,
-)
-from pyspark.sql.functions import (
-    count as count_,
-)
-from pyspark.sql.functions import (
-    log as spark_log,
-)
-from pyspark.sql.functions import (
-    max as max_,
-)
-from pyspark.sql.functions import (
-    mean as mean_,
-)
+from pyspark.sql.functions import col, explode, lit, when
+from pyspark.sql.functions import count as count_
 
 # numpy/pandas/scikit-learn (imported inside functions) are installed per job into this directory by an
 # init container (job.py REFERENCE_PY_DEPS); the Spark image has none of them.
@@ -79,6 +46,13 @@ if os.path.isdir(_PYDEPS) and _PYDEPS not in sys.path:
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TXNS", "silver.transactions")
+SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+_BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
+_BRONZE_ROOT = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/").rstrip("/")
+ACCOUNT_PATH = env(
+    "LB_FINANCIAL_ACCOUNT_PATH", f"{_BRONZE_URI}{_BRONZE_ROOT}/bronze/account.parquet"
+)
 
 # Structuring thresholds mirror
 # `datagen_rs/src/amounts.rs::structuring_band` and the detector
@@ -107,13 +81,14 @@ _STRUCTURING_BANDS = {
     "KRW": (9_900_000.0, 9_999_999.0),
 }
 
-# High-risk countries used by the ``corridor_high_risk`` typology
-# and ``detection_rules._HIGH_RISK_CC``. Deliberately NOT used by
-# this script's feature set: any binary "is beneficiary in this set"
-# feature would be an exact-label proxy for corridor_high_risk (P1
-# from PR-A adversarial review). Retained here so a future PR that
-# hardens the datagen (probabilistic country overlays) can bring
-# country features back with a clean audit trail.
+#: reference_metrics.parquet columns (aggregate_reference_vs_rule.sql reads
+#: row_kind, typology_type, verdict, precision, recall, f1).
+_METRIC_SCHEMA = (
+    "row_kind string, typology_type string, verdict string, precision double, "
+    "recall double, f1 double, support long, ap double, ap_ci_lo double, "
+    "ap_ci_hi double, n_positives long, in_band boolean, leakage_pass boolean, "
+    "note string, feature_names_json string, excluded_features_json string"
+)
 
 
 def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest) -> list[dict]:
@@ -126,10 +101,8 @@ def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest)
     """
     silver = spark.table(f"{CATALOG}.{silver_txns_name}")
 
-    # Typology UETR set from manifest.
     typology_uetrs = manifest.select(explode(col("participant_uetrs")).alias("uetr")).distinct()
 
-    # Tag each silver txn as typology (T) or baseline (B).
     tagged = silver.select(
         col("uetr"),
         col("txn_currency").alias("currency"),
@@ -169,163 +142,164 @@ def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest)
     return rows
 
 
-def _build_reference_feature_frame(spark: SparkSession, silver_txns_name: str, manifest):
-    """Assemble a per-entity-per-day feature DataFrame plus labels.
+def _cap_customers(features, labels, typologies, cap_rows: int):
+    """Keep every labelled customer and a seeded sample of the rest when the
+    customer count exceeds ``cap_rows`` (driver memory). Each kept negative
+    carries weight 1 / fraction, which the gate uses in fitting and in AP, so
+    AP reflects the true prevalence."""
+    import aml_features as af
 
-    Feature columns:
-
-    - ``log_amount_mean``, ``log_amount_std`` over the entity-day
-    - ``mean_hour``, ``std_hour`` over the entity-day
-
-    ``amount_pct_of_ceiling`` was removed: it was log_amount_mean divided
-    by a constant, so it added no information and was not the relative
-    signal it was described as.
-
-    Excluded on purpose, and NOT added to LEAKY_FEATURES because
-    they are legitimate features in a real AML system that only
-    become label proxies against THIS datagen's deterministic
-    typology shapes:
-
-    - ``txn_count`` and ``unique_counterparties``: AML typologies
-      plant known participant counts and rows-per-instance (see
-      ``datagen_rs/src/typology.rs::SPECS``), so these cardinality
-      features fingerprint the typology by construction. Adding
-      them back is a datagen-side fix (probabilistic instance
-      shapes overlapping baseline), not a scorer-side fix.
-    - ``high_risk_country_ratio``: the datagen's ``corridor_high_risk``
-      typology draws participants exclusively from the SAME
-      HIGH_RISK_CC set the detector uses, so this ratio is 1.0 for
-      every corridor_high_risk row and near-baseline for everything
-      else. It IS the label for that typology.
-
-    Trade-off recorded in ``dev-artifacts/roleplay/COLLATED.md``:
-    dropping these features means the reference detector cannot
-    recover ``corridor_high_risk`` or the cardinality-planted
-    typologies at all -- their per-typology recall will read as 0.
-    That is the honest answer: nothing in the ~4 remaining features
-    encodes those typologies' signal, so the model has nothing to
-    learn from. A follow-up PR that adds a probabilistic country
-    overlay to the datagen would let those features come back.
-
-    Label: typology_type of any matching manifest row for that entity,
-    or ``"baseline"``.
-    """
-    silver = spark.table(f"{CATALOG}.{silver_txns_name}")
-
-    # (uetr, typology_type) pairs. First match wins if a UETR is in
-    # multiple manifest rows -- realistic worst case is rare and the
-    # model doesn't need a strict multi-label view.
-    typology_map = (
-        manifest.select("typology_type", explode(col("participant_uetrs")).alias("uetr"))
-        .dropna(subset=["uetr"])
-        .dropDuplicates(["uetr"])
-    )
-
-    labelled = silver.join(typology_map, on="uetr", how="left").withColumn(
-        "label",
-        when(col("typology_type").isNull(), lit("baseline")).otherwise(col("typology_type")),
-    )
-
-    # Aggregate to entity-day. Bucket key is ``to_date(txn_timestamp)``,
-    # NOT ``dayofmonth`` -- the latter collapses Jan 15 + Feb 15
-    # into a single ``day=15`` groupBy key, mashing unrelated
-    # transactions and destroying the signal the model tries to
-    # learn (P1 finding from PR-A adversarial review). AML datagen
-    # spans multi-week windows by design (CLAUDE.md gotcha 17).
-    # Group by entity-day ONLY. Grouping by the label as well split a planted
-    # entity-day into a typology-only row and a baseline-only row, so the
-    # features described the planted transactions in isolation: the model
-    # was scored on groups the label itself had formed (self-scoring). A
-    # real detector sees the account's day as a whole; the day is positive
-    # when any of its transactions is planted.
-    per_entity_day = (
-        labelled.withColumn("day", to_date(col("txn_timestamp")))
-        .groupBy("originator_id", "day")
-        .agg(
-            mean_(spark_log("txn_amount")).alias("log_amount_mean"),
-            stddev(spark_log("txn_amount")).alias("log_amount_std"),
-            mean_(hour("txn_timestamp")).alias("mean_hour"),
-            stddev(hour("txn_timestamp")).alias("std_hour"),
-            max_(col("typology_type")).alias("_typ"),
+    cust = features.filter(col("is_customer")).cache()
+    n = cust.count()
+    if n <= cap_rows:
+        pdf = af.gate_frame(cust, labels, typologies)
+        pdf["weight"] = 1.0
+        return pdf, n, 1.0
+    pos_keys = labels.filter(col("typology_type").isin(*typologies)).select("key").distinct()
+    pos = cust.join(pos_keys, "key", "left_semi")
+    neg = cust.join(pos_keys, "key", "left_anti")
+    n_pos = pos.count()
+    frac = min(1.0, max(0.0, (cap_rows - n_pos) / max(1, n - n_pos)))
+    kept = pos.withColumn("weight", lit(1.0)).unionByName(
+        neg.sample(withReplacement=False, fraction=frac, seed=0).withColumn(
+            "weight", lit(1.0 / frac) if frac > 0 else lit(0.0)
         )
-        .withColumn("label", when(col("_typ").isNull(), lit("baseline")).otherwise(col("_typ")))
-        .drop("_typ")
     )
+    pdf = af.gate_frame(kept, labels, typologies)
+    cust.unpersist()
+    return pdf, n, frac
 
-    return per_entity_day
+
+def _write_text(spark, uri: str, text: str) -> None:
+    """Write one file at ``uri`` through the Hadoop FileSystem API."""
+    jvm = spark._jvm
+    path = jvm.org.apache.hadoop.fs.Path(uri)
+    fs = path.getFileSystem(spark._jsc.hadoopConfiguration())
+    out = fs.create(path, True)
+    try:
+        out.write(bytearray(text.encode("utf-8")))
+    finally:
+        out.close()
 
 
-def _cap_and_pull(features_df, cap_rows: int):
-    """Pull labelled features into a pandas DataFrame with a size cap.
-
-    The cap protects the driver: at scale 100 the entity-day frame
-    can be O(10^7) rows, which is bigger than a 32 GB driver can
-    hold. Strategy: KEEP EVERY TYPOLOGY ROW, then fill the remaining
-    budget with a random sample of baseline rows. Typologies are
-    ~0.1 % of rows per REQ-G-03, so 200K cap * 0.1 % = 200 typology
-    rows if we sampled uniformly -- spread across 10+ typology_types
-    that is 20 per class average and rare typologies (e.g. random,
-    corridor_high_risk) fall below the ``min_positive_per_class``
-    threshold and ``INSUFFICIENT_LABELS`` becomes the default
-    verdict at production scale. Keeping all typology rows fixes
-    that (P2 fix from PR-A adversarial review).
-
-    Also caches the feature frame before the size probes so the
-    Spark plan runs once, not three times (P2 same review).
-    """
-    # Cache: three actions coming (count, filter+count, filter+sample+toPandas).
-    features_df = features_df.cache()
-    total = features_df.count()
-    if total <= cap_rows:
-        pdf = features_df.withColumn("sample_weight", lit(1.0)).toPandas()
-        features_df.unpersist()
-        return pdf
-
-    typology_df = features_df.filter(col("label") != lit("baseline"))
-    baseline_df = features_df.filter(col("label") == lit("baseline"))
-    typology_count = typology_df.count()
-
-    # If typology rows alone exceed the cap, we're in an unusual
-    # situation (very small dataset with mostly typologies) -- fall
-    # back to a proportional sample, still keeping all typologies.
-    if typology_count >= cap_rows:
-        pdf = typology_df.withColumn("sample_weight", lit(1.0)).toPandas()
-        features_df.unpersist()
-        return pdf
-
-    baseline_budget = max(0, cap_rows - typology_count)
-    total_baseline = total - typology_count
-    if total_baseline == 0:
-        # No baseline rows at all -- just pull typology.
-        pdf = typology_df.withColumn("sample_weight", lit(1.0)).toPandas()
-    else:
-        baseline_frac = min(1.0, float(baseline_budget) / float(total_baseline))
-        baseline_sample = baseline_df.sample(withReplacement=False, fraction=baseline_frac, seed=0)
-        # Each kept baseline row stands for 1 / fraction real ones, so the
-        # evaluation counts false positives at the true prevalence.
-        pdf = (
-            typology_df.withColumn("sample_weight", lit(1.0))
-            .union(baseline_sample.withColumn("sample_weight", lit(1.0 / baseline_frac)))
-            .toPandas()
+def _metric_rows(report: dict) -> list[dict]:
+    feats = json.dumps(report.get("features", []))
+    header = {
+        "row_kind": "aggregate",
+        "typology_type": None,
+        "verdict": report.get("verdict"),
+        "precision": None,
+        "recall": None,
+        "f1": None,
+        "support": report.get("n_scored_customers"),
+        "ap": None,
+        "ap_ci_lo": None,
+        "ap_ci_hi": None,
+        "n_positives": None,
+        "in_band": None,
+        "leakage_pass": (report.get("level2") or {}).get("all_pass_leakage"),
+        "note": (
+            "AML fidelity gate (prereg v{}); precision/recall/f1 per typology are "
+            "R-precision: the cut that alerts on as many customers as there are "
+            "positives".format(report.get("prereg_version"))
+        ),
+        "feature_names_json": feats,
+        "excluded_features_json": json.dumps(["is_customer"]),
+    }
+    rows = [header]
+    for t, r in (report.get("typologies") or {}).items():
+        rp = r.get("r_precision")
+        lo, hi = r.get("ap_ci") or [None, None]
+        rows.append(
+            {
+                "row_kind": "typology",
+                "typology_type": t,
+                "verdict": r.get("status"),
+                "precision": rp,
+                "recall": rp,
+                "f1": rp,
+                "support": r.get("n_positives"),
+                "ap": r.get("ap"),
+                "ap_ci_lo": lo,
+                "ap_ci_hi": hi,
+                "n_positives": r.get("n_positives"),
+                "in_band": r.get("in_band"),
+                "leakage_pass": r.get("leakage_pass"),
+                "note": r.get("kind"),
+                "feature_names_json": None,
+                "excluded_features_json": None,
+            }
         )
+    return rows
 
-    features_df.unpersist()
-    return pdf
+
+def _write_metrics(spark, output_prefix: str, rows: list[dict]) -> None:
+    df = spark.createDataFrame(rows, _METRIC_SCHEMA)
+    out = f"{output_prefix.rstrip('/')}/reference_metrics.parquet"
+    df.write.mode("overwrite").parquet(out)
+    log(f"Wrote {out}")
+
+
+def run_fidelity_gate(spark, manifest, *, cap_rows: int, provenance: dict) -> dict:
+    """Build silver features and evaluate the gate. Returns the report dict."""
+    import aml_features as af
+    from fidelity_gate import evaluate_gate, in_scope_typologies, load_preregistration
+
+    prereg, sha = load_preregistration()
+    typologies = in_scope_typologies(prereg)
+    txns, ents, id_map = af.silver_frames(
+        spark,
+        catalog=CATALOG,
+        txns_table=SILVER_TXNS,
+        entities_table=SILVER_ENTITIES,
+        accounts_table=SILVER_ACCOUNTS,
+        account_path=ACCOUNT_PATH,
+    )
+    txns = txns.cache()
+    features = af.entity_features(txns, ents).cache()
+    labels = af.labels_from_participants(manifest, id_map).cache()
+    tm = prereg["timing_mixture"]
+    timing = af.timing_mixture_counts(
+        features,
+        cohort_min_sends=tm["cohort_min_sends"],
+        low_cv_edge=tm["low_cv_edge"],
+        high_cv_edge=tm["high_cv_edge"],
+    )
+    density = af.typology_density(txns, manifest)
+    agreement = af.label_agreement(
+        labels.join(features.filter(col("is_customer")).select("key"), "key", "left_semi"),
+        af.labels_from_uetrs(manifest, txns).join(
+            features.filter(col("is_customer")).select("key"), "key", "left_semi"
+        ),
+    )
+    pdf, n_customers, frac = _cap_customers(features, labels, typologies, cap_rows)
+    log(f"Customers: {n_customers:,}; pulled to driver: {len(pdf):,} (negative fraction {frac})")
+    report = evaluate_gate(
+        pdf,
+        prereg,
+        prereg_sha256=sha,
+        timing_counts=timing,
+        density_counts=density,
+        provenance={
+            **provenance,
+            **af.manifest_provenance(manifest),
+            "adapter": "silver",
+            "n_customers": n_customers,
+            "negative_sample_fraction": frac,
+            "label_route_agreement_customers": agreement,
+        },
+    )
+    return report
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Leakage gate + reference-detector metrics for AML. "
-            "See docs/design/namespace-isolation.md for context on why."
-        )
-    )
+    parser = argparse.ArgumentParser(description="Leakage gate + AML fidelity gate (silver).")
     parser.add_argument("--manifest", required=True, help="S3 URI to manifest.parquet")
     parser.add_argument(
         "--output-prefix",
         required=True,
-        help="S3 URI prefix. Writes {prefix}/leakage_report.parquet and "
-        "{prefix}/reference_metrics.parquet.",
+        help="S3 URI prefix. Writes leakage_report.parquet, reference_metrics.parquet "
+        "and aml_gate_report.json under it.",
     )
     parser.add_argument(
         "--leakage-threshold",
@@ -337,9 +311,9 @@ def main() -> None:
     parser.add_argument(
         "--driver-sample-cap",
         type=int,
-        default=200_000,
-        help="Maximum labelled feature rows to pull into the driver for "
-        "sklearn training. Sampled per-label so rare typologies stay in.",
+        default=1_000_000,
+        help="Maximum customers pulled to the driver. Above it every labelled "
+        "customer is kept and the rest are sampled with inverse-fraction weights.",
     )
     parser.add_argument(
         "--silver-txns",
@@ -349,12 +323,12 @@ def main() -> None:
     args = parser.parse_args()
 
     spark = SparkSession.builder.appName("lb-score-financial-reference").getOrCreate()
+    prefix = args.output_prefix.rstrip("/")
     log("=" * 60)
-    log("AML reference detector + leakage gate")
+    log("AML band leakage gate + fidelity gate")
     log(f"Manifest:        {args.manifest}")
-    log(f"Output prefix:   {args.output_prefix}")
+    log(f"Output prefix:   {prefix}")
     log(f"Silver table:    {CATALOG}.{args.silver_txns}")
-    log(f"Threshold:       {args.leakage_threshold}")
     log("=" * 60)
 
     manifest = spark.read.parquet(args.manifest)
@@ -366,7 +340,7 @@ def main() -> None:
         )
     log(f"Manifest instances: {manifest_n:,}")
 
-    # ---------- Leakage gate ----------
+    # ---------- Band leakage gate ----------
     from reference_score import compute_leakage_gate
 
     band_rows = _compute_leakage_bands(spark, args.silver_txns, manifest)
@@ -378,150 +352,44 @@ def main() -> None:
             f"baseline={row.baseline_count} typology={row.typology_count} "
             f"ratio={row.ratio_baseline_over_typology:.3f} verdict={row.verdict.value}"
         )
-
-    leakage_df = spark.createDataFrame(leakage_report.as_dicts())
-    leakage_out = f"{args.output_prefix.rstrip('/')}/leakage_report.parquet"
-    leakage_df.write.mode("overwrite").parquet(leakage_out)
+    leakage_out = f"{prefix}/leakage_report.parquet"
+    spark.createDataFrame(leakage_report.as_dicts()).write.mode("overwrite").parquet(leakage_out)
     log(f"Wrote {leakage_out}")
 
-    # ---------- Reference detector ----------
-    from reference_score import (
-        LEAKY_FEATURES,
-        ReferenceModelVerdict,
-        train_reference_gbt,
-    )
-
-    # Build labelled features. If we cannot even build them (silver
-    # missing columns, empty), record NO_SKLEARN-shaped verdict with
-    # a note and continue -- the leakage gate has still shipped.
+    # ---------- Fidelity gate ----------
+    provenance = {
+        "git_sha": os.environ.get("LB_GIT_SHA", "unknown"),
+        "corpus_seed": os.environ.get("LB_DATAGEN_SEED"),
+        "manifest": args.manifest,
+        "silver_txns": f"{CATALOG}.{SILVER_TXNS}",
+    }
     try:
-        features_df = _build_reference_feature_frame(spark, args.silver_txns, manifest)
-    except Exception as e:  # noqa: BLE001
-        log(f"WARN: feature frame build failed: {e}; skipping reference model.")
-        _write_reference_stub(
-            spark, args.output_prefix, verdict="no_sklearn", note=f"feature build failed: {e}"
+        report = run_fidelity_gate(
+            spark, manifest, cap_rows=args.driver_sample_cap, provenance=provenance
         )
-        spark.stop()
-        return
+    except Exception as e:  # noqa: BLE001 -- the band gate has shipped; record why this did not
+        log(f"WARN: fidelity gate failed: {e}")
+        report = {"gate": "aml-fidelity", "verdict": "error", "note": str(e)}
+    report["band_leakage_overall_pass"] = leakage_report.overall_pass
 
-    pdf = _cap_and_pull(features_df, cap_rows=args.driver_sample_cap)
-    log(f"Reference feature rows pulled to driver: {len(pdf):,}")
+    try:
+        from fidelity_gate import summary_lines
 
-    if pdf.empty:
-        _write_reference_stub(
-            spark, args.output_prefix, verdict="no_sklearn", note="empty feature frame"
-        )
-        spark.stop()
-        return
-
-    labels = pdf["label"]
-    # Feature set is deliberately narrow -- see the docstring on
-    # _build_reference_feature_frame for why txn_count,
-    # unique_counterparties, and any country feature are excluded.
-    feature_cols = [
-        "log_amount_mean",
-        "log_amount_std",
-        "mean_hour",
-        "std_hour",
-    ]
-    features = pdf[feature_cols].fillna(0.0)
-
-    # Runtime guard, not assert -- assert becomes a no-op under
-    # python -O and the P3 finding from PR-A adversarial review
-    # correctly flagged this as fragile even though Spark drivers
-    # don't run -O today.
-    leaks = set(features.columns) & LEAKY_FEATURES
-    if leaks:
-        raise RuntimeError(
-            f"BUG: feature frame contains leaky columns {leaks!r}. "
-            "This should have been caught by train_reference_gbt's own "
-            "leak check -- if you reached here, the LEAKY_FEATURES set "
-            "in reference_score.py (packaged flat on the driver) is out of sync with what this Spark "
-            "script builds."
-        )
-
-    report = train_reference_gbt(
-        features,
-        labels,
-        groups=pdf["originator_id"],
-        sample_weight=pdf["sample_weight"],
-    )
-    log(f"Reference model verdict: {report.verdict.value}")
-    log(
-        f"Overall: precision={report.overall_precision:.3f} "
-        f"recall={report.overall_recall:.3f} f1={report.overall_f1:.3f} "
-        f"n_train={report.n_train} n_test={report.n_test}"
-    )
-    for r in report.per_typology:
+        for line in summary_lines(report):
+            log(line)
+    except Exception:  # noqa: BLE001 -- logging only
+        pass
+    text = json.dumps(report, indent=2, default=str)
+    report_out = f"{prefix}/aml_gate_report.json"
+    _write_text(spark, report_out, text)
+    log(f"Wrote {report_out}")
+    _write_metrics(spark, prefix, _metric_rows(report))
+    if report.get("verdict") == "no_sklearn":
         log(
-            f"  {r.typology_type}: support={r.support} "
-            f"precision={r.precision:.3f} recall={r.recall:.3f} f1={r.f1:.3f}"
+            "Fidelity gate SKIPPED (scikit-learn not importable on the driver). "
+            "The band leakage gate still ran."
         )
-
-    # Serialise: header row + per-typology rows so a single parquet
-    # can be joined against rule recall.
-    header = {
-        "row_kind": "aggregate",
-        "typology_type": None,
-        "verdict": report.verdict.value,
-        "precision": report.overall_precision,
-        "recall": report.overall_recall,
-        "f1": report.overall_f1,
-        "support": report.n_test,
-        "note": report.note,
-        "feature_names_json": json.dumps(list(report.feature_names)),
-        "excluded_features_json": json.dumps(list(report.excluded_features)),
-    }
-    detail_rows = [
-        {
-            "row_kind": "typology",
-            "typology_type": r.typology_type,
-            "verdict": report.verdict.value,
-            "precision": r.precision,
-            "recall": r.recall,
-            "f1": r.f1,
-            "support": r.support,
-            "note": None,
-            "feature_names_json": None,
-            "excluded_features_json": None,
-        }
-        for r in report.per_typology
-    ]
-    combined = spark.createDataFrame([header] + detail_rows)
-    ref_out = f"{args.output_prefix.rstrip('/')}/reference_metrics.parquet"
-    combined.write.mode("overwrite").parquet(ref_out)
-    log(f"Wrote {ref_out}")
-
-    if report.verdict is ReferenceModelVerdict.NO_SKLEARN:
-        log(
-            "Reference detector SKIPPED (scikit-learn not installed on driver). "
-            "The leakage gate still ran. Install scikit-learn on the Spark "
-            "image (e.g. add `scikit-learn>=1.3` to the driver deps) to "
-            "enable per-typology model recall."
-        )
-
     spark.stop()
-
-
-def _write_reference_stub(spark, output_prefix: str, *, verdict: str, note: str) -> None:
-    """Emit a placeholder reference_metrics.parquet so downstream
-    aggregations can join without a "file not found" error."""
-    row = {
-        "row_kind": "aggregate",
-        "typology_type": None,
-        "verdict": verdict,
-        "precision": 0.0,
-        "recall": 0.0,
-        "f1": 0.0,
-        "support": 0,
-        "note": note,
-        "feature_names_json": None,
-        "excluded_features_json": None,
-    }
-    df = spark.createDataFrame([row])
-    out = f"{output_prefix.rstrip('/')}/reference_metrics.parquet"
-    df.write.mode("overwrite").parquet(out)
-    log(f"Wrote stub {out} (verdict={verdict})")
 
 
 if __name__ == "__main__":
