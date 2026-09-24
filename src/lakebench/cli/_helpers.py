@@ -25,6 +25,8 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 # Shared console instance -- all CLI modules use this one
 console = Console()
+# Warnings that must not mix into machine-readable stdout (results -o json)
+err_console = Console(stderr=True)
 
 # Global journal instance (lazy-initialized)
 _journal: Journal | None = None
@@ -93,11 +95,36 @@ DEPRECATED_SHORT_F_HELP = "Deprecated short flag; see the warning it prints."
 
 
 def warn_deprecated_short_f(new_spelling: str) -> None:
-    """Warn that this command's ``-f`` is deprecated in favour of *new_spelling*."""
-    print_warning(
-        f"'-f' here is deprecated: use {new_spelling}. In a future release '-f' will "
-        "mean --file (the config path), as it does on every other command."
+    """Warn that this command's ``-f`` is deprecated in favour of *new_spelling*.
+
+    Goes to stderr so that, for example, ``results -f json | jq`` still parses.
+    """
+    err_console.print(
+        f"[yellow]WARN[/yellow] '-f' here is deprecated: use {new_spelling}. In a future "
+        "release '-f' will mean --file (the config path), as it does on every other command."
     )
+
+
+def _stdin_is_tty() -> bool:
+    import sys
+
+    return sys.stdin.isatty()
+
+
+def deprecated_short_f_force(new_spelling: str) -> None:
+    """Handle ``-f`` on destroy/clean, where it used to mean --force.
+
+    At a terminal, where a person may have typed ``-f`` expecting it to name
+    the config file as it does elsewhere, refuse rather than skip the
+    confirmation. In a script, keep the old meaning for this release and warn.
+    """
+    if _stdin_is_tty():
+        err_console.print(
+            f"[red]ERROR[/red] '-f' no longer skips confirmation here: use {new_spelling}. "
+            "'-f' will mean --file (the config path), as it does on every other command."
+        )
+        raise typer.Exit(2)
+    warn_deprecated_short_f(new_spelling)
 
 
 def print_info(message: str) -> None:

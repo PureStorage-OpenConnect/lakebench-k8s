@@ -120,3 +120,57 @@ def test_destroy_old_short_f_warns(tmp_path):
     # the warning is printed first.
     result = runner.invoke(app, ["destroy", str(tmp_path / "missing.yaml"), "-f"])
     assert "deprecated" in result.output and "-y" in result.output
+
+
+@pytest.mark.parametrize("command", ["destroy", "clean"])
+def test_short_f_force_is_refused_at_a_terminal(monkeypatch, tmp_path, command):
+    import lakebench.cli._helpers as helpers
+
+    monkeypatch.setattr(helpers, "_stdin_is_tty", lambda: True)
+    result = runner.invoke(app, [command, str(tmp_path / "cfg.yaml"), "-f"])
+    assert result.exit_code == 2
+    assert "no longer skips confirmation" in result.output
+
+
+@pytest.mark.parametrize("command", ["destroy", "clean"])
+def test_short_f_force_still_works_in_scripts(monkeypatch, tmp_path, command):
+    import lakebench.cli._helpers as helpers
+
+    monkeypatch.setattr(helpers, "_stdin_is_tty", lambda: False)
+    result = runner.invoke(app, [command, str(tmp_path / "missing.yaml"), "-f"])
+    # The warning prints, then the command carries on and stops at the
+    # missing config, not at the -f handling.
+    assert "deprecated" in result.output
+    assert "no longer skips confirmation" not in result.output
+
+
+def test_deprecation_warning_goes_to_stderr(capsys):
+    from lakebench.cli._helpers import warn_deprecated_short_f
+
+    warn_deprecated_short_f("-o")
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "deprecated" in captured.err
+
+
+@pytest.mark.parametrize("args", [["-o", "json"], ["-f", "json"]])
+def test_results_json_is_parseable_stdout(monkeypatch, tmp_path, args):
+    import json
+    import types
+
+    import lakebench.metrics as metrics_pkg
+
+    long_value = "x" * 400  # longer than any terminal: Rich would wrap it
+    pb = types.SimpleNamespace(to_dict=lambda: {"deployment_name": long_value, "scores": {}})
+
+    class FakeStorage:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def get_latest_run(self):
+            return types.SimpleNamespace(pipeline_benchmark=pb)
+
+    monkeypatch.setattr(metrics_pkg, "MetricsStorage", FakeStorage)
+    result = runner.invoke(app, ["results", "-m", str(tmp_path), *args])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["deployment_name"] == long_value
