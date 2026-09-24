@@ -40,3 +40,17 @@ def test_in_stream_round_dicts_are_gated():
     rnd = [{"name": "FQ3", "success": False}, {"name": "FQ1", "success": True}]
     probs = _benchmark_gate_problems(make_config(), rnd)
     assert probs and "FQ3" in probs[0]
+
+
+def test_paired_qph_ignores_queries_that_failed_in_either_run():
+    from lakebench.cli._run import _paired_qph
+
+    def r(name, secs, ok=True):
+        q = _q(name, ok)
+        q.elapsed_seconds = secs
+        return q
+
+    pre = [r("A", 10.0), r("B", 10.0), r("C", 180.0, ok=False)]
+    post = [r("A", 5.0), r("B", 5.0), r("C", 200.0)]
+    pre_q, post_q, n = _paired_qph(pre, post)
+    assert n == 2 and post_q == 2 * pre_q  # C is excluded from both

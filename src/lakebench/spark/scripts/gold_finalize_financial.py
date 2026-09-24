@@ -104,7 +104,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_ALERTS} (
     narrative          STRING,
     evidence           MAP<STRING, STRING>,
     detected_ts        TIMESTAMP
-) USING iceberg PARTITIONED BY (days(alert_ts))
+) USING iceberg PARTITIONED BY (months(alert_ts))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
 
@@ -273,6 +273,14 @@ def main() -> None:
             log(f"[startup] added detected_ts to {GOLD_ALERTS} (reused-catalog upgrade)")
     except Exception as e:  # noqa: BLE001
         log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
+
+    # gold.alerts holds THIS run's alerts only. Detection replaces each
+    # rule's rows as it runs, so a rule that is skipped or fails left an
+    # earlier run's rows behind: benchmark queries read them (one leftover
+    # giant-component row made every read of gold.alerts fail on a 1 GB
+    # Parquet page), and a "not run" rule still showed alerts.
+    spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{RUN_ID}'")
+    log(f"Cleared {GOLD_ALERTS} rows from earlier runs")
 
     txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
     baseline = build_baseline_dashboards(txns, RUN_ID)

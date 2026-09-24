@@ -74,7 +74,7 @@ class TestBronzeSchema:
 
 class TestSilverSchema:
     def test_transactions_partitioned_by_day(self):
-        assert "PARTITIONED BY (days(txn_timestamp))" in SILVER_TRANSACTIONS_DDL
+        assert "PARTITIONED BY (months(txn_timestamp))" in SILVER_TRANSACTIONS_DDL
 
     def test_counterparty_edges_bucketed_by_source(self):
         assert "PARTITIONED BY (bucket(64, source_entity_id))" in SILVER_COUNTERPARTY_EDGES_DDL
@@ -99,7 +99,7 @@ class TestGoldSchema:
 
     def test_alerts_partitioned_by_day(self):
         # Case-management systems read the last-N-days alerts hot.
-        assert "PARTITIONED BY (days(alert_ts))" in GOLD_ALERTS_DDL
+        assert "PARTITIONED BY (months(alert_ts))" in GOLD_ALERTS_DDL
 
     def test_risk_scores_supports_merge_key(self):
         # W9 MERGE keys on (entity_id, model_id).

@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
     source_message_ref      STRING,
     _batch_id               BIGINT,
     ingest_ts               TIMESTAMP
-) USING iceberg PARTITIONED BY (days(txn_timestamp))
+) USING iceberg PARTITIONED BY (months(txn_timestamp))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
 # `_batch_id` supports the silver_stream two-phase batchId idempotency
@@ -173,7 +173,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_STATEMENTS} (
     txn_id         STRING NOT NULL,
     uetr           STRING NOT NULL,
     bk_tx_cd       STRING NOT NULL      -- ISO 20022 bank txn code, e.g. PMNT-ICDT
-) USING iceberg PARTITIONED BY (days(book_ts), bucket(64, account_id))
+) USING iceberg PARTITIONED BY (months(book_ts))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
 

@@ -179,7 +179,7 @@ def main() -> None:
     alert_count = alerts.count()
     log(f"Rule produced {alert_count} alert rows")
     # Bootstrap the target with the full alerts schema + partition spec
-    # (days(alert_ts)) via CREATE IF NOT EXISTS. Preserves partitioning
+    # (months(alert_ts)) via CREATE IF NOT EXISTS. Preserves partitioning
     # on repeat runs.
     spark.sql(f"""
         CREATE TABLE IF NOT EXISTS {args.output_alerts} (
@@ -201,7 +201,7 @@ def main() -> None:
             narrative          STRING,
             evidence           MAP<STRING, STRING>,
             detected_ts        TIMESTAMP
-        ) USING iceberg PARTITIONED BY (days(alert_ts))
+        ) USING iceberg PARTITIONED BY (months(alert_ts))
         TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
     """)
     # LB-125 upgrade guard: rules now emit detected_ts, so a pre-existing
