@@ -13,21 +13,30 @@
 -- measurement.
 --
 -- Placeholders: {catalog}, {rule_id}, {typology_type}.
-WITH typ_instances AS (
-  SELECT typology_id, participant_uetrs, injection_ts_start
-  FROM {catalog}.bronze.manifest
-  WHERE typology_type = '{typology_type}'
+WITH run AS (
+  SELECT MAX(run_id) AS run_id FROM {catalog}.gold.detection_status
+),
+typ_uetrs AS (
+  SELECT m.typology_id, m.injection_ts_start, u.uetr
+  FROM {catalog}.bronze.manifest m
+  CROSS JOIN UNNEST(m.participant_uetrs) AS u(uetr)
+  WHERE m.typology_type = '{typology_type}'
+),
+alert_uetrs AS (
+  SELECT a.alert_ts, t.uetr
+  FROM {catalog}.gold.alerts a
+  CROSS JOIN UNNEST(a.related_txn_ids) AS t(uetr)
+  JOIN run ON a.run_id = run.run_id
+  WHERE a.rule_id = '{rule_id}'
 ),
 earliest_alert AS (
   SELECT
-    si.typology_id,
-    si.injection_ts_start,
-    MIN(a.alert_ts) AS first_alert_ts
-  FROM typ_instances si
-  JOIN {catalog}.gold.alerts a
-    ON a.rule_id = '{rule_id}'
-    AND ARRAYS_OVERLAP(a.related_txn_ids, si.participant_uetrs)
-  GROUP BY si.typology_id, si.injection_ts_start
+    tu.typology_id,
+    tu.injection_ts_start,
+    MIN(au.alert_ts) AS first_alert_ts
+  FROM typ_uetrs tu
+  JOIN alert_uetrs au ON au.uetr = tu.uetr
+  GROUP BY tu.typology_id, tu.injection_ts_start
 )
 SELECT
   APPROX_PERCENTILE(DATE_DIFF('second', injection_ts_start, first_alert_ts), 0.5) AS median_pattern_span_s,
