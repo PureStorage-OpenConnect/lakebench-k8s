@@ -16,16 +16,14 @@ review before it is called complete. Not "please review this" -- the
 prompt asks the reviewer to attack the change, find silent-corruption
 defects ranked by blast radius, and give a concrete failure scenario
 for each finding. Cheerleading reviews miss the class of bugs that
-matters. See `dev-artifacts/CONTROL-AML-C360.md` for the pattern in
-practice.
+matters.
 
 Every change touching >200 LOC, multiple modules, or the profile /
 compat / recipe / DDL / typology tables gets parallel adversarial
 subagents by dimension (correctness, race/concurrency, config/schema,
 resource sizing, destroy/cleanup ordering, test coverage). Findings
 are consolidated with severity ordering, silent-corruption first, and
-recorded in `dev-artifacts/ENGINEERING_HISTORY.md` alongside the
-change.
+recorded in the PR description alongside the change.
 
 If a fix is applied for a finding, the fix gets its own adversarial
 pass. Fixes have the same blind-spot problem as the original code.
@@ -80,32 +78,57 @@ those belong in the PR description and rot as the codebase evolves.
 
 ## Setup
 
+You need Python 3.10 or newer (CI tests 3.10 to 3.13) and, for the data
+generator, Rust 1.98.1 (the version CI pins; `rustup toolchain install
+1.98.1`).
+
 ```bash
-# Python side
+git clone https://github.com/PureStorage-OpenConnect/lakebench-k8s.git
+cd lakebench-k8s
+
+# Python side, in a virtual environment
+python3.11 -m venv .venv    # any Python 3.10 or newer
+. .venv/bin/activate
 pip install -e ".[dev]"
+pre-commit install          # optional: ruff, gitleaks and cargo fmt on commit
 
 # Rust datagen side
-cd datagen_rs && cargo build --release
+cd datagen_rs && cargo build --release && cd ..
 ```
-
-Python is 3.11 (`python3.11`, not bare `python3` which cannot import
-lakebench). Test runner is at `/usr/local/bin/pytest`. Linter is
-`ruff check` + `ruff format`.
 
 ## Testing
 
 ### Unit tests (mandatory)
 
 ```bash
-/usr/local/bin/pytest tests/ -x --timeout 60
+pytest tests/ -x
+ruff check src tests scripts
+ruff format --check src tests scripts
+mypy src/lakebench/
+
 # Rust
-cd datagen_rs && cargo test --release -- --test-threads=1
+cd datagen_rs
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --release -- --test-threads=1
+cd ..
 ```
 
-All must pass locally before any commit that touches the affected
-code path. Currently 1736 Python + 108 Rust tests. `--test-threads=1`
-on Rust because a few tests manipulate env vars in ways that race
-under parallel execution.
+All must pass before any commit that touches the affected code path.
+`--test-threads=1` on Rust because a few tests manipulate env vars in
+ways that race under parallel execution.
+
+The PySpark tests under `tests/spark/` skip unless PySpark is installed,
+and need a Java 17 runtime on `PATH` when it is. To run them:
+
+```bash
+pip install "pyspark==4.0.1" pyarrow
+pytest tests/spark -q
+```
+
+`python scripts/release_gate.py` runs every check above plus the example
+validation, version, changelog and secret-scan checks, and lists what
+failed. CI runs the same checks on every push.
 
 ### Live-cluster tests (for non-trivial changes)
 
@@ -120,19 +143,21 @@ lakebench run --timeout 1800 my-config.yaml
 lakebench destroy --force my-config.yaml
 ```
 
-For UAT sweeps see `dev-artifacts/DEMO-RUNBOOK.md`.
+This creates namespaces and buckets and runs Spark jobs sized in the
+tens of cores, so use a cluster you are allowed to load, and always
+finish with `destroy`.
 
 ## PR expectations
 
 A PR is ready when:
 
 - [ ] Tests pass locally, both suites
-- [ ] `ruff check` + `ruff format` clean
-- [ ] Adversarial review recorded in
-      `dev-artifacts/ENGINEERING_HISTORY.md` for non-trivial changes
+- [ ] `ruff check`, `ruff format` and `mypy` clean
+- [ ] Adversarial review findings recorded in the PR description for
+      non-trivial changes
 - [ ] Performance claims cite a specific metrics.json run
-- [ ] Docs updated where the change is user-visible
-- [ ] BUGS.md updated if the change fixes or opens a bug
+- [ ] Docs and `CHANGELOG.md` updated where the change is user-visible
+- [ ] Linked issue, if the change fixes or opens a bug
 - [ ] Description leads with the answer, then the reasoning. Not a
       wall of bullets.
 
@@ -167,13 +192,13 @@ explicitly asked. If a hook fails, fix the underlying issue.
 - `src/lakebench/` -- Python CLI, deploy, benchmark, metrics
 - `datagen_rs/` -- Rust datagen (financial + customer360 schemas)
 - `docs/` -- user-facing documentation
-- `dev-artifacts/` -- internal work products; gitignored
-- `tests/` -- Python unit tests
+- `tests/` -- Python unit tests (`tests/spark/` runs PySpark locally)
 - `datagen_rs/tests/` -- Rust regression tests
 - `examples/` -- hardened example configs per recipe
+- `scripts/` -- release gate, version and coverage checks
 
-If you are new here, `dev-artifacts/PLAN-AML-C360-HARDENING.md` and
-`CLAUDE.md` in the repo root are the fastest way to load context.
+If you are new here, start with `README.md`, `docs/recipes.md` and
+`docs/configuration.md`.
 
 ## What NOT to do
 
@@ -196,4 +221,8 @@ Open a discussion issue with:
 - What you are trying to do
 - What you tried
 - What happened (paste the error, don't paraphrase)
-- Your `lakebench --version` and cluster details
+- Your `lakebench version` output and cluster details
+
+Security problems go through private reporting instead; see
+`SECURITY.md`. Everyone taking part is expected to follow
+`CODE_OF_CONDUCT.md`.

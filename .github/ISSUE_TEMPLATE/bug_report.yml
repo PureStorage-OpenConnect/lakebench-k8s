@@ -1,0 +1,51 @@
+name: Bug report
+description: Something lakebench did wrong, or a number it reported that looks wrong.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go through private reporting instead; see SECURITY.md.
+        Remove credentials from anything you paste below.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The command you ran and what it did. Paste the error text; do not paraphrase it.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: lakebench version
+      description: Output of `lakebench version`, and whether you installed from PyPI, the binary, or source.
+    validations:
+      required: true
+  - type: input
+    id: recipe
+    attributes:
+      label: Recipe, workload, mode and scale
+      placeholder: "hive-iceberg-spark-trino, AML, batch, scale 10"
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kubernetes or OpenShift version, S3 backend (FlashBlade, Garage, AWS, ...), or local mode.
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration
+      description: The config YAML with credentials removed.
+      render: yaml
+  - type: input
+    id: run-id
+    attributes:
+      label: Run id
+      description: If a run completed, the id under lakebench-output/runs/.
