@@ -59,6 +59,45 @@ def detect_cpu_quota() -> int:
     return os.cpu_count() or 1
 
 
+# Peak-RSS model, mirrored from lakebench.config.autosizer (a unit test keeps
+# the two copies equal): per worker thread about MULT x the output file size;
+# node 0 on the financial path also builds the full world at about 575 B per
+# entity (111,111 entities per scale unit).
+PER_THREAD_FILE_MULTIPLIER = {"financial": 4.8, "customer360": 3.0}
+WORLD_BYTES_PER_ENTITY_NODE0 = 575
+ENTITIES_PER_SCALE = 111_111
+BASE_GIB = {"financial": 1.7, "customer360": 0.3}
+HEADROOM = 1.25
+
+
+def detect_memory_limit_bytes() -> int | None:
+    """The container's memory limit from cgroup v2 or v1, or None."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as f:
+                raw = f.read().strip()
+            if raw and raw != "max":
+                v = int(raw)
+                if v < 1 << 60:  # v1 reports "unlimited" as a huge number
+                    return v
+        except (OSError, ValueError):
+            pass
+    return None
+
+
+def max_threads_for_memory(
+    schema: str, scale: float, file_size_mb: int, is_node0: bool, limit_bytes: int
+) -> int:
+    """Largest thread count whose estimated peak RSS fits the memory limit."""
+    gib = limit_bytes / 2**30
+    world = 0.0
+    if schema == "financial" and is_node0:
+        world = ENTITIES_PER_SCALE * scale * WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
+    per_thread = (file_size_mb / 1024.0) * PER_THREAD_FILE_MULTIPLIER.get(schema, 3.0)
+    budget = gib / HEADROOM - world - BASE_GIB.get(schema, 0.3)
+    return max(1, int(budget // per_thread)) if per_thread > 0 else 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--schema", default="financial", choices=SUPPORTED_SCHEMAS)
@@ -86,7 +125,8 @@ def main() -> int:
     # always pre-writes the corpus, so it maps to `all` like `batch`.
     # Rejecting it crash-looped every scale > 10 generate.
     ap.add_argument(
-        "--mode", default="all",
+        "--mode",
+        default="all",
         choices=["all", "bronze", "reference", "batch", "continuous"],
     )
     # customer360-only args -- ignored on the financial path.
@@ -129,17 +169,39 @@ def main() -> int:
         # datagen.generators, so by default threads follow the pod CPU.
         threads = args.workers
 
+    # Never start more threads than the memory limit holds: each thread holds
+    # a full output file several times over, and an OOMKill restarts the pod
+    # from scratch. Fewer threads is slower but finishes.
+    limit = detect_memory_limit_bytes()
+    if limit:
+        is_node0 = node_id == 0 and args.mode in ("all", "batch", "continuous", "reference")
+        cap = max_threads_for_memory(args.schema, args.scale, args.file_size_mb, is_node0, limit)
+        if threads > cap:
+            print(
+                f"[entrypoint] capping threads {threads} -> {cap} to fit memory limit "
+                f"{limit / 2**30:.1f} GiB (file_size_mb={args.file_size_mb})",
+                file=sys.stderr,
+            )
+            threads = cap
+
     # Schema-conditional argv. --schema first so the Rust binary can dispatch
     # before parsing the shared args.
     common = [
         "/app/datagen_rs",
-        "--schema", args.schema,
-        "--bucket", args.bucket,
-        "--seed", str(args.seed),
-        "--file-size-mb", str(args.file_size_mb),
-        "--node-id", str(node_id),
-        "--total-nodes", str(args.total_nodes),
-        "--threads", str(threads),
+        "--schema",
+        args.schema,
+        "--bucket",
+        args.bucket,
+        "--seed",
+        str(args.seed),
+        "--file-size-mb",
+        str(args.file_size_mb),
+        "--node-id",
+        str(node_id),
+        "--total-nodes",
+        str(args.total_nodes),
+        "--threads",
+        str(threads),
     ]
     # --prefix: only forward when explicitly set. Forwarding empty overrides
     # the Rust binary's schema-appropriate default (e.g. c360's
@@ -153,22 +215,30 @@ def main() -> int:
         # template's `batch` alias to `all`.
         rust_mode = "all" if args.mode in ("batch", "continuous") else args.mode
         cmd = common + [
-            "--scale", str(args.scale),
-            "--corpus-months", str(args.corpus_months),
-            "--mode", rust_mode,
+            "--scale",
+            str(args.scale),
+            "--corpus-months",
+            str(args.corpus_months),
+            "--mode",
+            rust_mode,
         ]
-        summary = (
-            f"scale={args.scale} corpus_months={args.corpus_months} mode={rust_mode}"
-        )
+        summary = f"scale={args.scale} corpus_months={args.corpus_months} mode={rust_mode}"
     else:  # customer360
         cmd = common + [
-            "--target-tb", str(args.target_tb),
-            "--customer-id-max", str(args.customer_id_max),
-            "--payload-kb", str(args.payload_kb),
-            "--dirty-ratio", str(args.dirty_ratio),
-            "--duplicate-email-pct", str(args.duplicate_email_pct),
-            "--timestamp-start", args.timestamp_start,
-            "--timestamp-end", args.timestamp_end,
+            "--target-tb",
+            str(args.target_tb),
+            "--customer-id-max",
+            str(args.customer_id_max),
+            "--payload-kb",
+            str(args.payload_kb),
+            "--dirty-ratio",
+            str(args.dirty_ratio),
+            "--duplicate-email-pct",
+            str(args.duplicate_email_pct),
+            "--timestamp-start",
+            args.timestamp_start,
+            "--timestamp-end",
+            args.timestamp_end,
         ]
         summary = (
             f"target_tb={args.target_tb} customer_id_max={args.customer_id_max} "

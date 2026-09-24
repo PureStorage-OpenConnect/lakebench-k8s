@@ -432,7 +432,17 @@ class DatagenDeployer:
                         terminated = cs.last_state and cs.last_state.terminated
                         if terminated and terminated.reason == "OOMKilled":
                             oom_pods.append(pod_name)
-                        elif cs.restart_count and cs.restart_count >= 3:
+                        elif (
+                            cs.restart_count
+                            and cs.restart_count >= 3
+                            and pod.status.phase != "Succeeded"
+                            and cs.state is not None
+                            and cs.state.waiting is not None
+                            and cs.state.waiting.reason == "CrashLoopBackOff"
+                        ):
+                            # restart_count never resets, so require the pod to
+                            # be crash-looping NOW: one that recovered after a
+                            # few transient failures is still making progress.
                             crash_pods.append(pod_name)
                             if terminated:
                                 crash_details[pod_name] = f"exit {terminated.exit_code}" + (

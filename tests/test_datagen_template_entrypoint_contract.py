@@ -106,3 +106,41 @@ def test_user_datagen_cpu_and_memory_are_honoured():
     resolve_auto_sizing(cfg)
     assert cfg.architecture.workload.datagen.cpu == "16"
     assert cfg.architecture.workload.datagen.memory == "32Gi"
+
+
+def test_entrypoint_memory_model_matches_autosizer():
+    """The image's thread cap and lakebench's memory default use one model."""
+    from lakebench.config import autosizer as a
+
+    ep = _entrypoint()
+    assert ep.PER_THREAD_FILE_MULTIPLIER == a.DATAGEN_PER_THREAD_FILE_MULTIPLIER
+    assert ep.WORLD_BYTES_PER_ENTITY_NODE0 == a.DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0
+    assert ep.ENTITIES_PER_SCALE == a.DATAGEN_ENTITIES_PER_SCALE
+    assert ep.BASE_GIB == a.DATAGEN_BASE_GIB
+    assert ep.HEADROOM == a.DATAGEN_HEADROOM
+
+
+@pytest.mark.parametrize("schema", ["customer360", "financial"])
+@pytest.mark.parametrize("scale", [1, 10, 100])
+def test_default_memory_fits_default_threads(schema, scale):
+    """Regression: 8 threads at 512 MB files needed 12-26 GiB against an
+    8-12 GiB limit (measured with the real binary). The autosized memory must
+    fit the autosized CPU's threads, so the entrypoint never has to cap them."""
+    job = _render(schema, scale)
+    c = _container(job)
+    ep = _entrypoint()
+    cpu = int(str(c["resources"]["limits"]["cpu"]))
+    mem_gib = int(str(c["resources"]["limits"]["memory"]).removesuffix("Gi"))
+    args = [str(a) for a in c["args"]]
+    file_mb = int(args[args.index("--file-size-mb") + 1])
+    cap = ep.max_threads_for_memory(schema, float(scale), file_mb, True, mem_gib * 2**30)
+    assert cap >= cpu, f"{schema} scale {scale}: {cpu} threads but memory fits {cap}"
+    assert args[args.index("--workers") + 1] == "0"
+
+
+def test_thread_cap_under_tight_memory():
+    ep = _entrypoint()
+    # 512 MB files, 8 GiB limit, c360: about 1.5 GiB per thread -> 4 threads.
+    assert ep.max_threads_for_memory("customer360", 1.0, 512, True, 8 * 2**30) == 4
+    # Financial scale 500 on node 0 does not fit 8 GiB at all -> floor of 1.
+    assert ep.max_threads_for_memory("financial", 500.0, 64, True, 8 * 2**30) == 1
