@@ -33,3 +33,10 @@ def test_documented_delta_thrift_q2_is_tolerated():
     # The same failure on Iceberg is a real defect.
     cfg2 = make_config(recipe="hive-iceberg-spark-thrift")
     assert _benchmark_gate_problems(cfg2, [_q("Q2_filtered_aggregation", False)])
+
+
+def test_in_stream_round_dicts_are_gated():
+    """In-stream rounds store QueryResult.to_dict(); the gate must read them."""
+    rnd = [{"name": "FQ3", "success": False}, {"name": "FQ1", "success": True}]
+    probs = _benchmark_gate_problems(make_config(), rnd)
+    assert probs and "FQ3" in probs[0]

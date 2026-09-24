@@ -410,14 +410,20 @@ def _benchmark_gate_problems(cfg, queries) -> list[str]:
     """
     fmt = cfg.architecture.table_format.type.value
     engine = cfg.architecture.query_engine.type.value
+
+    # QueryResult objects (batch) or their to_dict() form (in-stream rounds).
+    def _name(q):
+        return q["name"] if isinstance(q, dict) else q.query.name
+
+    def _ok(q):
+        return bool(q["success"] if isinstance(q, dict) else q.success)
+
     bad = [
-        q
-        for q in queries
-        if not q.success and (fmt, engine, q.query.name) not in _KNOWN_QUERY_FAILURES
+        q for q in queries if not _ok(q) and (fmt, engine, _name(q)) not in _KNOWN_QUERY_FAILURES
     ]
     if not bad:
         return []
-    names = ", ".join(q.query.name for q in bad)
+    names = ", ".join(_name(q) for q in bad)
     return [
         f"Benchmark gate: {len(bad)} of {len(queries)} queries failed ({names}); "
         "QpH over the rest is not a valid score. Marking FAILURE."
