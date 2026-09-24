@@ -45,9 +45,44 @@ def test_helm_missing_raises():
             _mgr()._get_watched_namespaces()
 
 
-def test_release_not_found_means_nothing_watched():
-    with patch("subprocess.run", return_value=_helm(1, stderr="Error: release: not found")):
+def test_release_not_found_and_no_controller_means_nothing_watched():
+    runs = [
+        _helm(1, stderr="Error: release: not found"),
+        _helm(
+            1,
+            stderr='Error from server (NotFound): deployments.apps "spark-operator-controller" not found',
+        ),
+    ]
+    with patch("subprocess.run", side_effect=runs):
         assert _mgr()._get_watched_namespaces() == []
+
+
+def test_release_not_found_but_controller_present_raises():
+    runs = [_helm(1, stderr="Error: release: not found"), _helm(0, stdout="deployment exists")]
+    with patch("subprocess.run", side_effect=runs):
+        with pytest.raises(_WatchListReadError):
+            _mgr()._get_watched_namespaces()
+
+
+def test_release_not_found_and_probe_fails_raises():
+    runs = [
+        _helm(1, stderr="Error: release: not found"),
+        _helm(1, stderr="Unable to connect to the server"),
+    ]
+    with patch("subprocess.run", side_effect=runs):
+        with pytest.raises(_WatchListReadError):
+            _mgr()._get_watched_namespaces()
+
+
+def test_kube_context_is_passed_to_helm_and_kubectl():
+    mgr = SparkOperatorManager(namespace="spark-operator", version="2.5.1", kube_context="ctx-a")
+    assert mgr._with_context(["helm", "get", "values", "x"])[:3] == [
+        "helm",
+        "--kube-context",
+        "ctx-a",
+    ]
+    assert mgr._with_context(["kubectl", "get", "ns"])[:3] == ["kubectl", "--context", "ctx-a"]
+    assert _mgr()._with_context(["helm", "list"]) == ["helm", "list"]
 
 
 def test_non_strict_remove_fails_on_unreadable_list():

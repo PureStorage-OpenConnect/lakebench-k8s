@@ -59,6 +59,7 @@ DEFAULT_ACQUIRE_TIMEOUT_SEC = 30
 DEFAULT_TTL_SEC = 3600
 
 _POLL_INITIAL_SEC = 1.0
+_WAIT_NOTICE_SEC = 30.0
 _POLL_MAX_SEC = 4.0
 
 
@@ -352,6 +353,7 @@ def acquire_cluster_lock(
     deadline = time.time() + max(0.0, timeout)
     delay = _POLL_INITIAL_SEC
     last_state: LeaseState | None = None
+    last_notice = time.time()
 
     while True:
         try:
@@ -376,6 +378,16 @@ def acquire_cluster_lock(
         remaining = deadline - time.time()
         if remaining <= 0:
             break
+        # Waits can last minutes behind a helm upgrade; say who we wait for
+        # instead of going silent.
+        now = time.time()
+        if now - last_notice >= _WAIT_NOTICE_SEC:
+            last_notice = now
+            logger.warning(
+                "cluster_lock: waiting for lease held by %s (up to %.0fs more)",
+                getattr(outcome, "holder", "?"),
+                remaining,
+            )
         time.sleep(min(delay, remaining))
         delay = min(delay * 1.5, _POLL_MAX_SEC)
 

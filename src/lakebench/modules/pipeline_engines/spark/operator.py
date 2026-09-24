@@ -143,6 +143,7 @@ class SparkOperatorManager:
         namespace: str | None = None,
         version: str | None = None,
         job_namespace: str | None = None,
+        kube_context: str | None = None,
     ):
         """Initialize Spark Operator manager.
 
@@ -156,6 +157,24 @@ class SparkOperatorManager:
         self.namespace = namespace or self.DEFAULT_NAMESPACE
         self.target_version = version  # Version to install if not present
         self.job_namespace = job_namespace
+        # The config's kubeconfig context. helm and kubectl otherwise use the
+        # ambient current context, so a stale or different current context
+        # would read (and change) another cluster's operator.
+        self.kube_context = kube_context or None
+
+    def _with_context(self, cmd: list[str]) -> list[str]:
+        """Add the configured kube context to a helm/kubectl/oc command."""
+        if not self.kube_context or not cmd:
+            return cmd
+        if cmd[0] == "helm":
+            return [cmd[0], "--kube-context", self.kube_context, *cmd[1:]]
+        if cmd[0] in ("kubectl", "oc"):
+            return [cmd[0], "--context", self.kube_context, *cmd[1:]]
+        return cmd
+
+    def _run(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        """subprocess.run with the configured kube context applied."""
+        return subprocess.run(self._with_context(cmd), **kwargs)
 
     def check_status(self) -> OperatorStatus:
         """Check if Spark Operator is installed and ready.
@@ -165,7 +184,7 @@ class SparkOperatorManager:
         """
         try:
             # Check if CRD exists
-            result = subprocess.run(
+            result = self._run(
                 ["kubectl", "get", "crd", "sparkapplications.sparkoperator.k8s.io"],
                 capture_output=True,
                 text=True,
@@ -181,7 +200,7 @@ class SparkOperatorManager:
                 )
 
             # Check if operator deployment exists
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "get",
@@ -219,7 +238,7 @@ class SparkOperatorManager:
             operator_ns = parts[0] if parts else self.namespace
 
             # Check if operator is ready
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "get",
@@ -302,7 +321,7 @@ class SparkOperatorManager:
             Version string or None if not found
         """
         try:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "helm",
                     "list",
@@ -342,7 +361,7 @@ class SparkOperatorManager:
         """
         ns = operator_ns or self.namespace
         try:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "get",
@@ -384,6 +403,33 @@ class SparkOperatorManager:
         except Exception as e:
             raise _DeploymentReadError(str(e)) from e
 
+    def _no_release_watch_list(self) -> list[str]:
+        """Answer for "helm has no release": [] only if no operator runs.
+
+        A controller Deployment can exist without this Helm release (OLM, a
+        different release name). Its watch list cannot be read or changed
+        through Helm, so that case, and an unanswerable check, raise rather
+        than report "nothing watched".
+        """
+        probe = self._run(
+            ["kubectl", "get", "deployment", "spark-operator-controller", "-n", self.namespace],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0:
+            raise _WatchListReadError(
+                f"Helm release {self.HELM_RELEASE_NAME!r} not found in {self.namespace!r}, "
+                "but a spark-operator-controller Deployment exists there; the "
+                "operator is managed outside this Helm release, so lakebench "
+                "cannot read or change its watch list."
+            )
+        if "notfound" in (probe.stderr or "").lower().replace(" ", ""):
+            return []
+        raise _WatchListReadError(
+            f"could not confirm whether a Spark Operator runs in {self.namespace!r}: "
+            f"{(probe.stderr or '').strip()}"
+        )
+
     def _get_watched_namespaces(self) -> list[str] | None:
         """Get the namespaces the Spark Operator is configured to watch.
 
@@ -402,7 +448,7 @@ class SparkOperatorManager:
         try:
             import json
 
-            result = subprocess.run(
+            result = self._run(
                 [
                     "helm",
                     "get",
@@ -423,7 +469,7 @@ class SparkOperatorManager:
                 # omit the colon). No release means no operator, so nothing
                 # is watched; that is a real answer, not a read failure.
                 if re.search(r"release:? not found", (result.stderr or "").lower()):
-                    return []
+                    return self._no_release_watch_list()
                 raise _WatchListReadError(
                     f"helm get values {self.HELM_RELEASE_NAME} failed: "
                     f"{(result.stderr or '').strip()}"
@@ -527,7 +573,7 @@ class SparkOperatorManager:
                 f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
             ]
         )
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = self._run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             logger.error(
                 "helm upgrade (remove namespace) failed: %s",
@@ -608,7 +654,7 @@ class SparkOperatorManager:
                 cmd.extend(self._reuse_values_backfill())
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = self._run(cmd, capture_output=True, text=True)
             except FileNotFoundError:
                 logger.warning("helm not found on PATH -- cannot remove namespace from watch")
                 return False
@@ -919,7 +965,7 @@ class SparkOperatorManager:
                 cmd.extend(self._reuse_values_backfill())
 
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                result = self._run(cmd, capture_output=True, text=True)
             except FileNotFoundError:
                 logger.error("helm not found on PATH -- cannot add namespace")
                 return False
@@ -1012,7 +1058,7 @@ class SparkOperatorManager:
         deployments = ["spark-operator-controller", "spark-operator-webhook"]
 
         for deploy in deployments:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "rollout",
@@ -1031,7 +1077,7 @@ class SparkOperatorManager:
         logger.info("Restarting Spark Operator deployments to apply namespace changes")
 
         for deploy in deployments:
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "rollout",
@@ -1095,10 +1141,9 @@ class SparkOperatorManager:
         )
         return False
 
-    @staticmethod
-    def _is_openshift() -> bool:
+    def _is_openshift(self) -> bool:
         """Detect whether we are running on an OpenShift cluster."""
-        result = subprocess.run(
+        result = self._run(
             ["kubectl", "api-resources", "--api-group=security.openshift.io"],
             capture_output=True,
             text=True,
@@ -1113,7 +1158,7 @@ class SparkOperatorManager:
         pods to start.
         """
         for sa in ("spark-operator-controller", "spark-operator-webhook"):
-            subprocess.run(
+            self._run(
                 [
                     "oc",
                     "adm",
@@ -1150,7 +1195,7 @@ class SparkOperatorManager:
         patch_json = json.dumps(patch)
 
         for deploy in ("spark-operator-controller", "spark-operator-webhook"):
-            result = subprocess.run(
+            result = self._run(
                 [
                     "kubectl",
                     "patch",
@@ -1198,13 +1243,13 @@ class SparkOperatorManager:
 
         try:
             # Add Helm repo
-            subprocess.run(
+            self._run(
                 ["helm", "repo", "add", self.HELM_REPO_NAME, self.HELM_REPO_URL],
                 capture_output=True,
                 check=True,
             )
 
-            subprocess.run(
+            self._run(
                 ["helm", "repo", "update"],
                 capture_output=True,
                 check=True,
@@ -1243,7 +1288,7 @@ class SparkOperatorManager:
                     cmd.extend(["--set", f"{key}={value}"])
 
             # Run install
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = self._run(cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
                 logger.error(f"Helm install failed: {result.stderr}")

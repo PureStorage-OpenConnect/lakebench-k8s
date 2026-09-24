@@ -169,6 +169,64 @@ def clean(
     # sits outside the try: typer.confirm(abort=True) raises click.Abort,
     # which subclasses RuntimeError, so inside `except Exception` a "no"
     # was swallowed and the clean went ahead.
+    # Ownership gate, shared with destroy (check_data_ownership): clean must
+    # not be a bypass. Load the configured kube context first; every K8s call
+    # below (including the active-writer check) depends on it.
+    if bucket_targets:
+        from lakebench.deploy.ownership import (
+            IdentityVerdict,
+            build_identity_from_config,
+            check_data_ownership,
+            verify_namespace_identity,
+        )
+
+        ns = cfg.get_namespace()
+        kube_ctx = cfg.platform.kubernetes.context or ""
+        core_v1 = None
+        ns_present = False
+        ns_verified = False
+        try:
+            from kubernetes import client as _k8s
+            from kubernetes.client.rest import ApiException
+
+            from lakebench.k8s import get_k8s_client
+
+            get_k8s_client(context=kube_ctx, namespace=ns)
+            core_v1 = _k8s.CoreV1Api()
+            try:
+                core_v1.read_namespace(ns)
+                ns_present = True
+            except ApiException as e:
+                if e.status != 404:
+                    raise
+            if ns_present:
+                identity = build_identity_from_config(cfg, context=kube_ctx)
+                v = verify_namespace_identity(core_v1, ns, identity.name, identity.api_server)
+                if v.verdict is IdentityVerdict.MISMATCH:
+                    print_error(f"Refusing to clean: {v.hint}")
+                    raise typer.Exit(1)
+                ns_verified = v.verdict is not IdentityVerdict.ABSENT or force_legacy
+        except typer.Exit:
+            raise
+        except Exception as e:  # noqa: BLE001
+            print_warning(f"Could not reach the cluster to verify ownership: {e}")
+            core_v1 = None
+        decision = check_data_ownership(
+            core_v1,
+            namespace=ns,
+            deployment_name=cfg.name,
+            namespace_present=ns_present,
+            namespace_verified=ns_verified,
+            force_legacy=force_legacy,
+            context_name=kube_ctx,
+        )
+        if not decision.allowed:
+            print_error(decision.hint)
+            errors.append(decision.hint)
+            bucket_targets = {}
+        elif decision.hint:
+            print_warning(decision.hint)
+
     if bucket_targets:
         active_writers: list[str] = []
         try:

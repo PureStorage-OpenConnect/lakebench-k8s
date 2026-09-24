@@ -56,6 +56,30 @@ def _s3():
     return s3
 
 
+def _verified_namespace():
+    """Patches that make the deployment's namespace present and verified,
+    so these tests exercise the bucket-level checks after the gate."""
+    from contextlib import ExitStack
+
+    from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+    stack = ExitStack()
+    stack.enter_context(patch("kubernetes.client.CoreV1Api"))
+    stack.enter_context(
+        patch(
+            "lakebench.deploy.ownership.verify_namespace_identity",
+            return_value=IdentityReport(
+                verdict=IdentityVerdict.MATCH,
+                resource_name="lakebench",
+                expected_deployment="my-clean",
+                hint="",
+            ),
+        )
+    )
+    stack.enter_context(patch("lakebench.deploy.ownership.build_identity_from_config"))
+    return stack
+
+
 def _clean(cfg, **kw):
     from lakebench.cli._clean import clean
 
@@ -68,7 +92,8 @@ def _clean(cfg, **kw):
         "metrics_dir": Path("/tmp/nonexistent-metrics"),
     }
     args.update(kw)
-    return clean(**args)
+    with _verified_namespace():
+        return clean(**args)
 
 
 @patch("lakebench.k8s.get_k8s_client")
@@ -150,3 +175,29 @@ def test_declining_running_jobs_prompt_aborts(s3_cls, verify, batch, _crd, _k8s,
             _clean(_cfg(tmp_path), force=False)
     assert s3.empty_bucket.call_count == 0
     verify.assert_not_called()
+
+
+@patch("lakebench.k8s.get_k8s_client")
+@patch("lakebench.s3.S3Client")
+def test_clean_refuses_when_namespace_absent(s3_cls, _k8s, tmp_path):
+    """Same rule as destroy: a missing namespace (stale or wrong context)
+    means ownership cannot be proven, so buckets are not touched."""
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.cli._clean import clean
+
+    s3 = _s3()
+    s3_cls.return_value = s3
+    with patch("kubernetes.client.CoreV1Api") as core:
+        core.return_value.read_namespace.side_effect = ApiException(status=404)
+        core.return_value.list_namespace.return_value.items = []
+        with pytest.raises(typer.Exit):
+            clean(
+                target="data",
+                config_file=_cfg(tmp_path),
+                file_option=None,
+                force=True,
+                force_legacy=False,
+                metrics_dir=Path("/tmp/nonexistent-metrics"),
+            )
+    s3.empty_bucket.assert_not_called()

@@ -96,5 +96,41 @@ def test_destroy_skips_data_steps_when_name_is_shared():
         results = destroy_all(engine, clean_buckets=True)
     s3_cls.assert_not_called()
     skipped = [r for r in results if r.component == "s3-buckets"]
-    assert skipped and skipped[0].status is DeploymentStatus.SKIPPED
+    assert skipped and skipped[0].status is DeploymentStatus.FAILED
     assert "ns-b" in skipped[0].message
+
+
+def test_force_legacy_does_not_override_a_live_shared_name():
+    """--force-legacy waives only "namespace missing". Two live deployments
+    sharing a name share buckets, so nothing makes cleaning them safe."""
+    from lakebench.deploy.ownership import check_data_ownership
+
+    core = MagicMock()
+    core.list_namespace.return_value.items = [_ns("ns-b", "team-a")]
+    d = check_data_ownership(
+        core,
+        namespace="ns-a",
+        deployment_name="team-a",
+        namespace_present=False,
+        namespace_verified=False,
+        force_legacy=True,
+    )
+    assert not d.allowed and "ns-b" in d.hint
+
+
+def test_terminating_namespace_with_same_name_does_not_block():
+    from lakebench.deploy.ownership import check_data_ownership
+
+    ns_b = _ns("ns-b", "team-a")
+    ns_b.metadata.deletion_timestamp = "2026-09-24T00:00:00Z"
+    core = MagicMock()
+    core.list_namespace.return_value.items = [ns_b]
+    d = check_data_ownership(
+        core,
+        namespace="ns-a",
+        deployment_name="team-a",
+        namespace_present=True,
+        namespace_verified=True,
+        force_legacy=False,
+    )
+    assert d.allowed

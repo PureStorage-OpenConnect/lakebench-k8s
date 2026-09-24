@@ -334,7 +334,7 @@ def install_scratch_storage_class(
     # "already exists no-op" instead of a spurious 409 for whichever
     # loses the race.
     try:
-        with cluster_lock(core_v1, timeout=30):
+        with cluster_lock(core_v1, timeout=600):
             try:
                 storage_v1.read_storage_class(scratch.storage_class)
                 print_info(f"StorageClass {scratch.storage_class!r} already exists; no-op")
@@ -425,7 +425,7 @@ def install_spark_operator(
         v = v or cfg.platform.compute.spark.operator.version
 
     try:
-        with cluster_lock(core_v1, timeout=30):
+        with cluster_lock(core_v1, timeout=600):
             mgr = SparkOperatorManager(namespace=ns, version=v)
             ok = mgr.install()
     except ClusterLockHeld as e:
@@ -545,7 +545,7 @@ def migrate_deployment(
     custom_api = k8s_client.CustomObjectsApi()
 
     try:
-        with cluster_lock(core_v1, timeout=30):
+        with cluster_lock(core_v1, timeout=600):
             # Rename legacy SecretClasses. On a clean cluster where the
             # legacy names never existed, both branches 404 cleanly.
             _migrate_secretclass(
@@ -714,12 +714,14 @@ def repair_operator(
 
     ns = "spark-operator"
     v: str | None = None
+    kube_ctx: str | None = None
     if config_file is not None or file_option is not None:
         cfg = _load_cfg(config_file, file_option)
         ns = cfg.platform.compute.spark.operator.namespace or ns
         v = cfg.platform.compute.spark.operator.version
+        kube_ctx = cfg.platform.kubernetes.context or None
 
-    mgr = SparkOperatorManager(namespace=ns, version=v)
+    mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
     from lakebench.modules.pipeline_engines.spark.operator import _WatchListReadError
 
     try:
@@ -781,7 +783,7 @@ def repair_operator(
     # helper inside a single lease scope so the whole reconcile is one
     # atomic mutation.
     try:
-        with cluster_lock(core_v1, timeout=60):
+        with cluster_lock(core_v1, timeout=600):
             to_drop = [n for n in watched if n not in reconciled]
             for n in to_drop:
                 if not mgr._remove_namespace_from_watch_impl(n):  # noqa: SLF001
@@ -869,7 +871,7 @@ def reclaim_bucket(
 
     workload_schema = getattr(cfg, "workload_schema", None)
     try:
-        with cluster_lock(core_v1, timeout=30):
+        with cluster_lock(core_v1, timeout=600):
             # ADR-F3: object-count check MUST run inside the lease.
             # Two admins racing this command without --force-nonempty
             # can each observe 0 keys before the first commits any

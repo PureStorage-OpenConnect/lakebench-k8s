@@ -61,8 +61,8 @@ def test_absent_namespace_leaves_tables_and_buckets_alone():
     results, s3_cls = _run(_engine(namespace_exists=False), force_legacy=False)
     s3 = _by_component(results, "s3-buckets")
     tables = _by_component(results, "table-cleanup")
-    assert s3 and all(r.status is DeploymentStatus.SKIPPED for r in s3)
-    assert tables and all(r.status is DeploymentStatus.SKIPPED for r in tables)
+    assert s3 and all(r.status is DeploymentStatus.FAILED for r in s3)
+    assert tables and all(r.status is DeploymentStatus.FAILED for r in tables)
     assert "stale-ctx" in s3[0].message and "--force-legacy" in s3[0].message
     s3_cls.assert_not_called()
 
@@ -117,4 +117,5 @@ def test_namespace_kept_when_bucket_step_fails():
     engine.k8s.delete_namespace.assert_not_called()
     op.return_value.remove_namespace_from_watch.assert_not_called()
     ns = [r for r in results if r.component == "namespace"]
-    assert ns and ns[0].status is DeploymentStatus.SKIPPED
+    assert ns and ns[0].status is DeploymentStatus.FAILED
+    assert "Do not delete this namespace by hand" in ns[0].message
