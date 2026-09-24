@@ -1818,7 +1818,10 @@ def _run_sustained(
                         )
                         freshness_label = "freshness"
                         freshness_val = pb.data_freshness_seconds
-                        if (pb.query_time_freshness_seconds or 0) > 0:
+                        # Query-time freshness is event-date based and keeps
+                        # growing after a drained corpus (LB-145); show the
+                        # gold-cycle figure then.
+                        if (pb.query_time_freshness_seconds or 0) > 0 and not pb.corpus_drained:
                             freshness_label = "freshness (at query time)"
                             freshness_val = pb.query_time_freshness_seconds
                         freshness_str = (
@@ -1828,6 +1831,13 @@ def _run_sustained(
                             f"Pipeline Score: {freshness_str} {freshness_label}"
                             f" | {pb.sustained_throughput_rps:,.0f} rows/s sustained"
                             f" | {latency_str}ms latency (b/s/g)"
+                        )
+                    if pb.corpus_drained:
+                        print_warning(
+                            "The corpus was fully ingested before the window ended: freshness "
+                            "covers only gold cycles that saw new data, and rows/s is a lower "
+                            "bound set by corpus size. Use a longer corpus or a shorter window "
+                            "for a throughput figure (LB-145)."
                         )
                 elif pb.time_to_value_seconds > 0:
                     print_info(
