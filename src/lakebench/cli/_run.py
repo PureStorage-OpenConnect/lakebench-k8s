@@ -393,6 +393,37 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.rules_skipped = parsed.rules_skipped
 
 
+# Upstream failures a benchmark may carry without failing the run. Each is a
+# documented bug outside lakebench (CLAUDE.md gotcha 22 / LB-034).
+_KNOWN_QUERY_FAILURES = {
+    ("delta", "spark-thrift", "Q2_filtered_aggregation"),
+}
+
+
+def _benchmark_gate_problems(cfg, queries) -> list[str]:
+    """Reasons the benchmark result is not a valid score.
+
+    QpH is computed over the queries that succeeded, so a run where most
+    queries failed still printed a QpH (live AML run, 2026-09-24: 1 of 8
+    passed, QpH 166, exit 0). Every failure outside the known upstream list
+    fails the run.
+    """
+    fmt = cfg.architecture.table_format.type.value
+    engine = cfg.architecture.query_engine.type.value
+    bad = [
+        q
+        for q in queries
+        if not q.success and (fmt, engine, q.query.name) not in _KNOWN_QUERY_FAILURES
+    ]
+    if not bad:
+        return []
+    names = ", ".join(q.query.name for q in bad)
+    return [
+        f"Benchmark gate: {len(bad)} of {len(queries)} queries failed ({names}); "
+        "QpH over the rest is not a valid score. Marking FAILURE."
+    ]
+
+
 def _aml_batch_gate_problems(
     gold_jobs: list, scoring: dict | None = None
 ) -> tuple[list[str], list[str]]:
@@ -1694,6 +1725,12 @@ def run(
                     iterations=bench_result.iterations,
                 )
                 collector.record_benchmark(bench_metrics)
+
+                _bench_problems = _benchmark_gate_problems(cfg, bench_result.queries)
+                for _p in _bench_problems:
+                    print_error(_p)
+                if _bench_problems:
+                    pipeline_success = False
 
                 _journal_safe(
                     j.record,
