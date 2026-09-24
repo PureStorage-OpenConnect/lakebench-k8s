@@ -22,8 +22,7 @@ from __future__ import annotations
 
 import time
 
-from common import apply_silver_transformations, env, log, write_delta_table
-from delta.tables import DeltaTable
+from common import apply_silver_transformations, env, log, table_exists, write_delta_table
 from pyspark.sql import SparkSession
 
 # ---------------------------------------------------------------------------
@@ -87,7 +86,7 @@ def write_silver_batch(batch_df, batch_id):
     # Write to Silver Delta table
     # First batch creates the table; subsequent batches append
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
-    if DeltaTable.isDeltaTable(spark, silver_tbl):
+    if table_exists(spark, silver_tbl):
         # Table exists -- append
         write_delta_table(spark, enriched, silver_tbl, silver_bucket, mode="append")
     else:
@@ -117,7 +116,7 @@ _TABLE_WAIT_MAX = 1800  # 30 minutes -- generous for large datagen
 
 _waited = 0
 while True:
-    if DeltaTable.isDeltaTable(spark, bronze_tbl):
+    if table_exists(spark, bronze_tbl):
         log(f"Bronze table {bronze_tbl} exists (waited {_waited}s)")
         break
     if _waited >= _TABLE_WAIT_MAX:

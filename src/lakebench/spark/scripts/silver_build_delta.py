@@ -18,8 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from common import apply_silver_transformations, env, log, write_delta_table
-from delta.tables import DeltaTable
+from common import apply_silver_transformations, env, log, table_exists, write_delta_table
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     approx_count_distinct,
@@ -267,17 +266,8 @@ def apply_dynamic_config(spark, profile: DataProfile):
 
 
 def _table_exists(spark, table_name: str) -> bool:
-    """Check if a Delta table exists."""
-    try:
-        return DeltaTable.isDeltaTable(spark, table_name)
-    except Exception:
-        # isDeltaTable may not work with catalog-qualified names;
-        # fall back to trying to read the table
-        try:
-            spark.table(table_name)
-            return True
-        except Exception:
-            return False
+    """Check if a catalog table exists (see common.table_exists)."""
+    return table_exists(spark, table_name)
 
 
 def _delta_write_props() -> dict[str, str]:

@@ -25,6 +25,30 @@ def env(name, default=None):
     return v
 
 
+def table_exists(spark, table_name):
+    """True if a catalog table exists, False only if it definitely does not.
+
+    Use this, not DeltaTable.isDeltaTable, for catalog names: isDeltaTable's
+    identifier is a FILE PATH, so "catalog.schema.table" is always False
+    (Delta docs). Callers branch to create-with-overwrite on False, so any
+    error other than a genuine not-found is re-raised: treating a transient
+    catalog failure as "missing" would overwrite a live table.
+    """
+    try:
+        spark.table(table_name).schema  # noqa: B018 -- forces resolution
+        return True
+    except Exception as e:  # noqa: BLE001
+        text = str(e)
+        if (
+            "TABLE_OR_VIEW_NOT_FOUND" in text
+            or "Table or view not found" in text
+            or "NoSuchTableException" in type(e).__name__
+            or "SCHEMA_NOT_FOUND" in text
+        ):
+            return False
+        raise
+
+
 def parse_size_gb(s):
     """Parse size string to GB."""
     return float(s)

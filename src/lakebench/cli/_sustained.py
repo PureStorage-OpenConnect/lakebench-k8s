@@ -35,6 +35,29 @@ from lakebench.k8s import K8sConnectionError, get_k8s_client
 logger = logging.getLogger(__name__)
 
 
+_C360_REQUIRED_STREAM_JOBS = ("bronze-ingest", "silver-stream")
+
+
+def _c360_continuous_gate_problems(rows_by_job: dict[str, int | None]) -> list[str]:
+    """Reasons a c360 continuous run must not pass: a required stream with no
+    parseable logs, or one that processed zero rows."""
+    problems = []
+    for job in _C360_REQUIRED_STREAM_JOBS:
+        if job not in rows_by_job:
+            continue  # stage not part of this run
+        rows = rows_by_job[job]
+        if rows is None:
+            problems.append(
+                f"c360 continuous gate: no parseable {job} driver logs; cannot "
+                "confirm data moved. Marking FAILURE."
+            )
+        elif rows == 0:
+            problems.append(
+                f"c360 continuous gate: {job} processed 0 rows over the whole run. Marking FAILURE."
+            )
+    return problems
+
+
 def _find_prometheus_svc(namespace: str) -> str | None:
     """Find the Prometheus service name in the given namespace.
 
@@ -1368,6 +1391,26 @@ def _run_sustained(
                     f"FAML continuous gate: detection produced {alert_count:,} "
                     "alerts over the window."
                 )
+
+        # c360 honest continuous gate (LB-044 for c360; FAML has its own above).
+        # A continuous run whose bronze or silver stream processed zero rows
+        # moved no data, whatever the exit codes say.
+        if cfg.architecture.workload.schema_type.value != "financial":
+            _rows_by_job: dict[str, int | None] = {}
+            for _jt, _jn in submitted:
+                if _jn in _C360_REQUIRED_STREAM_JOBS:
+                    _logs = driver_logs.get(_jn)
+                    try:
+                        _rows_by_job[_jn] = (
+                            collector.parse_streaming_logs(_logs, _jn).total_rows_processed
+                            if _logs
+                            else None
+                        )
+                    except Exception:  # noqa: BLE001
+                        _rows_by_job[_jn] = None
+            for _problem in _c360_continuous_gate_problems(_rows_by_job):
+                print_error(_problem)
+                pipeline_success = False
 
         # Record streaming metrics (from pre-captured driver logs)
         console.print()
