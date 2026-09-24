@@ -213,7 +213,7 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:latest`) is built from the `datagen/`
+The default image (`docker.io/sillidata/lb-datagen:d841bcc`) is built from the `datagen/`
 directory in this repository. To build and push a custom image:
 
 ```bash
