@@ -54,7 +54,10 @@ def _render(schema: str, scale: float) -> dict:
         architecture={"workload": {"schema": schema, "datagen": {"scale": scale}}},
     )
     resolve_auto_sizing(cfg)
-    engine = DeploymentEngine(cfg, dry_run=True)
+    # No cluster: the engine would otherwise load a kubeconfig, which exists
+    # on dev machines but not in CI.
+    with patch("lakebench.k8s.get_k8s_client"):
+        engine = DeploymentEngine(cfg, dry_run=True)
     ctx = DatagenDeployer(engine)._build_datagen_context()
     return yaml.safe_load(engine.renderer.render("datagen/job.yaml.j2", ctx))
 

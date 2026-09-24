@@ -17,6 +17,18 @@ from lakebench.deploy.engine import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_live_namespace_listing():
+    """These tests exercise ownership logic that lists namespaces. Without
+    this they reached whatever cluster the developer's kubeconfig pointed at
+    (a live, read-only call); in CI they failed. An empty cluster is the
+    neutral answer; tests that need specific namespaces patch CoreV1Api
+    themselves (inner patches win)."""
+    with patch("kubernetes.client.CoreV1Api") as core:
+        core.return_value.list_namespace.return_value.items = []
+        yield core
+
+
 def _make_config(**overrides) -> LakebenchConfig:
     """Create a LakebenchConfig with sensible defaults for testing.
 
@@ -1245,14 +1257,22 @@ class TestOwnershipHooksFire:
             )
         assert s3.empty_bucket.call_count == 0
 
+    @patch("lakebench.deploy.ownership.verify_namespace_identity")
+    @patch("lakebench.deploy.ownership.build_identity_from_config")
     @patch("kubernetes.client.BatchV1Api")
     @patch("lakebench.deploy.ownership.verify_bucket_ownership")
     @patch("lakebench.s3.S3Client")
     def test_clean_absent_bucket_proceeds_with_force_legacy(
-        self, mock_s3_cls, mock_verify, _mock_batch
+        self, mock_s3_cls, mock_verify, _mock_batch, _mock_ident, mock_ns_identity
     ):
         """--force-legacy on an untagged bucket proceeds. Confirms the
         opt-in escape hatch works so users can clean legacy state."""
+        from lakebench.deploy.ownership import IdentityReport as _IR
+        from lakebench.deploy.ownership import IdentityVerdict as _IV
+
+        mock_ns_identity.return_value = _IR(
+            verdict=_IV.MATCH, resource_name="ns", expected_deployment="my-clean", hint=""
+        )
         from pathlib import Path
         from tempfile import NamedTemporaryFile
 
