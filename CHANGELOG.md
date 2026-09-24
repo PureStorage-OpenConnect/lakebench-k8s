@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Breaking changes (read before upgrading)
+- **Unknown config keys are rejected.** Every config model forbids extra
+  keys, and the error names the full path (for example
+  `architecture.workload.datagen.scael: Extra inputs are not permitted`).
+  Keys that were silently ignored now stop every command, including
+  `destroy`. Keys removed in earlier releases warn and are ignored:
+  `images.pull_secrets`, `table_format.hudi`, `medallion.silver.strategy`,
+  `customer360.channels` / `event_types` / `quality_distribution`,
+  `scratch.create_storage_class`. If an old deployment's config has a
+  mistyped key, delete it before running `destroy`: correcting it can
+  retarget the namespace or buckets.
+- **Double spellings are errors.** Setting both `processing` and
+  `pipeline`, both `continuous` and `sustained`, or both `schema` and
+  `schema_type` used to drop one silently.
+- **`-f` means `--file`.** `destroy`/`clean`: use `--force`, `--yes` or
+  `-y` (old `-f` refuses at a terminal, still forces in scripts with a
+  warning). `init`: `--force`. `results`: `--format` / `-o`. `logs`:
+  `--follow` / `-F`. Admin commands gain `-f/--file`.
+- **`results -o json|csv`** prints plain stdout.
+- **AML rule targets changed.** W3 now searches 2-5 hop cycles and is
+  scored against `cycle`; W4 is scored against `rapid_layering`; a new
+  chain rule is scored against `stack`; W2 adds a per-beneficiary alert
+  kind. Per-rule recall and FP are not comparable with earlier runs, and
+  the AML query set grew from 30 to 34, so AML QpH is not comparable.
+- **Metric meanings changed:** `maintenance_value_pct` is null when not
+  measured (was 0.0); c360 `customer_recency_score` and Q6 are anchored to
+  the data clock, not the run date (Q6 and c360 QpH not comparable);
+  silver-build `output_rows` in incremental mode is per cycle.
+- **Release process (maintainers):** one `release.yml`; PyPI uploads after
+  the GitHub Release; tags must be the normalised version and on `main`;
+  `uat/results-<version>.md` is required. See `docs/releasing.md` for the
+  repository settings the gates depend on.
+
 ### Added
 - **LB-116: per-rule AML alert counts + errors surfaced into
   `metrics.json`.** ``JobMetrics`` gains ``alerts_by_rule: dict[str,
@@ -360,6 +393,46 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Removed
 - **`platform.storage.scratch.create_storage_class`.** See above.
+
+## [1.5.0] - 2026-09-16
+
+Hardening release built on mandatory adversarial review: 22 bugs fixed
+(LB-072 to LB-093). Reconstructed from the published release notes.
+
+### Changed
+- Polaris `client_secret` is required; no hardcoded default (LB-090).
+- Wait diagnostics fail fast on terminal Waiting reasons, with a
+  3-restart debounce for CrashLoopBackOff (LB-091).
+- Local-mode `ContainerRuntime.apply()` fingerprints the whole container
+  spec, so env, mount or port changes recreate the container (LB-092).
+- Storage conformance passes `ca_cert` / `verify_ssl` through (LB-075).
+
+### Fixed
+- Destroy paths that reported success on failure, an S3 client that
+  returned silently on timeout, metrics computed as 0 when the
+  denominator was unknown, and sustained runs that passed with 0 rows.
+- Shared-cluster races on Stackable SecretClass, the scratch
+  StorageClass and OpenShift SCC bindings (refcounted, read-modify-write).
+- Dead config fields with plausible defaults that nothing read.
+
+## [1.4.0] - 2026-07-29
+
+Local mode, component version refresh, storage conformance.
+Reconstructed from the tag message and repository history.
+
+### Added
+- `lakebench config storage`: graded S3 backend conformance checks
+  (FlashBlade and Garage validated; SeaweedFS refused).
+- Local mode (single-host container runtime).
+
+### Changed
+- Polaris 1.6.0, Spark Operator 2.5.1, kube-prometheus-stack chart pinned
+  (87.19.2).
+- S3A sets `fs.s3a.endpoint.region` on every job (LB-052).
+- Documented cluster minimums come from `compute_peak_requirements()`
+  (LB-050).
+- Iceberg runtime chosen by Spark and Iceberg version; Iceberg 1.11 with a
+  Java 11 Spark image is refused at config time.
 
 ## [1.3.1] - 2026-04-05
 
