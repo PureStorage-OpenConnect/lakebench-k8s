@@ -213,5 +213,16 @@ def test_a_small_full_pin_fails_exactly():
 
 def test_a_thin_normaliser_cannot_cancel_a_cliff():
     t = _tool()
-    # 2.5x cliff in dormancy, divided by a noisy 5/12 baseline, used to PASS.
-    assert t._ratio_verdict(40, 100, 2.0, (5, 12))[0] == "INSUFFICIENT"
+    # 2.5x cliff in dormancy, divided by a noisy 5/12 baseline, used to PASS;
+    # the thin baseline is now ignored and the cliff stands on its own.
+    assert t._ratio_verdict(40, 100, 2.0, (5, 12))[0] == "FAIL"
+    # A mild excess with a thin baseline is not certified either way.
+    assert t._ratio_verdict(40, 60, 2.0, (5, 12))[0] == "INSUFFICIENT"
+
+
+def test_normalised_small_pin_fails_exactly():
+    t = _tool()
+    # Dormancy fully pinned above 90 d against a healthy baseline.
+    assert t._ratio_verdict(0, 20, 2.0, (500, 500))[0] == "FAIL"
+    # A gross cliff with a thin baseline still FAILs on its own.
+    assert t._ratio_verdict(0, 500, 2.0, (5, 12))[0] == "FAIL"

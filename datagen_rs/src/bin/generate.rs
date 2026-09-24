@@ -612,7 +612,8 @@ fn pacs008_main() {
             // this cycle when any of its rows does, so a row whose mass sits
             // within rounding of a boundary is never dropped by both cycles.
             .filter(|&fid| {
-                base_start(fid).max(slice_i0) < base_start(fid + 1).min(slice_i1)
+                cycles == 1
+                    || base_start(fid).max(slice_i0) < base_start(fid + 1).min(slice_i1)
                     || typ_by_file[fid as usize]
                         .iter()
                         .any(|r| in_slice(gcal.mass_at(r.ts_us)))

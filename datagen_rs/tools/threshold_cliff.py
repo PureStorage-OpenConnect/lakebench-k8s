@@ -231,35 +231,38 @@ def _ratio_verdict(
     Without a baseline, a thin window is tested exactly: the larger side's
     count against Binomial(n_lo + n_hi, limit / (1 + limit)), the split at
     exactly the limit, so a pin (0 against N) FAILs from N of about 17.
-    With a baseline (day-of-week matched gaps), both ratios are divided by
-    the baseline's over the same bins and tested on the log scale, and the
-    baseline must itself have MIN_COUNT rows a side, or a thin normaliser
-    could cancel a real cliff.
+    With a baseline (day-of-week matched gaps), the ratio is divided by the
+    baseline's over the same bins, and a thin window is tested exactly
+    against the baseline-adjusted split. The baseline must itself have
+    MIN_COUNT rows a side, or a thin normaliser could cancel a real cliff;
+    without that, only an unnormalised exact FAIL counts.
     """
     if n_lo + n_hi == 0:
         return "INSUFFICIENT", float("nan")
     a, b = max(n_lo, 0.5), max(n_hi, 0.5)
     r = b / a
+    rb = 1.0
     if base is not None:
         if min(base) < MIN_COUNT:
-            return "INSUFFICIENT", float("nan")
-        r = r / (base[1] / base[0])
-        se = math.sqrt(1 / a + 1 / b + 1 / base[0] + 1 / base[1])
-        lr = abs(math.log(r))
-        if lr > math.log(limit) and lr / se > Z_SIGNIFICANT:
-            return "FAIL", r
-        if min(n_lo, n_hi) < MIN_COUNT:
-            return "INSUFFICIENT", r
-        return ("PASS" if lr <= math.log(limit) else "INSUFFICIENT"), r
+            # A thin normaliser cannot certify anything: only a cliff that
+            # stands without it (tested exactly below) may FAIL.
+            v, r0 = _ratio_verdict(n_lo, n_hi, limit)
+            return ("FAIL" if v == "FAIL" else "INSUFFICIENT"), r0
+        rb = base[1] / base[0]
+        r = r / rb
     lr = abs(math.log(r))
     if lr > math.log(limit):
         if min(n_lo, n_hi) < MIN_COUNT:
-            big, n = max(n_lo, n_hi), n_lo + n_hi
-            if _binom_tail(big, n, limit / (1 + limit)) < P_SIGNIFICANT:
+            # Exact: the larger side against the split a ratio of exactly
+            # limit (times the baseline ratio, when normalised) would give.
+            r0 = limit * rb if r > 1 else rb / limit
+            p_hi = r0 / (1 + r0)
+            k, p = (n_hi, p_hi) if r > 1 else (n_lo, 1 - p_hi)
+            if _binom_tail(k, n_lo + n_hi, p) < P_SIGNIFICANT:
                 return "FAIL", r
             return "INSUFFICIENT", r
-        se = math.sqrt(1 / a + 1 / b)
-        return ("FAIL" if lr / se > Z_SIGNIFICANT else "INSUFFICIENT"), r
+        var = 1 / a + 1 / b + ((1 / base[0] + 1 / base[1]) if base is not None else 0.0)
+        return ("FAIL" if lr / math.sqrt(var) > Z_SIGNIFICANT else "INSUFFICIENT"), r
     if min(n_lo, n_hi) < MIN_COUNT:
         return "INSUFFICIENT", r
     return "PASS", r
@@ -392,8 +395,10 @@ def main(root: str) -> int:
                 atom_p = res["atom"]
                 n_p = res["window"][0] + res["window"][1] + atom_p
             else:
-                ca = counter(table, col, atom_where)
-                atom_p, n_p = ca(t, t, exact=True), ca(t * (1 - w), t * (1 + w))
+                # The atom counts every planted row at t; the window keeps
+                # the exempt band out, so it cannot dilute the share.
+                atom_p = counter(table, col, atom_where)(t, t, exact=True)
+                n_p = res["window"][0] + res["window"][1] + atom_p
             res["atom"] = atom_p
             av = atom_verdict(atom_p, n_p, cb(t, t, exact=True), n_b, rmax)
             res["atom_verdict"] = av
@@ -443,16 +448,9 @@ def main(root: str) -> int:
         "(tid, ts) IN (SELECT tid, min(ts) FROM g "
         "WHERE typ = 'dormant_reactivation' AND pos > 1 GROUP BY tid)"
     )
-    run(
-        f"W8 gap {tg:g} d",
-        "dormancy",
-        "g",
-        "gap_days",
-        first_burst,
-        tg,
-        norm=base_gaps,
-        base=base_gaps,
-    )
+    # No atom check here: gaps are continuous (seconds), so no pin lands
+    # exactly on 90.000 days; the window tests carry the gap check.
+    run(f"W8 gap {tg:g} d", "dormancy", "g", "gap_days", first_burst, tg, norm=base_gaps)
     ff = th["w2_floor_factor"]
     for ccy, t in th["w2"].items():
         where = f"ccy = '{ccy}' AND (typ IS NULL OR typ NOT IN ({exempt}))"

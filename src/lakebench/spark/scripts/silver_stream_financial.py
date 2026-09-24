@@ -125,11 +125,17 @@ def _kyc(spark):
     if _KYC_LOADED:
         return _KYC
     deadline = time.time() + KYC_WAIT_S
+    extended = False
     while True:
         party, account = reference_frames(spark)
         if party is not None and account is not None:
             break
         if time.time() >= deadline:
+            if account is not None and not extended:
+                # Account is written before party: party is still uploading
+                # (5-10 GB at scale 1000). Give it one more wait.
+                deadline, extended = time.time() + KYC_WAIT_S, True
+                continue
             party, account = _read_reference(spark)
             break
         log(f"[kyc] party/account masters not there yet; waiting (up to {KYC_WAIT_S}s)")
@@ -154,8 +160,10 @@ def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
     new_accts = accts.join(have_a, accts["iban"] == have_a["_have"], "left_anti")
     # One small file per table per batch, not one per shuffle partition: the
     # dimensions are append-only in continuous mode and nothing compacts them.
-    new_ents = new_ents.coalesce(1).cache()
-    new_accts = new_accts.coalesce(1).cache()
+    # repartition, not coalesce: coalesce would pull the anti-join itself into
+    # one task, and the first batch carries nearly every entity.
+    new_ents = new_ents.repartition(1).cache()
+    new_accts = new_accts.repartition(1).cache()
     try:
         n_e, n_a = new_ents.count(), new_accts.count()
         if n_e:
