@@ -36,6 +36,7 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     array,
     array_distinct,
+    array_sort,
     col,
     collect_list,
     collect_set,
@@ -46,6 +47,8 @@ from pyspark.sql.functions import (
     lit,
     map_from_arrays,
     row_number,
+    size,
+    struct,
     to_timestamp,
     when,
 )
@@ -480,6 +483,8 @@ def w1_connected_components(
     max_iterations: int = 20,
     max_vertices: int = 5_000_000,
     run_id: str = "unknown",
+    max_cluster_size: int = 1000,
+    max_txns_per_alert: int = 10_000,
 ) -> DataFrame:
     """Undirected connected components over the entity graph induced by
     silver.transactions. Emits one alert per component whose vertex count
@@ -519,6 +524,15 @@ def w1_connected_components(
             an unhelpful multi-hour replay. Default 5M; operator
             raises it when they have the executor budget.
         run_id: opaque id written into every alert row.
+        max_cluster_size: components larger than this are not emitted. On
+            the full transaction graph the baseline counterparty rings join
+            most entities into one giant component; as an alert it named
+            every transaction in the corpus (a single row past Spark's 2 GB
+            limit at scale 10) and no investigator could work it. They are
+            counted and logged instead.
+        max_txns_per_alert: cap on related_txn_ids per alert (earliest
+            first); the evidence map records the total and whether the list
+            was truncated.
 
     Returns:
         DataFrame with the gold.alerts schema. Empty when no component
@@ -578,7 +592,12 @@ def w1_connected_components(
         # emit a false "hit max_iterations without convergence" warning.
         return _empty_alerts_df(spark, run_id)
 
-    labels = vertices.withColumn("label", col("id")).cache()
+    # localCheckpoint (eager) rather than cache: it materialises AND cuts the
+    # lineage. With cache each iteration's plan embedded the previous one, so
+    # the plan (and its string form, built for every query event) grew with
+    # every round; the driver ran out of heap building it (reproduced in the
+    # executed W1 test) and planning time grew each iteration.
+    labels = vertices.withColumn("label", col("id")).localCheckpoint()
 
     converged = False
     for _iteration in range(max_iterations):
@@ -602,7 +621,7 @@ def w1_connected_components(
             .unionByName(neighbour_labels)
             .groupBy("id")
             .agg(_min("label").alias("label"))
-            .cache()
+            .localCheckpoint()
         )
         # Convergence check: per-vertex label deltas, not distinct-label
         # count. A component that still has multiple live labels can
@@ -619,7 +638,6 @@ def w1_connected_components(
             .limit(1)
             .count()
         )
-        labels.unpersist(blocking=False)
         labels = new_labels
         if changed == 0:
             converged = True
@@ -634,13 +652,31 @@ def w1_connected_components(
 
     # Vertex -> component: labels is (id, label). Component = label.
     # Group by component to get its members.
+    # Sizes first; only components inside [min, max] are materialised, since
+    # collect_set over the giant component is itself an oversized row.
+    sizes = labels.groupBy(col("label").alias("component")).agg(
+        count(lit(1)).alias("component_size")
+    )
+    giant = (
+        sizes.filter(col("component_size") > max_cluster_size)
+        .agg(count(lit(1)).alias("n"), max_("component_size").alias("largest"))
+        .collect()[0]
+    )
+    if giant["n"]:
+        print(
+            f"[W1] {giant['n']} component(s) above max_cluster_size={max_cluster_size} "
+            f"not emitted (largest {giant['largest']} entities)"
+        )
+    qualifying = sizes.filter(
+        (col("component_size") >= min_cluster_size) & (col("component_size") <= max_cluster_size)
+    )
     components = (
-        labels.groupBy(col("label").alias("component"))
+        labels.join(qualifying, labels["label"] == qualifying["component"], "inner")
+        .groupBy("component")
         .agg(
             collect_set(col("id")).alias("entity_ids"),
-            count(lit(1)).alias("component_size"),
+            max_("component_size").alias("component_size"),
         )
-        .filter(col("component_size") >= min_cluster_size)
     )
 
     # For each qualifying component, gather the transactions that
@@ -652,15 +688,30 @@ def w1_connected_components(
     # appeared once under src_hits and once under dst_hits, then
     # collect_list->distinct dedup'd on the reduce side). Single
     # equi-join, each edge counted once, no dedup shuffle.
-    edges_tagged = edges.join(
-        labels.select(col("id").alias("_src"), col("label").alias("component")),
-        edges["src"] == col("_src"),
-        "inner",
-    ).select(col("component"), col("uetr"), col("txn_timestamp"))
-    edge_aggs = edges_tagged.groupBy("component").agg(
-        array_distinct(collect_list("uetr")).alias("related_txn_ids"),
-        min_("txn_timestamp").alias("first_ts"),
-        max_("txn_timestamp").alias("last_ts"),
+    edges_tagged = (
+        edges.join(
+            labels.select(col("id").alias("_src"), col("label").alias("component")),
+            edges["src"] == col("_src"),
+            "inner",
+        )
+        .join(qualifying.select("component"), "component", "left_semi")
+        .select(col("component"), col("uetr"), col("txn_timestamp"))
+    )
+    edge_aggs = (
+        edges_tagged.groupBy("component")
+        .agg(
+            array_sort(
+                array_distinct(collect_list(struct(col("txn_timestamp"), col("uetr"))))
+            ).alias("_txns"),
+            min_("txn_timestamp").alias("first_ts"),
+            max_("txn_timestamp").alias("last_ts"),
+        )
+        .withColumn("txn_total", size(col("_txns")))
+        .withColumn(
+            "related_txn_ids",
+            expr(f"transform(slice(_txns, 1, {int(max_txns_per_alert)}), t -> t.uetr)"),
+        )
+        .drop("_txns")
     )
     # Bring the components metadata back for alert construction. Inner
     # join on component drops any component_size < min_cluster_size
@@ -707,6 +758,9 @@ def w1_connected_components(
                 lit("max_iterations"),
                 lit("max_vertices"),
                 lit("converged"),
+                lit("max_cluster_size"),
+                lit("txn_total"),
+                lit("txns_truncated"),
             ),
             array(
                 lit("W1_connected_components"),
@@ -714,6 +768,9 @@ def w1_connected_components(
                 lit(str(max_iterations)),
                 lit(str(max_vertices)),
                 lit("true" if converged else "false"),
+                lit(str(max_cluster_size)),
+                col("txn_total").cast("string"),
+                (col("txn_total") > lit(int(max_txns_per_alert))).cast("string"),
             ),
         ).alias("evidence"),
         # LB-125: wall-clock at rule execution. Batch = detection time;
@@ -722,13 +779,9 @@ def w1_connected_components(
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
-    # Return the alerts plan with ``labels`` still cached. Everything
-    # downstream (components + edges_tagged + alerts) is a lazy plan
-    # rooted at labels; unpersisting here would force a 2x
-    # recomputation of the entire 20-iteration min-propagation loop
-    # on the caller's first action (round-2 adversarial finding).
-    # The Spark driver exits after the job, so the cache is released
-    # by JVM shutdown.
+    # ``labels`` is checkpointed, so everything downstream (components,
+    # edges_tagged, alerts) reads the materialised labels rather than
+    # recomputing the propagation loop.
     return alerts
 
 
