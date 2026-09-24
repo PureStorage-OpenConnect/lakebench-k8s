@@ -270,6 +270,9 @@ def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
     txns, ents, id_map = af.bronze_frames(
         spark, pacs_path=pacs, party_path=party_path, account_path=acct
     )
+    assert af.duplicate_ibans(spark, acct) == 0
+    dup = _write(spark, ACCOUNTS + [(4, "IB5")], ACCOUNT_SCHEMA, tmp_path / "acct-dup")
+    assert af.duplicate_ibans(spark, dup) == 1
     assert dict(id_map.select("dg_id", "key").collect()) == {i: i for i in range(1, 7)}
     keys = {r["orig_key"] for r in txns.collect()} | {r["bene_key"] for r in txns.collect()}
     assert keys == {1, 2, 3, 4, 5, 6, None}
@@ -402,10 +405,15 @@ def test_manifest_glob_reads_every_cycle_and_nothing_else(spark, tmp_path):
         ("manifest.parquet", "STACK_7_0000000"),
         ("manifest-c001.parquet", "STACK_7_0000001"),
         ("manifest-backup.parquet", "STACK_7_0000002"),
+        ("manifest-c1000.parquet", "STACK_7_0000003"),
     ):
         spark.createDataFrame([(tid, "stack", 1)], schema).write.parquet(str(d / name))
-    got = spark.read.parquet(af.manifest_glob(str(d / "manifest.parquet")))
-    assert sorted(r["typology_id"] for r in got.collect()) == ["STACK_7_0000000", "STACK_7_0000001"]
+    want = ["STACK_7_0000000", "STACK_7_0000001", "STACK_7_0000003"]
+    # Same rows whether the caller passes cycle 0's path or the cluster's glob.
+    for uri in (str(d / "manifest.parquet"), str(d / "manifest*.parquet")):
+        got = af.read_manifest(spark, uri)
+        assert sorted(r["typology_id"] for r in got.collect()) == want
+        assert got.columns == ["typology_id", "typology_type", "seed"]
     af.check_manifest(got)
     with pytest.raises(ValueError, match="repeat typology_id"):
         af.check_manifest(got.unionByName(got))
@@ -421,7 +429,9 @@ def test_corpus_seed_check(spark):
         return v - (1 << 64) if v >= 1 << 63 else v  # stored as i64
 
     rows = [(f"DORMANT_REACTIVATION_11_{j:07d}", iseed(42, 11, j)) for j in range(5)]
-    m = spark.createDataFrame(rows, "typology_id string, seed long")
+    m = spark.createDataFrame(
+        rows + [(None, 5), ("X_1_0000000", None)], "typology_id string, seed long"
+    )
     assert af.corpus_seed_check(m, 42)["matched_share"] == 1.0
     assert af.corpus_seed_check(m, 50000042)["matched_share"] == 0.0
     assert af.corpus_seed_check(m, None)["matched_share"] is None

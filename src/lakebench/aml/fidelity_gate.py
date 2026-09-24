@@ -136,7 +136,13 @@ def _jobs() -> int:
         jobs = int(os.environ.get("LB_AML_GATE_JOBS", ""))
     except ValueError:
         jobs = 0
-    return jobs if jobs > 0 else (os.cpu_count() or 1)
+    if jobs > 0:
+        return jobs
+    from joblib import cpu_count
+
+    # joblib's count honours the pod's CPU quota and affinity; os.cpu_count()
+    # would return every core on the node.
+    return cpu_count()
 
 
 def _oof_scores(make_model, X, y, w, folds):

@@ -444,11 +444,25 @@ def manifest_glob(uri: str) -> str:
     """Every cycle's manifest next to ``uri``: a multi-cycle corpus writes
     manifest.parquet for cycle 0 and manifest-cNNN.parquet for the rest
     (datagen_rs::cycle::ref_key), and silver holds every cycle's rows."""
-    base = "manifest.parquet"
-    if uri.rstrip("/").endswith(base):
-        # Only the generator's names: manifest.parquet and manifest-cNNN.parquet.
-        return uri.rstrip("/")[: -len(base)] + "manifest{.parquet,-c[0-9][0-9][0-9].parquet}"
+    u = uri.rstrip("/")
+    for base in ("manifest.parquet", "manifest*.parquet"):
+        if u.endswith(base):
+            return u[: -len(base)] + "manifest*.parquet"
     return uri
+
+
+#: The generator's manifest names: manifest.parquet and manifest-cNNN.parquet,
+#: NNN at least three digits (cycle.rs formats {cycle:03}, a minimum width).
+_MANIFEST_NAME = r"(^|/)manifest(-c[0-9]{3,})?\.parquet(/[^/]*)?$"
+
+
+def read_manifest(spark, uri: str) -> DataFrame:
+    """Every cycle's manifest next to ``uri`` and nothing else: the glob is
+    broad (manifest*.parquet) and each row is kept only if its source file has
+    one of the generator's names, so a manifest-backup.parquet is ignored and
+    cycle 1000+ is not."""
+    df = spark.read.parquet(manifest_glob(uri))
+    return df.filter(col("_metadata.file_path").rlike(_MANIFEST_NAME)).select(*df.columns)
 
 
 def check_manifest(manifest: DataFrame) -> None:
@@ -468,12 +482,19 @@ def corpus_seed_check(manifest: DataFrame, seed) -> dict:
 
     datagen_rs::typology::schedule_ex derives iseed = splitmix64(seed ^
     splitmix64(0xF100 + tid * TID_SEED_STRIDE + j)), with tid and j in the
-    typology_id. Cycle n > 0 mixes the seed per cycle, so only a share of a
-    multi-cycle manifest matches; a single-cycle corpus matches fully.
+    typology_id. The pacs.008 driver schedules once with the raw --seed and
+    splits instances across cycle manifests afterwards, so a right seed
+    matches every row, multi-cycle or not.
     """
     if seed is None:
         return {"claimed_seed": None, "matched_share": None}
-    rows = manifest.select("typology_id", "seed").limit(_SEED_CHECK_ROWS).collect()
+    rows = (
+        manifest.select("typology_id", "seed")
+        .filter(col("typology_id").isNotNull() & col("seed").isNotNull())
+        .orderBy("typology_id")
+        .limit(_SEED_CHECK_ROWS)
+        .collect()
+    )
     hit = 0
     for r in rows:
         _, tid, j = r["typology_id"].rsplit("_", 2)
@@ -589,7 +610,7 @@ def bronze_frames(spark, *, pacs_path: str, party_path: str, account_path: str):
 
     p = spark.read.parquet(pacs_path)
     # One holder per IBAN (min, deterministic) so a duplicate IBAN in the
-    # master cannot duplicate payment rows.
+    # master cannot duplicate payment rows; duplicate_ibans() counts them.
     holder = (
         spark.read.parquet(account_path)
         .select(col("iban"), col("holder_entity_id").cast("long").alias("_holder"))
@@ -642,6 +663,19 @@ def bronze_frames(spark, *, pacs_path: str, party_path: str, account_path: str):
 # ---------------------------------------------------------------------------
 # Hand-off to the pure-Python gate
 # ---------------------------------------------------------------------------
+
+
+def duplicate_ibans(spark, account_path: str) -> int:
+    """IBANs held by more than one entity in the account master. The bronze
+    adapter settles them on the smaller holder id, so any nonzero count means
+    its ground truth is not exact."""
+    a = spark.read.parquet(account_path)
+    return int(
+        a.groupBy("iban")
+        .agg(countDistinct("holder_entity_id").alias("_n"))
+        .filter(col("_n") > lit(1))
+        .count()
+    )
 
 
 def unkeyed_rows(txns: DataFrame) -> int:

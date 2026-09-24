@@ -104,7 +104,7 @@ def main(argv=None) -> int:
     t0 = time.time()
     try:
         manifest_src = af.manifest_glob(str(corpus / "manifest/manifest.parquet"))
-        manifest = spark.read.parquet(manifest_src)
+        manifest = af.read_manifest(spark, manifest_src)
         af.check_manifest(manifest)
         seed_check = af.corpus_seed_check(manifest, args.seed)
         txns, ents, id_map = af.bronze_frames(
@@ -128,6 +128,7 @@ def main(argv=None) -> int:
         )
         density = af.typology_density(txns, manifest)
         unkeyed = af.unkeyed_rows(txns)
+        dup_ibans = af.duplicate_ibans(spark, str(corpus / "bronze/account.parquet"))
         cust_keys = features.filter(col("is_customer")).select("key")
         agreement = af.label_agreement(
             by_participant.join(cust_keys, "key", "left_semi"),
@@ -140,6 +141,7 @@ def main(argv=None) -> int:
             "label_role": role,
             "label_role_overridden": role != registered_role,
             "unkeyed_rows": unkeyed,
+            "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
             "aml_features_sha256": af.source_sha256(),
             "corpus": str(corpus),
@@ -162,10 +164,13 @@ def main(argv=None) -> int:
         provenance={**prov, "spark_seconds": round(t_spark, 1)},
     )
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
-    if args.seed is not None and not seed_check["matched_share"]:
+    seed_ok = seed_check["matched_share"] == 1
+    if args.seed is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
-        add_pass(report, "corpus_fully_keyed", unkeyed == 0)
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
+        if args.seed is not None:
+            add_pass(report, "corpus_seed_verified", seed_ok)
         # A diagnostic run under another label role is never a pass.
         add_pass(report, "registered_label_role", role == registered_role)
     for line in summary_lines(report):
