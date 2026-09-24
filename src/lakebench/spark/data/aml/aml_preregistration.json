@@ -1,6 +1,6 @@
 {
   "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate script loads this file; AML-GOALS.md describes it. Changing any value after a gate run requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a. Every numeric gate in AML-GOALS.md must have a key here (enforced by test).",
-  "version": "3.3",
+  "version": "3.3.1",
   "registered": "2026-09-24",
   "metric": "average_precision",
   "unit_of_scoring": {
@@ -11,7 +11,9 @@
   "cv": {
     "folds": 5,
     "stratified": true,
-    "seed": 7
+    "seed": 7,
+    "group_by": "customer",
+    "note": "StratifiedKFold when every row is its own customer, StratifiedGroupKFold otherwise; the bootstrap resamples customers"
   },
   "reference_model": {
     "estimator": "HistGradientBoostingClassifier",
@@ -23,7 +25,8 @@
   "shortcut_model": {
     "estimator": "DecisionTreeClassifier",
     "max_depth": 2,
-    "single_feature_also_scores_raw_rank": true
+    "single_feature_also_scores_raw_rank": true,
+    "raw_rank": "out of fold: direction chosen on the training folds, within-fold percentile ranks pooled"
   },
   "corpora": {
     "calibration_seed": 42,

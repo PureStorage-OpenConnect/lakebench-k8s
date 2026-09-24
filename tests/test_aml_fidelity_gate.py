@@ -292,11 +292,16 @@ def test_high_risk_countries_match_generator_corridor_pool():
 
 def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
-    assert p["version"] == "3.3"
+    assert p["version"] == "3.3.1"
     assert p["band"] == {**p["band"], "ap_min": 0.3, "ap_max": 0.8}
     assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
     assert p["shortcut_model"]["max_depth"] == 2
-    assert p["cv"] == {"folds": 5, "stratified": True, "seed": 7}
+    assert {k: p["cv"][k] for k in ("folds", "stratified", "seed")} == {
+        "folds": 5,
+        "stratified": True,
+        "seed": 7,
+    }
+    assert p["cv"]["group_by"] == "customer"
 
 
 def test_load_preregistration_prefers_flat_copy(tmp_path, monkeypatch):
@@ -395,3 +400,47 @@ def test_runner_version_check_reads_job_pins():
     assert runner.version_mismatches(off) == {
         "scikit-learn": {"pinned": pins["scikit-learn"], "installed": "0.0"}
     }
+
+
+def test_rank_shortcut_pools_folds_that_chose_different_directions():
+    """Each fold is right in its own direction; pooled on one scale the
+    shortcut stays near perfect. Pooling raw signed scores put every row of the
+    flipped fold (a nonnegative feature, negated) below every row of the other."""
+    n = 400
+    y = np.zeros(n, dtype=int)
+    y[::10] = 1
+    x = np.where(y == 1, 5.0, 1.0)
+    half = np.arange(n) >= n // 2
+    x[half] = np.where(y[half] == 1, 1.0, 5.0)  # second half: positives low
+    w = np.ones(n)
+    a, b = np.where(~half)[0], np.where(half)[0]
+    folds = [(a, a), (b, b)]
+    ap = fg._ap(y, fg._oof_rank_scores(x, y, w, folds), w)
+    assert ap > 0.9
+
+
+def test_unique_groups_keep_stratified_kfold():
+    from sklearn.model_selection import StratifiedKFold
+
+    y = (np.random.default_rng(1).random(500) < 0.1).astype(int)
+    p = _prereg()
+    got = fg._folds(y, np.arange(500), p)
+    want = StratifiedKFold(n_splits=p["cv"]["folds"], shuffle=True, random_state=p["cv"]["seed"])
+    for (_tr, te), (_tr2, te2) in zip(got, want.split(y.reshape(-1, 1), y), strict=True):
+        assert (te == te2).all()
+
+
+def test_single_class_training_fold_does_not_crash():
+    X = np.zeros((10, 1))
+    y = np.array([1, 1, 0, 0, 0, 0, 0, 0, 0, 0])
+    w = np.ones(10)
+    folds = [(np.arange(2, 10), np.arange(0, 2)), (np.arange(0, 10), np.arange(2, 10))]
+    oof = fg._oof_scores(lambda: fg._reference_model(_prereg()), X, y, w, folds)
+    assert (oof[:2] == 0.0).all()
+
+
+def test_null_group_is_refused():
+    df = _frame()
+    df["group"] = None
+    with pytest.raises(ValueError, match="NULL group"):
+        fg.evaluate_gate(df, _prereg())

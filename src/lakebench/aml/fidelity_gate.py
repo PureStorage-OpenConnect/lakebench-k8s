@@ -128,14 +128,22 @@ def _shortcut_model(prereg: dict):
 
 
 def _folds(y, groups, prereg: dict):
-    """Stratified folds that never split a group (StratifiedGroupKFold)."""
-    from sklearn.model_selection import StratifiedGroupKFold
+    """Stratified folds that never split a group. With one row per group this
+    is plain StratifiedKFold (same folds, and StratifiedGroupKFold's per-group
+    loop costs minutes at a million customers); otherwise
+    StratifiedGroupKFold. Both take the pre-registered folds and seed."""
+    import numpy as np
+    from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
 
     cv = prereg["cv"]
     if not cv["stratified"]:
         raise ValueError("the pre-registered CV is stratified; stratified=false is not implemented")
-    skf = StratifiedGroupKFold(n_splits=cv["folds"], shuffle=True, random_state=cv["seed"])
-    return list(skf.split(y.reshape(-1, 1), y, groups))
+    X = y.reshape(-1, 1)
+    if len(np.unique(groups)) == len(y):
+        skf = StratifiedKFold(n_splits=cv["folds"], shuffle=True, random_state=cv["seed"])
+        return list(skf.split(X, y))
+    sgkf = StratifiedGroupKFold(n_splits=cv["folds"], shuffle=True, random_state=cv["seed"])
+    return list(sgkf.split(X, y, groups))
 
 
 def _ap(y, score, w):
@@ -172,6 +180,11 @@ def _oof_scores(make_model, X, y, w, folds):
 
     oof = np.zeros(len(y), dtype=float)
     for train, test in folds:
+        if len(np.unique(y[train])) < 2:
+            # A group holding every positive can leave a training fold with
+            # one class; score its test fold as the training prevalence.
+            oof[test] = float(np.average(y[train], weights=w[train]))
+            continue
         m = make_model()
         m.fit(X[train], y[train], sample_weight=w[train])
         oof[test] = m.predict_proba(X[test])[:, 1]
@@ -180,9 +193,13 @@ def _oof_scores(make_model, X, y, w, folds):
 
 def _oof_rank_scores(x, y, w, folds):
     """The raw feature as a score, out of fold: each fold's direction is the
-    better one on its training folds, applied to its test fold. NaN ranks
+    better one on its training folds, applied to its test fold, and the test
+    fold's scores are turned into within-fold percentile ranks so folds that
+    chose different directions pool on one scale (raw signed values would put
+    every row of a flipped fold below every row of the others). NaN ranks
     lowest in either direction (the fill uses feature values only, no labels)."""
     import numpy as np
+    from scipy.stats import rankdata
 
     finite = np.isfinite(x)
     if not finite.any():
@@ -194,7 +211,8 @@ def _oof_rank_scores(x, y, w, folds):
     oof = np.zeros(len(x), dtype=float)
     for train, test in folds:
         better_up = _ap(y[train], up[train], w[train]) >= _ap(y[train], down[train], w[train])
-        oof[test] = up[test] if better_up else down[test]
+        s = up[test] if better_up else down[test]
+        oof[test] = rankdata(s, method="average") / len(s)
     return oof
 
 
@@ -509,9 +527,12 @@ def evaluate_gate(
         if "weight" in frame.columns
         else np.ones(len(frame), dtype=float)
     )
-    groups = (
-        frame[GROUP_COLUMN].to_numpy() if GROUP_COLUMN in frame.columns else np.arange(len(frame))
-    )
+    if GROUP_COLUMN in frame.columns:
+        if frame[GROUP_COLUMN].isna().any():
+            raise ValueError(f"gate frame has NULL {GROUP_COLUMN} values")
+        groups = frame[GROUP_COLUMN].to_numpy()
+    else:
+        groups = np.arange(len(frame))
     report["n_groups"] = int(len(np.unique(groups)))
     per = {}
     for t in typologies:

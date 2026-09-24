@@ -308,13 +308,13 @@ def run_fidelity_gate(
             "label_route_agreement_customers": agreement,
         },
     )
+    seed_ok = seed_check["matched_share"] == 1
+    if seed_check["claimed_seed"] is not None and not seed_ok:
+        report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
         add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
         if seed_check["claimed_seed"] is not None:
-            seed_ok = seed_check["matched_share"] == 1
             add_pass(report, "corpus_seed_verified", seed_ok)
-            if not seed_ok:
-                report["corpus_role"] = "unverified"
     return report
 
 
