@@ -10,6 +10,7 @@ from rich.panel import Panel
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.cli._helpers import (
+    DEPRECATED_SHORT_F_HELP,
     _journal_safe,
     console,
     journal_open,
@@ -18,6 +19,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
     resolve_config_path,
+    warn_deprecated_short_f,
 )
 from lakebench.config import (
     ConfigError,
@@ -55,9 +57,14 @@ def clean(
         bool,
         typer.Option(
             "--force",
-            "-f",
+            "--yes",
+            "-y",
             help="Skip confirmation prompt",
         ),
+    ] = False,
+    force_short_f: Annotated[
+        bool,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
     force_legacy: Annotated[
         bool,
@@ -103,6 +110,9 @@ def clean(
       metrics - Delete local metrics/runs directory
       journal - Delete all journal session files
     """
+    if force_short_f:
+        warn_deprecated_short_f("--yes / -y (or --force)")
+        force = True
     target = target.lower().strip()
     if target not in CLEAN_TARGETS:
         print_error(f"Invalid target: '{target}'. Must be one of: {', '.join(CLEAN_TARGETS)}")

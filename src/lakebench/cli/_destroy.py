@@ -22,6 +22,7 @@ from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
 from ._helpers import (
+    DEPRECATED_SHORT_F_HELP,
     _journal_safe,
     console,
     journal_open,
@@ -29,6 +30,7 @@ from ._helpers import (
     print_info,
     print_success,
     resolve_config_path,
+    warn_deprecated_short_f,
 )
 
 
@@ -113,9 +115,14 @@ def destroy(
         bool,
         typer.Option(
             "--force",
-            "-f",
+            "--yes",
+            "-y",
             help="Skip confirmation prompt",
         ),
+    ] = False,
+    force_short_f: Annotated[
+        bool,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
     local: Annotated[
         bool,
@@ -174,6 +181,9 @@ def destroy(
 
     Removes all Lakebench resources from the cluster.
     """
+    if force_short_f:
+        warn_deprecated_short_f("--yes / -y (or --force)")
+        force = True
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
     config_file = resolve_config_path(config_file, file_option)
