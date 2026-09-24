@@ -95,12 +95,20 @@ pub fn native_amount(rng: &mut Rng, mu_shift: f64, ccy: &str) -> f64 {
         } else {
             10f64.powf((step_usd / fx).log10().round()).max(1.0)
         };
-        (raw / step).round() * step
+        // A payment smaller than half the step would round to 0.00; nobody
+        // rounds a $30 payment to nothing, so small amounts keep their value.
+        let snapped = (raw / step).round() * step;
+        if snapped > 0.0 {
+            snapped
+        } else {
+            raw
+        }
     } else {
         raw
     };
     let m = minor_units(ccy);
-    (amt * m).round() / m
+    // Never below one minor unit: a zero-value payment is not a payment.
+    ((amt * m).round() / m).max(1.0 / m)
 }
 
 /// Amount tight against the local structuring band.
@@ -139,7 +147,8 @@ pub fn forwarded_amount(rng: &mut Rng, prev_usd: f64, ccy: &str) -> f64 {
     let skim = SKIM_MIN + rng.unit() * (SKIM_MAX - SKIM_MIN);
     let usd = prev_usd * (1.0 - skim);
     let m = minor_units(ccy);
-    (usd / fx_to_usd(ccy) * m).round() / m
+    // At least one minor unit, so a long chain never forwards nothing.
+    ((usd / fx_to_usd(ccy) * m).round() / m).max(1.0 / m)
 }
 
 /// Amounts for one instance's rows, in row order. `ccy_of(orig)` and
