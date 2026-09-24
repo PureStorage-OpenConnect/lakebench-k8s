@@ -39,6 +39,24 @@ LABEL_PREFIX = "label:"
 #: its own group.
 GROUP_COLUMN = "group"
 
+#: Libraries whose versions the report records (A6 compares like with like).
+LIBRARIES = ("numpy", "scipy", "pandas", "sklearn", "joblib", "threadpoolctl", "pyspark")
+
+
+def library_versions() -> dict[str, str | None]:
+    """Python and library versions of this process; None when not importable."""
+    import importlib
+    import platform
+
+    out: dict[str, str | None] = {"python": platform.python_version()}
+    for name in LIBRARIES:
+        try:
+            out[name] = getattr(importlib.import_module(name), "__version__", None)
+        except ImportError:
+            out[name] = None
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Pre-registration
 # ---------------------------------------------------------------------------
@@ -464,6 +482,7 @@ def evaluate_gate(
         "prereg_sha256": prereg_sha256,
         "metric": prereg["metric"],
         "provenance": dict(provenance or {}),
+        "libraries": library_versions(),
         "corpus_role": corpus_role((provenance or {}).get("corpus_seed"), prereg),
         "features": features,
         "timing_mixture": _timing_mixture(timing_counts, prereg),

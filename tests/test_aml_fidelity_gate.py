@@ -370,8 +370,28 @@ def test_bootstrap_resamples_groups():
     assert fg._resample_rows(np.array([4, 4, 1]), order, start, length).tolist() == [4, 4, 1]
 
 
-def test_report_records_groups():
+def test_report_records_groups_and_libraries():
     df = _frame()
     df["group"] = np.arange(len(df)) // 3
     rep = fg.evaluate_gate(df, _prereg())
     assert rep["n_groups"] == len(df) // 3
+    libs = rep["libraries"]
+    assert libs["python"] and libs["sklearn"] and libs["numpy"]
+
+
+def test_runner_version_check_reads_job_pins():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("aml_gate_runner", RUNNER_SRC)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    pins = runner.pinned_deps()
+    assert pins["scikit-learn"] and pins["numpy"]
+    same = {"numpy": pins["numpy"], "scipy": pins["scipy"], "pandas": pins["pandas"]}
+    same |= {"sklearn": pins["scikit-learn"], "joblib": pins["joblib"]}
+    same["threadpoolctl"] = pins["threadpoolctl"]
+    assert runner.version_mismatches(same) == {}
+    off = {**same, "sklearn": "0.0"}
+    assert runner.version_mismatches(off) == {
+        "scikit-learn": {"pinned": pins["scikit-learn"], "installed": "0.0"}
+    }
