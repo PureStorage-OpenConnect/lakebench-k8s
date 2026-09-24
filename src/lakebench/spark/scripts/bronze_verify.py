@@ -20,29 +20,21 @@ _TS = ("timestamp", "timestamp_ntz")
 _STR = ("string",)
 _BOOL = ("boolean",)
 
-# Every column silver_build/gold_finalize read, plus the identifiers the
-# benchmark relies on, with the Spark type families accepted for each.
+# Columns silver_build or gold_finalize compute on, with the Spark type
+# families accepted for each. Missing or mistyped fails the job.
 REQUIRED_COLUMNS = {
-    "id": _INT,
-    "row_id": _INT,
     "event_timestamp": _TS,
-    "event_id": _STR,
-    "session_id": _STR,
     "customer_id": _INT,
+    "session_id": _STR,
     "email_raw": _STR,
     "phone_raw": _STR,
     "interaction_type": _STR,
-    "product_id": _STR,
-    "product_category": _STR,
     "transaction_amount": _NUM,
-    "currency": _STR,
     "channel": _STR,
     "device_type": _STR,
     "browser": _STR,
-    "ip_address": _STR,
     "city_raw": _STR,
     "state_raw": _STR,
-    "zip_code": _STR,
     "page_views": _INT,
     "time_on_site_seconds": _INT,
     "support_ticket_id": _STR,
@@ -54,6 +46,19 @@ REQUIRED_COLUMNS = {
     "points_earned": _INT,
     "points_redeemed": _INT,
     "data_quality_flag": _STR,
+}
+
+# Columns silver only carries through. ``schema: custom`` also runs this job,
+# so a missing or retyped one is a warning, not a failure.
+PASSTHROUGH_COLUMNS = {
+    "id": _INT,
+    "row_id": _INT,
+    "event_id": _STR,
+    "product_id": _STR,
+    "product_category": _STR,
+    "currency": _STR,
+    "ip_address": _STR,
+    "zip_code": _STR,
     "interaction_payload": _STR,
 }
 
@@ -66,18 +71,28 @@ def _family_ok(simple_type, allowed):
     return any(simple_type == a or simple_type.startswith(a + "(") for a in allowed)
 
 
+def _column_issues(types, columns, label):
+    issues = []
+    missing = [c for c in columns if c not in types]
+    if missing:
+        issues.append(f"missing {label} columns: {missing}")
+    for name, allowed in columns.items():
+        t = types.get(name)
+        if t is not None and not _family_ok(t, allowed):
+            issues.append(f"column {name} has type {t}, expected one of {list(allowed)}")
+    return issues
+
+
 def schema_problems(schema):
     """Missing or wrongly typed required columns, as messages."""
     types = {f.name: f.dataType.simpleString() for f in schema.fields}
-    problems = []
-    missing = [c for c in REQUIRED_COLUMNS if c not in types]
-    if missing:
-        problems.append(f"missing required columns: {missing}")
-    for name, allowed in REQUIRED_COLUMNS.items():
-        t = types.get(name)
-        if t is not None and not _family_ok(t, allowed):
-            problems.append(f"column {name} has type {t}, expected one of {list(allowed)}")
-    return problems
+    return _column_issues(types, REQUIRED_COLUMNS, "required")
+
+
+def schema_warnings(schema):
+    """Missing or retyped pass-through columns, as messages."""
+    types = {f.name: f.dataType.simpleString() for f in schema.fields}
+    return _column_issues(types, PASSTHROUGH_COLUMNS, "pass-through")
 
 
 def verify_bronze(df):
@@ -93,7 +108,7 @@ def verify_bronze(df):
     from pyspark.sql.functions import sum as sum_
 
     problems = schema_problems(df.schema)
-    warnings = []
+    warnings = schema_warnings(df.schema)
     present = set(df.columns)
 
     aggs = [count(lit(1)).alias("rows")]
@@ -181,7 +196,7 @@ def main() -> None:
     log("=" * 60)
     log("SAMPLE DATA (5 rows)")
     log("=" * 60)
-    df.select("event_id", "customer_id", "interaction_type", "channel", "city_raw").limit(5).show(
+    df.select("customer_id", "interaction_type", "channel", "city_raw").limit(5).show(
         truncate=False
     )
 
