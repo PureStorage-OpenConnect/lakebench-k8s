@@ -1,13 +1,14 @@
-# Recipe: polaris-iceberg-spark-financial (local mode, scale <= 1)
+# Recipe: polaris-iceberg-spark-thrift, AML workload at scale 1
 #
-# Developer-sanity Financial pipeline. Runs on a single host via podman
-# (ContainerRuntime) with Garage as the local S3 backend. Graph workloads
-# (W1 Connected Components, W2/W3 motifs, W4 Pregel) are EXCLUDED at
-# this scale -- they need GraphFrames + serious memory and belong on
-# cluster. Non-graph workloads (W6-W11) execute for basic recall coverage.
+# Small AML config for developer sanity on a single host. Local mode is
+# chosen on the command line, not in this file:
 #
-# Aligns with addendum A.5 (local-mode storage = Garage) and Q12 answer
-# (local scale <= 1, no graph workloads).
+#   lakebench config validate examples/polaris-iceberg-spark-financial-local.yaml --local
+#
+# reports whether local mode can run it. Earlier versions of this file carried
+# platform.local, platform.garage and architecture.workloads.excluded blocks;
+# no code read them, and lakebench now rejects unknown keys. No detection rule
+# is excluded by config: the graph rules (W1-W4) run like the rest.
 
 name: polaris-iceberg-financial-local
 recipe: polaris-iceberg-spark-thrift
@@ -20,9 +21,6 @@ images:
   pull_policy: IfNotPresent
 
 platform:
-  local:
-    runtime: podman              # ContainerRuntime dispatch (addendum A.3)
-
   storage:
     s3:
       endpoint: http://127.0.0.1:3900   # bundled Garage default
@@ -34,9 +32,6 @@ platform:
         bronze: lb-financial-bronze
         silver: lb-financial-silver
         gold: lb-financial-gold
-
-  garage:
-    enabled: true                # local-mode S3 substrate
 
 architecture:
   catalog:
@@ -75,11 +70,3 @@ architecture:
   query_engine:
     type: spark-thrift
 
-  # Explicit workload exclusions for local mode. The workload runner honours
-  # this list once ENG-2C.4.* lands the detection modules.
-  workloads:
-    excluded:
-      - W1_synthetic_id      # GraphFrames CC; heavy memory
-      - W2_structuring       # GraphFrames motif finding
-      - W3_round_tripping    # GraphFrames motif finding
-      - W4_risk_propagation  # GraphFrames Pregel
