@@ -1700,6 +1700,14 @@ def _run_sustained(
                         f"({len(rounds)} rounds)"
                     )
                     _print_rounds_summary(console, rounds)
+                    # Same rule as batch: a round with failed queries is not
+                    # a score (QpH counts only the queries that passed).
+                    from lakebench.cli._run import _benchmark_gate_problems
+
+                    for idx, rnd in enumerate(rounds, 1):
+                        for problem in _benchmark_gate_problems(cfg, rnd.queries):
+                            print_error(f"Round {idx}: {problem}")
+                            pipeline_success = False
             except Exception as e:
                 print_warning(f"Benchmark aggregation failed: {e}")
 
