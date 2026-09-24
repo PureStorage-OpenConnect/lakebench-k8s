@@ -1229,7 +1229,8 @@ fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
 #[test]
 fn customer_since_precedes_the_corpus_and_the_accounts() {
     use datagen_rs::kyc::{
-        account_opened_day, corpus_start_day, customer_since_day, days_from_civil,
+        account_opened_day, corpus_start_day, customer_since_day, days_from_civil, is_customer,
+        primary_opened_day,
     };
     assert_eq!(corpus_start_day(60), days_from_civil(2021, 1, 1));
     assert_eq!(corpus_start_day(18), days_from_civil(2024, 7, 1));
@@ -1237,8 +1238,19 @@ fn customer_since_precedes_the_corpus_and_the_accounts() {
     let mut sum = 0.0;
     for id in 1..=50_000u64 {
         let d = customer_since_day(id, 42, 60);
-        assert!(d < start && d <= account_opened_day(id));
+        let p = primary_opened_day(id, 42, 60);
+        assert!(d < start);
         assert!(d > start - (31.0 * 365.25) as i32);
+        // The payment account is open before the corpus starts, and a
+        // customer's is opened on or after onboarding.
+        assert!(
+            p < start,
+            "id {id}: payment account opened {p} >= corpus start"
+        );
+        if is_customer(id, 42) {
+            assert!(p >= d, "id {id}: account opened before customer_since");
+        }
+        assert!(account_opened_day(id, p) >= p);
         sum += (start - d) as f64 / 365.25;
     }
     let mean = sum / 50_000.0;
@@ -1519,4 +1531,28 @@ fn only_micro_structuring_draws_band_amounts() {
         let banded = emit_instance(inst).iter().any(|r| r.structuring);
         assert_eq!(banded, inst.typ == "micro_structuring", "{}", inst.id);
     }
+}
+
+#[test]
+fn customer_accounts_are_us_accounts() {
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::model::build_world;
+    let w = build_world(0.05, 42, 60);
+    let (mut foreign_cust, mut foreign_non) = (0, 0);
+    for i in 1..=w.population {
+        let c = is_customer(i as u64, 42);
+        if c {
+            assert!(
+                w.iban[i].starts_with("US"),
+                "customer {i} holds {}",
+                w.iban[i]
+            );
+            foreign_cust += (w.country[i] != "US") as usize;
+        } else {
+            assert_eq!(&w.iban[i][..2], w.country[i]);
+            foreign_non += (w.country[i] != "US") as usize;
+        }
+    }
+    // Residence is unchanged: foreign residents bank with the US FI too.
+    assert!(foreign_cust > 0 && foreign_non > 0);
 }
