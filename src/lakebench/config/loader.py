@@ -73,6 +73,18 @@ def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
             continue
         value = data.pop(flat_key)
 
+        # A config still using the deprecated 'architecture.processing' key
+        # gets flat pipeline fields there, rather than a new 'pipeline'
+        # block that would collide with it.
+        arch = data.get("architecture")
+        if (
+            nested_path[:2] == ("architecture", "pipeline")
+            and isinstance(arch, dict)
+            and "processing" in arch
+            and "pipeline" not in arch
+        ):
+            nested_path = ("architecture", "processing", *nested_path[2:])
+
         # Walk the nested path, creating intermediate dicts as needed
         target = data
         for key in nested_path[:-1]:

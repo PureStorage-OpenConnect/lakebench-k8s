@@ -1,0 +1,16 @@
+name: v14user
+images:
+  pull_secrets: [regcred]
+platform:
+  storage:
+    s3: {endpoint: "http://1.2.3.4:80", access_key: a, secret_key: b}
+    scratch: {enabled: true, create_storage_class: false}
+architecture:
+  workload:
+    customer360:
+      channels: [web, mobile]
+      quality_distribution: {clean: 0.92, duplicate_suspected: 0.02, incomplete: 0.03, format_inconsistent: 0.03}
+  pipeline:
+    medallion:
+      silver:
+        strategy: {enable_salting: true}
