@@ -118,7 +118,7 @@ def build_delta_maintenance_sql(
         # Combining them into one -e submission would be needed for the
         # SET to actually gate the VACUUM if a future Delta enforces the
         # check -- update this + `exec_sql` together if that surfaces.
-        stmts: list[str] = []
+        stmts = []
         if retention_hours < 168.0:
             stmts.append("SET spark.databricks.delta.retentionDurationCheck.enabled=false")
         stmts.append(f"VACUUM {table} RETAIN {retention_hours} HOURS")

@@ -675,7 +675,7 @@ class DeploymentEngine:
 
         identity = build_identity_from_config(
             self.config,
-            context=self.config.platform.kubernetes.context or None,
+            context=self.config.platform.kubernetes.context or "",
         )
         core_v1 = _kclient.CoreV1Api()
         # PR-1-F1: force_legacy on the FIRST create OR on any retry after a
@@ -855,7 +855,7 @@ class DeploymentEngine:
 
         identity = build_identity_from_config(
             self.config,
-            context=self.config.platform.kubernetes.context or None,
+            context=self.config.platform.kubernetes.context or "",
         )
         boto = s3.raw_client  # boto3 client under the hood
         unsupported_warned = False  # log the tagging fallback once per deploy
@@ -871,7 +871,7 @@ class DeploymentEngine:
         from lakebench.k8s import get_k8s_client as _get_k8s
 
         _get_k8s(
-            context=self.config.platform.kubernetes.context or None,
+            context=self.config.platform.kubernetes.context or "",
             namespace=self.config.get_namespace(),
         )
         other_deployments = list_lakebench_deployment_names(

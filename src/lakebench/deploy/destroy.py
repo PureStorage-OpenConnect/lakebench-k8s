@@ -120,7 +120,7 @@ def destroy_all(
     if engine.k8s.namespace_exists(namespace):
         identity = build_identity_from_config(
             engine.config,
-            context=engine.config.platform.kubernetes.context or None,
+            context=engine.config.platform.kubernetes.context or "",
         )
         core_v1 = k8s_client.CoreV1Api()
         v = verify_namespace_identity(
@@ -515,7 +515,7 @@ def destroy_all(
                 from lakebench.k8s import get_k8s_client as _get_k8s
 
                 _get_k8s(
-                    context=engine.config.platform.kubernetes.context or None,
+                    context=engine.config.platform.kubernetes.context or "",
                     namespace=engine.config.get_namespace(),
                 )
                 other_deployments = list_lakebench_deployment_names(

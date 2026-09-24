@@ -797,7 +797,7 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
             secret_key=s3_cfg.secret_key,
             region=s3_cfg.region,
             path_style=s3_cfg.path_style,
-            ca_cert=getattr(s3_cfg, "ca_cert", None),
+            ca_cert=getattr(s3_cfg, "ca_cert", None) or "",
             verify_ssl=getattr(s3_cfg, "verify_ssl", True),
         )
     except Exception as e:  # noqa: BLE001
