@@ -88,3 +88,41 @@ def test_originator_form_unchanged(spark):
     assert out[0]["entity_id"] == 5
     assert out[0]["evidence"]["aggregation"] == "originator"
     assert out[0]["alert_score"] == pytest.approx(0.5)
+
+
+def test_single_sender_is_only_the_originator_kind(spark):
+    """One smurf paying one account three times raised both kinds on the
+    same transactions; the beneficiary kind now needs two senders."""
+    rows = [(f"u{i}", 7, 9, i, 9500 + i, "USD") for i in range(3)]
+    out = _alerts(spark, rows)
+    assert [a["alert_type"] for a in out] == ["structuring"]
+
+
+def test_burst_across_day_boundaries_is_caught(spark):
+    """Eight senders, two credits per UTC day across four days: no tumbling
+    day holds three, but three fall within 24 h of each other."""
+    hours = [20, 23, 25, 46, 49, 70, 73, 94]
+    rows = [(f"b{i}", 100 + i, 9, h, 9500, "USD") for i, h in enumerate(hours)]
+    out = [a for a in _alerts(spark, rows) if a["alert_type"] == "structuring_beneficiary"]
+    sets = [set(a["related_txn_ids"]) for a in out]
+    assert {"b0", "b1", "b2"} in sets
+    # No reported window is contained in another.
+    assert not any(a < b for a in sets for b in sets)
+    for a in out:
+        assert a["entity_id"] == 9
+        ts = sorted(hours[int(u[1:])] for u in a["related_txn_ids"])
+        assert ts[-1] - ts[0] < 24
+
+
+def test_window_is_shorter_than_24_hours(spark):
+    """Credits exactly 24 h apart are not within one window."""
+    rows = [("w0", 1, 9, 0, 9500, "USD"), ("w1", 2, 9, 12, 9500, "USD")]
+    rows.append(("w2", 3, 9, 24, 9500, "USD"))
+    assert _alerts(spark, rows) == []
+
+
+def test_score_is_capped(spark):
+    rows = [(f"c{i}", 5, 20 + i, i * 0.5, 9500, "USD") for i in range(13)]
+    out = _alerts(spark, rows)
+    assert [a["alert_type"] for a in out] == ["structuring"]
+    assert out[0]["alert_score"] == pytest.approx(0.95)
