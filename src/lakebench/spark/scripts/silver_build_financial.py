@@ -1,7 +1,7 @@
 """Silver Build (Financial) -- normalise bronze pacs.008 into the 5 silver tables.
 
 Output tables (DDL in src/lakebench/deploy/financial_ddl.py):
-- silver.transactions          -- flat transaction facts, partitioned by day
+- silver.transactions          -- flat transaction facts, partitioned by month
 - silver.entities              -- Person/Company/FI dimension
 - silver.accounts              -- IBAN-to-entity linkage + current_balance
 - silver.account_statements    -- camt.053-shaped statement lines with running balance
@@ -22,7 +22,14 @@ from __future__ import annotations
 
 import time
 
-from common import ensure_column, env, iceberg_table_stats, log, log_job_metrics
+from common import (
+    ensure_column,
+    ensure_partition_transform,
+    env,
+    iceberg_table_stats,
+    log,
+    log_job_metrics,
+)
 from pyspark.sql import SparkSession, Window
 from pyspark.sql.functions import (
     abs as abs_,
@@ -870,6 +877,12 @@ def main() -> None:
     for table in (SILVER_TRANSACTIONS, SILVER_EDGES):
         ensure_column(spark, f"{CATALOG}.{table}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "ingest_ts", "TIMESTAMP")
+    ensure_partition_transform(
+        spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "days(txn_timestamp)", "months(txn_timestamp)"
+    )
+    ensure_partition_transform(
+        spark, f"{CATALOG}.{SILVER_STATEMENTS}", "days(book_ts)", "months(book_ts)"
+    )
 
     bronze = spark.table(f"{CATALOG}.{BRONZE_TABLE}")
     bronze_rows = bronze.count()
