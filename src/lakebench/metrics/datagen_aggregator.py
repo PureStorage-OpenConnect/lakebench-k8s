@@ -196,6 +196,8 @@ class FleetSummary:
     # "complete" -- every expected pod reported; aggregates are trustworthy
     # "partial" -- some pods missing; aggregates computed over what we have
     # "empty" -- no pods reported; all aggregates zero and cpu_hr_per_tb is None
+    # "mixed" -- pods disagree on a corpus-defining parameter (see
+    #   mixed_params): the pods did not write one corpus
     data_quality: str
     total_bytes_written: int
     total_files_written: int
@@ -216,6 +218,10 @@ class FleetSummary:
     worst_pod_elapsed_s: float
     best_pod_elapsed_s: float
     per_pod: list[PodMetrics] = field(default_factory=list)
+    # c360 customer id space shared by every pod; None when absent or when
+    # the pods disagree (then it is listed in mixed_params).
+    customer_id_max: int | None = None
+    mixed_params: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -240,6 +246,8 @@ class FleetSummary:
             "phase_p95_s": {k: round(v, 3) for k, v in self.phase_p95_s.items()},
             "worst_pod_elapsed_s": round(self.worst_pod_elapsed_s, 3),
             "best_pod_elapsed_s": round(self.best_pod_elapsed_s, 3),
+            "customer_id_max": self.customer_id_max,
+            "mixed_params": list(self.mixed_params),
             "per_pod": [_pod_to_dict(p) for p in self.per_pod],
         }
 
@@ -290,6 +298,9 @@ def collect_from_pod_logs(
             logger.warning("pod %s metrics line unusable: %s", pod_name, e)
 
     return _summarize(pods, expected_pods or len(pod_logs))
+
+
+_CORPUS_PARAMS = ("schema", "customer_id_max", "scale", "target_tb", "dirty_ratio")
 
 
 def _summarize(pods: list[PodMetrics], pods_expected: int) -> FleetSummary:
@@ -375,8 +386,23 @@ def _summarize(pods: list[PodMetrics], pods_expected: int) -> FleetSummary:
         "s3_put": pct(s3put, 0.95),
     }
 
+    # Parameters that define the corpus must be identical on every pod. A pod
+    # that disagrees (a stale image, a hand-run Job) wrote rows from a
+    # different id space or size, and the union is not one corpus.
+    mixed_params = []
+    shared: dict[str, Any] = {}
+    for name in _CORPUS_PARAMS:
+        values = {getattr(p, name) for p in pods if getattr(p, name) is not None}
+        if len(values) > 1:
+            mixed_params.append(name)
+            logger.warning("datagen pods disagree on %s: %s", name, sorted(values))
+        shared[name] = values.pop() if len(values) == 1 else None
+
     pods_missing = max(0, pods_expected - len(pods))
-    data_quality = "complete" if pods_missing == 0 else "partial"
+    if mixed_params:
+        data_quality = "mixed"
+    else:
+        data_quality = "complete" if pods_missing == 0 else "partial"
     return FleetSummary(
         schema=pods[0].schema,
         pods_expected=pods_expected,
@@ -398,6 +424,8 @@ def _summarize(pods: list[PodMetrics], pods_expected: int) -> FleetSummary:
         worst_pod_elapsed_s=wall_max,
         best_pod_elapsed_s=wall_min,
         per_pod=sorted(pods, key=lambda x: x.node_id),
+        customer_id_max=shared["customer_id_max"],
+        mixed_params=mixed_params,
     )
 
 
