@@ -471,3 +471,152 @@ fn mpu_writer_drop_without_finish_leaves_no_object() {
     let res = handle.block_on(async move { store_c.get(&path_c).await });
     assert!(res.is_err(), "abandoned object should not be readable");
 }
+
+// ---------------------------------------------------------------------------
+// Persona + per-account point process (P2, LB-130)
+// ---------------------------------------------------------------------------
+//
+// These pin the properties the persona exists to provide: per-account
+// heterogeneity (so entity_profiles features vary across accounts), strict
+// determinism (so generation stays reproducible), and mean-preservation of the
+// amount shift (so the aggregate amount band is not moved). If any regress, the
+// separability rework loses its foundation or the gate's distribution checks
+// drift, so they fail here rather than only on a live regen.
+
+use datagen_rs::amounts::{lognormal_amount, lognormal_amount_shifted};
+use datagen_rs::model::build_world_ex;
+use datagen_rs::world::{
+    amount_log_shift, hash_normal, rate_mult, BASELINE_ACTIVITY, TYPE_PERSON,
+};
+
+#[test]
+fn persona_deterministic() {
+    // Same (id, seed) -> identical persona, every call.
+    for id in [1u64, 2, 100, 111_111] {
+        assert_eq!(rate_mult(id, 42), rate_mult(id, 42));
+        assert_eq!(amount_log_shift(id, 42), amount_log_shift(id, 42));
+        assert_eq!(hash_normal(id, 909), hash_normal(id, 909));
+    }
+    // Different id -> (almost surely) different persona.
+    assert_ne!(rate_mult(1, 42), rate_mult(2, 42));
+    assert_ne!(amount_log_shift(1, 42), amount_log_shift(2, 42));
+    // Different seed -> different persona.
+    assert_ne!(rate_mult(1, 42), rate_mult(1, 43));
+}
+
+#[test]
+fn persona_rate_has_real_spread() {
+    // The whole point of P2: accounts must NOT all share one rate. Over a
+    // population sample, rate_mult must produce genuinely quiet and genuinely
+    // busy accounts, not a near-constant. (Pre-P2 every account of a type
+    // shared exactly one rate.)
+    let seed = 42;
+    let n = 20_000u64;
+    let vals: Vec<f64> = (1..=n).map(|id| rate_mult(id, seed)).collect();
+    let quiet = vals.iter().filter(|&&v| v < 0.5).count();
+    let busy = vals.iter().filter(|&&v| v > 2.0).count();
+    // exp(N(0,1)): ~25% below 0.5, ~25% above 2.0. Wide tolerance.
+    assert!(
+        quiet > n as usize / 10,
+        "too few quiet accounts ({}/{}): dormancy has nothing to show against",
+        quiet, n
+    );
+    assert!(busy > n as usize / 10, "too few busy accounts ({}/{})", busy, n);
+    // All strictly positive and finite.
+    assert!(vals.iter().all(|&v| v.is_finite() && v > 0.0));
+}
+
+#[test]
+fn persona_amount_shift_is_mean_preserving() {
+    // amount_log_shift is recentred so E[exp(shift)] == 1, i.e. the population
+    // mean amount is unchanged by the persona. Estimate the mean multiplier
+    // over a large sample; it must sit close to 1.0.
+    let seed = 42;
+    let n = 200_000u64;
+    let mean_mult: f64 =
+        (1..=n).map(|id| amount_log_shift(id, seed).exp()).sum::<f64>() / n as f64;
+    assert!(
+        (mean_mult - 1.0).abs() < 0.03,
+        "amount shift not mean-preserving: E[exp(shift)] = {}",
+        mean_mult
+    );
+    // And it must actually spread amounts (not collapse to 1.0 everywhere).
+    let big = (1..=n).filter(|&id| amount_log_shift(id, seed).exp() > 1.5).count();
+    assert!(big > n as usize / 20, "amount shift has no spread ({}/{})", big, n);
+}
+
+#[test]
+fn lognormal_shifted_zero_matches_base() {
+    // Delegation must be byte-identical: same RNG state + zero shift == the old
+    // lognormal_amount, so passing 0.0 anywhere is a pure no-op.
+    let mut a = Rng::new(777);
+    let mut b = Rng::new(777);
+    for _ in 0..10_000 {
+        assert_eq!(lognormal_amount(&mut a), lognormal_amount_shifted(&mut b, 0.0));
+    }
+}
+
+#[test]
+fn world_activity_is_per_entity_not_per_type() {
+    // After P2, two persons must (almost surely) have different activity rates;
+    // pre-P2 every person shared BASELINE_ACTIVITY[PERSON] exactly.
+    let w = build_world_ex(0.2, 42, 12, false);
+    let base = BASELINE_ACTIVITY[TYPE_PERSON as usize];
+    // Collect activity for the first several persons.
+    let persons: Vec<f64> = (1..w.population)
+        .filter(|&i| w.ty[i] == TYPE_PERSON)
+        .take(500)
+        .map(|i| w.activity[i])
+        .collect();
+    assert!(persons.len() > 50, "not enough persons sampled");
+    // Not all equal to the per-type base.
+    let all_base = persons.iter().all(|&v| (v - base).abs() < 1e-9);
+    assert!(!all_base, "activity is still a per-type constant");
+    // Distinct values exist.
+    let distinct = {
+        let mut s: Vec<u64> = persons.iter().map(|v| v.to_bits()).collect();
+        s.sort_unstable();
+        s.dedup();
+        s.len()
+    };
+    assert!(distinct > persons.len() / 2, "activity not sufficiently heterogeneous");
+    // amount_logshift column is built and non-trivial.
+    assert_eq!(w.amount_logshift.len(), w.population + 1);
+    assert!(w.amount_logshift[1..].iter().any(|&v| v.abs() > 0.01));
+}
+
+#[test]
+fn persona_preserves_structuring_band_baseline_density() {
+    // Leakage guard (P2 review F1): structuring_amount bypasses the persona
+    // amount shift, so the [9500, 9999] USD structuring band stays fixed while
+    // the shifted baseline distribution retreats from it. The leakage gate
+    // fails a band when baseline_density / typology_density < 0.10, so if a
+    // larger AMOUNT_LOG_SD starves the band of baseline rows, a structuring
+    // typology becomes a near-perfect label by artifact. Pin a floor on the
+    // baseline in-band fraction so that regression trips here, not silently on
+    // a live regen. Pre-P2 ~1.28%, at sd=0.6 ~1.14%; floor at 1.0% catches a
+    // material further drop while tolerating the current design.
+    use datagen_rs::amounts::lognormal_amount_shifted;
+    use datagen_rs::world::amount_log_shift;
+
+    let seed = 42;
+    let n = 400_000u64;
+    // One baseline amount per account, drawn with that account's persona shift,
+    // exactly as the base-row loop does.
+    let mut rng = Rng::new(0xB0BA);
+    let mut in_band = 0u64;
+    for id in 1..=n {
+        let amt = lognormal_amount_shifted(&mut rng, amount_log_shift(id, seed));
+        if (9500.0..=9999.0).contains(&amt) {
+            in_band += 1;
+        }
+    }
+    let frac = in_band as f64 / n as f64;
+    assert!(
+        frac >= 0.010,
+        "baseline density in the USD structuring band is {:.4}% (< 1.0%): a \
+         structuring typology is drifting toward a leaked label; lower \
+         AMOUNT_LOG_SD or scale amounts by currency",
+        frac * 100.0
+    );
+}

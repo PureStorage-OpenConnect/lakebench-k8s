@@ -37,7 +37,14 @@ pub struct World {
     pub pep: Vec<bool>,
     pub n_accounts: Vec<i32>,
     pub ring_sz: Vec<i64>,
+    /// Per-entity activity rate: BASELINE_ACTIVITY[type] * persona rate_mult(id).
+    /// Drives activity-weighted originator sampling, so each account has its own
+    /// consistent cadence (a per-account Poisson process) rather than a per-type
+    /// constant. Always built (the bronze emit path samples originators).
     pub activity: Vec<f64>,
+    /// Per-entity additive shift to the log-normal amount mean (persona). Always
+    /// built: the bronze base-amount draw reads it per row.
+    pub amount_logshift: Vec<f64>,
     pub ring_hit: Vec<f64>,
     pub bic_pool: Vec<String>,
 }
@@ -124,8 +131,25 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
     };
     let ring_sz: Vec<i64> = (0..=n).into_par_iter()
         .map(|i| if i == 0 { 0 } else { W::ring_size(i as u64, ty[i], seed) }).collect();
-    let activity: Vec<f64> = ty.par_iter()
-        .map(|&t| if t < 0 { 0.0 } else { W::BASELINE_ACTIVITY[t as usize] }).collect();
+    // Per-entity activity rate = per-type base * persona multiplier, so accounts
+    // have individual cadences. Indexed (not par_iter over ty) because rate_mult
+    // needs the entity id. Index 0 is the unused sentinel.
+    let activity: Vec<f64> = (0..=n)
+        .into_par_iter()
+        .map(|i| {
+            let t = ty[i];
+            if i == 0 || t < 0 {
+                0.0
+            } else {
+                W::BASELINE_ACTIVITY[t as usize] * W::rate_mult(i as u64, seed)
+            }
+        })
+        .collect();
+    // Per-entity persona amount shift (recentred, mean-preserving).
+    let amount_logshift: Vec<f64> = (0..=n)
+        .into_par_iter()
+        .map(|i| if i == 0 { 0.0 } else { W::amount_log_shift(i as u64, seed) })
+        .collect();
     let ring_hit: Vec<f64> = ty.par_iter()
         .map(|&t| if t < 0 { 0.0 } else { W::RING_HIT_RATE[t as usize] }).collect();
 
@@ -150,6 +174,7 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
         n_accounts,
         ring_sz,
         activity,
+        amount_logshift,
         ring_hit,
         bic_pool: pool,
     }

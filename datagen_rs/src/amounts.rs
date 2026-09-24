@@ -47,7 +47,19 @@ pub fn structuring_band(ccy: &str) -> (f64, f64) {
 
 /// Baseline log-normal amount with round-number snapping. Rounded to cents.
 pub fn lognormal_amount(rng: &mut Rng) -> f64 {
-    let raw = (LN_MU + LN_SIGMA * rng.normal()).exp().min(AMOUNT_CEILING);
+    lognormal_amount_shifted(rng, 0.0)
+}
+
+/// Log-normal amount with a per-account additive shift to the log-mean, then
+/// round-number snapping. `mu_shift` is the account's persona amount shift
+/// (`world::amount_log_shift`); 0.0 reproduces the population-default draw. The
+/// RNG draw order (normal then unit) is identical to the unshifted path, so
+/// `lognormal_amount_shifted(rng, 0.0)` is byte-identical to the old
+/// `lognormal_amount`.
+pub fn lognormal_amount_shifted(rng: &mut Rng, mu_shift: f64) -> f64 {
+    let raw = ((LN_MU + mu_shift) + LN_SIGMA * rng.normal())
+        .exp()
+        .min(AMOUNT_CEILING);
     let amt = if rng.unit() < ROUND_SNAP_RATE {
         let step = if raw < 1_000.0 {
             100.0
