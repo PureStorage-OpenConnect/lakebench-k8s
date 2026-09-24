@@ -103,6 +103,10 @@ def main() -> int:
     ap.add_argument("--schema", default="financial", choices=SUPPORTED_SCHEMAS)
     # Shared args -- both schemas consume these.
     ap.add_argument("--seed", type=int, default=42)
+    # Multi-cycle runs: cycle n > 0 draws disjoint event streams and writes
+    # cycle-suffixed object keys, so bronze accumulates across cycles instead
+    # of being overwritten (datagen_rs/src/cycle.rs). 0 = a single run.
+    ap.add_argument("--cycle", type=int, default=0)
     # NOTE: default is 32 to match the pre-M6 entrypoint (existing financial
     # K8s Job YAMLs assume 32). c360 K8s Job templates that want a different
     # file size pass --file-size-mb explicitly.
@@ -209,6 +213,12 @@ def main() -> int:
     # bucket root, breaking Silver's read path.
     if args.prefix:
         common += ["--prefix", args.prefix]
+    if args.cycle < 0:
+        print(f"[entrypoint] --cycle must be >= 0; got {args.cycle}", file=sys.stderr)
+        return 2
+    # Forwarded only when non-zero so a single-cycle argv is unchanged.
+    if args.cycle:
+        common += ["--cycle", str(args.cycle)]
 
     if args.schema == "financial":
         # Rust driver only knows all/bronze/reference. Map the K8s
@@ -248,7 +258,7 @@ def main() -> int:
 
     print(
         f"[entrypoint] schema={args.schema} node {node_id}/{args.total_nodes} "
-        f"threads={threads} -> s3://{args.bucket}/{args.prefix} :: {summary}",
+        f"threads={threads} cycle={args.cycle} -> s3://{args.bucket}/{args.prefix} :: {summary}",
         flush=True,
     )
     # execvp replaces this process, so the Rust binary is PID 1 of the pod and
