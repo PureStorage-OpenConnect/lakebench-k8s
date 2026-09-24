@@ -115,33 +115,62 @@ def test_init_without_force_refuses_to_overwrite(tmp_path):
     assert out.read_text() == "old: true\n"
 
 
-def test_destroy_old_short_f_warns(tmp_path):
-    # The config does not exist, so destroy stops before touching anything;
-    # the warning is printed first.
-    result = runner.invoke(app, ["destroy", str(tmp_path / "missing.yaml"), "-f"])
-    assert "deprecated" in result.output and "-y" in result.output
+@pytest.fixture
+def no_cluster(monkeypatch, tmp_path):
+    # No test here may reach a cluster, whatever -f ends up meaning.
+    monkeypatch.setenv("KUBECONFIG", str(tmp_path / "nonexistent-kubeconfig"))
+    monkeypatch.delenv("LAKEBENCH_LEGACY_SHORT_F", raising=False)
+    monkeypatch.chdir(tmp_path)
+    return tmp_path
+
+
+def _cfg(tmp_path):
+    p = tmp_path / "cfg.yaml"
+    p.write_text("name: shortf-test\n")
+    return p
 
 
 @pytest.mark.parametrize("command", ["destroy", "clean"])
-def test_short_f_force_is_refused_at_a_terminal(monkeypatch, tmp_path, command):
-    import lakebench.cli._helpers as helpers
-
-    monkeypatch.setattr(helpers, "_stdin_is_tty", lambda: True)
-    result = runner.invoke(app, [command, str(tmp_path / "cfg.yaml"), "-f"])
-    assert result.exit_code == 2
+@pytest.mark.parametrize("stdin", ["", None])
+def test_short_f_force_is_refused_everywhere(no_cluster, command, stdin):
+    # stdin="" is a non-terminal pipe (agents, IDE runners, ssh host cmd).
+    result = runner.invoke(app, [command, str(_cfg(no_cluster)), "-f"], input=stdin)
+    assert result.exit_code == 2, result.output
     assert "no longer skips confirmation" in result.output
+    assert "--force or -y" in result.output
 
 
 @pytest.mark.parametrize("command", ["destroy", "clean"])
-def test_short_f_force_still_works_in_scripts(monkeypatch, tmp_path, command):
+def test_short_f_force_refused_with_closed_stdin(no_cluster, monkeypatch, command):
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", None)
+    from lakebench.cli._helpers import stdin_is_tty
+
+    assert stdin_is_tty() is False
+    result = runner.invoke(app, [command, str(_cfg(no_cluster)), "-f"])
+    assert result.exit_code == 2
+
+
+@pytest.mark.parametrize("command", ["destroy", "clean"])
+def test_force_plus_short_f_is_not_refused(no_cluster, command):
     import lakebench.cli._helpers as helpers
 
-    monkeypatch.setattr(helpers, "_stdin_is_tty", lambda: False)
-    result = runner.invoke(app, [command, str(tmp_path / "missing.yaml"), "-f"])
-    # The warning prints, then the command carries on and stops at the
-    # missing config, not at the -f handling.
-    assert "deprecated" in result.output
+    result = runner.invoke(app, [command, str(no_cluster / "missing.yaml"), "--force", "-f"])
+    assert result.exit_code != 2
     assert "no longer skips confirmation" not in result.output
+    # Sanity: the -f handler returned force unchanged rather than exiting.
+    assert helpers.deprecated_short_f_force("--force or -y", True) is True
+
+
+@pytest.mark.parametrize("command", ["destroy", "clean"])
+def test_legacy_env_restores_old_meaning(no_cluster, monkeypatch, command):
+    monkeypatch.setenv("LAKEBENCH_LEGACY_SHORT_F", "1")
+    # The config does not exist, so the command stops before any cluster
+    # call; it must get past the -f handling to fail there.
+    result = runner.invoke(app, [command, str(no_cluster / "missing.yaml"), "-f"])
+    assert result.exit_code != 2
+    assert "deprecated" in result.output
 
 
 def test_deprecation_warning_goes_to_stderr(capsys):
@@ -174,3 +203,9 @@ def test_results_json_is_parseable_stdout(monkeypatch, tmp_path, args):
     result = runner.invoke(app, ["results", "-m", str(tmp_path), *args])
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["deployment_name"] == long_value
+
+
+def test_results_format_table_and_short_f_conflict(tmp_path):
+    result = runner.invoke(app, ["results", "-m", str(tmp_path), "--format", "table", "-f", "json"])
+    assert result.exit_code == 2
+    assert "both --format table and -f json" in result.output
