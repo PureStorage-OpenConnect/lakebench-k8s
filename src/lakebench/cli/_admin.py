@@ -57,14 +57,20 @@ admin_app = typer.Typer(
 # ---------------------------------------------------------------------------
 
 
-def _get_core_v1():
-    """Return a kubernetes CoreV1Api, printing a clean refusal on failure."""
+def _get_core_v1(context: str | None = None):
+    """Return a kubernetes CoreV1Api, printing a clean refusal on failure.
+
+    ``context`` selects the kubeconfig context (the config's
+    ``platform.kubernetes.context``); None means the current context. Every
+    client a command uses must come from the same context, or it reads one
+    cluster and changes another.
+    """
     try:
         from kubernetes import client as k8s_client
         from kubernetes import config as k8s_config
 
         try:
-            k8s_config.load_kube_config()
+            k8s_config.load_kube_config(context=context or None)
         except Exception:  # noqa: BLE001
             k8s_config.load_incluster_config()
         return k8s_client.CoreV1Api()
@@ -710,8 +716,6 @@ def repair_operator(
     )
     from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
 
-    core_v1 = _get_core_v1()
-
     ns = "spark-operator"
     v: str | None = None
     kube_ctx: str | None = None
@@ -721,6 +725,7 @@ def repair_operator(
         v = cfg.platform.compute.spark.operator.version
         kube_ctx = cfg.platform.kubernetes.context or None
 
+    core_v1 = _get_core_v1(context=kube_ctx)
     mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
     from lakebench.modules.pipeline_engines.spark.operator import _WatchListReadError
 

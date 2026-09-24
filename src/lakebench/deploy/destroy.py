@@ -56,6 +56,36 @@ def _other_lakebench_namespaces_exist(core_v1, current_namespace: str) -> bool:
     return not _is_last_lakebench_namespace(names, current_namespace)
 
 
+def _buckets_hold_data(engine) -> bool | None:
+    """True if any of the deployment's buckets exists and holds an object,
+    False if none do, None if that cannot be determined. Read-only."""
+    try:
+        from lakebench.s3 import S3Client
+
+        s3_cfg = engine.config.platform.storage.s3
+        s3 = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=s3_cfg.ca_cert,
+            verify_ssl=s3_cfg.verify_ssl,
+        )
+        if s3._init_error:
+            return None
+        for bucket in (s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold):
+            if not s3.bucket_exists(bucket):
+                continue
+            resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+            if int(resp.get("KeyCount", 0)) > 0:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.debug("bucket contents check failed: %s", e)
+        return None
+
+
 def destroy_all(
     engine: DeploymentEngine,
     progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
@@ -183,7 +213,10 @@ def destroy_all(
             )
             ownership_proven = True
         else:
-            ownership_proven = True
+            # Only a MATCH is proof. NOT_FOUND here means the namespace
+            # vanished between the exists check and the read (a concurrent
+            # destroy), which proves nothing.
+            ownership_proven = v.verdict is IdentityVerdict.MATCH
             report(
                 "ownership-check",
                 DeploymentStatus.SUCCESS,
@@ -203,10 +236,25 @@ def destroy_all(
     )
     data_steps_allowed = decision.allowed
     no_ns_hint = decision.hint
+    # A refusal is FAILED (printed, non-zero exit) because it leaves data
+    # behind. With the namespace gone and the buckets absent or empty there is
+    # nothing left to protect (a re-run after a complete destroy, or a deploy
+    # that never got as far as creating them), so that is a plain skip.
+    refusal_status = DeploymentStatus.FAILED
+    if not data_steps_allowed and not namespace_present:
+        if _buckets_hold_data(engine) is False:
+            refusal_status = DeploymentStatus.SKIPPED
+            no_ns_hint = (
+                f"Namespace {namespace!r} and its buckets are already gone or empty; "
+                "nothing to clean."
+            )
     if not data_steps_allowed:
         logger.warning(no_ns_hint)
     elif decision.hint:
-        report("ownership-check", DeploymentStatus.IN_PROGRESS, decision.hint)
+        # Printed, not just progress: a --force-legacy wipe by name, or a
+        # shared-name check that could not run, must leave a visible record.
+        logger.warning(decision.hint)
+        report("ownership-check", DeploymentStatus.SUCCESS, decision.hint)
 
     # Step 1: Delete SparkApplications
     report("spark-jobs", DeploymentStatus.IN_PROGRESS, "Deleting SparkApplications...")
@@ -393,11 +441,11 @@ def destroy_all(
         results.append(
             DeploymentResult(
                 component="table-cleanup",
-                status=DeploymentStatus.FAILED,
+                status=refusal_status,
                 message=no_ns_hint,
             )
         )
-        report("table-cleanup", DeploymentStatus.FAILED, no_ns_hint)
+        report("table-cleanup", refusal_status, no_ns_hint)
     else:
         table_format = engine.config.architecture.table_format.type.value
         report("table-cleanup", DeploymentStatus.IN_PROGRESS, f"Dropping {table_format} tables...")
@@ -495,11 +543,11 @@ def destroy_all(
         results.append(
             DeploymentResult(
                 component="s3-buckets",
-                status=DeploymentStatus.FAILED,
+                status=refusal_status,
                 message=no_ns_hint,
             )
         )
-        report("s3-buckets", DeploymentStatus.FAILED, no_ns_hint)
+        report("s3-buckets", refusal_status, no_ns_hint)
     elif clean_buckets:
         report("s3-buckets", DeploymentStatus.IN_PROGRESS, "Cleaning S3 buckets...")
         try:
@@ -654,6 +702,11 @@ def destroy_all(
                             )
                         else:
                             unsupported_refused.append(bucket)
+                if unsupported_refused and other_deployments is None:
+                    # Could not list sibling deployments: a transient cluster
+                    # or RBAC problem, not proof the buckets are someone
+                    # else's. Keep the namespace so a re-run can finish.
+                    bucket_transient_failure = True
                 if mismatched or legacy_refused or unsupported_refused:
                     parts = []
                     if mismatched:

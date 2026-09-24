@@ -71,6 +71,17 @@ def clean(
             ),
         ),
     ] = False,
+    allow_unverified_cluster: Annotated[
+        bool,
+        typer.Option(
+            "--allow-unverified-cluster",
+            help=(
+                "Proceed when the kubeconfig cannot prove which cluster it "
+                "points at (no CA data for the api-server fingerprint). Same "
+                "meaning as on destroy."
+            ),
+        ),
+    ] = False,
     metrics_dir: Annotated[
         Path,
         typer.Option(
@@ -201,11 +212,19 @@ def clean(
                     raise
             if ns_present:
                 identity = build_identity_from_config(cfg, context=kube_ctx)
-                v = verify_namespace_identity(core_v1, ns, identity.name, identity.api_server)
+                v = verify_namespace_identity(
+                    core_v1,
+                    ns,
+                    identity.name,
+                    identity.api_server,
+                    allow_unverified_cluster=allow_unverified_cluster,
+                )
                 if v.verdict is IdentityVerdict.MISMATCH:
                     print_error(f"Refusing to clean: {v.hint}")
                     raise typer.Exit(1)
-                ns_verified = v.verdict is not IdentityVerdict.ABSENT or force_legacy
+                ns_verified = v.verdict is IdentityVerdict.MATCH or (
+                    v.verdict is IdentityVerdict.ABSENT and force_legacy
+                )
         except typer.Exit:
             raise
         except Exception as e:  # noqa: BLE001
