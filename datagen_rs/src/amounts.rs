@@ -115,7 +115,9 @@ pub fn native_amount(rng: &mut Rng, mu_shift: f64, ccy: &str) -> f64 {
 pub fn structuring_amount(rng: &mut Rng, ccy: &str) -> f64 {
     let (lo, hi) = structuring_band(ccy);
     let v = lo + rng.unit() * (hi - lo);
-    (v * 100.0).round() / 100.0
+    // In the currency's minor units: a fractional yen or won would be a label.
+    let m = minor_units(ccy);
+    (v * m).round() / m
 }
 
 /// Typologies that move one pot of money along a chain: each leg after the

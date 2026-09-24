@@ -511,10 +511,12 @@ fn pacs008_main() {
 
     let t_typ = t_typ0.elapsed().as_secs_f64();
 
-    // Reference zones (party, account, manifest) go first: they depend only
-    // on the world and the schedule, and in continuous mode silver-stream
-    // joins each micro-batch to the party master, so it must exist before
-    // the first bronze file lands.
+    // Reference zones (manifest, account, party) go before this pod's bronze
+    // files: they depend only on the world and the schedule, and in
+    // continuous mode silver-stream joins each micro-batch to the party
+    // master. With one pod in --mode all that puts them ahead of every bronze
+    // file; with several pods or a dedicated reference pod, bronze from other
+    // pods can land first, and silver-stream waits for them.
     let t_ref0 = std::time::Instant::now();
     // Track reference-zone bytes/files separately so the final summary line
     // reflects what a `--mode reference` pod produced. Previously the
@@ -540,26 +542,8 @@ fn pacs008_main() {
         // finish() is fail-loud: on error we panic so the pod exits
         // non-zero and the datagen Job restarts (same semantics as the
         // single-PUT path). Drop's best-effort abort covers panics.
-        if cycle_n == 0 {
-            let mut party_mpu = sink.put_multipart("bronze/party.parquet");
-            write_party_to(&w, &instances, &mut party_mpu);
-            let party_bytes = party_mpu.bytes_written();
-            party_mpu
-                .finish()
-                .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
-            ref_bytes += party_bytes;
-            ref_files += 1;
-
-            let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
-            write_account_to(&w, &mut acct_mpu);
-            let acct_bytes = acct_mpu.bytes_written();
-            acct_mpu
-                .finish()
-                .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
-            ref_bytes += acct_bytes;
-            ref_files += 1;
-        }
-
+        // Order: manifest, account, party. silver-stream waits for the party
+        // master, so once party is visible the other two are as well.
         // Manifest stays on the single-PUT path: it's a handful of MB
         // even at scale 1000 (one row per typology instance), so
         // multipart adds request overhead with no benefit.
@@ -583,6 +567,26 @@ fn pacs008_main() {
             &cycle::ref_key("manifest/manifest.parquet", cycle_n),
             man_bytes,
         );
+
+        if cycle_n == 0 {
+            let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
+            write_account_to(&w, &mut acct_mpu);
+            let acct_bytes = acct_mpu.bytes_written();
+            acct_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
+            ref_bytes += acct_bytes;
+            ref_files += 1;
+
+            let mut party_mpu = sink.put_multipart("bronze/party.parquet");
+            write_party_to(&w, &instances, &mut party_mpu);
+            let party_bytes = party_mpu.bytes_written();
+            party_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
+            ref_bytes += party_bytes;
+            ref_files += 1;
+        }
     }
     let t_ref = t_ref0.elapsed().as_secs_f64();
 
@@ -604,12 +608,14 @@ fn pacs008_main() {
     let my_files: Vec<i64> = if do_bronze {
         (0..total_files)
             .filter(|fid| fid % total_nodes == node_id)
+            // Exact, not by the file's nominal mass range: a file belongs to
+            // this cycle when any of its rows does, so a row whose mass sits
+            // within rounding of a boundary is never dropped by both cycles.
             .filter(|&fid| {
-                let (a, b) = (
-                    fid as f64 / total_files as f64,
-                    (fid + 1) as f64 / total_files as f64,
-                );
-                a < slice_hi && b > slice_lo
+                base_start(fid).max(slice_i0) < base_start(fid + 1).min(slice_i1)
+                    || typ_by_file[fid as usize]
+                        .iter()
+                        .any(|r| in_slice(gcal.mass_at(r.ts_us)))
             })
             .collect()
     } else {
