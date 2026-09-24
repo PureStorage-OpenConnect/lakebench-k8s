@@ -288,3 +288,18 @@ def test_budget_from_env_and_job_scratch(spark, monkeypatch):
     assert path_search_budget_rows(spark) == 12345
     monkeypatch.setenv("LB_PATH_SEARCH_MAX_ROWS", "not-a-number")
     assert path_search_budget_rows(spark) > 0
+
+
+def test_alert_ts_is_when_the_chain_first_qualifies(spark):
+    """Review: two carrying onward hops about six days apart pushed alert_ts
+    a week past the planted window, which scores as a miss. alert_ts is the
+    time of the chain's third transfer."""
+    from datetime import datetime, timedelta, timezone
+
+    rows = STACK + [("x1", 5, 81, 82 + 140, 820), ("x2", 81, 82, 82 + 280, 790)]
+    out, _ = _found(spark, rows)
+    assert len(out) == 1
+    assert STACK_IDS <= set(out[0]["related_txn_ids"])
+    t0 = datetime(2024, 3, 1, tzinfo=timezone.utc)
+    # collect() returns naive local time; astimezone reads it as local.
+    assert out[0]["alert_ts"].astimezone(timezone.utc) == t0 + timedelta(hours=58)

@@ -166,6 +166,7 @@ def w2_structuring(
     threshold_count: int = 3,
     window_hours: int = 24,
     per_beneficiary: bool = True,
+    max_txns_per_alert: int = 1000,
     run_id: str = "unknown",
 ) -> DataFrame:
     """Structuring: N>=threshold_count structuring-band transactions within
@@ -174,19 +175,23 @@ def w2_structuring(
     - originator (alert_type ``structuring``): one account making the
       transactions. Grouped by (originator, currency, tumbling window).
     - beneficiary (alert_type ``structuring_beneficiary``): one account
-      receiving them from at least two different senders, the classic
-      multiple-depositor (smurfing) scenario. A single sender structuring
-      into one account is the originator kind's case; counting it here too
-      raised two alerts on the same transactions. No currency key: each
+      receiving them from at least threshold_count different senders in
+      the window, the classic multiple-depositor (smurfing) scenario. Fewer
+      senders is the originator kind's case: with a two-sender minimum, one
+      sender structuring three times plus any other in-band credit raised
+      both kinds on the same transactions. No currency key: each
       sender pays in its own account currency, so a currency split would
       let smurfs in different currencies evade; each credit is still tested
       against its own currency's band.
 
       The beneficiary kind uses a sliding window: one candidate window
       [t, t + window_hours) per credit, keeping only windows that are not
-      contained in the previous credit's window. Tumbling buckets miss
-      bursts that straddle a boundary (eight credits split 2/2/2/2 across
-      four UTC days never reach 3 in one bucket).
+      contained in the previous credit's window, then merging overlapping
+      qualifying windows into one alert per burst (related_txn_ids capped
+      at max_txns_per_alert, earliest uetrs by sort order; the narrative
+      carries the full count). Tumbling buckets miss bursts that straddle
+      a boundary (eight credits split 2/2/2/2 across four UTC days never
+      reach 3 in one bucket).
 
     Both kinds share the band and count, and both are W2_structuring
     alerts; ``evidence['aggregation']`` names the kind.
@@ -277,9 +282,38 @@ def w2_structuring(
             )
             .filter(col("_prev_last").isNull() | (col("_last_rn") > col("_prev_last")))
         )
-        by_bene = anchored.filter(
-            (col("suspicious_count") >= threshold_count) & (size(col("_related_entity_ids")) >= 2)
-        ).select(
+        qualifying = anchored.filter(
+            (col("suspicious_count") >= threshold_count)
+            & (size(col("_related_entity_ids")) >= threshold_count)
+        ).withColumn("_end_t", expr(f"_t + {window_us - 1}"))
+        # Overlapping qualifying windows are one burst: a steady stream of
+        # band-sized credits would otherwise raise one alert per credit,
+        # each repeating the previous one's transactions.
+        by_start = Window.partitionBy("entity_id").orderBy("_t", "_rn")
+        bursts = (
+            qualifying.withColumn(
+                "_prev_end",
+                max_("_end_t").over(by_start.rowsBetween(Window.unboundedPreceding, -1)),
+            )
+            .withColumn(
+                "_new", (col("_prev_end").isNull() | (col("_t") > col("_prev_end"))).cast("int")
+            )
+            .withColumn("_burst", sum_("_new").over(by_start))
+            .groupBy("entity_id", "_burst")
+            .agg(
+                array_sort(array_distinct(expr("flatten(collect_list(related_txn_ids))"))).alias(
+                    "_all_txns"
+                ),
+                array_distinct(expr("flatten(collect_list(_related_entity_ids))")).alias(
+                    "_related_entity_ids"
+                ),
+                min_("first_ts").alias("first_ts"),
+                max_("last_ts").alias("last_ts"),
+            )
+            .withColumn("suspicious_count", size(col("_all_txns")))
+            .withColumn("related_txn_ids", expr(f"slice(_all_txns, 1, {int(max_txns_per_alert)})"))
+        )
+        by_bene = bursts.select(
             "entity_id",
             "suspicious_count",
             "related_txn_ids",
@@ -355,17 +389,24 @@ def w2_structuring(
 #      PATH_SEARCH_BYTES_PER_ROW;
 #   3. PATH_SEARCH_MAX_PATHS (gold-finalize at scale 10, 4 x 100 Gi).
 # PATH_SEARCH_BYTES_PER_ROW is a footprint, not a row size: peak local scratch
-# (cached and checkpointed blocks plus shuffle files) per held row. Measured
-# with spark.local.dir polled every 0.5 s on a scale-0.25 corpus (6.67M
-# transfers): W3 peaked at 3.13 GB holding 26.2M rows (119 B per row), W17 at
-# 3.39 GB holding 20.2M (168 B, including what W3 had not yet released).
-# Before levels were checkpointed and released, a review measured 430 B, since
-# every level and its shuffle stayed on disk. These are resource guards, not
+# (cached and checkpointed blocks plus shuffle files, including the sampling
+# joins that estimate each level) per held row. Measured with
+# spark.local.dir polled every 0.5 s on a scale-0.25 corpus (6.67M
+# transfers): W3 peaked at 4.45 GB holding 26.2M rows (170 B per row), W17
+# at 5.25 GB holding 20.2M (260 B, including files W3 had not yet released;
+# the rules run back to back in one stage). 260 is used. The share leaves
+# 30% of scratch for the silver scan and the alert write. Projected at
+# scale 10, W3 holds about 1.05B rows at peak against a 1.16B budget on
+# gold-finalize (4 x 100 Gi); gold-refresh (2 x 100 Gi) skips it there. A
+# row's width grows with depth (more uetrs per path); the flat figure was
+# measured over all levels together. Before levels were checkpointed and
+# released, a review measured 430 B. These are resource guards, not
 # detection thresholds.
-PATH_SEARCH_BYTES_PER_ROW = 160
-PATH_SEARCH_SCRATCH_SHARE = 0.5
+PATH_SEARCH_BYTES_PER_ROW = 260
+PATH_SEARCH_SCRATCH_SHARE = 0.7
 PATH_SEARCH_MAX_PATHS = int(4 * 100 * 2**30 * PATH_SEARCH_SCRATCH_SHARE / PATH_SEARCH_BYTES_PER_ROW)
 PATH_SEARCH_MAX_ROWS_ENV = "LB_PATH_SEARCH_MAX_ROWS"
+PATH_SEARCH_NO_PVC_BYTES = 20 * 2**30
 _SCRATCH_SIZE_CONF = (
     "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-local-dir-1.options.sizeLimit"
 )
@@ -402,8 +443,12 @@ def path_search_budget_rows(spark) -> int:
         scratch = _parse_size_bytes(conf.get(_SCRATCH_SIZE_CONF, None))
     except Exception:  # noqa: BLE001
         executors, scratch = 0, None
-    if executors > 0 and scratch:
-        return int(executors * scratch * PATH_SEARCH_SCRATCH_SHARE / PATH_SEARCH_BYTES_PER_ROW)
+    if executors > 0:
+        # No scratch PVC (platform.storage.scratch off, e.g. non-Portworx):
+        # local dirs sit on node ephemeral storage; assume the 20 Gi the job
+        # gives its work-dir emptyDir rather than disk that may not exist.
+        per_executor = scratch or PATH_SEARCH_NO_PVC_BYTES
+        return int(executors * per_executor * PATH_SEARCH_SCRATCH_SHARE / PATH_SEARCH_BYTES_PER_ROW)
     return PATH_SEARCH_MAX_PATHS
 
 
@@ -623,16 +668,13 @@ def _sampled_size(paths: DataFrame, n_paths: int, extend) -> float:
     return extend(paths.sample(False, frac, seed=17)).count() / frac
 
 
-def _next_estimate(sizes: list[int]) -> float:
-    """Next level's size from the last growth factor (sizes[-1] / sizes[-2])."""
-    prev, last = sizes[-2], sizes[-1]
-    return last * (last / prev) if prev > 0 else float(last)
-
-
-def _cut_small(df: DataFrame) -> DataFrame:
-    """Materialise a small result frame and drop its lineage, so the large
-    levels it came from can be released."""
-    return df.localCheckpoint(eager=True)
+def _cut_small(df: DataFrame, budget: _PathBudget, label: str) -> DataFrame:
+    """Materialise a result frame (cycles, complete chains) and drop its
+    lineage, so the levels it came from can be released. Its rows stay held
+    until the rule ends and count against the budget."""
+    cut = df.localCheckpoint(eager=True)
+    budget.add(cut.count(), label)
+    return cut
 
 
 def w3_round_tripping(
@@ -695,13 +737,22 @@ def w3_round_tripping(
     def _ext(p: DataFrame) -> DataFrame:
         return _extend_paths(p, step, hop_us).filter(col("e_t") <= col("t_first") + lit(total_us))
 
-    sizes = [n_edges]
+    n_paths = n_edges
     held_prev = n_edges  # level 1 is the edge frame
     cycles = []
     for _hop in range(2, max_hops + 1):
-        est = _sampled_size(paths, sizes[-1], _ext) if _hop == 2 else _next_estimate(sizes)
-        level, n = budget.admit(_ext(paths), est, f"level {_hop}")
-        sizes.append(n)
+        # The last level is only read for the transfers that close a cycle.
+        final = _hop == max_hops
+
+        def _build(p: DataFrame, final: bool = final) -> DataFrame:
+            e = _ext(p)
+            return e.filter(col("e_dst") == col("start")) if final else e
+
+        # Estimated from a sample of the paths at every level: a growth
+        # factor from earlier levels is wrong in both directions (a review
+        # measured a 45x under-estimate and a skip on a level that was empty).
+        est = _sampled_size(paths, n_paths, _build)
+        level, n = budget.admit(_build(paths), est, f"level {_hop}")
         cycles.append(
             _cut_small(
                 level.filter(col("e_dst") == col("start")).select(
@@ -710,7 +761,9 @@ def w3_round_tripping(
                     col("nodes"),
                     col("t_first"),
                     col("e_ts").alias("ts_last"),
-                )
+                ),
+                budget,
+                f"cycles {_hop}",
             )
         )
         # The previous level (the edge frame, for level 2) is not read again.
@@ -719,7 +772,7 @@ def w3_round_tripping(
         paths = None
         budget.release(held_prev)
         held_prev = n
-        if _hop == max_hops:
+        if final:
             break
         paths = level.filter(~array_contains(col("nodes"), col("e_dst"))).select(
             col("start"),
@@ -729,6 +782,7 @@ def w3_round_tripping(
             concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
             concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
         )
+        n_paths = n
         level = None
     step.unpersist()
 
@@ -811,7 +865,9 @@ def w17_layering_chain(
     cliff check must exempt it.
 
     Precision decision: on a corpus with amount continuity this rule is
-    about 1% precise for stack (25 of 2,191 alerts on Lane A's corpus).
+    about 1% precise for stack (118 of 11,381 alerts touch a stack
+    transfer on Lane A's 2fb9259 corpus at scale 0.25, and a review found 25
+    of 2,191 at scale 0.05).
     That is deliberate and published as is. Tightening min_hops, adding a
     dwell limit or narrowing the ratio toward the generator's stack
     parameters (hop gaps of 6-54 h, a 1-10% skim) would be tuning the rule
@@ -872,6 +928,12 @@ def w17_layering_chain(
             col("e_t").alias("t_last"),
             col("e_amt").alias("amt_last"),
             col("e_ts").alias("ts_last"),
+            # When the chain first qualifies: the time of its min_hops-th
+            # transfer. Used as alert_ts, the moment the rule could have
+            # fired; later onward hops extend the chain but do not delay it.
+            when(size(col("uetrs")) + lit(1) == lit(min_hops), col("e_ts"))
+            .otherwise(col("ts_q"))
+            .alias("ts_q"),
             concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
             concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
         )
@@ -882,33 +944,48 @@ def w17_layering_chain(
         col("t").alias("t_last"),
         col("amt").alias("amt_last"),
         col("ts").alias("ts_last"),
+        when(lit(False), col("ts")).alias("ts_q"),  # null, typed like ts
         array(col("uetr")).alias("uetrs"),
         array(col("src"), col("dst")).alias("nodes"),
     )
-    sizes = [n_edges]
+    n_paths = n_edges
     held_prev = n_edges
     complete = []  # complete chains of >= min_hops transfers, per level
     for hop in range(1, max_hops + 1):
         # ``paths`` holds chains of ``hop`` transfers; ``level`` their
-        # one-transfer extensions.
-        est = _sampled_size(paths, sizes[-1], _ext) if hop == 1 else _next_estimate(sizes)
-        level, n = budget.admit(_ext(paths), est, f"level {hop + 1}")
-        sizes.append(n)
+        # one-transfer extensions. At max_hops only the extensions that
+        # return to the start are needed (to drop returning chains).
+        final = hop == max_hops
+
+        def _build(p: DataFrame, final: bool = final) -> DataFrame:
+            e = _ext(p)
+            return e.filter(col("e_dst") == col("start")) if final else e
+
+        # Sampled at every level; see w3_round_tripping.
+        est = _sampled_size(paths, n_paths, _build)
+        level, n = budget.admit(_build(paths), est, f"level {hop + 1}")
         if hop >= min_hops:
             returns = level.filter(col("e_dst") == col("start")).select("uetrs")
             done = paths.join(returns, "uetrs", "left_anti")
-            if hop < max_hops:
+            if not final:
                 onward = level.filter(~array_contains(col("nodes"), col("e_dst")))
                 done = done.join(onward.select("uetrs"), "uetrs", "left_anti")
-            complete.append(_cut_small(done.select("uetrs", "nodes", "ts_last")))
+            complete.append(
+                _cut_small(
+                    done.select("uetrs", "nodes", "ts_last", "ts_q"), budget, f"complete {hop}"
+                )
+            )
+            # Drop every reference to the previous level before releasing it.
+            done = returns = onward = None
         if hop == 1:
             edges.unpersist()
         paths = None
         budget.release(held_prev)
         held_prev = n
-        if hop == max_hops:
+        if final:
             break
         paths = _advance(level)
+        n_paths = n
         level = None
     step.unpersist()
 
@@ -937,12 +1014,14 @@ def w17_layering_chain(
             element_at(col("uetrs"), 1).alias("first_uetr"),
             element_at(col("nodes"), 1).alias("sender"),
             col("ts_last"),
+            col("ts_q"),
         )
         .groupBy("tail", "tail_nodes")
         .agg(
             array_sort(collect_set("first_uetr")).alias("first_uetrs"),
             array_sort(collect_set("sender")).alias("senders"),
             max_("ts_last").alias("ts_last"),
+            max_("ts_q").alias("ts_q"),
         )
         .select(
             element_at(col("tail_nodes"), 1).alias("entity"),
@@ -951,6 +1030,7 @@ def w17_layering_chain(
             (size(col("tail")) + lit(1)).alias("hops"),
             size(col("first_uetrs")).alias("feeders"),
             col("ts_last"),
+            col("ts_q"),
         )
     )
     return merged.select(
@@ -962,7 +1042,9 @@ def w17_layering_chain(
         col("entity").alias("entity_id"),
         col("uetrs").alias("related_txn_ids"),
         col("nodes").alias("related_entity_ids"),
-        col("ts_last").alias("alert_ts"),
+        # When the chain first qualified (see _advance), not when its last
+        # onward hop happened: scoring bounds alert_ts by the planted window.
+        col("ts_q").alias("alert_ts"),
         # Longer chains are more deliberate. Bounded [0.6, 0.9].
         expr("least(0.9, 0.3 + 0.1 * hops)").cast("double").alias("alert_score"),
         when(col("hops") >= 5, lit("HIGH"))

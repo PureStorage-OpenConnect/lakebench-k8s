@@ -68,7 +68,7 @@ def test_several_senders_into_one_beneficiary(spark):
 
 
 def test_two_credits_or_different_days_do_not_fire(spark):
-    rows = [
+    rows = [  # three senders, but only two within any 24 h
         ("d1", 1, 9, 1, 9500, "USD"),
         ("d2", 2, 9, 5, 9600, "USD"),
         # Next UTC day.
@@ -100,18 +100,33 @@ def test_single_sender_is_only_the_originator_kind(spark):
 
 def test_burst_across_day_boundaries_is_caught(spark):
     """Eight senders, two credits per UTC day across four days: no tumbling
-    day holds three, but three fall within 24 h of each other."""
+    day holds three, but b0..b2 fall within 24 h (and b1..b3). The two
+    overlapping windows are one burst, so one alert."""
     hours = [20, 23, 25, 46, 49, 70, 73, 94]
     rows = [(f"b{i}", 100 + i, 9, h, 9500, "USD") for i, h in enumerate(hours)]
     out = [a for a in _alerts(spark, rows) if a["alert_type"] == "structuring_beneficiary"]
-    sets = [set(a["related_txn_ids"]) for a in out]
-    assert {"b0", "b1", "b2"} in sets
-    # No reported window is contained in another.
-    assert not any(a < b for a in sets for b in sets)
-    for a in out:
-        assert a["entity_id"] == 9
-        ts = sorted(hours[int(u[1:])] for u in a["related_txn_ids"])
-        assert ts[-1] - ts[0] < 24
+    assert [sorted(a["related_txn_ids"]) for a in out] == [["b0", "b1", "b2", "b3"]]
+    assert out[0]["entity_id"] == 9
+
+
+def test_steady_stream_is_one_alert(spark):
+    """60 band credits every 2 h from three senders: one alert per burst,
+    not one per credit, and its transaction list is capped."""
+    from detection_rules import w2_structuring
+
+    rows = [(f"q{i:02d}", 1 + i % 3, 9, 2 * i, 9500, "USD") for i in range(60)]
+    out = w2_structuring(_df(spark, rows), max_txns_per_alert=10, run_id="r").collect()
+    bene = [a for a in out if a["alert_type"] == "structuring_beneficiary"]
+    assert len(bene) == 1
+    assert len(bene[0]["related_txn_ids"]) == 10
+    assert " received 60 " in bene[0]["narrative"]
+
+
+def test_one_structurer_plus_one_other_is_not_multiple_depositors(spark):
+    """O structures into B three times and S pays B once: the originator kind
+    fires; the beneficiary kind needs three senders and does not."""
+    rows = [(f"o{i}", 7, 9, i, 9500, "USD") for i in range(3)] + [("s1", 8, 9, 4, 9600, "USD")]
+    assert [a["alert_type"] for a in _alerts(spark, rows)] == ["structuring"]
 
 
 def test_window_is_shorter_than_24_hours(spark):
