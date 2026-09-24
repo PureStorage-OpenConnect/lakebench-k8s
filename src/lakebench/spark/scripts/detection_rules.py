@@ -187,9 +187,11 @@ def w2_structuring(
       The beneficiary kind uses a sliding window: one candidate window
       [t, t + window_hours) per credit, keeping only windows that are not
       contained in the previous credit's window, then merging overlapping
-      qualifying windows into one alert per burst (related_txn_ids capped
-      at max_txns_per_alert, earliest uetrs by sort order; the narrative
-      carries the full count). Tumbling buckets miss bursts that straddle
+      qualifying windows into bursts, cut into chunks of one window length
+      of anchors: one alert per chunk, spanning at most two windows, with
+      alert_ts the chunk's last credit. related_txn_ids is capped at
+      max_txns_per_alert (by uetr sort order; the narrative carries the full
+      count). Tumbling buckets miss bursts that straddle
       a boundary (eight credits split 2/2/2/2 across four UTC days never
       reach 3 in one bucket).
 
@@ -299,14 +301,26 @@ def w2_structuring(
                 "_new", (col("_prev_end").isNull() | (col("_t") > col("_prev_end"))).cast("int")
             )
             .withColumn("_burst", sum_("_new").over(by_start))
-            .groupBy("entity_id", "_burst")
+            # A burst is cut into window-length chunks of anchors, so a
+            # busy account's months-long stream is not one alert whose
+            # alert_ts (its end) lies weeks after the credits of interest.
+            # Each alert then spans at most two windows.
+            .withColumn(
+                "_chunk",
+                (
+                    (col("_t") - min_("_t").over(Window.partitionBy("entity_id", "_burst")))
+                    / lit(window_us)
+                ).cast("long"),
+            )
+            .groupBy("entity_id", "_burst", "_chunk")
             .agg(
                 array_sort(array_distinct(expr("flatten(collect_list(related_txn_ids))"))).alias(
                     "_all_txns"
                 ),
-                array_distinct(expr("flatten(collect_list(_related_entity_ids))")).alias(
-                    "_related_entity_ids"
-                ),
+                expr(
+                    f"slice(array_distinct(flatten(collect_list(_related_entity_ids))), "
+                    f"1, {int(max_txns_per_alert)})"
+                ).alias("_related_entity_ids"),
                 min_("first_ts").alias("first_ts"),
                 max_("last_ts").alias("last_ts"),
             )
@@ -445,8 +459,9 @@ def path_search_budget_rows(spark) -> int:
         executors, scratch = 0, None
     if executors > 0:
         # No scratch PVC (platform.storage.scratch off, e.g. non-Portworx):
-        # local dirs sit on node ephemeral storage; assume the 20 Gi the job
-        # gives its work-dir emptyDir rather than disk that may not exist.
+        # Spark's local dirs are then an emptyDir with no size limit on the
+        # node's ephemeral storage, whose size the job cannot see. 20 Gi per
+        # executor is a conservative guess, not a known limit.
         per_executor = scratch or PATH_SEARCH_NO_PVC_BYTES
         return int(executors * per_executor * PATH_SEARCH_SCRATCH_SHARE / PATH_SEARCH_BYTES_PER_ROW)
     return PATH_SEARCH_MAX_PATHS
