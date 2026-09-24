@@ -15,7 +15,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from common import apply_silver_transformations, env, log
+from common import (
+    apply_silver_transformations_anchored,
+    env,
+    log,
+    resolve_data_clock,
+    set_utc_session,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     approx_count_distinct,
@@ -258,8 +264,8 @@ def apply_dynamic_config(spark, profile: DataProfile):
 # ============================================================
 # TRANSFORMATION LOGIC
 # ============================================================
-# apply_silver_transformations() is imported from common.py
-# (shared between batch silver_build.py and streaming silver_stream.py)
+# apply_silver_transformations_anchored() is imported from common.py
+# (shared between batch silver_build.py and continuous silver_stream.py)
 
 # ============================================================
 # STRATEGY IMPLEMENTATIONS
@@ -275,6 +281,27 @@ def _table_exists(spark, table_name: str) -> bool:
         return False
 
 
+def rows_added_by_last_commit(spark, silver_tbl):
+    """Rows the table's latest snapshot added (this cycle's write).
+
+    Snapshot metadata only; falls back to a full count when the summary is
+    missing. In incremental mode the table count is every cycle so far,
+    which overstated output_rows.
+    """
+    try:
+        # The snapshot main points at, not the latest committed_at (a
+        # writer's clock), so the answer is exact.
+        r = spark.sql(
+            f"SELECT s.summary['added-records'] AS n FROM {silver_tbl}.snapshots s "
+            f"JOIN {silver_tbl}.refs r ON s.snapshot_id = r.snapshot_id WHERE r.name = 'main'"
+        ).collect()
+        if r and r[0]["n"] is not None:
+            return int(r[0]["n"])
+    except Exception as e:  # noqa: BLE001
+        log(f"Warning: snapshot summary unavailable ({e}); counting the table")
+    return spark.table(silver_tbl).count()
+
+
 def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
@@ -282,8 +309,9 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
     bronze_count = df_bronze.count()
     log(f"Bronze records: {bronze_count:,}")
+    anchor = resolve_data_clock(df_bronze)
 
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
     silver_count = silver_df.count()
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
@@ -329,8 +357,11 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
 
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
 
+    # LB_DATA_CLOCK when set; a one-column pass over bronze only without it.
+    anchor = resolve_data_clock(df_bronze)
+
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations(df_bronze)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
 
     # LB-049: distribution-mode is overridable via Spark conf for scale
     # testing. Default changed from "none" to "hash" -- see docstring.
@@ -354,7 +385,7 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
             writer = writer.tableProperty("write.spark.fanout.enabled", "true")
         writer.createOrReplace()
 
-    silver_count = spark.table(silver_tbl).count()
+    silver_count = rows_added_by_last_commit(spark, silver_tbl)
     log(f"Wrote {silver_count:,} records")
 
     return silver_count
@@ -373,6 +404,7 @@ log("Customer 360 Silver Build - Adaptive Transformation Pipeline")
 log("=" * 60)
 
 spark = SparkSession.builder.appName("lb-silver-build").getOrCreate()
+set_utc_session(spark)
 
 # Check for legacy shuffle partition override
 shuffle_override = os.getenv("LB_SILVER_SHUFFLE_PARTITIONS")

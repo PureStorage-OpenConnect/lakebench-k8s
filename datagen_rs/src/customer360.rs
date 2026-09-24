@@ -61,6 +61,20 @@ pub struct Config {
 }
 
 impl Config {
+    /// Defaults with the customer id space sized for `scale`
+    /// (`customer_id_max_for_scale`). Rows are then a pure function of
+    /// (seed, scale, file_id, rows_per_file).
+    pub fn for_scale(
+        seed: u64,
+        scale: f64,
+        file_id: u64,
+        rows_per_file: usize,
+    ) -> Result<Self, String> {
+        let mut cfg = Self::new(seed, file_id, rows_per_file);
+        cfg.customer_id_max = customer_id_max_for_scale(scale)?;
+        Ok(cfg)
+    }
+
     /// Sensible defaults matching Python's Config defaults for c360.
     pub fn new(seed: u64, file_id: u64, rows_per_file: usize) -> Self {
         Self {
@@ -76,6 +90,104 @@ impl Config {
             timestamp_end_us: 1_735_689_600_000_000,
         }
     }
+}
+
+/// Customers per unit of scale factor. Mirrors `customer360_dimensions` in
+/// `src/lakebench/config/scale.py`: scale 1 = 100K customers, 10 = 1M,
+/// 100 = 10M. The id space used to be a fixed 500K at every scale, so a
+/// scale-100 corpus had the same customers as scale 1 with 100x the events
+/// each (E4).
+pub const CUSTOMERS_PER_SCALE_UNIT: u64 = 100_000;
+
+/// `customer_id_max` for a scale factor: `max(1, round(scale * 100_000))`,
+/// rounding half to even like Python's `round` so the Rust and Python
+/// customer counts agree for every scale. Ids are drawn from
+/// `1..=customer_id_max`. Errors on a non-positive or non-finite scale, or
+/// one above 2^32 ids. Use `customer_id_max_for_scale_within` on a pod, which
+/// also checks the loyalty lookup fits the memory limit.
+pub fn customer_id_max_for_scale(scale: f64) -> Result<u64, String> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return Err(format!(
+            "scale must be a positive finite number; got {}",
+            scale
+        ));
+    }
+    let n = (scale * CUSTOMERS_PER_SCALE_UNIT as f64).round_ties_even();
+    if n > u32::MAX as f64 {
+        return Err(format!(
+            "scale {} gives {} customers, above the {} supported",
+            scale,
+            n,
+            u32::MAX
+        ));
+    }
+    Ok((n as u64).max(1))
+}
+
+/// Bytes the per-pod `LoyaltyLookup` holds per customer id (one `bool`, one
+/// `u8`).
+pub const LOYALTY_BYTES_PER_CUSTOMER: u64 = 2;
+
+/// Share of the pod memory limit the loyalty lookup may take. The rest is
+/// for the per-thread file buffers, which dominate a datagen pod's RSS.
+pub const LOYALTY_MEMORY_SHARE: f64 = 0.25;
+
+/// Error unless a lookup for `customer_id_max` fits `LOYALTY_MEMORY_SHARE`
+/// of `mem_limit_bytes`. No limit (None) always fits.
+pub fn check_id_space_fits_memory(
+    customer_id_max: u64,
+    mem_limit_bytes: Option<u64>,
+) -> Result<(), String> {
+    let Some(limit) = mem_limit_bytes else {
+        return Ok(());
+    };
+    let need = customer_id_max.saturating_add(1) * LOYALTY_BYTES_PER_CUSTOMER;
+    let budget = (limit as f64 * LOYALTY_MEMORY_SHARE) as u64;
+    if need > budget {
+        return Err(format!(
+            "customer_id_max={} needs a {:.2} GiB loyalty lookup, over the {:.2} GiB \
+             ({}% of the {:.2} GiB pod memory limit) it may use; raise the datagen \
+             pod memory or lower the scale / unique_customers",
+            customer_id_max,
+            need as f64 / (1u64 << 30) as f64,
+            budget as f64 / (1u64 << 30) as f64,
+            (LOYALTY_MEMORY_SHARE * 100.0) as u32,
+            limit as f64 / (1u64 << 30) as f64
+        ));
+    }
+    Ok(())
+}
+
+/// `customer_id_max_for_scale`, refused when the lookup would not fit the
+/// pod memory limit (`pod_memory_limit_bytes()`, or None off a pod).
+pub fn customer_id_max_for_scale_within(
+    scale: f64,
+    mem_limit_bytes: Option<u64>,
+) -> Result<u64, String> {
+    let n = customer_id_max_for_scale(scale)?;
+    check_id_space_fits_memory(n, mem_limit_bytes)?;
+    Ok(n)
+}
+
+/// The container memory limit from cgroup v2 (`memory.max`) or v1
+/// (`memory.limit_in_bytes`); None when unlimited or unreadable.
+pub fn pod_memory_limit_bytes() -> Option<u64> {
+    for path in [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let t = text.trim();
+            if t == "max" {
+                return None;
+            }
+            if let Ok(v) = t.parse::<u64>() {
+                // cgroup v1 reports "unlimited" as a huge page-aligned value.
+                return if v >= (1u64 << 60) { None } else { Some(v) };
+            }
+        }
+    }
+    None
 }
 
 // Named indices into INTERACTION_TYPES so the conditional-null and page-view
@@ -819,6 +931,113 @@ mod tests {
         let sampler = r::CustomerIdSampler::new(10_000);
         let cfg = small_cfg(rows);
         build_batch(&cfg, &loyalty, &sampler)
+    }
+
+    #[test]
+    fn customer_count_scales_with_scale_factor() {
+        // Same numbers as scale.py customer360_dimensions.
+        for (scale, want) in [
+            (0.01, 1_000u64),
+            (0.1, 10_000),
+            (1.0, 100_000),
+            (5.0, 500_000),
+            (10.0, 1_000_000),
+            (100.0, 10_000_000),
+            (1000.0, 100_000_000),
+        ] {
+            assert_eq!(
+                customer_id_max_for_scale(scale).unwrap(),
+                want,
+                "scale {}",
+                scale
+            );
+        }
+        // Never zero customers; half rounds to even like Python's round().
+        assert_eq!(customer_id_max_for_scale(1e-9).unwrap(), 1);
+        assert_eq!(customer_id_max_for_scale(0.000025).unwrap(), 2);
+        assert_eq!(customer_id_max_for_scale(0.000015).unwrap(), 2);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e6] {
+            assert!(customer_id_max_for_scale(bad).is_err(), "scale {}", bad);
+        }
+    }
+
+    #[test]
+    fn id_space_is_capped_by_pod_memory() {
+        let gib = 1u64 << 30;
+        // 4 GiB pod: 1 GiB for the lookup, 2 bytes per id -> ~536M ids.
+        assert!(customer_id_max_for_scale_within(1000.0, Some(4 * gib)).is_ok());
+        let err = customer_id_max_for_scale_within(10_000.0, Some(4 * gib)).unwrap_err();
+        assert!(err.contains("pod memory limit"), "{}", err);
+        // The u32 ceiling (8 GiB lookup) must not pass on a 4 GiB pod.
+        assert!(check_id_space_fits_memory(u32::MAX as u64, Some(4 * gib)).is_err());
+        // Boundary: exactly the budget fits, one id more does not.
+        let max_ids = (4 * gib / 4) / LOYALTY_BYTES_PER_CUSTOMER - 1;
+        assert!(check_id_space_fits_memory(max_ids, Some(4 * gib)).is_ok());
+        assert!(check_id_space_fits_memory(max_ids + 1, Some(4 * gib)).is_err());
+        // No limit known: only the u32 ceiling applies.
+        assert!(customer_id_max_for_scale_within(10_000.0, None).is_ok());
+    }
+
+    fn build_for_scale(seed: u64, scale: f64, file_id: u64, rows: usize) -> RecordBatch {
+        let mut cfg = Config::for_scale(seed, scale, file_id, rows).unwrap();
+        cfg.payload_kb = 1;
+        let loyalty = r::LoyaltyLookup::build(seed, cfg.customer_id_max);
+        let sampler = r::CustomerIdSampler::new(cfg.customer_id_max);
+        build_batch(&cfg, &loyalty, &sampler)
+    }
+
+    fn customer_ids(batch: &RecordBatch) -> Vec<i64> {
+        batch
+            .column(batch.schema().index_of("customer_id").unwrap())
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
+    #[test]
+    fn customer_ids_stay_inside_the_scaled_id_space() {
+        for scale in [0.01, 1.0, 10.0] {
+            let max = customer_id_max_for_scale(scale).unwrap() as i64;
+            let ids = customer_ids(&build_for_scale(42, scale, 3, 20_000));
+            assert!(
+                ids.iter().all(|&c| (1..=max).contains(&c)),
+                "scale {} id outside 1..={}",
+                scale,
+                max
+            );
+        }
+    }
+
+    #[test]
+    fn larger_scale_reaches_more_customers() {
+        // 20K rows, 60% of them uniform over the retail band: at scale 1
+        // (100K ids) the top id seen stays under 100K; at scale 10 (1M ids)
+        // most retail draws land above 100K.
+        let s1 = customer_ids(&build_for_scale(42, 1.0, 0, 20_000));
+        let s10 = customer_ids(&build_for_scale(42, 10.0, 0, 20_000));
+        assert!(*s1.iter().max().unwrap() <= 100_000);
+        let above = s10.iter().filter(|&&c| c > 100_000).count();
+        assert!(
+            above > s10.len() / 3,
+            "only {} of {} ids above 100K",
+            above,
+            s10.len()
+        );
+        let distinct = |v: &[i64]| v.iter().collect::<std::collections::HashSet<_>>().len();
+        assert!(distinct(&s10) > distinct(&s1));
+    }
+
+    #[test]
+    fn rows_are_a_pure_function_of_seed_scale_file() {
+        let a = build_for_scale(7, 10.0, 5, 3_000);
+        let b = build_for_scale(7, 10.0, 5, 3_000);
+        assert_eq!(a, b, "same (seed, scale, file) must give identical rows");
+        let other_scale = build_for_scale(7, 1.0, 5, 3_000);
+        assert_ne!(customer_ids(&a), customer_ids(&other_scale));
+        let other_file = build_for_scale(7, 10.0, 6, 3_000);
+        assert_ne!(customer_ids(&a), customer_ids(&other_file));
     }
 
     #[test]

@@ -150,14 +150,18 @@ _Q6 = BenchmarkQuery(
     display_name="Customer RFM scoring",
     query_class="analytics",
     sql="""\
-WITH customer_rfm AS (
+WITH data_clock AS (
+  SELECT MAX(interaction_date) AS as_of FROM {catalog}.{silver_table}
+),
+customer_rfm AS (
   SELECT
-    customer_id,
-    DATE_DIFF('day', MAX(interaction_date), CURRENT_DATE) AS recency_days,
-    COUNT(DISTINCT interaction_date) AS frequency,
-    ROUND(SUM(transaction_amount), 2) AS monetary
-  FROM {catalog}.{silver_table}
-  GROUP BY customer_id
+    s.customer_id,
+    DATE_DIFF('day', MAX(s.interaction_date), MAX(c.as_of)) AS recency_days,
+    COUNT(DISTINCT s.interaction_date) AS frequency,
+    ROUND(SUM(s.transaction_amount), 2) AS monetary
+  FROM {catalog}.{silver_table} s
+  CROSS JOIN data_clock c
+  GROUP BY s.customer_id
 )
 SELECT
   CASE
