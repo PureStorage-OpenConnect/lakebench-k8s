@@ -30,9 +30,11 @@ silver applies. w (window_rel) and the window ratio limit
 
 Exemption (R2): a declared definitional typology is exempt on its defining
 attribute only. micro_structuring's defining attribute is its amount (the
-structuring band), so its rows are left out of the amount checks (W2 band
-edges and the USD amount thresholds it sits under, W6 and W7's $10,000) and
-kept in the gap checks.
+structuring band [floor, t)), so its rows are left out of the planted window
+checks on amounts (W2 band edges, and the USD thresholds its band sits
+under, W6 and W7's $10,000). They stay in the planted atom checks (a planted
+row exactly at t fires a >= t rule, which the band does not cover), in the
+all-rows checks (about 0.007% of rows) and in the gap checks.
 
 The statistic and its limits, declared before any run:
 
@@ -202,31 +204,65 @@ def load_thresholds(rules_src: str, silver_src: str, prereg: dict) -> dict:
     }
 
 
+def _binom_tail(k: int, n: int, p: float) -> float:
+    """P(X >= k) for X ~ Binomial(n, p), in log space (n can be large)."""
+    if k <= 0:
+        return 1.0
+    lp, lq = math.log(p), math.log1p(-p)
+    terms = [
+        math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) + i * lp + (n - i) * lq
+        for i in range(k, n + 1)
+    ]
+    m = max(terms)
+    return min(1.0, math.exp(m) * sum(math.exp(t - m) for t in terms))
+
+
+# One-sided tail matching the 3-standard-error rule used for large counts.
+P_SIGNIFICANT = 0.00135
+
+
 def _ratio_verdict(
     n_lo: int, n_hi: int, limit: float, base: tuple[int, int] | None = None
 ) -> tuple[str, float]:
-    """FAIL on a significant excess over the limit even in a thin window (266
-    rows below t against 11 above is a cliff whatever MIN_COUNT says); PASS
-    needs MIN_COUNT rows on each side. Zero counts get a 0.5 continuity
-    correction for the test only."""
+    """FAIL on a significant excess over the limit, even in a thin window
+    (266 rows below t against 11 above is a cliff whatever MIN_COUNT says);
+    PASS needs MIN_COUNT rows on each side.
+
+    Without a baseline, a thin window is tested exactly: the larger side's
+    count against Binomial(n_lo + n_hi, limit / (1 + limit)), the split at
+    exactly the limit, so a pin (0 against N) FAILs from N of about 17.
+    With a baseline (day-of-week matched gaps), both ratios are divided by
+    the baseline's over the same bins and tested on the log scale, and the
+    baseline must itself have MIN_COUNT rows a side, or a thin normaliser
+    could cancel a real cliff.
+    """
     if n_lo + n_hi == 0:
         return "INSUFFICIENT", float("nan")
     a, b = max(n_lo, 0.5), max(n_hi, 0.5)
     r = b / a
-    var = 1 / a + 1 / b
     if base is not None:
-        # Day-of-week matched: divide by the baseline's ratio over the same
-        # bins, so the calendar's own ripple cancels.
-        bl, bh = max(base[0], 0.5), max(base[1], 0.5)
-        r = r / (bh / bl)
-        var += 1 / bl + 1 / bh
+        if min(base) < MIN_COUNT:
+            return "INSUFFICIENT", float("nan")
+        r = r / (base[1] / base[0])
+        se = math.sqrt(1 / a + 1 / b + 1 / base[0] + 1 / base[1])
+        lr = abs(math.log(r))
+        if lr > math.log(limit) and lr / se > Z_SIGNIFICANT:
+            return "FAIL", r
+        if min(n_lo, n_hi) < MIN_COUNT:
+            return "INSUFFICIENT", r
+        return ("PASS" if lr <= math.log(limit) else "INSUFFICIENT"), r
     lr = abs(math.log(r))
-    se = math.sqrt(var)
-    if lr > math.log(limit) and lr / se > Z_SIGNIFICANT:
-        return "FAIL", r
+    if lr > math.log(limit):
+        if min(n_lo, n_hi) < MIN_COUNT:
+            big, n = max(n_lo, n_hi), n_lo + n_hi
+            if _binom_tail(big, n, limit / (1 + limit)) < P_SIGNIFICANT:
+                return "FAIL", r
+            return "INSUFFICIENT", r
+        se = math.sqrt(1 / a + 1 / b)
+        return ("FAIL" if lr / se > Z_SIGNIFICANT else "INSUFFICIENT"), r
     if min(n_lo, n_hi) < MIN_COUNT:
         return "INSUFFICIENT", r
-    return ("PASS" if lr <= math.log(limit) else "INSUFFICIENT"), r
+    return "PASS", r
 
 
 def cliff(count, t: float, w: float, max_ratio: float, base_count=None) -> dict:
@@ -285,7 +321,9 @@ def main(root: str) -> int:
     base = Path(root)
     pacs = next(base.rglob("bronze/pacs008"))
     # Every cycle's manifest (manifest.parquet, manifest-c001.parquet, ...).
-    manifest = next(base.rglob("manifest"))
+    manifest = next(
+        p for p in base.rglob("manifest") if p.is_dir() and any(p.glob("manifest*.parquet"))
+    )
     manifest = manifest / "manifest*.parquet"
     th = load_thresholds(RULES.read_text(), SILVER.read_text(), json.loads(PREREG.read_text()))
     fx_case = " ".join(f"WHEN '{k}' THEN {v}" for k, v in th["fx"].items())
@@ -315,7 +353,9 @@ def main(root: str) -> int:
         def count(lo: float, hi: float, exact: bool = False) -> int:
             # Amounts are cents; compare exact values at cent resolution so a
             # float product never misses an atom.
-            if exact:
+            if exact and table == "g":
+                rng = f"{col} = {lo!r}"  # gaps: an exact day count, no tolerance
+            elif exact:
                 rng = f"round({col}, 2) = round({lo!r}, 2)"
             else:
                 rng = f"{col} >= {lo!r} AND {col} < {hi!r}"
@@ -334,6 +374,7 @@ def main(root: str) -> int:
         base: str | None = None,
         norm: str | None = None,
         exempt_reason: str | None = None,
+        atom_where: str | None = None,
     ) -> None:
         """``base``: planted-vs-baseline atom check. ``norm``: divide the
         ratios by this population's ratios over the same bins (day-of-week
@@ -347,8 +388,14 @@ def main(root: str) -> int:
         if base is not None:
             cb = counter(table, col, base)
             n_b = cb(t * (1 - w), t * (1 + w))
-            n_p = res["window"][0] + res["window"][1] + res["atom"]
-            av = atom_verdict(res["atom"], n_p, cb(t, t, exact=True), n_b, rmax)
+            if atom_where is None:
+                atom_p = res["atom"]
+                n_p = res["window"][0] + res["window"][1] + atom_p
+            else:
+                ca = counter(table, col, atom_where)
+                atom_p, n_p = ca(t, t, exact=True), ca(t * (1 - w), t * (1 + w))
+            res["atom"] = atom_p
+            av = atom_verdict(atom_p, n_p, cb(t, t, exact=True), n_b, rmax)
             res["atom_verdict"] = av
             order = {"FAIL": 2, "INSUFFICIENT": 1, "PASS": 0}
             res["verdict"] = max((res["verdict"], av), key=order.get)
@@ -364,8 +411,20 @@ def main(root: str) -> int:
     usd_base = "typ IS NULL AND ccy = 'USD'"
     exempt = ", ".join(f"'{x}'" for x in EXEMPT_W2)
     planted_usd = f"typ IS NOT NULL AND typ NOT IN ({exempt}) AND ccy = 'USD'"
-    for pop, where in (("planted $", planted_usd), ("bursts", burst)):
-        run(f"W8 amount ${t8:,.0f}", pop, "r", "usd", where, t8, base=usd_base)
+    # The exemption covers micro_structuring's band [floor, t), not t itself:
+    # a planted atom exactly at t fires a >= t rule, so the atom check keeps it.
+    atom_usd = "typ IS NOT NULL AND ccy = 'USD'"
+    run(
+        f"W8 amount ${t8:,.0f}",
+        "planted $",
+        "r",
+        "usd",
+        planted_usd,
+        t8,
+        base=usd_base,
+        atom_where=atom_usd,
+    )
+    run(f"W8 amount ${t8:,.0f}", "bursts", "r", "usd", burst, t8, base=usd_base)
     tg = th["w8_gap_days"]
     base_gaps = "gap_days IS NOT NULL AND typ IS NULL"
     run(
@@ -384,7 +443,16 @@ def main(root: str) -> int:
         "(tid, ts) IN (SELECT tid, min(ts) FROM g "
         "WHERE typ = 'dormant_reactivation' AND pos > 1 GROUP BY tid)"
     )
-    run(f"W8 gap {tg:g} d", "dormancy", "g", "gap_days", first_burst, tg, norm=base_gaps)
+    run(
+        f"W8 gap {tg:g} d",
+        "dormancy",
+        "g",
+        "gap_days",
+        first_burst,
+        tg,
+        norm=base_gaps,
+        base=base_gaps,
+    )
     ff = th["w2_floor_factor"]
     for ccy, t in th["w2"].items():
         where = f"ccy = '{ccy}' AND (typ IS NULL OR typ NOT IN ({exempt}))"
@@ -392,7 +460,16 @@ def main(root: str) -> int:
         base_c = f"ccy = '{ccy}' AND typ IS NULL"
         for name, edge in (("threshold", t), ("band floor", ff * t)):
             run(f"W2 {ccy} {name} {edge:,.0f}", "all rows", "r", "amt", where, edge)
-            run(f"W2 {ccy} {name} {edge:,.0f}", "planted", "r", "amt", planted, edge, base=base_c)
+            run(
+                f"W2 {ccy} {name} {edge:,.0f}",
+                "planted",
+                "r",
+                "amt",
+                planted,
+                edge,
+                base=base_c,
+                atom_where=f"ccy = '{ccy}' AND typ IS NOT NULL",
+            )
     missing: list[str] = []
     for label, key in (("W7", "w7_amount_usd"), ("W6", "w6_amount_usd")):
         if not th[key]:
@@ -412,6 +489,7 @@ def main(root: str) -> int:
                 planted_usd,
                 t,
                 base=usd_base,
+                atom_where=atom_usd,
             )
 
     print(
