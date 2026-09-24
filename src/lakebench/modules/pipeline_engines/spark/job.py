@@ -712,6 +712,26 @@ _ICEBERG_RUNTIME_SUFFIX: dict[tuple[int, int], str] = {
 # is exactly the signal that triggers the next resolver.
 _MAVEN_MIRROR_REPOS = "https://maven-central.storage-download.googleapis.com/maven2/"
 
+# Python packages the AML reference detector (D9) needs on the driver. The
+# apache/spark images ship Python 3.10 with pip but no numpy, so these are
+# installed per job into an emptyDir by an init container. Exact pins keep the
+# GBT reproducible (P4.2); they are the newest releases with cp310 wheels, so
+# they trail the local harness (Python 3.11) by a minor version or two, which
+# A6 absorbs (cluster AP must match the harness within its bootstrap CI).
+REFERENCE_PY_DEPS = (
+    "numpy==2.2.6",
+    "scipy==1.15.3",
+    "pandas==2.3.3",
+    "scikit-learn==1.7.2",
+    "joblib==1.5.2",
+    "threadpoolctl==3.6.0",
+    "python-dateutil==2.9.0.post0",
+    "pytz==2025.2",
+    "tzdata==2025.2",
+    "six==1.17.0",
+)
+REFERENCE_PY_DEPS_DIR = "/opt/lb-pydeps"
+
 
 def _spark_interval_to_seconds(interval: str) -> int:
     """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
@@ -1968,6 +1988,35 @@ class SparkJobManager:
                 container["volumeMounts"].append({"name": "truststore", "mountPath": "/truststore"})
             for container in executor_pod_template["spec"]["containers"]:
                 container["volumeMounts"].append({"name": "truststore", "mountPath": "/truststore"})
+
+        # The reference detector trains on the driver only; executors do not
+        # need the packages. Driver-side only: the volume is added to the
+        # driver template's own copy of the volume list.
+        if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
+            driver_pod_template["spec"]["volumes"] = [
+                *driver_pod_template["spec"]["volumes"],
+                {"name": "lb-pydeps", "emptyDir": {"sizeLimit": "2Gi"}},
+            ]
+            _deps_mount = {"name": "lb-pydeps", "mountPath": REFERENCE_PY_DEPS_DIR}
+            driver_pod_template["spec"]["initContainers"].append(
+                {
+                    "name": "install-pydeps",
+                    "image": cfg.images.spark,
+                    "imagePullPolicy": cfg.images.pull_policy.value,
+                    "securityContext": {"runAsUser": 185, "runAsGroup": 185},
+                    "env": [{"name": "HOME", "value": "/tmp"}],
+                    "command": [
+                        "/bin/bash",
+                        "-c",
+                        "set -e; python3 -m pip install --no-cache-dir --no-deps "
+                        f"--only-binary=:all: --target {REFERENCE_PY_DEPS_DIR} "
+                        + " ".join(REFERENCE_PY_DEPS),
+                    ],
+                    "volumeMounts": [_deps_mount],
+                }
+            )
+            for container in driver_pod_template["spec"]["containers"]:
+                container["volumeMounts"] = [*container["volumeMounts"], _deps_mount]
             # JVM truststore args for driver and executor
             _ts_opts = (
                 " -Djavax.net.ssl.trustStore=/truststore/truststore.jks"

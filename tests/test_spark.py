@@ -2078,3 +2078,41 @@ def test_get_engine_rejects_unknown_engine():
         mock_engine.value = "flink"
         with pytest.raises(ValueError, match="Unsupported pipeline engine"):
             get_engine(cfg, k8s)
+
+
+class TestReferencePyDeps:
+    """D9: the reference-detector job installs pinned scikit-learn/pandas into a
+    driver-only emptyDir; no other job pays for it."""
+
+    def _mgr(self):
+        config = _make_config(
+            architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}}
+        )
+        return SparkJobManager(config, _mock_k8s())
+
+    def test_reference_job_installs_pinned_deps_on_driver_only(self):
+        from lakebench.modules.pipeline_engines.spark.job import (
+            REFERENCE_PY_DEPS,
+            REFERENCE_PY_DEPS_DIR,
+        )
+
+        m = self._mgr()._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
+        drv = m["spec"]["driver"]["template"]["spec"]
+        init = {c["name"]: c for c in drv["initContainers"]}
+        assert "install-pydeps" in init
+        cmd = init["install-pydeps"]["command"][-1]
+        for dep in REFERENCE_PY_DEPS:
+            assert "==" in dep and dep in cmd
+        assert f"--target {REFERENCE_PY_DEPS_DIR}" in cmd
+        mounts = drv["containers"][0]["volumeMounts"]
+        assert any(v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in mounts)
+        exe = m["spec"]["executor"]["template"]["spec"]
+        assert not any(v["name"] == "lb-pydeps" for v in exe["volumes"])
+        assert not any(
+            v["mountPath"] == REFERENCE_PY_DEPS_DIR for v in exe["containers"][0]["volumeMounts"]
+        )
+
+    def test_other_jobs_do_not_install_deps(self):
+        m = self._mgr()._build_manifest(JobType.GOLD_FINALIZE)
+        drv = m["spec"]["driver"]["template"]["spec"]
+        assert "install-pydeps" not in {c["name"] for c in drv["initContainers"]}
