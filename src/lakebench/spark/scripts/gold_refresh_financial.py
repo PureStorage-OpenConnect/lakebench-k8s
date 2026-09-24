@@ -60,7 +60,7 @@ import time
 import uuid
 
 from bronze_verify_financial import MANIFEST_TABLE, register_manifest
-from common import env, iceberg_table_stats, log, one_line, table_exists
+from common import ensure_partition_transform, env, iceberg_table_stats, log, one_line, table_exists
 from gold_finalize_financial import (
     DDL_ALERTS,
     DDL_CLUSTERS,
@@ -128,6 +128,9 @@ def _bootstrap_gold_tables(spark) -> None:
     """
     for ddl in (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS):
         spark.sql(ddl)
+    ensure_partition_transform(
+        spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
+    )
     try:
         cols = [f.name for f in spark.table(f"{CATALOG}.{GOLD_ALERTS}").schema.fields]
         if "detected_ts" not in cols:

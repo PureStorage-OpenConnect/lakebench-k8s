@@ -26,7 +26,14 @@ from __future__ import annotations
 import time
 import uuid
 
-from common import env, iceberg_table_stats, log, log_job_metrics, one_line
+from common import (
+    ensure_partition_transform,
+    env,
+    iceberg_table_stats,
+    log,
+    log_job_metrics,
+    one_line,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     array,
@@ -273,6 +280,9 @@ def main() -> None:
             log(f"[startup] added detected_ts to {GOLD_ALERTS} (reused-catalog upgrade)")
     except Exception as e:  # noqa: BLE001
         log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
+    ensure_partition_transform(
+        spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
+    )
 
     # gold.alerts holds THIS run's alerts only. Detection replaces each
     # rule's rows as it runs, so a rule that is skipped or fails left an
