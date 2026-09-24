@@ -81,9 +81,13 @@ def main() -> int:
     # only accepts all/bronze/reference. Mapping keeps existing K8s
     # templates working without a template + entrypoint rev at the same
     # time. On the customer360 path --mode is dropped entirely.
+    # `continuous` is what lakebench passes for continuous pipelines (and the
+    # autosizer's `auto` mode resolves to above scale 10). The generator
+    # always pre-writes the corpus, so it maps to `all` like `batch`.
+    # Rejecting it crash-looped every scale > 10 generate.
     ap.add_argument(
         "--mode", default="all",
-        choices=["all", "bronze", "reference", "batch"],
+        choices=["all", "bronze", "reference", "batch", "continuous"],
     )
     # customer360-only args -- ignored on the financial path.
     ap.add_argument("--target-tb", type=float, default=0.1)
@@ -120,9 +124,9 @@ def main() -> int:
 
     threads = detect_cpu_quota()
     if args.workers and args.workers > 0:
-        # Explicit --workers overrides the cgroup-detected default so the K8s
-        # Job template can size datagen concurrency independently of the pod's
-        # CPU limit.
+        # An explicit, user-chosen --workers overrides the detected CPU count.
+        # lakebench passes 0 ("auto") unless the config sets
+        # datagen.generators, so by default threads follow the pod CPU.
         threads = args.workers
 
     # Schema-conditional argv. --schema first so the Rust binary can dispatch
@@ -147,7 +151,7 @@ def main() -> int:
     if args.schema == "financial":
         # Rust driver only knows all/bronze/reference. Map the K8s
         # template's `batch` alias to `all`.
-        rust_mode = "all" if args.mode == "batch" else args.mode
+        rust_mode = "all" if args.mode in ("batch", "continuous") else args.mode
         cmd = common + [
             "--scale", str(args.scale),
             "--corpus-months", str(args.corpus_months),

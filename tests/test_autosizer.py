@@ -212,11 +212,11 @@ class TestAutoSizingScaleOnly:
         assert config.architecture.query_engine.trino.worker.replicas == 1
         assert config.architecture.query_engine.trino.worker.memory == "8Gi"
         assert config.architecture.workload.datagen.parallelism == 2
-        # Batch mode: fixed 4 CPU, 4Gi
-        assert config.architecture.workload.datagen.cpu == "4"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 1
-        assert config.architecture.workload.datagen.uploaders == 1
+        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
+        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        assert config.architecture.workload.datagen.cpu == "8"
+        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.generators == 0
 
     def test_balanced_scale_sizing(self):
         """Scale=10 should get balanced tier resources, still batch mode."""
@@ -230,10 +230,11 @@ class TestAutoSizingScaleOnly:
         assert config.platform.compute.spark.executor.memory == "16g"
         assert config.architecture.query_engine.trino.worker.replicas == 2
         assert config.architecture.workload.datagen.parallelism == 4
-        # Batch mode at scale=10
-        assert config.architecture.workload.datagen.cpu == "4"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 1
+        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
+        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        assert config.architecture.workload.datagen.cpu == "8"
+        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.generators == 0
 
     def test_performance_scale_sizing(self):
         """Scale=100 should get performance tier resources, continuous mode."""
@@ -248,11 +249,11 @@ class TestAutoSizingScaleOnly:
         assert config.architecture.query_engine.trino.worker.replicas == 4
         assert config.architecture.query_engine.trino.worker.memory == "48Gi"
         assert config.architecture.workload.datagen.parallelism >= 8
-        # Continuous mode: fixed 8 CPU, 8Gi, 8 generators (Rust image)
+        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
+        # the pod CPU request). See test_datagen_template_entrypoint_contract.
         assert config.architecture.workload.datagen.cpu == "8"
         assert config.architecture.workload.datagen.memory == "8Gi"
-        assert config.architecture.workload.datagen.generators == 8
-        assert config.architecture.workload.datagen.uploaders == 2
+        assert config.architecture.workload.datagen.generators == 0
 
     def test_extreme_scale_sizing(self):
         """Scale=1000 should get extreme tier resources, continuous mode."""
@@ -265,10 +266,11 @@ class TestAutoSizingScaleOnly:
         assert config.platform.compute.spark.executor.instances >= 16
         assert config.platform.compute.spark.executor.memory == "48g"
         assert config.architecture.query_engine.trino.worker.replicas >= 8
-        # Continuous mode (Rust image, 8Gi memory)
+        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
+        # the pod CPU request). See test_datagen_template_entrypoint_contract.
         assert config.architecture.workload.datagen.cpu == "8"
         assert config.architecture.workload.datagen.memory == "8Gi"
-        assert config.architecture.workload.datagen.generators == 8
+        assert config.architecture.workload.datagen.generators == 0
 
     def test_memory_overhead_derived(self):
         """Memory overhead should be ~25% of executor memory."""
@@ -346,13 +348,14 @@ class TestAutoSizingUserOverride:
         )
         resolve_auto_sizing(config)
 
-        # Batch mode forced: 4 CPU, 4Gi, 1 generator
-        assert config.architecture.workload.datagen.cpu == "4"
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.generators == 1
+        # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
+        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        assert config.architecture.workload.datagen.cpu == "8"
+        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.generators == 0
 
-    def test_datagen_memory_hardlocked_continuous(self):
-        """User-set memory is overridden to mode-correct value (continuous)."""
+    def test_datagen_memory_user_value_honoured_continuous(self):
+        """User-set datagen memory is kept (the old hard-lock overwrote it)."""
         config = LakebenchConfig(
             name="test",
             architecture={
@@ -361,12 +364,11 @@ class TestAutoSizingUserOverride:
         )
         resolve_auto_sizing(config)
 
-        # Even though user set 16Gi, continuous mode hard-locks to 8Gi (Rust image).
-        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.memory == "16Gi"
         assert config.architecture.workload.datagen.cpu == "8"
 
-    def test_datagen_memory_hardlocked_batch(self):
-        """User-set memory is overridden to mode-correct value (batch)."""
+    def test_datagen_memory_user_value_honoured_batch(self):
+        """User-set datagen memory is kept in batch mode too."""
         config = LakebenchConfig(
             name="test",
             architecture={
@@ -377,9 +379,8 @@ class TestAutoSizingUserOverride:
         )
         resolve_auto_sizing(config)
 
-        # Even though user set 16Gi, batch mode hard-locks to 4Gi
-        assert config.architecture.workload.datagen.memory == "4Gi"
-        assert config.architecture.workload.datagen.cpu == "4"
+        assert config.architecture.workload.datagen.memory == "16Gi"
+        assert config.architecture.workload.datagen.cpu == "8"
 
 
 # ---------------------------------------------------------------------------
