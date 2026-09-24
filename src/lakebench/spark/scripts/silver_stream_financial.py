@@ -52,9 +52,22 @@ against the same table. Batch-mode silver_build writes with _batch_id
 = NULL (one row per pair, unchanged from before), so a fresh batch
 deployment sees no change.
 
-Entities/accounts are refreshed lazily by the batch silver_build;
-streaming mode does not update the dimension tables to keep the
-per-batch cost low.
+Dimensions (entities, accounts): continuous mode never runs the batch
+silver_build, so each micro-batch appends the entities and accounts it
+introduces (anti-join on entity_id / iban against the table), carrying
+country and the monitored-population / KYC columns from the party and
+account masters. The anti-join makes a retried batch a no-op for rows it
+already wrote. The masters are read once, when they appear: the datagen
+writes them before its first bronze file, and a batch that arrives first
+waits for them (LB_FINANCIAL_KYC_WAIT_S), so no entity is written with
+NULL KYC that a moment later would have had it; if they never appear,
+the stream fails unless the manifest proves a pre-KYC corpus.
+
+Known differences from batch mode: an entity's name, type and (for
+LEI-keyed entities) country, and an account's holder and opened_date, come
+from the first micro-batch that sees them rather than from the whole
+corpus. The datagen gives each entity one name and country, so the
+difference is limited to opened_date (first date the stream saw).
 """
 
 from __future__ import annotations
@@ -71,8 +84,15 @@ from silver_build_financial import (
     DDL_ENTITIES,
     DDL_STATEMENTS,
     DDL_TXNS,
+    KYC_ACCOUNT_COLUMNS,
+    KYC_ENTITY_COLUMNS,
+    _read_reference,
+    build_accounts,
     build_edges,
+    build_entities,
+    build_kyc,
     build_transactions,
+    reference_frames,
 )
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
@@ -83,6 +103,77 @@ CHECKPOINT_URI = env(
     "LB_FINANCIAL_SILVER_CHECKPOINT", "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
 )
 TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "30"))
+SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+KYC_WAIT_S = int(env("LB_FINANCIAL_KYC_WAIT_S", "900"))
+
+# Party/account masters joined into the dimensions: loaded once (see
+# _kyc), None until then. _KYC_LOADED marks a completed attempt, since a
+# pre-KYC corpus legitimately has no masters.
+_KYC = None
+_KYC_LOADED = False
+
+
+def _kyc(spark):
+    """The KYC-by-IBAN frame, read once. Waits up to KYC_WAIT_S for both
+    masters to be visible (a dedicated reference pod, or other pods' bronze,
+    can beat them; the datagen writes party last, so a visible party means
+    the rest is there). After the wait _read_reference decides, and raises
+    unless the manifest proves a pre-KYC corpus: the stream fails loudly
+    rather than write a run's dimensions with NULL KYC."""
+    global _KYC, _KYC_LOADED
+    if _KYC_LOADED:
+        return _KYC
+    deadline = time.time() + KYC_WAIT_S
+    extended = False
+    while True:
+        party, account = reference_frames(spark)
+        if party is not None and account is not None:
+            break
+        if time.time() >= deadline:
+            if account is not None and not extended:
+                # Account is written before party: party is still uploading
+                # (5-10 GB at scale 1000). Give it one more wait.
+                deadline, extended = time.time() + KYC_WAIT_S, True
+                continue
+            party, account = _read_reference(spark)
+            break
+        log(f"[kyc] party/account masters not there yet; waiting (up to {KYC_WAIT_S}s)")
+        time.sleep(10)
+    kyc = build_kyc(party, account)
+    _KYC = kyc.cache() if kyc is not None else None
+    _KYC_LOADED = True
+    log(f"[kyc] masters {'loaded' if _KYC is not None else 'absent (pre-KYC corpus): KYC NULL'}")
+    return _KYC
+
+
+def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
+    """Append the entities and accounts this batch introduces. Anti-join on
+    the key against the table, so a replayed batch writes nothing twice."""
+    from pyspark.sql.functions import col
+
+    ents = build_entities(txns.drop("_batch_id"), batch_df, kyc)
+    have = spark.table(f"{CATALOG}.{SILVER_ENTITIES}").select(col("entity_id").alias("_have"))
+    new_ents = ents.join(have, ents["entity_id"] == have["_have"], "left_anti")
+    accts = build_accounts(batch_df, kyc)
+    have_a = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}").select(col("iban").alias("_have"))
+    new_accts = accts.join(have_a, accts["iban"] == have_a["_have"], "left_anti")
+    # One small file per table per batch, not one per shuffle partition: the
+    # dimensions are append-only in continuous mode and nothing compacts them.
+    # repartition, not coalesce: coalesce would pull the anti-join itself into
+    # one task, and the first batch carries nearly every entity.
+    new_ents = new_ents.repartition(1).cache()
+    new_accts = new_accts.repartition(1).cache()
+    try:
+        n_e, n_a = new_ents.count(), new_accts.count()
+        if n_e:
+            new_ents.writeTo(f"{CATALOG}.{SILVER_ENTITIES}").append()
+        if n_a:
+            new_accts.writeTo(f"{CATALOG}.{SILVER_ACCOUNTS}").append()
+        return n_e, n_a
+    finally:
+        new_ents.unpersist(blocking=False)
+        new_accts.unpersist(blocking=False)
 
 
 def _merge_batch(batch_df, batch_id: int) -> None:
@@ -131,6 +222,10 @@ def _merge_batch(batch_df, batch_id: int) -> None:
         edges_batch.writeTo(f"{CATALOG}.{SILVER_EDGES}").append()
 
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
+
+        # PHASE 3: dimensions this batch introduces (entities, accounts).
+        n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark))
+        log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
         log(f"Batch {batch_id}: committed to {SILVER_TXNS} in {time.time() - t0:.1f}s")
     finally:
         tagged_txns.unpersist(blocking=False)
@@ -171,6 +266,13 @@ def main() -> None:
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
+    # P10 stage 0/2 columns on a reused catalog (same list as silver_build).
+    for table, columns in (
+        (SILVER_ENTITIES, KYC_ENTITY_COLUMNS),
+        (SILVER_ACCOUNTS, KYC_ACCOUNT_COLUMNS),
+    ):
+        for name, sql_type in columns:
+            ensure_column(spark, f"{CATALOG}.{table}", name, sql_type.upper())
 
     # LB-127: the bronze table carries an OVERWRITE snapshot from the
     # bronze-verify preflight (LB_REGISTER_TABLE=1 does a full CTAS/register

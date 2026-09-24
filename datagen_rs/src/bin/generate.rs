@@ -11,15 +11,16 @@ use rayon::prelude::*;
 
 use parquet::arrow::ArrowWriter;
 
-use datagen_rs::amounts::{native_amount, structuring_amount};
+use datagen_rs::amounts::{instance_amounts, native_amount};
 use datagen_rs::customer360;
 use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
+use datagen_rs::cycle;
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
 use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_ex;
 use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
-use datagen_rs::s3sink::{S3Cfg, S3Sink};
+use datagen_rs::s3sink::S3Sink;
 use datagen_rs::timing::{sample_ts_on_day, DayCal};
 use datagen_rs::world::ring_member;
 use datagen_rs::writer::{
@@ -81,6 +82,50 @@ fn arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
         }
     }
     default
+}
+
+/// --cycle, strictly: absent means 0, but a present value that does not parse
+/// as a cycle number exits 2. The lenient `arg()` would turn `--cycle -1` or a
+/// typo into cycle 0 and overwrite cycle 0's objects.
+fn cycle_arg() -> u64 {
+    strict_u64_arg("--cycle", 0, cycle::MAX_CYCLE)
+}
+
+/// (--cycle n, --cycles N), strictly parsed; n must be below N.
+fn cycle_args() -> (u64, u64) {
+    let n = cycle_arg();
+    let total = strict_u64_arg("--cycles", 1, cycle::MAX_CYCLE + 1);
+    if total == 0 || n >= total {
+        eprintln!("--cycle must be in 0..--cycles; got --cycle {n} --cycles {total}");
+        std::process::exit(2);
+    }
+    (n, total)
+}
+
+/// A u64 flag in 0..=max: absent gives `default`; a present value that does
+/// not parse (including `-1` and typos) exits 2 rather than falling back.
+fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
+    let args: Vec<String> = std::env::args().collect();
+    // Accept `--cycle N` and `--cycle=N`; anything else that names the flag
+    // but does not parse is an error, never a silent cycle 0.
+    let eq = format!("{flag}=");
+    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
+        if a == flag {
+            Some(args.get(i + 1).cloned().unwrap_or_default())
+        } else {
+            a.strip_prefix(eq.as_str()).map(str::to_string)
+        }
+    });
+    let Some(raw) = raw else {
+        return default;
+    };
+    match raw.parse::<u64>() {
+        Ok(c) if c <= max => c,
+        _ => {
+            eprintln!("{flag} must be an integer in 0..={max}; got {raw:?}");
+            std::process::exit(2);
+        }
+    }
 }
 
 struct TypRow {
@@ -146,6 +191,13 @@ fn pacs008_main() {
         std::process::exit(2);
     }
     let seed: i64 = arg("--seed", 42);
+    // Multi-cycle runs (datagen_rs::cycle): cycle n of --cycles N emits the
+    // one-shot corpus rows whose calendar mass lies in [n/N, (n+1)/N), so the
+    // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a
+    // one-shot run.
+    let (cycle_n, cycles) = cycle_args();
+    let (slice_lo, slice_hi) = cycle::mass_slice(cycle_n, cycles);
+    let in_slice = move |m: f64| m >= slice_lo && m < slice_hi;
     let scale: f64 = arg("--scale", 0.01);
     let corpus_months: i64 = arg("--corpus-months", 60);
     let file_size_mb: i64 = arg("--file-size-mb", 32);
@@ -265,14 +317,7 @@ fn pacs008_main() {
     // Validate S3 config + build the sink BEFORE the multi-minute world build,
     // so bad creds / missing endpoint surface in milliseconds. Building the
     // sink also proves the tokio runtime and object_store client init cleanly.
-    let s3_cfg = match S3Cfg::try_from_env(bucket.clone(), prefix.clone()) {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("s3 config error: {}", msg);
-            std::process::exit(2);
-        }
-    };
-    let sink = S3Sink::new(&s3_cfg);
+    let sink = S3Sink::from_env(&bucket, &prefix);
 
     let t0 = std::time::Instant::now();
     // A dedicated-bronze pod (writes no reference zones) can skip the
@@ -338,6 +383,10 @@ fn pacs008_main() {
     let mut trng = Rng::new((seed as u64) ^ 0x7791);
     // Shaped [first, last] in-window row per instance, for the manifest.
     let mut inst_bounds: HashMap<String, (i64, i64)> = HashMap::new();
+    // Calendar mass of each instance's last emitted row: a multi-cycle run
+    // lists the instance in the manifest of the cycle that emits that row,
+    // so each pattern's ground truth appears once, when it is complete.
+    let mut inst_last_mass: HashMap<String, f64> = HashMap::new();
     for inst in &instances {
         let is_dormant = inst.typ == "dormant_reactivation";
         // Shape every row of the instance once, here, with an instance-keyed
@@ -349,7 +398,20 @@ fn pacs008_main() {
         ) {
             inst_bounds.insert(inst.id.clone(), b);
         }
-        for (row_idx, r) in rows.into_iter().enumerate() {
+        // Typology rows carry the ORIGINATOR's persona amount shift and
+        // currency, the same as that account's baseline rows, so a
+        // participant's amounts stay consistent with its own history; chained
+        // legs forward the previous leg less a skim (amounts::instance_amounts).
+        // Amounts are assigned before the suppression drop below, so a dropped
+        // leg still carries the chain forward.
+        let amounts = instance_amounts(
+            inst.typ,
+            &rows,
+            |o| w.ccy[o as usize],
+            |o| w.amount_logshift[o as usize],
+            &mut trng,
+        );
+        for (row_idx, (r, amount)) in rows.into_iter().zip(amounts).enumerate() {
             // A NON-dormant typology row whose originator is a dormant
             // participant inside its suppression window would fill the dormancy
             // gap -- drop it. Dormant-instance rows (anchor + burst) are exempt.
@@ -358,16 +420,10 @@ fn pacs008_main() {
                 continue;
             }
             let ccy = w.ccy[r.orig as usize];
-            // Typology rows carry the ORIGINATOR's persona amount shift and
-            // currency, the same as that account's baseline rows, so a
-            // participant's amounts stay consistent with its own history.
-            let amount = if r.structuring {
-                structuring_amount(&mut trng, ccy)
-            } else {
-                native_amount(&mut trng, w.amount_logshift[r.orig as usize], ccy)
-            };
-            let fid = ((gcal.mass_at(r.ts_us) * total_files as f64) as i64)
-                .clamp(0, total_files - 1) as usize;
+            let m = gcal.mass_at(r.ts_us);
+            let last = inst_last_mass.entry(inst.id.clone()).or_insert(m);
+            *last = last.max(m);
+            let fid = ((m * total_files as f64) as i64).clamp(0, total_files - 1) as usize;
             let uid = typology_uid(inst.seed, row_idx);
             typ_by_file[fid].push(TypRow {
                 orig: r.orig,
@@ -402,15 +458,14 @@ fn pacs008_main() {
     let base_mass = move |i: u64| -> f64 {
         (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
     };
-    // First base row whose mass is >= fid/F.
-    let base_start = |fid: i64| -> u64 {
-        if fid <= 0 {
+    // First base row whose mass is >= target (base_mass is increasing).
+    let first_at_mass = |target: f64| -> u64 {
+        if target <= 0.0 {
             return 0;
         }
-        if fid >= total_files {
+        if target >= 1.0 {
             return n_base_total;
         }
-        let target = fid as f64 / total_files as f64;
         let mut i = ((target * n_base_total as f64) as u64).min(n_base_total);
         while i > 0 && base_mass(i - 1) >= target {
             i -= 1;
@@ -420,6 +475,18 @@ fn pacs008_main() {
         }
         i
     };
+    // First base row of file fid (mass >= fid/F).
+    let base_start = |fid: i64| -> u64 {
+        if fid <= 0 {
+            0
+        } else if fid >= total_files {
+            n_base_total
+        } else {
+            first_at_mass(fid as f64 / total_files as f64)
+        }
+    };
+    // The cycle's slice of the base rows.
+    let (slice_i0, slice_i1) = (first_at_mass(slice_lo), first_at_mass(slice_hi));
     let rows_per_file = (n_base_total as i64 / total_files).max(1);
 
     // Activity-weighted originator sampling: prefix sums.
@@ -444,6 +511,85 @@ fn pacs008_main() {
 
     let t_typ = t_typ0.elapsed().as_secs_f64();
 
+    // Reference zones (manifest, account, party) go before this pod's bronze
+    // files: they depend only on the world and the schedule, and in
+    // continuous mode silver-stream joins each micro-batch to the party
+    // master. With one pod in --mode all that puts them ahead of every bronze
+    // file; with several pods or a dedicated reference pod, bronze from other
+    // pods can land first, and silver-stream waits for them.
+    let t_ref0 = std::time::Instant::now();
+    // Track reference-zone bytes/files separately so the final summary line
+    // reflects what a `--mode reference` pod produced. Previously the
+    // reference path did not touch `total_bytes`/`files_written`, so a
+    // reference pod always logged `files_written=0 bytes=0` even after
+    // successfully uploading party/account/manifest -- confusing for
+    // anyone monitoring aggregate throughput from pod logs.
+    let mut ref_bytes: u64 = 0;
+    let mut ref_files: u64 = 0;
+    if do_reference {
+        // Party and account are the same for every cycle (the world and the
+        // schedule are the one-shot ones), so only cycle 0 writes them.
+        // Party and account stream through a real S3 multipart upload
+        // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
+        // into MpuWriter, which enqueues 5 MiB parts against S3 as they
+        // fill. Whole-object size is no longer bounded by process RAM
+        // or the 5 GiB single-PUT ceiling -- S3 multipart supports up
+        // to 5 TiB per object across 10k parts, so at 5 MiB parts we
+        // top out around 50 GiB per file (well past scale >=1000's
+        // ~5-10 GB party.parquet). If the caller wants larger, bump
+        // WriteMultipart's chunk_size via a new S3Sink helper.
+        //
+        // finish() is fail-loud: on error we panic so the pod exits
+        // non-zero and the datagen Job restarts (same semantics as the
+        // single-PUT path). Drop's best-effort abort covers panics.
+        // Order: manifest, account, party. silver-stream waits for the party
+        // master, so once party is visible the other two are as well.
+        // Manifest stays on the single-PUT path: it's a handful of MB
+        // even at scale 1000 (one row per typology instance), so
+        // multipart adds request overhead with no benefit.
+        // This cycle's instances: those whose last emitted row is in its
+        // slice (an instance with no emitted rows goes by its window end).
+        let mine: Vec<datagen_rs::typology::Instance> = instances
+            .iter()
+            .filter(|i| {
+                let m = inst_last_mass
+                    .get(&i.id)
+                    .copied()
+                    .unwrap_or_else(|| gcal.mass_at(i.end_us));
+                in_slice(m)
+            })
+            .cloned()
+            .collect();
+        let man_bytes = encode_parquet(&build_manifest(&mine, seed, &inst_uids), 8 * 1024 * 1024);
+        ref_bytes += man_bytes.len() as u64;
+        ref_files += 1;
+        sink.put(
+            &cycle::ref_key("manifest/manifest.parquet", cycle_n),
+            man_bytes,
+        );
+
+        if cycle_n == 0 {
+            let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
+            write_account_to(&w, &mut acct_mpu);
+            let acct_bytes = acct_mpu.bytes_written();
+            acct_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
+            ref_bytes += acct_bytes;
+            ref_files += 1;
+
+            let mut party_mpu = sink.put_multipart("bronze/party.parquet");
+            write_party_to(&w, &instances, &mut party_mpu);
+            let party_bytes = party_mpu.bytes_written();
+            party_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
+            ref_bytes += party_bytes;
+            ref_files += 1;
+        }
+    }
+    let t_ref = t_ref0.elapsed().as_secs_f64();
+
     let total_bytes = AtomicU64::new(0);
     let files_written = AtomicU64::new(0);
     // Rows THIS POD wrote (not corpus-wide `total_txns`; that is a
@@ -456,19 +602,38 @@ fn pacs008_main() {
     let write_ns = AtomicU64::new(0);
     let t_gen0 = std::time::Instant::now();
 
+    // Files cover equal slices of calendar mass, [fid/F, (fid+1)/F); a cycle
+    // generates only the files that intersect its slice, and only the rows of
+    // those files that fall inside it (a straddling file is split).
     let my_files: Vec<i64> = if do_bronze {
         (0..total_files)
             .filter(|fid| fid % total_nodes == node_id)
+            // Exact, not by the file's nominal mass range: a file belongs to
+            // this cycle when any of its rows does, so a row whose mass sits
+            // within rounding of a boundary is never dropped by both cycles.
+            .filter(|&fid| {
+                cycles == 1
+                    || base_start(fid).max(slice_i0) < base_start(fid + 1).min(slice_i1)
+                    || typ_by_file[fid as usize]
+                        .iter()
+                        .any(|r| in_slice(gcal.mass_at(r.ts_us)))
+            })
             .collect()
     } else {
         Vec::new()
     };
     my_files.par_iter().for_each(|&fid| {
-        let typ = &typ_by_file[fid as usize];
+        let typ: Vec<&TypRow> = typ_by_file[fid as usize]
+            .iter()
+            .filter(|r| in_slice(gcal.mass_at(r.ts_us)))
+            .collect();
         let n_typ = typ.len();
-        let i0 = base_start(fid);
-        let i1 = base_start(fid + 1);
+        let i0 = base_start(fid).max(slice_i0);
+        let i1 = base_start(fid + 1).min(slice_i1).max(i0);
         let n_base = (i1 - i0) as usize;
+        if cycles > 1 && n_base + n_typ == 0 {
+            return;
+        }
 
         let cap = n_base + n_typ;
         let mut orig = Vec::with_capacity(cap);
@@ -576,7 +741,7 @@ fn pacs008_main() {
         let buf = encode_parquet(&batch, cap_hint);
         write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let sz = buf.len() as u64;
-        let key = format!("bronze/pacs008/part-{:06}.parquet", fid);
+        let key = cycle::pacs_key(fid, cycle_n);
         let tu = std::time::Instant::now();
         sink.put(&key, buf);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -589,61 +754,8 @@ fn pacs008_main() {
     let rows_written = rows_written.load(Ordering::Relaxed);
     let t_gen = t_gen0.elapsed().as_secs_f64();
 
-    let t_ref0 = std::time::Instant::now();
-    // Track reference-zone bytes/files separately so the final summary line
-    // reflects what a `--mode reference` pod produced. Previously the
-    // reference path did not touch `total_bytes`/`files_written`, so a
-    // reference pod always logged `files_written=0 bytes=0` even after
-    // successfully uploading party/account/manifest -- confusing for
-    // anyone monitoring aggregate throughput from pod logs.
-    let mut ref_bytes: u64 = 0;
-    let mut ref_files: u64 = 0;
-    if do_reference {
-        // Party and account stream through a real S3 multipart upload
-        // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
-        // into MpuWriter, which enqueues 5 MiB parts against S3 as they
-        // fill. Whole-object size is no longer bounded by process RAM
-        // or the 5 GiB single-PUT ceiling -- S3 multipart supports up
-        // to 5 TiB per object across 10k parts, so at 5 MiB parts we
-        // top out around 50 GiB per file (well past scale >=1000's
-        // ~5-10 GB party.parquet). If the caller wants larger, bump
-        // WriteMultipart's chunk_size via a new S3Sink helper.
-        //
-        // finish() is fail-loud: on error we panic so the pod exits
-        // non-zero and the datagen Job restarts (same semantics as the
-        // single-PUT path). Drop's best-effort abort covers panics.
-        let mut party_mpu = sink.put_multipart("bronze/party.parquet");
-        write_party_to(&w, &instances, &mut party_mpu);
-        let party_bytes = party_mpu.bytes_written();
-        party_mpu
-            .finish()
-            .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
-        ref_bytes += party_bytes;
-        ref_files += 1;
-
-        let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
-        write_account_to(&w, &mut acct_mpu);
-        let acct_bytes = acct_mpu.bytes_written();
-        acct_mpu
-            .finish()
-            .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
-        ref_bytes += acct_bytes;
-        ref_files += 1;
-
-        // Manifest stays on the single-PUT path: it's a handful of MB
-        // even at scale 1000 (one row per typology instance), so
-        // multipart adds request overhead with no benefit.
-        let man_bytes = encode_parquet(
-            &build_manifest(&instances, seed, &inst_uids),
-            8 * 1024 * 1024,
-        );
-        ref_bytes += man_bytes.len() as u64;
-        ref_files += 1;
-        sink.put("manifest/manifest.parquet", man_bytes);
-    }
     let total_bytes = total_bytes + ref_bytes;
     let files_written = files_written + ref_files;
-    let t_ref = t_ref0.elapsed().as_secs_f64();
     let up_s = upload_ns.load(Ordering::Relaxed) as f64 / 1e9;
     let el = t0.elapsed().as_secs_f64();
     eprintln!(
@@ -742,10 +854,12 @@ fn customer360_main() {
         std::process::exit(2);
     }
     let seed: i64 = arg("--seed", 42);
+    // See datagen_rs::cycle: n > 0 offsets the per-file stream and row ids and
+    // suffixes the keys; 0 reproduces a run without --cycle.
+    let cycle_n: u64 = cycle_arg();
     // Two sizing controls: --target-tb picks total file count, --file-size-mb
-    // picks per-file size. --scale is accepted but ignored on the c360 path
-    // (it's the Python-side abstraction and only informs row density; on the
-    // Rust c360 path, target_tb is what actually drives file count).
+    // picks per-file size. --scale sizes only the customer id space (when
+    // --customer-id-max is absent); target_tb drives file count.
     let target_tb: f64 = arg("--target-tb", 0.1);
     if !target_tb.is_finite() || target_tb <= 0.0 {
         eprintln!(
@@ -777,7 +891,22 @@ fn customer360_main() {
         );
         std::process::exit(2);
     }
-    let customer_id_max: u64 = arg("--customer-id-max", 500_000u64);
+    // Customer id space: an explicit --customer-id-max (lakebench passes the
+    // configured customer count) wins; otherwise it follows --scale, 100K
+    // customers per scale unit, matching scale.py (E4). It was a fixed 500K
+    // at every scale. Either way it must fit the pod's memory.
+    let mem_limit = customer360::pod_memory_limit_bytes();
+    let customer_id_max: u64 = match arg::<u64>("--customer-id-max", 0) {
+        0 => {
+            let scale: f64 = arg("--scale", 1.0);
+            customer360::customer_id_max_for_scale_within(scale, mem_limit)
+        }
+        n => customer360::check_id_space_fits_memory(n, mem_limit).map(|_| n),
+    }
+    .unwrap_or_else(|e| {
+        eprintln!("customer id space: {}", e);
+        std::process::exit(2);
+    });
     // `customer360_bytes_per_row_default()` is measured at payload_kb=2. Any
     // other value silently mis-sizes rows_per_file (files 1/N or Nx too
     // large). Refuse until per-payload measurements are folded in.
@@ -832,14 +961,7 @@ fn customer360_main() {
             .expect("failed to size rayon pool");
     }
 
-    let s3_cfg = match S3Cfg::try_from_env(bucket.clone(), prefix.clone()) {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("s3 config error: {}", msg);
-            std::process::exit(2);
-        }
-    };
-    let sink = S3Sink::new(&s3_cfg);
+    let sink = S3Sink::from_env(&bucket, &prefix);
 
     let t0 = std::time::Instant::now();
     let file_size_bytes = (file_size_mb as usize) * 1024 * 1024;
@@ -856,6 +978,18 @@ fn customer360_main() {
     // datagen/generate.py:271. Very small target_tb still gets at least 1
     // file so the run isn't a no-op.
     let total_files: i64 = (target_bytes / file_size_bytes as u64).max(1) as i64;
+    // c360 row ids are file_id * rows_per_file with the cycle in file_id's
+    // high bits (cycle::c360_file_id); refuse a cycle whose ids leave i64
+    // rather than let them wrap and collide.
+    if (cycle::c360_file_id(total_files as u64, cycle_n) as i128) * (rows_per_file as i128)
+        > i64::MAX as i128
+    {
+        eprintln!(
+            "--cycle {} with {} rows per file overflows c360 row ids",
+            cycle_n, rows_per_file
+        );
+        std::process::exit(2);
+    }
 
     // Build the loyalty lookup + customer_id sampler ONCE, then share via Arc
     // across rayon workers. Same lookup used by every file so
@@ -881,7 +1015,7 @@ fn customer360_main() {
     my_files.par_iter().for_each(|&fid| {
         let cfg = customer360::Config {
             seed: seed as u64,
-            file_id: fid as u64,
+            file_id: cycle::c360_file_id(fid as u64, cycle_n),
             rows_per_file,
             customer_id_max,
             dirty_ratio,
@@ -901,7 +1035,7 @@ fn customer360_main() {
         let sz = buf.len() as u64;
 
         // key is relative to S3Sink.prefix (set from --prefix). Sink prepends.
-        let key = format!("part-{:06}.parquet", fid);
+        let key = cycle::c360_key(fid, cycle_n);
         let tu = std::time::Instant::now();
         sink.put(&key, buf);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);

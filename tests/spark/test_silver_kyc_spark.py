@@ -1,0 +1,216 @@
+"""Executed test: silver.entities and silver.accounts carry the monitored
+population and KYC from the datagen party/account masters (GOALS P10 stages 0
+and 2). A payment reaches its party's KYC through the account IBAN."""
+
+from __future__ import annotations
+
+import datetime as dt
+import sys
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("pyspark")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
+
+
+@pytest.fixture(scope="module")
+def spark():
+    import os
+
+    from pyspark.sql import SparkSession
+
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    s = (
+        SparkSession.builder.master("local[1]")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "2")
+        .getOrCreate()
+    )
+    yield s
+    s.stop()
+
+
+PARTY = (
+    "struct<nm:string, ctry_of_res:string, pstl_adr:struct<twn_nm:string>, id:struct<lei:string>>"
+)
+ACCT = "struct<iban:string, ccy:string>"
+AGT = "struct<bicfi:string>"
+TS = dt.datetime(2024, 3, 1, 12, 0)
+
+
+def _bronze(spark):
+    alice = ("ALICE", "US", ("BOSTON",), ("LEIALICE",))
+    bob = ("BOB", "GB", ("LONDON",), ("LEIBOB",))
+    return spark.createDataFrame(
+        [
+            (alice, bob, ("US01", "USD"), ("GB02", "GBP"), ("MERIUS2LXXX",), ("NRTHGB3XXXX",), TS),
+            (bob, alice, ("GB02", "GBP"), ("US01", "USD"), ("NRTHGB3XXXX",), ("MERIUS2LXXX",), TS),
+        ],
+        f"dbtr {PARTY}, cdtr {PARTY}, dbtr_acct {ACCT}, cdtr_acct {ACCT}, "
+        f"dbtr_agt {AGT}, cdtr_agt {AGT}, cre_dt_tm timestamp",
+    )
+
+
+def _refs(spark):
+    party = spark.createDataFrame(
+        [
+            (
+                1,
+                "clear",
+                True,
+                True,
+                "MERIUS2L",
+                dt.date(2015, 5, 1),
+                "person",
+                1234.5,
+                2,
+                "medium",
+                "country=0;type=0;volume=0;pep=1",
+            ),
+            (2, "SDN", False, False, "NRTHGB3X", None, None, None, None, None, None),
+        ],
+        "entity_id bigint, sanctions_status string, pep_status boolean, is_customer boolean, "
+        "home_fi string, customer_since date, customer_type string, "
+        "expected_monthly_volume_usd double, crr_score int, crr_tier string, crr_factors string",
+    )
+    account = spark.createDataFrame(
+        [
+            (11, "US01", 1, "MERIUS2L"),
+            (12, "US99", 1, "MERIUS2L"),  # a second account, never used in payments
+            (21, "GB02", 2, "NRTHGB3X"),
+        ],
+        "account_id bigint, iban string, holder_entity_id bigint, home_fi string",
+    )
+    return party, account
+
+
+def _txns(bronze):
+    from silver_build_financial import _entity_id_from
+
+    return bronze.select(
+        _entity_id_from(
+            bronze.dbtr.nm, bronze.dbtr.ctry_of_res, bronze.dbtr.pstl_adr.twn_nm, bronze.dbtr.id.lei
+        ).alias("originator_id"),
+        _entity_id_from(
+            bronze.cdtr.nm, bronze.cdtr.ctry_of_res, bronze.cdtr.pstl_adr.twn_nm, bronze.cdtr.id.lei
+        ).alias("beneficiary_id"),
+        bronze.dbtr.nm.alias("rptd_originator_name"),
+        bronze.cdtr.nm.alias("rptd_beneficiary_name"),
+    )
+
+
+def test_entities_carry_kyc_for_customers_only(spark):
+    from silver_build_financial import DDL_ENTITIES, build_entities, build_kyc
+
+    bronze = _bronze(spark)
+    kyc = build_kyc(*_refs(spark))
+    df = build_entities(_txns(bronze), bronze, kyc)
+    rows = {r["name"]: r for r in df.collect()}
+    a, b = rows["ALICE"], rows["BOB"]
+    assert a["is_customer"] is True and b["is_customer"] is False
+    assert (a["home_fi"], b["home_fi"]) == ("MERIUS2L", "NRTHGB3X")
+    assert a["crr_tier"] == "medium" and a["customer_type"] == "person"
+    assert a["customer_since"] == dt.date(2015, 5, 1)
+    assert float(a["expected_monthly_volume_usd"]) == 1234.5
+    assert b["crr_tier"] is None and b["customer_since"] is None
+    # PEP and sanctions now come from the party master, not constants.
+    assert a["pep_status"] is True and b["pep_status"] is False
+    assert (a["sanctions_status"], b["sanctions_status"]) == ("clear", "sdn")
+    # Column order is the DDL's (the inline DDL is what silver bootstraps).
+    ddl_cols = [
+        ln.split()[0] for ln in DDL_ENTITIES.split("(", 1)[1].splitlines() if ln.startswith("    ")
+    ]
+    assert df.columns == ddl_cols
+
+
+def test_accounts_carry_home_fi_and_customer_flag(spark):
+    from silver_build_financial import (
+        DDL_ACCOUNTS,
+        build_accounts,
+        build_kyc,
+        update_accounts_balance,
+    )
+
+    bronze = _bronze(spark)
+    kyc = build_kyc(*_refs(spark))
+    accts = build_accounts(bronze, kyc)
+    rows = {r["iban"]: r for r in accts.collect()}
+    assert set(rows) == {"US01", "GB02"}
+    assert (rows["US01"]["home_fi"], rows["US01"]["is_customer"]) == ("MERIUS2L", True)
+    assert (rows["GB02"]["home_fi"], rows["GB02"]["is_customer"]) == ("NRTHGB3X", False)
+    ddl_cols = [
+        ln.split()[0] for ln in DDL_ACCOUNTS.split("(", 1)[1].splitlines() if ln.startswith("    ")
+    ]
+    assert accts.columns == ddl_cols
+    stmts = spark.createDataFrame(
+        [], "account_id bigint, bal_after decimal(38,2), entry_seq bigint"
+    )
+    assert update_accounts_balance(accts, stmts).columns == ddl_cols
+
+
+def test_missing_or_old_reference_files_give_null_kyc(spark):
+    from silver_build_financial import build_accounts, build_entities, build_kyc
+
+    party, account = _refs(spark)
+    assert build_kyc(None, None) is None
+    assert build_kyc(party.drop("is_customer"), account) is None
+    bronze = _bronze(spark)
+    ents = build_entities(_txns(bronze), bronze, None).collect()
+    assert all(r["is_customer"] is None and r["pep_status"] is False for r in ents)
+    assert all(r["home_fi"] is None for r in build_accounts(bronze, None).collect())
+
+
+def test_reference_read_tolerates_only_a_missing_path(spark, tmp_path, monkeypatch):
+    import silver_build_financial as sb
+
+    monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "nope/party.parquet"))
+    monkeypatch.setattr(sb, "ACCOUNT_PATH", str(tmp_path / "nope/account.parquet"))
+    assert sb.reference_frames(spark) == (None, None)
+
+    class Boom:
+        class read:  # noqa: N801 -- mimics spark.read
+            @staticmethod
+            def parquet(_path):
+                raise RuntimeError("403 Forbidden: InvalidAccessKeyId")
+
+    with pytest.raises(RuntimeError, match="Forbidden"):
+        sb._read_reference(Boom())
+
+    # One file present, the other missing: a broken reference write.
+    party, _ = _refs(spark)
+    party.write.parquet(str(tmp_path / "p.parquet"))
+    monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "p.parquet"))
+    with pytest.raises(RuntimeError, match="only one KYC reference file"):
+        sb._read_reference(spark)
+
+
+def test_missing_kyc_raises_unless_the_manifest_proves_pre_kyc(spark, tmp_path, monkeypatch):
+    import silver_build_financial as sb
+
+    monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "nope/party.parquet"))
+    monkeypatch.setattr(sb, "ACCOUNT_PATH", str(tmp_path / "nope/account.parquet"))
+    man = tmp_path / "manifest"
+    monkeypatch.setattr(sb, "MANIFEST_GLOB", str(man / "manifest*.parquet"))
+    # No manifest either (reference pod never ran, or a wrong prefix): raise.
+    with pytest.raises(RuntimeError, match="does not show a pre-KYC"):
+        sb._read_reference(spark)
+    # A pre-KYC manifest: tolerated, NULL KYC.
+    spark.createDataFrame([("datagen-v2-rs-0.1",)], "model_version string").write.parquet(
+        str(man / "manifest.parquet")
+    )
+    assert sb._read_reference(spark) == (None, None)
+    # A KYC-era cycle manifest next to it: missing KYC raises again.
+    spark.createDataFrame([("datagen-v2-rs-0.2",)], "model_version string").write.parquet(
+        str(man / "manifest-c001.parquet")
+    )
+    with pytest.raises(RuntimeError, match="does not show a pre-KYC"):
+        sb._read_reference(spark)
+
+
+def test_only_known_old_versions_predate_kyc():
+    from silver_build_financial import predates_kyc
+
+    assert predates_kyc("datagen-v2-rs-0.1")
+    for v in ("datagen-v2-rs-0.2", "datagen-v3-rs-0.1", None, "something-else"):
+        assert not predates_kyc(v)

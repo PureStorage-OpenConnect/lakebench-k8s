@@ -80,7 +80,8 @@ def _code_only(source: str) -> str:
 def test_rust_datagen_writes_expected_sub_paths():
     """If the Rust datagen renames any of these paths, every reader
     that expects them needs updating in the same commit."""
-    src = _read("datagen_rs/src/bin/generate.rs")
+    # Object keys are built in cycle.rs (multi-cycle keys, WORKPLAN B4).
+    src = _read("datagen_rs/src/bin/generate.rs") + _read("datagen_rs/src/cycle.rs")
     for label, sub in DATAGEN_SUBPATHS.items():
         # transactions_dir is a directory; the actual key format is
         # "bronze/pacs008/part-{:06}.parquet". Anchor on the dir

@@ -95,17 +95,88 @@ pub fn native_amount(rng: &mut Rng, mu_shift: f64, ccy: &str) -> f64 {
         } else {
             10f64.powf((step_usd / fx).log10().round()).max(1.0)
         };
-        (raw / step).round() * step
+        // A payment smaller than half the step would round to 0.00; nobody
+        // rounds a $30 payment to nothing, so small amounts keep their value.
+        let snapped = (raw / step).round() * step;
+        if snapped > 0.0 {
+            snapped
+        } else {
+            raw
+        }
     } else {
         raw
     };
     let m = minor_units(ccy);
-    (amt * m).round() / m
+    // Never below one minor unit: a zero-value payment is not a payment.
+    ((amt * m).round() / m).max(1.0 / m)
 }
 
 /// Amount tight against the local structuring band.
 pub fn structuring_amount(rng: &mut Rng, ccy: &str) -> f64 {
     let (lo, hi) = structuring_band(ccy);
     let v = lo + rng.unit() * (hi - lo);
-    (v * 100.0).round() / 100.0
+    // In the currency's minor units: a fractional yen or won would be a label.
+    let m = minor_units(ccy);
+    (v * m).round() / m
+}
+
+/// Typologies that move one pot of money along a chain: each leg after the
+/// first forwards what the previous leg delivered (emit order is chain order
+/// for all four; see typology::emit_instance, and placement.rs preserves it).
+pub fn is_chained(typ: &str) -> bool {
+    matches!(
+        typ,
+        "rapid_layering" | "stack" | "cycle" | "cross_border_cycle"
+    )
+}
+
+/// Per-hop skim range. Money mules and layering intermediaries keep a
+/// commission on what they pass on. Europol's EMMA (European Money Mule
+/// Action) press releases describe mules as paid by commission but give no
+/// figure; the commonly quoted recruitment offer is "keep 10% and wire the
+/// rest" (Wikipedia "Money mule"; NASAA investor advisory on money mules),
+/// hence single-digit percent up to about 10%. Secondary sources only: a
+/// primary figure is still to be found. The range is a realism parameter,
+/// not tuned to any rule's pass-through threshold.
+pub const SKIM_MIN: f64 = 0.01;
+pub const SKIM_MAX: f64 = 0.10;
+
+/// Amount of a forwarding leg: the previous leg's USD value less a
+/// U(SKIM_MIN, SKIM_MAX) skim, expressed in the forwarding account's currency
+/// (legs can change currency) and rounded to its minor units. No round-number
+/// snapping: a forwarded remainder is an odd amount.
+pub fn forwarded_amount(rng: &mut Rng, prev_usd: f64, ccy: &str) -> f64 {
+    let skim = SKIM_MIN + rng.unit() * (SKIM_MAX - SKIM_MIN);
+    let usd = prev_usd * (1.0 - skim);
+    let m = minor_units(ccy);
+    // At least one minor unit, so a long chain never forwards nothing.
+    ((usd / fx_to_usd(ccy) * m).round() / m).max(1.0 / m)
+}
+
+/// Amounts for one instance's rows, in row order. `ccy_of(orig)` and
+/// `shift_of(orig)` give the originator's currency and persona amount shift.
+/// Structuring rows draw from the band; the first leg of a chained typology
+/// and every other row keep the persona draw; later chained legs forward the
+/// previous leg (see `forwarded_amount`).
+pub fn instance_amounts<'a>(
+    typ: &str,
+    rows: &[crate::typology::TxRow],
+    ccy_of: impl Fn(u64) -> &'a str,
+    shift_of: impl Fn(u64) -> f64,
+    rng: &mut Rng,
+) -> Vec<f64> {
+    let chained = is_chained(typ);
+    let mut prev_usd: Option<f64> = None;
+    rows.iter()
+        .map(|r| {
+            let ccy = ccy_of(r.orig);
+            let amt = match (chained, prev_usd) {
+                (true, Some(p)) => forwarded_amount(rng, p, ccy),
+                _ if r.structuring => structuring_amount(rng, ccy),
+                _ => native_amount(rng, shift_of(r.orig), ccy),
+            };
+            prev_usd = Some(amt * fx_to_usd(ccy));
+            amt
+        })
+        .collect()
 }

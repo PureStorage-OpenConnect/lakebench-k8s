@@ -155,3 +155,90 @@ class TestRenderDDL:
         assert "lakehouse.default.pacs008_raw" in rendered
         assert "{catalog}" not in rendered
         assert "{table}" not in rendered
+
+
+def _ddl_columns(ddl: str) -> list[tuple[str, str]]:
+    """(name, type) per column line of a CREATE TABLE body, comments stripped."""
+    import re
+
+    body = re.split(r"\n\)", ddl.split("(", 1)[1], maxsplit=1)[0]
+    out = []
+    depth = 0
+    for raw in body.splitlines():
+        line = raw.split("--", 1)[0].rstrip().rstrip(",")
+        if not line.strip():
+            continue
+        if depth == 0:
+            parts = line.split()
+            out.append((parts[0], " ".join(parts[1:2])))
+        depth += line.count("<") - line.count(">")
+    return out
+
+
+class TestKycLockstep:
+    """P10 stage 0/2 columns: deployer DDL and the silver job's inline DDL agree."""
+
+    @pytest.mark.parametrize(
+        "deployer_ddl,inline_name",
+        [(SILVER_ENTITIES_DDL, "DDL_ENTITIES"), (SILVER_ACCOUNTS_DDL, "DDL_ACCOUNTS")],
+    )
+    def test_inline_ddl_matches_deployer_ddl(self, deployer_ddl, inline_name):
+        from pathlib import Path
+
+        src = Path("src/lakebench/spark/scripts/silver_build_financial.py").read_text()
+        inline = src[src.index(f"{inline_name} = ") :].split('"""')[1]
+        names = [n for n, _ in _ddl_columns(deployer_ddl)]
+        assert names == [n for n, _ in _ddl_columns(inline)]
+
+    def test_entities_carry_kyc_columns(self):
+        names = [n for n, _ in _ddl_columns(SILVER_ENTITIES_DDL)]
+        for c in (
+            "is_customer",
+            "home_fi",
+            "customer_since",
+            "customer_type",
+            "expected_monthly_volume_usd",
+            "crr_score",
+            "crr_tier",
+            "crr_factors",
+        ):
+            assert c in names
+
+    def test_accounts_carry_home_fi(self):
+        names = [n for n, _ in _ddl_columns(SILVER_ACCOUNTS_DDL)]
+        assert "home_fi" in names and "is_customer" in names
+
+    def test_kyc_column_tuples_match_ddl(self):
+        """silver_build's ensure_column list covers every KYC column in the DDL."""
+        import ast
+        from pathlib import Path
+
+        tree = ast.parse(Path("src/lakebench/spark/scripts/silver_build_financial.py").read_text())
+        consts = {
+            t.id: ast.literal_eval(n.value)
+            for n in tree.body
+            if isinstance(n, ast.Assign)
+            for t in n.targets
+            if isinstance(t, ast.Name) and t.id in ("KYC_ENTITY_COLUMNS", "KYC_ACCOUNT_COLUMNS")
+        }
+        ent = [n for n, _ in _ddl_columns(SILVER_ENTITIES_DDL)]
+        acc = [n for n, _ in _ddl_columns(SILVER_ACCOUNTS_DDL)]
+        assert [n for n, _ in consts["KYC_ENTITY_COLUMNS"]] == ent[ent.index("is_customer") :]
+        assert [n for n, _ in consts["KYC_ACCOUNT_COLUMNS"]] == acc[acc.index("home_fi") :]
+
+
+def test_datagen_fatf_list_matches_the_reference_file():
+    """kyc.rs FATF_LISTED is exactly the home codes on the FATF list."""
+    import json
+    import re
+    from pathlib import Path
+
+    kyc = Path("datagen_rs/src/kyc.rs").read_text()
+    world = Path("datagen_rs/src/world.rs").read_text()
+    listed = re.findall(r'"([A-Z]{2})"', re.search(r"FATF_LISTED[^=]*=\s*\[(.*?)\];", kyc).group(1))
+    home = re.findall(
+        r'"([A-Z]{2})"', re.search(r"HOME_CODES[^=]*=\s*\[(.*?)\];", world, re.S).group(1)
+    )
+    ref = json.loads(Path("src/lakebench/spark/data/aml/high_risk_jurisdictions.json").read_text())
+    fatf = {e["country_code"] for e in ref["entries"]}
+    assert sorted(listed) == sorted(set(home) & fatf)

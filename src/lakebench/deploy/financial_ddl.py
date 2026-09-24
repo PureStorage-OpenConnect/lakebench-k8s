@@ -175,7 +175,17 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     bic                 STRING,
     sanctions_status    STRING,                   -- clear, sdn, warn, pep, NULL
     pep_status          BOOLEAN,
-    initial_risk_score  DOUBLE
+    initial_risk_score  DOUBLE,
+    -- Monitored population and KYC (GOALS P10 stages 0 and 2), from the
+    -- datagen party master. KYC columns are NULL for non-customers.
+    is_customer         BOOLEAN,                  -- a customer of the reporting FI
+    home_fi             STRING,                   -- BIC8 of the entity's bank
+    customer_since      DATE,
+    customer_type       STRING,                   -- person, business
+    expected_monthly_volume_usd DECIMAL(18, 2),   -- declared at onboarding
+    crr_score           INT,                      -- customer risk rating points
+    crr_tier            STRING,                   -- low, medium, high
+    crr_factors         STRING                    -- country=;type=;volume=;pep=
 )
 USING iceberg
 TBLPROPERTIES (
@@ -194,7 +204,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     currency           STRING NOT NULL,
     opened_date        DATE   NOT NULL,
     closed_date        DATE,
-    current_balance    DECIMAL(38, 2)
+    current_balance    DECIMAL(38, 2),
+    home_fi            STRING,                    -- BIC8 of the holding bank
+    is_customer        BOOLEAN                    -- held at the reporting FI
 )
 USING iceberg
 TBLPROPERTIES (

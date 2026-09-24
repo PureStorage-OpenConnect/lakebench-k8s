@@ -4,11 +4,16 @@
 use rayon::prelude::*;
 
 use crate::arena::ArenaCol;
-use crate::ids::{bic_idx, bic_pool, iban_for, lei_for};
+use crate::ids::{bic_pool, iban_for, lei_for};
+use crate::kyc::entity_bic_idx;
 use crate::realism as R;
 use crate::world as W;
 
-pub const MODEL_VERSION: &str = "datagen-v2-rs-0.1";
+/// Stamped on every party, account and manifest row. 0.2 is the first
+/// version with the monitored population and KYC (party.is_customer etc.):
+/// silver_build_financial refuses to write NULL KYC for a 0.2+ corpus whose
+/// party/account files are missing. Bump on any change readers must detect.
+pub const MODEL_VERSION: &str = "datagen-v2-rs-0.2";
 
 pub struct World {
     pub seed: i64,
@@ -42,6 +47,9 @@ pub struct World {
     /// consistent cadence (a per-account Poisson process) rather than a per-type
     /// constant. Always built (the bronze emit path samples originators).
     pub activity: Vec<f64>,
+    /// Sum of `activity` over the population, so a declared expected volume can
+    /// use each entity's share of the send volume.
+    pub total_activity: f64,
     /// Per-entity additive shift to the log-normal amount mean (persona). Always
     /// built: the bronze base-amount draw reads it per row.
     pub amount_logshift: Vec<f64>,
@@ -165,7 +173,8 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
         Vec::new()
     } else {
         sentinel("_", &|i| {
-            let cc = country[i];
+            let cc =
+                crate::kyc::account_country(crate::kyc::is_customer(i as u64, seed), country[i]);
             iban_for(&[cc.as_bytes()[0], cc.as_bytes()[1]], i as u64)
         })
     };
@@ -179,7 +188,7 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
     } else {
         (0..=n)
             .into_par_iter()
-            .map(|i| pool[bic_idx(i as u64, pool.len())].clone())
+            .map(|i| pool[entity_bic_idx(i as u64, seed, pool.len())].clone())
             .collect()
     };
     let n_accounts: Vec<i32> = if bronze_only {
@@ -231,6 +240,7 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
             }
         })
         .collect();
+    let total_activity: f64 = activity.iter().sum();
     let ring_hit: Vec<f64> = ty
         .par_iter()
         .map(|&t| {
@@ -271,6 +281,7 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
         n_accounts,
         ring_sz,
         activity,
+        total_activity,
         amount_logshift,
         ring_hit,
         bic_pool: pool,

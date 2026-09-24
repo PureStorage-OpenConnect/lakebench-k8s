@@ -73,6 +73,8 @@ REGISTER = _REGISTER_MODE == "1"
 CONTINUOUS_RESET = _REGISTER_MODE == "schema"
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
+SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
@@ -184,8 +186,11 @@ def _continuous_reset(spark, df):
     if location:
         _delete_dir_if_disjoint(spark, location, BRONZE_URI + PACS_PREFIX)
     # Silver stream tables own their files, so PURGE them rather than leave
-    # orphaned data in the silver bucket on every rerun.
-    for t in (SILVER_TXNS, SILVER_EDGES):
+    # orphaned data in the silver bucket on every rerun. Entities and accounts
+    # too: the continuous stream only appends dimension rows it has not seen,
+    # so rows from an earlier run (another seed, scale or a pre-KYC corpus)
+    # would otherwise survive the reset.
+    for t in (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS):
         spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{t} PURGE")
     (
         df.limit(0)
@@ -198,7 +203,7 @@ def _continuous_reset(spark, df):
     )
     log(
         f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
-        f"dropped {SILVER_TXNS}, {SILVER_EDGES}"
+        f"dropped {SILVER_TXNS}, {SILVER_EDGES}, {SILVER_ENTITIES}, {SILVER_ACCOUNTS}"
     )
     # The previous run's manifest table must not outlive the reset: this
     # run's datagen writes a new schedule, and scoring against the old one
