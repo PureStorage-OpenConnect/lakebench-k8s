@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import time
 
-from common import env, log, write_delta_table
-from delta.tables import DeltaTable
+from common import env, log, table_exists, write_delta_table
 from pyspark.sql import SparkSession
 
 # ---------------------------------------------------------------------------
@@ -102,7 +101,7 @@ def write_bronze_batch(batch_df, batch_id):
     bronze_bucket = env("LB_BRONZE_URI", "s3a://lb-bronze/")
     if not _table_created:
         # First batch -- create or verify the table exists
-        if DeltaTable.isDeltaTable(spark, table_name):
+        if table_exists(spark, table_name):
             _table_created = True
         else:
             log(f"Batch {batch_id}: creating bronze table {table_name}")
