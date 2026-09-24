@@ -11,7 +11,12 @@ consumes files incrementally as they arrive.
 Replay idempotency (E3): each micro-batch is one Delta commit written with
 Delta's idempotent-write options (txnAppId = stream + query id, txnVersion =
 batch id), so a batch replayed after a driver restart commits nothing the
-second time instead of appending a duplicate copy to bronze_raw.
+second time instead of appending a duplicate copy to bronze_raw. Only the
+first micro-batch of a query run can be a replay; for that batch the table
+version is compared before and after the write, and a skipped write is
+logged as "skipped (txn already applied)", which the metrics collector does
+not count as rows. Startup refuses a fresh checkpoint over a non-empty
+bronze_raw: the new query would re-read the whole landing zone into it.
 
 Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
@@ -28,8 +33,11 @@ import time
 from common import (
     await_stream,
     delta_idempotent_options,
+    delta_table_version,
     env,
     log,
+    refuse_fresh_checkpoint_over_data,
+    replay_possible,
     set_utc_session,
     table_exists,
     write_delta_table,
@@ -43,21 +51,24 @@ _LANDING_WAIT_MAX = 1800  # 30 minutes
 def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket):
     """Append one micro-batch to the bronze Delta table exactly once.
 
-    Returns the rows in the batch (0 when empty). A replay is skipped by
-    Delta itself inside the write, so it is logged like any other batch;
-    a restarted driver is a new pod, and its log is all the collector reads.
+    Returns the rows this call committed: 0 for an empty batch or a replay
+    Delta skipped.
     """
     spark = batch_df.sparkSession
+    check_replay = replay_possible(spark)
     batch_start = time.time()
     count = batch_df.count()
     if count == 0:
         log(f"Batch {batch_id}: empty, skipping")
         return 0
 
-    log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
     txn = delta_idempotent_options(spark, "lb-bronze-ingest", batch_id)
     if table_exists(spark, table_name):
+        before = delta_table_version(spark, table_name) if check_replay else None
         write_delta_table(spark, batch_df, table_name, bronze_bucket, mode="append", options=txn)
+        if before is not None and delta_table_version(spark, table_name) == before:
+            log(f"Batch {batch_id}: skipped (txn already applied)")
+            return 0
     else:
         log(f"Batch {batch_id}: creating bronze table {table_name}")
         write_delta_table(
@@ -72,6 +83,8 @@ def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket):
                 **txn,
             },
         )
+    # Logged after the commit so a skipped replay is never counted as rows.
+    log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
     batch_time = time.time() - batch_start
     log(f"Batch {batch_id}: committed in {batch_time:.1f}s")
     return count
@@ -120,6 +133,7 @@ def main() -> None:
         time.sleep(_LANDING_WAIT_INTERVAL)
         waited += _LANDING_WAIT_INTERVAL
 
+    refuse_fresh_checkpoint_over_data(spark, checkpoint_location, table_name)
     stream = (
         spark.readStream.schema(inferred_schema)
         .option("maxFilesPerTrigger", max_files_per_trigger)

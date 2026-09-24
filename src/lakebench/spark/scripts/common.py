@@ -345,15 +345,49 @@ def set_utc_session(spark):
 def data_clock_date(df, ts_col="event_timestamp"):
     """Latest event date in ``df`` (UTC), or None when it has no timestamps.
 
-    The c360 data clock: recency is measured from the newest event in the
-    data, not from the day the job happens to run, so a rerun of the same
-    corpus reproduces the same scores (GOALS P4.2). Call with the session
-    already pinned to UTC (``set_utc_session``).
+    A full scan of one column. The fallback data clock when LB_DATA_CLOCK is
+    not set (see ``resolve_data_clock``). Call with the session already
+    pinned to UTC (``set_utc_session``).
     """
     from pyspark.sql.functions import col, to_date
     from pyspark.sql.functions import max as max_
 
     return df.agg(max_(to_date(col(ts_col))).alias("d")).collect()[0]["d"]
+
+
+def configured_data_clock(value=None):
+    """Last day of the configured datagen window, or None when unset.
+
+    LB_DATA_CLOCK is ``datagen.timestamp_end`` (job.py). Datagen treats the
+    end as exclusive, so the newest possible event date is the day before.
+    """
+    from datetime import date, timedelta
+
+    raw = os.getenv("LB_DATA_CLOCK", "") if value is None else value
+    raw = raw.strip()
+    if not raw:
+        return None
+    return date.fromisoformat(raw[:10]) - timedelta(days=1)
+
+
+def resolve_data_clock(df_fallback=None):
+    """The c360 data clock: the date recency is measured from.
+
+    One clock for the whole run: from LB_DATA_CLOCK when set, so batch,
+    every multi-cycle cycle and every micro-batch use the same anchor and a
+    rerun reproduces the same scores (GOALS P4.2). Only when it is unset is
+    it measured as max(event date) of ``df_fallback``. Logs which was used.
+    """
+    anchor = configured_data_clock()
+    if anchor is not None:
+        log(f"Data clock (recency anchor): {anchor} from LB_DATA_CLOCK")
+        return anchor
+    if df_fallback is None:
+        log("Data clock: LB_DATA_CLOCK unset and no data to measure; recency is NULL")
+        return None
+    anchor = data_clock_date(df_fallback)
+    log(f"Data clock (recency anchor): {anchor} from max(event_timestamp); LB_DATA_CLOCK unset")
+    return anchor
 
 
 def apply_silver_transformations_anchored(df_bronze, anchor_date):
@@ -406,22 +440,86 @@ def delta_idempotent_options(spark, app, batch_id):
     }
 
 
+def stream_run_id(spark):
+    """Run id of the streaming query in the current ``foreachBatch`` call.
+
+    A new run id every time a query starts, including a restart from the
+    same checkpoint. Spark uses it as the job group of the micro-batch
+    thread. None when it cannot be read.
+    """
+    return spark.sparkContext.getLocalProperty("spark.jobGroup.id") or None
+
+
+_RUNS_STARTED = set()
+
+
+def replay_possible(spark):
+    """True for the first micro-batch of each query run, False after.
+
+    A batch that fails stops its query and the driver exits (``await_stream``),
+    so only the first batch a run executes can repeat a batch an earlier run
+    committed. Writers do their replay check (a DELETE, a snapshot or version
+    lookup) only then instead of on every batch. When the run id is not
+    readable every batch is treated as a possible replay: slower, never wrong.
+    """
+    run = stream_run_id(spark)
+    if run is None:
+        return True
+    if run in _RUNS_STARTED:
+        return False
+    _RUNS_STARTED.add(run)
+    return True
+
+
+def delta_table_version(spark, fq_table):
+    """Latest commit version of a Delta table."""
+    return int(spark.sql(f"DESCRIBE HISTORY {fq_table} LIMIT 1").collect()[0]["version"])
+
+
+def checkpoint_is_fresh(spark, checkpoint_location):
+    """True when a streaming checkpoint has no committed offsets yet."""
+    jvm = spark._jvm
+    hconf = spark._jsc.hadoopConfiguration()
+    offsets = jvm.org.apache.hadoop.fs.Path(checkpoint_location.rstrip("/") + "/offsets")
+    fs = offsets.getFileSystem(hconf)
+    return not fs.exists(offsets) or len(fs.listStatus(offsets)) == 0
+
+
+def refuse_fresh_checkpoint_over_data(spark, checkpoint_location, fq_table):
+    """Exit when a fresh checkpoint would re-read the source into a full table.
+
+    A new checkpoint starts the source from the beginning, so every row
+    already in ``fq_table`` would be written a second time. That happens when
+    checkpoints are deleted but tables are not. Clear both, or neither.
+    """
+    if not checkpoint_is_fresh(spark, checkpoint_location):
+        return
+    if not table_exists(spark, fq_table) or spark.table(fq_table).limit(1).count() == 0:
+        return
+    log(
+        f"ERROR: checkpoint {checkpoint_location} is empty but {fq_table} already has "
+        "rows; starting would re-read the whole source and duplicate them. Drop the "
+        "table or restore the checkpoint."
+    )
+    raise SystemExit(1)
+
+
 def await_stream(spark, query):
     """Block until ``query`` stops; re-raise its failure.
 
-    SIGTERM and SIGINT stop the query cleanly. A query that died with an
-    exception fails the driver, so the Kubernetes job reports the real
-    outcome instead of a pass with no data (LB-044).
+    SIGTERM and SIGINT only set a flag; the loop below stops the query, so
+    the handler never calls into py4j while the main thread may be inside
+    it. A query that died with an exception fails the driver, so the
+    Kubernetes job reports the real outcome instead of a pass with no data
+    (LB-044).
     """
     import signal
     import time
 
+    stop = {"signal": None}
+
     def _shutdown_handler(signum, frame):  # noqa: ARG001
-        log(f"Signal {signum} received; stopping stream cleanly")
-        try:
-            query.stop()
-        except Exception as e:  # noqa: BLE001
-            log(f"query.stop failed: {e}")
+        stop["signal"] = signum
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -430,6 +528,13 @@ def await_stream(spark, query):
             pass
 
     while query.isActive:
+        if stop["signal"] is not None:
+            log(f"Signal {stop['signal']} received; stopping stream cleanly")
+            try:
+                query.stop()
+            except Exception as e:  # noqa: BLE001
+                log(f"query.stop failed: {e}")
+            break
         time.sleep(1)
 
     exc = query.exception()

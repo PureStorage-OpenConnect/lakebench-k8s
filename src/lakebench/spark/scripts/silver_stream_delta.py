@@ -12,9 +12,15 @@ processes micro-batches as new rows arrive in bronze_raw.
 Replay idempotency (E3): each micro-batch is one Delta commit written with
 Delta's idempotent-write options (txnAppId = stream + query id, txnVersion =
 batch id). A batch replayed after a driver restart carries a txnVersion Delta
-has already recorded, so the second write commits nothing. This is Delta's
-equivalent of the `_batch_id` delete-then-append the Iceberg streams use, and
-it is atomic because the whole batch is one commit.
+has already recorded, so the second write commits nothing. Only the first
+micro-batch of a query run can be a replay; for that batch the table version
+is compared before and after the write, and a skipped write is logged as
+"skipped (txn already applied)", a line the metrics collector does not count
+as processed rows. Startup refuses a fresh checkpoint over a non-empty silver
+table, which would re-read all of bronze into it a second time.
+
+Recency is anchored to LB_DATA_CLOCK (the configured datagen end) when set,
+otherwise to each micro-batch's newest event.
 
 Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
@@ -32,10 +38,14 @@ import time
 from common import (
     apply_silver_transformations_anchored,
     await_stream,
+    configured_data_clock,
     data_clock_date,
     delta_idempotent_options,
+    delta_table_version,
     env,
     log,
+    refuse_fresh_checkpoint_over_data,
+    replay_possible,
     set_utc_session,
     table_exists,
     write_delta_table,
@@ -46,33 +56,35 @@ _TABLE_WAIT_INTERVAL = 15  # seconds between checks
 _TABLE_WAIT_MAX = 1800  # 30 minutes -- generous for large datagen
 
 
-def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket):
+def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket, data_clock=None):
     """Transform one micro-batch and write it to the Silver Delta table once.
 
-    Returns the number of silver rows the batch produced.
+    ``data_clock`` is the recency anchor; None measures it from the batch.
+    Returns the rows this call committed: 0 for an empty batch or a replay
+    Delta skipped.
     """
     spark = batch_df.sparkSession
+    check_replay = replay_possible(spark)
     batch_start = time.time()
     count = batch_df.count()
     if count == 0:
         log(f"Batch {batch_id}: empty, skipping")
         return 0
 
-    log(f"Batch {batch_id}: transforming {count:,} rows")
-
-    anchor = data_clock_date(batch_df)
+    log(f"Batch {batch_id}: read {count:,} bronze rows")
+    anchor = data_clock if data_clock is not None else data_clock_date(batch_df)
     enriched = apply_silver_transformations_anchored(batch_df, anchor).cache()
     try:
         enriched_count = enriched.count()
-        log(
-            f"Batch {batch_id}: {enriched_count:,} rows after transforms "
-            f"(filtered ~{(1 - enriched_count / count) * 100:.0f}%)"
-        )
         txn = delta_idempotent_options(spark, "lb-silver-stream", batch_id)
         if table_exists(spark, silver_tbl):
+            before = delta_table_version(spark, silver_tbl) if check_replay else None
             write_delta_table(
                 spark, enriched, silver_tbl, silver_bucket, mode="append", options=txn
             )
+            if before is not None and delta_table_version(spark, silver_tbl) == before:
+                log(f"Batch {batch_id}: skipped (txn already applied)")
+                return 0
         else:
             log(f"Batch {batch_id}: creating Silver table with partitioning")
             write_delta_table(
@@ -87,6 +99,12 @@ def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket):
     finally:
         enriched.unpersist(blocking=False)
 
+    # Logged after the commit so a skipped replay is never counted as rows.
+    log(f"Batch {batch_id}: transforming {count:,} rows")
+    log(
+        f"Batch {batch_id}: {enriched_count:,} rows after transforms "
+        f"(filtered ~{(1 - enriched_count / count) * 100:.0f}%)"
+    )
     batch_time = time.time() - batch_start
     log(f"Batch {batch_id}: committed to {silver_tbl} in {batch_time:.1f}s")
     return enriched_count
@@ -128,6 +146,14 @@ def main() -> None:
     except Exception as e:
         log(f"Namespace creation note: {str(e)}")
 
+    refuse_fresh_checkpoint_over_data(spark, checkpoint_location, silver_tbl)
+    data_clock = configured_data_clock()
+    log(
+        f"Data clock (recency anchor): {data_clock} from LB_DATA_CLOCK"
+        if data_clock is not None
+        else "Data clock: LB_DATA_CLOCK unset; recency anchored per micro-batch"
+    )
+
     # Bronze-ingest creates bronze_raw on its first batch; silver-stream
     # starts concurrently. Any probe error only means "wait longer".
     waited = 0
@@ -144,7 +170,7 @@ def main() -> None:
     stream = spark.readStream.format("delta").table(bronze_tbl)
     query = (
         stream.writeStream.foreachBatch(
-            lambda df, bid: write_silver_batch(df, bid, silver_tbl, silver_uri)
+            lambda df, bid: write_silver_batch(df, bid, silver_tbl, silver_uri, data_clock)
         )
         .option("checkpointLocation", checkpoint_location)
         .trigger(processingTime=trigger_interval)

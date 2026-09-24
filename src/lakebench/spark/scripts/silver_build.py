@@ -17,9 +17,9 @@ from enum import Enum
 
 from common import (
     apply_silver_transformations_anchored,
-    data_clock_date,
     env,
     log,
+    resolve_data_clock,
     set_utc_session,
 )
 from pyspark.sql import SparkSession
@@ -281,14 +281,23 @@ def _table_exists(spark, table_name: str) -> bool:
         return False
 
 
-def bronze_count_and_clock(df_bronze):
-    """(row count, data-clock date) of bronze in one pass."""
-    from pyspark.sql.functions import count, lit
+def rows_added_by_last_commit(spark, silver_tbl):
+    """Rows the table's latest snapshot added (this cycle's write).
 
-    r = df_bronze.agg(
-        count(lit(1)).alias("n"), max_(to_date(col("event_timestamp"))).alias("d")
-    ).collect()[0]
-    return int(r["n"]), r["d"]
+    Snapshot metadata only; falls back to a full count when the summary is
+    missing. In incremental mode the table count is every cycle so far,
+    which overstated output_rows.
+    """
+    try:
+        r = spark.sql(
+            f"SELECT summary['added-records'] AS n FROM {silver_tbl}.snapshots "
+            "ORDER BY committed_at DESC LIMIT 1"
+        ).collect()
+        if r and r[0]["n"] is not None:
+            return int(r[0]["n"])
+    except Exception as e:  # noqa: BLE001
+        log(f"Warning: snapshot summary unavailable ({e}); counting the table")
+    return spark.table(silver_tbl).count()
 
 
 def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
@@ -296,9 +305,9 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     log("Executing SIMPLE strategy...")
 
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
-    bronze_count, anchor = bronze_count_and_clock(df_bronze)
+    bronze_count = df_bronze.count()
     log(f"Bronze records: {bronze_count:,}")
-    log(f"Data clock (recency anchor): {anchor}")
+    anchor = resolve_data_clock(df_bronze)
 
     silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
     silver_count = silver_df.count()
@@ -346,10 +355,8 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
 
     df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
 
-    # One extra pass over a single column: recency needs the data clock
-    # before the transform is planned.
-    anchor = data_clock_date(df_bronze)
-    log(f"Data clock (recency anchor): {anchor}")
+    # LB_DATA_CLOCK when set; a one-column pass over bronze only without it.
+    anchor = resolve_data_clock(df_bronze)
 
     # Apply transformations - all column operations, no joins
     silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
@@ -376,7 +383,7 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
             writer = writer.tableProperty("write.spark.fanout.enabled", "true")
         writer.createOrReplace()
 
-    silver_count = spark.table(silver_tbl).count()
+    silver_count = rows_added_by_last_commit(spark, silver_tbl)
     log(f"Wrote {silver_count:,} records")
 
     return silver_count

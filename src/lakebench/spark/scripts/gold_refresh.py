@@ -67,6 +67,8 @@ except Exception as e:
 
 # Track refresh cycles and incremental state
 _refresh_count = 0
+_read_failures = 0  # consecutive cycles whose silver lookup errored
+_MAX_READ_FAILURES = 5
 _last_max_date = None  # Track last-seen max interaction_date for incremental reads
 _incremental = env("LB_GOLD_INCREMENTAL", "false").lower() == "true"
 
@@ -85,16 +87,29 @@ def refresh_gold(trigger_df, batch_id):
     read and merged into Gold. In full mode, the entire Silver table is
     re-aggregated and Gold is overwritten.
     """
-    global _refresh_count, _last_max_date
+    global _refresh_count, _last_max_date, _read_failures
     _refresh_count += 1
     cycle_start = time.time()
 
     log(f"Refresh cycle {_refresh_count} (batch {batch_id})")
 
-    # Read current Silver table. Only a genuine not-found means "not ready";
-    # any other catalog error fails the stream instead of leaving gold empty
-    # for the whole run.
-    if not table_exists(spark, silver_tbl):
+    # Read current Silver table. Not-found means "not ready yet". Any other
+    # catalog error skips this cycle (a transient metastore hiccup should not
+    # cost a driver restart), but _MAX_READ_FAILURES in a row fail the stream
+    # instead of leaving gold stale for the whole run.
+    try:
+        ready = table_exists(spark, silver_tbl)
+    except Exception as e:  # noqa: BLE001
+        _read_failures += 1
+        log(
+            f"Cycle {_refresh_count}: Silver table unreadable "
+            f"({_read_failures}/{_MAX_READ_FAILURES}): {e}"
+        )
+        if _read_failures >= _MAX_READ_FAILURES:
+            raise
+        return
+    _read_failures = 0
+    if not ready:
         log(f"Cycle {_refresh_count}: Silver table not ready yet")
         return
     silver_df = spark.table(silver_tbl)
