@@ -176,3 +176,10 @@ def test_reference_read_tolerates_only_a_missing_path(spark, tmp_path, monkeypat
 
     with pytest.raises(RuntimeError, match="Forbidden"):
         sb._read_reference(Boom())
+
+    # One file present, the other missing: a broken reference write.
+    party, _ = _refs(spark)
+    party.write.parquet(str(tmp_path / "p.parquet"))
+    monkeypatch.setattr(sb, "PARTY_PATH", str(tmp_path / "p.parquet"))
+    with pytest.raises(RuntimeError, match="only one KYC reference file"):
+        sb._read_reference(spark)

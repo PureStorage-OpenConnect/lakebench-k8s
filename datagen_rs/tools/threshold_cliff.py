@@ -62,12 +62,14 @@ population, though, must not concentrate on t more than baseline rows do:
 3. Atom share s = atom / (window rows + atom). For a planted population,
    FAIL when s_planted > max_density_ratio x s_baseline, with at least
    MIN_ATOM planted rows at t and the difference significant (two-proportion
-   z > 3). This is what catches a typology pinned to exactly t, which the
+   z > 3). For USD thresholds both sides are USD-currency rows, since only
+   those can land exactly on a USD value. This is what catches a typology pinned to exactly t, which the
    windows alone would read as empty.
 
 "Significant" means |ln ratio| exceeds 3 standard errors, with the Poisson
-approximation se = sqrt(1/n1 + 1/n2); a large but noisy ratio is
-INSUFFICIENT, as is any window with fewer than MIN_COUNT rows on a side.
+approximation se = sqrt(1/n1 + 1/n2) (0.5 continuity correction for a zero
+count). A significant excess FAILs even in a thin window; a PASS needs
+MIN_COUNT rows on each side, and a large but noisy ratio is INSUFFICIENT.
 INSUFFICIENT is not a pass: it says the corpus is too small to test that
 threshold, so run at a larger scale for a claim.
 """
@@ -179,16 +181,21 @@ def load_thresholds(rules_src: str, silver_src: str, prereg: dict) -> dict:
 
 
 def _ratio_verdict(n_lo: int, n_hi: int, limit: float) -> tuple[str, float]:
-    if min(n_lo, n_hi) < MIN_COUNT:
-        if max(n_lo, n_hi) >= MIN_COUNT and min(n_lo, n_hi) == 0:
-            return "FAIL", math.inf
+    """FAIL on a significant excess over the limit even in a thin window (266
+    rows below t against 11 above is a cliff whatever MIN_COUNT says); PASS
+    needs MIN_COUNT rows on each side. Zero counts get a 0.5 continuity
+    correction for the test only."""
+    if n_lo + n_hi == 0:
         return "INSUFFICIENT", float("nan")
-    r = n_hi / n_lo
+    a, b = max(n_lo, 0.5), max(n_hi, 0.5)
+    r = b / a
     lr = abs(math.log(r))
-    if lr <= math.log(limit):
-        return "PASS", r
-    se = math.sqrt(1 / n_lo + 1 / n_hi)
-    return ("FAIL" if lr / se > Z_SIGNIFICANT else "INSUFFICIENT"), r
+    se = math.sqrt(1 / a + 1 / b)
+    if lr > math.log(limit) and lr / se > Z_SIGNIFICANT:
+        return "FAIL", r
+    if min(n_lo, n_hi) < MIN_COUNT:
+        return "INSUFFICIENT", r
+    return ("PASS" if lr <= math.log(limit) else "INSUFFICIENT"), r
 
 
 def cliff(count, t: float, w: float, max_ratio: float) -> dict:
@@ -216,8 +223,10 @@ def cliff(count, t: float, w: float, max_ratio: float) -> dict:
 def atom_verdict(atom_p: int, n_p: int, atom_b: int, n_b: int, max_ratio: float) -> str:
     """Statistic 3: does a planted population sit on t more than baseline?
     n_p and n_b are window rows plus the atom."""
-    if atom_p < MIN_ATOM or n_p == 0 or n_b == 0:
-        return "PASS" if atom_p < MIN_ATOM else "INSUFFICIENT"
+    if atom_p < MIN_ATOM:
+        return "PASS"
+    if n_b == 0:
+        return "FAIL"  # planted rows sit on t where baseline has nothing at all
     sp, sb = atom_p / n_p, atom_b / n_b
     if sp <= max_ratio * sb:
         return "PASS"
@@ -288,10 +297,13 @@ def main(root: str) -> int:
     t8 = th["w8_amount_usd"]
     # Dormancy burst rows are every row after the out-of-window anchor (pos 1).
     burst = "typ = 'dormant_reactivation' AND pos > 1"
-    baseline = "typ IS NULL"
     run(f"W8 amount ${t8:,.0f}", "all rows", "r", "usd", "TRUE", t8)
-    for pop, where in (("planted", "typ IS NOT NULL"), ("bursts", burst)):
-        run(f"W8 amount ${t8:,.0f}", pop, "r", "usd", where, t8, base=baseline)
+    # Only USD-native rows can land exactly on a USD threshold (snapping is in
+    # the payment currency), so the planted-vs-baseline atom comparison uses
+    # USD rows on both sides; a different currency mix would otherwise move it.
+    usd_base = "typ IS NULL AND ccy = 'USD'"
+    for pop, where in (("planted $", "typ IS NOT NULL AND ccy = 'USD'"), ("bursts", burst)):
+        run(f"W8 amount ${t8:,.0f}", pop, "r", "usd", where, t8, base=usd_base)
     tg = th["w8_gap_days"]
     run(f"W8 gap {tg:g} d", "all gaps", "g", "gap_days", "gap_days IS NOT NULL", tg)
     # The gap that ends in a dormancy burst's first row is the dormancy length.
@@ -312,12 +324,12 @@ def main(root: str) -> int:
             run(f"{label} amount ${t:,.0f}", "all rows", "r", "usd", "TRUE", t)
             run(
                 f"{label} amount ${t:,.0f}",
-                "planted",
+                "planted $",
                 "r",
                 "usd",
-                "typ IS NOT NULL",
+                "typ IS NOT NULL AND ccy = 'USD'",
                 t,
-                base=baseline,
+                base=usd_base,
             )
 
     print(

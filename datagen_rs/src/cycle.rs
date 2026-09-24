@@ -21,8 +21,8 @@ use crate::hash::splitmix64;
 
 /// Largest supported cycle: base_uid keeps it in bits 40..62, below the
 /// typology-uid bit 63. The c360 row ids (file_id * rows_per_file with
-/// file_id offset by cycle << 32) stay in i64 for rows_per_file < 2^31 / n,
-/// far above any cycle count a run uses.
+/// file_id offset by cycle << 32) stay in i64 only while rows_per_file is
+/// below 2^31 / n; bin/generate.rs refuses a c360 cycle that would overflow.
 pub const MAX_CYCLE: u64 = (1 << 23) - 1;
 
 /// Seed for the cycle's event streams. Identity for cycle 0.
