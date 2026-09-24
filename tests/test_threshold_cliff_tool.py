@@ -200,3 +200,18 @@ def test_an_underpowered_corpus_is_inconclusive_not_pass(tmp_path, capsys):
     """)
     assert t.main(str(tmp_path)) == 2
     assert "INCONCLUSIVE" in capsys.readouterr().out
+
+
+def test_a_small_full_pin_fails_exactly():
+    t = _tool()
+    # Every one of 20 dormancies just above 90 d: the Wald test cannot see
+    # it, the exact binomial test does.
+    assert t._ratio_verdict(0, 20, 2.0)[0] == "FAIL"
+    assert t._ratio_verdict(0, 5, 2.0)[0] == "INSUFFICIENT"
+    assert t._ratio_verdict(10, 12, 2.0)[0] == "INSUFFICIENT"
+
+
+def test_a_thin_normaliser_cannot_cancel_a_cliff():
+    t = _tool()
+    # 2.5x cliff in dormancy, divided by a noisy 5/12 baseline, used to PASS.
+    assert t._ratio_verdict(40, 100, 2.0, (5, 12))[0] == "INSUFFICIENT"
