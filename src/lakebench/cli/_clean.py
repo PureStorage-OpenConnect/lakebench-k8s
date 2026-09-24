@@ -111,8 +111,7 @@ def clean(
       journal - Delete all journal session files
     """
     if force_short_f:
-        deprecated_short_f_force("--force or -y")
-        force = True
+        force = deprecated_short_f_force("--force or -y", force)
     target = target.lower().strip()
     if target not in CLEAN_TARGETS:
         print_error(f"Invalid target: '{target}'. Must be one of: {', '.join(CLEAN_TARGETS)}")

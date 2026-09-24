@@ -1625,13 +1625,13 @@ def results(
         ),
     ] = None,
     output_format: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--format",
             "-o",
-            help="Output format: table, json, csv",
+            help="Output format: table, json, csv (default: table)",
         ),
-    ] = "table",
+    ] = None,
     format_short_f: Annotated[
         str | None,
         typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
@@ -1648,10 +1648,12 @@ def results(
     """
     if format_short_f is not None:
         warn_deprecated_short_f("--format / -o")
-        if output_format != "table" and output_format != format_short_f:
+        if output_format is not None and output_format != format_short_f:
             print_error(f"both --format {output_format} and -f {format_short_f} given")
             raise typer.Exit(2)
         output_format = format_short_f
+    if output_format is None:
+        output_format = "table"
     import json as _json
 
     from lakebench.metrics import MetricsStorage

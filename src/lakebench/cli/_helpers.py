@@ -105,26 +105,45 @@ def warn_deprecated_short_f(new_spelling: str) -> None:
     )
 
 
-def _stdin_is_tty() -> bool:
+def stdin_is_tty() -> bool:
+    """True only for an interactive stdin; a closed stdin (None) is not one."""
     import sys
 
-    return sys.stdin.isatty()
+    stdin = sys.stdin
+    try:
+        return stdin is not None and stdin.isatty()
+    except (AttributeError, ValueError):  # closed or replaced stream
+        return False
 
 
-def deprecated_short_f_force(new_spelling: str) -> None:
+LEGACY_SHORT_F_ENV = "LAKEBENCH_LEGACY_SHORT_F"
+
+
+def deprecated_short_f_force(new_spelling: str, force_given: bool) -> bool:
     """Handle ``-f`` on destroy/clean, where it used to mean --force.
 
-    At a terminal, where a person may have typed ``-f`` expecting it to name
-    the config file as it does elsewhere, refuse rather than skip the
-    confirmation. In a script, keep the old meaning for this release and warn.
+    ``-f`` means --file on every other command, so on a destructive command
+    it is refused outright rather than treated as consent to skip the
+    confirmation: AI agents, IDE task runners and ``ssh host cmd`` all run
+    without a terminal, so a TTY test cannot tell a script from a person.
+    Scripts that need the old meaning for one release set
+    LAKEBENCH_LEGACY_SHORT_F=1. When --force is also given, ``-f`` is
+    redundant and only warned about. Returns the resulting force value.
     """
-    if _stdin_is_tty():
-        err_console.print(
-            f"[red]ERROR[/red] '-f' no longer skips confirmation here: use {new_spelling}. "
-            "'-f' will mean --file (the config path), as it does on every other command."
-        )
-        raise typer.Exit(2)
-    warn_deprecated_short_f(new_spelling)
+    import os
+
+    if force_given:
+        warn_deprecated_short_f(new_spelling)
+        return True
+    if os.environ.get(LEGACY_SHORT_F_ENV) == "1":
+        warn_deprecated_short_f(new_spelling)
+        return True
+    err_console.print(
+        f"[red]ERROR[/red] '-f' no longer skips confirmation here: use {new_spelling}. "
+        "'-f' will mean --file (the config path), as it does on every other command. "
+        f"Set {LEGACY_SHORT_F_ENV}=1 to keep the old meaning for this release."
+    )
+    raise typer.Exit(2)
 
 
 def print_info(message: str) -> None:
