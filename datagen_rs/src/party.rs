@@ -5,8 +5,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array, ListArray,
-    MapArray, StringArray, StructArray,
+    ArrayRef, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int32Array, Int64Array,
+    ListArray, MapArray, StringArray, StructArray,
 };
 use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
@@ -15,6 +15,7 @@ use parquet::arrow::ArrowWriter;
 
 use crate::hash::splitmix64;
 use crate::ids::iban_for;
+use crate::kyc;
 use crate::model::{World, MODEL_VERSION};
 use crate::realism as R;
 use crate::typology::Instance;
@@ -71,6 +72,17 @@ pub fn party_schema() -> SchemaRef {
         Field::new("pep_status", DataType::Boolean, true),
         Field::new("initial_risk_score", DataType::Float64, true),
         Field::new("model_version", DataType::Utf8, true),
+        // Monitored population and KYC (GOALS P10 stages 0 and 2; see
+        // crate::kyc). The KYC fields are NULL for non-customers: the
+        // reporting FI holds no CDD file on another bank's customer.
+        Field::new("is_customer", DataType::Boolean, false),
+        Field::new("home_fi", DataType::Utf8, true),
+        Field::new("customer_since", DataType::Date32, true),
+        Field::new("customer_type", DataType::Utf8, true),
+        Field::new("expected_monthly_volume_usd", DataType::Float64, true),
+        Field::new("crr_score", DataType::Int32, true),
+        Field::new("crr_tier", DataType::Utf8, true),
+        Field::new("crr_factors", DataType::Utf8, true),
     ]))
 }
 
@@ -131,8 +143,48 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
     let mut sanc = Vec::with_capacity(m);
     let mut pep = Vec::with_capacity(m);
     let mut risk = Vec::with_capacity(m);
+    let mut is_cust = Vec::with_capacity(m);
+    let mut home: Vec<String> = Vec::with_capacity(m);
+    let mut since: Vec<Option<i32>> = Vec::with_capacity(m);
+    let mut ctype: Vec<Option<&'static str>> = Vec::with_capacity(m);
+    let mut exp_vol: Vec<Option<f64>> = Vec::with_capacity(m);
+    let mut crr_score: Vec<Option<i32>> = Vec::with_capacity(m);
+    let mut crr_tier: Vec<Option<&'static str>> = Vec::with_capacity(m);
+    let mut crr_factors: Vec<Option<String>> = Vec::with_capacity(m);
     for i in lo..=hi {
         let o = ov.get(&i);
+        let id = i as u64;
+        let cust = kyc::is_customer(id, w.seed);
+        is_cust.push(cust);
+        home.push(kyc::home_fi(&w.bic[i]).to_string());
+        if cust {
+            since.push(Some(kyc::customer_since_day(
+                id,
+                w.seed,
+                w.dims.corpus_months,
+            )));
+            ctype.push(Some(kyc::customer_type(w.ty[i])));
+            let v = kyc::expected_monthly_volume_usd(
+                id,
+                w.seed,
+                w.amount_logshift[i],
+                w.activity[i] / w.total_activity.max(f64::MIN_POSITIVE),
+                w.population,
+                w.dims.txn_per_entity_per_month,
+            );
+            let (sc, tier, f) = kyc::crr(w.ty[i], w.country[i], w.pep[i], v);
+            exp_vol.push(Some(v));
+            crr_score.push(Some(sc));
+            crr_tier.push(Some(tier));
+            crr_factors.push(Some(f));
+        } else {
+            since.push(None);
+            ctype.push(None);
+            exp_vol.push(None);
+            crr_score.push(None);
+            crr_tier.push(None);
+            crr_factors.push(None);
+        }
         ids.push(i as i64);
         etype.push(TYPE_LABELS[w.ty[i] as usize].to_string());
         let nm = o
@@ -217,6 +269,14 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
         Arc::new(BooleanArray::from(pep)),
         Arc::new(Float64Array::from(risk)),
         sarr(vec![MODEL_VERSION.to_string(); m]),
+        Arc::new(BooleanArray::from(is_cust)),
+        sarr(home),
+        Arc::new(Date32Array::from(since)),
+        Arc::new(StringArray::from(ctype)),
+        Arc::new(Float64Array::from(exp_vol)),
+        Arc::new(Int32Array::from(crr_score)),
+        Arc::new(StringArray::from(crr_tier)),
+        Arc::new(StringArray::from(crr_factors)),
     ];
     RecordBatch::try_new(party_schema(), cols).unwrap()
 }
@@ -248,13 +308,14 @@ pub fn account_schema() -> SchemaRef {
         Field::new("closed_date", DataType::Date32, true),
         Field::new("current_balance", DataType::Decimal128(18, 2), true),
         Field::new("model_version", DataType::Utf8, true),
+        // BIC8 of the bank group holding the account; the reporting FI
+        // (kyc::REPORTING_FI) for a customer's accounts.
+        Field::new("home_fi", DataType::Utf8, true),
     ]))
 }
 
 fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
     let seed_u = w.seed as u64;
-    let base_open: i32 = 18262; // 2020-01-01
-    let span_open: i64 = 2191;
     let mut acct_id = Vec::new();
     let mut iban = Vec::new();
     let mut holder = Vec::new();
@@ -262,6 +323,7 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
     let mut currency = Vec::new();
     let mut opened = Vec::new();
     let mut closed: Vec<Option<i32>> = Vec::new();
+    let mut home: Vec<String> = Vec::new();
     for id in lo as u64..=hi as u64 {
         let i = id as usize;
         let cc = w.country[i];
@@ -269,11 +331,21 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
         for seq in 0..w.n_accounts[i] as u64 {
             let acc_seed = splitmix64(id ^ (seq << 20) ^ seed_u);
             acct_id.push((splitmix64(id ^ (seq << 30)) & 0x7FFF_FFFF_FFFF_FFFF) as i64);
-            iban.push(iban_for(&cb, acc_seed));
+            // The first account is the one the entity's payments use: the
+            // pacs.008 emit writes iban_for(country, id) as the debtor and
+            // creditor account, so the account zone carries that same IBAN
+            // and silver can join a payment to its holder's KYC. Further
+            // accounts keep their own IBANs.
+            iban.push(if seq == 0 {
+                w.iban[i].clone()
+            } else {
+                iban_for(&cb, acc_seed)
+            });
             holder.push(id as i64);
             bank_bic.push(w.bic[i].clone());
+            home.push(kyc::home_fi(&w.bic[i]).to_string());
             currency.push(w.ccy[i].to_string());
-            let od = base_open + (splitmix64(id ^ 0x0DA7E) % span_open as u64) as i32;
+            let od = kyc::account_opened_day(id);
             opened.push(od);
             let cm = (splitmix64(id ^ 0xC1) as f64 / 18446744073709551616.0) < 0.02;
             closed.push(if cm {
@@ -297,6 +369,7 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
         Arc::new(Date32Array::from(closed)),
         Arc::new(balance),
         sarr(vec![MODEL_VERSION.to_string(); total]),
+        sarr(home),
     ];
     RecordBatch::try_new(account_schema(), cols).unwrap()
 }

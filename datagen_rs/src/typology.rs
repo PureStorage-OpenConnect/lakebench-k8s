@@ -11,6 +11,7 @@
 //! the reporting threshold. See MEMORY note project_fraud_aml for context.
 
 use crate::hash::{splitmix64, Rng};
+use crate::kyc::is_customer;
 use crate::world::{entity_type, TYPE_PERSON};
 
 pub struct Spec {
@@ -249,6 +250,53 @@ fn pick_distinct(rng: &mut Rng, pool: &[u64], k: usize) -> Vec<u64> {
     out
 }
 
+/// Index of the subject role in `participants`: the account whose behaviour
+/// the typology's designated scenario fires on, and so the one a real
+/// monitoring alert is raised on. The reporting FI monitors only its own
+/// customers, so the subject must be one (GOALS P10 stage 0). The rule:
+/// the collecting beneficiary for many-to-one structuring, the first
+/// pass-through account for layering chains, the originator otherwise.
+/// corridor_high_risk's originator is chosen per instance by a hash of its
+/// seed (see emit_instance), so the subject follows that flip.
+pub fn subject_index(typ: &str, n: usize, inst_seed: i64) -> usize {
+    match typ {
+        "fan_in" | "micro_structuring" => n - 1,
+        "stack" | "rapid_layering" => 1.min(n - 1),
+        "corridor_high_risk" => (splitmix64(inst_seed as u64) & 1) as usize,
+        _ => 0,
+    }
+}
+
+/// Make the subject role a customer while leaving every other participant a
+/// customer at the baseline rate. If the subject slot holds a non-customer it
+/// swaps with the first customer participant, so the instance keeps its drawn
+/// number of customers; only when no participant is a customer does it
+/// replace the subject with a uniform draw from the customer part of the same
+/// pool. Nothing but is_customer is conditioned (no PEP, tier, tenure or
+/// volume), which is what keeps KYC attributes from becoming labels.
+fn enforce_subject(
+    participants: &mut [u64],
+    subject: usize,
+    cust_pool: &[u64],
+    seed: i64,
+    rng: &mut Rng,
+) {
+    if is_customer(participants[subject], seed) || cust_pool.is_empty() {
+        return;
+    }
+    if let Some(j) = participants.iter().position(|&p| is_customer(p, seed)) {
+        participants.swap(subject, j);
+        return;
+    }
+    for _ in 0..50 {
+        let cand = cust_pool[rng.below(cust_pool.len() as u64) as usize];
+        if !participants.contains(&cand) {
+            participants[subject] = cand;
+            return;
+        }
+    }
+}
+
 pub fn schedule(
     seed: i64,
     total_rows: i64,
@@ -259,6 +307,14 @@ pub fn schedule(
 ) -> Vec<Instance> {
     let pool = person_pool(population, seed);
     let corridor = corridor_pool(&pool, country);
+    let cust_of = |v: &[u64]| -> Vec<u64> {
+        v.iter()
+            .copied()
+            .filter(|&id| is_customer(id, seed))
+            .collect()
+    };
+    let pool_cust = cust_of(&pool);
+    let corridor_cust = cust_of(&corridor);
     let budget = 0.001 * total_rows as f64 / SPECS.len() as f64;
     let span = (corpus_end_us - corpus_start_us).max(1);
     let mut instances = Vec::new();
@@ -274,9 +330,9 @@ pub fn schedule(
         // corridor_high_risk and cross_border_cycle select from the
         // high-risk country pool; every other typology uses the full
         // person pool.
-        let src_pool: &[u64] = match spec.name {
-            "corridor_high_risk" | "cross_border_cycle" => &corridor,
-            _ => &pool,
+        let (src_pool, src_cust): (&[u64], &[u64]) = match spec.name {
+            "corridor_high_risk" | "cross_border_cycle" => (&corridor, &corridor_cust),
+            _ => (&pool, &pool_cust),
         };
         // Skip a typology entirely if its source pool is too small to
         // yield `spec.participants` distinct entities. pick_distinct's
@@ -324,7 +380,9 @@ pub fn schedule(
                 (seed as u64) ^ splitmix64(0xF100 + (spec.tid as i64 * TID_SEED_STRIDE + j) as u64),
             ) as i64;
             let mut rng = Rng::new(iseed as u64);
+            let subject = subject_index(spec.name, spec.participants, iseed);
             let mut participants = pick_distinct(&mut rng, src_pool, spec.participants);
+            enforce_subject(&mut participants, subject, src_cust, seed, &mut rng);
             // Dormant instances: re-draw until the originator is unused, so each
             // dormant account owns exactly one dormancy window (see finding 2
             // above). Bounded; a collision is rare (birthday over ~n_inst in the
@@ -333,6 +391,7 @@ pub fn schedule(
                 let mut retries = 0;
                 while used_dormant_orig.contains(&participants[0]) && retries < 10 {
                     participants = pick_distinct(&mut rng, src_pool, spec.participants);
+                    enforce_subject(&mut participants, subject, src_cust, seed, &mut rng);
                     retries += 1;
                 }
                 used_dormant_orig.insert(participants[0]);

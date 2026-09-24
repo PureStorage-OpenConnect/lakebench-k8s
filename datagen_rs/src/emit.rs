@@ -15,7 +15,8 @@ use arrow::record_batch::RecordBatch;
 
 use crate::amounts::fx_to_usd;
 use crate::hash::splitmix64;
-use crate::ids::{bic_idx, iban_into, lei_into, msg_id_into, txn_id_into, uuid_v4_into};
+use crate::ids::{iban_into, lei_into, msg_id_into, txn_id_into, uuid_v4_into};
+use crate::kyc::entity_bic_idx;
 use crate::model::World;
 use crate::schema::*;
 
@@ -257,9 +258,10 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         b_ibc.append_value(unsafe { std::str::from_utf8_unchecked(&ib_c) });
         b_leo.append_value(unsafe { std::str::from_utf8_unchecked(&le_o) });
         b_lec.append_value(unsafe { std::str::from_utf8_unchecked(&le_c) });
-        // BIC: the 500-entry pool is cache-resident; index it directly.
-        let bic_o = &pool[bic_idx(b.orig[i], pool.len())];
-        let bic_c = &pool[bic_idx(b.bene[i], pool.len())];
+        // BIC: the 500-entry pool is cache-resident; index it directly. A
+        // customer's agent is the reporting FI (kyc::entity_bic_idx).
+        let bic_o = &pool[entity_bic_idx(b.orig[i], w.seed, pool.len())];
+        let bic_c = &pool[entity_bic_idx(b.bene[i], w.seed, pool.len())];
         b_bico.append_value(bic_o);
         b_bicc.append_value(bic_c);
         ct_o_ref.push(w.country[o]);
