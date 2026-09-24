@@ -11,6 +11,7 @@
 //! the reporting threshold. See MEMORY note project_fraud_aml for context.
 
 use crate::hash::{splitmix64, Rng};
+use crate::kyc::is_customer;
 use crate::world::{entity_type, TYPE_PERSON};
 
 pub struct Spec {
@@ -172,6 +173,7 @@ const TID_SEED_STRIDE: i64 = 100_000_000;
 /// distribution.
 const HIGH_RISK_CC: [&str; 6] = ["AE", "CN", "SG", "HK", "MX", "IN"];
 
+#[derive(Clone)]
 pub struct Instance {
     pub id: String,
     pub typ: &'static str,
@@ -249,6 +251,59 @@ fn pick_distinct(rng: &mut Rng, pool: &[u64], k: usize) -> Vec<u64> {
     out
 }
 
+/// Index of the subject role in `participants`: the account whose behaviour
+/// the typology's designated scenario fires on, and so the one a real
+/// monitoring alert is raised on. The reporting FI monitors only its own
+/// customers, so the subject must be one (GOALS P10 stage 0). The rule:
+/// the collecting beneficiary for many-to-one structuring, the first
+/// pass-through account for layering chains, the originator otherwise.
+/// corridor_high_risk's originator is chosen per instance by a hash of its
+/// seed (see emit_instance), so the subject follows that flip.
+pub fn subject_index(typ: &str, n: usize, inst_seed: i64) -> usize {
+    match typ {
+        "fan_in" | "micro_structuring" => n - 1,
+        "stack" | "rapid_layering" => 1.min(n - 1),
+        "corridor_high_risk" => (splitmix64(inst_seed as u64) & 1) as usize,
+        _ => 0,
+    }
+}
+
+/// Make the subject role a customer while leaving every other participant a
+/// customer at the baseline rate. A non-customer subject is replaced by a
+/// uniform draw from the customer part of the same pool, excluding the other
+/// participants; the others are never touched, so they stay independent draws
+/// at the base rate. (Swapping with a customer participant instead would move
+/// customers out of the non-subject roles and make is_customer = 0 a label
+/// signal for them.) Nothing but is_customer is conditioned (no PEP, tier,
+/// tenure or volume), which is what keeps KYC attributes from becoming labels.
+/// `world_seed` is the seed of the world the entity attributes come from.
+/// Returns false when no customer could be placed (empty pool or 50
+/// collisions), so the caller can count it.
+fn enforce_subject(
+    participants: &mut [u64],
+    subject: usize,
+    cust_pool: &[u64],
+    world_seed: i64,
+    rng: &mut Rng,
+) -> bool {
+    if is_customer(participants[subject], world_seed) {
+        return true;
+    }
+    if cust_pool.is_empty() {
+        return false;
+    }
+    for _ in 0..50 {
+        let cand = cust_pool[rng.below(cust_pool.len() as u64) as usize];
+        if !participants.contains(&cand) {
+            participants[subject] = cand;
+            return true;
+        }
+    }
+    false
+}
+
+/// `schedule_ex` with one seed for both the world and the event stream (a
+/// single-cycle run).
 pub fn schedule(
     seed: i64,
     total_rows: i64,
@@ -257,8 +312,42 @@ pub fn schedule(
     corpus_end_us: i64,
     country: &[&'static str],
 ) -> Vec<Instance> {
-    let pool = person_pool(population, seed);
+    schedule_ex(
+        seed,
+        seed,
+        total_rows,
+        population,
+        corpus_start_us,
+        corpus_end_us,
+        country,
+    )
+}
+
+/// Schedule typology instances. Entity attributes (entity type, customer
+/// status) are looked up with `world_seed`, the seed the world was built
+/// with; instance draws use `seed`, which a multi-cycle run mixes per cycle
+/// (crate::cycle). Using the stream seed for the lookups would pick subjects
+/// that are customers of a different world.
+pub fn schedule_ex(
+    world_seed: i64,
+    seed: i64,
+    total_rows: i64,
+    population: usize,
+    corpus_start_us: i64,
+    corpus_end_us: i64,
+    country: &[&'static str],
+) -> Vec<Instance> {
+    let pool = person_pool(population, world_seed);
     let corridor = corridor_pool(&pool, country);
+    let cust_of = |v: &[u64]| -> Vec<u64> {
+        v.iter()
+            .copied()
+            .filter(|&id| is_customer(id, world_seed))
+            .collect()
+    };
+    let mut subject_misses = 0usize;
+    let pool_cust = cust_of(&pool);
+    let corridor_cust = cust_of(&corridor);
     let budget = 0.001 * total_rows as f64 / SPECS.len() as f64;
     let span = (corpus_end_us - corpus_start_us).max(1);
     let mut instances = Vec::new();
@@ -274,9 +363,9 @@ pub fn schedule(
         // corridor_high_risk and cross_border_cycle select from the
         // high-risk country pool; every other typology uses the full
         // person pool.
-        let src_pool: &[u64] = match spec.name {
-            "corridor_high_risk" | "cross_border_cycle" => &corridor,
-            _ => &pool,
+        let (src_pool, src_cust): (&[u64], &[u64]) = match spec.name {
+            "corridor_high_risk" | "cross_border_cycle" => (&corridor, &corridor_cust),
+            _ => (&pool, &pool_cust),
         };
         // Skip a typology entirely if its source pool is too small to
         // yield `spec.participants` distinct entities. pick_distinct's
@@ -324,7 +413,10 @@ pub fn schedule(
                 (seed as u64) ^ splitmix64(0xF100 + (spec.tid as i64 * TID_SEED_STRIDE + j) as u64),
             ) as i64;
             let mut rng = Rng::new(iseed as u64);
+            let subject = subject_index(spec.name, spec.participants, iseed);
             let mut participants = pick_distinct(&mut rng, src_pool, spec.participants);
+            let mut placed =
+                enforce_subject(&mut participants, subject, src_cust, world_seed, &mut rng);
             // Dormant instances: re-draw until the originator is unused, so each
             // dormant account owns exactly one dormancy window (see finding 2
             // above). Bounded; a collision is rare (birthday over ~n_inst in the
@@ -333,6 +425,8 @@ pub fn schedule(
                 let mut retries = 0;
                 while used_dormant_orig.contains(&participants[0]) && retries < 10 {
                     participants = pick_distinct(&mut rng, src_pool, spec.participants);
+                    placed =
+                        enforce_subject(&mut participants, subject, src_cust, world_seed, &mut rng);
                     retries += 1;
                 }
                 used_dormant_orig.insert(participants[0]);
@@ -463,6 +557,7 @@ pub fn schedule(
                     (s, e)
                 }
             };
+            subject_misses += (!placed) as usize;
             instances.push(Instance {
                 id: format!("{}_{}_{:07}", spec.name.to_uppercase(), spec.tid, j),
                 typ: spec.name,
@@ -480,6 +575,13 @@ pub fn schedule(
             });
         }
     }
+    if subject_misses > 0 {
+        eprintln!(
+            "note: {} typology instances have a non-customer subject (customer pool too small) \
+             -- expected only at tiny scales",
+            subject_misses
+        );
+    }
     instances
 }
 
@@ -496,6 +598,11 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
     let (s, e) = (inst.start_us, inst.end_us);
     let mut rows = Vec::new();
     match inst.typ {
+        // fan_in / fan_out: the signal is the shape (many senders to one
+        // collector, or one payer to many), not the amount. Their amounts are
+        // each sender's own draw: pinning them to the structuring band made
+        // them sit just under W2's threshold by construction (AML-GOALS R2).
+        // Only micro_structuring keeps band amounts, its defining attribute.
         "fan_in" => {
             let bene = *p.last().unwrap();
             for &snd in &p[..p.len() - 1] {
@@ -503,7 +610,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     orig: snd,
                     bene,
                     ts_us: uu(&mut rng, s, e),
-                    structuring: true,
+                    structuring: false,
                 });
             }
         }
@@ -514,7 +621,7 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     orig,
                     bene: b,
                     ts_us: uu(&mut rng, s, e),
-                    structuring: true,
+                    structuring: false,
                 });
             }
         }

@@ -147,3 +147,40 @@ def test_thread_cap_under_tight_memory():
     assert ep.max_threads_for_memory("customer360", 1.0, 512, True, 8 * 2**30) == 4
     # Financial scale 500 on node 0 does not fit 8 GiB at all -> floor of 1.
     assert ep.max_threads_for_memory("financial", 500.0, 64, True, 8 * 2**30) == 1
+
+
+@pytest.mark.parametrize("schema", ["customer360", "financial"])
+@pytest.mark.parametrize("cycle", [0, 3])
+def test_cycle_is_forwarded_only_when_nonzero(schema, cycle, monkeypatch):
+    """WORKPLAN B4: --cycle reaches the binary for n > 0; cycle 0 keeps the
+    single-run argv unchanged."""
+    ep = _entrypoint()
+    monkeypatch.setenv("CPU_LIMIT", "8")
+    captured: dict = {}
+
+    def _fake_exec(_path, cmd):
+        captured["cmd"] = cmd
+        raise SystemExit(0)
+
+    argv = ["entrypoint.py", "--schema", schema, "--bucket", "b"]
+    if cycle:
+        argv += ["--cycle", str(cycle), "--cycles", "5"]
+    with patch.object(sys, "argv", argv):
+        with patch.object(ep.os, "execvp", _fake_exec):
+            with pytest.raises(SystemExit):
+                ep.main()
+    cmd = captured["cmd"]
+    if cycle:
+        assert cmd[cmd.index("--cycle") + 1] == str(cycle)
+        assert cmd[cmd.index("--cycles") + 1] == "5"
+    else:
+        assert "--cycle" not in cmd and "--cycles" not in cmd
+
+
+def test_negative_cycle_is_rejected(monkeypatch):
+    ep = _entrypoint()
+    monkeypatch.setenv("CPU_LIMIT", "8")
+    for bad in (["--cycle", "-1"], ["--cycle", "3", "--cycles", "3"], ["--cycles", "0"]):
+        with patch.object(sys, "argv", ["entrypoint.py", "--bucket", "b", *bad]):
+            with patch.object(ep.os, "execvp", lambda *_: pytest.fail("exec'd")):
+                assert ep.main() == 2

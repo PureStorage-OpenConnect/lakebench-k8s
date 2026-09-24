@@ -983,3 +983,636 @@ fn shaping_preserves_time_order_and_uses_each_rows_country() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Monitored population and KYC (kyc.rs, GOALS P10 stages 0 and 2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reporting_fi_is_exactly_two_pool_entries() {
+    use datagen_rs::ids::bic_pool;
+    use datagen_rs::kyc::{REPORTING_FI, REPORTING_FI_POOL_IDX};
+    let pool = bic_pool();
+    let hits: Vec<usize> = (0..pool.len())
+        .filter(|&i| pool[i].starts_with(REPORTING_FI))
+        .collect();
+    assert_eq!(hits, REPORTING_FI_POOL_IDX.to_vec());
+    assert_eq!(pool[0], "MERIUS2LXXX");
+    assert_eq!(pool[320], "MERIUS2LNYC");
+}
+
+#[test]
+fn reporting_fi_bic_marks_customers_and_only_customers() {
+    use datagen_rs::ids::bic_pool;
+    use datagen_rs::kyc::{entity_bic_idx, is_customer, REPORTING_FI};
+    let pool = bic_pool();
+    let (mut cust, mut n) = (0usize, 0usize);
+    for id in 1..=200_000u64 {
+        let c = is_customer(id, 42);
+        let ours = pool[entity_bic_idx(id, 42, pool.len())].starts_with(REPORTING_FI);
+        assert_eq!(c, ours, "id {id}: customer {c} but reporting-FI BIC {ours}");
+        cust += c as usize;
+        n += 1;
+    }
+    let f = cust as f64 / n as f64;
+    assert!((f - 0.5).abs() < 0.01, "customer share {f}");
+}
+
+#[test]
+fn customer_status_is_independent_of_type_and_country() {
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::world::{entity_type, home_country_idx, HOME_CODES};
+    let mut by_type = [(0usize, 0usize); 3];
+    let (mut us, mut us_c, mut fo, mut fo_c) = (0usize, 0usize, 0usize, 0usize);
+    for id in 1..=300_000u64 {
+        let c = is_customer(id, 7) as usize;
+        let t = entity_type(id, 7) as usize;
+        by_type[t].0 += 1;
+        by_type[t].1 += c;
+        if HOME_CODES[home_country_idx(id, 7)] == "US" {
+            us += 1;
+            us_c += c;
+        } else {
+            fo += 1;
+            fo_c += c;
+        }
+    }
+    for (n, c) in by_type {
+        let f = c as f64 / n as f64;
+        assert!((f - 0.5).abs() < 0.02, "customer share by type {f}");
+    }
+    let (fu, ff) = (us_c as f64 / us as f64, fo_c as f64 / fo as f64);
+    assert!((fu - ff).abs() < 0.02, "US {fu} vs foreign {ff}");
+}
+
+fn kyc_schedule(seed: i64) -> (Vec<datagen_rs::typology::Instance>, Vec<&'static str>) {
+    use datagen_rs::typology::schedule;
+    use datagen_rs::world::{home_country_idx, HOME_CODES};
+    let pop = 20_000usize;
+    let day = 86_400_000_000i64;
+    let start = 1_600_000_000i64 * 1_000_000;
+    let country: Vec<&'static str> = (0..=pop as u64)
+        .map(|i| HOME_CODES[home_country_idx(i.max(1), seed)])
+        .collect();
+    let insts = schedule(
+        seed,
+        (pop as i64) * 4 * 60,
+        pop,
+        start,
+        start + 1800 * day,
+        &country,
+    );
+    (insts, country)
+}
+
+#[test]
+fn every_typology_subject_is_a_customer_and_others_are_at_base_rate() {
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::typology::subject_index;
+    let seed = 42;
+    let (insts, _) = kyc_schedule(seed);
+    assert!(insts.len() > 500);
+    let (mut others, mut others_c) = (0usize, 0usize);
+    for inst in &insts {
+        let s = subject_index(inst.typ, inst.participants.len(), inst.seed);
+        assert!(
+            is_customer(inst.participants[s], seed),
+            "{}: subject {} is not a customer",
+            inst.id,
+            inst.participants[s]
+        );
+        // Participants stay distinct after the subject swap / replacement.
+        let mut p = inst.participants.clone();
+        p.sort_unstable();
+        p.dedup();
+        assert_eq!(
+            p.len(),
+            inst.participants.len(),
+            "{}: duplicate participant",
+            inst.id
+        );
+        for (j, &q) in inst.participants.iter().enumerate() {
+            if j != s {
+                others += 1;
+                others_c += is_customer(q, seed) as usize;
+            }
+        }
+    }
+    // Non-subject roles are never touched, so they stay at the base rate.
+    let f = others_c as f64 / others as f64;
+    assert!((0.47..=0.53).contains(&f), "non-subject customer share {f}");
+}
+
+#[test]
+fn subject_roles_match_the_emitted_chain() {
+    use datagen_rs::typology::{emit_instance, subject_index};
+    let (insts, _) = kyc_schedule(42);
+    for inst in insts.iter().take(2000) {
+        let s = inst.participants[subject_index(inst.typ, inst.participants.len(), inst.seed)];
+        let rows = emit_instance(inst);
+        match inst.typ {
+            // The subject originates at least one row ...
+            "fan_out"
+            | "random"
+            | "bipartite"
+            | "tbml_repeated_invoice"
+            | "cycle"
+            | "cross_border_cycle"
+            | "gather_scatter"
+            | "scatter_gather"
+            | "dormant_reactivation"
+            | "corridor_high_risk" => {
+                assert!(rows.iter().any(|r| r.orig == s), "{}", inst.id)
+            }
+            // ... receives the structured credits ...
+            "fan_in" | "micro_structuring" => {
+                assert!(rows.iter().all(|r| r.bene == s), "{}", inst.id)
+            }
+            // ... or receives and forwards.
+            "stack" | "rapid_layering" => {
+                assert!(rows.iter().any(|r| r.bene == s), "{}", inst.id);
+                assert!(rows.iter().any(|r| r.orig == s), "{}", inst.id);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
+    use datagen_rs::kyc::{crr, expected_monthly_volume_usd, is_customer};
+    use datagen_rs::model::build_world;
+    use datagen_rs::typology::subject_index;
+    let w = build_world(0.2, 42, 60);
+    let tier_of = |i: usize| -> &'static str {
+        let v = expected_monthly_volume_usd(
+            i as u64,
+            w.seed,
+            w.amount_logshift[i],
+            w.activity[i] / w.total_activity,
+            w.population,
+            w.dims.txn_per_entity_per_month,
+        );
+        crr(w.ty[i], w.country[i], w.pep[i], v).1
+    };
+    let mut all = [0usize; 3];
+    let mut person_us = [0usize; 3];
+    let idx = |t: &str| match t {
+        "low" => 0,
+        "medium" => 1,
+        _ => 2,
+    };
+    for i in 1..=w.population {
+        if !is_customer(i as u64, w.seed) {
+            continue;
+        }
+        let t = idx(tier_of(i));
+        all[t] += 1;
+        if w.ty[i] == datagen_rs::world::TYPE_PERSON && w.country[i] == "US" {
+            person_us[t] += 1;
+        }
+    }
+    let n: usize = all.iter().sum();
+    let share = |c: [usize; 3]| {
+        let n: usize = c.iter().sum();
+        [
+            c[0] as f64 / n as f64,
+            c[1] as f64 / n as f64,
+            c[2] as f64 / n as f64,
+        ]
+    };
+    let s = share(all);
+    eprintln!(
+        "CRR tiers over {n} customers: low {:.3} medium {:.3} high {:.3}",
+        s[0], s[1], s[2]
+    );
+    assert!(s[0] > 0.5 && s[2] < 0.10 && s[2] > 0.0, "tier shares {s:?}");
+
+    // Typology subjects from the person pool are US persons ~88% of the time;
+    // their tiers must look like baseline US-person customers' tiers, since
+    // selection never looks at anything the CRR uses beyond type and country.
+    let country: Vec<&'static str> = w.country.clone();
+    let insts = datagen_rs::typology::schedule(
+        42,
+        w.dims.total_txns(),
+        w.population,
+        0,
+        1800 * 86_400_000_000,
+        &country,
+    );
+    let mut subj = [0usize; 3];
+    for inst in &insts {
+        if matches!(inst.typ, "corridor_high_risk" | "cross_border_cycle") {
+            continue;
+        }
+        let s =
+            inst.participants[subject_index(inst.typ, inst.participants.len(), inst.seed)] as usize;
+        if w.country[s] == "US" {
+            subj[idx(tier_of(s))] += 1;
+        }
+    }
+    let (a, b) = (share(person_us), share(subj));
+    eprintln!(
+        "US-person customers {a:?} vs US subjects {b:?} (n={})",
+        subj.iter().sum::<usize>()
+    );
+    for k in 0..3 {
+        assert!(
+            (a[k] - b[k]).abs() < 0.08,
+            "tier {k}: baseline {} vs subjects {}",
+            a[k],
+            b[k]
+        );
+    }
+}
+
+#[test]
+fn customer_since_precedes_the_corpus_and_the_accounts() {
+    use datagen_rs::kyc::{
+        account_opened_day, corpus_start_day, customer_since_day, days_from_civil, is_customer,
+        primary_opened_day,
+    };
+    assert_eq!(corpus_start_day(60), days_from_civil(2021, 1, 1));
+    assert_eq!(corpus_start_day(18), days_from_civil(2024, 7, 1));
+    let start = corpus_start_day(60) as i32;
+    let mut sum = 0.0;
+    for id in 1..=50_000u64 {
+        let d = customer_since_day(id, 42, 60);
+        let p = primary_opened_day(id, 42, 60);
+        assert!(d < start);
+        assert!(d > start - (31.0 * 365.25) as i32);
+        // The payment account is open before the corpus starts, and a
+        // customer's is opened on or after onboarding.
+        assert!(
+            p < start,
+            "id {id}: payment account opened {p} >= corpus start"
+        );
+        if is_customer(id, 42) {
+            assert!(p >= d, "id {id}: account opened before customer_since");
+        }
+        assert!(account_opened_day(id, p) >= p);
+        sum += (start - d) as f64 / 365.25;
+    }
+    let mean = sum / 50_000.0;
+    assert!((5.0..9.0).contains(&mean), "mean tenure {mean} years");
+}
+
+#[test]
+fn kyc_attributes_are_pure_functions_of_id_and_seed() {
+    use datagen_rs::kyc::{customer_since_day, entity_bic_idx, is_customer};
+    for id in [1u64, 17, 99_999, 1 << 40] {
+        assert_eq!(is_customer(id, 5), is_customer(id, 5));
+        assert_eq!(entity_bic_idx(id, 5, 500), entity_bic_idx(id, 5, 500));
+        assert_eq!(customer_since_day(id, 5, 60), customer_since_day(id, 5, 60));
+    }
+    // Different seeds select different customer sets.
+    let diff = (1..=10_000u64)
+        .filter(|&id| is_customer(id, 1) != is_customer(id, 2))
+        .count();
+    assert!(diff > 4000, "seeds share the customer set ({diff} differ)");
+}
+
+#[test]
+fn party_and_account_zones_carry_kyc_and_join_to_payments() {
+    use arrow::array::{Array, BooleanArray, StringArray};
+    use datagen_rs::kyc::REPORTING_FI;
+    use datagen_rs::model::build_world;
+    use datagen_rs::party::{write_account_to, write_party_to};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let w = build_world(0.01, 42, 60);
+    // The writers read DG_COMPRESSION; hold the env lock so a concurrent
+    // compression test cannot swap in an invalid codec mid-write.
+    let (pbuf, abuf) = with_env("DG_COMPRESSION", None, || {
+        let mut pbuf = Vec::new();
+        write_party_to(&w, &[], &mut pbuf);
+        let mut abuf = Vec::new();
+        write_account_to(&w, &mut abuf);
+        (pbuf, abuf)
+    });
+    let read = |b: Vec<u8>| {
+        ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(b))
+            .unwrap()
+            .build()
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+    };
+    let col =
+        |rb: &arrow::record_batch::RecordBatch, n: &str| rb.column_by_name(n).unwrap().clone();
+    for rb in read(pbuf) {
+        let cust = col(&rb, "is_customer");
+        let cust = cust.as_any().downcast_ref::<BooleanArray>().unwrap();
+        let home = col(&rb, "home_fi");
+        let home = home.as_any().downcast_ref::<StringArray>().unwrap();
+        let tier = col(&rb, "crr_tier");
+        let since = col(&rb, "customer_since");
+        for r in 0..rb.num_rows() {
+            let c = cust.value(r);
+            assert_eq!(c, home.value(r) == REPORTING_FI);
+            assert_eq!(c, tier.is_valid(r), "tier present only for customers");
+            assert_eq!(c, since.is_valid(r));
+        }
+    }
+    let mut seen_primary = 0;
+    for rb in read(abuf) {
+        let iban = col(&rb, "iban");
+        let iban = iban.as_any().downcast_ref::<StringArray>().unwrap();
+        let holder = col(&rb, "holder_entity_id");
+        let holder = holder
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        let home = col(&rb, "home_fi");
+        let home = home.as_any().downcast_ref::<StringArray>().unwrap();
+        for r in 0..rb.num_rows() {
+            let h = holder.value(r) as usize;
+            assert_eq!(home.value(r), &w.bic[h][..8]);
+            if iban.value(r) == w.iban[h] {
+                seen_primary += 1;
+            }
+        }
+    }
+    // Every entity's payment IBAN appears exactly once in the account zone.
+    assert_eq!(seen_primary, w.population);
+}
+
+// ---------------------------------------------------------------------------
+// Amount continuity for chained typologies (amounts::instance_amounts)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chained_typologies_forward_the_previous_leg_less_a_skim() {
+    use datagen_rs::amounts::{fx_to_usd, instance_amounts, is_chained, SKIM_MAX, SKIM_MIN};
+    use datagen_rs::hash::Rng;
+    use datagen_rs::typology::emit_instance;
+    let (insts, _) = kyc_schedule(42);
+    let ccys = ["USD", "EUR", "JPY", "INR", "GBP"];
+    let ccy_of = |o: u64| ccys[(o % 5) as usize];
+    let mut rng = Rng::new(9);
+    let mut checked = 0;
+    for inst in &insts {
+        let rows = emit_instance(inst);
+        let amts = instance_amounts(inst.typ, &rows, ccy_of, |_| 0.0, &mut rng);
+        assert_eq!(amts.len(), rows.len());
+        if !is_chained(inst.typ) {
+            continue;
+        }
+        for k in 1..rows.len() {
+            // Emit order is chain order: each leg starts where the last ended.
+            assert_eq!(rows[k].orig, rows[k - 1].bene, "{} leg {k}", inst.id);
+            assert!(
+                rows[k].ts_us >= rows[k - 1].ts_us,
+                "{} leg {k} time",
+                inst.id
+            );
+            let prev = amts[k - 1] * fx_to_usd(ccy_of(rows[k - 1].orig));
+            let cur = amts[k] * fx_to_usd(ccy_of(rows[k].orig));
+            let ratio = cur / prev;
+            // Minor-unit rounding in JPY/INR moves the ratio by < 1e-3 at
+            // these amounts; allow that on both edges.
+            assert!(
+                (1.0 - SKIM_MAX - 1e-3..=1.0 - SKIM_MIN + 1e-3).contains(&ratio),
+                "{} leg {k}: forwarded {ratio}",
+                inst.id
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "only {checked} forwarding legs checked");
+}
+
+#[test]
+fn unchained_typologies_keep_independent_draws() {
+    use datagen_rs::amounts::{instance_amounts, native_amount, structuring_amount};
+    use datagen_rs::hash::Rng;
+    use datagen_rs::typology::TxRow;
+    let rows: Vec<TxRow> = (0..4)
+        .map(|i| TxRow {
+            orig: i + 1,
+            bene: 9,
+            ts_us: i as i64,
+            structuring: i % 2 == 0,
+        })
+        .collect();
+    let got = instance_amounts("fan_in", &rows, |_| "USD", |_| 0.3, &mut Rng::new(5));
+    let mut rng = Rng::new(5);
+    let want: Vec<f64> = rows
+        .iter()
+        .map(|r| {
+            if r.structuring {
+                structuring_amount(&mut rng, "USD")
+            } else {
+                native_amount(&mut rng, 0.3, "USD")
+            }
+        })
+        .collect();
+    assert_eq!(got, want);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-cycle generation (cycle.rs, WORKPLAN B4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cycle_zero_is_the_identity() {
+    use datagen_rs::cycle::*;
+    assert_eq!(mass_slice(0, 1), (f64::NEG_INFINITY, f64::INFINITY));
+    assert_eq!(mass_slice(1, 3), (1.0 / 3.0, 2.0 / 3.0));
+    assert_eq!(mass_slice(2, 3).1, f64::INFINITY);
+    assert_eq!(pacs_key(7, 0), "bronze/pacs008/part-000007.parquet");
+    assert_eq!(c360_key(7, 0), "part-000007.parquet");
+    assert_eq!(
+        ref_key("manifest/manifest.parquet", 0),
+        "manifest/manifest.parquet"
+    );
+    assert_eq!(c360_file_id(7, 0), 7);
+}
+
+#[test]
+fn cycle_keys_differ_and_keep_the_reader_suffix() {
+    use datagen_rs::cycle::*;
+    assert_eq!(pacs_key(7, 1), "bronze/pacs008/part-c001-000007.parquet");
+    assert_eq!(c360_key(7, 12), "part-c012-000007.parquet");
+    assert_eq!(
+        ref_key("manifest/manifest.parquet", 3),
+        "manifest/manifest-c003.parquet"
+    );
+    assert_eq!(
+        ref_key("bronze/party.parquet", 3),
+        "bronze/party-c003.parquet"
+    );
+    let keys: std::collections::HashSet<String> = (0..4u64)
+        .flat_map(|c| (0..100i64).map(move |f| pacs_key(f, c)))
+        .collect();
+    assert_eq!(keys.len(), 400);
+    assert!(keys.iter().all(|k| k.ends_with(".parquet")));
+}
+
+#[test]
+fn c360_cycles_have_disjoint_event_and_row_ids() {
+    use arrow::array::{Array, Int64Array, StringArray};
+    use datagen_rs::customer360::{build_batch, Config};
+    use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
+    use datagen_rs::cycle::c360_file_id;
+    use std::collections::HashSet;
+    let loyalty = LoyaltyLookup::build(42, 10_000);
+    let sampler = CustomerIdSampler::new(10_000);
+    let mut events: Vec<HashSet<String>> = Vec::new();
+    let mut rows: Vec<HashSet<i64>> = Vec::new();
+    for c in 0..2u64 {
+        let (mut e, mut r) = (HashSet::new(), HashSet::new());
+        for fid in 0..3u64 {
+            let mut cfg = Config::new(42, c360_file_id(fid, c), 500);
+            cfg.customer_id_max = 10_000;
+            let b = build_batch(&cfg, &loyalty, &sampler);
+            let ev = b.column_by_name("event_id").unwrap();
+            let ev = ev.as_any().downcast_ref::<StringArray>().unwrap();
+            e.extend((0..ev.len()).map(|i| ev.value(i).to_string()));
+            let id = b.column_by_name("id").unwrap();
+            let id = id.as_any().downcast_ref::<Int64Array>().unwrap();
+            r.extend((0..id.len()).map(|i| id.value(i)));
+        }
+        events.push(e);
+        rows.push(r);
+    }
+    assert!(
+        events[0].is_disjoint(&events[1]),
+        "c360 event_ids repeat across cycles"
+    );
+    assert!(
+        rows[0].is_disjoint(&rows[1]),
+        "c360 row ids repeat across cycles"
+    );
+}
+
+#[test]
+fn schedules_pick_subjects_from_the_world_not_the_stream_seed() {
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::typology::{schedule_ex, subject_index};
+    use datagen_rs::world::{entity_type, TYPE_PERSON};
+    let pop = 5_000usize;
+    let country: Vec<&'static str> = vec!["US"; pop + 1];
+    let insts = schedule_ex(
+        42,
+        0x5EED_0003,
+        (pop as i64) * 240,
+        pop,
+        0,
+        1 << 50,
+        &country,
+    );
+    for inst in &insts {
+        let s = inst.participants[subject_index(inst.typ, inst.participants.len(), inst.seed)];
+        assert!(
+            is_customer(s, 42),
+            "{}: subject not a customer of the world",
+            inst.id
+        );
+        assert!(inst
+            .participants
+            .iter()
+            .all(|&p| entity_type(p, 42) == TYPE_PERSON));
+    }
+}
+
+#[test]
+fn fi_entities_never_claim_the_reporting_fi_bic() {
+    use datagen_rs::kyc::{own_bic_idx, REPORTING_FI_POOL_IDX};
+    for id in 1..=100_000u64 {
+        assert!(!REPORTING_FI_POOL_IDX.contains(&own_bic_idx(id, 500)));
+    }
+}
+
+#[test]
+fn only_micro_structuring_draws_band_amounts() {
+    use datagen_rs::typology::emit_instance;
+    let (insts, _) = kyc_schedule(42);
+    for inst in &insts {
+        let banded = emit_instance(inst).iter().any(|r| r.structuring);
+        assert_eq!(banded, inst.typ == "micro_structuring", "{}", inst.id);
+    }
+}
+
+#[test]
+fn customer_accounts_are_us_accounts() {
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::model::build_world;
+    let w = build_world(0.05, 42, 60);
+    let (mut foreign_cust, mut foreign_non) = (0, 0);
+    for i in 1..=w.population {
+        let c = is_customer(i as u64, 42);
+        if c {
+            assert!(
+                w.iban[i].starts_with("US"),
+                "customer {i} holds {}",
+                w.iban[i]
+            );
+            foreign_cust += (w.country[i] != "US") as usize;
+        } else {
+            assert_eq!(&w.iban[i][..2], w.country[i]);
+            foreign_non += (w.country[i] != "US") as usize;
+        }
+    }
+    // Residence is unchanged: foreign residents bank with the US FI too.
+    assert!(foreign_cust > 0 && foreign_non > 0);
+}
+
+#[test]
+fn account_ibans_and_ids_are_unique_at_scale_10() {
+    // Scale 10 = 1,111,110 entities, past the 2^20 id where the old
+    // id ^ (seq << 20) packing collided.
+    use datagen_rs::ids::iban_for;
+    use datagen_rs::party::account_keys;
+    use datagen_rs::world::{accounts_for, dimensions};
+    use std::collections::HashSet;
+    let pop = dimensions(10.0, 60).population as u64;
+    assert!(pop > 1 << 20);
+    let mut ibans: HashSet<String> = HashSet::with_capacity(2_000_000);
+    let mut ids: HashSet<i64> = HashSet::with_capacity(2_000_000);
+    let mut n = 0usize;
+    for id in 1..=pop {
+        for seq in 0..accounts_for(id, 42) as u64 {
+            let (aid, acc_seed) = account_keys(id, seq, 42);
+            // Seq 0 carries the entity's own IBAN; the country prefix does not
+            // enter the digits, so one prefix checks body uniqueness.
+            let body_of = if seq == 0 { id } else { acc_seed };
+            ibans.insert(iban_for(b"US", body_of));
+            ids.insert(aid);
+            n += 1;
+        }
+    }
+    assert_eq!(ibans.len(), n, "duplicate IBANs");
+    assert_eq!(ids.len(), n, "duplicate account ids");
+}
+
+#[test]
+fn no_amount_rounds_to_zero() {
+    use datagen_rs::amounts::{forwarded_amount, native_amount};
+    use datagen_rs::hash::Rng;
+    let mut rng = Rng::new(3);
+    for ccy in ["USD", "JPY", "KRW", "EUR"] {
+        // A low persona shift makes small amounts common; before the fix
+        // round-number snapping sent some of them to 0.00.
+        for _ in 0..200_000 {
+            assert!(native_amount(&mut rng, -6.0, ccy) > 0.0, "{ccy}");
+        }
+        let mut v = 1.0;
+        for _ in 0..500 {
+            v = forwarded_amount(&mut rng, v, ccy);
+            assert!(v > 0.0, "{ccy} chain forwarded nothing");
+        }
+    }
+}
+
+#[test]
+fn structuring_amounts_are_in_minor_units() {
+    use datagen_rs::amounts::structuring_amount;
+    use datagen_rs::hash::Rng;
+    let mut rng = Rng::new(11);
+    for _ in 0..10_000 {
+        for ccy in ["JPY", "KRW"] {
+            let v = structuring_amount(&mut rng, ccy);
+            assert_eq!(v, v.round(), "fractional {ccy} {v}");
+        }
+    }
+}

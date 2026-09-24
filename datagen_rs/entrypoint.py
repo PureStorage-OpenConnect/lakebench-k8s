@@ -103,6 +103,13 @@ def main() -> int:
     ap.add_argument("--schema", default="financial", choices=SUPPORTED_SCHEMAS)
     # Shared args -- both schemas consume these.
     ap.add_argument("--seed", type=int, default=42)
+    # Multi-cycle runs (datagen_rs/src/cycle.rs). AML: cycle n of --cycles N
+    # emits the one-shot corpus rows in calendar-mass slice [n/N, (n+1)/N),
+    # so the union of all cycles is the one-shot corpus. c360: cycle n > 0
+    # shifts the per-file streams. Keys are cycle-suffixed for n > 0, so
+    # bronze accumulates. The defaults (0 of 1) are a single run.
+    ap.add_argument("--cycle", type=int, default=0)
+    ap.add_argument("--cycles", type=int, default=1)
     # NOTE: default is 32 to match the pre-M6 entrypoint (existing financial
     # K8s Job YAMLs assume 32). c360 K8s Job templates that want a different
     # file size pass --file-size-mb explicitly.
@@ -131,7 +138,9 @@ def main() -> int:
     )
     # customer360-only args -- ignored on the financial path.
     ap.add_argument("--target-tb", type=float, default=0.1)
-    ap.add_argument("--customer-id-max", type=int, default=500_000)
+    # None: the Rust binary derives the id space from --scale (100K
+    # customers per scale unit). It used to default to 500K at every scale.
+    ap.add_argument("--customer-id-max", type=int, default=None)
     ap.add_argument("--payload-kb", type=int, default=2)
     ap.add_argument("--dirty-ratio", type=float, default=0.08)
     ap.add_argument("--duplicate-email-pct", type=float, default=0.10)
@@ -209,6 +218,17 @@ def main() -> int:
     # bucket root, breaking Silver's read path.
     if args.prefix:
         common += ["--prefix", args.prefix]
+    if args.cycles < 1 or not 0 <= args.cycle < args.cycles:
+        print(
+            f"[entrypoint] need 0 <= --cycle < --cycles; got {args.cycle} of {args.cycles}",
+            file=sys.stderr,
+        )
+        return 2
+    # Forwarded only when not the defaults, so a single-run argv is unchanged.
+    if args.cycle:
+        common += ["--cycle", str(args.cycle)]
+    if args.cycles != 1:
+        common += ["--cycles", str(args.cycles)]
 
     if args.schema == "financial":
         # Rust driver only knows all/bronze/reference. Map the K8s
@@ -227,8 +247,11 @@ def main() -> int:
         cmd = common + [
             "--target-tb",
             str(args.target_tb),
-            "--customer-id-max",
-            str(args.customer_id_max),
+            *(
+                ["--customer-id-max", str(args.customer_id_max)]
+                if args.customer_id_max
+                else ["--scale", str(args.scale)]
+            ),
             "--payload-kb",
             str(args.payload_kb),
             "--dirty-ratio",
@@ -241,14 +264,15 @@ def main() -> int:
             args.timestamp_end,
         ]
         summary = (
-            f"target_tb={args.target_tb} customer_id_max={args.customer_id_max} "
+            f"target_tb={args.target_tb} "
+            f"customer_id_max={args.customer_id_max or f'scale({args.scale})'} "
             f"payload_kb={args.payload_kb} dirty_ratio={args.dirty_ratio} "
             f"ts=[{args.timestamp_start},{args.timestamp_end})"
         )
 
     print(
         f"[entrypoint] schema={args.schema} node {node_id}/{args.total_nodes} "
-        f"threads={threads} -> s3://{args.bucket}/{args.prefix} :: {summary}",
+        f"threads={threads} cycle={args.cycle} -> s3://{args.bucket}/{args.prefix} :: {summary}",
         flush=True,
     )
     # execvp replaces this process, so the Rust binary is PID 1 of the pod and
