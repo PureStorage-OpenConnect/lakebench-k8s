@@ -127,8 +127,10 @@ pytest tests/spark -q
 ```
 
 `python scripts/release_gate.py` runs every check above plus the example
-validation, version, changelog and secret-scan checks, and lists what
-failed. CI runs the same checks on every push.
+validation, version, changelog, UAT-results and secret-scan checks, and
+lists what failed. CI runs the lint, type, test, Rust and secret-scan
+checks on every push. How a release is cut, and the repository settings
+the release workflow depends on, are in `docs/releasing.md`.
 
 ### Live-cluster tests (for non-trivial changes)
 

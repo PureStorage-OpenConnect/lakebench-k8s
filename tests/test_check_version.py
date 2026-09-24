@@ -60,10 +60,29 @@ def test_mismatched_tag_fails(tree):
     assert len(problems) == 1 and "does not match" in problems[0]
 
 
-def test_dev_version_cannot_be_tagged(tree):
-    init, pp = tree("1.6.0.dev0")
+@pytest.mark.parametrize("version", ["1.6.0.dev0", "1.6.0dev0", "1.6.0-dev0", "1.6.0.DEV0"])
+def test_dev_version_cannot_be_tagged(tree, version):
+    init, pp = tree(version)
     problems = cv.check("v1.6.0.dev0", init, pp)
-    assert any(".dev build" in p for p in problems)
+    assert any("dev release" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("tag", ["vv1.6.0", "1.6.0", "v1.6", "v1.6.0.0", "vfoo", "v"])
+def test_malformed_or_unnormalised_tag_fails(tree, tag):
+    init, pp = tree("1.6.0")
+    assert cv.check(tag, init, pp), tag
+
+
+def test_prerelease_tag_matches_normalised(tree):
+    init, pp = tree("1.6.0rc1")
+    assert cv.check("v1.6.0rc1", init, pp) == []
+    # Same version, non-normalised spelling: refused so one version has one tag.
+    assert cv.check("v1.6.0-rc1", init, pp)
+
+
+def test_invalid_package_version(tree):
+    init, pp = tree("not-a-version")
+    assert any("PEP 440" in p for p in cv.check(None, init, pp))
 
 
 def test_static_pyproject_version_fails(tree):

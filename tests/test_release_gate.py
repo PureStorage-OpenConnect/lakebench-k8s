@@ -105,6 +105,7 @@ def test_gate_covers_the_required_checks():
         "version",
         "changelog",
         "em-dashes",
+        "uat-results",
     } <= names
 
 
@@ -113,3 +114,38 @@ def test_fast_checks_pass_on_this_tree():
     # at release time.
     results = rg.run_checks([c for c in rg.build_checks() if c.name in {"version", "examples"}])
     assert rg.failures(results) == [], rg.format_report(results)
+
+
+def test_uat_results_check(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    cv_version = "9.9.9"
+    monkeypatch.setattr(
+        rg,
+        "_load_script",
+        lambda name: type("M", (), {"package_version": staticmethod(lambda: cv_version)}),
+    )
+    assert rg.check_uat_results().status == rg.FAIL
+    path = tmp_path / "uat" / f"results-{cv_version}.md"
+    path.parent.mkdir()
+    path.write_text("results for another version\n")
+    assert rg.check_uat_results().status == rg.FAIL
+    path.write_text(f"# UAT {cv_version}\n")
+    assert rg.check_uat_results().status == rg.PASS
+
+
+def test_em_dash_scope_covers_changelog_github_examples_and_cli():
+    scope = rg.EM_DASH_SCOPE
+    assert "*.md" in scope and ".github/**" in scope and "examples/**" in scope
+    assert any(s.startswith("src/lakebench/cli") for s in scope)
+
+
+def test_pythonpath_is_appended_not_replaced(monkeypatch):
+    monkeypatch.setenv("PYTHONPATH", "/elsewhere")
+    parts = rg._pythonpath_with_src().split(":")
+    assert parts[0].endswith("/src") and "/elsewhere" in parts
+
+
+def test_check_examples_restores_sys_path():
+    before = list(sys.path)
+    rg.check_examples()
+    assert sys.path == before
