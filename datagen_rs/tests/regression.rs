@@ -310,16 +310,21 @@ fn compression_unknown_codec_panics() {
 
 #[test]
 fn uetr_derivation_stable_and_seed_sensitive() {
-    use datagen_rs::hash::splitmix64;
+    use datagen_rs::hash::uetr_seeds;
     use datagen_rs::ids::uuid_v4_into;
 
-    fn uetr(uid: u64, seed: u64) -> String {
-        let us = splitmix64(uid ^ seed ^ 0x0E7A);
-        let us2 = splitmix64(uid ^ seed ^ 0x5A1D);
+    // The derivation the manifest and the bronze writer actually call.
+    fn uetr(uid: u64, seed: i64) -> String {
+        let (us, us2) = uetr_seeds(uid, seed);
         let mut buf = String::with_capacity(40);
         uuid_v4_into(us, us2, &mut buf);
         buf
     }
+
+    // Adjacent seeds must not produce the same UETR set shifted by one uid
+    // (the additive-seed collision class, LB-139).
+    let a: std::collections::HashSet<String> = (0..2000).map(|u| uetr(u, 100)).collect();
+    assert!((0..2000).all(|u| !a.contains(&uetr(u, 101))));
 
     // Same input -> byte-identical output (this is the contract that keeps
     // manifest and bronze in sync).
@@ -915,4 +920,72 @@ fn dormancy_lengths_are_not_pinned_to_the_w8_threshold() {
         (0.10..0.60).contains(&below),
         "share of dormancies under 90 days is {below:.2}; expected both sides of W8's threshold"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Placement and shaping (placement.rs)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shaping_preserves_time_order_and_uses_each_rows_country() {
+    use datagen_rs::hash::Rng;
+    use datagen_rs::placement::shape_instance_rows;
+    use datagen_rs::timing::DayCal;
+    use datagen_rs::typology::{Instance, TxRow};
+
+    const DAY: i64 = 86_400_000_000;
+    let start = 1_609_459_200_000_000i64; // 2021-01-01
+    let cal = DayCal::new(start, 365);
+    // Originators alternate between two countries with different holidays.
+    let country = [
+        "_", "US", "GB", "US", "GB", "US", "GB", "US", "GB", "US", "GB",
+    ];
+    let inst = Instance {
+        id: "t".into(),
+        typ: "scatter_gather",
+        participants: vec![1, 2],
+        start_us: start + 100 * DAY,
+        end_us: start + 110 * DAY,
+        workload: "W1",
+        severity: "high",
+        seed: 7,
+        rows_per_instance: 10,
+        corpus_start_us: start,
+        corpus_end_us: start + 365 * DAY,
+        suppress_start_us: 0,
+        suppress_end_us: 0,
+    };
+    for trial in 0..200u64 {
+        let mut rng = Rng::new(trial);
+        // Original times strictly increasing, in reverse emit order, so a
+        // zip-by-emit-order implementation would invert them.
+        let mut rows: Vec<TxRow> = (0..10)
+            .map(|i| TxRow {
+                orig: (i % 10 + 1) as u64,
+                bene: 99,
+                ts_us: inst.start_us + (9 - i) * DAY + 3_600_000_000,
+                structuring: false,
+                min_amount_usd: None,
+            })
+            .collect();
+        let before: Vec<i64> = rows.iter().map(|r| r.ts_us).collect();
+        let (lo, hi) =
+            shape_instance_rows(&mut rows, &inst, &cal, 365 * DAY, &country, &mut rng).unwrap();
+        let mut idx: Vec<usize> = (0..10).collect();
+        idx.sort_by_key(|&i| before[i]);
+        for w in idx.windows(2) {
+            assert!(
+                rows[w[0]].ts_us < rows[w[1]].ts_us,
+                "trial {trial}: legs reordered"
+            );
+        }
+        for r in &rows {
+            let d = cal.day_of(r.ts_us);
+            assert!(
+                cal.is_business_day(d, country[r.orig as usize]),
+                "trial {trial}: row on a non-business day for its own country"
+            );
+            assert!(r.ts_us >= lo && r.ts_us <= hi);
+        }
+    }
 }

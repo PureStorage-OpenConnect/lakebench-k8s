@@ -179,6 +179,22 @@ impl DayCal {
         before + frac * (self.day_cdf[day] - before)
     }
 
+    /// Day index holding `ts_us`, clamped into the corpus.
+    pub fn day_of(&self, ts_us: i64) -> usize {
+        let d = ts_us.div_euclid(US_PER_DAY) - self.start_epoch_day;
+        d.clamp(0, self.span as i64 - 1) as usize
+    }
+
+    /// Epoch microseconds at the start of corpus day `day`.
+    pub fn day_start_us(&self, day: usize) -> i64 {
+        (self.start_epoch_day + day as i64) * US_PER_DAY
+    }
+
+    /// True when `day` is a business day for country `cc`.
+    pub fn is_business_day(&self, day: usize, cc: &str) -> bool {
+        self.is_business(day.min(self.span - 1), holidays(cc))
+    }
+
     #[inline]
     fn is_business(&self, day: usize, hol: &[(u32, u32)]) -> bool {
         if self.weekday[day] >= 5 {
