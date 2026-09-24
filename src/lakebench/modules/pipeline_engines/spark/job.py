@@ -742,6 +742,16 @@ def _lakebench_git_sha() -> str:
 
     root = Path(__file__).resolve().parent
     try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # A wheel installed inside some other repository (a venv under a repo)
+        # must not report that repository's HEAD.
+        if top.returncode != 0 or not (Path(top.stdout.strip()) / "src/lakebench").is_dir():
+            return "unknown"
         sha = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
             capture_output=True,
@@ -756,7 +766,10 @@ def _lakebench_git_sha() -> str:
             text=True,
             timeout=5,
         )
-        suffix = "-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else ""
+        if dirty.returncode != 0:
+            suffix = "-dirty-unknown"
+        else:
+            suffix = "-dirty" if dirty.stdout.strip() else ""
         return sha.stdout.strip() + suffix
     except (OSError, subprocess.TimeoutExpired):
         return "unknown"
