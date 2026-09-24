@@ -7,8 +7,10 @@ on:
     branches: ['**']
   pull_request:
     branches: [main]
-  # release.yml and binary.yml call this workflow on the tagged commit, so a
-  # tag publishes only when this exact CI passes on the code being shipped.
+  # release.yml calls this workflow on the tagged commit and publishes only
+  # if it passes. That binds only tags whose commit carries the current
+  # release.yml; see docs/releasing.md for the repository settings that
+  # cover the rest.
   workflow_call:
 
 permissions:
@@ -53,14 +55,15 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      # Coverage is collected on 3.11 only: the floors are checked on one
+      # interpreter so line-counting differences between versions do not move
+      # the number, and the other entries skip the tracing overhead.
       - name: Run unit tests
         run: >-
           pytest tests/ -x --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
-          --cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered
+          ${{ matrix.python-version == '3.11' && '--cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered' || '' }}
 
-      # Per-file floors on the scoring and metrics code (GOALS P8.3). Checked
-      # on one interpreter so line-counting differences between versions do
-      # not move the number.
+      # Per-file floors on the scoring and metrics code (GOALS P8.3).
       - name: Coverage floors
         if: matrix.python-version == '3.11'
         run: python scripts/check_coverage.py --suite unit coverage-unit.json

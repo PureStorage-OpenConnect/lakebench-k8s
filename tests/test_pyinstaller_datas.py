@@ -6,17 +6,42 @@ data directory fails this test until the spec picks it up."""
 
 from __future__ import annotations
 
-import re
+import ast
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-_DATAS_RE = re.compile(r'\(\s*"(src/lakebench/[^"]+)"\s*,\s*"([^"]+)"\s*\)')
-
 
 def _spec_datas() -> list[tuple[str, str]]:
-    return _DATAS_RE.findall((ROOT / "lakebench.spec").read_text())
+    """(src, dest) string pairs from the literal list in Analysis(datas=...).
+
+    Parsed with ast, so a commented-out tuple or one elsewhere in the spec
+    does not count."""
+    tree = ast.parse((ROOT / "lakebench.spec").read_text())
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Analysis"
+        ):
+            continue
+        for kw in node.keywords:
+            if kw.arg != "datas":
+                continue
+            value = kw.value
+            # datas=[...] + pydantic_datas + ...: the literal list is the
+            # leftmost operand.
+            while isinstance(value, ast.BinOp):
+                value = value.left
+            assert isinstance(value, ast.List), "datas= does not start with a literal list"
+            pairs = []
+            for elt in value.elts:
+                assert isinstance(elt, ast.Tuple) and len(elt.elts) == 2, ast.dump(elt)
+                src, dest = (ast.literal_eval(e) for e in elt.elts)
+                pairs.append((src, dest))
+            return pairs
+    raise AssertionError("no Analysis(datas=...) in lakebench.spec")
 
 
 def _package_data_files() -> list[str]:

@@ -18,9 +18,11 @@ import re
 import sys
 from pathlib import Path
 
+from packaging.version import InvalidVersion, Version
+
 try:
     import tomllib
-except ModuleNotFoundError:  # Python 3.10
+except ModuleNotFoundError:  # Python 3.10; tomli is in the dev extra there
     import tomli as tomllib  # type: ignore[no-redef]
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,12 +65,31 @@ def check(
     if not hatch_rel or (pyproject_path.parent / hatch_rel).resolve() != init_path.resolve():
         problems.append("[tool.hatch.version] path must point at src/lakebench/__init__.py")
 
+    try:
+        parsed = Version(version)
+    except InvalidVersion:
+        problems.append(f"package version {version!r} is not a valid PEP 440 version")
+        return problems
+
     if tag is not None:
-        tag_version = tag.removeprefix("refs/tags/").removeprefix("v")
-        if tag_version != version:
-            problems.append(f"tag {tag!r} does not match package version {version!r}")
-        if ".dev" in version:
-            problems.append(f"package version {version!r} is a .dev build; bump it before tagging")
+        raw = tag.removeprefix("refs/tags/")
+        if not raw.startswith("v") or raw.startswith("vv"):
+            problems.append(f"tag {tag!r} must be 'v' followed by the version, e.g. v{parsed}")
+            return problems
+        try:
+            tag_version = Version(raw[1:])
+        except InvalidVersion:
+            problems.append(f"tag {tag!r} is not 'v' plus a valid PEP 440 version")
+            return problems
+        # Versions compare equal after normalisation (1.6 == 1.6.0), so the
+        # tag must also be spelt exactly as the normalised package version;
+        # otherwise v1.6, v1.6.0 and v1.6.0.0 could all be cut for one release.
+        if tag_version != parsed or raw[1:] != str(parsed):
+            problems.append(
+                f"tag {tag!r} does not match package version {version!r} (expected v{parsed})"
+            )
+        if parsed.is_devrelease or tag_version.is_devrelease:
+            problems.append(f"version {version!r} is a dev release; bump it before tagging")
     return problems
 
 

@@ -106,8 +106,13 @@ def _tracked(*patterns: str) -> list[Path]:
 # -- checks ------------------------------------------------------------------
 
 
+def _pythonpath_with_src() -> str:
+    existing = os.environ.get("PYTHONPATH", "")
+    return os.pathsep.join([str(ROOT / "src"), *([existing] if existing else [])])
+
+
 def check_pytest() -> Result:
-    env = {"PYTHONPATH": str(ROOT / "src")}
+    env = {"PYTHONPATH": _pythonpath_with_src()}
     return command_check(
         "pytest",
         [sys.executable, "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider"],
@@ -116,12 +121,15 @@ def check_pytest() -> Result:
 
 
 def check_examples() -> Result:
-    sys.path.insert(0, str(ROOT / "src"))
-    from lakebench.config import load_config
-
     examples = sorted((ROOT / "examples").glob("*.yaml"))
     if not examples:
         return Result("examples", FAIL, "no examples/*.yaml found")
+    saved_path = list(sys.path)
+    sys.path.insert(0, str(ROOT / "src"))
+    try:
+        from lakebench.config import load_config
+    finally:
+        sys.path[:] = saved_path
     saved = {k: os.environ.get(k) for k in _EXAMPLE_ENV}
     os.environ.update({k: v for k, v in _EXAMPLE_ENV.items() if not os.environ.get(k)})
     failures = []
@@ -190,13 +198,37 @@ def find_em_dashes(paths: Sequence[Path]) -> list[str]:
     return hits
 
 
+# Everything a reader of the repository or the CLI sees. CLI help strings
+# live in the Python sources under src/lakebench/cli, so those are scanned
+# whole.
+EM_DASH_SCOPE = ("*.md", "**/*.md", ".github/**", "examples/**", "src/lakebench/cli/**/*.py")
+
+
 def check_em_dashes() -> Result:
-    paths = _tracked("README.md", "docs/*.md", "docs/**/*.md")
+    paths = [p for p in _tracked(*EM_DASH_SCOPE) if p.is_file()]
     hits = find_em_dashes(paths)
     if hits:
         shown = hits[:20] + ([f"... and {len(hits) - 20} more"] if len(hits) > 20 else [])
         return Result("em-dashes", FAIL, f"{len(hits)} lines with U+2014:\n" + "\n".join(shown))
     return Result("em-dashes", PASS, f"{len(paths)} files clean")
+
+
+# UAT evidence for a release lives at this path (docs/releasing.md). The file
+# must exist and name the version; its content is the maintainers' record of
+# which recipe x workload x mode runs passed, with run ids.
+UAT_RESULTS = "uat/results-{version}.md"
+
+
+def check_uat_results() -> Result:
+    cv = _load_script("check_version")
+    version = cv.package_version()
+    path = ROOT / UAT_RESULTS.format(version=version)
+    rel = path.relative_to(ROOT)
+    if not path.is_file():
+        return Result("uat-results", FAIL, f"{rel} not found (see docs/releasing.md)")
+    if version not in path.read_text():
+        return Result("uat-results", FAIL, f"{rel} does not mention version {version}")
+    return Result("uat-results", PASS, str(rel))
 
 
 def check_gitleaks() -> Result:
@@ -268,7 +300,8 @@ def build_checks(tag: str | None = None) -> list[Check]:
         Check("examples", check_examples, "every examples/*.yaml validates"),
         Check("version", make_version_check(tag), "single version source; tag matches"),
         Check("changelog", check_changelog, "CHANGELOG.md has a section for the version"),
-        Check("em-dashes", check_em_dashes, "no U+2014 in README.md or docs/"),
+        Check("em-dashes", check_em_dashes, "no U+2014 in *.md, .github/, examples/, CLI"),
+        Check("uat-results", check_uat_results, "uat/results-<version>.md exists"),
     ]
 
 
