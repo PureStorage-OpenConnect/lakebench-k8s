@@ -34,7 +34,17 @@ def _bare_engine() -> MagicMock:
     cfg.platform.kubernetes.context = None
     cfg.platform.compute.spark.operator.namespace = "spark-operator"
     cfg.platform.compute.spark.operator.version = "2.5.1"
+    cfg.platform.storage.s3.buckets.bronze = "lb-test-bronze"
+    cfg.platform.storage.s3.buckets.silver = "lb-test-silver"
+    cfg.platform.storage.s3.buckets.gold = "lb-test-gold"
     return engine
+
+
+def _healthy_s3() -> MagicMock:
+    s3 = MagicMock()
+    s3._init_error = None
+    s3.empty_bucket.return_value = 0
+    return s3
 
 
 def _run(engine, force_legacy: bool, ns_verdict, bucket_verdict):
@@ -72,6 +82,10 @@ def _run(engine, force_legacy: bool, ns_verdict, bucket_verdict):
         patch("kubernetes.client.StorageV1Api"),
         patch("kubernetes.client.BatchV1Api"),
         patch("lakebench.deploy.destroy.logger"),
+        # A healthy S3 client: an unmocked one fails init on the MagicMock
+        # config, and destroy (correctly) keeps the namespace after a failed
+        # bucket step, which is not what these tests are about.
+        patch("lakebench.s3.S3Client", return_value=_healthy_s3()),
     ):
         results = destroy_all(engine, force_legacy=force_legacy, progress_callback=_capture)
     return results, reports

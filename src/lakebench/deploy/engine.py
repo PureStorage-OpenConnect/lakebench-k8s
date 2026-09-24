@@ -592,6 +592,32 @@ class DeploymentEngine:
             return True
         return False
 
+    def _namespace_already_using_name(self, namespace: str) -> str | None:
+        """Return another namespace that carries this deployment's name, if any.
+
+        Enumeration failures return None (not a refusal): the bucket step
+        already refuses name-based ownership when it cannot list siblings.
+        """
+        try:
+            from kubernetes import client as _kclient
+
+            from lakebench.deploy.ownership import ANNOTATION_DEPLOYMENT_NAME
+            from lakebench.k8s import get_k8s_client as _get_k8s
+
+            _get_k8s(
+                context=self.config.platform.kubernetes.context or "",
+                namespace=namespace,
+            )
+            for n in _kclient.CoreV1Api().list_namespace().items:
+                if n.metadata.name == namespace:
+                    continue
+                anns = n.metadata.annotations or {}
+                if anns.get(ANNOTATION_DEPLOYMENT_NAME) == self.config.name:
+                    return str(n.metadata.name)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("deployment-name uniqueness check skipped: %s", e)
+        return None
+
     def _deploy_namespace(self, force_legacy: bool = False) -> DeploymentResult:
         """Deploy namespace and stamp ownership annotations.
 
@@ -612,6 +638,24 @@ class DeploymentEngine:
                 status=DeploymentStatus.SUCCESS,
                 message=f"Would create namespace: {namespace}",
                 elapsed_seconds=0,
+            )
+
+        # A deployment name must be unique across namespaces. Bucket ownership
+        # is keyed on the name (a tag, or a name prefix on FlashBlade), so two
+        # namespaces carrying the same name both claim the same buckets, and
+        # destroying either one deletes the other's data.
+        duplicate = self._namespace_already_using_name(namespace)
+        if duplicate:
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    f"Deployment name {self.config.name!r} is already used by "
+                    f"namespace {duplicate!r}. Deployment names must be unique on "
+                    "a cluster because bucket ownership is keyed on the name; "
+                    "choose a different `name:` in the config."
+                ),
+                elapsed_seconds=time.time() - start,
             )
 
         # Check if namespace exists and wait if it's terminating
