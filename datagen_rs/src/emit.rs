@@ -273,7 +273,7 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         } else {
             b_instg.append_value(bic_o);
         }
-        if (hop & 0xFF_FF00) < 15_000_00 {
+        if (hop & 0xFF_FF00) < 1_500_000 {
             b_instd.append_value(&pool[(splitmix64(b.bene[i] ^ 0x3333) % plen) as usize]);
         } else {
             b_instd.append_value(bic_c);

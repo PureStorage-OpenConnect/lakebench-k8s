@@ -147,7 +147,7 @@ pub fn build_batch(
     // not just debug.
     let loyalty_len = loyalty.member.len();
     assert!(
-        loyalty_len >= (cfg.customer_id_max as usize) + 1,
+        loyalty_len > (cfg.customer_id_max as usize),
         "loyalty lookup (len={}) too small for customer_id_max={}",
         loyalty_len,
         cfg.customer_id_max
@@ -434,7 +434,7 @@ pub fn build_batch(
     // Helper: sample a Bernoulli mask over `n` rows using per-row rates.
     // Returns row indices where the mask fired. Empty when rates are empty
     // (dirty_ratio == 0).
-    let mut dirty_pass = |rng: &mut Rng| -> Vec<u32> {
+    let dirty_pass = |rng: &mut Rng| -> Vec<u32> {
         if per_row_dirty_rate.is_empty() {
             return Vec::new();
         }
