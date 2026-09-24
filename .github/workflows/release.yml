@@ -10,39 +10,20 @@ permissions:
 jobs:
   # 1.5.0 reached PyPI from a commit that was never merged and never passed CI,
   # because this workflow only ran ruff and pytest. Publishing now needs the
-  # full CI workflow green on the tagged commit and the tag reachable from main.
+  # full CI workflow green on the tagged commit, the tag reachable from main,
+  # and scripts/release_gate.py passing (release-gate.yml).
   ci:
     name: CI on the tagged commit
     uses: ./.github/workflows/ci.yml
 
-  verify-tag:
-    name: Tag is on main and matches the version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Tagged commit is on main
-        run: |
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          commit="$(git rev-parse "${GITHUB_REF}^{commit}")"
-          if ! git merge-base --is-ancestor "$commit" origin/main; then
-            echo "::error::tag ${GITHUB_REF_NAME} (${commit}) is not on main; merge first, then tag"
-            exit 1
-          fi
-
-      - name: Tag matches the package version
-        run: python scripts/check_version.py --tag "${GITHUB_REF_NAME}"
+  release-gate:
+    name: Release gate
+    uses: ./.github/workflows/release-gate.yml
 
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [ci, verify-tag]
+    needs: [ci, release-gate]
     permissions:
       contents: read
       id-token: write  # Required for trusted publishing
