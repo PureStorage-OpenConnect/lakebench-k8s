@@ -789,7 +789,7 @@ def run(
         bool,
         typer.Option(
             "--sustained",
-            help="Run in sustained streaming mode (bronze-ingest -> silver-stream -> gold-refresh)",
+            help="Run in continuous (sustained) mode: bronze-ingest -> silver-stream -> gold-refresh",
         ),
     ] = False,
     continuous: Annotated[
@@ -804,7 +804,7 @@ def run(
         int | None,
         typer.Option(
             "--duration",
-            help="Streaming run duration in seconds (default: from config, typically 1800)",
+            help="Continuous run duration in seconds (default: from config, typically 1800)",
         ),
     ] = None,
     include_datagen: Annotated[
@@ -884,7 +884,7 @@ def run(
     With --generate (batch mode), generates data first, then runs the full
     pipeline. Sustained mode always runs datagen automatically.
 
-    With --sustained, runs the streaming pipeline instead:
+    With --sustained, runs the continuous pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
     and gold-refresh as concurrent streaming jobs. Monitors for
     the configured duration, then stops streaming and runs benchmark.
