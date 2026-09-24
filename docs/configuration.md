@@ -550,14 +550,7 @@ leave these at defaults and control volume via `datagen.scale`.
 |---|---|---|---|
 | `architecture.workload.customer360.unique_customers` | int or null | `null` | Override customer count. Null = derived from scale. |
 | `architecture.workload.customer360.date_range_days` | int or null | `null` | Override date range in days. Null = 365. |
-| `architecture.workload.customer360.channels` | list | `[web, mobile, store, call_center, social_media]` | Interaction channels. |
-| `architecture.workload.customer360.event_types` | list | `[purchase, browse, support, login, abandoned_cart]` | Event types. |
-| `architecture.workload.customer360.quality_distribution.clean` | float | `0.92` | Fraction of clean records. |
-| `architecture.workload.customer360.quality_distribution.duplicate_suspected` | float | `0.02` | Fraction of suspected duplicates. |
-| `architecture.workload.customer360.quality_distribution.incomplete` | float | `0.03` | Fraction of incomplete records. |
-| `architecture.workload.customer360.quality_distribution.format_inconsistent` | float | `0.03` | Fraction of format-inconsistent records. |
 
-Note: quality distribution values must sum to 1.0.
 
 ### Architecture -- Benchmark
 
@@ -764,8 +757,7 @@ A production-scale config for 1 TB benchmarking on a 64-core cluster:
 name: lakebench-1tb
 recipe: hive-iceberg-spark-trino
 
-datagen:
-  scale: 100
+scale: 100
 
 platform:
   storage:
