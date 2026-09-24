@@ -127,8 +127,16 @@ def _parallel(fn, items):
     GIL), keeping order. LB_AML_GATE_JOBS caps the threads; default all."""
     from joblib import Parallel, delayed
 
-    jobs = int(os.environ.get("LB_AML_GATE_JOBS", "-1"))
-    return Parallel(n_jobs=jobs, prefer="threads")(delayed(fn)(i) for i in items)
+    return Parallel(n_jobs=_jobs(), prefer="threads")(delayed(fn)(i) for i in items)
+
+
+def _jobs() -> int:
+    """Worker threads: LB_AML_GATE_JOBS if a positive integer, else the CPU count."""
+    try:
+        jobs = int(os.environ.get("LB_AML_GATE_JOBS", ""))
+    except ValueError:
+        jobs = 0
+    return jobs if jobs > 0 else (os.cpu_count() or 1)
 
 
 def _oof_scores(make_model, X, y, w, folds):
@@ -178,9 +186,16 @@ def _bootstrap_ci(y, score, w, prereg: dict) -> tuple[float | None, float | None
     pw = prereg["power"]
     rng = np.random.default_rng(prereg["cv"]["seed"])
     n = len(y)
-    draws = [rng.integers(0, n, n) for _ in range(pw["bootstrap_iterations"])]
-    draws = [idx for idx in draws if y[idx].sum() > 0]
-    vals = _parallel(lambda idx: _ap(y[idx], score[idx], w[idx]), draws)
+    # Draw in chunks of one resample per worker so memory stays bounded at a
+    # million customers; the RNG order, and so every number, is unchanged.
+    chunk = _jobs()
+    vals = []
+    left = pw["bootstrap_iterations"]
+    while left > 0:
+        draws = [rng.integers(0, n, n) for _ in range(min(chunk, left))]
+        left -= len(draws)
+        draws = [idx for idx in draws if y[idx].sum() > 0]
+        vals += _parallel(lambda idx: _ap(y[idx], score[idx], w[idx]), draws)
     if not vals:
         return None, None
     tail = (1 - pw["ci_level"]) / 2
@@ -375,6 +390,14 @@ def _passes(report: dict, prereg: dict) -> dict:
     }
     out["all"] = all(v for v in out.values() if v is not None)
     return out
+
+
+def add_pass(report: dict, name: str, ok: bool) -> None:
+    """Record an entry-point check (corpus keying, registered label role) in
+    the passes block and fold it into passes.all."""
+    passes = report.setdefault("passes", {"all": True})
+    passes[name] = bool(ok)
+    passes["all"] = bool(passes.get("all", True) and ok)
 
 
 def evaluate_gate(

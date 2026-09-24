@@ -324,3 +324,11 @@ def test_reference_model_ignores_doc_keys():
     p = _prereg()
     p["reference_model"] = {**p["reference_model"], "_doc": "a note"}
     assert fg.evaluate_gate(_frame(), p)["verdict"] == "ok"
+
+
+def test_add_pass_folds_into_all():
+    rep = {"passes": {"all": True, "d11_density": True}}
+    fg.add_pass(rep, "corpus_fully_keyed", True)
+    assert rep["passes"]["all"] is True
+    fg.add_pass(rep, "registered_label_role", False)
+    assert rep["passes"]["registered_label_role"] is False and rep["passes"]["all"] is False

@@ -201,7 +201,7 @@ def entity_features(txns: DataFrame, entities: DataFrame) -> DataFrame:
         *common,
     )
     # A self-payment appears once, on its send side.
-    in_side = base.filter(col("orig_key") != col("bene_key")).select(
+    in_side = base.filter(~col("orig_key").eqNullSafe(col("bene_key"))).select(
         col("bene_key").alias("key"),
         col("orig_key").alias("cp"),
         col("orig_country").alias("cp_country"),
@@ -308,6 +308,8 @@ def labels_from_participants(manifest: DataFrame, id_map: DataFrame) -> DataFram
 
 
 _GAMMA = 0x9E3779B97F4A7C15
+_TID_SEED_STRIDE = 100_000_000  # datagen_rs::typology::TID_SEED_STRIDE
+_SEED_CHECK_ROWS = 200
 _MASK64 = (1 << 64) - 1
 
 
@@ -341,11 +343,13 @@ def labels_from_subjects(spark, manifest: DataFrame, id_map: DataFrame) -> DataF
     rows = []
     for r in manifest.select("typology_type", "participant_entity_ids", "seed").collect():
         ids = r["participant_entity_ids"] or []
+        if ids and r["seed"] is None:
+            raise ValueError("manifest row has no instance seed; cannot resolve the subject role")
         if ids:
             rows.append(
                 (
                     r["typology_type"],
-                    int(ids[subject_index(r["typology_type"], len(ids), int(r["seed"] or 0))]),
+                    int(ids[subject_index(r["typology_type"], len(ids), int(r["seed"]))]),
                 )
             )
     subj = spark.createDataFrame(rows, "typology_type string, dg_id long")
@@ -442,8 +446,40 @@ def manifest_glob(uri: str) -> str:
     (datagen_rs::cycle::ref_key), and silver holds every cycle's rows."""
     base = "manifest.parquet"
     if uri.rstrip("/").endswith(base):
-        return uri.rstrip("/")[: -len(base)] + "manifest*.parquet"
+        # Only the generator's names: manifest.parquet and manifest-cNNN.parquet.
+        return uri.rstrip("/")[: -len(base)] + "manifest{.parquet,-c[0-9][0-9][0-9].parquet}"
     return uri
+
+
+def check_manifest(manifest: DataFrame) -> None:
+    """Refuse a manifest set that repeats an instance (stale cycle files from
+    an earlier run into the same prefix)."""
+    n = manifest.count()
+    distinct = manifest.select("typology_id").distinct().count()
+    if distinct != n:
+        raise ValueError(
+            f"manifest files repeat typology_id ({n} rows, {distinct} distinct): "
+            "stale cycle manifests in the prefix?"
+        )
+
+
+def corpus_seed_check(manifest: DataFrame, seed) -> dict:
+    """Does the claimed corpus seed reproduce the manifest's instance seeds?
+
+    datagen_rs::typology::schedule_ex derives iseed = splitmix64(seed ^
+    splitmix64(0xF100 + tid * TID_SEED_STRIDE + j)), with tid and j in the
+    typology_id. Cycle n > 0 mixes the seed per cycle, so only a share of a
+    multi-cycle manifest matches; a single-cycle corpus matches fully.
+    """
+    if seed is None:
+        return {"claimed_seed": None, "matched_share": None}
+    rows = manifest.select("typology_id", "seed").limit(_SEED_CHECK_ROWS).collect()
+    hit = 0
+    for r in rows:
+        _, tid, j = r["typology_id"].rsplit("_", 2)
+        inner = _splitmix64((0xF100 + int(tid) * _TID_SEED_STRIDE + int(j)) & _MASK64)
+        hit += _splitmix64((int(seed) & _MASK64) ^ inner) == (int(r["seed"]) & _MASK64)
+    return {"claimed_seed": seed, "matched_share": hit / len(rows) if rows else None}
 
 
 def source_sha256() -> str:
@@ -552,8 +588,13 @@ def bronze_frames(spark, *, pacs_path: str, party_path: str, account_path: str):
     from silver_build_financial import _usd_rate
 
     p = spark.read.parquet(pacs_path)
-    holder = spark.read.parquet(account_path).select(
-        col("iban"), col("holder_entity_id").cast("long").alias("_holder")
+    # One holder per IBAN (min, deterministic) so a duplicate IBAN in the
+    # master cannot duplicate payment rows.
+    holder = (
+        spark.read.parquet(account_path)
+        .select(col("iban"), col("holder_entity_id").cast("long").alias("_holder"))
+        .groupBy("iban")
+        .agg(min_("_holder").alias("_holder"))
     )
     p = p.join(
         holder.withColumnRenamed("iban", "_oi").withColumnRenamed("_holder", "_ok"),
@@ -601,6 +642,12 @@ def bronze_frames(spark, *, pacs_path: str, party_path: str, account_path: str):
 # ---------------------------------------------------------------------------
 # Hand-off to the pure-Python gate
 # ---------------------------------------------------------------------------
+
+
+def unkeyed_rows(txns: DataFrame) -> int:
+    """Payments with a NULL party key (an IBAN or entity the adapter could not
+    resolve). Nonzero means features are computed on a partial corpus."""
+    return int(txns.filter(col("orig_key").isNull() | col("bene_key").isNull()).count())
 
 
 def gate_frame(features: DataFrame, labels: DataFrame, typologies):

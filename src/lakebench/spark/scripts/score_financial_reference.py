@@ -215,7 +215,8 @@ def _metric_rows(report: dict) -> list[dict]:
             {
                 "row_kind": "typology",
                 "typology_type": t,
-                "verdict": r.get("status"),
+                # AP only: the rule-vs-reference recall columns are NULL.
+                "verdict": "ap_only" if r.get("status") == "ok" else r.get("status"),
                 "precision": None,
                 "recall": None,
                 "f1": None,
@@ -247,7 +248,7 @@ def run_fidelity_gate(
 ) -> dict:
     """Build silver features and evaluate the gate. Returns the report dict."""
     import aml_features as af
-    from fidelity_gate import evaluate_gate, in_scope_typologies, load_preregistration
+    from fidelity_gate import add_pass, evaluate_gate, in_scope_typologies, load_preregistration
 
     prereg, sha = load_preregistration()
     typologies = in_scope_typologies(prereg)
@@ -271,6 +272,7 @@ def run_fidelity_gate(
         high_cv_edge=tm["high_cv_edge"],
     )
     density = af.typology_density(txns, manifest)
+    unkeyed = af.unkeyed_rows(txns)
     agreement = af.label_agreement(
         af.labels_from_participants(manifest, id_map).join(
             features.filter(col("is_customer")).select("key"), "key", "left_semi"
@@ -292,12 +294,15 @@ def run_fidelity_gate(
             **af.manifest_provenance(manifest),
             "adapter": "silver",
             "label_role": role,
+            "unkeyed_rows": unkeyed,
             "aml_features_sha256": af.source_sha256(),
             "n_customers": n_customers,
             "negative_sample_fraction": frac,
             "label_route_agreement_customers": agreement,
         },
     )
+    if report.get("verdict") == "ok":
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0)
     return report
 
 
@@ -347,6 +352,7 @@ def main() -> None:
 
     manifest_src = af.manifest_glob(args.manifest)
     manifest = spark.read.parquet(manifest_src)
+    af.check_manifest(manifest)
     manifest_n = manifest.count()
     if manifest_n == 0:
         raise SystemExit(
@@ -409,9 +415,11 @@ def main() -> None:
             "The band leakage gate still ran."
         )
     spark.stop()
-    if report.get("verdict") == "error":
-        # Outputs are written, but a crashed gate must not read as a pass (R6).
-        raise SystemExit("fidelity gate failed; see aml_gate_report.json")
+    if report.get("verdict") in ("error", "empty_frame"):
+        # Outputs are written, but a crashed gate, or one that scored no
+        # customer (a broken key or id map looks like this), must not read as
+        # a pass (R6). no_sklearn stays a soft skip: the band gate still ran.
+        raise SystemExit(f"fidelity gate verdict {report.get('verdict')}; see aml_gate_report.json")
 
 
 if __name__ == "__main__":
