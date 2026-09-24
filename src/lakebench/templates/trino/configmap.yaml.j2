@@ -17,6 +17,17 @@ data:
     node-scheduler.include-coordinator=false
     http-server.http.port=8080
     discovery.uri=http://lakebench-trino:8080
+    {% if trino_worker_spill_enabled | default(true) %}
+    {# The coordinator PLANS with spill-enabled; the workers execute with
+       theirs. With spill on the workers only, the coordinator never set a
+       join's spillable flag and the workers failed the query with
+       "spillable not yet set" (3 of 8 AML queries, live 2026-09-24). It never
+       spills itself (include-coordinator=false); the path must just exist. #}
+    spill-enabled=true
+    spiller-spill-path=/data/trino/spill
+    max-spill-per-node={{ trino_worker_spill_max | default('40Gi') | replace('Gi', 'GB') }}
+    spill-compression-enabled=true
+    {% endif %}
 
   config.properties.worker: |
     coordinator=false
