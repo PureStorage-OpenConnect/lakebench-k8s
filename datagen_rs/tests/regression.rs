@@ -777,11 +777,13 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             inst.suppress_start_us < inst.start_us,
             "suppress must start before burst"
         );
-        // Dormancy length (window start -> burst start) is at least 95 days.
+        // Dormancy length (window start -> burst start) is 60..365 days
+        // (log-uniform; not tied to W8's 90-day threshold, LB-138).
+        let dorm = (inst.start_us - inst.suppress_start_us) / day;
         assert!(
-            inst.start_us - inst.suppress_start_us >= 95 * day,
-            "dormancy shorter than 95d: {} days",
-            (inst.start_us - inst.suppress_start_us) / day
+            (59..=366).contains(&dorm),
+            "dormancy {} days outside 60..365",
+            dorm
         );
 
         let rows = emit_instance(inst);
@@ -803,11 +805,12 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             rows[0].orig, inst.participants[0],
             "anchor orig = dormant account"
         );
-        // Burst rows: floored, inside [start, end], originated by the dormant account.
+        // Burst rows: inside [start, end], originated by the dormant account,
+        // with no rule-derived amount floor (LB-138).
         for r in &rows[1..] {
             assert!(
-                r.min_amount_usd.is_some(),
-                "burst rows must carry the amount floor"
+                r.min_amount_usd.is_none(),
+                "burst rows must not carry a rule-derived amount floor"
             );
             assert!(
                 r.ts_us >= inst.start_us && r.ts_us <= inst.end_us,
@@ -815,12 +818,12 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             );
             assert_eq!(r.orig, inst.participants[0], "burst orig = dormant account");
         }
-        // The originator gap (anchor -> earliest burst row) exceeds 90 days, so
-        // W8's per-originator LAG fires.
+        // The originator gap (anchor -> earliest burst row) is the dormancy
+        // plus the anchor offset: at least the 60-day minimum.
         let first_burst = rows[1..].iter().map(|r| r.ts_us).min().unwrap();
         assert!(
-            first_burst - rows[0].ts_us > 90 * day,
-            "originator gap not > 90d: {} days",
+            first_burst - rows[0].ts_us > 60 * day,
+            "originator gap not > 60d: {} days",
             (first_burst - rows[0].ts_us) / day
         );
     }
@@ -884,4 +887,32 @@ fn floored_lognormal_always_clears_floor_and_varies() {
             floored_lognormal(&mut y, -0.5, floor)
         );
     }
+}
+
+#[test]
+fn dormancy_lengths_are_not_pinned_to_the_w8_threshold() {
+    // LB-138 / AML-GOALS R2: no generation parameter may sit on a rule
+    // threshold. A meaningful share of dormancies fall on each side of W8's
+    // 90 days, rather than all just above it.
+    let day = 86_400_000_000i64;
+    let corpus_start = 1_600_000_000_000_000i64;
+    let corpus_end = corpus_start + 1800 * day;
+    let country: Vec<&'static str> = vec!["US"; 200_001];
+    let insts =
+        datagen_rs::typology::schedule(7, 200_000_000, 200_000, corpus_start, corpus_end, &country);
+    let lens: Vec<i64> = insts
+        .iter()
+        .filter(|i| i.typ == "dormant_reactivation")
+        .map(|i| (i.start_us - i.suppress_start_us) / day)
+        .collect();
+    assert!(
+        lens.len() > 50,
+        "too few dormancy instances: {}",
+        lens.len()
+    );
+    let below = lens.iter().filter(|&&d| d < 90).count() as f64 / lens.len() as f64;
+    assert!(
+        (0.10..0.60).contains(&below),
+        "share of dormancies under 90 days is {below:.2}; expected both sides of W8's threshold"
+    );
 }

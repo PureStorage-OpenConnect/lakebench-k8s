@@ -3,11 +3,11 @@
 # that carries the binary beside a thin entrypoint which runs it and uploads
 # the output to S3, matching the datagen K8s Job contract.
 
-FROM rust:1-bookworm AS build
+FROM rust:1.98.1-bookworm AS build
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --bin generate
+RUN cargo build --release --locked --bin generate
 
 FROM python:3.13-slim
 WORKDIR /app

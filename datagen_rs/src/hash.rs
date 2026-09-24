@@ -67,3 +67,17 @@ impl Rng {
         (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
     }
 }
+
+/// The two 64-bit seeds a row's UETR and msg_id are derived from. The corpus
+/// seed is hashed before it is mixed with the row uid: a plain `uid ^ seed`
+/// made uid 100 under seed 42 collide with uid 101 under seed 43, so corpora
+/// with nearby seeds shared UETRs. Shared by the bronze writer and the
+/// manifest builder, which must agree exactly.
+#[inline]
+pub fn uetr_seeds(uid: u64, seed: i64) -> (u64, u64) {
+    let s = splitmix64((seed as u64) ^ 0x7E7B_1D00_5EED_0001);
+    (
+        splitmix64(uid ^ s ^ 0x0E7A),
+        splitmix64(uid ^ splitmix64(s ^ 0x5A1D)),
+    )
+}

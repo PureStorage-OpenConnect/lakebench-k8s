@@ -151,6 +151,34 @@ impl DayCal {
         }
     }
 
+    /// Number of days covered.
+    pub fn span(&self) -> usize {
+        self.span
+    }
+
+    /// Day index holding cumulative day-weight mass `u` in [0, 1).
+    #[inline]
+    pub fn day_for_mass(&self, u: f64) -> usize {
+        self.day_cdf.partition_point(|&c| c <= u).min(self.span - 1)
+    }
+
+    /// Cumulative day-weight mass at an instant, treating each day's weight
+    /// as spread uniformly across the day. Monotonic in `ts_us`.
+    pub fn mass_at(&self, ts_us: i64) -> f64 {
+        let day_start = self.start_epoch_day * US_PER_DAY;
+        if ts_us <= day_start {
+            return 0.0;
+        }
+        let off = ts_us - day_start;
+        let day = (off / US_PER_DAY) as usize;
+        if day >= self.span {
+            return 1.0;
+        }
+        let before = if day == 0 { 0.0 } else { self.day_cdf[day - 1] };
+        let frac = (off % US_PER_DAY) as f64 / US_PER_DAY as f64;
+        before + frac * (self.day_cdf[day] - before)
+    }
+
     #[inline]
     fn is_business(&self, day: usize, hol: &[(u32, u32)]) -> bool {
         if self.weekday[day] >= 5 {
@@ -181,7 +209,14 @@ pub fn sample_ts(rng: &mut Rng, cal: &DayCal, cc: &str) -> i64 {
     if day >= cal.span {
         day = cal.span - 1;
     }
-    day = cal.roll(day, cc);
+    sample_ts_on_day(rng, cal, day, cc)
+}
+
+/// Shaped timestamp on a given calendar day: roll forward to the country's
+/// next business day, then draw the intraday time. The day itself comes from
+/// the caller (for base rows, from the row's position in calendar mass).
+pub fn sample_ts_on_day(rng: &mut Rng, cal: &DayCal, day: usize, cc: &str) -> i64 {
+    let day = cal.roll(day.min(cal.span - 1), cc);
     // Intraday hour by inverse-CDF.
     let uh = rng.unit();
     let mut acc = 0.0;
