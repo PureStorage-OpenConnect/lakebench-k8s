@@ -118,19 +118,24 @@ def test_fast_checks_pass_on_this_tree():
 
 def test_uat_results_check(tmp_path, monkeypatch):
     monkeypatch.setattr(rg, "ROOT", tmp_path)
-    cv_version = "9.9.9"
-    monkeypatch.setattr(
-        rg,
-        "_load_script",
-        lambda name: type("M", (), {"package_version": staticmethod(lambda: cv_version)}),
-    )
-    assert rg.check_uat_results().status == rg.FAIL
-    path = tmp_path / "uat" / f"results-{cv_version}.md"
+    version = "9.9.9"
+    fake = type("M", (), {"package_version": staticmethod(lambda: version)})
+    monkeypatch.setattr(rg, "_load_script", lambda name: fake)
+    assert rg.check_uat_results().status == rg.FAIL  # missing
+    path = tmp_path / "uat" / f"results-{version}.md"
     path.parent.mkdir()
-    path.write_text("results for another version\n")
+    table = "| recipe | mode | result | run id |\n|---|---|---|---|\n"
+    row = "| hive-iceberg-spark-trino | batch | PASS | run-1 |\n"
+    path.write_text(f"Mentions {version} but no heading\n{table}{row}")
     assert rg.check_uat_results().status == rg.FAIL
-    path.write_text(f"# UAT {cv_version}\n")
-    assert rg.check_uat_results().status == rg.PASS
+    path.write_text(f"# UAT results {version}.1\n{table}{row}")
+    assert rg.check_uat_results().status == rg.FAIL  # heading must match exactly
+    path.write_text(f"# UAT results {version}\n{table}")
+    res = rg.check_uat_results()
+    assert res.status == rg.FAIL and "no results table rows" in res.detail
+    path.write_text(f"# UAT results {version}\n\n{table}{row}")
+    res = rg.check_uat_results()
+    assert res.status == rg.PASS and "1 result rows" in res.detail
 
 
 def test_em_dash_scope_covers_changelog_github_examples_and_cli():

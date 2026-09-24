@@ -213,10 +213,26 @@ def check_em_dashes() -> Result:
     return Result("em-dashes", PASS, f"{len(paths)} files clean")
 
 
-# UAT evidence for a release lives at this path (docs/releasing.md). The file
-# must exist and name the version; its content is the maintainers' record of
+# UAT evidence for a release lives at this path (docs/releasing.md). The
+# file must start its record with the exact heading below and contain at
+# least one markdown table data row; the rows are the maintainers' record of
 # which recipe x workload x mode runs passed, with run ids.
 UAT_RESULTS = "uat/results-{version}.md"
+UAT_HEADING = "# UAT results {version}"
+
+
+def _table_data_rows(text: str) -> list[str]:
+    rows = [ln.strip() for ln in text.splitlines() if ln.strip().startswith("|")]
+    # Drop the header row and the |---|---| separator of each table.
+    data = []
+    for i, row in enumerate(rows):
+        is_sep = set(row.replace("|", "").replace(" ", "")) <= set("-:") and "-" in row
+        next_is_sep = i + 1 < len(rows) and (
+            set(rows[i + 1].replace("|", "").replace(" ", "")) <= set("-:") and "-" in rows[i + 1]
+        )
+        if not is_sep and not next_is_sep:
+            data.append(row)
+    return data
 
 
 def check_uat_results() -> Result:
@@ -226,9 +242,14 @@ def check_uat_results() -> Result:
     rel = path.relative_to(ROOT)
     if not path.is_file():
         return Result("uat-results", FAIL, f"{rel} not found (see docs/releasing.md)")
-    if version not in path.read_text():
-        return Result("uat-results", FAIL, f"{rel} does not mention version {version}")
-    return Result("uat-results", PASS, str(rel))
+    text = path.read_text()
+    heading = UAT_HEADING.format(version=version)
+    if heading not in [ln.rstrip() for ln in text.splitlines()]:
+        return Result("uat-results", FAIL, f"{rel} has no '{heading}' heading line")
+    rows = _table_data_rows(text)
+    if not rows:
+        return Result("uat-results", FAIL, f"{rel} has no results table rows")
+    return Result("uat-results", PASS, f"{rel}: {len(rows)} result rows")
 
 
 def check_gitleaks() -> Result:

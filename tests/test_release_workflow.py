@@ -53,9 +53,15 @@ def test_one_workflow_publishes_on_tags():
 def test_publish_order():
     jobs = _load("release.yml")["jobs"]
     assert jobs["ci"]["uses"] == "./.github/workflows/ci.yml"
-    assert {"ci", "verify-tag", "gate", "build-dist", "build-binary", "github-release"} <= (
-        _upstream(jobs, "publish")
-    )
+    assert {
+        "ci",
+        "verify-tag",
+        "gate",
+        "build-dist",
+        "build-binary-linux",
+        "build-binary-macos",
+        "github-release",
+    } <= _upstream(jobs, "publish")
     assert "publish" not in _upstream(jobs, "github-release")
 
 
@@ -81,3 +87,21 @@ def test_gate_runs_release_only_checks_strictly():
     assert "scripts/release_gate.py" in steps and "--require-all" in steps
     for check in ("examples", "version", "changelog", "em-dashes", "uat-results"):
         assert check in steps
+
+
+def test_linux_binary_is_built_for_rhel8_glibc():
+    job = _load("release.yml")["jobs"]["build-binary-linux"]
+    assert job["container"] == "rockylinux:8"
+    steps = " ".join(str(s.get("run", "")) for s in job["steps"])
+    assert "objdump -T" in steps and "2.28" in steps
+
+
+def test_macos_runners_match_the_architecture_they_claim():
+    job = _load("release.yml")["jobs"]["build-binary-macos"]
+    entries = {e["os"]: e for e in job["strategy"]["matrix"]["include"]}
+    assert entries["macos-amd64"]["runner"] == "macos-15-intel"
+    assert entries["macos-amd64"]["arch"] == "x86_64"
+    assert entries["macos-arm64"]["arch"] == "arm64"
+    assert "latest" not in entries["macos-amd64"]["runner"]
+    steps = " ".join(str(s.get("run", "")) for s in job["steps"])
+    assert "lipo -archs" in steps and "WANT_ARCH" in steps
