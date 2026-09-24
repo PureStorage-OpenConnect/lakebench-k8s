@@ -1,10 +1,13 @@
 """Executed against a local Iceberg catalog: the gold detection driver computes
 each rule's alerts exactly once (F2: it used to count the frame and then
 INSERT from an unmaterialised temp view, so every rule ran twice), writes
-them, and records the count in gold.detection_status.
+them, and records the count in gold.detection_status. Also: earlier runs'
+alerts are cleared only after this run's 'pending' status is written, and a
+rule that skips leaves no rows behind.
 
-Needs the Iceberg Spark runtime jar for the installed Spark; set
-LB_TEST_ICEBERG_JAR to its path, otherwise the test is skipped.
+Needs the Iceberg Spark runtime jar for the installed Spark: LB_TEST_ICEBERG_JAR
+names it, or LB_SPARK_TEST_JARS (comma-separated, as Lane D and integrate use)
+contains it. Otherwise the test is skipped.
 """
 
 from __future__ import annotations
@@ -16,9 +19,20 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("pyspark")
-_JAR = os.environ.get("LB_TEST_ICEBERG_JAR")
+
+
+def _find_jar() -> str | None:
+    cands = [os.environ.get("LB_TEST_ICEBERG_JAR", "")]
+    cands += os.environ.get("LB_SPARK_TEST_JARS", "").split(",")
+    for c in (c.strip() for c in cands):
+        if c and "iceberg-spark-runtime" in Path(c).name and Path(c).is_file():
+            return c
+    return None
+
+
+_JAR = _find_jar()
 pytestmark = pytest.mark.skipif(
-    not (_JAR and Path(_JAR).is_file()), reason="LB_TEST_ICEBERG_JAR not set"
+    _JAR is None, reason="no Iceberg runtime jar in LB_TEST_ICEBERG_JAR / LB_SPARK_TEST_JARS"
 )
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
 
@@ -122,6 +136,40 @@ def _check(spark):
     status = spark.table("lakehouse.gold.detection_status").collect()
     assert [(r["rule_id"], r["status"], r["alert_count"]) for r in status] == [
         ("WX_counting", "ran", 5)
+    ]
+
+    # Ordering: run-2's 'pending' status is written while run-1's alerts
+    # still exist; they are cleared only after it.
+    seen = []
+    real_status = gf._write_detection_status
+
+    def spy(sp, rows, rid):
+        old = sp.table("lakehouse.gold.alerts").where("run_id = 'run-1'").count()
+        seen.append((rows[0][1], old))
+        return real_status(sp, rows, rid)
+
+    def skipping_rule(silver_txns, run_id="unknown"):
+        raise detection_rules.RuleSkipped("test-skip")
+
+    detection_rules._RULE_DISPATCH["WX_skip"] = skipping_rule
+    gf._write_detection_status = spy
+    try:
+        # A skipped rule's rows from an earlier tick of the same run go too.
+        spark.sql(
+            "INSERT INTO lakehouse.gold.alerts SELECT alert_id, 'WX_skip', rule_version, "
+            "model_id, model_version, entity_id, related_txn_ids, related_entity_ids, "
+            "alert_ts, alert_score, priority, status, disposition, alert_type, 'run-2', "
+            "narrative, evidence, detected_ts FROM lakehouse.gold.alerts LIMIT 1"
+        )
+        gf.run_detection_rules(spark, txns, "run-2", rules=("WX_skip",))
+    finally:
+        gf._write_detection_status = real_status
+        del detection_rules._RULE_DISPATCH["WX_skip"]
+    assert seen[0] == ("pending", 5)
+    assert spark.table("lakehouse.gold.alerts").count() == 0
+    status = spark.table("lakehouse.gold.detection_status").collect()
+    assert [(r["rule_id"], r["status"], r["reason"]) for r in status] == [
+        ("WX_skip", "skipped", "test-skip")
     ]
 
 

@@ -166,9 +166,8 @@ def main() -> None:
 
     _bootstrap_gold_tables(spark)
 
-    # This run's alerts only (see gold_finalize_financial): rules skipped in
-    # continuous mode would otherwise keep an earlier run's rows.
-    spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{RUN_ID}'")
+    # Earlier runs' alerts are cleared by run_detection_rules on each tick,
+    # after the tick's 'pending' status is written.
     consecutive_failures = 0
     manifest_ready = table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}")
     cycle = 0

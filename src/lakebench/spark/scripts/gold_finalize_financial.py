@@ -276,13 +276,8 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
 
-    # gold.alerts holds THIS run's alerts only. Detection replaces each
-    # rule's rows as it runs, so a rule that is skipped or fails left an
-    # earlier run's rows behind: benchmark queries read them (one leftover
-    # giant-component row made every read of gold.alerts fail on a 1 GB
-    # Parquet page), and a "not run" rule still showed alerts.
-    spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{RUN_ID}'")
-    log(f"Cleared {GOLD_ALERTS} rows from earlier runs")
+    # Earlier runs' alerts are cleared inside run_detection_rules, after this
+    # run's 'pending' status is written (see there for why the order matters).
 
     txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
     baseline = build_baseline_dashboards(txns, RUN_ID)
@@ -405,6 +400,16 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
         [(rid, "pending", None, RULE_TARGET_TYPOLOGY.get(rid), None) for rid in rules],
         run_id,
     )
+    # gold.alerts holds THIS run's alerts only. Detection replaces each
+    # rule's rows as it runs, so a rule that is skipped or fails left an
+    # earlier run's rows behind: benchmark queries read them (one leftover
+    # giant-component row made every read of gold.alerts fail on a 1 GB
+    # Parquet page), and a "not run" rule still showed alerts. This runs
+    # AFTER the pending write: done first, a crash in between left
+    # detection_status naming the previous run as complete with its alerts
+    # gone, and scoring then reported 0% recall as a valid result.
+    spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{run_id}'")
+    log(f"[detection] cleared {GOLD_ALERTS} rows from runs other than {run_id}")
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
@@ -466,10 +471,12 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
         except RuleSkipped as skip:
             # A structural skip is NOT a zero and NOT an error. Emit a
             # third log shape the collector records distinctly so the
-            # scorecard renders "not run" rather than 0% recall. Prior
-            # rows for this rule_id are left untouched (we never reached
-            # the DELETE), so a later run at a higher cap can still write
-            # them without a stale-delete gap.
+            # scorecard renders "not run" rather than 0% recall. Rows of
+            # earlier runs are already gone; rows this rule wrote on an
+            # earlier tick of this run (continuous mode) are removed too, so
+            # gold.alerts never shows alerts for a rule the status calls
+            # not run.
+            _drop_rule_alerts(spark, rule_id)
             elapsed = time.time() - rule_start
             log(
                 f"[detection] {rule_id}: skipped={skip.reason} "
@@ -488,6 +495,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # successful run.
             err = one_line(f"{type(e).__name__}: {e}")
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
+            _drop_rule_alerts(spark, rule_id)
             status_rows.append((rule_id, "error", err, target_typology, None))
         finally:
             # The alerts frame and W1/W3/W17's intermediate frames (edges,
@@ -511,6 +519,16 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     # source (e.g. W1 skipped at high scale) writes an empty derived table,
     # which is the correct "nothing to project" state, not a bug.
     _project_derived_gold(spark, run_id)
+
+
+def _drop_rule_alerts(spark, rule_id: str) -> None:
+    """Remove ``rule_id``'s rows after it skipped or failed. Best effort: a
+    failure here is logged, and the status row still says the rule did not
+    run."""
+    try:
+        spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'")
+    except Exception as e:  # noqa: BLE001
+        log(f"[detection] {rule_id}: could not clear its rows: {one_line(e)}")
 
 
 def _write_rule_alerts(spark, alerts, rule_id: str, alert_count: int) -> None:
