@@ -12,8 +12,6 @@ All observability settings live under the `observability` key as a flat model:
 observability:
   enabled: false                     # Master switch for the observability stack
   prometheus_stack_enabled: true     # Deploy kube-prometheus-stack
-  s3_metrics_enabled: true           # Collect S3 throughput metrics
-  spark_metrics_enabled: true        # Collect Spark job metrics
   dashboards_enabled: true           # Enable Grafana dashboards
   retention: "7d"                    # Prometheus data retention period
   storage: "10Gi"                    # Prometheus PVC size
@@ -32,6 +30,10 @@ observability:
       recommendations: true          # Include sizing recommendations
       platform_metrics: true         # Include platform metrics tab
 ```
+
+`s3_metrics_enabled` and `spark_metrics_enabled` exist in the schema but nothing reads
+them; setting either prints a warning. Spark and S3 metrics are collected whenever the
+stack is enabled.
 
 Set `observability.enabled: true` to deploy the stack. All sub-flags (`prometheus_stack_enabled`, `dashboards_enabled`, etc.) default to `true` when the stack is enabled.
 
