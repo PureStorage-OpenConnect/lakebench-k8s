@@ -64,10 +64,14 @@ from pyspark.sql.functions import (
     sum as sum_,
 )
 
-# Reporting thresholds by currency, mirroring datagen_rs::amounts::structuring_band.
-# A txn is "structuring-suspicious" when its amount is >= 90% of the
-# reporting threshold in its currency (i.e. sits in the top band under
-# reporting) -- this matches the width of the datagen's structuring_band.
+# Cash-reporting thresholds by currency (USD 10,000 CTR and the local
+# equivalents). Structuring is defined relative to these, so the generator
+# plants its structuring amounts against the same figures; that shared input
+# is the regulation, not a rule parameter tuned to the data. A txn is
+# "structuring-suspicious" when its amount is between 90% of the threshold
+# and the threshold. The 90% floor is self-chosen (R2): it is wider than the
+# generator's band (95-99.99% for USD) and belongs in the threshold-cliff
+# check.
 _STRUCTURING_THRESHOLDS = {
     "USD": 10_000.0,
     "CAD": 10_000.0,
@@ -147,12 +151,8 @@ class RuleSkipped(Exception):
 
 
 def _suspicious_amount_expr():
-    """Build a boolean Column expressing "txn amount is in the structuring
-    band for its currency". The band per datagen is (9500, 9999) for USD;
-    we widen slightly to (9000, 10000) to catch amounts detection would
-    flag in the real world (someone rounding down to $9500 exactly, or
-    the datagen picking $9500 = the band's floor).
-    """
+    """Boolean Column: txn amount is in [0.9 x threshold, threshold] for its
+    currency (see _STRUCTURING_THRESHOLDS for the provenance of both)."""
     when_expr = None
     for ccy, thr in _STRUCTURING_THRESHOLDS.items():
         floor = thr * 0.9
@@ -169,31 +169,40 @@ def w2_structuring(
     run_id: str = "unknown",
 ) -> DataFrame:
     """Structuring: N>=threshold_count structuring-band transactions within
-    one window_hours window, aggregated two ways.
+    window_hours, aggregated two ways.
 
     - originator (alert_type ``structuring``): one account making the
-      transactions. Grouped by (originator, currency, window).
+      transactions. Grouped by (originator, currency, tumbling window).
     - beneficiary (alert_type ``structuring_beneficiary``): one account
-      receiving them from any senders, the classic multiple-depositor
-      (smurfing) scenario. Grouped by (beneficiary, window) without the
-      currency: each sender pays in its own account currency, so a
-      currency split would let smurfs in different currencies evade. Each
-      credit is still tested against its own currency's band.
+      receiving them from at least two different senders, the classic
+      multiple-depositor (smurfing) scenario. A single sender structuring
+      into one account is the originator kind's case; counting it here too
+      raised two alerts on the same transactions. No currency key: each
+      sender pays in its own account currency, so a currency split would
+      let smurfs in different currencies evade; each credit is still tested
+      against its own currency's band.
 
-    Both kinds share the band, count and window, and both are
-    W2_structuring alerts; ``evidence['aggregation']`` names the kind.
+      The beneficiary kind uses a sliding window: one candidate window
+      [t, t + window_hours) per credit, keeping only windows that are not
+      contained in the previous credit's window. Tumbling buckets miss
+      bursts that straddle a boundary (eight credits split 2/2/2/2 across
+      four UTC days never reach 3 in one bucket).
 
-    Windows are tumbling ``window()`` buckets of window_hours. Emits one
-    alert per (entity, window) with related_txn_ids populated with the
-    UETRs of the triggering transactions.
+    Both kinds share the band and count, and both are W2_structuring
+    alerts; ``evidence['aggregation']`` names the kind.
+
+    Thresholds (R2 provenance): threshold_count 3 and the 24 h window are
+    self-chosen. FinCEN and FFIEC describe structuring by its intent
+    (transactions broken up to stay under the reporting threshold) and give
+    no count or window; "3 in-band transactions in a day" is our reading,
+    not a cited figure, and belongs in the threshold-cliff check with the
+    90% band floor.
 
     Args:
         silver_txns: DataFrame of silver.transactions schema.
         threshold_count: minimum count of structuring-band txns in the
-            window to trigger an alert. Default 3, the conventional
-            "several transactions just under the threshold" count.
-        window_hours: window size. Default 24 (typical AML interpretation
-            of "same day").
+            window to trigger an alert.
+        window_hours: window length.
         per_beneficiary: also emit the beneficiary aggregation.
         run_id: opaque id for the detection run, written into every
             alert row.
@@ -201,6 +210,7 @@ def w2_structuring(
     Returns:
         DataFrame with the gold.alerts schema.
     """
+    from pyspark.sql.functions import lag
     from pyspark.sql.functions import window as window_
 
     suspicious = silver_txns.filter(_suspicious_amount_expr()).select(
@@ -209,39 +219,73 @@ def w2_structuring(
         col("beneficiary_id"),
         col("txn_timestamp"),
         col("txn_currency"),
+        _epoch_micros(silver_txns).alias("_t"),
     )
     win = window_(col("txn_timestamp"), f"{window_hours} hours")
 
-    def _agg(grouped, counterparty: str):
-        return grouped.agg(
+    by_orig = (
+        suspicious.groupBy(col("originator_id").alias("entity_id"), col("txn_currency"), win)
+        .agg(
             count(lit(1)).alias("suspicious_count"),
             collect_list("uetr").alias("related_txn_ids"),
-            collect_set(counterparty).alias("_related_entity_ids"),
+            collect_set("beneficiary_id").alias("_related_entity_ids"),
             min_("txn_timestamp").alias("first_ts"),
             max_("txn_timestamp").alias("last_ts"),
-        ).filter(col("suspicious_count") >= threshold_count)
-
-    by_orig = _agg(
-        suspicious.groupBy(col("originator_id").alias("entity_id"), col("txn_currency"), win),
-        "beneficiary_id",
-    ).select(
-        "*",
-        lit("structuring").alias("_type"),
-        lit("originator").alias("_aggregation"),
-        expr(
-            "concat('Entity ', cast(entity_id as string), ' made ', "
-            "cast(suspicious_count as string), ' structuring-band ', txn_currency, "
-            "' transactions between ', cast(first_ts as string), ' and ', "
-            "cast(last_ts as string))"
-        ).alias("_narrative"),
+        )
+        .filter(col("suspicious_count") >= threshold_count)
+        .select(
+            "entity_id",
+            "suspicious_count",
+            "related_txn_ids",
+            "_related_entity_ids",
+            "first_ts",
+            "last_ts",
+            lit("structuring").alias("_type"),
+            lit("originator").alias("_aggregation"),
+            expr(
+                "concat('Entity ', cast(entity_id as string), ' made ', "
+                "cast(suspicious_count as string), ' structuring-band ', txn_currency, "
+                "' transactions between ', cast(first_ts as string), ' and ', "
+                "cast(last_ts as string))"
+            ).alias("_narrative"),
+        )
     )
-    windowed = by_orig.drop("txn_currency", "window")
+    windowed = by_orig
     if per_beneficiary:
-        by_bene = _agg(
-            suspicious.groupBy(col("beneficiary_id").alias("entity_id"), win),
-            "originator_id",
+        window_us = int(window_hours) * 3_600_000_000
+        ordered = Window.partitionBy("beneficiary_id").orderBy("_t", "uetr")
+        frame = Window.partitionBy("beneficiary_id").orderBy("_t").rangeBetween(0, window_us - 1)
+        anchored = (
+            suspicious.withColumn("_rn", row_number().over(ordered))
+            .select(
+                col("beneficiary_id").alias("entity_id"),
+                col("_rn"),
+                col("uetr"),
+                col("_t"),
+                count(lit(1)).over(frame).alias("suspicious_count"),
+                collect_list("uetr").over(frame).alias("related_txn_ids"),
+                collect_set("originator_id").over(frame).alias("_related_entity_ids"),
+                col("txn_timestamp").alias("first_ts"),
+                max_("txn_timestamp").over(frame).alias("last_ts"),
+                max_("_rn").over(frame).alias("_last_rn"),
+            )
+            # A window is contained in the previous credit's window exactly
+            # when both end at the same credit.
+            .withColumn(
+                "_prev_last",
+                lag("_last_rn").over(Window.partitionBy("entity_id").orderBy("_rn")),
+            )
+            .filter(col("_prev_last").isNull() | (col("_last_rn") > col("_prev_last")))
+        )
+        by_bene = anchored.filter(
+            (col("suspicious_count") >= threshold_count) & (size(col("_related_entity_ids")) >= 2)
         ).select(
-            "*",
+            "entity_id",
+            "suspicious_count",
+            "related_txn_ids",
+            "_related_entity_ids",
+            "first_ts",
+            "last_ts",
             lit("structuring_beneficiary").alias("_type"),
             lit("beneficiary").alias("_aggregation"),
             expr(
@@ -251,7 +295,7 @@ def w2_structuring(
                 "cast(first_ts as string), ' and ', cast(last_ts as string))"
             ).alias("_narrative"),
         )
-        windowed = windowed.unionByName(by_bene.drop("window"))
+        windowed = windowed.unionByName(by_bene)
 
     alerts = windowed.select(
         expr("uuid()").alias("alert_id"),
@@ -421,6 +465,25 @@ class _PathBudget:
             pass
 
 
+def _epoch_micros(df: DataFrame):
+    """txn_timestamp as epoch microseconds, independent of the session zone.
+
+    TIMESTAMP (silver): unix_micros. TIMESTAMP_NTZ (raw generator Parquet):
+    read as UTC wall-clock from calendar fields; a cast or timestampdiff
+    would apply the session zone and, outside UTC, shift or collapse wall
+    times inside a DST change.
+    """
+    from pyspark.sql.types import TimestampNTZType
+
+    if isinstance(df.schema["txn_timestamp"].dataType, TimestampNTZType):
+        return expr(
+            "datediff(to_date(txn_timestamp), DATE'1970-01-01') * 86400000000L"
+            " + (hour(txn_timestamp) * 3600L + minute(txn_timestamp) * 60L) * 1000000L"
+            " + cast(extract(SECOND FROM txn_timestamp) * 1000000 AS BIGINT)"
+        )
+    return expr("unix_micros(txn_timestamp)")
+
+
 def _flow_edges(silver_txns: DataFrame, with_amount: bool = False) -> DataFrame:
     """Directed transfer edges for the path searches.
 
@@ -432,18 +495,7 @@ def _flow_edges(silver_txns: DataFrame, with_amount: bool = False) -> DataFrame:
     wall times inside a DST change. With ``with_amount`` only transfers with
     a positive USD amount are kept (amount continuity needs one).
     """
-    from pyspark.sql.types import TimestampNTZType
-
-    if isinstance(silver_txns.schema["txn_timestamp"].dataType, TimestampNTZType):
-        # Built from calendar fields, which read NTZ without any zone
-        # (timestampdiff and casts both go through the session zone).
-        t = expr(
-            "datediff(to_date(txn_timestamp), DATE'1970-01-01') * 86400000000L"
-            " + (hour(txn_timestamp) * 3600L + minute(txn_timestamp) * 60L) * 1000000L"
-            " + cast(extract(SECOND FROM txn_timestamp) * 1000000 AS BIGINT)"
-        )
-    else:
-        t = expr("unix_micros(txn_timestamp)")
+    t = _epoch_micros(silver_txns)
     cols = [
         col("uetr"),
         col("originator_id").alias("src"),
