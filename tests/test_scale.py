@@ -49,7 +49,7 @@ class TestCustomer360Dimensions:
         d10 = customer360_dimensions(10)
         assert d10.customers == d1.customers * 10
         assert d10.approx_rows == d1.approx_rows * 10
-        assert d10.approx_bronze_gb == d1.approx_bronze_gb * 10
+        assert d10.approx_bronze_gb == pytest.approx(d1.approx_bronze_gb * 10)
 
     def test_events_per_customer_fixed(self):
         """Events per customer is the same at any scale."""
@@ -84,9 +84,10 @@ class TestFinancialDimensions:
 
     def test_scale_1(self):
         dims = financial_dimensions(1)
-        assert dims.customers == 500_000  # accounts
-        assert dims.date_range_days == 365
-        assert dims.approx_bronze_gb == 10.0
+        assert dims.customers == 111_111  # entities, as datagen_rs writes them
+        assert dims.date_range_days == 1826
+        assert dims.approx_rows == 111_111 * 4 * 60
+        assert dims.approx_bronze_gb == 8.4
 
 
 class TestGetDimensions:
@@ -102,21 +103,21 @@ class TestGetDimensions:
 
     def test_financial(self):
         dims = get_dimensions("financial", 1)
-        assert dims.customers == 500_000
+        assert dims.customers == 111_111
 
     def test_financial_scales_linearly(self):
         d1 = get_dimensions("financial", 1)
         d10 = get_dimensions("financial", 10)
         assert d10.customers == d1.customers * 10
         assert d10.approx_rows == d1.approx_rows * 10
-        assert d10.approx_bronze_gb == d1.approx_bronze_gb * 10
+        assert d10.approx_bronze_gb == pytest.approx(d1.approx_bronze_gb * 10)
 
     def test_financial_via_workload_schema_enum(self):
         from lakebench.config.schema import WorkloadSchema
 
         assert WorkloadSchema.FINANCIAL.value == "financial"
         dims = get_dimensions(WorkloadSchema.FINANCIAL.value, 1)
-        assert dims.customers == 500_000
+        assert dims.customers == 111_111
 
     def test_unknown_schema_raises(self):
         with pytest.raises(ValueError, match="Unknown schema type"):

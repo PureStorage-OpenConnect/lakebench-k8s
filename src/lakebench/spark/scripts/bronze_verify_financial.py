@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import time
 
-from common import env, log
+from common import env, log, log_job_metrics, path_size_gb
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, expr
+from pyspark.sql.functions import col
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 # datagen_rs is the only shipping datagen after the Python generator was
@@ -94,6 +94,22 @@ REQUIRED_FLAT_COLS = (
 )
 
 
+def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
+    """JOB METRICS for the collector. Reuses the preflight byte count when
+    the register path already listed the source tree."""
+    if source_bytes is not None:
+        size_gb = source_bytes / (1024**3)
+    else:
+        size_gb = path_size_gb(spark, BRONZE_URI + PACS_PREFIX)
+    log_job_metrics(
+        "bronze-verify",
+        input_size_gb=size_gb,
+        input_rows=row_count,
+        output_rows=row_count,
+        elapsed_seconds=elapsed,
+    )
+
+
 def main() -> None:
     spark = SparkSession.builder.appName("lb-bronze-verify-financial").getOrCreate()
     start_time = time.time()
@@ -146,6 +162,7 @@ def main() -> None:
     partition_days = df.select("intr_bk_sttlm_dt").distinct().count()
     log(f"Partition days present: {partition_days}")
 
+    source_bytes = None
     if REGISTER:
         # Register the Iceberg table over the datagen Parquet files. Two
         # implementations are attempted in order:
@@ -185,6 +202,7 @@ def main() -> None:
                 if st.isFile() and st.getPath().getName().endswith(".parquet"):
                     total_bytes += int(st.getLen())
                     total_files += 1
+            source_bytes = total_bytes
             log(
                 f"Source parquet: {total_files:,} files, "
                 f"{total_bytes / 1024**3:.1f} GB "
@@ -223,6 +241,7 @@ def main() -> None:
                 f"cols={col_count} days={partition_days}"
             )
             log("=" * 60)
+            _log_bronze_metrics(spark, source_bytes, row_count, elapsed)
             spark.stop()
             return
 
@@ -231,16 +250,20 @@ def main() -> None:
             # every column of the parquet source under its real name.
             spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
             src = spark.read.parquet(BRONZE_URI + PACS_PREFIX)
-            # Iceberg CREATE ... USING iceberg PARTITIONED BY (days(...))
-            # requires the partition column to be declared in the schema,
-            # which it already is (intr_bk_sttlm_dt DATE). Use writeTo
-            # with .create() to get schema-from-DataFrame + partition
-            # spec + tblproperties in a single atomic call.
+            # The target is UNPARTITIONED on purpose. add_files can only map
+            # source files onto identity partitions read from Hive-style
+            # directories; against a days(intr_bk_sttlm_dt) spec it fails
+            # with "Invalid partition transformation", and the old code then
+            # fell back to CTAS on every run, doubling bronze storage and
+            # spending most of bronze-verify rewriting it (measured scale 1:
+            # 8.4 GB source became 13.9 GB, 245 of 273 s). Datagen writes a
+            # flat, date-clustered file layout, so Iceberg's per-file min/max
+            # on intr_bk_sttlm_dt still prunes date filters at file level,
+            # and silver-build scans the whole table regardless.
             (
                 src.limit(0)
                 .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
                 .using("iceberg")
-                .partitionedBy(expr("days(intr_bk_sttlm_dt)"))
                 .tableProperty("format-version", "2")
                 .tableProperty("write.parquet.compression-codec", "snappy")
                 .create()
@@ -298,6 +321,7 @@ def main() -> None:
         f"cols={col_count} days={partition_days}"
     )
     log("=" * 60)
+    _log_bronze_metrics(spark, source_bytes, row_count, elapsed)
 
     spark.stop()
 

@@ -26,7 +26,7 @@ from __future__ import annotations
 import time
 import uuid
 
-from common import env, log, one_line
+from common import env, iceberg_table_stats, log, log_job_metrics, one_line
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     array,
@@ -290,9 +290,23 @@ def main() -> None:
 
     run_detection_rules(spark, txns, RUN_ID)
 
+    elapsed = time.time() - start
     log("=" * 60)
-    log(f"Gold finalize complete in {time.time() - start:.1f}s")
+    log(f"Gold finalize complete in {elapsed:.1f}s")
     log("=" * 60)
+    silver_rows, silver_gb = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_TXNS}")
+    try:
+        run_alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == RUN_ID).count()
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] alert count unavailable: {one_line(e)}")
+        run_alerts = 0
+    log_job_metrics(
+        "gold-finalize",
+        input_size_gb=silver_gb,
+        input_rows=silver_rows,
+        output_rows=run_alerts,
+        elapsed_seconds=elapsed,
+    )
     spark.stop()
 
 

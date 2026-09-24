@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 
-from common import env, log
+from common import env, iceberg_table_stats, log, log_job_metrics
 from pyspark.sql import SparkSession, Window
 from pyspark.sql.functions import (
     abs as abs_,
@@ -846,7 +846,8 @@ def main() -> None:
             log(f"[startup] ADD COLUMN _batch_id on {table} skipped: {e}")
 
     bronze = spark.table(f"{CATALOG}.{BRONZE_TABLE}")
-    log(f"Read bronze: {CATALOG}.{BRONZE_TABLE} ({bronze.count():,} rows)")
+    bronze_rows = bronze.count()
+    log(f"Read bronze: {CATALOG}.{BRONZE_TABLE} ({bronze_rows:,} rows)")
 
     # NB: `.overwrite(lit(True))` (not `.createOrReplace()`) preserves the
     # table's partition spec and schema. The original design used
@@ -896,9 +897,19 @@ def main() -> None:
     # Guard against ruff unused-import warnings for symbols kept for clarity.
     _ = (date_format,)
 
+    elapsed = time.time() - start
     log("=" * 60)
-    log(f"Silver build complete in {time.time() - start:.1f}s")
+    log(f"Silver build complete in {elapsed:.1f}s")
     log("=" * 60)
+    _, bronze_gb = iceberg_table_stats(spark, f"{CATALOG}.{BRONZE_TABLE}")
+    silver_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}")
+    log_job_metrics(
+        "silver-build",
+        input_size_gb=bronze_gb,
+        input_rows=bronze_rows,
+        output_rows=silver_rows,
+        elapsed_seconds=elapsed,
+    )
     spark.stop()
 
 
