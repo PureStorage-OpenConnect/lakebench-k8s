@@ -110,16 +110,17 @@ def test_burst_across_day_boundaries_is_caught(spark):
 
 
 def test_steady_stream_is_one_alert(spark):
-    """60 band credits every 2 h from three senders: one alert per burst,
-    not one per credit, and its transaction list is capped."""
+    """60 band credits every 2 h from three senders: about one alert per
+    day, not one per credit, and each transaction list is capped."""
     from detection_rules import w2_structuring
 
     rows = [(f"q{i:02d}", 1 + i % 3, 9, 2 * i, 9500, "USD") for i in range(60)]
     out = w2_structuring(_df(spark, rows), max_txns_per_alert=10, run_id="r").collect()
     bene = [a for a in out if a["alert_type"] == "structuring_beneficiary"]
-    assert len(bene) == 1
-    assert len(bene[0]["related_txn_ids"]) == 10
-    assert " received 60 " in bene[0]["narrative"]
+    # 120 h of credits: one alert per day-long chunk of the burst.
+    assert 4 <= len(bene) <= 6
+    assert all(len(a["related_txn_ids"]) <= 10 for a in bene)
+    assert any(" received 2" in a["narrative"] for a in bene)  # full count, over the cap
 
 
 def test_one_structurer_plus_one_other_is_not_multiple_depositors(spark):
@@ -141,3 +142,28 @@ def test_score_is_capped(spark):
     out = _alerts(spark, rows)
     assert [a["alert_type"] for a in out] == ["structuring"]
     assert out[0]["alert_score"] == pytest.approx(0.95)
+
+
+def test_busy_account_burst_keeps_alert_ts_near_the_credits(spark):
+    """Review: a beneficiary with three band credits a day for 60 days became
+    one burst whose alert_ts was its last day. A planted burst on day 10 must
+    be in an alert whose alert_ts is within two days of it."""
+    rows = []
+    for d in range(60):
+        for k, h in enumerate((3, 10, 17)):
+            rows.append((f"bg{d:02d}{k}", 300 + k, 77, 24 * d + h, 9400, "USD"))
+    planted = [(f"p{i}", 400 + i, 77, 24 * 10 + 9 * i, 9500, "USD") for i in range(8)]
+    out = [
+        a for a in _alerts(spark, rows + planted) if a["alert_type"] == "structuring_beneficiary"
+    ]
+    hits = [a for a in out if any(u.startswith("p") for u in a["related_txn_ids"])]
+    assert hits
+    from datetime import datetime, timedelta, timezone
+
+    t0 = datetime(2024, 3, 1, tzinfo=timezone.utc)
+    last_planted = t0 + timedelta(hours=24 * 10 + 63)
+    assert any(
+        a["alert_ts"].astimezone(timezone.utc) <= last_planted + timedelta(days=2) for a in hits
+    )
+    # About one alert per day, not one per credit.
+    assert len(out) <= 70
