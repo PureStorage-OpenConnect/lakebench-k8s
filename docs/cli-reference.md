@@ -38,7 +38,7 @@ lakebench init [OPTIONS]
 | `--recipe` | `-r` | `""` | Architecture recipe |
 | `--interactive/--no-interactive` | `-i` | `true` | Guided setup with prompts |
 | `--advanced` | | `false` | Full 5-step wizard (recipe, mode, scale) |
-| `--force` | `-f` | `false` | Overwrite existing file |
+| `--force` | | `false` | Overwrite existing file |
 
 Quick mode (default) asks 4 questions: endpoint, access key, secret key, scale.
 Advanced mode (`--advanced`) runs the full 5-step wizard with recipe selection,
@@ -369,7 +369,7 @@ lakebench clean TARGET [CONFIG_FILE] [OPTIONS]
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--force` | `-f` | `false` | Skip confirmation prompt |
+| `--force` / `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--metrics-dir` | `-m` | `./lakebench-output/runs` | Metrics directory (for `metrics` target) |
 
 Valid targets:
@@ -393,7 +393,7 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--force` | `-f` | `false` | Skip confirmation prompt |
+| `--force` / `--yes` | `-y` | `false` | Skip confirmation prompt |
 | `--local` | | `false` | Tear down the local stack instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
@@ -430,7 +430,7 @@ lakebench results [OPTIONS]
 |---|---|---|---|
 | `--metrics` | `-m` | `./lakebench-output/runs` | Directory containing run subdirectories |
 | `--run` | `-r` | latest | Specific run ID |
-| `--format` | `-f` | `table` | Output format: `table`, `json`, `csv` |
+| `--format` | `-o` | `table` | Output format: `table`, `json`, `csv` |
 
 Shows a stage-matrix view of pipeline performance with throughput, data
 volumes, executor counts, and timing for each stage.
@@ -445,7 +445,7 @@ lakebench logs COMPONENT [CONFIG_FILE] [OPTIONS]
 
 | Flag | Short | Default | Description |
 |---|---|---|---|
-| `--follow` | `-f` | `false` | Follow log output (like `tail -f`) |
+| `--follow` | `-F` | `false` | Follow log output (like `tail -f`) |
 | `--lines` | `-n` | `100` | Number of lines to show |
 
 Valid components: `postgres`, `hive`, `polaris`, `trino`, `spark-driver`.

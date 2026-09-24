@@ -150,7 +150,6 @@ platform:
       enabled: false                 # Enable Portworx scratch PVCs
       storage_class: "px-csi-scratch"  # Must be repl=1
       size: "100Gi"                  # Default PVC size (overridden per job)
-      create_storage_class: true     # Auto-create the StorageClass
 ```
 
 When enabled, each executor gets a dynamically provisioned PVC mounted at

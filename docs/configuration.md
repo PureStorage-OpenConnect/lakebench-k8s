@@ -132,7 +132,6 @@ images:
   polaris: apache/polaris:1.6.0
   trino: trinodb/trino:483
   pull_policy: Always                 # Always | IfNotPresent | Never
-  pull_secrets: []                    # List of imagePullSecret names
 
 # ---------------------------------------------------------------------------
 # LAYER 1: PLATFORM
@@ -174,7 +173,6 @@ platform:
       enabled: false                  # Enable Portworx scratch StorageClass
       storage_class: px-csi-scratch
       size: 100Gi
-      create_storage_class: true
 
   compute:
     spark:
@@ -382,7 +380,6 @@ registries or custom builds.
 | `images.polaris` | string | `apache/polaris:1.6.0` | Apache Polaris REST catalog image. |
 | `images.trino` | string | `trinodb/trino:483` | Trino query engine image. |
 | `images.pull_policy` | enum | `Always` | `Always`, `IfNotPresent`, or `Never`. |
-| `images.pull_secrets` | list | `[]` | List of Kubernetes `imagePullSecret` names. |
 
 ### Platform -- Kubernetes
 
@@ -418,7 +415,6 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `platform.storage.scratch.enabled` | bool | `false` | Enable scratch StorageClass for Spark PVCs. |
 | `platform.storage.scratch.storage_class` | string | `px-csi-scratch` | StorageClass name for scratch volumes. |
 | `platform.storage.scratch.size` | string | `100Gi` | Default scratch PVC size. |
-| `platform.storage.scratch.create_storage_class` | bool | `true` | Create the StorageClass if it does not exist (requires cluster-admin). Set to `false` if the SC already exists or is managed externally. |
 | `platform.storage.scratch.provisioner` | string | `pxd.portworx.com` | CSI provisioner for the StorageClass. Use `rancher.io/local-path`, `ebs.csi.aws.com`, etc. for non-Portworx providers. |
 | `platform.storage.scratch.parameters` | dict | `{"repl": "1", ...}` | Provider-specific StorageClass parameters. |
 
@@ -876,9 +872,10 @@ images:
   spark: my-registry.internal/apache/spark:4.0.2-python3
   trino: my-registry.internal/trinodb/trino:483
   pull_policy: Always
-  pull_secrets:
-    - my-registry-pull-secret
 ```
+
+Private registries need an `imagePullSecret` on the service accounts in the
+namespace; lakebench does not set one.
 
 Set `pull_policy: Always` after pushing a new image tag to ensure Kubernetes
 pulls the latest version.

@@ -60,24 +60,12 @@ Update your Lakebench YAML configuration to point to the new image:
 ```yaml
 images:
   datagen: your-registry/lb-datagen:custom
-
-platform:
-  compute:
-    spark:
-      pull_policy: Always  # Forces Kubernetes to pull the latest image
+  pull_policy: Always  # Forces Kubernetes to pull the image again
 ```
 
 Setting `pull_policy: Always` is important after pushing a new image tag. Without
 it, Kubernetes may use a cached version of the image if the tag already existed
-on the node.
-
-You can also set `pull_policy` at the top level of the `images` block:
-
-```yaml
-images:
-  datagen: your-registry/lb-datagen:custom
-  pull_policy: Always
-```
+on the node. Prefer a new, immutable tag per build over reusing one.
 
 ## Anatomy of generate.py
 
