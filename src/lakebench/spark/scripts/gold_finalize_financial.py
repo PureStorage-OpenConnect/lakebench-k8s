@@ -34,6 +34,7 @@ from common import (
     log_job_metrics,
     one_line,
 )
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     array,
@@ -84,6 +85,7 @@ except ValueError:
 DEFAULT_DETECTION_RULES = (
     "W2_structuring",
     "W3_round_tripping",
+    "W17_layering_chain",
     "W4_risk_propagation",
     "W7_cross_border_high_risk",
     "W8_dormant_reactivation",
@@ -284,13 +286,8 @@ def main() -> None:
         spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
     )
 
-    # gold.alerts holds THIS run's alerts only. Detection replaces each
-    # rule's rows as it runs, so a rule that is skipped or fails left an
-    # earlier run's rows behind: benchmark queries read them (one leftover
-    # giant-component row made every read of gold.alerts fail on a 1 GB
-    # Parquet page), and a "not run" rule still showed alerts.
-    spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{RUN_ID}'")
-    log(f"Cleared {GOLD_ALERTS} rows from earlier runs")
+    # Earlier runs' alerts are cleared inside run_detection_rules, after this
+    # run's 'pending' status is written (see there for why the order matters).
 
     txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
     baseline = build_baseline_dashboards(txns, RUN_ID)
@@ -375,7 +372,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     from detection_rules import RULE_TARGET_TYPOLOGY, RuleSkipped, get_rule
 
     # Which rules to run this invocation. Batch passes None (the full default
-    # set); the continuous gold loop passes a bounded set (W2/W3/W4) plus a
+    # set); the continuous gold loop passes a bounded set (W2/W3/W4/W17) plus a
     # skipped_rules list for the rules it deliberately does NOT run there --
     # W1 (per-tick graph recompute too costly), W7 (silver.entities is not
     # maintained by silver_stream, so it would false-report 0% recall), and
@@ -413,6 +410,16 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
         [(rid, "pending", None, RULE_TARGET_TYPOLOGY.get(rid), None) for rid in rules],
         run_id,
     )
+    # gold.alerts holds THIS run's alerts only. Detection replaces each
+    # rule's rows as it runs, so a rule that is skipped or fails left an
+    # earlier run's rows behind: benchmark queries read them (one leftover
+    # giant-component row made every read of gold.alerts fail on a 1 GB
+    # Parquet page), and a "not run" rule still showed alerts. This runs
+    # AFTER the pending write: done first, a crash in between left
+    # detection_status naming the previous run as complete with its alerts
+    # gone, and scoring then reported 0% recall as a valid result.
+    spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{run_id}'")
+    log(f"[detection] cleared {GOLD_ALERTS} rows from runs other than {run_id}")
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
@@ -441,6 +448,14 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
                 params["max_vertices"] = _W1_MAX_VERTICES
             alerts = fn(txns, **params)
+            # Persist before counting, so the rule is computed exactly once.
+            # The loop used to count the frame and then INSERT from a temp
+            # view, which is not materialised: every rule ran twice, each run
+            # re-reading silver and redoing its joins. A rule that fails
+            # while computing has its rows removed by the error handler
+            # below, so gold.alerts never shows alerts for a rule whose
+            # status is not 'ran'.
+            alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
             # partial-write incident (DELETE commits, INSERT throws)
@@ -456,15 +471,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
                 prior_count = int(prior_row[0]["c"]) if prior_row else 0
             except Exception:  # noqa: BLE001 -- diagnostic only
                 prior_count = -1
-            # Materialise the alerts frame so the write half does not
-            # re-execute the rule on retry. Also lets us fail with a
-            # clear signal if the count/write disagrees.
-            tmp_view = f"_lb_alerts_{rule_id}"
-            alerts.createOrReplaceTempView(tmp_view)
-            spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'")
-            if alert_count > 0:
-                spark.sql(f"INSERT INTO {CATALOG}.{GOLD_ALERTS} SELECT * FROM {tmp_view}")
-            spark.catalog.dropTempView(tmp_view)
+            _write_rule_alerts(spark, alerts, rule_id, alert_count)
             elapsed = time.time() - rule_start
             log(
                 f"[detection] {rule_id}: alerts={alert_count} "
@@ -475,10 +482,12 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
         except RuleSkipped as skip:
             # A structural skip is NOT a zero and NOT an error. Emit a
             # third log shape the collector records distinctly so the
-            # scorecard renders "not run" rather than 0% recall. Prior
-            # rows for this rule_id are left untouched (we never reached
-            # the DELETE), so a later run at a higher cap can still write
-            # them without a stale-delete gap.
+            # scorecard renders "not run" rather than 0% recall. Rows of
+            # earlier runs are already gone; rows this rule wrote on an
+            # earlier tick of this run (continuous mode) are removed too, so
+            # gold.alerts never shows alerts for a rule the status calls
+            # not run.
+            _drop_rule_alerts(spark, rule_id)
             elapsed = time.time() - rule_start
             log(
                 f"[detection] {rule_id}: skipped={skip.reason} "
@@ -497,7 +506,14 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # successful run.
             err = one_line(f"{type(e).__name__}: {e}")
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
+            _drop_rule_alerts(spark, rule_id)
             status_rows.append((rule_id, "error", err, target_typology, None))
+        finally:
+            # The alerts frame and W1/W3/W17's intermediate frames (edges,
+            # step, path levels) are persisted. Nothing outlives the rule's
+            # write, and left cached they hold executor memory and scratch
+            # through every later rule.
+            spark.catalog.clearCache()
     log(f"[detection] total alerts written: {total_alerts}")
 
     for rule_id in skipped_rules:
@@ -514,6 +530,32 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     # source (e.g. W1 skipped at high scale) writes an empty derived table,
     # which is the correct "nothing to project" state, not a bug.
     _project_derived_gold(spark, run_id)
+
+
+def _drop_rule_alerts(spark, rule_id: str) -> None:
+    """Remove ``rule_id``'s rows after it skipped or failed. Best effort: a
+    failure here is logged, and the status row still says the rule did not
+    run."""
+    try:
+        spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'")
+    except Exception as e:  # noqa: BLE001
+        log(f"[detection] {rule_id}: could not clear its rows: {one_line(e)}")
+
+
+def _write_rule_alerts(spark, alerts, rule_id: str, alert_count: int) -> None:
+    """Replace ``rule_id``'s rows in gold.alerts with ``alerts`` (persisted).
+
+    DELETE then INSERT: two Iceberg commits, see run_detection_rules for the
+    partial-write semantics.
+    """
+    tmp_view = f"_lb_alerts_{rule_id}"
+    alerts.createOrReplaceTempView(tmp_view)
+    try:
+        spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'")
+        if alert_count > 0:
+            spark.sql(f"INSERT INTO {CATALOG}.{GOLD_ALERTS} SELECT * FROM {tmp_view}")
+    finally:
+        spark.catalog.dropTempView(tmp_view)
 
 
 def _write_detection_status(spark, status_rows: list, run_id: str) -> None:
@@ -608,7 +650,8 @@ def _project_derived_gold(spark, run_id: str) -> None:
             )
         )
         clusters.writeTo(f"{CATALOG}.{GOLD_CLUSTERS}").overwrite(lit(True))
-        log(f"[derived] wrote {GOLD_CLUSTERS} from W1 alerts ({clusters.count()} rows)")
+        n = spark.table(f"{CATALOG}.{GOLD_CLUSTERS}").count()
+        log(f"[derived] wrote {GOLD_CLUSTERS} from W1 alerts ({n} rows)")
     except Exception as e:  # noqa: BLE001
         log(f"[derived] entity_clusters projection failed: {type(e).__name__}: {e}")
 
@@ -634,7 +677,8 @@ def _project_derived_gold(spark, run_id: str) -> None:
             )
         )
         risk.writeTo(f"{CATALOG}.{GOLD_RISK}").overwrite(lit(True))
-        log(f"[derived] wrote {GOLD_RISK} from W4 alerts ({risk.count()} rows)")
+        n = spark.table(f"{CATALOG}.{GOLD_RISK}").count()
+        log(f"[derived] wrote {GOLD_RISK} from W4 alerts ({n} rows)")
     except Exception as e:  # noqa: BLE001
         log(f"[derived] risk_scores projection failed: {type(e).__name__}: {e}")
 

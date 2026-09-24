@@ -29,13 +29,18 @@ ingestion. It is more expensive per tick (bounded by the batch detection
 cost), which is the honest cost of keeping gold fresh under a growing corpus.
 
 Rule set in continuous mode:
-- RUN: W2/W3/W4 -- they need only silver.transactions, which silver_stream
+- RUN: W2/W3/W4/W17 -- they need only silver.transactions, which silver_stream
   maintains.
 - SKIPPED (recorded as status='skipped' so score renders "not run", not a
   false 0%): W1 (per-tick connected-components recompute is too costly; the
   windowed-recompute variant is Phase 5b), W7 (needs silver.entities, which
   silver_stream does not maintain -- Phase 5a builds continuous dimensions),
   W8 (needs a >=90-day dormancy gap a narrow continuous corpus cannot hold).
+
+A rule that errors or skips on a tick loses the rows it wrote on earlier
+ticks of the run, and its status for the tick is 'error' or 'skipped'. So a
+transient failure on the last tick scores that rule's typologies as not run,
+never as the previous tick's alerts under a status that says otherwise.
 
 detected_ts semantics in continuous (LB-127): because each tick rewrites a
 rule's alerts, detected_ts carries the LAST re-detection time, not the first.
@@ -87,6 +92,7 @@ CONTINUOUS_RULES = (
     "W2_structuring",
     "W3_round_tripping",
     "W4_risk_propagation",
+    "W17_layering_chain",
 )
 # Rules deliberately not run in continuous mode, recorded as 'skipped' so
 # their typologies render "not run" rather than a false 0% recall.
@@ -168,9 +174,8 @@ def main() -> None:
 
     _bootstrap_gold_tables(spark)
 
-    # This run's alerts only (see gold_finalize_financial): rules skipped in
-    # continuous mode would otherwise keep an earlier run's rows.
-    spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{RUN_ID}'")
+    # Earlier runs' alerts are cleared by run_detection_rules on each tick,
+    # after the tick's 'pending' status is written.
     consecutive_failures = 0
     manifest_ready = table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}")
     cycle = 0

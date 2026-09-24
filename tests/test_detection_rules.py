@@ -59,6 +59,7 @@ def test_dispatcher_covers_documented_rules():
         "W6_pep_counterparty",
         "W7_cross_border_high_risk",
         "W8_dormant_reactivation",
+        "W17_layering_chain",
     ):
         assert expected in keys, f"missing rule {expected} in dispatcher"
 
@@ -171,6 +172,7 @@ def test_w2_structuring_takes_expected_kwargs():
         "W6_pep_counterparty",
         "W7_cross_border_high_risk",
         "W8_dormant_reactivation",
+        "W17_layering_chain",
     ],
 )
 def test_rule_ids_stable(rule_id):
@@ -957,7 +959,7 @@ def test_replay_uses_signature_not_co_varnames():
 def test_all_rules_stamp_detected_ts():
     """LB-125: every rule's alert projection appends current_timestamp() as
     detected_ts. AST-checked per rule so a dropped stamp fails here (the
-    gold.alerts DDL positional INSERT ... SELECT * requires all 8 rules to
+    gold.alerts DDL positional INSERT ... SELECT * requires all 9 rules to
     emit the column, in last position)."""
     tree = _module_ast()
     rule_fns = [
@@ -968,7 +970,7 @@ def test_all_rules_stamp_detected_ts():
         and n.name[0] == "w"
         and n.name[1].isdigit()
     ]
-    assert len(rule_fns) == 8, [f.name for f in rule_fns]
+    assert len(rule_fns) == 9, [f.name for f in rule_fns]
     src = DETECTION_RULES_PATH.read_text()
     for fn in rule_fns:
         fn_src = ast.get_source_segment(src, fn)

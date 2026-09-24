@@ -22,6 +22,8 @@ Rules implemented in this file:
   black list jurisdiction.
 - W8_dormant_reactivation: originator account inactive > 90 days then
   a transaction >= $5,000-equivalent.
+- W17_layering_chain: open chains of 3+ transfers where each hop forwards
+  80-100% of the previous one within 7 days (temporal path search).
 
 W5_splink_resolution (probabilistic entity resolution) is a separate
 research effort tracked as ENH; it is not a "fix" and is intentionally
@@ -62,10 +64,14 @@ from pyspark.sql.functions import (
     sum as sum_,
 )
 
-# Reporting thresholds by currency, mirroring datagen_rs::amounts::structuring_band.
-# A txn is "structuring-suspicious" when its amount is >= 90% of the
-# reporting threshold in its currency (i.e. sits in the top band under
-# reporting) -- this matches the width of the datagen's structuring_band.
+# Cash-reporting thresholds by currency (USD 10,000 CTR and the local
+# equivalents). Structuring is defined relative to these, so the generator
+# plants its structuring amounts against the same figures; that shared input
+# is the regulation, not a rule parameter tuned to the data. A txn is
+# "structuring-suspicious" when its amount is between 90% of the threshold
+# and the threshold. The 90% floor is self-chosen (R2): it is wider than the
+# generator's band (95-99.99% for USD) and belongs in the threshold-cliff
+# check.
 _STRUCTURING_THRESHOLDS = {
     "USD": 10_000.0,
     "CAD": 10_000.0,
@@ -105,6 +111,7 @@ RULE_TARGET_TYPOLOGY = {
     "W6_pep_counterparty": None,
     "W7_cross_border_high_risk": "corridor_high_risk",
     "W8_dormant_reactivation": "dormant_reactivation",
+    "W17_layering_chain": "stack",
 }
 
 
@@ -144,12 +151,8 @@ class RuleSkipped(Exception):
 
 
 def _suspicious_amount_expr():
-    """Build a boolean Column expressing "txn amount is in the structuring
-    band for its currency". The band per datagen is (9500, 9999) for USD;
-    we widen slightly to (9000, 10000) to catch amounts detection would
-    flag in the real world (someone rounding down to $9500 exactly, or
-    the datagen picking $9500 = the band's floor).
-    """
+    """Boolean Column: txn amount is in [0.9 x threshold, threshold] for its
+    currency (see _STRUCTURING_THRESHOLDS for the provenance of both)."""
     when_expr = None
     for ccy, thr in _STRUCTURING_THRESHOLDS.items():
         floor = thr * 0.9
@@ -162,59 +165,185 @@ def w2_structuring(
     silver_txns: DataFrame,
     threshold_count: int = 3,
     window_hours: int = 24,
+    per_beneficiary: bool = True,
+    max_txns_per_alert: int = 1000,
     run_id: str = "unknown",
 ) -> DataFrame:
-    """Detect entities that made N>=threshold_count structuring-band txns
-    within a rolling window_hours-hour window.
+    """Structuring: N>=threshold_count structuring-band transactions within
+    window_hours, aggregated two ways.
 
-    Emits one alert per (entity, window) with related_txn_ids populated
-    with the UETRs of the triggering transactions.
+    - originator (alert_type ``structuring``): one account making the
+      transactions. Grouped by (originator, currency, tumbling window).
+    - beneficiary (alert_type ``structuring_beneficiary``): one account
+      receiving them from at least threshold_count different senders in
+      the window, the classic multiple-depositor (smurfing) scenario. Fewer
+      senders is the originator kind's case: with a two-sender minimum, one
+      sender structuring three times plus any other in-band credit raised
+      both kinds on the same transactions. No currency key: each
+      sender pays in its own account currency, so a currency split would
+      let smurfs in different currencies evade; each credit is still tested
+      against its own currency's band.
 
-    Uses a rolling window via `window()` function (Spark) so overlapping
-    24-hour spans are handled naturally. Group by (entity, window,
-    currency) so a mixed-currency actor doesn't dilute.
+      The beneficiary kind uses a sliding window: one candidate window
+      [t, t + window_hours) per credit, keeping only windows that are not
+      contained in the previous credit's window, then merging overlapping
+      qualifying windows into bursts, cut into chunks of one window length
+      of anchors: one alert per chunk, spanning at most two windows, with
+      alert_ts the chunk's last credit. related_txn_ids is capped at
+      max_txns_per_alert (by uetr sort order; the narrative carries the full
+      count). Tumbling buckets miss bursts that straddle
+      a boundary (eight credits split 2/2/2/2 across four UTC days never
+      reach 3 in one bucket).
+
+    Both kinds share the band and count, and both are W2_structuring
+    alerts; ``evidence['aggregation']`` names the kind.
+
+    Thresholds (R2 provenance): threshold_count 3 and the 24 h window are
+    self-chosen. FinCEN and FFIEC describe structuring by its intent
+    (transactions broken up to stay under the reporting threshold) and give
+    no count or window; "3 in-band transactions in a day" is our reading,
+    not a cited figure, and belongs in the threshold-cliff check with the
+    90% band floor.
 
     Args:
         silver_txns: DataFrame of silver.transactions schema.
         threshold_count: minimum count of structuring-band txns in the
-            window to trigger an alert. Default 3, matches the datagen
-            micro_structuring instance's typical (participants=9,
-            rows_per_instance=8) pattern.
-        window_hours: rolling window size. Default 24 (typical AML
-            interpretation of "same day").
+            window to trigger an alert.
+        window_hours: window length.
+        per_beneficiary: also emit the beneficiary aggregation.
         run_id: opaque id for the detection run, written into every
             alert row.
 
     Returns:
         DataFrame with the gold.alerts schema.
     """
+    from pyspark.sql.functions import lag
     from pyspark.sql.functions import window as window_
 
     suspicious = silver_txns.filter(_suspicious_amount_expr()).select(
         col("uetr"),
-        col("originator_id").alias("entity_id"),
+        col("originator_id"),
         col("beneficiary_id"),
         col("txn_timestamp"),
-        col("txn_amount").cast("double").alias("amount"),
         col("txn_currency"),
+        _epoch_micros(silver_txns).alias("_t"),
     )
+    win = window_(col("txn_timestamp"), f"{window_hours} hours")
 
-    windowed = (
-        suspicious.groupBy(
-            col("entity_id"),
-            col("txn_currency"),
-            window_(col("txn_timestamp"), f"{window_hours} hours"),
-        )
+    by_orig = (
+        suspicious.groupBy(col("originator_id").alias("entity_id"), col("txn_currency"), win)
         .agg(
             count(lit(1)).alias("suspicious_count"),
             collect_list("uetr").alias("related_txn_ids"),
             collect_set("beneficiary_id").alias("_related_entity_ids"),
-            max_("amount").alias("max_amount"),
             min_("txn_timestamp").alias("first_ts"),
             max_("txn_timestamp").alias("last_ts"),
         )
         .filter(col("suspicious_count") >= threshold_count)
+        .select(
+            "entity_id",
+            "suspicious_count",
+            "related_txn_ids",
+            "_related_entity_ids",
+            "first_ts",
+            "last_ts",
+            lit("structuring").alias("_type"),
+            lit("originator").alias("_aggregation"),
+            expr(
+                "concat('Entity ', cast(entity_id as string), ' made ', "
+                "cast(suspicious_count as string), ' structuring-band ', txn_currency, "
+                "' transactions between ', cast(first_ts as string), ' and ', "
+                "cast(last_ts as string))"
+            ).alias("_narrative"),
+        )
     )
+    windowed = by_orig
+    if per_beneficiary:
+        window_us = int(window_hours) * 3_600_000_000
+        ordered = Window.partitionBy("beneficiary_id").orderBy("_t", "uetr")
+        frame = Window.partitionBy("beneficiary_id").orderBy("_t").rangeBetween(0, window_us - 1)
+        anchored = (
+            suspicious.withColumn("_rn", row_number().over(ordered))
+            .select(
+                col("beneficiary_id").alias("entity_id"),
+                col("_rn"),
+                col("uetr"),
+                col("_t"),
+                count(lit(1)).over(frame).alias("suspicious_count"),
+                collect_list("uetr").over(frame).alias("related_txn_ids"),
+                collect_set("originator_id").over(frame).alias("_related_entity_ids"),
+                col("txn_timestamp").alias("first_ts"),
+                max_("txn_timestamp").over(frame).alias("last_ts"),
+                max_("_rn").over(frame).alias("_last_rn"),
+            )
+            # A window is contained in the previous credit's window exactly
+            # when both end at the same credit.
+            .withColumn(
+                "_prev_last",
+                lag("_last_rn").over(Window.partitionBy("entity_id").orderBy("_rn")),
+            )
+            .filter(col("_prev_last").isNull() | (col("_last_rn") > col("_prev_last")))
+        )
+        qualifying = anchored.filter(
+            (col("suspicious_count") >= threshold_count)
+            & (size(col("_related_entity_ids")) >= threshold_count)
+        ).withColumn("_end_t", expr(f"_t + {window_us - 1}"))
+        # Overlapping qualifying windows are one burst: a steady stream of
+        # band-sized credits would otherwise raise one alert per credit,
+        # each repeating the previous one's transactions.
+        by_start = Window.partitionBy("entity_id").orderBy("_t", "_rn")
+        bursts = (
+            qualifying.withColumn(
+                "_prev_end",
+                max_("_end_t").over(by_start.rowsBetween(Window.unboundedPreceding, -1)),
+            )
+            .withColumn(
+                "_new", (col("_prev_end").isNull() | (col("_t") > col("_prev_end"))).cast("int")
+            )
+            .withColumn("_burst", sum_("_new").over(by_start))
+            # A burst is cut into window-length chunks of anchors, so a
+            # busy account's months-long stream is not one alert whose
+            # alert_ts (its end) lies weeks after the credits of interest.
+            # Each alert then spans at most two windows.
+            .withColumn(
+                "_chunk",
+                (
+                    (col("_t") - min_("_t").over(Window.partitionBy("entity_id", "_burst")))
+                    / lit(window_us)
+                ).cast("long"),
+            )
+            .groupBy("entity_id", "_burst", "_chunk")
+            .agg(
+                array_sort(array_distinct(expr("flatten(collect_list(related_txn_ids))"))).alias(
+                    "_all_txns"
+                ),
+                expr(
+                    f"slice(array_distinct(flatten(collect_list(_related_entity_ids))), "
+                    f"1, {int(max_txns_per_alert)})"
+                ).alias("_related_entity_ids"),
+                min_("first_ts").alias("first_ts"),
+                max_("last_ts").alias("last_ts"),
+            )
+            .withColumn("suspicious_count", size(col("_all_txns")))
+            .withColumn("related_txn_ids", expr(f"slice(_all_txns, 1, {int(max_txns_per_alert)})"))
+        )
+        by_bene = bursts.select(
+            "entity_id",
+            "suspicious_count",
+            "related_txn_ids",
+            "_related_entity_ids",
+            "first_ts",
+            "last_ts",
+            lit("structuring_beneficiary").alias("_type"),
+            lit("beneficiary").alias("_aggregation"),
+            expr(
+                "concat('Entity ', cast(entity_id as string), ' received ', "
+                "cast(suspicious_count as string), ' structuring-band transactions from ', "
+                "cast(size(_related_entity_ids) as string), ' senders between ', "
+                "cast(first_ts as string), ' and ', cast(last_ts as string))"
+            ).alias("_narrative"),
+        )
+        windowed = windowed.unionByName(by_bene)
 
     alerts = windowed.select(
         expr("uuid()").alias("alert_id"),
@@ -229,7 +358,7 @@ def w2_structuring(
         expr("cast(_related_entity_ids as array<bigint>)").alias("related_entity_ids"),
         col("last_ts").alias("alert_ts"),
         # Alert score: 0.5 baseline + 0.05 * (count - threshold), capped 0.95.
-        (lit(0.5) + (col("suspicious_count") - lit(threshold_count)) * lit(0.05))
+        expr(f"least(0.95, 0.5 + (suspicious_count - {int(threshold_count)}) * 0.05)")
         .cast("double")
         .alias("alert_score"),
         when(col("suspicious_count") >= 6, lit("HIGH"))
@@ -238,17 +367,17 @@ def w2_structuring(
         .alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
-        lit("structuring").alias("alert_type"),
+        col("_type").alias("alert_type"),
         lit(run_id).alias("run_id"),
-        expr(
-            "concat('Entity ', cast(entity_id as string), ' made ', "
-            "cast(suspicious_count as string), ' structuring-band ', txn_currency, "
-            "' transactions between ', cast(first_ts as string), ' and ', "
-            "cast(last_ts as string))"
-        ).alias("narrative"),
+        col("_narrative").alias("narrative"),
         map_from_arrays(
-            array(lit("rule"), lit("threshold"), lit("window_hours")),
-            array(lit("W2_structuring"), lit(str(threshold_count)), lit(str(window_hours))),
+            array(lit("rule"), lit("threshold"), lit("window_hours"), lit("aggregation")),
+            array(
+                lit("W2_structuring"),
+                lit(str(threshold_count)),
+                lit(str(window_hours)),
+                col("_aggregation"),
+            ),
         ).alias("evidence"),
         # LB-125: wall-clock at rule execution. Batch = detection time;
         # continuous = the far end of detected_ts - ingest_ts (freshness /
@@ -259,6 +388,310 @@ def w2_structuring(
     return alerts
 
 
+# ---------------------------------------------------------------------------
+# Temporal path search shared by W3 (cycles) and W17 (open layering chains).
+# ---------------------------------------------------------------------------
+
+# Path-search budget. Every row the searches hold on an executor (edges, the
+# step frame, the live path levels) counts against it, and each level is
+# estimated before it is built, so the search skips with
+# RuleSkipped("path-cap") instead of filling the stage's scratch. The budget is
+# in rows, from bytes:
+#   1. LB_PATH_SEARCH_MAX_ROWS, when set to a positive integer;
+#   2. the running job's scratch: spark.executor.instances x the executor
+#      scratch PVC sizeLimit x PATH_SEARCH_SCRATCH_SHARE, divided by
+#      PATH_SEARCH_BYTES_PER_ROW;
+#   3. PATH_SEARCH_MAX_PATHS (gold-finalize at scale 10, 4 x 100 Gi).
+# PATH_SEARCH_BYTES_PER_ROW is a footprint, not a row size: peak local scratch
+# (cached and checkpointed blocks plus shuffle files, including the sampling
+# joins that estimate each level) per held row. Measured with
+# spark.local.dir polled every 0.5 s on a scale-0.25 corpus (6.67M
+# transfers): W3 peaked at 4.45 GB holding 26.2M rows (170 B per row), W17
+# at 5.25 GB holding 20.2M (260 B, including files W3 had not yet released;
+# the rules run back to back in one stage). 260 is used. The share leaves
+# 30% of scratch for the silver scan and the alert write. Projected at
+# scale 10, W3 holds about 1.05B rows at peak against a 1.16B budget on
+# gold-finalize (4 x 100 Gi); gold-refresh (2 x 100 Gi) skips it there. A
+# row's width grows with depth (more uetrs per path); the flat figure was
+# measured over all levels together. Before levels were checkpointed and
+# released, a review measured 430 B. These are resource guards, not
+# detection thresholds.
+PATH_SEARCH_BYTES_PER_ROW = 260
+PATH_SEARCH_SCRATCH_SHARE = 0.7
+PATH_SEARCH_MAX_PATHS = int(4 * 100 * 2**30 * PATH_SEARCH_SCRATCH_SHARE / PATH_SEARCH_BYTES_PER_ROW)
+PATH_SEARCH_MAX_ROWS_ENV = "LB_PATH_SEARCH_MAX_ROWS"
+PATH_SEARCH_NO_PVC_BYTES = 20 * 2**30
+_SCRATCH_SIZE_CONF = (
+    "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-local-dir-1.options.sizeLimit"
+)
+
+
+def _parse_size_bytes(text: str | None) -> int | None:
+    """Kubernetes quantity ("100Gi", "500G", "512Mi") in bytes, or None."""
+    import re
+
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGTP]i?)?\s*", text or "")
+    if not m:
+        return None
+    unit = m.group(2) or ""
+    power = "KMGTP".index(unit[0]) + 1 if unit else 0
+    base = 1024 if unit.endswith("i") else 1000
+    return int(float(m.group(1)) * base**power)
+
+
+def path_search_budget_rows(spark) -> int:
+    """Row budget for W3/W17 in the running job (see the table above)."""
+    import os
+
+    raw = os.environ.get(PATH_SEARCH_MAX_ROWS_ENV, "").strip()
+    if raw:
+        try:
+            if int(raw) > 0:
+                return int(raw)
+        except ValueError:
+            pass
+        print(f"[path-search] ignoring {PATH_SEARCH_MAX_ROWS_ENV}={raw!r}")
+    try:
+        conf = spark.sparkContext.getConf()
+        executors = int(conf.get("spark.executor.instances", "0") or 0)
+        scratch = _parse_size_bytes(conf.get(_SCRATCH_SIZE_CONF, None))
+    except Exception:  # noqa: BLE001
+        executors, scratch = 0, None
+    if executors > 0:
+        # No scratch PVC (platform.storage.scratch off, e.g. non-Portworx):
+        # Spark's local dirs are then an emptyDir with no size limit on the
+        # node's ephemeral storage, whose size the job cannot see. 20 Gi per
+        # executor is a conservative guess, not a known limit.
+        per_executor = scratch or PATH_SEARCH_NO_PVC_BYTES
+        return int(executors * per_executor * PATH_SEARCH_SCRATCH_SHARE / PATH_SEARCH_BYTES_PER_ROW)
+    return PATH_SEARCH_MAX_PATHS
+
+
+class _PathBudget:
+    """Rows one path search holds, against its budget.
+
+    ``admit`` checks the estimate first, so a level that would take the held
+    rows over the budget is never built, then materialises the frame
+    (``cut``: local checkpoint, which also drops its lineage and so frees the
+    shuffles behind it once unreferenced) and checks the real count.
+    """
+
+    def __init__(self, spark, rule: str, max_rows: int) -> None:
+        self.spark = spark
+        self.rule = rule
+        self.max_rows = max_rows
+        self.live = 0
+
+    def _skip(self, what: str, rows: int) -> None:
+        raise RuleSkipped(
+            "path-cap",
+            f"{self.rule} path search {what} {rows} rows with {self.live} held "
+            f"(budget {self.max_rows}; set {PATH_SEARCH_MAX_ROWS_ENV} when the "
+            "stage has the scratch for it)",
+        )
+
+    def check(self, estimate: float, label: str) -> None:
+        if self.live + estimate > self.max_rows:
+            self._skip(f"estimates {label} at", int(estimate))
+
+    def add(self, n: int, label: str, estimate: float | None = None) -> None:
+        self.live += n
+        est = "n/a" if estimate is None else str(int(estimate))
+        print(
+            f"[{self.rule}] {label} rows={n} estimate={est} held={self.live} budget={self.max_rows}"
+        )
+        if self.live > self.max_rows:
+            self._skip(f"holds {label} of", n)
+
+    def admit(self, df: DataFrame, estimate: float, label: str):
+        """Returns ``(checkpointed_df, rows)``."""
+        self.check(estimate, label)
+        cut = df.localCheckpoint(eager=True)
+        n = cut.count()
+        self.add(n, label, estimate)
+        return cut, n
+
+    def release(self, n: int) -> None:
+        """Forget ``n`` held rows whose frame the caller no longer references.
+
+        Local checkpoint blocks and shuffle files are removed by Spark's
+        ContextCleaner once the driver-side objects are collected; the GC
+        request makes that happen now rather than at the next periodic GC.
+        """
+        self.live -= n
+        try:
+            self.spark.sparkContext._jvm.System.gc()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _epoch_micros(df: DataFrame):
+    """txn_timestamp as epoch microseconds, independent of the session zone.
+
+    TIMESTAMP (silver): unix_micros. TIMESTAMP_NTZ (raw generator Parquet):
+    read as UTC wall-clock from calendar fields; a cast or timestampdiff
+    would apply the session zone and, outside UTC, shift or collapse wall
+    times inside a DST change.
+    """
+    from pyspark.sql.types import TimestampNTZType
+
+    if isinstance(df.schema["txn_timestamp"].dataType, TimestampNTZType):
+        return expr(
+            "datediff(to_date(txn_timestamp), DATE'1970-01-01') * 86400000000L"
+            " + (hour(txn_timestamp) * 3600L + minute(txn_timestamp) * 60L) * 1000000L"
+            " + cast(extract(SECOND FROM txn_timestamp) * 1000000 AS BIGINT)"
+        )
+    return expr("unix_micros(txn_timestamp)")
+
+
+def _flow_edges(silver_txns: DataFrame, with_amount: bool = False) -> DataFrame:
+    """Directed transfer edges for the path searches.
+
+    ``t`` is epoch microseconds, so two hops inside the same second still
+    order. For TIMESTAMP input (silver) it is unix_micros, which does not
+    depend on the session time zone. TIMESTAMP_NTZ input (raw generator
+    Parquet) is read as UTC wall-clock by arithmetic, not by a cast, since a
+    cast would apply the session zone and, outside UTC, shift or collapse
+    wall times inside a DST change. With ``with_amount`` only transfers with
+    a positive USD amount are kept (amount continuity needs one).
+    """
+    t = _epoch_micros(silver_txns)
+    cols = [
+        col("uetr"),
+        col("originator_id").alias("src"),
+        col("beneficiary_id").alias("dst"),
+        t.alias("t"),
+        col("txn_timestamp").alias("ts"),
+    ]
+    if with_amount:
+        cols.append(col("txn_amount_usd").cast("double").alias("amt"))
+    edges = silver_txns.select(*cols).filter(
+        col("src").isNotNull() & col("dst").isNotNull() & (col("src") != col("dst"))
+    )
+    if with_amount:
+        edges = edges.filter(col("amt").isNotNull() & (col("amt") > lit(0)))
+    return edges
+
+
+def _search_frames(
+    silver_txns: DataFrame,
+    rule: str,
+    bucket_us: int,
+    max_out_degree: int,
+    max_edges: int,
+    max_paths: int | None,
+    with_amount: bool,
+):
+    """Edges and the extension (step) frame, both held and budgeted.
+
+    Returns ``(budget, edges, n_edges, step, n_step)``. ``edges`` is
+    persisted (the caller unpersists it once level 2 is built); ``step`` is
+    persisted for the whole search.
+
+    The step frame holds every non-hub transfer. Hubs are accounts sending
+    more than ``max_out_degree`` transfers in any hop-window bucket (payment
+    processors); they are excluded as intermediaries so one processor does
+    not multiply every path. max_out_degree=200 per week is self-chosen.
+
+    Each transfer appears twice, under bucket ``floor(t / hop)`` and the one
+    before it. A path ending at time ``t_last`` in bucket ``b`` can only be
+    extended by a transfer in ``(t_last, t_last + hop]``, whose bucket is
+    ``b`` or ``b + 1``; joining on ``(node, b)`` therefore finds every valid
+    extension exactly once. Without the bucket the join key is the node
+    alone, and a busy beneficiary pairs every transfer it received over 60
+    months with every one it sent before the time filter runs. The frame is
+    hash-partitioned on the join key before it is persisted, so each level's
+    join shuffles only the path side.
+
+    W3 and W17 each build their own edges and step frames. Sharing them
+    within one detection pass would save one silver scan and one step build
+    per pass, but the driver isolates rules (and clears the cache after each
+    one), so it is not done.
+    """
+    from pyspark import StorageLevel
+
+    spark = silver_txns.sparkSession
+    budget = _PathBudget(
+        spark, rule, path_search_budget_rows(spark) if max_paths is None else max_paths
+    )
+    edges = _flow_edges(silver_txns, with_amount).persist(StorageLevel.MEMORY_AND_DISK)
+    n_edges = edges.count()
+    if n_edges > max_edges:
+        raise RuleSkipped(
+            "edge-cap",
+            f"edges={n_edges} max={max_edges} (raise max_edges to run {rule} at this scale)",
+        )
+    budget.add(n_edges, "edges")
+
+    bucket = (col("t") / lit(bucket_us)).cast("long")
+    hubs = (
+        edges.groupBy("src", bucket.alias("_w"))
+        .agg(count(lit(1)).alias("_n"))
+        .filter(col("_n") > max_out_degree)
+        .select(col("src").alias("hub"))
+        .distinct()
+    )
+    non_hub = edges.join(hubs, edges["src"] == hubs["hub"], "left_anti")
+    renamed = [
+        col("uetr").alias("e_uetr"),
+        col("src").alias("e_src"),
+        col("dst").alias("e_dst"),
+        col("t").alias("e_t"),
+        col("ts").alias("e_ts"),
+    ]
+    if with_amount:
+        renamed.append(col("amt").alias("e_amt"))
+    base = non_hub.select(*renamed)
+    e_bucket = (col("e_t") / lit(bucket_us)).cast("long")
+    parts = int(spark.conf.get("spark.sql.shuffle.partitions", "200"))
+    step = (
+        base.withColumn("_b", e_bucket)
+        .unionByName(base.withColumn("_b", e_bucket - lit(1)))
+        .repartition(parts, "e_src", "_b")
+    )
+    budget.check(2 * n_edges, "step")
+    step = step.persist(StorageLevel.MEMORY_AND_DISK)
+    n_step = step.count()
+    budget.add(n_step, "step", 2 * n_edges)
+    return budget, edges, n_edges, step, n_step
+
+
+def _extend_paths(paths: DataFrame, step: DataFrame, bucket_us: int) -> DataFrame:
+    """Join each path to the transfers that can follow its last hop.
+
+    A hop must start strictly after the previous one. Two transfers with the
+    same microsecond timestamp therefore never chain, in either order: the
+    data cannot say which came first, and neither rule guesses.
+    """
+    p_bucket = (col("t_last") / lit(bucket_us)).cast("long")
+    return (
+        paths.withColumn("_pb", p_bucket)
+        .join(step, (col("end") == col("e_src")) & (col("_pb") == col("_b")), "inner")
+        .filter(col("e_t") > col("t_last"))
+        .filter(col("e_t") <= col("t_last") + lit(bucket_us))
+        .drop("_pb", "_b")
+    )
+
+
+def _sampled_size(paths: DataFrame, n_paths: int, extend) -> float:
+    """Estimated row count of ``extend(paths)`` from a sample of the paths."""
+    if n_paths <= 0:
+        return 0.0
+    frac = min(1.0, 1_000_000 / n_paths)
+    if frac >= 1.0:
+        return float(extend(paths).count())
+    return extend(paths.sample(False, frac, seed=17)).count() / frac
+
+
+def _cut_small(df: DataFrame, budget: _PathBudget, label: str) -> DataFrame:
+    """Materialise a result frame (cycles, complete chains) and drop its
+    lineage, so the levels it came from can be released. Its rows stay held
+    until the rule ends and count against the budget."""
+    cut = df.localCheckpoint(eager=True)
+    budget.add(cut.count(), label)
+    return cut
+
+
 def w3_round_tripping(
     silver_txns: DataFrame,
     max_hops: int = 5,
@@ -266,6 +699,7 @@ def w3_round_tripping(
     total_window_days: int = 30,
     max_out_degree: int = 200,
     max_edges: int = 3_000_000_000,
+    max_paths: int | None = None,
     run_id: str = "unknown",
 ) -> DataFrame:
     """Round-tripping: funds that return to their originator through 2 to
@@ -277,101 +711,100 @@ def w3_round_tripping(
     The earlier form only found A -> B -> A, which none of the planted cycle
     typologies contain (cycle and cross_border_cycle route A -> B -> C -> D
     -> A), so it could not detect its designated typology. No amount
-    condition is applied: the parameters are scenario-style windows, not
-    derived from the generator.
+    condition is applied. The windows, max_hops and the hub cut are
+    self-chosen scenario parameters, not derived from the generator.
 
     Cost control: paths are extended hop by hop from every transfer, and
     each cycle is found once (starting from its earliest transfer, since hop
     times strictly increase). Entities sending more than ``max_out_degree``
     transfers in any hop window are treated as hubs (payment processors)
-    and excluded as intermediaries. Above ``max_edges`` transfers the rule
-    raises RuleSkipped("edge-cap").
+    and excluded as intermediaries. The extension join is keyed on (entity,
+    hop-window bucket). Each level is checkpointed and the one before it
+    released, so at most two levels are held. Above ``max_edges`` transfers
+    the rule raises RuleSkipped("edge-cap"); when a level would take the held
+    rows over the path-search budget (``max_paths`` rows, default
+    path_search_budget_rows) it raises RuleSkipped("path-cap").
 
     Emits one alert per cycle: entity_id is the originator, related_txn_ids
     the transfers in hop order.
     """
-    from pyspark import StorageLevel
-    from pyspark.sql.functions import array_contains, concat, size, unix_timestamp
+    from pyspark.sql.functions import array_contains, concat
 
-    edges = silver_txns.select(
-        col("uetr"),
-        col("originator_id").alias("src"),
-        col("beneficiary_id").alias("dst"),
-        unix_timestamp(col("txn_timestamp")).alias("t"),
-        col("txn_timestamp").alias("ts"),
-    ).filter(col("src").isNotNull() & col("dst").isNotNull() & (col("src") != col("dst")))
-    n_edges = edges.count()
-    if n_edges > max_edges:
-        raise RuleSkipped(
-            "edge-cap",
-            f"edges={n_edges} max={max_edges} (raise max_edges to run W3 at this scale)",
-        )
-    hop_s = hop_window_hours * 3600
-    total_s = total_window_days * 86400
-
-    # Hubs: busiest accounts by sends per hop window, excluded as
-    # intermediaries so one processor does not multiply every path.
-    per_window = edges.withColumn("_w", (col("t") / lit(hop_s)).cast("long"))
-    hubs = (
-        per_window.groupBy("src", "_w")
-        .agg(count(lit(1)).alias("_n"))
-        .filter(col("_n") > max_out_degree)
-        .select(col("src").alias("hub"))
-        .distinct()
+    spark = silver_txns.sparkSession
+    if max_hops < 2:
+        print(f"[W3] max_hops={max_hops}: a round trip needs at least 2 transfers")
+        return _empty_alerts_df(spark, run_id)
+    hop_us = hop_window_hours * 3_600_000_000
+    total_us = total_window_days * 86_400_000_000
+    budget, edges, n_edges, step, _ = _search_frames(
+        silver_txns, "W3", hop_us, max_out_degree, max_edges, max_paths, with_amount=False
     )
-    step = edges.join(hubs, edges["src"] == hubs["hub"], "left_anti").select(
-        col("uetr").alias("e_uetr"),
-        col("src").alias("e_src"),
-        col("dst").alias("e_dst"),
-        col("t").alias("e_t"),
-        col("ts").alias("e_ts"),
-    )
-    # persist, not checkpoint: the lineage is at most max_hops deep, and the
-    # union of closed cycles below would otherwise recompute earlier hops.
-    step = step.persist(StorageLevel.MEMORY_AND_DISK)
 
     paths = edges.select(
         col("src").alias("start"),
         col("dst").alias("end"),
         col("t").alias("t_first"),
         col("t").alias("t_last"),
-        col("ts").alias("ts_last"),
         array(col("uetr")).alias("uetrs"),
         array(col("src"), col("dst")).alias("nodes"),
     )
-    cycles = None
-    for _hop in range(2, max_hops + 1):
-        ext = (
-            paths.join(step, paths["end"] == step["e_src"], "inner")
-            .filter(col("e_t") > col("t_last"))
-            .filter(col("e_t") <= col("t_last") + lit(hop_s))
-            .filter(col("e_t") <= col("t_first") + lit(total_s))
-        )
-        closed = ext.filter(col("e_dst") == col("start")).select(
-            col("start"),
-            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
-            col("nodes"),
-            col("t_first"),
-            col("e_ts").alias("ts_last"),
-        )
-        cycles = closed if cycles is None else cycles.unionByName(closed)
-        if _hop == max_hops:
-            break
-        paths = (
-            ext.filter(~array_contains(col("nodes"), col("e_dst")))
-            .select(
-                col("start"),
-                col("e_dst").alias("end"),
-                col("t_first"),
-                col("e_t").alias("t_last"),
-                col("e_ts").alias("ts_last"),
-                concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
-                concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
-            )
-            .persist(StorageLevel.MEMORY_AND_DISK)
-        )
 
-    alerts = cycles.withColumn("hops", size(col("uetrs")))
+    def _ext(p: DataFrame) -> DataFrame:
+        return _extend_paths(p, step, hop_us).filter(col("e_t") <= col("t_first") + lit(total_us))
+
+    n_paths = n_edges
+    held_prev = n_edges  # level 1 is the edge frame
+    cycles = []
+    for _hop in range(2, max_hops + 1):
+        # The last level is only read for the transfers that close a cycle.
+        final = _hop == max_hops
+
+        def _build(p: DataFrame, final: bool = final) -> DataFrame:
+            e = _ext(p)
+            return e.filter(col("e_dst") == col("start")) if final else e
+
+        # Estimated from a sample of the paths at every level: a growth
+        # factor from earlier levels is wrong in both directions (a review
+        # measured a 45x under-estimate and a skip on a level that was empty).
+        est = _sampled_size(paths, n_paths, _build)
+        level, n = budget.admit(_build(paths), est, f"level {_hop}")
+        cycles.append(
+            _cut_small(
+                level.filter(col("e_dst") == col("start")).select(
+                    col("start"),
+                    concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+                    col("nodes"),
+                    col("t_first"),
+                    col("e_ts").alias("ts_last"),
+                ),
+                budget,
+                f"cycles {_hop}",
+            )
+        )
+        # The previous level (the edge frame, for level 2) is not read again.
+        if _hop == 2:
+            edges.unpersist()
+        paths = None
+        budget.release(held_prev)
+        held_prev = n
+        if final:
+            break
+        paths = level.filter(~array_contains(col("nodes"), col("e_dst"))).select(
+            col("start"),
+            col("e_dst").alias("end"),
+            col("t_first"),
+            col("e_t").alias("t_last"),
+            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+            concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
+        )
+        n_paths = n
+        level = None
+    step.unpersist()
+
+    found = cycles[0]
+    for c in cycles[1:]:
+        found = found.unionByName(c)
+    alerts = found.withColumn("hops", size(col("uetrs")))
     return alerts.select(
         expr("uuid()").alias("alert_id"),
         lit("W3_round_tripping").alias("rule_id"),
@@ -420,6 +853,254 @@ def w3_round_tripping(
     )
 
 
+def w17_layering_chain(
+    silver_txns: DataFrame,
+    min_hops: int = 3,
+    max_hops: int = 6,
+    hop_window_hours: int = 168,
+    min_forward_ratio: float = 0.8,
+    max_forward_ratio: float = 1.0,
+    max_out_degree: int = 200,
+    max_edges: int = 3_000_000_000,
+    max_paths: int | None = None,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Layering chain: funds passed along an open chain of at least
+    ``min_hops`` transfers A -> B -> C -> D, where each hop starts after the
+    previous one and within ``hop_window_hours`` of it, forwards between
+    ``min_forward_ratio`` and ``max_forward_ratio`` of the previous hop's USD
+    amount, and the chain does not return to its start (that is W3's cycle).
+
+    Thresholds (R2 provenance): min_forward_ratio 0.8, the seven-day hop
+    window, min_hops 3 and max_hops 6 are self-chosen scenario parameters (0.8
+    is the pass-through figure W4 also uses). None is derived from the
+    generator's stack windows, hop gaps or skim range, and they belong in the
+    threshold-cliff check. max_forward_ratio 1.0 is a physical bound, not a
+    tuning choice: an account cannot pass on more than it received, so the
+    cliff check must exempt it.
+
+    Precision decision: on a corpus with amount continuity this rule is
+    about 1% precise for stack (118 of 11,381 alerts touch a stack
+    transfer on Lane A's 2fb9259 corpus at scale 0.25, and a review found 25
+    of 2,191 at scale 0.05).
+    That is deliberate and published as is. Tightening min_hops, adding a
+    dwell limit or narrowing the ratio toward the generator's stack
+    parameters (hop gaps of 6-54 h, a 1-10% skim) would be tuning the rule
+    to the data (AML-GOALS R2). The planned structural cut is monitoring
+    customer accounts only (P10 stage 0).
+
+    Which chains are reported. Chains are searched from every transfer; a
+    chain is complete when no transfer can extend it, or when it reaches
+    ``max_hops`` (truncated; a longer run is then reported as overlapping
+    windows, one per start). A complete chain whose end can send the funds
+    back to its start is dropped. Of the rest:
+
+    - a chain that is a strict suffix of another reported chain is dropped:
+      it shows no transfer the longer one does not;
+    - chains that differ only in their first transfer are merged into one
+      alert. Several unrelated credits into one account can each carry the
+      amount onward; they feed one pass-through, not several.
+
+    Attribution: entity_id is the chain's first intermediary, the first
+    account seen to receive funds and pass on 80-100% of them within the
+    window. The first sender is only a payer: it may be innocent (an
+    employer, a customer, a hub), and several payers can feed one chain, so
+    alerting on it blames the wrong party. The senders stay in
+    related_entity_ids.
+
+    Transfers with equal timestamps never chain (see _extend_paths).
+
+    Cost control is the same as W3: hubs excluded as intermediaries, a join
+    keyed on (entity, hop-window bucket), checkpointed levels with at most
+    two held, and the ``max_edges`` / path-search budget skips. Amount
+    continuity prunes each level to the small share of onward transfers that
+    carry the amount.
+    """
+    from pyspark.sql.functions import array_contains, concat, element_at
+    from pyspark.sql.functions import slice as slice_
+
+    spark = silver_txns.sparkSession
+    min_hops = max(2, int(min_hops))
+    if max_hops < min_hops:
+        print(f"[W17] min_hops={min_hops} > max_hops={max_hops}: no chain can qualify")
+        return _empty_alerts_df(spark, run_id)
+
+    hop_us = hop_window_hours * 3_600_000_000
+    budget, edges, n_edges, step, _ = _search_frames(
+        silver_txns, "W17", hop_us, max_out_degree, max_edges, max_paths, with_amount=True
+    )
+
+    def _ext(p: DataFrame) -> DataFrame:
+        e = _extend_paths(p, step, hop_us)
+        return e.filter(col("e_amt") >= col("amt_last") * lit(min_forward_ratio)).filter(
+            col("e_amt") <= col("amt_last") * lit(max_forward_ratio)
+        )
+
+    def _advance(level: DataFrame) -> DataFrame:
+        return level.filter(~array_contains(col("nodes"), col("e_dst"))).select(
+            col("start"),
+            col("e_dst").alias("end"),
+            col("e_t").alias("t_last"),
+            col("e_amt").alias("amt_last"),
+            col("e_ts").alias("ts_last"),
+            # When the chain first qualifies: the time of its min_hops-th
+            # transfer. Used as alert_ts, the moment the rule could have
+            # fired; later onward hops extend the chain but do not delay it.
+            when(size(col("uetrs")) + lit(1) == lit(min_hops), col("e_ts"))
+            .otherwise(col("ts_q"))
+            .alias("ts_q"),
+            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+            concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
+        )
+
+    paths = edges.select(
+        col("src").alias("start"),
+        col("dst").alias("end"),
+        col("t").alias("t_last"),
+        col("amt").alias("amt_last"),
+        col("ts").alias("ts_last"),
+        when(lit(False), col("ts")).alias("ts_q"),  # null, typed like ts
+        array(col("uetr")).alias("uetrs"),
+        array(col("src"), col("dst")).alias("nodes"),
+    )
+    n_paths = n_edges
+    held_prev = n_edges
+    complete = []  # complete chains of >= min_hops transfers, per level
+    for hop in range(1, max_hops + 1):
+        # ``paths`` holds chains of ``hop`` transfers; ``level`` their
+        # one-transfer extensions. At max_hops only the extensions that
+        # return to the start are needed (to drop returning chains).
+        final = hop == max_hops
+
+        def _build(p: DataFrame, final: bool = final) -> DataFrame:
+            e = _ext(p)
+            return e.filter(col("e_dst") == col("start")) if final else e
+
+        # Sampled at every level; see w3_round_tripping.
+        est = _sampled_size(paths, n_paths, _build)
+        level, n = budget.admit(_build(paths), est, f"level {hop + 1}")
+        if hop >= min_hops:
+            returns = level.filter(col("e_dst") == col("start")).select("uetrs")
+            done = paths.join(returns, "uetrs", "left_anti")
+            if not final:
+                onward = level.filter(~array_contains(col("nodes"), col("e_dst")))
+                done = done.join(onward.select("uetrs"), "uetrs", "left_anti")
+            complete.append(
+                _cut_small(
+                    done.select("uetrs", "nodes", "ts_last", "ts_q"), budget, f"complete {hop}"
+                )
+            )
+            # Drop every reference to the previous level before releasing it.
+            done = returns = onward = None
+        if hop == 1:
+            edges.unpersist()
+        paths = None
+        budget.release(held_prev)
+        held_prev = n
+        if final:
+            break
+        paths = _advance(level)
+        n_paths = n
+        level = None
+    step.unpersist()
+
+    chains = complete[0]
+    for c in complete[1:]:
+        chains = chains.unionByName(c)
+    # Every strict suffix (of length >= min_hops) of each complete chain.
+    suffixes = (
+        "transform(sequence(2, greatest(2, size(uetrs) - {m} + 1)), "
+        "i -> slice(uetrs, i, size(uetrs) - i + 1))"
+    ).replace("{m}", str(min_hops))
+    covered = (
+        chains.select(explode(expr(suffixes)).alias("s"))
+        .filter(size(col("s")) >= lit(min_hops))
+        .select(col("s").alias("uetrs"))
+        .distinct()
+    )
+    kept = chains.join(covered, "uetrs", "left_anti")
+
+    # Merge chains that share everything after their first transfer.
+    n_t = size(col("uetrs"))
+    merged = (
+        kept.select(
+            slice_(col("uetrs"), 2, n_t - 1).alias("tail"),
+            slice_(col("nodes"), 2, n_t).alias("tail_nodes"),
+            element_at(col("uetrs"), 1).alias("first_uetr"),
+            element_at(col("nodes"), 1).alias("sender"),
+            col("ts_last"),
+            col("ts_q"),
+        )
+        .groupBy("tail", "tail_nodes")
+        .agg(
+            array_sort(collect_set("first_uetr")).alias("first_uetrs"),
+            array_sort(collect_set("sender")).alias("senders"),
+            max_("ts_last").alias("ts_last"),
+            max_("ts_q").alias("ts_q"),
+        )
+        .select(
+            element_at(col("tail_nodes"), 1).alias("entity"),
+            concat(col("first_uetrs"), col("tail")).alias("uetrs"),
+            array_distinct(concat(col("senders"), col("tail_nodes"))).alias("nodes"),
+            (size(col("tail")) + lit(1)).alias("hops"),
+            size(col("first_uetrs")).alias("feeders"),
+            col("ts_last"),
+            col("ts_q"),
+        )
+    )
+    return merged.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W17_layering_chain").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("entity").alias("entity_id"),
+        col("uetrs").alias("related_txn_ids"),
+        col("nodes").alias("related_entity_ids"),
+        # When the chain first qualified (see _advance), not when its last
+        # onward hop happened: scoring bounds alert_ts by the planted window.
+        col("ts_q").alias("alert_ts"),
+        # Longer chains are more deliberate. Bounded [0.6, 0.9].
+        expr("least(0.9, 0.3 + 0.1 * hops)").cast("double").alias("alert_score"),
+        when(col("hops") >= 5, lit("HIGH"))
+        .when(col("hops") >= 4, lit("MED"))
+        .otherwise(lit("LOW"))
+        .alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("layering_chain").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Entity ', cast(entity as string), ' passed on funds along ', "
+            "cast(hops as string), ' transfers (', cast(feeders as string), "
+            "' feeding credit(s)) ending ', cast(ts_last as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(
+                lit("rule"),
+                lit("hops"),
+                lit("feeders"),
+                lit("hop_window_hours"),
+                lit("min_forward_ratio"),
+                lit("max_forward_ratio"),
+                lit("max_out_degree"),
+            ),
+            array(
+                lit("W17_layering_chain"),
+                col("hops").cast("string"),
+                col("feeders").cast("string"),
+                lit(str(hop_window_hours)),
+                lit(str(min_forward_ratio)),
+                lit(str(max_forward_ratio)),
+                lit(str(max_out_degree)),
+            ),
+        ).alias("evidence"),
+        # LB-125: wall-clock at rule execution, appended LAST to match the
+        # gold.alerts DDL column order (positional INSERT ... SELECT *).
+        current_timestamp().alias("detected_ts"),
+    )
+
+
 def w4_risk_propagation(
     silver_txns: DataFrame,
     velocity_hours: int = 6,
@@ -455,8 +1136,19 @@ def w4_risk_propagation(
         col("txn_timestamp").alias("ts_out"),
     )
     seconds = velocity_hours * 3600
+    # Join on (entity, velocity-window bucket), not the entity alone: keyed
+    # on the entity, a busy account paired every credit it received over the
+    # corpus with every payment it sent before the time filter ran. An
+    # outgoing payment within ``seconds`` after a credit in bucket k lies in
+    # bucket k or k + 1, so each outgoing row is offered under both.
+    in_b = (unix_timestamp(col("ts_in")) / lit(seconds)).cast("long")
+    out_b = (unix_timestamp(col("ts_out")) / lit(seconds)).cast("long")
+    incoming = incoming.withColumn("_bi", in_b)
+    outgoing = outgoing.withColumn("_bo", out_b).unionByName(
+        outgoing.withColumn("_bo", out_b - lit(1))
+    )
     joined = (
-        incoming.join(outgoing, col("b") == col("b2"), "inner")
+        incoming.join(outgoing, (col("b") == col("b2")) & (col("_bi") == col("_bo")), "inner")
         .filter(col("ts_out") >= col("ts_in"))
         .filter((unix_timestamp(col("ts_out")) - unix_timestamp(col("ts_in"))) <= seconds)
         # amt_in > 0 guards against div-by-zero downstream on the score
@@ -1457,6 +2149,7 @@ _RULE_DISPATCH = {
     "W6_pep_counterparty": w6_pep_counterparty,
     "W7_cross_border_high_risk": w7_cross_border_high_risk,
     "W8_dormant_reactivation": w8_dormant_reactivation,
+    "W17_layering_chain": w17_layering_chain,
 }
 
 
