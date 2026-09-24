@@ -74,11 +74,7 @@ pub fn rgltry_item_fields() -> Fields {
         Field::new("dbt_cdt_rptg_ind", DataType::Utf8, true),
         Field::new("authrty_nm", DataType::Utf8, true),
         Field::new("authrty_ctry", DataType::Utf8, true),
-        Field::new(
-            "details",
-            DataType::List(rgltry_detail_field()),
-            true,
-        ),
+        Field::new("details", DataType::List(rgltry_detail_field()), true),
     ])
 }
 
@@ -98,14 +94,22 @@ pub fn pacs008_schema() -> SchemaRef {
     let ultmt = || DataType::Struct(ultmt_fields());
     Arc::new(Schema::new(vec![
         Field::new("msg_id", DataType::Utf8, true),
-        Field::new("cre_dt_tm", DataType::Timestamp(TimeUnit::Microsecond, None), true),
+        Field::new(
+            "cre_dt_tm",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            true,
+        ),
         Field::new("nb_of_txs", DataType::Int32, true),
         Field::new("ctrl_sum", dec18(), true),
         Field::new("ttl_intr_bk_sttlm_amt", dec18(), true),
         Field::new("intr_bk_sttlm_dt", DataType::Date32, true),
         Field::new(
             "sttlm_inf",
-            DataType::Struct(Fields::from(vec![Field::new("sttlm_mtd", DataType::Utf8, true)])),
+            DataType::Struct(Fields::from(vec![Field::new(
+                "sttlm_mtd",
+                DataType::Utf8,
+                true,
+            )])),
             true,
         ),
         Field::new(
@@ -310,7 +314,10 @@ mod tests {
             DataType::Timestamp(TimeUnit::Microsecond, Some(tz)) => {
                 assert_eq!(tz.as_ref(), "UTC");
             }
-            other => panic!("event_timestamp datatype = {:?}, expected Timestamp(us, UTC)", other),
+            other => panic!(
+                "event_timestamp datatype = {:?}, expected Timestamp(us, UTC)",
+                other
+            ),
         }
     }
 

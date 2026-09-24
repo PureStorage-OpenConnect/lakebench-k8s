@@ -311,7 +311,11 @@ pub fn build_batch(
             0
         };
         page_views.push(pv);
-        let tos: i32 = if pv > 0 { 30 + rng.below(3600) as i32 } else { 0 };
+        let tos: i32 = if pv > 0 {
+            30 + rng.below(3600) as i32
+        } else {
+            0
+        };
         time_on_site.push(tos);
         bounce_rates.push(if pv == 1 { 1.0 } else { 0.0 });
 
@@ -594,8 +598,7 @@ pub fn build_batch(
             fbuf.push_str("PRD");
             push_zero_padded(&mut fbuf, product_nums[i] as u64, 5);
             b_product_id.append_value(&fbuf);
-            b_product_category
-                .append_value(r::PRODUCT_CATEGORIES[product_cat_idx[i] as usize]);
+            b_product_category.append_value(r::PRODUCT_CATEGORIES[product_cat_idx[i] as usize]);
             b_click_count.append_value(click_counts_raw[i]);
             b_items_in_cart.append_value(items_in_cart_raw[i]);
         }
@@ -920,8 +923,20 @@ mod tests {
             .unwrap();
         for i in 0..batch.num_rows() {
             let is_support = itypes.value(i) == "support";
-            assert_eq!(tid.is_null(i), !is_support, "row {} ticket vs {}", i, itypes.value(i));
-            assert_eq!(iss.is_null(i), !is_support, "row {} issue vs {}", i, itypes.value(i));
+            assert_eq!(
+                tid.is_null(i),
+                !is_support,
+                "row {} ticket vs {}",
+                i,
+                itypes.value(i)
+            );
+            assert_eq!(
+                iss.is_null(i),
+                !is_support,
+                "row {} issue vs {}",
+                i,
+                itypes.value(i)
+            );
         }
     }
 
@@ -942,7 +957,13 @@ mod tests {
             .unwrap();
         for i in 0..batch.num_rows() {
             let is_member = mem.value(i);
-            assert_eq!(tier.is_null(i), !is_member, "row {}: member={}", i, is_member);
+            assert_eq!(
+                tier.is_null(i),
+                !is_member,
+                "row {}: member={}",
+                i,
+                is_member
+            );
         }
     }
 
@@ -1060,7 +1081,13 @@ mod tests {
             .unwrap();
         for i in 0..batch.num_rows() {
             if itypes.value(i) != "purchase" {
-                assert_eq!(amt.value(i), 0.0, "row {} non-purchase amt {}", i, amt.value(i));
+                assert_eq!(
+                    amt.value(i),
+                    0.0,
+                    "row {} non-purchase amt {}",
+                    i,
+                    amt.value(i)
+                );
             } else {
                 assert!(amt.value(i) >= 1.0 && amt.value(i) <= 9999.99);
             }
@@ -1085,14 +1112,25 @@ mod tests {
         for i in 0..batch.num_rows() {
             let t = itypes.value(i);
             let is_np = t == "login" || t == "support";
-            assert_eq!(cv.value(i).is_nan(), is_np, "row {} cart {} type {}", i, cv.value(i), t);
+            assert_eq!(
+                cv.value(i).is_nan(),
+                is_np,
+                "row {} cart {} type {}",
+                i,
+                cv.value(i),
+                t
+            );
         }
     }
 
     #[test]
     fn event_timestamp_has_utc_tz() {
         let batch = build(10);
-        let f = batch.schema().field_with_name("event_timestamp").unwrap().clone();
+        let f = batch
+            .schema()
+            .field_with_name("event_timestamp")
+            .unwrap()
+            .clone();
         match f.data_type() {
             arrow::datatypes::DataType::Timestamp(_, Some(tz)) => assert_eq!(tz.as_ref(), "UTC"),
             other => panic!("wrong dtype: {:?}", other),
@@ -1156,7 +1194,11 @@ mod tests {
         for i in 0..batch.num_rows() {
             let cid = cids.value(i);
             let is_member = mem.value(i);
-            let t = if tier.is_null(i) { None } else { Some(tier.value(i).to_string()) };
+            let t = if tier.is_null(i) {
+                None
+            } else {
+                Some(tier.value(i).to_string())
+            };
             let entry = (is_member, t);
             match seen.get(&cid) {
                 Some(prev) => assert_eq!(
@@ -1213,7 +1255,10 @@ mod tests {
         // Legacy-import rows should be corrupted at ~70x the rate of
         // primary_system rows. This is the whole point of M-R2 -- catches
         // regressions where dirty rate reverts to uniform.
-        let cfg = Config { rows_per_file: 20_000, ..small_cfg(20_000) };
+        let cfg = Config {
+            rows_per_file: 20_000,
+            ..small_cfg(20_000)
+        };
         let loyalty = r::LoyaltyLookup::build(42, cfg.customer_id_max);
         let sampler = r::CustomerIdSampler::new(cfg.customer_id_max);
         let batch = build_batch(&cfg, &loyalty, &sampler);
@@ -1229,8 +1274,7 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let clean: std::collections::HashSet<&str> =
-            r::CITIES.iter().map(|(c, _)| *c).collect();
+        let clean: std::collections::HashSet<&str> = r::CITIES.iter().map(|(c, _)| *c).collect();
         let mut legacy_total = 0u64;
         let mut legacy_dirty = 0u64;
         let mut primary_total = 0u64;
@@ -1240,11 +1284,15 @@ mod tests {
             match src.value(i) {
                 "legacy_import" => {
                     legacy_total += 1;
-                    if is_dirty { legacy_dirty += 1; }
+                    if is_dirty {
+                        legacy_dirty += 1;
+                    }
                 }
                 "primary_system" => {
                     primary_total += 1;
-                    if is_dirty { primary_dirty += 1; }
+                    if is_dirty {
+                        primary_dirty += 1;
+                    }
                 }
                 _ => {}
             }
@@ -1285,7 +1333,11 @@ mod tests {
             .unwrap();
         for i in 0..batch.num_rows() {
             let n: u32 = z.value(i).parse().unwrap();
-            assert!((10_000..=99_998).contains(&n), "zip {} out of Python range", n);
+            assert!(
+                (10_000..=99_998).contains(&n),
+                "zip {} out of Python range",
+                n
+            );
         }
         let p = batch
             .column_by_name("product_id")
@@ -1382,8 +1434,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        let mut counts: std::collections::HashMap<i64, u64> =
-            std::collections::HashMap::new();
+        let mut counts: std::collections::HashMap<i64, u64> = std::collections::HashMap::new();
         for i in 0..batch.num_rows() {
             *counts.entry(cid.value(i)).or_insert(0) += 1;
         }
@@ -1405,8 +1456,7 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        let mut lengths: std::collections::HashMap<&str, u32> =
-            std::collections::HashMap::new();
+        let mut lengths: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
         for i in 0..batch.num_rows() {
             *lengths.entry(sid.value(i)).or_insert(0) += 1;
         }
@@ -1423,10 +1473,7 @@ mod tests {
         );
         // Every non-truncated session must be in [5, 20]. Allow at most one
         // outlier (the last, possibly truncated).
-        let outliers = vals
-            .iter()
-            .filter(|&&l| !(5..=20).contains(&l))
-            .count();
+        let outliers = vals.iter().filter(|&&l| !(5..=20).contains(&l)).count();
         assert!(
             outliers <= 1,
             "expected at most 1 length outlier (truncated last), got {}: values {:?}",
@@ -1499,8 +1546,12 @@ mod tests {
             per_session_range
                 .entry(s)
                 .and_modify(|(lo, hi)| {
-                    if t < *lo { *lo = t; }
-                    if t > *hi { *hi = t; }
+                    if t < *lo {
+                        *lo = t;
+                    }
+                    if t > *hi {
+                        *hi = t;
+                    }
                 })
                 .or_insert((t, t));
         }
@@ -1548,7 +1599,11 @@ mod tests {
                 same += 1;
             }
         }
-        assert!(compared > 100, "not enough same-session comparisons: {}", compared);
+        assert!(
+            compared > 100,
+            "not enough same-session comparisons: {}",
+            compared
+        );
         let rate = same as f64 / compared as f64;
         // Expected ~0.59: two rows both keep (0.7^2 = 0.49) or both redraw
         // to same (0.3^2 * 0.2 = 0.018) or one-keep-one-redraw picking base
@@ -1564,8 +1619,14 @@ mod tests {
 
     #[test]
     fn file_id_isolates_content() {
-        let cfg0 = Config { file_id: 0, ..small_cfg(500) };
-        let cfg1 = Config { file_id: 1, ..small_cfg(500) };
+        let cfg0 = Config {
+            file_id: 0,
+            ..small_cfg(500)
+        };
+        let cfg1 = Config {
+            file_id: 1,
+            ..small_cfg(500)
+        };
         let loyalty = r::LoyaltyLookup::build(42, 10_000);
         let sampler = r::CustomerIdSampler::new(10_000);
         let a = build_batch(&cfg0, &loyalty, &sampler);
@@ -1589,6 +1650,11 @@ mod tests {
                 diffs += 1;
             }
         }
-        assert!(diffs > ca.len() / 2, "only {} of {} differ", diffs, ca.len());
+        assert!(
+            diffs > ca.len() / 2,
+            "only {} of {} differ",
+            diffs,
+            ca.len()
+        );
     }
 }

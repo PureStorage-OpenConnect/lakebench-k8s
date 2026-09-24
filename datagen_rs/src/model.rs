@@ -71,38 +71,91 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
     // memory during build is therefore roughly 2-3x the final world for the
     // arena columns, not 1x. Pod memory limits must budget for this.
     let sentinel = |first: &str, f: &(dyn Fn(usize) -> String + Sync)| -> Vec<String> {
-        (0..=n).into_par_iter().map(|i| if i == 0 { first.to_string() } else { f(i) }).collect()
+        (0..=n)
+            .into_par_iter()
+            .map(|i| if i == 0 { first.to_string() } else { f(i) })
+            .collect()
     };
 
-    let ty: Vec<i8> = (0..=n).into_par_iter()
-        .map(|i| if i == 0 { 0 } else { W::entity_type(i as u64, seed) }).collect();
-    let country: Vec<&'static str> = (0..=n).into_par_iter()
-        .map(|i| if i == 0 { "US" } else { W::HOME_CODES[W::home_country_idx(i as u64, seed)] })
+    let ty: Vec<i8> = (0..=n)
+        .into_par_iter()
+        .map(|i| {
+            if i == 0 {
+                0
+            } else {
+                W::entity_type(i as u64, seed)
+            }
+        })
         .collect();
-    let ccy: Vec<&'static str> = country.par_iter().map(|c| R::currency_for_country(c)).collect();
+    let country: Vec<&'static str> = (0..=n)
+        .into_par_iter()
+        .map(|i| {
+            if i == 0 {
+                "US"
+            } else {
+                W::HOME_CODES[W::home_country_idx(i as u64, seed)]
+            }
+        })
+        .collect();
+    let ccy: Vec<&'static str> = country
+        .par_iter()
+        .map(|c| R::currency_for_country(c))
+        .collect();
     // Build the hot per-entity strings into an arena. The parallel producer
     // stays as-is (build cost is ~1% of total), the from_vec is one sequential
     // pass; the arena is what emit reads at scale.
-    let names_vec: Vec<String> = (0..=n).into_par_iter().map(|i| {
-        if i == 0 { return "_".to_string(); }
-        let id = i as u64;
-        match ty[i] {
-            W::TYPE_PERSON => R::person_name(id, seed),
-            W::TYPE_COMPANY => R::company_name(id, country[i], seed),
-            _ => R::fi_name(id, seed),
-        }
-    }).collect();
+    let names_vec: Vec<String> = (0..=n)
+        .into_par_iter()
+        .map(|i| {
+            if i == 0 {
+                return "_".to_string();
+            }
+            let id = i as u64;
+            match ty[i] {
+                W::TYPE_PERSON => R::person_name(id, seed),
+                W::TYPE_COMPANY => R::company_name(id, country[i], seed),
+                _ => R::fi_name(id, seed),
+            }
+        })
+        .collect();
     let name = ArenaCol::from_vec(names_vec);
-    let street = ArenaCol::build_par(n, |i| if i == 0 { "_".into() } else { R::street(i as u64, country[i], seed) });
-    let town = ArenaCol::build_par(n, |i| if i == 0 { "_".into() } else { R::city(i as u64, country[i], seed) });
+    let street = ArenaCol::build_par(n, |i| {
+        if i == 0 {
+            "_".into()
+        } else {
+            R::street(i as u64, country[i], seed)
+        }
+    });
+    let town = ArenaCol::build_par(n, |i| {
+        if i == 0 {
+            "_".into()
+        } else {
+            R::city(i as u64, country[i], seed)
+        }
+    });
     // Reference-only columns: skipped for a dedicated-bronze pod.
-    let region = if bronze_only { Vec::new() } else { sentinel("_", &|i| R::region(i as u64, country[i], seed)) };
-    let postcode = if bronze_only { Vec::new() } else { sentinel("_", &|i| R::postcode(i as u64, country[i], seed)) };
+    let region = if bronze_only {
+        Vec::new()
+    } else {
+        sentinel("_", &|i| R::region(i as u64, country[i], seed))
+    };
+    let postcode = if bronze_only {
+        Vec::new()
+    } else {
+        sentinel("_", &|i| R::postcode(i as u64, country[i], seed))
+    };
     let email: Vec<String> = if bronze_only {
         Vec::new()
     } else {
-        (0..=n).into_par_iter()
-            .map(|i| if i == 0 { "_".to_string() } else { R::email(name.get(i), i as u64, country[i], seed) })
+        (0..=n)
+            .into_par_iter()
+            .map(|i| {
+                if i == 0 {
+                    "_".to_string()
+                } else {
+                    R::email(name.get(i), i as u64, country[i], seed)
+                }
+            })
             .collect()
     };
     // The bronze emit path recomputes IBAN/LEI/BIC per row (ids::iban_into etc.),
@@ -116,21 +169,43 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
             iban_for(&[cc.as_bytes()[0], cc.as_bytes()[1]], i as u64)
         })
     };
-    let lei = if bronze_only { Vec::new() } else { sentinel("_", &|i| lei_for(i as u64)) };
+    let lei = if bronze_only {
+        Vec::new()
+    } else {
+        sentinel("_", &|i| lei_for(i as u64))
+    };
     let bic: Vec<String> = if bronze_only {
         Vec::new()
     } else {
-        (0..=n).into_par_iter()
-            .map(|i| pool[bic_idx(i as u64, pool.len())].clone()).collect()
+        (0..=n)
+            .into_par_iter()
+            .map(|i| pool[bic_idx(i as u64, pool.len())].clone())
+            .collect()
     };
     let n_accounts: Vec<i32> = if bronze_only {
         Vec::new()
     } else {
-        (0..=n).into_par_iter()
-            .map(|i| if i == 0 { 0 } else { W::accounts_for(i as u64, seed) }).collect()
+        (0..=n)
+            .into_par_iter()
+            .map(|i| {
+                if i == 0 {
+                    0
+                } else {
+                    W::accounts_for(i as u64, seed)
+                }
+            })
+            .collect()
     };
-    let ring_sz: Vec<i64> = (0..=n).into_par_iter()
-        .map(|i| if i == 0 { 0 } else { W::ring_size(i as u64, ty[i], seed) }).collect();
+    let ring_sz: Vec<i64> = (0..=n)
+        .into_par_iter()
+        .map(|i| {
+            if i == 0 {
+                0
+            } else {
+                W::ring_size(i as u64, ty[i], seed)
+            }
+        })
+        .collect();
     // Per-entity activity rate = per-type base * persona multiplier, so accounts
     // have individual cadences. Indexed (not par_iter over ty) because rate_mult
     // needs the entity id. Index 0 is the unused sentinel.
@@ -148,10 +223,24 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
     // Per-entity persona amount shift (recentred, mean-preserving).
     let amount_logshift: Vec<f64> = (0..=n)
         .into_par_iter()
-        .map(|i| if i == 0 { 0.0 } else { W::amount_log_shift(i as u64, seed) })
+        .map(|i| {
+            if i == 0 {
+                0.0
+            } else {
+                W::amount_log_shift(i as u64, seed)
+            }
+        })
         .collect();
-    let ring_hit: Vec<f64> = ty.par_iter()
-        .map(|&t| if t < 0 { 0.0 } else { W::RING_HIT_RATE[t as usize] }).collect();
+    let ring_hit: Vec<f64> = ty
+        .par_iter()
+        .map(|&t| {
+            if t < 0 {
+                0.0
+            } else {
+                W::RING_HIT_RATE[t as usize]
+            }
+        })
+        .collect();
 
     World {
         seed,
@@ -169,8 +258,16 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
         lei,
         bic,
         ccy,
-        sanctioned: if bronze_only { Vec::new() } else { W::sanctioned_set(n, seed) },
-        pep: if bronze_only { Vec::new() } else { W::pep_set(n, seed) },
+        sanctioned: if bronze_only {
+            Vec::new()
+        } else {
+            W::sanctioned_set(n, seed)
+        },
+        pep: if bronze_only {
+            Vec::new()
+        } else {
+            W::pep_set(n, seed)
+        },
         n_accounts,
         ring_sz,
         activity,

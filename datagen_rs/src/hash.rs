@@ -36,7 +36,9 @@ impl Rng {
         // Hash the seed so that streams from adjacent seeds (e.g. consecutive
         // typology instance seeds) are independent, not one-step shifts of each
         // other. Without this, rng(s) and rng(s+1) share nearly every draw.
-        Self { state: splitmix64(seed ^ 0x243F_6A88_85A3_08D3) }
+        Self {
+            state: splitmix64(seed ^ 0x243F_6A88_85A3_08D3),
+        }
     }
     #[inline(always)]
     pub fn next_u64(&mut self) -> u64 {

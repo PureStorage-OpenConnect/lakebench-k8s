@@ -5,8 +5,8 @@ use std::io::Write;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array,
-    ListArray, MapArray, StringArray, StructArray,
+    ArrayRef, BooleanArray, Date32Array, Decimal128Array, Float64Array, Int64Array, ListArray,
+    MapArray, StringArray, StructArray,
 };
 use arrow::buffer::{OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
@@ -90,22 +90,28 @@ fn syn_overrides(w: &World, instances: &[Instance]) -> HashMap<usize, Override> 
         let base_phone = R::phone(base as u64, w.country[base], w.seed);
         let half = (cluster.len() / 2).max(1);
         for &e in &cluster[1..=half.min(cluster.len() - 1)] {
-            ov.insert(e as usize, Override {
-                street: Some(w.street.get(base).to_string()),
-                town: Some(w.town.get(base).to_string()),
-                postcode: Some(w.postcode[base].clone()),
-                email: Some(w.email[base].clone()),
-                phone: Some(base_phone.clone()),
-                ..Default::default()
-            });
+            ov.insert(
+                e as usize,
+                Override {
+                    street: Some(w.street.get(base).to_string()),
+                    town: Some(w.town.get(base).to_string()),
+                    postcode: Some(w.postcode[base].clone()),
+                    email: Some(w.email[base].clone()),
+                    phone: Some(base_phone.clone()),
+                    ..Default::default()
+                },
+            );
         }
         for (k, &e) in cluster[1 + half..].iter().enumerate() {
-            ov.insert(e as usize, Override {
-                name: Some(name_variant(w.name.get(base), k % 5)),
-                email: Some(email_typo(&w.email[base])),
-                phone: Some(phone_variant(&base_phone)),
-                ..Default::default()
-            });
+            ov.insert(
+                e as usize,
+                Override {
+                    name: Some(name_variant(w.name.get(base), k % 5)),
+                    email: Some(email_typo(&w.email[base])),
+                    phone: Some(phone_variant(&base_phone)),
+                    ..Default::default()
+                },
+            );
         }
     }
     ov
@@ -129,22 +135,59 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
         let o = ov.get(&i);
         ids.push(i as i64);
         etype.push(TYPE_LABELS[w.ty[i] as usize].to_string());
-        let nm = o.and_then(|x| x.name.clone()).unwrap_or_else(|| w.name.get(i).to_string());
+        let nm = o
+            .and_then(|x| x.name.clone())
+            .unwrap_or_else(|| w.name.get(i).to_string());
         names.push(nm);
-        st.push(o.and_then(|x| x.street.clone()).unwrap_or_else(|| w.street.get(i).to_string()));
-        tw.push(o.and_then(|x| x.town.clone()).unwrap_or_else(|| w.town.get(i).to_string()));
+        st.push(
+            o.and_then(|x| x.street.clone())
+                .unwrap_or_else(|| w.street.get(i).to_string()),
+        );
+        tw.push(
+            o.and_then(|x| x.town.clone())
+                .unwrap_or_else(|| w.town.get(i).to_string()),
+        );
         rg.push(w.region[i].clone());
-        pc.push(o.and_then(|x| x.postcode.clone()).unwrap_or_else(|| w.postcode[i].clone()));
+        pc.push(
+            o.and_then(|x| x.postcode.clone())
+                .unwrap_or_else(|| w.postcode[i].clone()),
+        );
         ctry.push(w.country[i].to_string());
-        em.push(o.and_then(|x| x.email.clone()).unwrap_or_else(|| w.email[i].clone()));
-        ph.push(o.and_then(|x| x.phone.clone()).unwrap_or_else(|| R::phone(i as u64, w.country[i], w.seed)));
-        lei.push(if w.ty[i] == TYPE_PERSON { None } else { Some(w.lei[i].clone()) });
-        bic.push(if w.ty[i] == TYPE_FI { Some(w.bic[i].clone()) } else { None });
-        sanc.push(if w.sanctioned[i] { "SDN".to_string() } else { "clear".to_string() });
+        em.push(
+            o.and_then(|x| x.email.clone())
+                .unwrap_or_else(|| w.email[i].clone()),
+        );
+        ph.push(
+            o.and_then(|x| x.phone.clone())
+                .unwrap_or_else(|| R::phone(i as u64, w.country[i], w.seed)),
+        );
+        lei.push(if w.ty[i] == TYPE_PERSON {
+            None
+        } else {
+            Some(w.lei[i].clone())
+        });
+        bic.push(if w.ty[i] == TYPE_FI {
+            Some(w.bic[i].clone())
+        } else {
+            None
+        });
+        sanc.push(if w.sanctioned[i] {
+            "SDN".to_string()
+        } else {
+            "clear".to_string()
+        });
         pep.push(w.pep[i]);
-        let mut r = match w.ty[i] { TYPE_FI => 0.3, TYPE_PERSON => 0.05, _ => 0.15 };
-        if w.sanctioned[i] { r = (r + 0.6f64).min(0.99); }
-        if w.pep[i] { r = (r + 0.3f64).min(0.99); }
+        let mut r = match w.ty[i] {
+            TYPE_FI => 0.3,
+            TYPE_PERSON => 0.05,
+            _ => 0.15,
+        };
+        if w.sanctioned[i] {
+            r = (r + 0.6f64).min(0.99);
+        }
+        if w.pep[i] {
+            r = (r + 0.3f64).min(0.99);
+        }
         risk.push(r);
     }
     let legal = names.clone();
@@ -233,12 +276,17 @@ fn account_chunk(w: &World, lo: usize, hi: usize) -> RecordBatch {
             let od = base_open + (splitmix64(id ^ 0x0DA7E) % span_open as u64) as i32;
             opened.push(od);
             let cm = (splitmix64(id ^ 0xC1) as f64 / 18446744073709551616.0) < 0.02;
-            closed.push(if cm { Some(od + (splitmix64(id) % 365) as i32 + 180) } else { None });
+            closed.push(if cm {
+                Some(od + (splitmix64(id) % 365) as i32 + 180)
+            } else {
+                None
+            });
         }
     }
     let total = acct_id.len();
-    let balance =
-        Decimal128Array::from(vec![None as Option<i128>; total]).with_precision_and_scale(18, 2).unwrap();
+    let balance = Decimal128Array::from(vec![None as Option<i128>; total])
+        .with_precision_and_scale(18, 2)
+        .unwrap();
     let cols: Vec<ArrayRef> = vec![
         Arc::new(Int64Array::from(acct_id)),
         sarr(iban),
@@ -294,9 +342,21 @@ pub fn manifest_schema() -> SchemaRef {
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
             true,
         ),
-        Field::new("injection_ts_start", DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None), true),
-        Field::new("injection_ts_end", DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None), true),
-        Field::new("injection_parameters", DataType::Map(Arc::new(entries), false), true),
+        Field::new(
+            "injection_ts_start",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new(
+            "injection_ts_end",
+            DataType::Timestamp(arrow::datatypes::TimeUnit::Microsecond, None),
+            true,
+        ),
+        Field::new(
+            "injection_parameters",
+            DataType::Map(Arc::new(entries), false),
+            true,
+        ),
         Field::new("expected_workload", DataType::Utf8, true),
         Field::new("severity", DataType::Utf8, true),
         Field::new("seed", DataType::Int64, true),
@@ -317,8 +377,8 @@ pub fn build_manifest(
     seed: i64,
     inst_uids: &std::collections::HashMap<String, Vec<u64>>,
 ) -> RecordBatch {
-    use arrow::array::TimestampMicrosecondArray;
     use crate::ids::uuid_v4_into;
+    use arrow::array::TimestampMicrosecondArray;
     let m = instances.len();
     let tid: Vec<String> = instances.iter().map(|i| i.id.clone()).collect();
     let ttype: Vec<String> = instances.iter().map(|i| i.typ.to_string()).collect();
@@ -367,7 +427,10 @@ pub fn build_manifest(
     // injection_parameters map: one entry per instance {rows_per_instance: N}
     let keys = StringArray::from_iter_values(vec!["rows_per_instance".to_string(); m]);
     let vals = StringArray::from_iter_values(
-        instances.iter().map(|i| i.rows_per_instance.to_string()).collect::<Vec<_>>(),
+        instances
+            .iter()
+            .map(|i| i.rows_per_instance.to_string())
+            .collect::<Vec<_>>(),
     );
     let entries = StructArray::new(
         Fields::from(vec![
@@ -397,7 +460,9 @@ pub fn build_manifest(
         Arc::new(map),
         sarr(instances.iter().map(|i| i.workload.to_string()).collect()),
         sarr(instances.iter().map(|i| i.severity.to_string()).collect()),
-        Arc::new(Int64Array::from(instances.iter().map(|i| i.seed).collect::<Vec<_>>())),
+        Arc::new(Int64Array::from(
+            instances.iter().map(|i| i.seed).collect::<Vec<_>>(),
+        )),
         sarr(vec![MODEL_VERSION.to_string(); m]),
     ];
     RecordBatch::try_new(manifest_schema(), cols).unwrap()
@@ -432,7 +497,12 @@ fn name_variant(name: &str, kind: usize) -> String {
 }
 
 fn email_typo(email: &str) -> String {
-    for (k, v) in [("gmail", "gmial"), ("yahoo", "yaoo"), ("hotmail", "hotnail"), ("outlook", "outlok")] {
+    for (k, v) in [
+        ("gmail", "gmial"),
+        ("yahoo", "yaoo"),
+        ("hotmail", "hotnail"),
+        ("outlook", "outlok"),
+    ] {
         if email.contains(k) {
             return email.replacen(k, v, 1);
         }

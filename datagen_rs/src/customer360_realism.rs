@@ -27,17 +27,35 @@ pub const CHANNELS: [&str; 5] = ["web", "mobile_app", "store", "call_center", "s
 pub const DEVICE_TYPES: [&str; 3] = ["desktop", "mobile", "tablet"];
 pub const BROWSERS: [&str; 4] = ["chrome", "safari", "firefox", "edge"];
 pub const LOYALTY_TIERS: [&str; 3] = ["bronze", "silver", "gold"];
-pub const EMAIL_DOMAINS: [&str; 5] =
-    ["gmail.com", "yahoo.com", "outlook.com", "icloud.com", "hotmail.com"];
-pub const OPERATING_SYSTEMS: [&str; 5] =
-    ["Windows NT 10.0", "macOS 14.0", "Linux", "iOS 17", "Android 14"];
+pub const EMAIL_DOMAINS: [&str; 5] = [
+    "gmail.com",
+    "yahoo.com",
+    "outlook.com",
+    "icloud.com",
+    "hotmail.com",
+];
+pub const OPERATING_SYSTEMS: [&str; 5] = [
+    "Windows NT 10.0",
+    "macOS 14.0",
+    "Linux",
+    "iOS 17",
+    "Android 14",
+];
 
-pub const DATA_QUALITY_FLAGS: [&str; 4] =
-    ["clean", "duplicate_suspected", "incomplete_data", "format_inconsistent"];
+pub const DATA_QUALITY_FLAGS: [&str; 4] = [
+    "clean",
+    "duplicate_suspected",
+    "incomplete_data",
+    "format_inconsistent",
+];
 pub const DATA_QUALITY_WEIGHTS: [f64; 4] = [0.92, 0.02, 0.03, 0.03];
 
-pub const DATA_SOURCES: [&str; 4] =
-    ["primary_system", "legacy_import", "manual_entry", "third_party_api"];
+pub const DATA_SOURCES: [&str; 4] = [
+    "primary_system",
+    "legacy_import",
+    "manual_entry",
+    "third_party_api",
+];
 pub const DATA_SOURCE_WEIGHTS: [f64; 4] = [0.70, 0.15, 0.10, 0.05];
 
 /// Per-source dirty-data rate. Real pipelines don't corrupt data uniformly:
@@ -390,7 +408,9 @@ pub struct RowScratch {
 
 impl RowScratch {
     pub fn new() -> Self {
-        Self { buf: String::with_capacity(128) }
+        Self {
+            buf: String::with_capacity(128),
+        }
     }
 }
 
@@ -918,12 +938,12 @@ mod tests {
         // later. Matches datagen/generate.py:421-434 mode-by-mode.
         let src = "user1234@gmail.com";
         let cases: [(u8, &str); 6] = [
-            (0, "user1234gmail.com"),          // missing @
-            (1, "USER1234@GMAIL.COM"),         // ALL CAPS
-            (2, "  user1234@gmail.com  "),     // whitespace pad
-            (3, "user1234@@gmail.com"),        // double @
-            (4, "user1234@gmail"),             // strip TLD (rfind('.'))
-            (5, "user1234.at.gmail.com"),      // @ -> .at.
+            (0, "user1234gmail.com"),      // missing @
+            (1, "USER1234@GMAIL.COM"),     // ALL CAPS
+            (2, "  user1234@gmail.com  "), // whitespace pad
+            (3, "user1234@@gmail.com"),    // double @
+            (4, "user1234@gmail"),         // strip TLD (rfind('.'))
+            (5, "user1234.at.gmail.com"),  // @ -> .at.
         ];
         for (mode, want) in cases {
             let mut out = String::new();
@@ -978,11 +998,7 @@ mod tests {
         for _ in 0..20 {
             let mut buf = String::new();
             append_user_agent(&mut rng, &mut buf);
-            assert!(
-                BROWSERS.iter().any(|b| buf.starts_with(b)),
-                "ua = {}",
-                buf
-            );
+            assert!(BROWSERS.iter().any(|b| buf.starts_with(b)), "ua = {}", buf);
             assert!(buf.contains('/'));
             assert!(buf.contains(") ") || buf.ends_with(')'));
         }
@@ -995,7 +1011,9 @@ mod tests {
             let mut buf = String::new();
             append_fingerprint(&mut rng, &mut buf);
             assert_eq!(buf.len(), 64);
-            assert!(buf.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+            assert!(buf
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
         }
     }
 
@@ -1006,7 +1024,9 @@ mod tests {
             let mut buf = String::new();
             append_payload_hex(&mut rng, &mut buf, kb);
             assert_eq!(buf.len(), kb * 1024 * 2, "kb={}", kb);
-            assert!(buf.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
+            assert!(buf
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()));
         }
     }
 

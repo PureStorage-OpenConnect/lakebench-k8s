@@ -20,8 +20,8 @@ use crate::model::World;
 use crate::schema::*;
 
 const PURPOSES: [&str; 15] = [
-    "SALA", "COMC", "GDDS", "SUPP", "TRAD", "INTC", "TREA", "CASH", "DIVI", "INTE", "LOAN",
-    "PENS", "TAXS", "RENT", "SCVE",
+    "SALA", "COMC", "GDDS", "SUPP", "TRAD", "INTC", "TREA", "CASH", "DIVI", "INTE", "LOAN", "PENS",
+    "TAXS", "RENT", "SCVE",
 ];
 const PURPOSE_W: [f64; 15] = [
     0.15, 0.10, 0.08, 0.10, 0.15, 0.05, 0.03, 0.08, 0.02, 0.03, 0.04, 0.03, 0.05, 0.05, 0.04,
@@ -31,8 +31,8 @@ const CLR_CHANL: [&str; 4] = ["RTGS", "RTNS", "MPNS", "BOOK"];
 const SVC_LVL: [&str; 5] = ["SEPA", "URGP", "NURG", "PRPT", "G001"];
 const INSTR_PRTY: [&str; 2] = ["NORM", "HIGH"];
 const REGULATORS: [&str; 16] = [
-    "FinCEN", "FCA", "BaFin", "ACPR", "FINMA", "MAS", "FSA", "CBUAE", "RBI", "FINTRAC",
-    "AUSTRAC", "SAFE", "CNBV", "SBP", "CIMA", "APRA",
+    "FinCEN", "FCA", "BaFin", "ACPR", "FINMA", "MAS", "FSA", "CBUAE", "RBI", "FINTRAC", "AUSTRAC",
+    "SAFE", "CNBV", "SBP", "CIMA", "APRA",
 ];
 
 #[inline]
@@ -50,7 +50,11 @@ fn nb_from(mask: &[bool]) -> Option<NullBuffer> {
 }
 
 fn dec18(v: Vec<i128>) -> ArrayRef {
-    Arc::new(Decimal128Array::from(v).with_precision_and_scale(18, 5).unwrap())
+    Arc::new(
+        Decimal128Array::from(v)
+            .with_precision_and_scale(18, 5)
+            .unwrap(),
+    )
 }
 
 /// Constant string column of length n, built once.
@@ -75,7 +79,11 @@ pub struct Batch<'a> {
 }
 
 fn agent(bicfi: ArrayRef, lei: ArrayRef, nm: ArrayRef, nulls: Option<NullBuffer>) -> ArrayRef {
-    Arc::new(StructArray::new(agent_fields(), vec![bicfi, lei, nm], nulls))
+    Arc::new(StructArray::new(
+        agent_fields(),
+        vec![bicfi, lei, nm],
+        nulls,
+    ))
 }
 
 pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
@@ -198,7 +206,11 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         let cross_ccy = uf(s ^ 0xDDBB) < 0.10;
         let other = if ccy == "USD" { "EUR" } else { "USD" };
         let ic = if cross_ccy { other } else { ccy };
-        let xf = if cross_ccy { fx_to_usd(ccy) / fx_to_usd(ic) } else { 1.0 };
+        let xf = if cross_ccy {
+            fx_to_usd(ccy) / fx_to_usd(ic)
+        } else {
+            1.0
+        };
         xchg_i.push((xf * 1e10).round() as i128);
         instd_amt_i.push((amt * xf * 100_000.0).round() as i128);
         b_ictry.append_value(ic);
@@ -358,21 +370,55 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
     let intrmy1 = agent(i1_bic, lei_o.clone(), corr.clone(), nb_from(&chain1));
     let intrmy2 = agent(i2_bic, lei_o.clone(), corr.clone(), nb_from(&chain2));
     let intrmy3 = agent(i3_bic, lei_o.clone(), corr.clone(), nb_from(&chain3));
-    let prvs1 = agent(prvs_bic.clone(), lei_o.clone(), corr.clone(), nb_from(&prvs_m));
+    let prvs1 = agent(
+        prvs_bic.clone(),
+        lei_o.clone(),
+        corr.clone(),
+        nb_from(&prvs_m),
+    );
     let allnull = vec![false; n];
-    let prvs2 = agent(prvs_bic.clone(), lei_o.clone(), corr.clone(), nb_from(&allnull));
+    let prvs2 = agent(
+        prvs_bic.clone(),
+        lei_o.clone(),
+        corr.clone(),
+        nb_from(&allnull),
+    );
     let prvs3 = agent(prvs_bic, lei_o.clone(), corr, nb_from(&allnull));
 
-    let ultmt_dbtr = ultmt(name_o.clone(), lei_o.clone(), ct_o.clone(), nb_from(&ultd_m));
-    let ultmt_cdtr = ultmt(name_c.clone(), lei_c.clone(), ct_c.clone(), nb_from(&ultc_m));
+    let ultmt_dbtr = ultmt(
+        name_o.clone(),
+        lei_o.clone(),
+        ct_o.clone(),
+        nb_from(&ultd_m),
+    );
+    let ultmt_cdtr = ultmt(
+        name_c.clone(),
+        lei_c.clone(),
+        ct_c.clone(),
+        nb_from(&ultc_m),
+    );
     let initg_pty: ArrayRef = Arc::new(StructArray::new(
         initg_fields(),
         vec![name_o.clone(), lei_o.clone()],
         nb_from(&initg_m),
     ));
 
-    let dbtr = party(name_o, st_o, tw_o, ct_o.clone(), lei_o.clone(), null_str.clone());
-    let cdtr = party(name_c, st_c, tw_c, ct_c.clone(), lei_c.clone(), null_str.clone());
+    let dbtr = party(
+        name_o,
+        st_o,
+        tw_o,
+        ct_o.clone(),
+        lei_o.clone(),
+        null_str.clone(),
+    );
+    let cdtr = party(
+        name_c,
+        st_c,
+        tw_c,
+        ct_c.clone(),
+        lei_c.clone(),
+        null_str.clone(),
+    );
     let dbtr_acct = acct(iban_o, ccy_arr.clone(), null_str.clone());
     let cdtr_acct = acct(iban_c, ccy_arr.clone(), null_str.clone());
 
@@ -400,7 +446,11 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         ccy_arr,
         dec18(instd_amt_i),
         ictry,
-        Arc::new(Decimal128Array::from(xchg_i).with_precision_and_scale(11, 10).unwrap()),
+        Arc::new(
+            Decimal128Array::from(xchg_i)
+                .with_precision_and_scale(11, 10)
+                .unwrap(),
+        ),
         chrg,
         intrmy1,
         intrmy2,
@@ -430,7 +480,14 @@ fn ultmt(nm: ArrayRef, lei: ArrayRef, ctry: ArrayRef, nulls: Option<NullBuffer>)
     Arc::new(StructArray::new(ultmt_fields(), vec![nm, lei, ctry], nulls))
 }
 
-fn party(nm: ArrayRef, st: ArrayRef, tw: ArrayRef, ct: ArrayRef, lei: ArrayRef, null_str: ArrayRef) -> ArrayRef {
+fn party(
+    nm: ArrayRef,
+    st: ArrayRef,
+    tw: ArrayRef,
+    ct: ArrayRef,
+    lei: ArrayRef,
+    null_str: ArrayRef,
+) -> ArrayRef {
     let addr = StructArray::new(
         Fields::from(vec![
             Field::new("strt_nm", DataType::Utf8, true),
@@ -448,11 +505,19 @@ fn party(nm: ArrayRef, st: ArrayRef, tw: ArrayRef, ct: ArrayRef, lei: ArrayRef, 
         vec![null_str, lei],
         None,
     );
-    Arc::new(StructArray::new(party_fields(), vec![nm, Arc::new(addr), Arc::new(id), ct], None))
+    Arc::new(StructArray::new(
+        party_fields(),
+        vec![nm, Arc::new(addr), Arc::new(id), ct],
+        None,
+    ))
 }
 
 fn acct(iban: ArrayRef, ccy: ArrayRef, null_str: ArrayRef) -> ArrayRef {
-    Arc::new(StructArray::new(acct_fields(), vec![iban, null_str, ccy], None))
+    Arc::new(StructArray::new(
+        acct_fields(),
+        vec![iban, null_str, ccy],
+        None,
+    ))
 }
 
 fn offsets_from_counts(counts: &[i32]) -> OffsetBuffer<i32> {
@@ -478,7 +543,12 @@ fn build_rmt_ustrd(mask: &[bool], txn_seed: &[u64]) -> ArrayRef {
         }
     }
     let field = Arc::new(Field::new("item", DataType::Utf8, true));
-    Arc::new(ListArray::new(field, offsets_from_counts(&counts), Arc::new(vals.finish()), nb_from(mask)))
+    Arc::new(ListArray::new(
+        field,
+        offsets_from_counts(&counts),
+        Arc::new(vals.finish()),
+        nb_from(mask),
+    ))
 }
 
 fn build_rmt_strd(mask: &[bool], txn_seed: &[u64], amt_i: &[i128]) -> ArrayRef {
@@ -499,8 +569,17 @@ fn build_rmt_strd(mask: &[bool], txn_seed: &[u64], amt_i: &[i128]) -> ArrayRef {
         vec![Arc::new(refs.finish()), dec18(amts)],
         None,
     );
-    let field = Arc::new(Field::new("item", DataType::Struct(rmt_strd_fields()), true));
-    Arc::new(ListArray::new(field, offsets_from_counts(&counts), Arc::new(values), nb_from(mask)))
+    let field = Arc::new(Field::new(
+        "item",
+        DataType::Struct(rmt_strd_fields()),
+        true,
+    ));
+    Arc::new(ListArray::new(
+        field,
+        offsets_from_counts(&counts),
+        Arc::new(values),
+        nb_from(mask),
+    ))
 }
 
 fn build_rgltry(
@@ -555,6 +634,15 @@ fn build_rgltry(
         ],
         None,
     );
-    let field = Arc::new(Field::new("item", DataType::Struct(rgltry_item_fields()), true));
-    Arc::new(ListArray::new(field, offsets_from_counts(&outer_counts), Arc::new(items), nb_from(mask)))
+    let field = Arc::new(Field::new(
+        "item",
+        DataType::Struct(rgltry_item_fields()),
+        true,
+    ));
+    Arc::new(ListArray::new(
+        field,
+        offsets_from_counts(&outer_counts),
+        Arc::new(items),
+        nb_from(mask),
+    ))
 }

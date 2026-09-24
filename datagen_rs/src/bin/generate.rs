@@ -220,7 +220,8 @@ fn pacs008_main() {
     if !(1..=12 * 200).contains(&corpus_months) {
         eprintln!(
             "--corpus-months must be in 1..={} months; got {}",
-            12 * 200, corpus_months
+            12 * 200,
+            corpus_months
         );
         std::process::exit(2);
     }
@@ -254,7 +255,10 @@ fn pacs008_main() {
     // bounds, but a future change to days_from_civil could still push span_us
     // <= 0 for some pathological (year, month) combo.
     if span_us <= 0 {
-        eprintln!("computed corpus window is non-positive; corpus_months={}", corpus_months);
+        eprintln!(
+            "computed corpus window is non-positive; corpus_months={}",
+            corpus_months
+        );
         std::process::exit(2);
     }
 
@@ -295,7 +299,8 @@ fn pacs008_main() {
 
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
-    let instances = datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
+    let instances =
+        datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
     // Instance-id -> list of uids for the rows emitted for that instance.
     // Populated at typology-scheduling time so it's deterministic (both
@@ -326,12 +331,14 @@ fn pacs008_main() {
     let mut trng = Rng::new((seed as u64) ^ 0x7791);
     for inst in &instances {
         let is_dormant = inst.typ == "dormant_reactivation";
-        for (row_idx, r) in datagen_rs::typology::emit_instance(inst).into_iter().enumerate() {
+        for (row_idx, r) in datagen_rs::typology::emit_instance(inst)
+            .into_iter()
+            .enumerate()
+        {
             // A NON-dormant typology row whose originator is a dormant
             // participant inside its suppression window would fill the dormancy
             // gap -- drop it. Dormant-instance rows (anchor + burst) are exempt.
-            if !is_dormant
-                && in_suppress_window(&is_suppressed, &suppress_windows, r.orig, r.ts_us)
+            if !is_dormant && in_suppress_window(&is_suppressed, &suppress_windows, r.orig, r.ts_us)
             {
                 continue;
             }
@@ -353,7 +360,12 @@ fn pacs008_main() {
             let fid = (((r.ts_us - start_us) / step_us).clamp(0, total_files - 1)) as usize;
             let uid = typology_uid(inst.seed, row_idx);
             typ_by_file[fid].push(TypRow {
-                orig: r.orig, bene: r.bene, ts_us: r.ts_us, amount, ccy, uid,
+                orig: r.orig,
+                bene: r.bene,
+                ts_us: r.ts_us,
+                amount,
+                ccy,
+                uid,
             });
             inst_uids.entry(inst.id.clone()).or_default().push(uid);
         }
@@ -394,7 +406,9 @@ fn pacs008_main() {
     let t_gen0 = std::time::Instant::now();
 
     let my_files: Vec<i64> = if do_bronze {
-        (0..total_files).filter(|fid| fid % total_nodes == node_id).collect()
+        (0..total_files)
+            .filter(|fid| fid % total_nodes == node_id)
+            .collect()
     } else {
         Vec::new()
     };
@@ -410,7 +424,8 @@ fn pacs008_main() {
         let n_typ = typ.len();
         let n_base = (rows_per_file as usize).saturating_sub(n_typ);
 
-        let mut rng = Rng::new((seed as u64).wrapping_add(1_000_003u64.wrapping_mul(fid as u64 + 1)));
+        let mut rng =
+            Rng::new((seed as u64).wrapping_add(1_000_003u64.wrapping_mul(fid as u64 + 1)));
         let cal = DayCal::new(start_aligned, span_days);
 
         let cap = n_base + n_typ;
@@ -470,7 +485,10 @@ fn pacs008_main() {
             orig.push(o);
             bene.push(b);
             ts_us.push(t);
-            amount.push(lognormal_amount_shifted(&mut rng, w.amount_logshift[o as usize]));
+            amount.push(lognormal_amount_shifted(
+                &mut rng,
+                w.amount_logshift[o as usize],
+            ));
             ccy.push(cc);
             uid_pre.push(base_uid_hi | base_idx as u64);
         }
@@ -478,7 +496,11 @@ fn pacs008_main() {
             orig.push(r.orig);
             bene.push(r.bene);
             // keep typology ts as-is (already within window); shape intraday.
-            ts_us.push(shape_fixed_day(&mut rng, r.ts_us, w.country[r.orig as usize]));
+            ts_us.push(shape_fixed_day(
+                &mut rng,
+                r.ts_us,
+                w.country[r.orig as usize],
+            ));
             amount.push(r.amount);
             ccy.push(r.ccy);
             uid_pre.push(r.uid);
@@ -498,7 +520,17 @@ fn pacs008_main() {
         let uid: Vec<u64> = idx.iter().map(|&i| uid_pre[i]).collect();
 
         let tb = std::time::Instant::now();
-        let batch = build_batch(&w, &Batch { orig: orig2, bene: bene2, ts_us: ts2, amount: amt2, ccy: ccy2, uid });
+        let batch = build_batch(
+            &w,
+            &Batch {
+                orig: orig2,
+                bene: bene2,
+                ts_us: ts2,
+                amount: amt2,
+                ccy: ccy2,
+                uid,
+            },
+        );
         build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let tw = std::time::Instant::now();
         // Slight overshoot on the pre-alloc so ArrowWriter rarely reallocs.
@@ -586,7 +618,12 @@ fn pacs008_main() {
     let cpu_tot = (build_s + write_s).max(1e-9);
     eprintln!(
         "phases: world={:.2}s typ={:.2}s gen={:.2}s ref={:.2}s (bronze_only={}) world_share={:.0}%",
-        t_world, t_typ, t_gen, t_ref, bronze_only, 100.0 * t_world / el.max(1e-9)
+        t_world,
+        t_typ,
+        t_gen,
+        t_ref,
+        bronze_only,
+        100.0 * t_world / el.max(1e-9)
     );
     eprintln!(
         "gen split (thread-s): build_batch={:.1}s ({:.0}%) encode_parquet={:.1}s ({:.0}%) s3_put={:.1}s",
@@ -673,7 +710,10 @@ fn customer360_main() {
     // Rust c360 path, target_tb is what actually drives file count).
     let target_tb: f64 = arg("--target-tb", 0.1);
     if !target_tb.is_finite() || target_tb <= 0.0 {
-        eprintln!("--target-tb must be a positive finite number; got {}", target_tb);
+        eprintln!(
+            "--target-tb must be a positive finite number; got {}",
+            target_tb
+        );
         std::process::exit(2);
     }
     let file_size_mb: i64 = arg("--file-size-mb", 64);
@@ -720,7 +760,10 @@ fn customer360_main() {
     let ts_start_str: String = arg("--timestamp-start", "2024-01-01".to_string());
     let ts_end_str: String = arg("--timestamp-end", "2025-01-01".to_string());
     let ts_start_us = parse_date_to_us(&ts_start_str).unwrap_or_else(|| {
-        eprintln!("--timestamp-start must be YYYY-MM-DD; got {:?}", ts_start_str);
+        eprintln!(
+            "--timestamp-start must be YYYY-MM-DD; got {:?}",
+            ts_start_str
+        );
         std::process::exit(2);
     });
     let ts_end_us = parse_date_to_us(&ts_end_str).unwrap_or_else(|| {
@@ -764,7 +807,10 @@ fn customer360_main() {
     let file_size_bytes = (file_size_mb as usize) * 1024 * 1024;
     let bytes_per_row = customer360_bytes_per_row_default();
     if bytes_per_row <= 0.0 || !bytes_per_row.is_finite() {
-        panic!("customer360_bytes_per_row_default returned non-positive {}", bytes_per_row);
+        panic!(
+            "customer360_bytes_per_row_default returned non-positive {}",
+            bytes_per_row
+        );
     }
     let rows_per_file: usize = ((file_size_bytes as f64) / bytes_per_row).max(1000.0) as usize;
     let target_bytes: u64 = (target_tb * 1024.0 * 1024.0 * 1024.0 * 1024.0) as u64;
@@ -921,7 +967,10 @@ mod tests {
     #[test]
     fn parse_date_to_us_2024_01_01() {
         // 2024-01-01T00:00:00Z = 1704067200 seconds since epoch.
-        assert_eq!(parse_date_to_us("2024-01-01"), Some(1_704_067_200 * 1_000_000));
+        assert_eq!(
+            parse_date_to_us("2024-01-01"),
+            Some(1_704_067_200 * 1_000_000)
+        );
     }
 
     #[test]

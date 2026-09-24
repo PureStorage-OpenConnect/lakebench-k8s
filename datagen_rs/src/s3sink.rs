@@ -40,13 +40,21 @@ impl S3Cfg {
     /// endpoint) exits fast with a clear message instead of after minutes of
     /// wasted setup and a panic deep in a rayon worker.
     pub fn try_from_env(bucket: String, prefix: String) -> Result<Self, String> {
-        let endpoint = env::var("S3_ENDPOINT").map_err(|_| "S3_ENDPOINT env var required".to_string())?;
+        let endpoint =
+            env::var("S3_ENDPOINT").map_err(|_| "S3_ENDPOINT env var required".to_string())?;
         let region = env::var("AWS_REGION").unwrap_or_else(|_| "us-east-1".into());
         let access_key = env::var("AWS_ACCESS_KEY_ID")
             .map_err(|_| "AWS_ACCESS_KEY_ID env var required".to_string())?;
         let secret_key = env::var("AWS_SECRET_ACCESS_KEY")
             .map_err(|_| "AWS_SECRET_ACCESS_KEY env var required".to_string())?;
-        Ok(Self { bucket, prefix, endpoint, region, access_key, secret_key })
+        Ok(Self {
+            bucket,
+            prefix,
+            endpoint,
+            region,
+            access_key,
+            secret_key,
+        })
     }
 }
 
@@ -177,10 +185,7 @@ impl S3Sink {
                     // immediately so the pod fails fast and a rotated key is
                     // obvious from the first line of pod logs.
                     if is_fatal(&e) {
-                        panic!(
-                            "s3 put fatal (no retry): key={} err={}",
-                            full, e
-                        );
+                        panic!("s3 put fatal (no retry): key={} err={}", full, e);
                     }
                     last_err = Some(format!("{}", e));
                     eprintln!(
@@ -244,11 +249,7 @@ impl MpuWriter {
     /// build one against `object_store::memory::InMemory` without going
     /// through `S3Sink`. Chunk size is object_store's default 5 MiB
     /// (matches the S3 multipart minimum for non-final parts).
-    pub fn from_upload(
-        upload: Box<dyn MultipartUpload>,
-        handle: Handle,
-        key: String,
-    ) -> Self {
+    pub fn from_upload(upload: Box<dyn MultipartUpload>, handle: Handle, key: String) -> Self {
         Self {
             inner: Some(WriteMultipart::new(upload)),
             handle,
@@ -325,10 +326,7 @@ impl std::io::Write for MpuWriter {
         self.handle
             .block_on(w.wait_for_capacity(MPU_MAX_CONCURRENT_PARTS))
             .map_err(|e| {
-                std::io::Error::other(format!(
-                    "mpu part upload failed (key={}): {}",
-                    self.key, e
-                ))
+                std::io::Error::other(format!("mpu part upload failed (key={}): {}", self.key, e))
             })?;
         w.write(buf);
         self.bytes_written += buf.len() as u64;
@@ -346,16 +344,16 @@ impl std::io::Write for MpuWriter {
         // We do NOT force chunk-flushing to S3 -- WriteMultipart
         // buffers a partial chunk internally and emits it on finish;
         // that's the correct trade for streaming parquet writes.
-        let Some(w) = self.inner.as_mut() else { return Ok(()); };
+        let Some(w) = self.inner.as_mut() else {
+            return Ok(());
+        };
         let _guard = self.handle.enter();
-        self.handle
-            .block_on(w.wait_for_capacity(1))
-            .map_err(|e| {
-                std::io::Error::other(format!(
-                    "mpu part upload failed on flush (key={}): {}",
-                    self.key, e
-                ))
-            })
+        self.handle.block_on(w.wait_for_capacity(1)).map_err(|e| {
+            std::io::Error::other(format!(
+                "mpu part upload failed on flush (key={}): {}",
+                self.key, e
+            ))
+        })
     }
 }
 
