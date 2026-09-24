@@ -165,21 +165,47 @@ def clean(
     total_deleted = 0
     errors = []
 
-    # Check for active datagen before cleaning S3 buckets
+    # Check for writers still active before cleaning S3 buckets. The prompt
+    # sits outside the try: typer.confirm(abort=True) raises click.Abort,
+    # which subclasses RuntimeError, so inside `except Exception` a "no"
+    # was swallowed and the clean went ahead.
     if bucket_targets:
+        active_writers: list[str] = []
         try:
             from kubernetes import client as k8s_client
 
             ns = cfg.get_namespace()
-            batch_v1 = k8s_client.BatchV1Api()
-            job = batch_v1.read_namespaced_job("lakebench-datagen", ns)
-            active_pods = job.status.active or 0
-            if active_pods > 0:
-                print_warning(f"Datagen job has {active_pods} active pod(s)")
-                if not force:
-                    typer.confirm("Data generation is running. Clean anyway?", abort=True)
+            try:
+                job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", ns)
+                active_pods = job.status.active or 0
+                if active_pods > 0:
+                    active_writers.append(f"datagen job ({active_pods} active pod(s))")
+            except Exception:
+                pass  # no datagen job
+            try:
+                apps = k8s_client.CustomObjectsApi().list_namespaced_custom_object(
+                    group="sparkoperator.k8s.io",
+                    version="v1beta2",
+                    namespace=ns,
+                    plural="sparkapplications",
+                )
+                for app in apps.get("items", []):
+                    state = ((app.get("status") or {}).get("applicationState") or {}).get(
+                        "state", ""
+                    )
+                    if state not in ("COMPLETED", "FAILED", "SUBMISSION_FAILED"):
+                        active_writers.append(
+                            f"Spark application {app['metadata']['name']} ({state or 'pending'})"
+                        )
+            except Exception:
+                pass  # no Spark Operator CRD or K8s unavailable
         except Exception:
-            pass  # No datagen job or K8s unavailable -- safe to proceed
+            pass  # K8s client unavailable -- nothing to check
+        if active_writers:
+            for w in active_writers:
+                print_warning(f"Still writing: {w}")
+            if not force:
+                typer.confirm("Jobs are still writing to these buckets. Clean anyway?", abort=True)
 
     # Clean S3 buckets
     if bucket_targets:
@@ -211,8 +237,30 @@ def clean(
             # destroy paths so `clean` cannot be used as a bypass.
             from lakebench.deploy.ownership import (
                 IdentityVerdict,
+                bucket_name_matches_deployment,
+                list_lakebench_deployment_names,
                 verify_bucket_ownership,
             )
+
+            # Backends without bucket tagging (FlashBlade) report every bucket
+            # as UNSUPPORTED. Fall back to the same longest-prefix name check
+            # destroy uses, which needs the other deployments' names. None
+            # means the enumeration failed, and the fallback then refuses.
+            other_deployments: list[str] | None
+            try:
+                from kubernetes import client as _k8s
+
+                from lakebench.k8s import get_k8s_client
+
+                get_k8s_client(
+                    context=cfg.platform.kubernetes.context or "",
+                    namespace=cfg.get_namespace(),
+                )
+                other_deployments = list_lakebench_deployment_names(
+                    _k8s.CoreV1Api(), exclude=cfg.get_namespace()
+                )
+            except Exception:
+                other_deployments = None
 
             for layer, bucket in bucket_targets.items():
                 try:
@@ -237,6 +285,24 @@ def clean(
                     if v.verdict is IdentityVerdict.NOT_FOUND:
                         print_info(f"{layer}: bucket {bucket!r} does not exist")
                         continue
+                    if v.verdict is IdentityVerdict.UNSUPPORTED:
+                        prefix_ok = other_deployments is not None and (
+                            bucket_name_matches_deployment(bucket, cfg.name, other_deployments)
+                        )
+                        if not prefix_ok and not force_legacy:
+                            reason = (
+                                "could not list other lakebench deployments to check name ownership"
+                                if other_deployments is None
+                                else "the bucket name does not match this deployment, "
+                                "or another deployment has a longer-prefix claim"
+                            )
+                            errors.append(f"{layer}: ownership unverifiable ({reason})")
+                            print_error(
+                                f"Refusing to clean {layer}: bucket {bucket!r} is on a "
+                                f"backend without bucket tagging and {reason}. Pass "
+                                "--force-legacy only if you have confirmed it is yours."
+                            )
+                            continue
 
                     deleted = s3.empty_bucket(bucket, progress_callback=_clean_progress)
                     total_deleted += deleted

@@ -53,7 +53,9 @@ def _run_destroy(engine, manager_cls) -> list:
         # report their own failures and are not what this test is about.
         patch("lakebench.deploy.destroy.logger"),
     ):
-        return destroy_all(engine)
+        # Buckets are not under test here; a failed bucket step (the mocked
+        # S3 config cannot init) now keeps the namespace by design.
+        return destroy_all(engine, clean_buckets=False)
 
 
 class TestOrdering:

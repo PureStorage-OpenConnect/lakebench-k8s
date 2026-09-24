@@ -117,7 +117,15 @@ def destroy_all(
         verify_namespace_identity,
     )
 
-    if engine.k8s.namespace_exists(namespace):
+    # Whether this destroy has proof that the namespace (and so the data it
+    # names) belongs to the caller. Without the namespace there is no
+    # identity record to check: a stale or wrong kubeconfig context makes a
+    # live deployment's namespace look absent, while its buckets (on a shared
+    # object store) and tables are still reachable by name. The data-touching
+    # steps below therefore require a verified namespace or --force-legacy.
+    ownership_proven = False
+    namespace_present = engine.k8s.namespace_exists(namespace)
+    if namespace_present:
         identity = build_identity_from_config(
             engine.config,
             context=engine.config.platform.kubernetes.context or "",
@@ -173,12 +181,62 @@ def destroy_all(
                 "(no lakebench identity to verify against)",
                 namespace,
             )
+            ownership_proven = True
         else:
+            ownership_proven = True
             report(
                 "ownership-check",
                 DeploymentStatus.SUCCESS,
                 f"Verified deployment: {identity.name}",
             )
+
+    data_steps_allowed = ownership_proven or force_legacy
+    no_ns_hint = ""
+    # Deployments created before names were enforced unique may share a name
+    # across namespaces. They then share buckets, so cleaning them from one
+    # namespace deletes the other's data.
+    if data_steps_allowed and not force_legacy:
+        from lakebench.deploy.ownership import ANNOTATION_DEPLOYMENT_NAME
+
+        try:
+            for n in k8s_client.CoreV1Api().list_namespace().items:
+                if n.metadata.name == namespace:
+                    continue
+                if (n.metadata.annotations or {}).get(
+                    ANNOTATION_DEPLOYMENT_NAME
+                ) == engine.config.name:
+                    data_steps_allowed = False
+                    no_ns_hint = (
+                        f"Namespace {n.metadata.name!r} carries the same deployment "
+                        f"name {engine.config.name!r}, so the tables and buckets "
+                        "this destroy names are shared with it. They were left "
+                        "untouched. Destroy one deployment with --force-legacy "
+                        "only after moving the other to a unique name."
+                    )
+                    logger.warning(no_ns_hint)
+                    break
+        except Exception as e:  # noqa: BLE001
+            logger.debug("shared-name check skipped: %s", e)
+    if not namespace_present:
+        context_name = engine.config.platform.kubernetes.context or "(current context)"
+        no_ns_hint = (
+            f"Namespace {namespace!r} does not exist on kubeconfig context "
+            f"{context_name}, so this destroy cannot prove the tables and "
+            "buckets it names are yours: with a stale or wrong context they "
+            "may belong to a live deployment on another cluster that shares "
+            "the object store. Tables and buckets were left untouched. If you "
+            "have confirmed they are yours (for example a previous destroy "
+            "removed the namespace but failed to clean the buckets), re-run "
+            "with --force-legacy."
+        )
+        if force_legacy:
+            logger.warning(
+                "destroy --force-legacy: namespace %s absent; cleaning tables "
+                "and buckets by name without an identity record",
+                namespace,
+            )
+        else:
+            logger.warning(no_ns_hint)
 
     # Step 1: Delete SparkApplications
     report("spark-jobs", DeploymentStatus.IN_PROGRESS, "Deleting SparkApplications...")
@@ -361,93 +419,112 @@ def destroy_all(
     time.sleep(2)
 
     # Step 3: Drop tables via available engine (Trino or Spark Thrift)
-    table_format = engine.config.architecture.table_format.type.value
-    report("table-cleanup", DeploymentStatus.IN_PROGRESS, f"Dropping {table_format} tables...")
-    try:
-        from lakebench.deploy.iceberg import (
-            build_drop_table_sql,
-            exec_sql,
-            find_maintenance_engine,
-        )
-
-        maint_engine, pod_name, catalog = find_maintenance_engine(
-            engine.config,
-            namespace,
-        )
-        if maint_engine and pod_name and catalog:
-            tables = engine.config.architecture.tables
-            tables_to_drop = [
-                f"{catalog}.{tables.bronze}",
-                f"{catalog}.{tables.silver}",
-                f"{catalog}.{tables.gold}",
-            ]
-            # Run maintenance before dropping tables to clean S3
-            for table in tables_to_drop:
-                if table_format == "delta":
-                    from lakebench.deploy.delta_maintenance import (
-                        build_delta_maintenance_sql,
-                    )
-
-                    maint_sqls = build_delta_maintenance_sql(maint_engine, catalog, table, 0.0)
-                else:
-                    from lakebench.deploy.iceberg import build_maintenance_sql
-
-                    maint_sqls = build_maintenance_sql(maint_engine, catalog, table, "0s")
-                for sql in maint_sqls:
-                    try:
-                        exec_sql(maint_engine, engine.k8s, pod_name, namespace, sql)
-                    except Exception as e:
-                        logger.warning(
-                            "%s maintenance failed (table may not exist): %s",
-                            table_format.title(),
-                            e,
-                        )
-            # Now drop the tables
-            for table in tables_to_drop:
-                drop_sql = build_drop_table_sql(maint_engine, table)
-                if drop_sql:
-                    try:
-                        exec_sql(maint_engine, engine.k8s, pod_name, namespace, drop_sql)
-                    except Exception as e:
-                        logger.warning("DROP TABLE failed for %s: %s", table, e)
-            results.append(
-                DeploymentResult(
-                    component="table-cleanup",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"{table_format.title()} tables dropped (via {maint_engine})",
-                )
-            )
-            report(
-                "table-cleanup",
-                DeploymentStatus.SUCCESS,
-                f"{table_format.title()} tables dropped (via {maint_engine})",
-            )
-        else:
-            engine_type = engine.config.architecture.query_engine.type.value
-            msg = (
-                "DuckDB cannot run table maintenance, skipping table cleanup"
-                if engine_type == "duckdb"
-                else "No capable engine pod found, skipping table cleanup"
-            )
-            results.append(
-                DeploymentResult(
-                    component="table-cleanup",
-                    status=DeploymentStatus.SKIPPED,
-                    message=msg,
-                )
-            )
-    except Exception as e:
-        logger.warning("Table cleanup failed: %s", e, exc_info=True)
+    if not data_steps_allowed:
         results.append(
             DeploymentResult(
                 component="table-cleanup",
                 status=DeploymentStatus.SKIPPED,
-                message=f"Table cleanup skipped: {e}",
+                message=no_ns_hint,
             )
         )
+        report("table-cleanup", DeploymentStatus.SKIPPED, "Skipped: ownership not provable")
+    else:
+        table_format = engine.config.architecture.table_format.type.value
+        report("table-cleanup", DeploymentStatus.IN_PROGRESS, f"Dropping {table_format} tables...")
+        try:
+            from lakebench.deploy.iceberg import (
+                build_drop_table_sql,
+                exec_sql,
+                find_maintenance_engine,
+            )
+
+            maint_engine, pod_name, catalog = find_maintenance_engine(
+                engine.config,
+                namespace,
+            )
+            if maint_engine and pod_name and catalog:
+                tables = engine.config.architecture.tables
+                tables_to_drop = [
+                    f"{catalog}.{tables.bronze}",
+                    f"{catalog}.{tables.silver}",
+                    f"{catalog}.{tables.gold}",
+                ]
+                # Run maintenance before dropping tables to clean S3
+                for table in tables_to_drop:
+                    if table_format == "delta":
+                        from lakebench.deploy.delta_maintenance import (
+                            build_delta_maintenance_sql,
+                        )
+
+                        maint_sqls = build_delta_maintenance_sql(maint_engine, catalog, table, 0.0)
+                    else:
+                        from lakebench.deploy.iceberg import build_maintenance_sql
+
+                        maint_sqls = build_maintenance_sql(maint_engine, catalog, table, "0s")
+                    for sql in maint_sqls:
+                        try:
+                            exec_sql(maint_engine, engine.k8s, pod_name, namespace, sql)
+                        except Exception as e:
+                            logger.warning(
+                                "%s maintenance failed (table may not exist): %s",
+                                table_format.title(),
+                                e,
+                            )
+                # Now drop the tables
+                for table in tables_to_drop:
+                    drop_sql = build_drop_table_sql(maint_engine, table)
+                    if drop_sql:
+                        try:
+                            exec_sql(maint_engine, engine.k8s, pod_name, namespace, drop_sql)
+                        except Exception as e:
+                            logger.warning("DROP TABLE failed for %s: %s", table, e)
+                results.append(
+                    DeploymentResult(
+                        component="table-cleanup",
+                        status=DeploymentStatus.SUCCESS,
+                        message=f"{table_format.title()} tables dropped (via {maint_engine})",
+                    )
+                )
+                report(
+                    "table-cleanup",
+                    DeploymentStatus.SUCCESS,
+                    f"{table_format.title()} tables dropped (via {maint_engine})",
+                )
+            else:
+                engine_type = engine.config.architecture.query_engine.type.value
+                msg = (
+                    "DuckDB cannot run table maintenance, skipping table cleanup"
+                    if engine_type == "duckdb"
+                    else "No capable engine pod found, skipping table cleanup"
+                )
+                results.append(
+                    DeploymentResult(
+                        component="table-cleanup",
+                        status=DeploymentStatus.SKIPPED,
+                        message=msg,
+                    )
+                )
+        except Exception as e:
+            logger.warning("Table cleanup failed: %s", e, exc_info=True)
+            results.append(
+                DeploymentResult(
+                    component="table-cleanup",
+                    status=DeploymentStatus.SKIPPED,
+                    message=f"Table cleanup skipped: {e}",
+                )
+            )
 
     # Step 4: Clean S3 buckets (optional)
-    if clean_buckets:
+    if clean_buckets and not data_steps_allowed:
+        results.append(
+            DeploymentResult(
+                component="s3-buckets",
+                status=DeploymentStatus.SKIPPED,
+                message=no_ns_hint,
+            )
+        )
+        report("s3-buckets", DeploymentStatus.SKIPPED, "Skipped: ownership not provable")
+    elif clean_buckets:
         report("s3-buckets", DeploymentStatus.IN_PROGRESS, "Cleaning S3 buckets...")
         try:
             from lakebench.s3 import S3Client
@@ -1197,6 +1274,29 @@ def destroy_all(
     # `kubectl delete storageclass <name>`.
 
     # Finally, delete namespace if we created it
+    bucket_step_failed = any(
+        r.component == "s3-buckets" and r.status is DeploymentStatus.FAILED for r in results
+    )
+    if engine.config.platform.kubernetes.create_namespace and bucket_step_failed:
+        # The namespace's identity annotations are the only proof that the
+        # buckets belong to this deployment. Deleting it after the bucket step
+        # failed would leave full buckets that no later destroy can prove it
+        # owns. Keep the namespace (and its watch-list entry, so it still
+        # works) until the bucket problem is fixed and destroy is re-run.
+        keep_msg = (
+            f"Namespace {namespace!r} NOT deleted because the S3 bucket step "
+            "failed; it is the ownership record for those buckets. Fix the "
+            "bucket error above and re-run destroy."
+        )
+        results.append(
+            DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.SKIPPED,
+                message=keep_msg,
+            )
+        )
+        report("namespace", DeploymentStatus.SKIPPED, keep_msg)
+        return results
     if engine.config.platform.kubernetes.create_namespace:
         # Drop the namespace from the Spark Operator's watch list FIRST. The
         # operator crash-loops on a watched namespace that does not exist

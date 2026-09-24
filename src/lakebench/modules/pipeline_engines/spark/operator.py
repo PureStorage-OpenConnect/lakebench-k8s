@@ -6,6 +6,7 @@ Handles detection and installation of the Kubeflow Spark Operator.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -16,6 +17,23 @@ logger = logging.getLogger(__name__)
 
 class _DeploymentReadError(Exception):
     """Raised when the controller deployment spec cannot be read."""
+
+
+# How long a watch-list mutation waits for the cluster lease. A holder keeps it
+# across a helm upgrade, two rollout waits (120 s each) and a verify, so up to
+# about 5 minutes; a 30 s acquire made concurrent deploys and destroys fail
+# instead of queueing, which parallel UAT hit.
+_WATCH_LIST_LOCK_TIMEOUT_S = 600
+
+
+class _WatchListReadError(Exception):
+    """The operator's watch list could not be read.
+
+    Distinct from "watches nothing": callers that treated a failed read as an
+    empty list would report a strict remove as done without checking it (the
+    namespace is then deleted while still watched, crash-looping the operator
+    for every tenant), or overwrite the list with only their own namespace.
+    """
 
 
 class WatchListMutationError(RuntimeError):
@@ -233,7 +251,11 @@ class SparkOperatorManager:
                     watched = self._get_active_namespaces(operator_ns)
                 except _DeploymentReadError:
                     # Could not read deployment spec, fall back to Helm values
-                    watched = self._get_watched_namespaces()
+                    try:
+                        watched = self._get_watched_namespaces()
+                    except _WatchListReadError as e:
+                        logger.warning("Spark Operator watch list unreadable: %s", e)
+                        watched = []  # reported below as "could not determine"
                 if watched is None:
                     # Watches all namespaces (empty or unset)
                     watching_namespace = True
@@ -369,9 +391,13 @@ class SparkOperatorManager:
         ``spark.jobNamespaces`` to ``["default"]``, NOT "all namespaces").
 
         Returns:
-            List of namespace strings if jobNamespaces is set,
-            None if the operator watches all namespaces (empty list),
-            or empty list ``[]`` if Helm values could not be retrieved.
+            List of namespace strings if jobNamespaces is set, None if the
+            operator watches all namespaces, or ``[]`` if the Helm release
+            does not exist (no operator, so nothing is watched).
+
+        Raises:
+            _WatchListReadError: the values could not be read for any other
+                reason (helm missing, RBAC, unparseable output).
         """
         try:
             import json
@@ -393,8 +419,15 @@ class SparkOperatorManager:
             )
 
             if result.returncode != 0:
-                logger.debug("Could not get Helm values: %s", result.stderr)
-                return []
+                # helm prints "Error: release: not found" (older versions
+                # omit the colon). No release means no operator, so nothing
+                # is watched; that is a real answer, not a read failure.
+                if re.search(r"release:? not found", (result.stderr or "").lower()):
+                    return []
+                raise _WatchListReadError(
+                    f"helm get values {self.HELM_RELEASE_NAME} failed: "
+                    f"{(result.stderr or '').strip()}"
+                )
 
             values = json.loads(result.stdout)
             ns_value = values.get("spark", {}).get("jobNamespaces", None)
@@ -410,9 +443,10 @@ class SparkOperatorManager:
                 return filtered if filtered else None
             return None  # Unknown type -- assume watches all
 
+        except _WatchListReadError:
+            raise
         except Exception as e:
-            logger.debug("Error reading Helm values: %s", e)
-            return []
+            raise _WatchListReadError(f"error reading Helm values: {e}") from e
 
     def _filter_existing_namespaces(self, namespaces: list[str]) -> list[str]:
         """Return only namespaces that exist on the cluster.
@@ -456,7 +490,11 @@ class SparkOperatorManager:
         Returns:
             True if the RBAC was successfully recreated.
         """
-        watched = self._get_watched_namespaces()
+        try:
+            watched = self._get_watched_namespaces()
+        except _WatchListReadError as e:
+            logger.error("Cannot recreate RBAC for %s: %s", namespace, e)
+            return False
         if watched is None:
             return True
         if namespace not in watched:
@@ -534,7 +572,13 @@ class SparkOperatorManager:
         if strict:
             return self._remove_namespace_from_watch_locked(namespace)
         for attempt in range(self._HELM_CONFLICT_RETRIES):
-            watched = self._get_watched_namespaces()
+            try:
+                watched = self._get_watched_namespaces()
+            except _WatchListReadError as e:
+                # Cannot prove the namespace is gone from the list. Reporting
+                # success here would let destroy delete a watched namespace.
+                logger.error("Cannot remove %s from the watch list: %s", namespace, e)
+                return False
             if watched is None:
                 # Watches all namespaces -- nothing namespace-specific to drop.
                 return True
@@ -631,7 +675,7 @@ class SparkOperatorManager:
             ) from e
 
         try:
-            with cluster_lock(core_v1, timeout=30):
+            with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S):
                 ok = self._remove_namespace_from_watch_impl(namespace)
         except ClusterLockHeld as e:
             raise WatchListMutationError(
@@ -783,7 +827,7 @@ class SparkOperatorManager:
             )
             return None, "unlocked"
 
-        lease_cm = cluster_lock(core_v1, timeout=30)
+        lease_cm = cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S)
         try:
             lease_cm.__enter__()
             return lease_cm, "locked"
@@ -837,7 +881,13 @@ class SparkOperatorManager:
             # Re-read on every attempt.  A retry exists precisely because
             # another writer may have changed the list since the last read,
             # so reusing the earlier value would re-introduce the lost update.
-            watched = self._get_watched_namespaces()
+            try:
+                watched = self._get_watched_namespaces()
+            except _WatchListReadError as e:
+                # Writing [namespace] now would drop every other deployment's
+                # namespace from the list.
+                logger.error("Cannot add %s to the watch list: %s", namespace, e)
+                return False
             if watched is None:
                 # Already watches all namespaces
                 return True

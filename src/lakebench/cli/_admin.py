@@ -720,7 +720,13 @@ def repair_operator(
         v = cfg.platform.compute.spark.operator.version
 
     mgr = SparkOperatorManager(namespace=ns, version=v)
-    watched = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
+    from lakebench.modules.pipeline_engines.spark.operator import _WatchListReadError
+
+    try:
+        watched = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
+    except _WatchListReadError as e:
+        print_error(f"Cannot read the Spark Operator watch list: {e}")
+        raise typer.Exit(1) from e
     if watched is None:
         print_info("Spark Operator watches all namespaces; nothing to reconcile")
         return
