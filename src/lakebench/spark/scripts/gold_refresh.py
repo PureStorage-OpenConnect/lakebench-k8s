@@ -5,7 +5,7 @@ Uses a rate source with foreachBatch to periodically read the full Silver
 Iceberg table, compute daily KPI aggregations, and overwrite the Gold table.
 Each cycle produces a complete, consistent Gold snapshot.
 
-This is the sustained-pipeline equivalent of gold_finalize.py. Where
+This is the continuous-pipeline equivalent of gold_finalize.py. Where
 gold_finalize runs once as a batch job, gold_refresh re-aggregates on
 a timer (default every 5 minutes) so the Gold layer stays fresh.
 
@@ -18,7 +18,14 @@ Environment variables (set by job.py):
 
 import time
 
-from common import env, get_daily_kpi_aggregations, log
+from common import (
+    await_stream,
+    env,
+    get_daily_kpi_aggregations,
+    log,
+    set_utc_session,
+    table_exists,
+)
 from pyspark.sql import SparkSession
 
 # ---------------------------------------------------------------------------
@@ -37,6 +44,7 @@ gold_tbl = f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard'
 # Spark session
 # ---------------------------------------------------------------------------
 spark = SparkSession.builder.appName("lb-gold-refresh").getOrCreate()
+set_utc_session(spark)
 
 log("=" * 60)
 log("Gold Refresh (Periodic Re-aggregation)")
@@ -83,12 +91,13 @@ def refresh_gold(trigger_df, batch_id):
 
     log(f"Refresh cycle {_refresh_count} (batch {batch_id})")
 
-    # Read current Silver table
-    try:
-        silver_df = spark.table(silver_tbl)
-    except Exception as e:
-        log(f"Cycle {_refresh_count}: Silver table not ready yet: {e}")
+    # Read current Silver table. Only a genuine not-found means "not ready";
+    # any other catalog error fails the stream instead of leaving gold empty
+    # for the whole run.
+    if not table_exists(spark, silver_tbl):
+        log(f"Cycle {_refresh_count}: Silver table not ready yet")
         return
+    silver_df = spark.table(silver_tbl)
 
     # Incremental: only read partitions newer than what we last processed
     if _incremental and _last_max_date is not None:
@@ -205,6 +214,6 @@ query = (
 )
 
 log("Streaming query started, awaiting termination...")
-query.awaitTermination()
+await_stream(spark, query)
 
 spark.stop()

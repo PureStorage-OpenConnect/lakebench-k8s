@@ -17,11 +17,10 @@ import sys
 import time
 from enum import Enum
 
-from common import env, get_daily_kpi_aggregations, log, write_delta_table
+from common import env, get_daily_kpi_aggregations, log, set_utc_session, write_delta_table
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
-    current_timestamp,
 )
 from pyspark.sql.functions import max as max_
 
@@ -232,10 +231,12 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
         last_date = None
         existing_gold = None
 
-    # Read Silver, filter to new data if watermark exists
+    # Recompute from the watermark date INCLUSIVE and replace those gold rows
+    # (same fix as gold_finalize.py, E2). A strict > dropped any silver rows
+    # that landed on the last processed date, a cycle boundary day.
     silver_df = spark.table(silver_tbl)
     if last_date:
-        silver_df = silver_df.filter(col("interaction_date") > last_date)
+        silver_df = silver_df.filter(col("interaction_date") >= last_date)
 
     new_count = silver_df.count()
     if new_count == 0:
@@ -247,11 +248,9 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
     log(f"Processing {new_count:,} new records")
 
     # Aggregate new data
-    new_kpis = (
-        silver_df.groupBy("interaction_date")
-        .agg(*get_daily_kpi_aggregations())
-        .withColumn("last_updated", current_timestamp())
-    )
+    # Same columns as SIMPLE_AGG / TWO_PHASE_AGG: an extra update-time column
+    # made the append fail on cycle 2 of every multi-cycle run.
+    new_kpis = silver_df.groupBy("interaction_date").agg(*get_daily_kpi_aggregations())
 
     new_kpi_count = new_kpis.count()
     log(f"Generated {new_kpi_count:,} new KPI records")
@@ -274,8 +273,9 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
             options=opts,
         )
     else:
-        # Append new records (dates don't overlap due to filter)
-        log("Appending to existing Gold table...")
+        log(f"Replacing gold rows from {last_date} on...")
+        if last_date is not None:  # an empty gold table has no watermark
+            spark.sql(f"DELETE FROM {gold_tbl} WHERE interaction_date >= DATE '{last_date}'")
         write_delta_table(
             spark,
             new_kpis_consolidated,
@@ -299,6 +299,7 @@ log("Customer 360 Gold Finalize (Delta) - Adaptive Aggregation Pipeline")
 log("=" * 60)
 
 spark = SparkSession.builder.appName("lb-gold-finalize-delta").getOrCreate()
+set_utc_session(spark)
 
 start_time = time.time()
 
