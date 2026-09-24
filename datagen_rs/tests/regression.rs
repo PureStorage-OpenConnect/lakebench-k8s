@@ -1398,3 +1398,145 @@ fn unchained_typologies_keep_independent_draws() {
         .collect();
     assert_eq!(got, want);
 }
+
+// ---------------------------------------------------------------------------
+// Multi-cycle generation (cycle.rs, WORKPLAN B4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cycle_zero_is_the_identity() {
+    use datagen_rs::cycle::*;
+    assert_eq!(stream_seed(42, 0), 42);
+    assert_eq!(base_uid(123_456, 0), 123_456);
+    assert_eq!(instance_id("FAN_IN_2_0000007", 0), "FAN_IN_2_0000007");
+    assert_eq!(pacs_key(7, 0), "bronze/pacs008/part-000007.parquet");
+    assert_eq!(c360_key(7, 0), "part-000007.parquet");
+    assert_eq!(
+        ref_key("manifest/manifest.parquet", 0),
+        "manifest/manifest.parquet"
+    );
+    assert_eq!(c360_file_id(7, 0), 7);
+}
+
+#[test]
+fn cycle_keys_differ_and_keep_the_reader_suffix() {
+    use datagen_rs::cycle::*;
+    assert_eq!(pacs_key(7, 1), "bronze/pacs008/part-c001-000007.parquet");
+    assert_eq!(c360_key(7, 12), "part-c012-000007.parquet");
+    assert_eq!(
+        ref_key("manifest/manifest.parquet", 3),
+        "manifest/manifest-c003.parquet"
+    );
+    assert_eq!(
+        ref_key("bronze/party.parquet", 3),
+        "bronze/party-c003.parquet"
+    );
+    let keys: std::collections::HashSet<String> = (0..4u64)
+        .flat_map(|c| (0..100i64).map(move |f| pacs_key(f, c)))
+        .collect();
+    assert_eq!(keys.len(), 400);
+    assert!(keys.iter().all(|k| k.ends_with(".parquet")));
+}
+
+#[test]
+fn cycles_zero_and_one_have_disjoint_uids_and_uetrs() {
+    use datagen_rs::cycle::{base_uid, instance_id, stream_seed};
+    use datagen_rs::hash::{splitmix64, uetr_seeds};
+    use datagen_rs::ids::uuid_v4_into;
+    use datagen_rs::typology::schedule;
+    use std::collections::HashSet;
+    let seed = 42i64;
+    let pop = 5_000usize;
+    let day = 86_400_000_000i64;
+    let country: Vec<&'static str> = vec!["US"; pop + 1];
+    let uetr = |uid: u64| {
+        let (a, b) = uetr_seeds(uid, seed);
+        let mut s = String::new();
+        uuid_v4_into(a, b, &mut s);
+        s
+    };
+    // Same derivation as bin/generate.rs::typology_uid.
+    let typ_uid = |iseed: i64, k: usize| {
+        splitmix64((iseed as u64).wrapping_add((k as u64) << 40)) | 0x8000_0000_0000_0000
+    };
+    let mut ids: Vec<HashSet<String>> = Vec::new();
+    let mut uetrs: Vec<HashSet<String>> = Vec::new();
+    for c in 0..2u64 {
+        let insts = schedule(
+            stream_seed(seed, c),
+            (pop as i64) * 240,
+            pop,
+            0,
+            1800 * day,
+            &country,
+        );
+        let mut u: HashSet<String> = (0..20_000u64).map(|gi| uetr(base_uid(gi, c))).collect();
+        for inst in &insts {
+            for k in 0..inst.rows_per_instance + 1 {
+                u.insert(uetr(typ_uid(inst.seed, k)));
+            }
+        }
+        ids.push(insts.iter().map(|i| instance_id(&i.id, c)).collect());
+        uetrs.push(u);
+    }
+    assert!(
+        ids[0].is_disjoint(&ids[1]),
+        "typology ids repeat across cycles"
+    );
+    assert!(
+        uetrs[0].is_disjoint(&uetrs[1]),
+        "UETRs repeat across cycles"
+    );
+    // And the schedule itself moved (different participants), not just the ids.
+    let p = |c: u64| {
+        schedule(
+            stream_seed(seed, c),
+            (pop as i64) * 240,
+            pop,
+            0,
+            1800 * day,
+            &country,
+        )
+        .into_iter()
+        .map(|i| i.participants)
+        .collect::<Vec<_>>()
+    };
+    assert_ne!(p(0), p(1));
+}
+
+#[test]
+fn c360_cycles_have_disjoint_event_and_row_ids() {
+    use arrow::array::{Array, Int64Array, StringArray};
+    use datagen_rs::customer360::{build_batch, Config};
+    use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
+    use datagen_rs::cycle::c360_file_id;
+    use std::collections::HashSet;
+    let loyalty = LoyaltyLookup::build(42, 10_000);
+    let sampler = CustomerIdSampler::new(10_000);
+    let mut events: Vec<HashSet<String>> = Vec::new();
+    let mut rows: Vec<HashSet<i64>> = Vec::new();
+    for c in 0..2u64 {
+        let (mut e, mut r) = (HashSet::new(), HashSet::new());
+        for fid in 0..3u64 {
+            let mut cfg = Config::new(42, c360_file_id(fid, c), 500);
+            cfg.customer_id_max = 10_000;
+            let b = build_batch(&cfg, &loyalty, &sampler);
+            let ev = b.column_by_name("event_id").unwrap();
+            let ev = ev.as_any().downcast_ref::<StringArray>().unwrap();
+            e.extend((0..ev.len()).map(|i| ev.value(i).to_string()));
+            let id = b.column_by_name("id").unwrap();
+            let id = id.as_any().downcast_ref::<Int64Array>().unwrap();
+            r.extend((0..id.len()).map(|i| id.value(i)));
+        }
+        events.push(e);
+        rows.push(r);
+    }
+    assert!(
+        events[0].is_disjoint(&events[1]),
+        "c360 event_ids repeat across cycles"
+    );
+    assert!(
+        rows[0].is_disjoint(&rows[1]),
+        "c360 row ids repeat across cycles"
+    );
+}

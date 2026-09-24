@@ -14,6 +14,7 @@ use parquet::arrow::ArrowWriter;
 use datagen_rs::amounts::{instance_amounts, native_amount};
 use datagen_rs::customer360;
 use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
+use datagen_rs::cycle;
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
 use datagen_rs::metrics::PodMetrics;
@@ -146,6 +147,11 @@ fn pacs008_main() {
         std::process::exit(2);
     }
     let seed: i64 = arg("--seed", 42);
+    // Multi-cycle runs (datagen_rs::cycle): cycle n > 0 draws its event
+    // streams from a cycle-mixed seed and writes cycle-suffixed keys. The
+    // world keeps --seed. 0 reproduces a run without --cycle byte for byte.
+    let cycle_n: u64 = arg("--cycle", 0u64);
+    let sseed: i64 = cycle::stream_seed(seed, cycle_n);
     let scale: f64 = arg("--scale", 0.01);
     let corpus_months: i64 = arg("--corpus-months", 60);
     let file_size_mb: i64 = arg("--file-size-mb", 32);
@@ -305,7 +311,10 @@ fn pacs008_main() {
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
     let mut instances =
-        datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
+        datagen_rs::typology::schedule(sseed, total_txns, pop, start_us, end_us, &w.country);
+    for inst in instances.iter_mut() {
+        inst.id = cycle::instance_id(&inst.id, cycle_n);
+    }
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
@@ -335,7 +344,7 @@ fn pacs008_main() {
                 .push((inst.suppress_start_us, inst.suppress_end_us));
         }
     }
-    let mut trng = Rng::new((seed as u64) ^ 0x7791);
+    let mut trng = Rng::new((sseed as u64) ^ 0x7791);
     // Shaped [first, last] in-window row per instance, for the manifest.
     let mut inst_bounds: HashMap<String, (i64, i64)> = HashMap::new();
     for inst in &instances {
@@ -403,7 +412,7 @@ fn pacs008_main() {
     // mass falls in [fid/F, (fid+1)/F).
     let n_typ_total: i64 = typ_by_file.iter().map(|v| v.len() as i64).sum();
     let n_base_total: u64 = (total_txns - n_typ_total).max(0) as u64;
-    let base_seed = splitmix64((seed as u64) ^ 0xBA5E_0000_0000_0001);
+    let base_seed = splitmix64((sseed as u64) ^ 0xBA5E_0000_0000_0001);
     let base_mass = move |i: u64| -> f64 {
         (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
     };
@@ -537,7 +546,7 @@ fn pacs008_main() {
             ts_us.push(t);
             amount.push(native_amount(&mut rng, w.amount_logshift[o as usize], cc));
             ccy.push(cc);
-            uid_pre.push(gi);
+            uid_pre.push(cycle::base_uid(gi, cycle_n));
         }
         for r in typ {
             orig.push(r.orig);
@@ -581,7 +590,7 @@ fn pacs008_main() {
         let buf = encode_parquet(&batch, cap_hint);
         write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let sz = buf.len() as u64;
-        let key = format!("bronze/pacs008/part-{:06}.parquet", fid);
+        let key = cycle::pacs_key(fid, cycle_n);
         let tu = std::time::Instant::now();
         sink.put(&key, buf);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -617,7 +626,7 @@ fn pacs008_main() {
         // finish() is fail-loud: on error we panic so the pod exits
         // non-zero and the datagen Job restarts (same semantics as the
         // single-PUT path). Drop's best-effort abort covers panics.
-        let mut party_mpu = sink.put_multipart("bronze/party.parquet");
+        let mut party_mpu = sink.put_multipart(&cycle::ref_key("bronze/party.parquet", cycle_n));
         write_party_to(&w, &instances, &mut party_mpu);
         let party_bytes = party_mpu.bytes_written();
         party_mpu
@@ -626,7 +635,7 @@ fn pacs008_main() {
         ref_bytes += party_bytes;
         ref_files += 1;
 
-        let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
+        let mut acct_mpu = sink.put_multipart(&cycle::ref_key("bronze/account.parquet", cycle_n));
         write_account_to(&w, &mut acct_mpu);
         let acct_bytes = acct_mpu.bytes_written();
         acct_mpu
@@ -644,7 +653,10 @@ fn pacs008_main() {
         );
         ref_bytes += man_bytes.len() as u64;
         ref_files += 1;
-        sink.put("manifest/manifest.parquet", man_bytes);
+        sink.put(
+            &cycle::ref_key("manifest/manifest.parquet", cycle_n),
+            man_bytes,
+        );
     }
     let total_bytes = total_bytes + ref_bytes;
     let files_written = files_written + ref_files;
@@ -747,6 +759,9 @@ fn customer360_main() {
         std::process::exit(2);
     }
     let seed: i64 = arg("--seed", 42);
+    // See datagen_rs::cycle: n > 0 offsets the per-file stream and row ids and
+    // suffixes the keys; 0 reproduces a run without --cycle.
+    let cycle_n: u64 = arg("--cycle", 0u64);
     // Two sizing controls: --target-tb picks total file count, --file-size-mb
     // picks per-file size. --scale is accepted but ignored on the c360 path
     // (it's the Python-side abstraction and only informs row density; on the
@@ -886,7 +901,7 @@ fn customer360_main() {
     my_files.par_iter().for_each(|&fid| {
         let cfg = customer360::Config {
             seed: seed as u64,
-            file_id: fid as u64,
+            file_id: cycle::c360_file_id(fid as u64, cycle_n),
             rows_per_file,
             customer_id_max,
             dirty_ratio,
@@ -906,7 +921,7 @@ fn customer360_main() {
         let sz = buf.len() as u64;
 
         // key is relative to S3Sink.prefix (set from --prefix). Sink prepends.
-        let key = format!("part-{:06}.parquet", fid);
+        let key = cycle::c360_key(fid, cycle_n);
         let tu = std::time::Instant::now();
         sink.put(&key, buf);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);

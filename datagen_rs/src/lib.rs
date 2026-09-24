@@ -6,6 +6,7 @@ pub mod amounts;
 pub mod arena;
 pub mod customer360;
 pub mod customer360_realism;
+pub mod cycle;
 pub mod emit;
 pub mod hash;
 pub mod ids;
