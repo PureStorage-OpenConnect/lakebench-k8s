@@ -105,10 +105,33 @@ jobs:
       - name: cargo test
         run: cargo test --release --locked
 
+  spark-tests:
+    name: Spark (executed tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The detection, scoring and silver logic is PySpark; these tests run it
+      # on a local Spark session instead of inspecting source text.
+      - name: Install dependencies
+        run: pip install -e ".[dev]" "pyspark==4.0.1" pyarrow
+
+      - name: Run Spark tests
+        run: pytest tests/spark -q
+
   build:
     name: Build Package
     runs-on: ubuntu-latest
-    needs: [lint, test, secrets, rust]
+    needs: [lint, test, secrets, rust, spark-tests]
     steps:
       - uses: actions/checkout@v4
 

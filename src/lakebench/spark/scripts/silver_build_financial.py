@@ -350,7 +350,40 @@ def build_transactions(bronze):
     )
 
 
-def build_entities(txns_df):
+def _entity_countries(bronze):
+    """entity_id -> country of residence, from both sides of every payment.
+
+    silver.transactions does not store the parties' countries (they only feed
+    the entity_id hash and cross_border), so they are read from bronze with
+    the same entity_id expression build_transactions uses. Country is part of
+    the name-hash key, so each non-LEI entity has exactly one country; for
+    LEI-keyed entities the lexically smallest is taken (deterministic).
+    """
+    from pyspark.sql.functions import min as _min
+
+    sides = []
+    for side in ("dbtr", "cdtr"):
+        sides.append(
+            bronze.select(
+                _entity_id_from(
+                    col(f"{side}.nm"),
+                    col(f"{side}.ctry_of_res"),
+                    col(f"{side}.pstl_adr.twn_nm"),
+                    col(f"{side}.id.lei"),
+                ).alias("entity_id"),
+                col(f"{side}.ctry_of_res").alias("country"),
+            )
+        )
+    return (
+        sides[0]
+        .unionByName(sides[1])
+        .where(col("country").isNotNull())
+        .groupBy("entity_id")
+        .agg(_min("country").alias("country"))
+    )
+
+
+def build_entities(txns_df, bronze=None):
     """Distinct entity dimension from originator+beneficiary sides.
 
     Determinism note: `dropDuplicates(["entity_id"])` picks arbitrarily on
@@ -376,6 +409,13 @@ def build_entities(txns_df):
     # "UNKNOWN" here is loud in a downstream dashboard; a NULL would
     # crash the write with a delayed error.
     picked = picked.withColumn("name", coalesce(col("_min_name"), lit("UNKNOWN"))).drop("_min_name")
+    # Country was a NULL literal, so W7 (high-risk corridor), which inner-joins
+    # on a non-NULL beneficiary country, could never fire and reported
+    # "ran, 0 alerts" (2026-09-24 audit).
+    if bronze is not None:
+        picked = picked.join(_entity_countries(bronze), "entity_id", "left")
+    else:
+        picked = picked.withColumn("country", lit(None).cast("string"))
     return picked.select(
         col("entity_id"),
         # We can't tell Person from Company from FI from pacs.008 name alone;
@@ -404,7 +444,7 @@ def build_entities(txns_df):
         .alias("address"),
         lit(None).cast("string").alias("email_addr"),
         lit(None).cast("string").alias("phone_number"),
-        lit(None).cast("string").alias("country"),
+        col("country").cast("string").alias("country"),
         lit(None).cast("string").alias("lei"),
         lit(None).cast("string").alias("bic"),
         lit("clear").alias("sanctions_status"),
@@ -822,7 +862,7 @@ def main() -> None:
     _replace_data(txns, SILVER_TRANSACTIONS)
     log("Wrote silver.transactions")
 
-    _replace_data(build_entities(txns), SILVER_ENTITIES)
+    _replace_data(build_entities(txns, bronze), SILVER_ENTITIES)
     log("Wrote silver.entities")
 
     # Build silver.accounts first (placeholder current_balance = NULL) so we
