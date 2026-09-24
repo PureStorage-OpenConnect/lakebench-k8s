@@ -97,8 +97,9 @@ ACCOUNT_PATH = env(
 MANIFEST_GLOB = env(
     "LB_FINANCIAL_MANIFEST_GLOB", f"{_BRONZE_URI}{_BRONZE_ROOT}/manifest/manifest*.parquet"
 )
-# First datagen model_version that writes the KYC reference columns.
-KYC_MODEL_VERSION = (0, 2)
+# Datagen model_versions from before the KYC reference columns. Only these
+# excuse missing masters; datagen-v2-rs-0.2 is the first KYC version.
+PRE_KYC_MODEL_VERSIONS = frozenset({"datagen-v2-rs-0.1"})
 
 # Columns silver.entities takes from the party master (GOALS P10 stages 0 and
 # 2). The KYC columns are NULL for non-customers: the reporting FI holds no
@@ -925,15 +926,10 @@ def build_entity_profiles(txns_df):
     )
 
 
-def _read_reference(spark):
-    """(party, account) DataFrames, or (None, None) when either file is absent
-    (a corpus from before the KYC columns, or a bronze-only layout).
-
-    Only a missing path is tolerated. Any other read error (credentials, S3
-    outage, a corrupt file) raises: is_customer defines the monitored
-    population, so silently writing NULL KYC would turn every customer-scoped
-    rule into "ran, 0 alerts".
-    """
+def reference_frames(spark):
+    """(party, account) DataFrames, each None when its file is absent. Only a
+    missing path is tolerated; any other read error (credentials, S3 outage,
+    a corrupt file) raises."""
     frames = []
     for path in (PARTY_PATH, ACCOUNT_PATH):
         try:
@@ -944,34 +940,45 @@ def _read_reference(spark):
                 raise
             log(f"reference file not found: {msg.splitlines()[0][:200]}")
             frames.append(None)
-    # Exactly one absent is a broken reference write (a pod that died between
-    # the two uploads, or a mistyped path) and must not produce a green job
-    # with NULL KYC. Both absent is fine only for a corpus that predates KYC.
-    if (frames[0] is None) != (frames[1] is None):
-        raise RuntimeError(
-            f"only one KYC reference file is readable: party={PARTY_PATH} "
-            f"({'missing' if frames[0] is None else 'ok'}), account={ACCOUNT_PATH} "
-            f"({'missing' if frames[1] is None else 'ok'})"
-        )
-    if frames[0] is None and _corpus_has_kyc(spark):
-        raise RuntimeError(
-            f"KYC reference files missing ({PARTY_PATH}, {ACCOUNT_PATH}) but the "
-            f"manifest ({MANIFEST_GLOB}) is from a KYC-capable datagen"
-        )
     return frames[0], frames[1]
 
 
-def kyc_capable(model_version) -> bool:
-    """True when a datagen model_version string writes KYC (0.2 and later)."""
-    import re
+def _read_reference(spark):
+    """(party, account) DataFrames, or (None, None) for a corpus that
+    provably predates KYC.
 
-    m = re.search(r"datagen-v2-rs-(\d+)\.(\d+)", model_version or "")
-    return bool(m) and (int(m.group(1)), int(m.group(2))) >= KYC_MODEL_VERSION
+    is_customer defines the monitored population, so silently writing NULL
+    KYC would turn every customer-scoped rule into "ran, 0 alerts". Missing
+    masters are therefore tolerated only when the corpus manifest is readable
+    and every model_version in it is a known pre-KYC one. A missing manifest
+    proves nothing (the reference pod writes it too), so it raises, as does
+    exactly one master being readable (a pod that died between uploads, or a
+    mistyped path).
+    """
+    party, account = reference_frames(spark)
+    if (party is None) != (account is None):
+        raise RuntimeError(
+            f"only one KYC reference file is readable: party={PARTY_PATH} "
+            f"({'missing' if party is None else 'ok'}), account={ACCOUNT_PATH} "
+            f"({'missing' if account is None else 'ok'})"
+        )
+    if party is None and not _corpus_predates_kyc(spark):
+        raise RuntimeError(
+            f"KYC reference files missing ({PARTY_PATH}, {ACCOUNT_PATH}) and the "
+            f"manifest ({MANIFEST_GLOB}) does not show a pre-KYC datagen"
+        )
+    return party, account
 
 
-def _corpus_has_kyc(spark) -> bool:
-    """Whether the corpus manifest says its datagen writes KYC. An unreadable
-    manifest is not proof either way, so it logs and returns False."""
+def predates_kyc(model_version) -> bool:
+    """True only for a known datagen model_version from before KYC. Anything
+    else (a later version, a future naming scheme, NULL) is not proof."""
+    return model_version in PRE_KYC_MODEL_VERSIONS
+
+
+def _corpus_predates_kyc(spark) -> bool:
+    """Whether the corpus manifest proves a pre-KYC datagen: readable, and
+    every model_version in it is a known pre-KYC one."""
     try:
         versions = [
             r[0]
@@ -980,7 +987,7 @@ def _corpus_has_kyc(spark) -> bool:
     except Exception as e:
         log(f"manifest unreadable for the KYC version check: {str(e).splitlines()[0][:200]}")
         return False
-    return any(kyc_capable(v) for v in versions)
+    return bool(versions) and all(predates_kyc(v) for v in versions)
 
 
 def main() -> None:
