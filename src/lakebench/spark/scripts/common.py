@@ -25,6 +25,17 @@ def env(name, default=None):
     return v
 
 
+def one_line(text, limit=200):
+    """Collapse whitespace so a value stays on one log line.
+
+    The driver-log parser reads per-rule status one line at a time; Spark
+    exception messages are usually multi-line, and a rule whose error text
+    spilled onto the next line vanished from rule_errors entirely instead of
+    being reported as an error.
+    """
+    return " ".join(str(text).split())[:limit]
+
+
 def table_exists(spark, table_name):
     """True if a catalog table exists, False only if it definitely does not.
 
