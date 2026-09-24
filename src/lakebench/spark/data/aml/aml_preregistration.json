@@ -5,7 +5,8 @@
   "metric": "average_precision",
   "unit_of_scoring": {
     "entity": "customer",
-    "label": "customer participant of any instance of the typology (manifest participant_entity_ids), one-vs-rest over all scored customers"
+    "label_role": "participant",
+    "label": "customer participant of any instance of the typology (manifest participant_entity_ids), one-vs-rest over all scored customers; label_role 'subject' (the role typology::subject_index names) is the alternative the gate implements"
   },
   "cv": {
     "folds": 5,

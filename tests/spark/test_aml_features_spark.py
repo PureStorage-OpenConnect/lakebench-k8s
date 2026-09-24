@@ -200,10 +200,11 @@ def _write(spark, rows, schema, path):
 def _manifest(spark):
     return spark.createDataFrame(
         [
-            ("stack", [1, 2, 3], ["u12", "u23"]),
-            ("dormant_reactivation", [4, 5], ["u45"]),
+            ("stack", [1, 2, 3], ["u12", "u23"], 11),
+            ("dormant_reactivation", [4, 5], ["u45"], 12),
         ],
-        "typology_type string, participant_entity_ids array<long>, participant_uetrs array<string>",
+        "typology_type string, participant_entity_ids array<long>, "
+        "participant_uetrs array<string>, seed long",
     )
 
 
@@ -211,7 +212,7 @@ ACCOUNT_SCHEMA = "holder_entity_id long, iban string"
 ACCOUNTS = [(i, f"IB{i}") for i in range(1, 7)] + [(3, "IB3-second")]
 
 
-def test_bronze_adapter_labels_by_participant_via_iban(spark, tmp_path):
+def test_bronze_adapter_keys_on_ground_truth_via_iban(spark, tmp_path):
     import aml_features as af
 
     def party(nm, lei, ctry, iban):
@@ -231,6 +232,9 @@ def test_bronze_adapter_labels_by_participant_via_iban(spark, tmp_path):
     from decimal import Decimal
 
     lei = {i: f"LEI{i:017d}" for i in range(1, 7)}
+    # Entities 5 and 6 share an LEI: silver would merge them, bronze must not
+    # (A6 exists to catch exactly that difference).
+    lei[6] = lei[5]
 
     def row(u, o, b, h):
         do, da = party(f"n{o}", lei[o], "US", f"IB{o}")
@@ -262,7 +266,9 @@ def test_bronze_adapter_labels_by_participant_via_iban(spark, tmp_path):
     txns, ents, id_map = af.bronze_frames(
         spark, pacs_path=pacs, party_path=party_path, account_path=acct
     )
-    assert dict(id_map.collect()) == {i: lei[i] for i in range(1, 7)}
+    assert dict(id_map.select("dg_id", "key").collect()) == {i: i for i in range(1, 7)}
+    keys = {r["orig_key"] for r in txns.collect()} | {r["bene_key"] for r in txns.collect()}
+    assert keys == {1, 2, 3, 4, 5, 6}
     from pyspark.sql.functions import hour
 
     # TIMESTAMP_NTZ wall clock 10:00 becomes the 10:00 UTC instant.
@@ -272,12 +278,18 @@ def test_bronze_adapter_labels_by_participant_via_iban(spark, tmp_path):
         for r in af.labels_from_participants(_manifest(spark), id_map).collect()
     }
     assert labels == {
-        (lei[1], "stack"),
-        (lei[2], "stack"),
-        (lei[3], "stack"),
-        (lei[4], "dormant_reactivation"),
-        (lei[5], "dormant_reactivation"),
+        (1, "stack"),
+        (2, "stack"),
+        (3, "stack"),
+        (4, "dormant_reactivation"),
+        (5, "dormant_reactivation"),
     }
+    # Subject role: stack's first pass-through (index 1), dormant's originator.
+    subj = {
+        (r["key"], r["typology_type"])
+        for r in af.labels_from_subjects(spark, _manifest(spark), id_map).collect()
+    }
+    assert subj == {(2, "stack"), (4, "dormant_reactivation")}
     # The UETR route agrees for these instances (every participant is on a row).
     by_uetr = af.labels_from_uetrs(_manifest(spark), txns)
     agree = af.label_agreement(af.labels_from_participants(_manifest(spark), id_map), by_uetr)
@@ -359,3 +371,27 @@ def test_density_and_timing_counts(spark):
     # P sends daily: gap_cv 0, in the cohort at 20 sends.
     c = af.timing_mixture_counts(feats, cohort_min_sends=20, low_cv_edge=0.5, high_cv_edge=1.0)
     assert c == {"n_cohort": 1, "n_below_low": 1, "n_above_high": 0}
+
+
+def test_subject_index_mirrors_generator():
+    import aml_features as af
+
+    # Standard splitmix64 first output for state 0.
+    assert af._splitmix64(0) == 0xE220A8397B1DCDAF
+    assert af.subject_index("micro_structuring", 9, 5) == 8
+    assert af.subject_index("fan_in", 6, 5) == 5
+    assert af.subject_index("rapid_layering", 3, 5) == 1
+    assert af.subject_index("gather_scatter", 9, 5) == 0
+    flips = {af.subject_index("corridor_high_risk", 2, s) for s in range(-50, 50)}
+    assert flips == {0, 1}
+    # Negative i64 seeds are read as their u64 bit pattern, as in Rust.
+    assert af.subject_index("corridor_high_risk", 2, -1) == af._splitmix64((1 << 64) - 1) & 1
+
+
+def test_manifest_glob_covers_every_cycle():
+    import aml_features as af
+
+    assert af.manifest_glob("s3a://b/p/manifest/manifest.parquet") == (
+        "s3a://b/p/manifest/manifest*.parquet"
+    )
+    assert af.manifest_glob("/x/other.parquet") == "/x/other.parquet"

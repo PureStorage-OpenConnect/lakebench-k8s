@@ -90,7 +90,7 @@ def _sklearn_available() -> bool:
 def _reference_model(prereg: dict):
     from sklearn.ensemble import HistGradientBoostingClassifier
 
-    spec = dict(prereg["reference_model"])
+    spec = {k: v for k, v in prereg["reference_model"].items() if not k.startswith("_")}
     name = spec.pop("estimator")
     if name != "HistGradientBoostingClassifier":
         raise ValueError(f"unsupported reference_model.estimator {name!r}")
@@ -120,6 +120,15 @@ def _ap(y, score, w):
     from sklearn.metrics import average_precision_score
 
     return float(average_precision_score(y, score, sample_weight=w))
+
+
+def _parallel(fn, items):
+    """Map ``fn`` over ``items`` in threads (tree fits and AP release the
+    GIL), keeping order. LB_AML_GATE_JOBS caps the threads; default all."""
+    from joblib import Parallel, delayed
+
+    jobs = int(os.environ.get("LB_AML_GATE_JOBS", "-1"))
+    return Parallel(n_jobs=jobs, prefer="threads")(delayed(fn)(i) for i in items)
 
 
 def _oof_scores(make_model, X, y, w, folds):
@@ -169,12 +178,9 @@ def _bootstrap_ci(y, score, w, prereg: dict) -> tuple[float | None, float | None
     pw = prereg["power"]
     rng = np.random.default_rng(prereg["cv"]["seed"])
     n = len(y)
-    vals = []
-    for _ in range(pw["bootstrap_iterations"]):
-        idx = rng.integers(0, n, n)
-        if y[idx].sum() == 0:
-            continue
-        vals.append(_ap(y[idx], score[idx], w[idx]))
+    draws = [rng.integers(0, n, n) for _ in range(pw["bootstrap_iterations"])]
+    draws = [idx for idx in draws if y[idx].sum() > 0]
+    vals = _parallel(lambda idx: _ap(y[idx], score[idx], w[idx]), draws)
     if not vals:
         return None, None
     tail = (1 - pw["ci_level"]) / 2
@@ -210,23 +216,24 @@ def _evaluate_typology(name, X, y, w, features, prereg, kind) -> dict[str, Any]:
     out.update(status="ok", ap=ap, ap_ci=[lo, hi], r_precision=_r_precision(y, oof, w))
 
     # D5 shortcuts: every single feature and every feature pair, same folds.
-    single = []
-    for j, f in enumerate(features):
-        xj = X[:, [j]]
-        tree = _ap(y, _oof_scores(lambda: _shortcut_model(prereg), xj, y, w, folds), w)
-        rank = (
-            _rank_ap(X[:, j], y, w)
-            if prereg["shortcut_model"].get("single_feature_also_scores_raw_rank")
-            else 0.0
-        )
-        single.append({"feature": f, "ap": max(tree, rank), "tree_ap": tree, "rank_ap": rank})
+    use_rank = prereg["shortcut_model"].get("single_feature_also_scores_raw_rank")
+
+    def shortcut_ap(cols):
+        return _ap(y, _oof_scores(lambda: _shortcut_model(prereg), X[:, cols], y, w, folds), w)
+
+    def one(j):
+        tree = shortcut_ap([j])
+        rank = _rank_ap(X[:, j], y, w) if use_rank else 0.0
+        return {"feature": features[j], "ap": max(tree, rank), "tree_ap": tree, "rank_ap": rank}
+
+    single = _parallel(one, range(len(features)))
     single.sort(key=lambda r: -r["ap"])
-    pairs = []
-    for a in range(len(features)):
-        for b in range(a + 1, len(features)):
-            xab = X[:, [a, b]]
-            pap = _ap(y, _oof_scores(lambda: _shortcut_model(prereg), xab, y, w, folds), w)
-            pairs.append({"features": [features[a], features[b]], "ap": pap})
+    combos = [(a, b) for a in range(len(features)) for b in range(a + 1, len(features))]
+    pair_aps = _parallel(lambda ab: shortcut_ap(list(ab)), combos)
+    pairs = [
+        {"features": [features[a], features[b]], "ap": pap}
+        for (a, b), pap in zip(combos, pair_aps, strict=True)
+    ]
     pairs.sort(key=lambda r: -r["ap"])
 
     lk = prereg["leakage"]
@@ -337,6 +344,39 @@ def _density(counts: dict | None, prereg: dict) -> dict | None:
     }
 
 
+def corpus_role(seed, prereg: dict) -> str:
+    """calibration / evaluation / robustness by the pre-registered seeds, or
+    unknown. R3: tuning happens on calibration only; a report that says
+    evaluation or robustness before the freeze is a burned seed."""
+    if seed is None:
+        return "unknown"
+    for role in ("calibration", "evaluation", "robustness"):
+        if str(prereg["corpora"].get(f"{role}_seed")) == str(seed):
+            return role
+    return "other"
+
+
+def _passes(report: dict, prereg: dict) -> dict:
+    """Every gate outcome on this corpus in one place. ``verdict == "ok"``
+    only says the gate ran; these say whether each gate passed."""
+    per = report["typologies"]
+    beh = list(prereg["behavioural_subset"])
+    dfn = list(prereg["definitional_subset"])
+    tm, dn = report.get("timing_mixture"), report.get("density")
+    out = {
+        "level2_on_this_corpus": bool(report["level2"]["holds_on_this_corpus"]),
+        "d5_leakage_behavioural": all(bool(per[t].get("leakage_pass")) for t in beh),
+        "d7_k_in_band": report["level2"]["k_in_band"] >= report["level2"]["k_required"],
+        "definitional_check": all(
+            bool((per[t].get("definitional_check") or {}).get("pass")) for t in dfn
+        ),
+        "d2_timing_mixture": None if tm is None else bool(tm["pass"]),
+        "d11_density": None if dn is None else bool(dn["pass"]),
+    }
+    out["all"] = all(v for v in out.values() if v is not None)
+    return out
+
+
 def evaluate_gate(
     frame,
     prereg: dict,
@@ -357,6 +397,7 @@ def evaluate_gate(
         "prereg_sha256": prereg_sha256,
         "metric": prereg["metric"],
         "provenance": dict(provenance or {}),
+        "corpus_role": corpus_role((provenance or {}).get("corpus_seed"), prereg),
         "features": features,
         "timing_mixture": _timing_mixture(timing_counts, prereg),
         "density": _density(density_counts, prereg),
@@ -390,6 +431,7 @@ def evaluate_gate(
     report["typologies"] = per
     report["level2"] = _level2(per, prereg)
     report["verdict"] = "ok"
+    report["passes"] = _passes(report, prereg)
     return report
 
 
@@ -406,7 +448,7 @@ def summary_lines(report: dict) -> list[str]:
         sc = r["shortcuts"]
         s1 = sc.get("single_feature", {}).get("best", {})
         s2 = sc.get("feature_pair_depth2", {}).get("best", {})
-        lo, hi = r["ap_ci"]
+        lo, hi = (v if v is not None else float("nan") for v in r["ap_ci"])
         lines.append(
             f"  {t} [{r['kind']}]: AP={r['ap']:.3f} CI=[{lo:.3f},{hi:.3f}] "
             f"n_pos={r['n_positives']} in_band={r['in_band']} "

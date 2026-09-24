@@ -62,6 +62,18 @@ def main(argv=None) -> int:
     ap.add_argument("--prereg", type=Path, default=None, help="pre-registration JSON path")
     ap.add_argument("--driver-memory", default="12g")
     ap.add_argument("--master", default="local[*]")
+    ap.add_argument(
+        "--label-role",
+        choices=["participant", "subject"],
+        default=None,
+        help="override the pre-registered unit_of_scoring.label_role (diagnostic only; "
+        "the report records the override)",
+    )
+    ap.add_argument(
+        "--require-pass",
+        action="store_true",
+        help="exit 2 unless every gate passes (passes.all); default exit 0 when the gate ran",
+    )
     args = ap.parse_args(argv)
 
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
@@ -90,7 +102,8 @@ def main(argv=None) -> int:
     spark.sparkContext.setLogLevel("ERROR")
     t0 = time.time()
     try:
-        manifest = spark.read.parquet(str(corpus / "manifest/manifest.parquet"))
+        manifest_src = af.manifest_glob(str(corpus / "manifest/manifest.parquet"))
+        manifest = spark.read.parquet(manifest_src)
         txns, ents, id_map = af.bronze_frames(
             spark,
             pacs_path=str(corpus / "bronze/pacs008"),
@@ -99,7 +112,10 @@ def main(argv=None) -> int:
         )
         txns = txns.cache()
         features = af.entity_features(txns, ents).cache()
-        labels = af.labels_from_participants(manifest, id_map).cache()
+        registered_role = prereg["unit_of_scoring"]["label_role"]
+        role = args.label_role or registered_role
+        labels = af.labels_for_role(spark, manifest, id_map, role).cache()
+        by_participant = af.labels_from_participants(manifest, id_map)
         tm = prereg["timing_mixture"]
         timing = af.timing_mixture_counts(
             features,
@@ -110,12 +126,16 @@ def main(argv=None) -> int:
         density = af.typology_density(txns, manifest)
         cust_keys = features.filter(col("is_customer")).select("key")
         agreement = af.label_agreement(
-            labels.join(cust_keys, "key", "left_semi"),
+            by_participant.join(cust_keys, "key", "left_semi"),
             af.labels_from_uetrs(manifest, txns).join(cust_keys, "key", "left_semi"),
         )
         pdf = af.gate_frame(features, labels, typologies)
         prov = {
             "adapter": "bronze",
+            "manifest": manifest_src,
+            "label_role": role,
+            "label_role_overridden": role != registered_role,
+            "aml_features_sha256": af.source_sha256(),
             "corpus": str(corpus),
             "corpus_seed": args.seed,
             "git_sha": _git_sha(),
@@ -144,7 +164,11 @@ def main(argv=None) -> int:
         print(f"wrote {args.out}")
     else:
         print(text)
-    return 0 if report.get("verdict") == "ok" else 1
+    if report.get("verdict") != "ok":
+        return 1
+    if args.require_pass and not report["passes"]["all"]:
+        return 2
+    return 0
 
 
 if __name__ == "__main__":

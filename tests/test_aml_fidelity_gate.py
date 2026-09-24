@@ -307,3 +307,20 @@ def test_load_preregistration_prefers_flat_copy(tmp_path, monkeypatch):
     assert got == {"version": "x"} and len(sha) == 64
     monkeypatch.setenv("LB_AML_PREREG_PATH", str(p))
     assert fg.load_preregistration()[0] == {"version": "x"}
+
+
+def test_passes_summary_and_corpus_role():
+    p = _prereg()
+    rep = fg.evaluate_gate(_frame(), p, provenance={"corpus_seed": 42})
+    assert rep["corpus_role"] == "calibration"
+    assert rep["passes"]["d5_leakage_behavioural"] is False
+    assert rep["passes"]["all"] is False
+    assert rep["passes"]["d2_timing_mixture"] is None  # not supplied, not counted
+    assert fg.corpus_role(p["corpora"]["evaluation_seed"], p) == "evaluation"
+    assert fg.corpus_role(7, p) == "other" and fg.corpus_role(None, p) == "unknown"
+
+
+def test_reference_model_ignores_doc_keys():
+    p = _prereg()
+    p["reference_model"] = {**p["reference_model"], "_doc": "a note"}
+    assert fg.evaluate_gate(_frame(), p)["verdict"] == "ok"

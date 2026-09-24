@@ -61,7 +61,6 @@ from __future__ import annotations
 
 from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
-    broadcast,
     coalesce,
     col,
     countDistinct,
@@ -73,7 +72,6 @@ from pyspark.sql.functions import (
     lit,
     stddev_pop,
     to_date,
-    trim,
     when,
 )
 from pyspark.sql.functions import count as count_
@@ -166,6 +164,12 @@ def _in_structuring_band(amount_col, ccy_col):
     return expr
 
 
+def _ratio(num, den):
+    """num / den, NULL when den is NULL or 0 (Spark 4 ANSI mode raises on a
+    zero divisor, e.g. an entity whose sends all share one second)."""
+    return when(den != lit(0), num / den)
+
+
 def _check_columns(df: DataFrame, needed, what: str) -> None:
     missing = [c for c in needed if c not in df.columns]
     if missing:
@@ -214,7 +218,7 @@ def entity_features(txns: DataFrame, entities: DataFrame) -> DataFrame:
         countDistinct(to_date(col("ts"))).cast("double").alias("active_days"),
         mean_("amount_usd").alias("amount_mean_usd"),
         max_("amount_usd").alias("amount_max_usd"),
-        (stddev_pop("amount_usd") / mean_("amount_usd")).alias("amount_cv"),
+        _ratio(stddev_pop("amount_usd"), mean_("amount_usd")).alias("amount_cv"),
         countDistinct("cp").cast("double").alias("n_counterparties"),
         frac(col("_xb")).alias("frac_cross_border"),
         frac((col("amount") % lit(ROUND_UNIT)) == lit(0)).alias("frac_round_amount"),
@@ -260,8 +264,8 @@ def entity_features(txns: DataFrame, entities: DataFrame) -> DataFrame:
         count_(lit(1)).cast("double").alias("n_sends"),
         mean_("_gap").alias("gap_mean_days"),
         max_("_gap").alias("gap_max_days"),
-        (stddev_pop("_gap") / mean_("_gap")).alias("gap_cv"),
-        (max_("_gap") / mean_("_gap")).alias("max_gap_over_mean_gap"),
+        _ratio(stddev_pop("_gap"), mean_("_gap")).alias("gap_cv"),
+        _ratio(max_("_gap"), mean_("_gap")).alias("max_gap_over_mean_gap"),
     )
 
     ent = entities.select(
@@ -301,6 +305,60 @@ def labels_from_participants(manifest: DataFrame, id_map: DataFrame) -> DataFram
         col("typology_type"), explode(col("participant_entity_ids")).alias("dg_id")
     )
     return parts.join(id_map, "dg_id", "inner").select("key", "typology_type").distinct()
+
+
+_GAMMA = 0x9E3779B97F4A7C15
+_MASK64 = (1 << 64) - 1
+
+
+def _splitmix64(x: int) -> int:
+    """datagen_rs::hash::splitmix64."""
+    z = (x + _GAMMA) & _MASK64
+    z = ((z ^ (z >> 30)) * 0xBF58476D1CE4E5B9) & _MASK64
+    z = ((z ^ (z >> 27)) * 0x94D049BB133111EB) & _MASK64
+    return z ^ (z >> 31)
+
+
+def subject_index(typ: str, n: int, inst_seed: int) -> int:
+    """datagen_rs::typology::subject_index: the participant the typology's
+    scenario fires on (always a customer, typology::enforce_subject)."""
+    if typ in ("fan_in", "micro_structuring"):
+        return n - 1
+    if typ in ("stack", "rapid_layering"):
+        return min(1, n - 1)
+    if typ == "corridor_high_risk":
+        return _splitmix64(inst_seed & _MASK64) & 1
+    return 0
+
+
+def labels_from_subjects(spark, manifest: DataFrame, id_map: DataFrame) -> DataFrame:
+    """(key, typology_type) for the subject role of every instance only.
+
+    The manifest's ``seed`` is the instance seed, which corridor_high_risk's
+    subject flip needs. Instances are small (tens of thousands at scale 10),
+    so the role is resolved on the driver.
+    """
+    rows = []
+    for r in manifest.select("typology_type", "participant_entity_ids", "seed").collect():
+        ids = r["participant_entity_ids"] or []
+        if ids:
+            rows.append(
+                (
+                    r["typology_type"],
+                    int(ids[subject_index(r["typology_type"], len(ids), int(r["seed"] or 0))]),
+                )
+            )
+    subj = spark.createDataFrame(rows, "typology_type string, dg_id long")
+    return subj.join(id_map, "dg_id", "inner").select("key", "typology_type").distinct()
+
+
+def labels_for_role(spark, manifest: DataFrame, id_map: DataFrame, role: str) -> DataFrame:
+    """Labels for the pre-registered role (unit_of_scoring.label_role)."""
+    if role == "participant":
+        return labels_from_participants(manifest, id_map)
+    if role == "subject":
+        return labels_from_subjects(spark, manifest, id_map)
+    raise ValueError(f"unknown label_role {role!r}")
 
 
 def labels_from_uetrs(manifest: DataFrame, txns: DataFrame) -> DataFrame:
@@ -378,6 +436,25 @@ def timing_mixture_counts(
     }
 
 
+def manifest_glob(uri: str) -> str:
+    """Every cycle's manifest next to ``uri``: a multi-cycle corpus writes
+    manifest.parquet for cycle 0 and manifest-cNNN.parquet for the rest
+    (datagen_rs::cycle::ref_key), and silver holds every cycle's rows."""
+    base = "manifest.parquet"
+    if uri.rstrip("/").endswith(base):
+        return uri.rstrip("/")[: -len(base)] + "manifest*.parquet"
+    return uri
+
+
+def source_sha256() -> str:
+    """sha256 of this file: the feature definitions are not in the
+    pre-registration, so the report pins them by content."""
+    import hashlib
+    from pathlib import Path
+
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
 def manifest_provenance(manifest: DataFrame) -> dict:
     """Generator MODEL_VERSION(s) and instance count carried by the manifest."""
     versions = sorted(
@@ -430,7 +507,7 @@ def silver_frames(
         col("customer_type"),
         col("crr_tier"),
     )
-    ctry = broadcast(ent.select("key", "home_country"))
+    ctry = ent.select("key", "home_country")
     txns = (
         t.select(
             col("uetr"),
@@ -466,16 +543,31 @@ def silver_frames(
 def bronze_frames(spark, *, pacs_path: str, party_path: str, account_path: str):
     """(txns, entities, id_map) from a raw datagen corpus.
 
-    Entity key is the payment's LEI (datagen stamps one on every party of
-    every payment). Attributes come from the party master, not from silver.
+    Entity key is the ground-truth datagen entity id: each payment's debtor
+    and creditor IBAN resolved through the account master's holder. Silver
+    keys on a hash of the payment's LEI instead, so a keying defect in silver
+    (merged or split accounts) moves the silver AP away from this one, which
+    is what A6 tests. Attributes come from the party master, not from silver.
     """
     from silver_build_financial import _usd_rate
 
     p = spark.read.parquet(pacs_path)
+    holder = spark.read.parquet(account_path).select(
+        col("iban"), col("holder_entity_id").cast("long").alias("_holder")
+    )
+    p = p.join(
+        holder.withColumnRenamed("iban", "_oi").withColumnRenamed("_holder", "_ok"),
+        col("dbtr_acct.iban") == col("_oi"),
+        "left",
+    ).join(
+        holder.withColumnRenamed("iban", "_bi").withColumnRenamed("_holder", "_bk"),
+        col("cdtr_acct.iban") == col("_bi"),
+        "left",
+    )
     txns = p.select(
         col("uetr"),
-        trim(col("dbtr.id.lei")).alias("orig_key"),
-        trim(col("cdtr.id.lei")).alias("bene_key"),
+        col("_ok").alias("orig_key"),
+        col("_bk").alias("bene_key"),
         # Bronze carries TIMESTAMP_NTZ; silver stores TIMESTAMP. Cast so both
         # adapters hand entity_features the same type (session time zone UTC).
         col("cre_dt_tm").cast("timestamp").alias("ts"),
@@ -487,15 +579,14 @@ def bronze_frames(spark, *, pacs_path: str, party_path: str, account_path: str):
         col("dbtr.ctry_of_res").alias("orig_country"),
         col("cdtr.ctry_of_res").alias("bene_country"),
     )
-    iban_to_key = (
-        p.select(col("dbtr_acct.iban").alias("iban"), trim(col("dbtr.id.lei")).alias("key"))
-        .unionByName(
-            p.select(col("cdtr_acct.iban").alias("iban"), trim(col("cdtr.id.lei")).alias("key"))
-        )
-        .filter(col("iban").isNotNull() & col("key").isNotNull())
+    # Identity map over every holder that pays or is paid.
+    id_map = (
+        txns.select(col("orig_key").alias("key"))
+        .unionByName(txns.select(col("bene_key").alias("key")))
+        .filter(col("key").isNotNull())
         .distinct()
+        .withColumn("dg_id", col("key"))
     )
-    id_map = _account_id_map(spark.read.parquet(account_path), iban_to_key)
     party = spark.read.parquet(party_path).select(
         col("entity_id").cast("long").alias("dg_id"),
         col("is_customer"),
