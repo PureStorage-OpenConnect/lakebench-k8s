@@ -1758,6 +1758,35 @@ class TestReferenceScoreWiring:
     """The reference detector (LB-130 gate) must be packaged and importable on a
     Spark driver that has no lakebench install."""
 
+    def test_reference_job_carries_seed_and_git_sha(self, monkeypatch):
+        """The fidelity gate names the corpus seed and revision it scored
+        (AML-GOALS R6); only the reference job gets them."""
+        from lakebench.deploy.datagen import DATAGEN_SEED
+        from lakebench.modules.pipeline_engines.spark import job as jobmod
+
+        monkeypatch.setattr(jobmod, "_lakebench_git_sha", lambda: "abc123")
+        mgr = SparkJobManager(_make_config(), _mock_k8s())
+
+        def env(jt):
+            return {e["name"]: e.get("value") for e in mgr._build_env_vars(jt)}
+
+        ref = env(JobType.SCORE_FINANCIAL_REFERENCE)
+        assert ref["LB_DATAGEN_SEED"] == str(DATAGEN_SEED)
+        assert ref["LB_GIT_SHA"] == "abc123"
+        other = env(JobType.SCORE_FINANCIAL)
+        assert "LB_DATAGEN_SEED" not in other and "LB_GIT_SHA" not in other
+
+    def test_git_sha_helper_never_raises(self, monkeypatch):
+        import subprocess
+
+        from lakebench.modules.pipeline_engines.spark import job as jobmod
+
+        def boom(*a, **k):
+            raise OSError("no git")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        assert jobmod._lakebench_git_sha() == "unknown"
+
     def test_configmap_includes_reference_script_and_module(self):
         """deploy_scripts_configmap must ship BOTH score_financial_reference.py
         and reference_score.py (the self-contained module it imports) flat, so

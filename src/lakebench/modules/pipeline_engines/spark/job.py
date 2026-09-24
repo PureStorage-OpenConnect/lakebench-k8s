@@ -733,6 +733,35 @@ REFERENCE_PY_DEPS = (
 REFERENCE_PY_DEPS_DIR = "/opt/lb-pydeps"
 
 
+def _lakebench_git_sha() -> str:
+    """HEAD of the git checkout the lakebench package runs from, with a
+    -dirty suffix for tracked changes; "unknown" for an installed wheel or
+    when git is unavailable."""
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if sha.returncode != 0 or not sha.stdout.strip():
+            return "unknown"
+        dirty = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        suffix = "-dirty" if dirty.returncode == 0 and dirty.stdout.strip() else ""
+        return sha.stdout.strip() + suffix
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
 def _spark_interval_to_seconds(interval: str) -> int:
     """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
     ``"1 hour"``) to an integer seconds value. Returns 10 on unparseable
@@ -2340,6 +2369,14 @@ class SparkJobManager:
                             "value": str(_spark_interval_to_seconds(trigger_interval)),
                         }
                     )
+
+        # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
+        # the report scored and which lakebench revision produced it.
+        if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
+            from lakebench.deploy.datagen import DATAGEN_SEED
+
+            env.append({"name": "LB_DATAGEN_SEED", "value": str(DATAGEN_SEED)})
+            env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
         if cycle_env:

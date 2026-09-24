@@ -273,6 +273,11 @@ def run_fidelity_gate(
     )
     density = af.typology_density(txns, manifest)
     unkeyed = af.unkeyed_rows(txns)
+    # The id map goes through the account master's IBANs, so a duplicate IBAN
+    # there would label the wrong silver entity.
+    dup_ibans = af.duplicate_ibans(spark, ACCOUNT_PATH)
+    seed = provenance.get("corpus_seed")
+    seed_check = af.corpus_seed_check(manifest, int(seed) if seed not in (None, "") else None)
     agreement = af.label_agreement(
         af.labels_from_participants(manifest, id_map).join(
             features.filter(col("is_customer")).select("key"), "key", "left_semi"
@@ -295,6 +300,8 @@ def run_fidelity_gate(
             "adapter": "silver",
             "label_role": role,
             "unkeyed_rows": unkeyed,
+            "duplicate_ibans": dup_ibans,
+            "corpus_seed_check": seed_check,
             "aml_features_sha256": af.source_sha256(),
             "n_customers": n_customers,
             "negative_sample_fraction": frac,
@@ -302,7 +309,12 @@ def run_fidelity_gate(
         },
     )
     if report.get("verdict") == "ok":
-        add_pass(report, "corpus_fully_keyed", unkeyed == 0)
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
+        if seed_check["claimed_seed"] is not None:
+            seed_ok = seed_check["matched_share"] == 1
+            add_pass(report, "corpus_seed_verified", seed_ok)
+            if not seed_ok:
+                report["corpus_role"] = "unverified"
     return report
 
 
