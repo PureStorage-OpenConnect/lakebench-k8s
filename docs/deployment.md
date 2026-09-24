@@ -172,7 +172,7 @@ The destroy engine follows a specific sequence to ensure clean removal:
 
 | Flag | Short | Description |
 |---|---|---|
-| `--force` | `-f` | Skip the confirmation prompt |
+| `--force` / `--yes` | `-y` | Skip the confirmation prompt |
 
 ### Examples
 
