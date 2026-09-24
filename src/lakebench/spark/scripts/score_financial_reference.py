@@ -351,7 +351,7 @@ def main() -> None:
     import aml_features as af
 
     manifest_src = af.manifest_glob(args.manifest)
-    manifest = spark.read.parquet(manifest_src)
+    manifest = af.read_manifest(spark, args.manifest)
     af.check_manifest(manifest)
     manifest_n = manifest.count()
     if manifest_n == 0:
