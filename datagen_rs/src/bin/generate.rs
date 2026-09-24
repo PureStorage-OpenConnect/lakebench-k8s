@@ -511,6 +511,81 @@ fn pacs008_main() {
 
     let t_typ = t_typ0.elapsed().as_secs_f64();
 
+    // Reference zones (party, account, manifest) go first: they depend only
+    // on the world and the schedule, and in continuous mode silver-stream
+    // joins each micro-batch to the party master, so it must exist before
+    // the first bronze file lands.
+    let t_ref0 = std::time::Instant::now();
+    // Track reference-zone bytes/files separately so the final summary line
+    // reflects what a `--mode reference` pod produced. Previously the
+    // reference path did not touch `total_bytes`/`files_written`, so a
+    // reference pod always logged `files_written=0 bytes=0` even after
+    // successfully uploading party/account/manifest -- confusing for
+    // anyone monitoring aggregate throughput from pod logs.
+    let mut ref_bytes: u64 = 0;
+    let mut ref_files: u64 = 0;
+    if do_reference {
+        // Party and account are the same for every cycle (the world and the
+        // schedule are the one-shot ones), so only cycle 0 writes them.
+        // Party and account stream through a real S3 multipart upload
+        // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
+        // into MpuWriter, which enqueues 5 MiB parts against S3 as they
+        // fill. Whole-object size is no longer bounded by process RAM
+        // or the 5 GiB single-PUT ceiling -- S3 multipart supports up
+        // to 5 TiB per object across 10k parts, so at 5 MiB parts we
+        // top out around 50 GiB per file (well past scale >=1000's
+        // ~5-10 GB party.parquet). If the caller wants larger, bump
+        // WriteMultipart's chunk_size via a new S3Sink helper.
+        //
+        // finish() is fail-loud: on error we panic so the pod exits
+        // non-zero and the datagen Job restarts (same semantics as the
+        // single-PUT path). Drop's best-effort abort covers panics.
+        if cycle_n == 0 {
+            let mut party_mpu = sink.put_multipart("bronze/party.parquet");
+            write_party_to(&w, &instances, &mut party_mpu);
+            let party_bytes = party_mpu.bytes_written();
+            party_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
+            ref_bytes += party_bytes;
+            ref_files += 1;
+
+            let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
+            write_account_to(&w, &mut acct_mpu);
+            let acct_bytes = acct_mpu.bytes_written();
+            acct_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
+            ref_bytes += acct_bytes;
+            ref_files += 1;
+        }
+
+        // Manifest stays on the single-PUT path: it's a handful of MB
+        // even at scale 1000 (one row per typology instance), so
+        // multipart adds request overhead with no benefit.
+        // This cycle's instances: those whose last emitted row is in its
+        // slice (an instance with no emitted rows goes by its window end).
+        let mine: Vec<datagen_rs::typology::Instance> = instances
+            .iter()
+            .filter(|i| {
+                let m = inst_last_mass
+                    .get(&i.id)
+                    .copied()
+                    .unwrap_or_else(|| gcal.mass_at(i.end_us));
+                in_slice(m)
+            })
+            .cloned()
+            .collect();
+        let man_bytes = encode_parquet(&build_manifest(&mine, seed, &inst_uids), 8 * 1024 * 1024);
+        ref_bytes += man_bytes.len() as u64;
+        ref_files += 1;
+        sink.put(
+            &cycle::ref_key("manifest/manifest.parquet", cycle_n),
+            man_bytes,
+        );
+    }
+    let t_ref = t_ref0.elapsed().as_secs_f64();
+
     let total_bytes = AtomicU64::new(0);
     let files_written = AtomicU64::new(0);
     // Rows THIS POD wrote (not corpus-wide `total_txns`; that is a
@@ -672,78 +747,8 @@ fn pacs008_main() {
     let rows_written = rows_written.load(Ordering::Relaxed);
     let t_gen = t_gen0.elapsed().as_secs_f64();
 
-    let t_ref0 = std::time::Instant::now();
-    // Track reference-zone bytes/files separately so the final summary line
-    // reflects what a `--mode reference` pod produced. Previously the
-    // reference path did not touch `total_bytes`/`files_written`, so a
-    // reference pod always logged `files_written=0 bytes=0` even after
-    // successfully uploading party/account/manifest -- confusing for
-    // anyone monitoring aggregate throughput from pod logs.
-    let mut ref_bytes: u64 = 0;
-    let mut ref_files: u64 = 0;
-    if do_reference {
-        // Party and account are the same for every cycle (the world and the
-        // schedule are the one-shot ones), so only cycle 0 writes them.
-        // Party and account stream through a real S3 multipart upload
-        // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
-        // into MpuWriter, which enqueues 5 MiB parts against S3 as they
-        // fill. Whole-object size is no longer bounded by process RAM
-        // or the 5 GiB single-PUT ceiling -- S3 multipart supports up
-        // to 5 TiB per object across 10k parts, so at 5 MiB parts we
-        // top out around 50 GiB per file (well past scale >=1000's
-        // ~5-10 GB party.parquet). If the caller wants larger, bump
-        // WriteMultipart's chunk_size via a new S3Sink helper.
-        //
-        // finish() is fail-loud: on error we panic so the pod exits
-        // non-zero and the datagen Job restarts (same semantics as the
-        // single-PUT path). Drop's best-effort abort covers panics.
-        if cycle_n == 0 {
-            let mut party_mpu = sink.put_multipart("bronze/party.parquet");
-            write_party_to(&w, &instances, &mut party_mpu);
-            let party_bytes = party_mpu.bytes_written();
-            party_mpu
-                .finish()
-                .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
-            ref_bytes += party_bytes;
-            ref_files += 1;
-
-            let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
-            write_account_to(&w, &mut acct_mpu);
-            let acct_bytes = acct_mpu.bytes_written();
-            acct_mpu
-                .finish()
-                .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
-            ref_bytes += acct_bytes;
-            ref_files += 1;
-        }
-
-        // Manifest stays on the single-PUT path: it's a handful of MB
-        // even at scale 1000 (one row per typology instance), so
-        // multipart adds request overhead with no benefit.
-        // This cycle's instances: those whose last emitted row is in its
-        // slice (an instance with no emitted rows goes by its window end).
-        let mine: Vec<datagen_rs::typology::Instance> = instances
-            .iter()
-            .filter(|i| {
-                let m = inst_last_mass
-                    .get(&i.id)
-                    .copied()
-                    .unwrap_or_else(|| gcal.mass_at(i.end_us));
-                in_slice(m)
-            })
-            .cloned()
-            .collect();
-        let man_bytes = encode_parquet(&build_manifest(&mine, seed, &inst_uids), 8 * 1024 * 1024);
-        ref_bytes += man_bytes.len() as u64;
-        ref_files += 1;
-        sink.put(
-            &cycle::ref_key("manifest/manifest.parquet", cycle_n),
-            man_bytes,
-        );
-    }
     let total_bytes = total_bytes + ref_bytes;
     let files_written = files_written + ref_files;
-    let t_ref = t_ref0.elapsed().as_secs_f64();
     let up_s = upload_ns.load(Ordering::Relaxed) as f64 / 1e9;
     let el = t0.elapsed().as_secs_f64();
     eprintln!(
