@@ -51,58 +51,56 @@ pub fn lognormal_amount(rng: &mut Rng) -> f64 {
 }
 
 /// Log-normal amount with a per-account additive shift to the log-mean, then
-/// round-number snapping. `mu_shift` is the account's persona amount shift
-/// (`world::amount_log_shift`); 0.0 reproduces the population-default draw. The
-/// RNG draw order (normal then unit) is identical to the unshifted path, so
-/// `lognormal_amount_shifted(rng, 0.0)` is byte-identical to the old
-/// `lognormal_amount`.
+/// round-number snapping, in USD. `mu_shift` is the account's persona amount
+/// shift (`world::amount_log_shift`); 0.0 reproduces the population-default draw.
 pub fn lognormal_amount_shifted(rng: &mut Rng, mu_shift: f64) -> f64 {
-    let raw = ((LN_MU + mu_shift) + LN_SIGMA * rng.normal())
+    native_amount(rng, mu_shift, "USD")
+}
+
+/// Minor units per currency (JPY and KRW have none).
+fn minor_units(ccy: &str) -> f64 {
+    match ccy {
+        "JPY" | "KRW" => 1.0,
+        _ => 100.0,
+    }
+}
+
+/// Amount in the account's own currency (LB-137). The log-normal is defined
+/// in USD, where the bank model's median and tail live, and the draw is then
+/// expressed in `ccy`. Drawing every currency on the USD scale left JPY, INR
+/// and KRW baselines about 150x too small, so almost no baseline payment sat in
+/// those currencies' structuring bands and a structuring row there was a label.
+/// Snapping to round numbers happens in `ccy`, since people round in the
+/// currency they pay in. For USD the result, and the RNG draw order (normal,
+/// then unit), are identical to the old USD-only draw.
+pub fn native_amount(rng: &mut Rng, mu_shift: f64, ccy: &str) -> f64 {
+    let fx = fx_to_usd(ccy);
+    let raw_usd = ((LN_MU + mu_shift) + LN_SIGMA * rng.normal())
         .exp()
         .min(AMOUNT_CEILING);
+    let raw = raw_usd / fx;
     let amt = if rng.unit() < ROUND_SNAP_RATE {
-        let step = if raw < 1_000.0 {
+        let step_usd = if raw_usd < 1_000.0 {
             100.0
-        } else if raw < 10_000.0 {
+        } else if raw_usd < 10_000.0 {
             1_000.0
-        } else if raw < 100_000.0 {
+        } else if raw_usd < 100_000.0 {
             10_000.0
         } else {
             100_000.0
+        };
+        // The same step in `ccy`, snapped to a power of ten.
+        let step = if fx == 1.0 {
+            step_usd
+        } else {
+            10f64.powf((step_usd / fx).log10().round()).max(1.0)
         };
         (raw / step).round() * step
     } else {
         raw
     };
-    (amt * 100.0).round() / 100.0
-}
-
-/// Log-normal amount (with the per-account persona shift) rejection-sampled into
-/// the account's own upper tail until it clears `native_floor`, with a jittered
-/// fallback if the rejection budget is exhausted. Always returns a value
-/// >= native_floor. Used for the W8 dormant-reactivation burst.
-///
-/// The floor is on the NATIVE amount, not a USD-converted one: silver computes
-/// `txn_amount_usd = intr_bk_sttlm_amt * coalesce(xchg_rate, 1.0)` and xchg_rate
-/// is 1.0 for the ~90% of rows that are not flagged cross-currency, so for that
-/// dominant path the native amount IS what W8 compares against 5000. Flooring on
-/// native*fx_to_usd instead would leave a GBP/EUR/etc. burst below silver's USD
-/// value and silently miss W8. (The ~10% cross-currency rows remain subject to
-/// the pre-existing currency-scaling gap tracked as LB-137.) The jittered
-/// fallback avoids a fixed-constant amount spike (a leakage artifact) for
-/// deep-low-persona accounts that exhaust the rejection budget.
-pub fn floored_lognormal(rng: &mut Rng, mu_shift: f64, native_floor: f64) -> f64 {
-    let mut a = lognormal_amount_shifted(rng, mu_shift);
-    let mut tries = 0;
-    while a < native_floor && tries < 24 {
-        a = lognormal_amount_shifted(rng, mu_shift);
-        tries += 1;
-    }
-    if a < native_floor {
-        ((native_floor * (1.0 + 0.25 * rng.unit())) * 100.0).round() / 100.0
-    } else {
-        a
-    }
+    let m = minor_units(ccy);
+    (amt * m).round() / m
 }
 
 /// Amount tight against the local structuring band.

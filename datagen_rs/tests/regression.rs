@@ -802,21 +802,14 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             rows[0].ts_us < inst.suppress_start_us,
             "anchor must precede the window"
         );
-        assert!(
-            rows[0].min_amount_usd.is_none(),
-            "anchor must be a normal-amount send"
-        );
         assert_eq!(
             rows[0].orig, inst.participants[0],
             "anchor orig = dormant account"
         );
-        // Burst rows: inside [start, end], originated by the dormant account,
-        // with no rule-derived amount floor (LB-138).
+        // Burst rows: inside [start, end], originated by the dormant account.
+        // TxRow has no amount-floor field at all, so no rule-derived floor
+        // can come back (LB-138).
         for r in &rows[1..] {
-            assert!(
-                r.min_amount_usd.is_none(),
-                "burst rows must not carry a rule-derived amount floor"
-            );
             assert!(
                 r.ts_us >= inst.start_us && r.ts_us <= inst.end_us,
                 "burst row outside the manifest window"
@@ -845,52 +838,54 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
 }
 
 #[test]
-fn floored_lognormal_always_clears_floor_and_varies() {
-    // W8 burst floor (P3): the returned NATIVE amount must always clear the
-    // floor -- even for deep-low-persona accounts that exhaust the rejection
-    // budget -- and the exhaustion fallback must NOT be a fixed constant (that
-    // would be a leakage artifact). Deterministic for a given rng seed.
-    use datagen_rs::amounts::floored_lognormal;
-    let floor = 5200.0;
-    // Very negative shift => almost every draw is below the floor => the
-    // fallback path dominates; assert it still clears AND that the fallback
-    // values are not all identical.
-    let mut r = Rng::new(4242);
-    let mut fallback_vals = Vec::new();
-    for _ in 0..2000 {
-        let a = floored_lognormal(&mut r, -3.0, floor);
+fn every_currency_has_baseline_mass_in_its_structuring_band() {
+    // LB-137: amounts were drawn on the USD scale for every currency, so a JPY
+    // baseline payment was ~5,000 yen and almost none (~1e-7) sat in the
+    // [990,000, 999,999] yen band. A structuring row in JPY, INR or KRW was
+    // then a label by itself. Drawn in each account's own currency, every
+    // band holds baseline mass comparable to its width (expected 0.2% to 1.3%).
+    use datagen_rs::amounts::{native_amount, structuring_band};
+    let n = 400_000u64;
+    for ccy in [
+        "USD", "GBP", "EUR", "CHF", "JPY", "AED", "SGD", "CAD", "MXN", "CNY", "INR", "AUD", "HKD",
+        "KRW", "BRL",
+    ] {
+        let (lo, hi) = structuring_band(ccy);
+        let mut rng = Rng::new(0xB0BB);
+        let mut in_band = 0u64;
+        for id in 1..=n {
+            let amt = native_amount(&mut rng, datagen_rs::world::amount_log_shift(id, 42), ccy);
+            if (lo..=hi).contains(&amt) {
+                in_band += 1;
+            }
+        }
+        let frac = in_band as f64 / n as f64;
         assert!(
-            a >= floor,
-            "floored_lognormal returned {} < floor {}",
-            a,
-            floor
+            frac >= 0.001,
+            "{ccy}: baseline density in its structuring band is {:.4}% (< 0.1%): \
+             structuring rows in {ccy} would be separable by amount alone",
+            frac * 100.0
         );
-        fallback_vals.push(a);
     }
-    let distinct = {
-        let mut b: Vec<u64> = fallback_vals.iter().map(|v| v.to_bits()).collect();
-        b.sort_unstable();
-        b.dedup();
-        b.len()
-    };
-    assert!(
-        distinct > 50,
-        "fallback collapsed to a near-constant ({} distinct)",
-        distinct
-    );
-    // Normal-persona account: mostly natural upper-tail draws, still >= floor.
-    let mut r2 = Rng::new(99);
-    for _ in 0..2000 {
-        assert!(floored_lognormal(&mut r2, 0.0, floor) >= floor);
-    }
-    // Determinism.
-    let mut x = Rng::new(7);
-    let mut y = Rng::new(7);
-    for _ in 0..500 {
+}
+
+#[test]
+fn usd_amounts_unchanged_by_currency_scaling() {
+    use datagen_rs::amounts::{lognormal_amount_shifted, native_amount};
+    let mut a = Rng::new(11);
+    let mut b = Rng::new(11);
+    for i in 0..5000 {
+        let shift = (i % 7) as f64 * 0.1 - 0.3;
         assert_eq!(
-            floored_lognormal(&mut x, -0.5, floor),
-            floored_lognormal(&mut y, -0.5, floor)
+            lognormal_amount_shifted(&mut a, shift).to_bits(),
+            native_amount(&mut b, shift, "USD").to_bits()
         );
+    }
+    // JPY and KRW carry no minor units.
+    let mut r = Rng::new(5);
+    for _ in 0..1000 {
+        let v = native_amount(&mut r, 0.0, "JPY");
+        assert_eq!(v, v.round());
     }
 }
 
@@ -965,7 +960,6 @@ fn shaping_preserves_time_order_and_uses_each_rows_country() {
                 bene: 99,
                 ts_us: inst.start_us + (9 - i) * DAY + 3_600_000_000,
                 structuring: false,
-                min_amount_usd: None,
             })
             .collect();
         let before: Vec<i64> = rows.iter().map(|r| r.ts_us).collect();

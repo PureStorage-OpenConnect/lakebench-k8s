@@ -203,15 +203,6 @@ pub struct TxRow {
     pub bene: u64,
     pub ts_us: i64,
     pub structuring: bool,
-    /// Optional NATIVE-currency amount floor on the row (P3, W8). When set, the
-    /// driver draws from the originator's own persona log-normal and
-    /// rejection-samples into that account's upper tail until the amount clears
-    /// this floor, so a dormant-reactivation burst reliably trips W8. The floor
-    /// is NATIVE, not USD-converted: silver's txn_amount_usd == native for the
-    /// ~90% non-cross-currency rows W8 reads, so a native floor of 5200 clears
-    /// the 5000 rule threshold there (see amounts::floored_lognormal; the field
-    /// name is historical). None everywhere else.
-    pub min_amount_usd: Option<f64>,
 }
 
 fn person_pool(population: usize, seed: i64) -> Vec<u64> {
@@ -513,7 +504,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene,
                     ts_us: uu(&mut rng, s, e),
                     structuring: true,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -525,7 +515,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: b,
                     ts_us: uu(&mut rng, s, e),
                     structuring: true,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -539,7 +528,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: hub,
                     ts_us: uu(&mut rng, s, s + third),
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
             for &b in &p[1 + half..] {
@@ -548,7 +536,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: b,
                     ts_us: uu(&mut rng, s + 2 * third, e),
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -562,14 +549,12 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: m,
                     ts_us: uu(&mut rng, s, s + half),
                     structuring: false,
-                    min_amount_usd: None,
                 });
                 rows.push(TxRow {
                     orig: m,
                     bene,
                     ts_us: uu(&mut rng, s + half, e),
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -584,7 +569,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: p[(i + 1) % n],
                     ts_us: base + jit,
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -598,7 +582,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: p[i + 1],
                     ts_us: base + jit,
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -608,7 +591,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 bene: p[1],
                 ts_us: uu(&mut rng, s, e),
                 structuring: false,
-                min_amount_usd: None,
             });
         }
         "bipartite" => {
@@ -620,7 +602,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                         bene: dst,
                         ts_us: uu(&mut rng, s, e),
                         structuring: false,
-                        min_amount_usd: None,
                     });
                 }
             }
@@ -637,7 +618,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: bb,
                     ts_us: uu(&mut rng, s, e),
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -661,14 +641,12 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 bene: m,
                 ts_us: t1.min(t2),
                 structuring: false,
-                min_amount_usd: None,
             });
             rows.push(TxRow {
                 orig: m,
                 bene: b,
                 ts_us: t1.max(t2),
                 structuring: false,
-                min_amount_usd: None,
             });
         }
         // dormant_reactivation (P3, W8). One pre-window ANCHOR send (normal
@@ -692,7 +670,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 bene: b,
                 ts_us: anchor_ts,
                 structuring: false,
-                min_amount_usd: None,
             });
             for _ in 0..inst.rows_per_instance {
                 rows.push(TxRow {
@@ -702,7 +679,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     structuring: false,
                     // No rule-derived floor (LB-138): the burst is drawn from
                     // the account's own amount distribution like any send.
-                    min_amount_usd: None,
                 });
             }
         }
@@ -720,7 +696,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: p[(i + 1) % n],
                     ts_us: base + jit,
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -736,7 +711,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene,
                     ts_us: uu(&mut rng, s, e),
                     structuring: true,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -754,7 +728,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                     bene: b,
                     ts_us: uu(&mut rng, s, e),
                     structuring: false,
-                    min_amount_usd: None,
                 });
             }
         }
@@ -778,7 +751,6 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 bene: b,
                 ts_us: uu(&mut rng, s, e),
                 structuring: false,
-                min_amount_usd: None,
             });
         }
         _ => {}
