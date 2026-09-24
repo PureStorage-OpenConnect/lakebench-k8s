@@ -101,10 +101,14 @@ def _print_pipeline_scorecard(
         if pb.stage_latency_profile:
             lat = "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
             scores.append(f"  Latency (b/s/g):  {lat}ms")
-        if pb.ingest_ratio > 0:
+        if pb.ingest_ratio is None:
+            scores.append("  Completeness:   [dim]unmeasured[/dim]")
+        elif pb.ingest_ratio > 0:
             pct = pb.ingest_ratio * 100
             scores.append(f"  Completeness:   {pct:>7.1f}%")
-        if pb.pipeline_saturated:
+        # pipeline_saturated is bool | None. None means unmeasurable and must
+        # not be silently coerced to "not saturated" via a truthy check.
+        if pb.pipeline_saturated is True:
             scores.append("  [yellow]Pipeline saturated (completeness < 95%)[/yellow]")
     else:
         if pb.time_to_value_seconds > 0:
@@ -937,7 +941,15 @@ def run(
     # Branch: sustained streaming pipeline (CLI flag overrides config)
     use_sustained = sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
     if use_sustained:
-        _run_sustained(cfg, config_file, timeout, skip_benchmark, duration)
+        _run_sustained(
+            cfg,
+            config_file,
+            timeout,
+            skip_benchmark,
+            duration,
+            skip_generate=skip_generate,
+            skip_maintenance=skip_maintenance,
+        )
         return
 
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
@@ -1092,15 +1104,17 @@ def run(
                         secret_key=s3_cfg.secret_key,
                         region=s3_cfg.region,
                         path_style=s3_cfg.path_style,
+                        ca_cert=s3_cfg.ca_cert,
+                        verify_ssl=s3_cfg.verify_ssl,
                     )
                     dg_info = _s3_dg.get_bucket_size(s3_cfg.buckets.bronze)
                     if dg_info.size_bytes:
                         _datagen_output_gb = dg_info.size_bytes / (1024**3)
-                    if dg_info.object_count:
-                        # Estimate rows from scale factor (1.5M rows per scale unit)
-                        _datagen_output_rows = int(
-                            cfg.architecture.workload.datagen.scale * 1_500_000
-                        )
+                    # datagen row count is not measurable from S3 metadata.
+                    # Leaving _datagen_output_rows at 0 signals "unmeasurable"
+                    # so ingest_ratio and pipeline_saturated stay None instead
+                    # of being computed against a fictional `scale * 1_500_000`
+                    # denominator (LB-044 pattern).
                 except Exception as e:
                     logger.warning("Could not measure bronze bucket size: %s", e)
             except Exception as e:
@@ -1332,6 +1346,8 @@ def run(
                             secret_key=s3_cfg.secret_key,
                             region=s3_cfg.region,
                             path_style=s3_cfg.path_style,
+                            ca_cert=s3_cfg.ca_cert,
+                            verify_ssl=s3_cfg.verify_ssl,
                         )
                         _bucket_info = _s3.get_bucket_size(_stage_bucket_map[stage_name])
                         if _bucket_info.size_bytes:

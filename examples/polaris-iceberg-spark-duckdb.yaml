@@ -51,6 +51,10 @@ platform:
 architecture:
   catalog:
     type: polaris
+    polaris:
+      # LB-090: each install must set its own OAuth2 secret. Generate with:
+      #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:
     mode: batch

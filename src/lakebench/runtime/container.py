@@ -10,6 +10,7 @@ podman for image builds, and it needs no daemon.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -23,6 +24,12 @@ logger = logging.getLogger(__name__)
 # Applied to every container so `delete_all()` can find them without guessing
 # from name prefixes.
 MANAGED_LABEL = "lakebench.managed"
+
+# Fingerprint of the requested ComponentSpec. Stamped as a label on every
+# container so `apply()` can tell "same image, but different env/ports/mounts"
+# apart from "identical spec" -- comparing image alone lets a redeploy with a
+# changed S3 endpoint silently reuse the previous config (LB-092).
+SPEC_FINGERPRINT_LABEL = "lakebench.spec-fingerprint"
 
 
 class ContainerRuntimeError(RuntimeError):
@@ -73,21 +80,33 @@ class ContainerRuntime:
         return RuntimeKind.CONTAINER
 
     def apply(self, spec: ComponentSpec, replace: bool = False) -> None:
-        """Create the container, or reuse a running one with the same image.
+        """Create the container, or reuse a running one with the same spec.
 
         Reuse matters for correctness, not just speed. Recreating a container
         discards anything held in its writable layer, so a deployer that calls
         ``apply()`` twice would silently reset the component's state. An
-        already-running container with the same image is left alone.
+        already-running container with an identical ComponentSpec is left
+        alone; anything else (different image, env, ports, mounts, args, or
+        command) forces a recreate.
+
+        The identity check used to compare image alone (LB-092): a redeploy
+        that changed only the S3 endpoint or bucket kept the running Garage
+        container with its old config and quietly diverged. Fingerprinting
+        the whole spec closes that.
 
         Args:
             spec: Component to create.
             replace: Force remove-and-recreate even when a match is running.
         """
         name = self._qualified(spec.name)
+        fingerprint = _fingerprint_spec(spec)
 
-        if not replace and self._is_running(name) and self._image_of(name) == spec.image:
-            logger.debug("Container %s already running with image %s, reusing", name, spec.image)
+        if (
+            not replace
+            and self._is_running(name)
+            and self._label_of(name, SPEC_FINGERPRINT_LABEL) == fingerprint
+        ):
+            logger.debug("Container %s already running with matching spec, reusing", name)
             return
 
         self.delete(spec.name)
@@ -95,6 +114,7 @@ class ContainerRuntime:
         cmd = [self.cli, "run", "-d", "--name", name]
         cmd += ["--label", f"{MANAGED_LABEL}=true"]
         cmd += ["--label", f"lakebench.namespace={self.namespace}"]
+        cmd += ["--label", f"{SPEC_FINGERPRINT_LABEL}={fingerprint}"]
         for key, value in spec.labels.items():
             cmd += ["--label", f"{key}={value}"]
         for key, value in spec.env.items():
@@ -263,6 +283,28 @@ class ContainerRuntime:
         )
         return result.stdout.strip() if result.returncode == 0 else ""
 
+    def _label_of(self, qualified: str, key: str) -> str:
+        # Read one label from a running container. Missing container or
+        # missing label both return "" so callers can compare with an
+        # expected value without special-casing.
+        result = subprocess.run(  # noqa: S603
+            [
+                self.cli,
+                "inspect",
+                qualified,
+                "--format",
+                f'{{{{ index .Config.Labels "{key}" }}}}',
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        value = result.stdout.strip()
+        # podman/docker render a missing map key as "<no value>"; normalise.
+        return "" if value == "<no value>" else value
+
     def _is_running(self, qualified: str) -> bool:
         result = subprocess.run(  # noqa: S603
             [self.cli, "inspect", qualified, "--format", "{{.State.Running}}"],
@@ -299,3 +341,24 @@ class ContainerRuntime:
                 f"Failed to {what}: {(result.stderr or result.stdout).strip()}"
             )
         return result.stdout.strip()
+
+
+def _fingerprint_spec(spec: ComponentSpec) -> str:
+    """Canonical short fingerprint of the fields that affect container
+    behaviour. Two specs that produce the same fingerprint should be
+    interchangeable at runtime.
+
+    Excludes ``spec.name`` (identity, tracked separately), ``labels``
+    (metadata, containers get relabeled cheaply), and ``readiness_command``
+    /``replicas`` (runtime concerns, not container config).
+    """
+    payload = {
+        "image": spec.image,
+        "command": list(spec.command),
+        "args": list(spec.args),
+        "env": sorted(spec.env.items()),
+        "ports": sorted((p.container_port, p.host_port, p.name) for p in spec.ports),
+        "mounts": sorted((m.source, m.target, m.read_only) for m in spec.mounts),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()[:16]

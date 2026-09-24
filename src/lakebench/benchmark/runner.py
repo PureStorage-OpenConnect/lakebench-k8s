@@ -250,7 +250,16 @@ class BenchmarkRunner:
 
         successful = [r for r in results if r.success]
         total_seconds = sum(r.elapsed_seconds for r in results)
-        qph = (len(successful) / total_seconds) * 3600 if total_seconds > 0 and successful else 0
+        # QpH divides successful count by SUCCESSFUL wall time, not total.
+        # Including failed-query wall time (typically a full query_timeout)
+        # in the denominator lets one timeout drop QpH by an order of
+        # magnitude, which is not a benchmark score -- it's a policy artifact.
+        successful_seconds = sum(r.elapsed_seconds for r in successful)
+        qph = (
+            (len(successful) / successful_seconds) * 3600
+            if successful_seconds > 0 and successful
+            else 0
+        )
 
         return BenchmarkResult(
             mode="power",
