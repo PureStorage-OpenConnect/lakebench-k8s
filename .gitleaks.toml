@@ -45,7 +45,3 @@ regexes = ['''^GK1a2b3c4d5e6f7890abcdef12$''']
 [[allowlists]]
 description = "Garage rpc_secret for a single-node loopback-only local instance (src/lakebench/deploy/garage.py); fixed on purpose for reproducibility"
 regexes = ['''^(0123456789abcdef){1,4}$''']
-
-[[allowlists]]
-description = "KNOWN WEAKNESS, LB-140: shared default Polaris OAuth client secret. Remove this entry when the secret is generated per deployment."
-regexes = ['''^lakebench-polaris-secret-2024$''']
