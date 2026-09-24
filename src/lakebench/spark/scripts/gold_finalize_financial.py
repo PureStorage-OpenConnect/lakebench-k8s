@@ -363,8 +363,18 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     total_alerts = 0
     # Per-rule status accumulated for the durable gold.detection_status table
     # (LB-119). Each entry: (rule_id, status, reason, target_typology,
-    # alert_count). status in {'ran','skipped','error'}.
+    # alert_count). status in {'pending','ran','skipped','error'}.
     status_rows: list[tuple] = []
+    # Mark this run as in progress BEFORE touching gold.alerts. The per-rule
+    # DELETE+INSERT below rewrites alerts rule by rule; if the driver died
+    # mid-loop, detection_status would still name the PREVIOUS run and a
+    # later score would read half-rewritten alerts as a complete run.
+    # Scoring refuses any 'pending' status.
+    _write_detection_status(
+        spark,
+        [(rid, "pending", None, RULE_TARGET_TYPOLOGY.get(rid), None) for rid in rules],
+        run_id,
+    )
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)

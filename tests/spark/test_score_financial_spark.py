@@ -138,3 +138,44 @@ def test_fp_is_none_without_alerts_and_per_rule_otherwise(spark):
     _, s = compute_scores(spark, _manifest(spark), alerts, STATUS)
     assert s["fp_rate"] == pytest.approx(1 / 3)  # global: only a3 touches nothing
     assert s["fp_rate_by_rule"]["W2_structuring"] == pytest.approx(2 / 3)
+
+
+def test_giant_alert_has_low_txn_precision_and_high_chance(spark):
+    """W1-style: one alert over every txn. Alert-level it touches its target,
+    so its alert FP is 0; txn-level precision and the per-rule chance expose
+    it (review finding on 95f3605)."""
+    from score_financial import compute_scores
+
+    status = [
+        {"rule_id": "W4_risk_propagation", "status": "ran", "target_typology": "fan_out"},
+    ]
+    everything = ["u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8"] + [f"b{i}" for i in range(92)]
+    alerts = _alerts(spark, [("giant", "W4_risk_propagation", everything)])
+    per, s = compute_scores(spark, _manifest(spark), alerts, status)
+    assert _by_type(per)["fan_out"]["recall"] == pytest.approx(1.0)
+    assert s["fp_rate_by_rule"]["W4_risk_propagation"] == pytest.approx(0.0)
+    assert s["txn_precision_by_rule"]["W4_risk_propagation"] == pytest.approx(3 / 100)
+    assert s["chance_by_rule"]["W4_risk_propagation"] == pytest.approx(1.0)
+
+
+def test_rules_without_target_are_not_given_an_fp(spark):
+    from score_financial import compute_scores
+
+    status = STATUS + [{"rule_id": "W5_sanctions_match", "status": "ran", "target_typology": None}]
+    alerts = _alerts(
+        spark, [("s1", "W5_sanctions_match", ["u1"]), ("a1", "W2_structuring", ["u1"])]
+    )
+    _, s = compute_scores(spark, _manifest(spark), alerts, status)
+    assert "W5_sanctions_match" not in s["fp_rate_by_rule"]
+    assert s["fp_rate_by_rule"]["W2_structuring"] == pytest.approx(0.0)
+
+
+def test_partial_when_one_of_two_designated_rules_errors(spark):
+    from score_financial import compute_scores
+
+    status = STATUS + [{"rule_id": "W9_extra", "status": "error", "target_typology": "fan_out"}]
+    alerts = _alerts(spark, [("a1", "W2_structuring", ["u1"])])
+    per, _ = compute_scores(spark, _manifest(spark), alerts, status)
+    row = _by_type(per)["fan_out"]
+    assert row["detection_status"] == "partial"
+    assert row["recall"] == pytest.approx(0.5)

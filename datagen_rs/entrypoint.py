@@ -64,7 +64,7 @@ def detect_cpu_quota() -> int:
 # node 0 on the financial path also builds the full world at about 575 B per
 # entity (111,111 entities per scale unit).
 PER_THREAD_FILE_MULTIPLIER = {"financial": 4.8, "customer360": 3.0}
-WORLD_BYTES_PER_ENTITY_NODE0 = 575
+WORLD_BYTES_PER_ENTITY_NODE0 = 650
 ENTITIES_PER_SCALE = 111_111
 BASE_GIB = {"financial": 1.7, "customer360": 0.3}
 HEADROOM = 1.25

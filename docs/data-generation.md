@@ -179,7 +179,7 @@ architecture:
       scale: 10                  # Abstract scale factor (1 unit ~ 10 GB)
       mode: auto                 # auto | batch | continuous
       parallelism: 4             # Number of parallel Kubernetes pods
-      file_size: 512mb           # Target Parquet file size
+      file_size: 64mb            # Target Parquet file size (per-thread memory scales with it)
       dirty_data_ratio: 0.08     # Fraction of intentionally dirty records
       cpu: "2"                   # CPU request per pod
       memory: 4Gi                # Memory request per pod

@@ -305,7 +305,7 @@ architecture:
       scale: 10                       # 1 unit ~ 10 GB bronze
       mode: auto                      # auto | batch | continuous
       parallelism: 4
-      file_size: 512mb
+      file_size: 64mb
       dirty_data_ratio: 0.08
 
   benchmark:
@@ -534,7 +534,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.workload.datagen.target_size` | string or null | `null` | **Deprecated.** Legacy size string (e.g., `100gb`). Converted to scale automatically. |
 | `architecture.workload.datagen.mode` | enum | `auto` | Datagen mode: `auto`, `batch`, or `continuous`. Auto selects based on scale. |
 | `architecture.workload.datagen.parallelism` | int | `4` | Number of parallel datagen pods. |
-| `architecture.workload.datagen.file_size` | string | `512mb` | Target Parquet file size. |
+| `architecture.workload.datagen.file_size` | string | `64mb` | Target Parquet file size. Datagen memory per thread scales with it (about 4.8x for financial, 3.0x for customer360). |
 | `architecture.workload.datagen.dirty_data_ratio` | float | `0.08` | Fraction of intentionally dirty records (0.0--1.0). |
 | `architecture.workload.datagen.cpu` | string | `2` | CPU per datagen pod. **Hard-locked by mode** (batch=4, continuous=8). |
 | `architecture.workload.datagen.memory` | string | `4Gi` | Memory per datagen pod. **Hard-locked by mode** (batch=4Gi, continuous=24Gi). |

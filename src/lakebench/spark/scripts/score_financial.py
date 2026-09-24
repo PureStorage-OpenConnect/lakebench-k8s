@@ -31,6 +31,7 @@ import argparse
 from common import env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
+    broadcast,
     coalesce,
     col,
     explode,
@@ -67,21 +68,32 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         if not rules:
             return "no_rule"
         states = {rule_status.get(rid) for rid in rules}
+        if "ran" in states and states != {"ran"}:
+            # Some designated rules ran, others skipped or errored: the recall
+            # below covers only the rules that ran.
+            return "partial"
         if "ran" in states:
             return "scored"
         if "error" in states:
             return "rule_error"
         return "rule_skipped"
 
-    manifest_uetrs = manifest.select(
-        "typology_id",
-        "typology_type",
-        "expected_workload",
-        explode_outer(col("participant_uetrs")).alias("uetr"),
-    ).distinct()
-    alert_uetrs = alerts.select(
-        "alert_id", "rule_id", explode(col("related_txn_ids")).alias("uetr")
-    ).distinct()
+    manifest_uetrs = (
+        manifest.select(
+            "typology_id",
+            "typology_type",
+            "expected_workload",
+            explode_outer(col("participant_uetrs")).alias("uetr"),
+        )
+        .distinct()
+        .cache()
+    )
+    # Cached: reused by every join and action below (about 7).
+    alert_uetrs = (
+        alerts.select("alert_id", "rule_id", explode(col("related_txn_ids")).alias("uetr"))
+        .distinct()
+        .cache()
+    )
 
     # (typology_type, rule_id) for designated rules that actually ran.
     pairs = [
@@ -93,7 +105,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     pair_df = spark.createDataFrame(pairs, "typology_type STRING, rule_id STRING")
 
     designated_hits = (
-        manifest_uetrs.join(pair_df, "typology_type")
+        manifest_uetrs.join(broadcast(pair_df), "typology_type")
         .join(alert_uetrs.select("rule_id", "uetr").distinct(), ["rule_id", "uetr"])
         .select("typology_id")
         .distinct()
@@ -138,7 +150,7 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         agg.join(state_df, "typology_type", "left")
         .withColumn(
             "recall",
-            when(col("detection_status") == lit("scored"), col("recall_raw")).otherwise(
+            when(col("detection_status").isin("scored", "partial"), col("recall_raw")).otherwise(
                 lit(None).cast("double")
             ),
         )
@@ -149,31 +161,57 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
     # rule: alerts of a rule touching no txn of that rule's target typology.
     total_alerts = alerts.count()
     fp_by_rule: dict[str, float | None] = {}
+    txn_precision_by_rule: dict[str, float] = {}
+    chance_by_rule: dict[str, float] = {}
     if total_alerts > 0:
         manifest_all = manifest_uetrs.select("uetr").where(col("uetr").isNotNull()).distinct()
         tp_global = alert_uetrs.join(manifest_all, "uetr").select("alert_id").distinct().count()
         fp_alerts = total_alerts - tp_global
         fp_rate: float | None = fp_alerts / total_alerts
-        tagged = alert_uetrs.join(
-            manifest_uetrs.select("uetr", "typology_type").where(col("uetr").isNotNull()),
-            "uetr",
-            "left",
-        )
+        targeted = {rid: typ for typ, rids in designated.items() for rid in rids}
         target_df = spark.createDataFrame(
-            [(rid, typ) for typ, rids in designated.items() for rid in rids],
-            "rule_id STRING, target STRING",
+            list(targeted.items()) or [("", "")], "rule_id STRING, target STRING"
         )
-        per_alert = (
-            tagged.join(target_df, "rule_id", "left")
+        target_uetrs = manifest_uetrs.select("uetr", "typology_type").where(col("uetr").isNotNull())
+        # One row per (alert, uetr) with whether that txn belongs to the
+        # alert rule's target typology. Rules with no target (W5/W6 list
+        # matches) are left out: "false positive" has no meaning for them.
+        refs = (
+            alert_uetrs.join(broadcast(target_df), "rule_id")
+            .join(target_uetrs, "uetr", "left")
             .withColumn(
                 "on_target",
                 when(col("typology_type") == col("target"), lit(1)).otherwise(lit(0)),
             )
-            .groupBy("alert_id", "rule_id")
+            .groupBy("alert_id", "rule_id", "uetr")
             .agg(smax("on_target").alias("on_target"))
+            .cache()
         )
-        for row in per_alert.groupBy("rule_id").agg({"on_target": "avg"}).collect():
-            fp_by_rule[row["rule_id"]] = 1.0 - float(row["avg(on_target)"])
+        # Alert-level: an alert is a false positive if it touches none of its
+        # target's txns. Txn-level precision: the share of an alert's txns
+        # that are planted target txns, so one giant alert over the whole
+        # corpus cannot score itself perfect.
+        per_alert = refs.groupBy("alert_id", "rule_id").agg(smax("on_target").alias("hit"))
+        for row in per_alert.groupBy("rule_id").agg({"hit": "avg"}).collect():
+            fp_by_rule[row["rule_id"]] = 1.0 - float(row["avg(hit)"])
+        for row in refs.groupBy("rule_id").agg({"on_target": "avg"}).collect():
+            txn_precision_by_rule[row["rule_id"]] = float(row["avg(on_target)"])
+        # Per-rule chance: the share of random-control instances a rule's
+        # alerts touch. Recall at or below this is indistinguishable from
+        # chance for that rule.
+        random_ids = manifest_uetrs.where(col("typology_type") == lit("random"))
+        n_random = random_ids.select("typology_id").distinct().count()
+        if n_random:
+            hits = (
+                random_ids.join(alert_uetrs.select("rule_id", "uetr").distinct(), "uetr")
+                .select("rule_id", "typology_id")
+                .distinct()
+                .groupBy("rule_id")
+                .count()
+                .collect()
+            )
+            for row in hits:
+                chance_by_rule[row["rule_id"]] = row["count"] / n_random
     else:
         fp_alerts = 0
         fp_rate = None  # no alerts: there is no false-positive rate to report
@@ -190,6 +228,8 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         "fp_alerts": int(fp_alerts),
         "fp_rate": fp_rate,
         "fp_rate_by_rule": fp_by_rule,
+        "txn_precision_by_rule": txn_precision_by_rule,
+        "chance_by_rule": chance_by_rule,
         "random_control_floor": (float(random_row[0]["incidental_recall"]) if random_row else None),
     }
     return per_typology, summary
@@ -257,6 +297,13 @@ def main() -> None:
             "expected exactly one. Re-run gold-finalize."
         )
     current_run_id = run_ids[0]
+    pending = sorted(r["rule_id"] for r in status_rows if r.get("status") == "pending")
+    if pending:
+        raise SystemExit(
+            f"Run {current_run_id} is incomplete: rules {pending} are still 'pending' in "
+            f"{CATALOG}.{GOLD_STATUS}, so gold-finalize did not finish and gold.alerts "
+            "may be half rewritten. Re-run gold-finalize."
+        )
     alerts = alerts_all.filter(col("run_id") == lit(current_run_id))
 
     per_typology, summary = compute_scores(spark, manifest, alerts, status_rows)
