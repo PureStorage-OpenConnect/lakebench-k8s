@@ -380,12 +380,22 @@ def generate(
             )
             _journal_safe(j.end_command, success=True)
 
+            # Same prefix mapping as DatagenDeployer: financial on the C360
+            # default path_template writes under pacs008.
+            written_prefix = cfg.architecture.pipeline.medallion.bronze.path_template
+            if (
+                cfg.architecture.workload.schema_type.value == "financial"
+                and written_prefix == "customer/interactions"
+            ):
+                written_prefix = "pacs008"
             console.print(
                 Panel(
                     f"[green]Data generation complete![/green]\n\n"
                     f"Succeeded: {completion_result.details.get('succeeded', '?')} pods\n"
-                    f"Elapsed: {completion_result.elapsed_seconds:.0f}s\n\n"
-                    f"Data written to: s3://{cfg.platform.storage.s3.buckets.bronze}/{cfg.architecture.pipeline.medallion.bronze.path_template}"
+                    # Whole wait, not the finalizer's own check (which is ~0s
+                    # when the polling loop already saw the job finish).
+                    f"Elapsed: {time.time() - start:.0f}s\n\n"
+                    f"Data written to: s3://{cfg.platform.storage.s3.buckets.bronze}/{written_prefix}"
                     f"\n\nNext: [bold]lakebench run[/bold]  to execute the pipeline",
                     title="Generation Complete",
                     expand=False,
