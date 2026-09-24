@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use parquet::arrow::ArrowWriter;
 
-use datagen_rs::amounts::{lognormal_amount, structuring_amount};
+use datagen_rs::amounts::{lognormal_amount_shifted, structuring_amount};
 use datagen_rs::customer360;
 use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::emit::{build_batch, Batch};
@@ -289,10 +289,14 @@ fn pacs008_main() {
     for inst in &instances {
         for (row_idx, r) in datagen_rs::typology::emit_instance(inst).into_iter().enumerate() {
             let ccy = w.ccy[r.orig as usize];
+            // Typology rows carry the ORIGINATOR's persona amount shift, the
+            // same as that account's baseline rows, so a typology participant's
+            // amounts stay consistent with its own history and do not create a
+            // marginal amount artifact that separates typology from baseline.
             let amount = if r.structuring {
                 structuring_amount(&mut trng, ccy)
             } else {
-                lognormal_amount(&mut trng)
+                lognormal_amount_shifted(&mut trng, w.amount_logshift[r.orig as usize])
             };
             let fid = (((r.ts_us - start_us) / step_us).clamp(0, total_files - 1)) as usize;
             let uid = typology_uid(inst.seed, row_idx);
@@ -395,7 +399,7 @@ fn pacs008_main() {
             orig.push(o);
             bene.push(b);
             ts_us.push(sample_ts(&mut rng, &cal, w.country[o as usize]));
-            amount.push(lognormal_amount(&mut rng));
+            amount.push(lognormal_amount_shifted(&mut rng, w.amount_logshift[o as usize]));
             ccy.push(cc);
             uid_pre.push(base_uid_hi | base_idx as u64);
         }

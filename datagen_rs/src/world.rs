@@ -28,6 +28,65 @@ pub const RING_HIT_RATE: [f64; 3] = [0.95, 0.80, 0.60];
 pub const SANCTIONS_RATE: f64 = 0.0005;
 pub const PEP_RATE: f64 = 0.0020;
 
+// --- Persona (P2, LB-130 datagen fidelity) --------------------------------
+// Before P2 every account of a given type shared one activity rate and one
+// amount distribution, so entity_profiles features (avg_gap_days,
+// avg_amount_usd) were near-constant across accounts and no typology could be
+// separated from an average account: the injected rows were swamped by an
+// identical baseline. The persona gives each account an INDIVIDUAL, consistent
+// cadence and amount scale, derived as a pure function of (id, seed) so
+// generation stays reproducible and shardable by time window. This is the
+// foundation the trajectory typologies (P3) deviate against.
+
+/// Log-sd of the per-account activity-rate multiplier. The multiplier is
+/// exp(N(0, sd)), so a meaningful minority of accounts are genuinely quiet
+/// (rate well below 1x) and some are hyperactive, spreading realised
+/// transaction counts -- and therefore avg_gap_days -- across the population.
+/// At 1.0, ~16% of accounts sit below 0.37x and ~16% above 2.7x their per-type
+/// base rate.
+pub const RATE_LOG_SD: f64 = 1.0;
+
+/// Log-sd of the per-account amount scale, applied as an additive shift to the
+/// log-normal mean and recentred so the population-level mean amount is
+/// preserved (see `amount_log_shift`).
+pub const AMOUNT_LOG_SD: f64 = 0.6;
+
+/// Deterministic standard normal from (id, salt) via Box-Muller on two
+/// independent hash_frac draws. Pure function of the inputs, so each entity's
+/// persona regenerates bit-identically. `salt` and `salt + 1` map through the
+/// golden-ratio multiply in hash_frac to well-separated streams, so u1 and u2
+/// are effectively independent.
+#[inline]
+pub fn hash_normal(id: u64, salt: i64) -> f64 {
+    let u1 = hash_frac(id, salt).max(1e-300);
+    let u2 = hash_frac(id, salt + 1);
+    (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+}
+
+/// Per-account activity-rate multiplier (log-normal, median 1x). Multiplies the
+/// per-type BASELINE_ACTIVITY so originator sampling reflects each account's
+/// own rate, giving a per-account (inhomogeneous Poisson) point process rather
+/// than a per-type constant.
+#[inline]
+pub fn rate_mult(id: u64, seed: i64) -> f64 {
+    (RATE_LOG_SD * hash_normal(id, seed + 909)).exp()
+}
+
+/// Per-account additive shift to the log-normal amount mean, recentred by
+/// -sd^2/2 so E[exp(shift)] = 1: the population MEAN amount (total money moved)
+/// is preserved. Only the mean is held -- the population is now a scale mixture
+/// of lognormals, so its median drops (~18% at sd=0.6) and its spread widens
+/// (effective log-sd sqrt(1.4^2 + 0.6^2)). That is by design: it gives each
+/// account a consistent typical amount instead of every account drawing from
+/// one shared distribution. It is NOT band-preserving -- absolute-threshold
+/// rules (W8 $5000, W2 structuring bands) are recalibrated at P5, and the
+/// baseline density inside the structuring band is guarded by a regression test
+/// so a larger sd cannot silently starve the band past the leakage gate.
+#[inline]
+pub fn amount_log_shift(id: u64, seed: i64) -> f64 {
+    AMOUNT_LOG_SD * hash_normal(id, seed + 1010) - 0.5 * AMOUNT_LOG_SD * AMOUNT_LOG_SD
+}
+
 // Accounts-per-entity CDF: 70/22/6/2 -> 1..4 accounts.
 const ACCT_CDF: [f64; 4] = [0.70, 0.92, 0.98, 1.00];
 
