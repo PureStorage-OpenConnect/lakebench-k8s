@@ -1,0 +1,142 @@
+{
+  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate script loads this file; AML-GOALS.md describes it. Changing any value after a gate run requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a. Every numeric gate in AML-GOALS.md must have a key here (enforced by test).",
+  "version": "3.2",
+  "registered": "2026-09-24",
+  "metric": "average_precision",
+  "cv": {
+    "folds": 5,
+    "stratified": true,
+    "seed": 7
+  },
+  "corpora": {
+    "calibration_seed": 42,
+    "evaluation_seed": 50000042,
+    "robustness_seed": 90000042,
+    "robustness_perturbation": {
+      "median_amount_multiplier": 1.2,
+      "persona_sd_multiplier": 1.2,
+      "dormancy_range_multiplier": 1.2,
+      "note": "natural units (LN_MU += ln 1.2, not LN_MU * 1.2); values fixed at registration, corpus generated after freeze"
+    }
+  },
+  "behavioural_subset": [
+    "gather_scatter",
+    "rapid_layering",
+    "stack",
+    "dormant_reactivation"
+  ],
+  "definitional_subset": [
+    "micro_structuring",
+    "corridor_high_risk"
+  ],
+  "level2": {
+    "k_in_band": 3,
+    "n": 4,
+    "require_on_corpora": [
+      "evaluation",
+      "robustness"
+    ],
+    "if_robustness_fails": "publish as 'Level 2 on evaluation corpus, not robust'; do not claim Level 2"
+  },
+  "band": {
+    "ap_min": 0.3,
+    "ap_max": 0.8,
+    "anchor": "self-chosen; external anchor pending (IBM AMLworld, Altman et al. 2023)"
+  },
+  "leakage": {
+    "shortcut_ap_abs_max": 0.2,
+    "shortcut_ap_rel_max": 0.5,
+    "shortcut_models": [
+      "single_feature",
+      "feature_pair_depth2"
+    ]
+  },
+  "scale_invariance": {
+    "method": "equivalence: bootstrap CI of (scale10 AP - scale1 AP) lies entirely within [-ap_diff_abs_max, +ap_diff_abs_max]",
+    "ap_diff_abs_max": 0.05,
+    "ks_stat_max": 0.1
+  },
+  "threshold_cliff": {
+    "window_rel": 0.1,
+    "max_density_ratio": 2.0,
+    "definition": "density inside [t*(1-w), t) vs [t, t*(1+w)] for every rule threshold t; ratio in either direction must not exceed max_density_ratio"
+  },
+  "features": [
+    "txn_count",
+    "active_days",
+    "gap_mean_days",
+    "gap_max_days",
+    "gap_cv",
+    "amount_mean_usd",
+    "amount_max_usd",
+    "amount_cv",
+    "n_counterparties",
+    "frac_cross_border",
+    "frac_round_amount",
+    "max_burst_24h",
+    "frac_in_structuring_band",
+    "home_country_high_risk",
+    "frac_high_risk_corridor",
+    "max_gap_over_mean_gap",
+    "frac_overnight",
+    "frac_weekend",
+    "hour_of_day_entropy"
+  ],
+  "classification": {
+    "definitional_rule": "a typology is definitional only if the generator conditions its label on the single attribute in defining_feature AND that feature alone reaches AP >= definitional_min_single_ap on the calibration corpus",
+    "defining_feature": {
+      "micro_structuring": "frac_in_structuring_band",
+      "corridor_high_risk": "home_country_high_risk"
+    },
+    "definitional_min_single_ap": 0.95,
+    "reclassification": "behavioural -> definitional is forbidden for this release after any gate run (D0 included); if it happens N stays 4 and the typology counts as a miss. definitional -> behavioural is always allowed."
+  },
+  "power": {
+    "min_positives": 200,
+    "below_min": "underpowered: counts as a miss against K, never a pass",
+    "bootstrap_iterations": 1000,
+    "ci_level": 0.95
+  },
+  "distribution_match": {
+    "test": "two-sample KS statistic (effect size, not p-value; large n makes p-values meaningless)",
+    "ks_stat_max": 0.1,
+    "applies_to": [
+      "R2 burst vs account's own amount distribution",
+      "D3 burst amounts"
+    ]
+  },
+  "timing_mixture": {
+    "low_cv_edge": 0.5,
+    "high_cv_edge": 1.0,
+    "min_share_below_low": 0.15,
+    "min_share_above_high": 0.15,
+    "cohort_min_sends": 20,
+    "anchor": "self-chosen; pending citation (burstiness literature + payments source)"
+  },
+  "counter_leakage": {
+    "removal_must_raise_best_shortcut_ap_by": 0.05,
+    "min_typologies_affected": 1
+  },
+  "rules": {
+    "w8_fp_target_profile_relative": 0.05,
+    "w8_fp_provisional_floor_absolute": 0.1,
+    "note": "reported outcomes owned by P5, not datagen gates"
+  },
+  "gate_runs": {
+    "d0_is_gate_run": true,
+    "d0_corpus": "calibration only; never evaluation or robustness",
+    "band_change_after_d0": "only via AML-GOALS section 9, and only to figures quoted verbatim from the cited source; otherwise stays [0.30,0.80]"
+  },
+  "seed_guard": {
+    "max_n_inst_scale100": 200000,
+    "rule": "no pairwise seed gap may lie within max_n_inst_scale100 of a multiple of TID_SEED_STRIDE; D10 reads seeds from this file and enumerates iseeds at scale-100 n_inst"
+  },
+  "density": {
+    "target_frac_rows": 0.001,
+    "tolerance_pp": 0.0002,
+    "scales": [
+      1,
+      10
+    ]
+  }
+}
