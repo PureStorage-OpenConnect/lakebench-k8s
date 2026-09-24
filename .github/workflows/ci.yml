@@ -54,7 +54,16 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run unit tests
-        run: pytest tests/ -x --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+        run: >-
+          pytest tests/ -x --tb=short --ignore=tests/test_e2e.py --ignore=tests/test_integration.py
+          --cov=lakebench --cov-report=json:coverage-unit.json --cov-report=term:skip-covered
+
+      # Per-file floors on the scoring and metrics code (GOALS P8.3). Checked
+      # on one interpreter so line-counting differences between versions do
+      # not move the number.
+      - name: Coverage floors
+        if: matrix.python-version == '3.11'
+        run: python scripts/check_coverage.py --suite unit coverage-unit.json
 
   secrets:
     name: Secret scan
@@ -129,7 +138,14 @@ jobs:
         run: pip install -e ".[dev]" "pyspark==4.0.1" pyarrow
 
       - name: Run Spark tests
-        run: pytest tests/spark -q
+        run: >-
+          pytest tests/spark -q
+          --cov=src/lakebench/spark/scripts --cov-report=json:coverage-spark.json
+
+      # detection_rules.py is imported by path as a top-level module, so it
+      # is measured here and not in the unit job.
+      - name: Coverage floors
+        run: python scripts/check_coverage.py --suite spark coverage-spark.json
 
   build:
     name: Build Package
