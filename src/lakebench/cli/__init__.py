@@ -1233,7 +1233,7 @@ def stop(
         ),
     ] = None,
 ) -> None:
-    """Stop running streaming jobs.
+    """Stop running continuous-mode jobs.
 
     Deletes all streaming SparkApplications (bronze-ingest, silver-stream,
     gold-refresh) from the cluster.
@@ -1280,9 +1280,9 @@ def stop(
             print_info(f"lakebench-{name}: not running ({e})")
 
     if stopped > 0:
-        print_success(f"Stopped {stopped} streaming job(s)")
+        print_success(f"Stopped {stopped} continuous job(s)")
     else:
-        print_info("No streaming jobs were running")
+        print_info("No continuous jobs were running")
 
     _journal_safe(
         j.record,
@@ -2047,7 +2047,7 @@ def recommend(
         str | None,
         typer.Option(
             "--mode",
-            help="Pipeline mode: batch (sequential phases) or sustained (concurrent datagen+streaming). Default: batch.",
+            help="Pipeline mode: batch (sequential phases) or sustained (continuous: datagen and pipeline run concurrently). Default: batch.",
         ),
     ] = None,
 ) -> None:

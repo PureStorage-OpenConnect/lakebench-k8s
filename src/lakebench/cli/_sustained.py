@@ -1280,7 +1280,7 @@ def _run_sustained(
 
         # Launch all streaming jobs concurrently
         console.print()
-        console.print("[bold]Launching streaming jobs...[/bold]")
+        console.print("[bold]Launching continuous jobs...[/bold]")
 
         _journal_safe(
             j.record,
@@ -1530,7 +1530,7 @@ def _run_sustained(
 
         # Capture driver logs BEFORE stopping jobs (pods are deleted on stop)
         console.print()
-        console.print("[bold]Collecting streaming metrics...[/bold]")
+        console.print("[bold]Collecting continuous-mode metrics...[/bold]")
         namespace = cfg.get_namespace()
         driver_logs: dict[str, str | None] = {}
         for _job_type, job_name in submitted:
@@ -1559,7 +1559,7 @@ def _run_sustained(
                 print_warning(f"{job_name}: log capture failed: {e}")
 
         # Stop streaming jobs
-        console.print("[bold]Stopping streaming jobs...[/bold]")
+        console.print("[bold]Stopping continuous jobs...[/bold]")
         for _job_type, job_name in submitted:
             try:
                 k8s.delete_custom_resource(
@@ -1648,7 +1648,7 @@ def _run_sustained(
 
         # Record streaming metrics (from pre-captured driver logs)
         console.print()
-        console.print("[bold]Parsing streaming metrics...[/bold]")
+        console.print("[bold]Parsing continuous-mode metrics...[/bold]")
         for _job_type, job_name in submitted:
             logs = driver_logs.get(job_name)
             if logs:
