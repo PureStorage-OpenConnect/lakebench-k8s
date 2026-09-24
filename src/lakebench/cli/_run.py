@@ -539,7 +539,8 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
         if prefix == "customer/interactions":
             prefix = "pacs008"
         prefix = prefix.rstrip("/")
-        manifest_uri = f"s3a://{s3.buckets.bronze}/{prefix}/manifest/manifest.parquet"
+        # Glob over every cycle's manifest (manifest.parquet, manifest-cNNN.parquet).
+        manifest_uri = f"s3a://{s3.buckets.bronze}/{prefix}/manifest/manifest*.parquet"
         json_key = f"scoring/{run_id}/recall.json"
         output_uri = f"s3a://{s3.buckets.gold}/scoring/{run_id}/recall.parquet"
         # Derive the SparkApplication name from the enum rather than a literal

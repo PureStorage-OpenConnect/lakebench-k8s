@@ -44,6 +44,10 @@ DATAGEN_SUBPATHS = {
     "manifest_file": "manifest/manifest.parquet",
 }
 
+# Readers glob every cycle's manifest: cycle n > 0 writes
+# manifest/manifest-cNNN.parquet (datagen --cycle, WORKPLAN B4).
+MANIFEST_GLOB = "manifest/manifest*.parquet"
+
 
 def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text()
@@ -152,8 +156,12 @@ def test_bronze_verify_registers_manifest_iceberg_table():
         "bronze_verify_financial no longer references MANIFEST_TABLE. "
         "The AML benchmark's manifest reads will fail."
     )
-    assert DATAGEN_SUBPATHS["manifest_file"] in code, (
-        "bronze_verify_financial no longer knows about "
-        f"{DATAGEN_SUBPATHS['manifest_file']!r}. Manifest sidecar "
-        "will not be registered as an Iceberg table."
+    assert MANIFEST_GLOB in code, (
+        f"bronze_verify_financial does not read {MANIFEST_GLOB!r}: later "
+        "cycles' planted instances would be scored as unlabelled negatives."
     )
+
+
+def test_run_scores_against_every_cycles_manifest():
+    code = _code_only(_read("src/lakebench/cli/_run.py"))
+    assert MANIFEST_GLOB in code

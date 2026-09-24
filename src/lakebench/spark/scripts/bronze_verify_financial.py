@@ -24,7 +24,7 @@ BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 #     {root}/bronze/pacs008/part-*.parquet   (pacs.008 transactions)
 #     {root}/bronze/party.parquet            (reference table)
 #     {root}/bronze/account.parquet          (reference table)
-#     {root}/manifest/manifest.parquet       (typology ground truth)
+#     {root}/manifest/manifest*.parquet      (typology ground truth; one file per cycle)
 # LB-089: prior to PR-F this script assumed the flat datagen_py layout
 # where the ROOT prefix directly held the pacs.008 files, and Spark
 # listing the ROOT hit the three subdirs and failed with
@@ -44,7 +44,9 @@ PACS_PREFIX = env(
 # manifest registration so an AML benchmark actually produces recall.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
-    BRONZE_ROOT_PREFIX.rstrip("/") + "/manifest/manifest.parquet",
+    # A glob: multi-cycle datagen writes manifest-c001.parquet etc. next to
+    # cycle 0's manifest.parquet, and a cycle left out is unlabelled truth.
+    BRONZE_ROOT_PREFIX.rstrip("/") + "/manifest/manifest*.parquet",
 )
 MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 # Default REGISTER=1: silver_build reads a real Iceberg table
