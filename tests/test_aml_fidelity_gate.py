@@ -402,6 +402,26 @@ def test_runner_version_check_reads_job_pins():
     }
 
 
+def test_relative_cap_as_lift_over_prevalence():
+    """Under the lift formula a weak full model does not fail every feature
+    that edges above prevalence; a real shortcut still fails."""
+    df = _frame(n=4000, prev=0.08, separable=False)
+    ratio = fg.evaluate_gate(df, _prereg())["typologies"]["beh"]
+    p = _prereg()
+    p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence"}
+    lift = fg.evaluate_gate(df, p)["typologies"]["beh"]
+    prev, ap = lift["prevalence"], lift["ap"]
+    sc = lift["shortcuts"]["single_feature"]
+    assert sc["rel_cap"] == pytest.approx(prev + p["leakage"]["shortcut_ap_rel_max"] * (ap - prev))
+    assert sc["rel_cap_formula"] == "lift_over_prevalence"
+    assert ratio["shortcuts"]["single_feature"]["rel_cap_formula"] == "ratio"
+    planted = fg.evaluate_gate(_frame(), p)["typologies"]["beh"]
+    assert planted["shortcuts"]["single_feature"]["pass"] is False
+    p["leakage"]["relative_cap_formula"] = "nonsense"
+    with pytest.raises(ValueError, match="relative_cap_formula"):
+        fg.evaluate_gate(df, p)
+
+
 def test_rank_shortcut_pools_folds_that_chose_different_directions():
     """Each fold is right in its own direction; pooled on one scale the
     shortcut stays near perfect. Pooling raw signed scores put every row of the

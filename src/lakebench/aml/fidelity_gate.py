@@ -332,6 +332,17 @@ def _evaluate_typology(name, X, y, w, groups, features, prereg, kind) -> dict[st
     pairs.sort(key=lambda r: -r["ap"])
 
     lk = prereg["leakage"]
+    prev = out["prevalence"]
+    formula = lk.get("relative_cap_formula", "ratio")
+    if formula == "ratio":
+        rel_cap = lk["shortcut_ap_rel_max"] * ap
+    elif formula == "lift_over_prevalence":
+        # (shortcut_ap - prevalence) <= rel_max * (ap - prevalence): the cap
+        # applies to what each model gains over a random ranking, so a full
+        # model that barely beats prevalence does not fail every feature.
+        rel_cap = prev + lk["shortcut_ap_rel_max"] * (ap - prev)
+    else:
+        raise ValueError(f"unknown leakage.relative_cap_formula {formula!r}")
     shortcuts = {}
     for model, best in (
         ("single_feature", single[0]),
@@ -341,11 +352,12 @@ def _evaluate_typology(name, X, y, w, groups, features, prereg, kind) -> dict[st
             continue
         s_ap = best["ap"]
         abs_ok = s_ap <= lk["shortcut_ap_abs_max"]
-        rel_ok = s_ap <= lk["shortcut_ap_rel_max"] * ap
+        rel_ok = s_ap <= rel_cap
         shortcuts[model] = {
             "best": best,
             "abs_cap": lk["shortcut_ap_abs_max"],
-            "rel_cap": lk["shortcut_ap_rel_max"] * ap,
+            "rel_cap": rel_cap,
+            "rel_cap_formula": formula,
             "pass_abs": abs_ok,
             "pass_rel": rel_ok,
             "pass": abs_ok and rel_ok,
