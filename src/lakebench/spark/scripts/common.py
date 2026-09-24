@@ -370,6 +370,220 @@ def apply_silver_transformations(df_bronze):
     )
 
 
+def set_utc_session(spark):
+    """Pin the Spark session time zone to UTC.
+
+    Datagen writes ``event_timestamp`` as a UTC-adjusted instant, and every
+    derived calendar field (``interaction_date``, hour, weekday, week, month,
+    year) is computed in the session time zone. Left at the JVM default, the
+    same data lands on different dates on a pod whose TZ is not UTC.
+    """
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+
+
+def data_clock_date(df, ts_col="event_timestamp"):
+    """Latest event date in ``df`` (UTC), or None when it has no timestamps.
+
+    A full scan of one column. The fallback data clock when LB_DATA_CLOCK is
+    not set (see ``resolve_data_clock``). Call with the session already
+    pinned to UTC (``set_utc_session``).
+    """
+    from pyspark.sql.functions import col, to_date
+    from pyspark.sql.functions import max as max_
+
+    return df.agg(max_(to_date(col(ts_col))).alias("d")).collect()[0]["d"]
+
+
+def configured_data_clock(value=None):
+    """Last day of the configured datagen window, or None when unset.
+
+    LB_DATA_CLOCK is ``datagen.timestamp_end`` (job.py). Datagen treats the
+    end as exclusive, so the newest possible event date is the day before.
+    """
+    from datetime import date, timedelta
+
+    raw = os.getenv("LB_DATA_CLOCK", "") if value is None else value
+    raw = raw.strip()
+    if not raw:
+        return None
+    return date.fromisoformat(raw[:10]) - timedelta(days=1)
+
+
+def resolve_data_clock(df_fallback=None):
+    """The c360 data clock: the date recency is measured from.
+
+    One clock for the whole run: from LB_DATA_CLOCK when set, so batch,
+    every multi-cycle cycle and every micro-batch use the same anchor and a
+    rerun reproduces the same scores (GOALS P4.2). Only when it is unset is
+    it measured as max(event date) of ``df_fallback``. Logs which was used.
+    """
+    anchor = configured_data_clock()
+    if anchor is not None:
+        log(f"Data clock (recency anchor): {anchor} from LB_DATA_CLOCK")
+        return anchor
+    if df_fallback is None:
+        log("Data clock: LB_DATA_CLOCK unset and no data to measure; recency is NULL")
+        return None
+    anchor = data_clock_date(df_fallback)
+    log(f"Data clock (recency anchor): {anchor} from max(event_timestamp); LB_DATA_CLOCK unset")
+    return anchor
+
+
+def apply_silver_transformations_anchored(df_bronze, anchor_date):
+    """``apply_silver_transformations`` with recency anchored to the data clock.
+
+    ``customer_recency_score`` is ``30 - days between the event date and
+    anchor_date``: 30 for an event on the newest day of the data, 0 for one
+    30 days older, negative beyond. The shared transform measures from
+    ``current_date()``, which made the score a function of the run date
+    (CLAUDE.md gotcha 17). ``anchor_date`` is a ``datetime.date``; when it is
+    None (no timestamps at all) the score is NULL rather than run-dated.
+    """
+    from pyspark.sql.functions import col, datediff, lit
+
+    out = apply_silver_transformations(df_bronze)
+    if anchor_date is None:
+        score = lit(None).cast("int")
+    else:
+        score = lit(30) - datediff(lit(anchor_date), col("interaction_date"))
+    return out.withColumn("customer_recency_score", score)
+
+
+def streaming_query_id(spark):
+    """Id of the streaming query running the current ``foreachBatch`` call.
+
+    Stable across driver restarts from the same checkpoint and new for a
+    fresh checkpoint, so it scopes a batch id to one logical stream. Spark
+    sets it as a local property on the micro-batch thread. Raises when it is
+    absent: an idempotency key without it would be unsound.
+    """
+    qid = spark.sparkContext.getLocalProperty("sql.streaming.queryId")
+    if not qid:
+        raise RuntimeError("sql.streaming.queryId is not set; call from inside foreachBatch")
+    return qid
+
+
+def delta_idempotent_options(spark, app, batch_id):
+    """Delta writer options that make a ``foreachBatch`` write exactly-once.
+
+    Delta records (txnAppId, txnVersion) in the commit and skips any later
+    write whose txnVersion is not greater than the recorded one, so a
+    micro-batch replayed after a driver restart commits nothing the second
+    time. The app id includes the streaming query id: with a fixed app id a
+    fresh checkpoint (batch ids restart at 0) would have every write skipped,
+    a silent zero-row run.
+    """
+    return {
+        "txnAppId": f"{app}-{streaming_query_id(spark)}",
+        "txnVersion": str(int(batch_id)),
+    }
+
+
+def stream_run_id(spark):
+    """Run id of the streaming query in the current ``foreachBatch`` call.
+
+    A new run id every time a query starts, including a restart from the
+    same checkpoint. Spark uses it as the job group of the micro-batch
+    thread. None when it cannot be read.
+    """
+    return spark.sparkContext.getLocalProperty("spark.jobGroup.id") or None
+
+
+_RUNS_STARTED = set()
+
+
+def replay_possible(spark):
+    """True for the first micro-batch of each query run, False after.
+
+    A batch that fails stops its query and the driver exits (``await_stream``),
+    so only the first batch a run executes can repeat a batch an earlier run
+    committed. Writers do their replay check (a DELETE, a snapshot or version
+    lookup) only then instead of on every batch. When the run id is not
+    readable every batch is treated as a possible replay: slower, never wrong.
+    """
+    run = stream_run_id(spark)
+    if run is None:
+        return True
+    if run in _RUNS_STARTED:
+        return False
+    _RUNS_STARTED.add(run)
+    return True
+
+
+def delta_table_version(spark, fq_table):
+    """Latest commit version of a Delta table."""
+    return int(spark.sql(f"DESCRIBE HISTORY {fq_table} LIMIT 1").collect()[0]["version"])
+
+
+def checkpoint_is_fresh(spark, checkpoint_location):
+    """True when a streaming checkpoint has no committed offsets yet."""
+    jvm = spark._jvm
+    hconf = spark._jsc.hadoopConfiguration()
+    offsets = jvm.org.apache.hadoop.fs.Path(checkpoint_location.rstrip("/") + "/offsets")
+    fs = offsets.getFileSystem(hconf)
+    return not fs.exists(offsets) or len(fs.listStatus(offsets)) == 0
+
+
+def refuse_fresh_checkpoint_over_data(spark, checkpoint_location, fq_table):
+    """Exit when a fresh checkpoint would re-read the source into a full table.
+
+    A new checkpoint starts the source from the beginning, so every row
+    already in ``fq_table`` would be written a second time. That happens when
+    checkpoints are deleted but tables are not. Clear both, or neither.
+    """
+    if not checkpoint_is_fresh(spark, checkpoint_location):
+        return
+    if not table_exists(spark, fq_table) or spark.table(fq_table).limit(1).count() == 0:
+        return
+    log(
+        f"ERROR: checkpoint {checkpoint_location} is empty but {fq_table} already has "
+        "rows; starting would re-read the whole source and duplicate them. Drop the "
+        "table or restore the checkpoint."
+    )
+    raise SystemExit(1)
+
+
+def await_stream(spark, query):
+    """Block until ``query`` stops; re-raise its failure.
+
+    SIGTERM and SIGINT only set a flag; the loop below stops the query, so
+    the handler never calls into py4j while the main thread may be inside
+    it. A query that died with an exception fails the driver, so the
+    Kubernetes job reports the real outcome instead of a pass with no data
+    (LB-044).
+    """
+    import signal
+    import time
+
+    stop = {"signal": None}
+
+    def _shutdown_handler(signum, frame):  # noqa: ARG001
+        stop["signal"] = signum
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            signal.signal(sig, _shutdown_handler)
+        except ValueError:
+            pass
+
+    while query.isActive:
+        if stop["signal"] is not None:
+            log(f"Signal {stop['signal']} received; stopping stream cleanly")
+            try:
+                query.stop()
+            except Exception as e:  # noqa: BLE001
+                log(f"query.stop failed: {e}")
+            break
+        time.sleep(1)
+
+    exc = query.exception()
+    if exc is not None:
+        log(f"Streaming query failed: {one_line(exc, 2000)}")
+        spark.stop()
+        raise exc
+    log("Streaming query stopped")
+
+
 def get_daily_kpi_aggregations():
     """Return the list of aggregation expressions for daily KPIs.
 
