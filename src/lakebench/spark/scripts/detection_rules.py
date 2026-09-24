@@ -58,6 +58,9 @@ from pyspark.sql.functions import (
 from pyspark.sql.functions import (
     min as min_,
 )
+from pyspark.sql.functions import (
+    sum as sum_,
+)
 
 # Reporting thresholds by currency, mirroring datagen_rs::amounts::structuring_band.
 # A txn is "structuring-suspicious" when its amount is >= 90% of the
@@ -103,6 +106,11 @@ RULE_TARGET_TYPOLOGY = {
     "W7_cross_border_high_risk": "corridor_high_risk",
     "W8_dormant_reactivation": "dormant_reactivation",
 }
+
+
+# W1 declines to report when giant components (above max_cluster_size)
+# hold more than this share of all vertices; see w1_connected_components.
+GIANT_COMPONENT_SKIP_SHARE = 0.5
 
 
 class RuleSkipped(Exception):
@@ -477,6 +485,25 @@ def w4_risk_propagation(
     )
 
 
+def _truncate_lineage(df: DataFrame) -> DataFrame:
+    """Materialise ``df`` and cut its lineage.
+
+    A reliable checkpoint under ``LB_GOLD_URI`` when that is set (the
+    cluster path): unlike localCheckpoint it survives losing an executor,
+    which would otherwise fail the rule with "checkpoint block not found".
+    localCheckpoint otherwise (local runs and tests).
+    """
+    import os
+
+    base = os.getenv("LB_GOLD_URI")
+    sc = df.sparkSession.sparkContext
+    if base:
+        if not sc.getCheckpointDir():
+            sc.setCheckpointDir(base.rstrip("/") + "/_checkpoints/w1")
+        return df.checkpoint(eager=True)
+    return df.localCheckpoint(eager=True)
+
+
 def w1_connected_components(
     silver_txns: DataFrame,
     min_cluster_size: int = 3,
@@ -484,7 +511,7 @@ def w1_connected_components(
     max_vertices: int = 5_000_000,
     run_id: str = "unknown",
     max_cluster_size: int = 1000,
-    max_txns_per_alert: int = 10_000,
+    max_txns_per_alert: int = 250_000,
 ) -> DataFrame:
     """Undirected connected components over the entity graph induced by
     silver.transactions. Emits one alert per component whose vertex count
@@ -529,7 +556,9 @@ def w1_connected_components(
             most entities into one giant component; as an alert it named
             every transaction in the corpus (a single row past Spark's 2 GB
             limit at scale 10) and no investigator could work it. They are
-            counted and logged instead.
+            counted and logged instead; when they hold more than
+            GIANT_COMPONENT_SKIP_SHARE of all vertices the rule raises
+            RuleSkipped("giant-component") so the scorecard reads "not run".
         max_txns_per_alert: cap on related_txn_ids per alert (earliest
             first); the evidence map records the total and whether the list
             was truncated.
@@ -592,12 +621,12 @@ def w1_connected_components(
         # emit a false "hit max_iterations without convergence" warning.
         return _empty_alerts_df(spark, run_id)
 
-    # localCheckpoint (eager) rather than cache: it materialises AND cuts the
+    # Checkpointed (eager) rather than cached: it materialises AND cuts the
     # lineage. With cache each iteration's plan embedded the previous one, so
     # the plan (and its string form, built for every query event) grew with
     # every round; the driver ran out of heap building it (reproduced in the
     # executed W1 test) and planning time grew each iteration.
-    labels = vertices.withColumn("label", col("id")).localCheckpoint()
+    labels = _truncate_lineage(vertices.withColumn("label", col("id")))
 
     converged = False
     for _iteration in range(max_iterations):
@@ -621,8 +650,8 @@ def w1_connected_components(
             .unionByName(neighbour_labels)
             .groupBy("id")
             .agg(_min("label").alias("label"))
-            .localCheckpoint()
         )
+        new_labels = _truncate_lineage(new_labels)
         # Convergence check: per-vertex label deltas, not distinct-label
         # count. A component that still has multiple live labels can
         # keep shuffling vertices between them without changing the
@@ -659,14 +688,29 @@ def w1_connected_components(
     )
     giant = (
         sizes.filter(col("component_size") > max_cluster_size)
-        .agg(count(lit(1)).alias("n"), max_("component_size").alias("largest"))
+        .agg(
+            count(lit(1)).alias("n"),
+            max_("component_size").alias("largest"),
+            sum_("component_size").alias("vertices"),
+        )
         .collect()[0]
     )
     if giant["n"]:
-        print(
-            f"[W1] {giant['n']} component(s) above max_cluster_size={max_cluster_size} "
-            f"not emitted (largest {giant['largest']} entities)"
+        share = (giant["vertices"] or 0) / max(1, v_count)
+        detail = (
+            f"{giant['n']} component(s) above max_cluster_size={max_cluster_size} "
+            f"(largest {giant['largest']} entities, {share:.0%} of vertices)"
         )
+        if share > GIANT_COMPONENT_SKIP_SHARE:
+            # Most of the graph is one component: planted participants sit
+            # inside it, so emitting only the small components would report
+            # near-zero recall as if W1 had run and missed. Say "not run".
+            raise RuleSkipped(
+                "giant-component",
+                f"{detail}; connected components over the full transaction "
+                "graph cannot isolate typologies",
+            )
+        print(f"[W1] {detail} not emitted")
     qualifying = sizes.filter(
         (col("component_size") >= min_cluster_size) & (col("component_size") <= max_cluster_size)
     )

@@ -38,6 +38,38 @@ MIN_PLANTED = 40  # ignore cells with fewer planted rows than this (noise)
 P_LIMIT = 0.01  # family-wise false-alarm rate for the per-typology calendar tests
 
 
+MIN_EXPECTED = 5.0  # chi-square validity: every tested bin needs this many expected
+
+
+def chi2_merged(base: dict, cells: dict, n: float):
+    """Chi-square of observed ``cells`` against ``n * base`` shares, merging
+    the sparsest bins into one until every expected count is >= MIN_EXPECTED.
+
+    Returns (chi2, dof) or None when fewer than two bins remain (the test is
+    not meaningful at this sample size). Without merging, 24 hour bins or 31
+    day bins at a few dozen instances have expected counts below 1, where
+    the chi-square approximation is invalid and fails falsely.
+    """
+    keys = sorted((k for k in base if base[k] > 0), key=lambda k: base[k])
+    bins: list[tuple[float, float]] = []  # (expected, observed)
+    acc_e = acc_o = 0.0
+    for k in keys:
+        acc_e += n * base[k]
+        acc_o += cells.get(k, 0.0)
+        if acc_e >= MIN_EXPECTED:
+            bins.append((acc_e, acc_o))
+            acc_e = acc_o = 0.0
+    if acc_e > 0:
+        if bins:
+            e, o = bins.pop()
+            bins.append((e + acc_e, o + acc_o))
+        else:
+            return None
+    if len(bins) < 2:
+        return None
+    return sum((o - e) ** 2 / e for e, o in bins), len(bins) - 1
+
+
 def main(root: str) -> int:
     base = Path(root)
     pacs = next(base.rglob("bronze/pacs008"))
@@ -106,12 +138,11 @@ def main(root: str) -> int:
         flagged = False
         for t, cells in sorted(by_t.items()):
             n = sum(cells.values())
-            if n < 20:
+            res = chi2_merged(base, cells, n)
+            if res is None:
                 continue
-            chi2 = sum(
-                (cells.get(k, 0.0) - n * sh) ** 2 / (n * sh) for k, sh in base.items() if sh > 0
-            )
-            p = stats.chi2.sf(chi2, len(base) - 1)
+            chi2, dof = res
+            p = stats.chi2.sf(chi2, dof)
             if p < alpha:
                 flagged = True
                 print(f"  {t:24s} instances={n:.0f} chi2={chi2:.1f} p={p:.1e}")
@@ -137,8 +168,12 @@ def main(root: str) -> int:
             """).fetchall()
         )
         n = sum(cells.values())
-        chi2 = sum((cells.get(k, 0.0) - n * sh) ** 2 / (n * sh) for k, sh in base.items() if sh > 0)
-        p = stats.chi2.sf(chi2, len(base) - 1)
+        res = chi2_merged(base, cells, n)
+        if res is None:
+            print(f"\n{label}: too few instances to test")
+            return
+        chi2, dof = res
+        p = stats.chi2.sf(chi2, dof)
         lrs = {k: cells.get(k, 0.0) / (n * sh) for k, sh in base.items() if sh > 0}
         k_worst = max(lrs, key=lambda k: abs(lrs[k] - 1))
         print(
@@ -146,7 +181,9 @@ def main(root: str) -> int:
             f"p={p:.1e}; worst cell {k_worst} LR={lrs[k_worst]:.2f}"
         )
         if p < P_LIMIT:
-            failures.append(f"{label} pooled p={p:.1e} (worst cell {k_worst} LR={lrs[k_worst]:.2f})")
+            failures.append(
+                f"{label} pooled p={p:.1e} (worst cell {k_worst} LR={lrs[k_worst]:.2f})"
+            )
 
     pooled_gate("dayofweek(ts)", "weekday")
     pooled_gate("day(ts)", "day of month")
