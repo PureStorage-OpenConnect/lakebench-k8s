@@ -300,12 +300,15 @@ def w2_structuring(
 # Temporal path search shared by W3 (cycles) and W9 (open layering chains).
 # ---------------------------------------------------------------------------
 
-# Cumulative persisted path rows above which W3/W9 decline to run. Sized from
-# the gold-finalize profile at scale 10 (4 executors x 100 Gi scratch): at
-# roughly 300 bytes per path row, 400M rows is about 120 GB, a third of the
-# scratch the stage has, leaving the rest for shuffle. This is a resource
-# guard, not a detection threshold.
-PATH_SEARCH_MAX_PATHS = 400_000_000
+# Cumulative persisted path rows above which W3/W9 decline to run. Measured
+# on a local scale-0.1 corpus, a persisted W3 level costs about 70 bytes per
+# row (Spark's compressed in-memory columns), and each W3 level holds 0.65 to
+# 0.92 rows per transfer; at scale 10 (267M transfers) the four W3 levels
+# total about 835M rows, roughly 60 GB. 1.5B rows is about 105 GB, a quarter
+# of gold-finalize's scratch at scale 10 (4 executors x 100 Gi), leaving the
+# rest for shuffle. At scale 100 W3 exceeds it and reports "not run". This is
+# a resource guard, not a detection threshold.
+PATH_SEARCH_MAX_PATHS = 1_500_000_000
 
 
 def _flow_edges(silver_txns: DataFrame, with_amount: bool = False) -> DataFrame:
@@ -319,7 +322,8 @@ def _flow_edges(silver_txns: DataFrame, with_amount: bool = False) -> DataFrame:
         col("uetr"),
         col("originator_id").alias("src"),
         col("beneficiary_id").alias("dst"),
-        expr("unix_micros(txn_timestamp)").alias("t"),
+        # The cast accepts TIMESTAMP_NTZ input (raw generator Parquet) too.
+        expr("unix_micros(cast(txn_timestamp as timestamp))").alias("t"),
         col("txn_timestamp").alias("ts"),
     ]
     if with_amount:
@@ -397,6 +401,7 @@ def _persist_counted(df: DataFrame, rule: str, total: list, max_paths: int) -> i
     df.persist(StorageLevel.MEMORY_AND_DISK)
     n = df.count()
     total[0] += n
+    print(f"[{rule}] path level rows={n} total={total[0]} max={max_paths}")
     if total[0] > max_paths:
         raise RuleSkipped(
             "path-cap",
@@ -734,8 +739,19 @@ def w4_risk_propagation(
         col("txn_timestamp").alias("ts_out"),
     )
     seconds = velocity_hours * 3600
+    # Join on (entity, velocity-window bucket), not the entity alone: keyed
+    # on the entity, a busy account paired every credit it received over the
+    # corpus with every payment it sent before the time filter ran. An
+    # outgoing payment within ``seconds`` after a credit in bucket k lies in
+    # bucket k or k + 1, so each outgoing row is offered under both.
+    in_b = (unix_timestamp(col("ts_in")) / lit(seconds)).cast("long")
+    out_b = (unix_timestamp(col("ts_out")) / lit(seconds)).cast("long")
+    incoming = incoming.withColumn("_bi", in_b)
+    outgoing = outgoing.withColumn("_bo", out_b).unionByName(
+        outgoing.withColumn("_bo", out_b - lit(1))
+    )
     joined = (
-        incoming.join(outgoing, col("b") == col("b2"), "inner")
+        incoming.join(outgoing, (col("b") == col("b2")) & (col("_bi") == col("_bo")), "inner")
         .filter(col("ts_out") >= col("ts_in"))
         .filter((unix_timestamp(col("ts_out")) - unix_timestamp(col("ts_in"))) <= seconds)
         # amt_in > 0 guards against div-by-zero downstream on the score

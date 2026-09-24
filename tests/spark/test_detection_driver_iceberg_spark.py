@@ -23,13 +23,10 @@ pytestmark = pytest.mark.skipif(
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spark/scripts"))
 
 
-@pytest.fixture(scope="module")
-def spark(tmp_path_factory):
+def _session(warehouse):
     from pyspark.sql import SparkSession
 
-    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
-    wh = tmp_path_factory.mktemp("wh")
-    s = (
+    return (
         SparkSession.builder.master("local[1]")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "2")
@@ -41,14 +38,29 @@ def spark(tmp_path_factory):
         )
         .config("spark.sql.catalog.lakehouse", "org.apache.iceberg.spark.SparkCatalog")
         .config("spark.sql.catalog.lakehouse.type", "hadoop")
-        .config("spark.sql.catalog.lakehouse.warehouse", str(wh))
+        .config("spark.sql.catalog.lakehouse.warehouse", str(warehouse))
         .getOrCreate()
     )
-    yield s
-    s.stop()
 
 
-def test_each_rule_computed_once(spark):
+def test_each_rule_computed_once(tmp_path):
+    """Runs in a fresh interpreter: spark.jars only takes effect in a JVM
+    that has not started yet, and other Spark tests share this process."""
+    import subprocess
+
+    env = dict(os.environ, PYSPARK_PYTHON=sys.executable)
+    proc = subprocess.run(
+        [sys.executable, __file__, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=600,
+    )
+    assert proc.returncode == 0, proc.stdout[-3000:] + proc.stderr[-3000:]
+    assert "CHECK OK" in proc.stdout
+
+
+def _check(spark):
     from datetime import datetime
 
     import detection_rules
@@ -111,3 +123,13 @@ def test_each_rule_computed_once(spark):
     assert [(r["rule_id"], r["status"], r["alert_count"]) for r in status] == [
         ("WX_counting", "ran", 5)
     ]
+
+
+if __name__ == "__main__":
+    os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    _spark = _session(sys.argv[1])
+    try:
+        _check(_spark)
+    finally:
+        _spark.stop()
+    print("CHECK OK")
