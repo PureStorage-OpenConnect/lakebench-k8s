@@ -40,3 +40,18 @@ def test_healthy_run_passes_and_last_cycle_wins():
 
 def test_no_gold_job_is_not_judged_here():
     assert _aml_batch_gate_problems([]) == ([], [])
+
+
+def test_skipped_behavioural_rule_warns():
+    from types import SimpleNamespace
+
+    from lakebench.cli._run import _aml_batch_gate_problems
+
+    job = SimpleNamespace(
+        rule_errors={},
+        alerts_by_rule={"W2_structuring": 5},
+        rules_skipped={"W1_connected_components": "giant-component"},
+    )
+    problems, warnings = _aml_batch_gate_problems([job], None)
+    assert not problems
+    assert any("gather_scatter" in w and "not run" in w for w in warnings)

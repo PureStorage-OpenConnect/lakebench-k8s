@@ -1302,8 +1302,14 @@ def _run_sustained(
         # A streaming submission that failed used to go unnoticed until the
         # end-of-run gates reported zero rows. Confirm each driver is running
         # first; dependency-download races on the shared operator are retried.
+        # One shared deadline: the streams start concurrently, so waiting
+        # for each in turn with its own budget could take N times as long.
+        _start_deadline = time.time() + 1800
         for _job_type, job_name in submitted:
-            running = monitor.wait_until_running(f"lakebench-{job_name}")
+            running = monitor.wait_until_running(
+                f"lakebench-{job_name}",
+                timeout_seconds=max(0, int(_start_deadline - time.time())),
+            )
             if not running.success:
                 print_error(f"lakebench-{job_name} did not start: {running.message}")
                 pipeline_success = False
