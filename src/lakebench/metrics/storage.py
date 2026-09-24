@@ -356,7 +356,7 @@ class MetricsStorage:
                 ),
                 throughput_gb_per_second=job_data.get("throughput_gb_per_second", 0),
                 throughput_rows_per_second=job_data.get("throughput_rows_per_second", 0),
-                # FAML detection metrics (LB-116/117). Serialized by asdict()
+                # AML detection metrics (LB-116/117). Serialized by asdict()
                 # but previously dropped on reload, so the disk-loaded report
                 # (the only path users see) showed zero alerts and lost skip
                 # reasons -- defeating the LB-119 "never misreport a skip"

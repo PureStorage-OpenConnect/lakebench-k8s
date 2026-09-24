@@ -41,7 +41,7 @@ class JobMetrics:
     throughput_gb_per_second: float = 0.0
     throughput_rows_per_second: float = 0.0
 
-    # Detection rules (FAML gold-finalize only). Empty for c360 and for
+    # Detection rules (AML gold-finalize only). Empty for c360 and for
     # non-gold jobs. Populated from ``[detection] {rule_id}: alerts=N ...``
     # lines the driver emits per rule; a rule that crashed shows up as
     # ``alerts=0`` with ``rule_errors[rule_id]`` carrying the exception.
@@ -233,7 +233,7 @@ class PipelineMetrics:
     # Shape: dict from FleetSummary.to_dict().
     datagen_fleet: dict[str, Any] | None = None
 
-    # Financial (FAML) recall scoring (optional -- populated for a batch
+    # Financial (AML) recall scoring (optional -- populated for a batch
     # financial run when `financial score` is folded into `run` (LB-123)).
     # Shape: the recall.json sidecar written by score_financial.py --
     # {"typologies": [{typology_type, expected_workload, recall,
@@ -1120,7 +1120,7 @@ def build_pipeline_benchmark(
             try:
                 from lakebench.spark.job import get_job_profile as _get_profile
 
-                # Schema-aware so FAML overrides (e.g. bronze-verify 20Gi) are
+                # Schema-aware so AML overrides (e.g. bronze-verify 20Gi) are
                 # reported, not the c360 base (LB-135 review finding).
                 _schema = run.config_snapshot.get("workload_schema")
                 _b_profile = _get_profile(job.job_type, _schema)

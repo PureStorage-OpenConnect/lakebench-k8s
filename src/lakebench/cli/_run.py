@@ -369,7 +369,7 @@ def _save_local_metrics(
 
 
 def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
-    """Copy the data + FAML detection fields parsed from driver logs onto the
+    """Copy the data + AML detection fields parsed from driver logs onto the
     stage's JobMetrics.
 
     Kept as one function, unit-tested, so a field that parse_driver_logs
@@ -384,7 +384,7 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.output_rows = parsed.output_rows
     job_metrics.throughput_gb_per_second = parsed.throughput_gb_per_second
     job_metrics.throughput_rows_per_second = parsed.throughput_rows_per_second
-    # FAML per-rule detection metrics (LB-116). The ONLY source of alert counts
+    # AML per-rule detection metrics (LB-116). The ONLY source of alert counts
     # + skip reasons for the scorecard; must be carried or the report shows
     # every rule "0 alerts" and drops skips (defeating the LB-119
     # never-misreport-a-skip invariant).
@@ -930,15 +930,15 @@ def run(
         timeout = base + detection_cushion
         if is_financial:
             # This one per-job timeout is applied to EVERY batch stage, and
-            # FAML bronze-verify (CTAS fallback over the full pacs.008 corpus,
+            # AML bronze-verify (CTAS fallback over the full pacs.008 corpus,
             # measured 4278s at scale 10) is the tightest of the three. Floor
             # the budget at the shared bronze-verify budget so bronze-verify
             # keeps real headroom over its measured cost -- base+cushion alone
             # left only 222s (5%) at scale 10, a false-failure risk under a
             # cold Ivy fetch or an OOM retry.
-            from lakebench.spark.job import faml_bronze_verify_timeout_budget
+            from lakebench.spark.job import aml_bronze_verify_timeout_budget
 
-            timeout = max(timeout, faml_bronze_verify_timeout_budget(scale))
+            timeout = max(timeout, aml_bronze_verify_timeout_budget(scale))
         if scale >= 50 or is_financial:
             print_info(f"Per-job timeout: {timeout}s (auto-scaled for scale {scale})")
 
@@ -1349,7 +1349,7 @@ def run(
                     _apply_parsed_job_metrics(job_metrics, parsed)
 
                 # Populate resource metrics from job profile. Pass the schema so
-                # FAML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)
+                # AML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)
                 # are reflected -- otherwise the scorecard under-reports the
                 # deployed resources (LB-135 review finding).
                 _schema = cfg.architecture.workload.schema_type.value
@@ -1603,8 +1603,8 @@ def run(
                     console.print("[bold]Pre-compaction benchmark[/bold]")
                     print_info("Benchmarking before maintenance (uncompacted data)...")
                     _pre_runner = _BR(cfg)
-                    # LB-117: 60s is too tight for FAML pre-compaction
-                    # queries even at small scale; bump to 180s for FAML.
+                    # LB-117: 60s is too tight for AML pre-compaction
+                    # queries even at small scale; bump to 180s for AML.
                     _pre_timeout = (
                         180 if cfg.architecture.workload.schema_type.value == "financial" else 60
                     )
@@ -1691,7 +1691,7 @@ def run(
                             console.print(f"[red]FAIL[/red] ({short_err})")
 
                 bench_runner = BenchmarkRunner(cfg)
-                # LB-117: FAML analytical queries (aggregate_typology_coverage
+                # LB-117: AML analytical queries (aggregate_typology_coverage
                 # etc) can exceed the 300s default at scale >= 5; a timeout
                 # here masquerades as a failed query and drops QpH to 0.
                 _bench_timeout = (

@@ -28,7 +28,7 @@ schema flag routes datagen and the pipeline scripts.
 - **Customer 360** (default). Retail interactions from ~8 channels flow
   through bronze / silver / gold into an executive dashboard and the
   8-query analytical benchmark. `workload.schema: customer360`.
-- **Financial-crime / AML (FAML).** pacs.008 wire messages flow through
+- **Financial crime (AML).** pacs.008 wire messages flow through
   bronze / silver / gold. Six W-rule detectors score against planted
   typologies (structuring, gather-scatter, rapid-layering, dormant
   reactivation, corridor risk, high-velocity chains). Per-rule recall,
@@ -36,7 +36,7 @@ schema flag routes datagen and the pipeline scripts.
   reference detector and a distribution-leakage gate, so a rule cannot
   read high recall from a label proxy without being caught.
   `workload.schema: financial`. See
-  [FAML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/faml-scoring.md)
+  [AML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/aml-scoring.md)
   for what precision and recall measure here vs what an AML ops team
   cares about.
 
@@ -175,7 +175,7 @@ pod).
 | `status` | Show deployment status |
 | `report` | Generate HTML scorecard report |
 | `recommend` | Recommend cluster sizing for a scale factor |
-| `financial` | FAML operator actions (`score`, `replay`, `reproduce`) |
+| `financial` | AML operator actions (`score`, `replay`, `reproduce`) |
 | `destroy` | Tear down all deployed resources |
 
 See [CLI Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/cli-reference.md)
@@ -206,7 +206,7 @@ All versions are overridable in the YAML config. See
 - [Compatibility Matrix](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/compatibility-matrix.md) -- Spark, Iceberg, and Delta version support
 - [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and sustained modes
 - [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- scorecard and query benchmark
-- [FAML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/faml-scoring.md) -- financial-crime / AML workload: rule recall, reference detector, leakage gate
+- [AML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/aml-scoring.md) -- financial-crime / AML workload: rule recall, reference detector, leakage gate
 - [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design
 - [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md) -- validated S3 backends and conformance checks
 - [Troubleshooting](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/troubleshooting.md) -- common errors and fixes

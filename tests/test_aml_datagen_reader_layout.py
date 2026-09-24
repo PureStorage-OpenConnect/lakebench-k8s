@@ -1,4 +1,4 @@
-"""LB-089 lock-step: FAML bronze reader path vs Rust datagen writer path.
+"""LB-089 lock-step: AML bronze reader path vs Rust datagen writer path.
 
 The Rust datagen (`datagen_rs/src/bin/generate.rs`) writes pacs.008
 transactions under ``{root}/bronze/pacs008/part-*.parquet``, party and
@@ -7,9 +7,9 @@ manifest under ``{root}/manifest/``. The Python bronze readers
 (``bronze_verify_financial.py`` and ``bronze_ingest_financial.py``)
 must default to a read path that matches. Before PR-F the readers
 assumed a flat layout inherited from the retired ``datagen_py``
-generator, so any FAML deploy against a fresh datagen invocation
+generator, so any AML deploy against a fresh datagen invocation
 failed the first Spark job with ``UNABLE_TO_INFER_SCHEMA`` -- the
-first live FAML end-to-end run on 2026-09-21 surfaced it.
+first live AML end-to-end run on 2026-09-21 surfaced it.
 
 This is a text-level check because the writer is Rust and the reader
 is Python; there is no import path that would tie them together at
@@ -31,7 +31,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-# The Rust datagen puts every FAML output under these sub-paths of the
+# The Rust datagen puts every AML output under these sub-paths of the
 # invocation prefix. Keys mirror the format!(...) calls in
 # datagen_rs/src/bin/generate.rs financial_main(). Referenced by
 # `test_rust_datagen_writes_expected_sub_paths` -- adding an entry
@@ -140,17 +140,17 @@ def test_reader_default_matches_datagen_default_prefix():
 
 
 def test_bronze_verify_registers_manifest_iceberg_table():
-    """LB-089 round 2: FAML benchmark queries rule_precision,
+    """LB-089 round 2: AML benchmark queries rule_precision,
     rule_recall, rule_pattern_span, and aggregate_typology_coverage all read
     `{catalog}.bronze.manifest`. Without a registration in
     bronze_verify_financial the four scoring queries fail with
     'Table does not exist' at benchmark time -- baseline recall
-    stays unpopulated and the FAML scorecard is silently the
+    stays unpopulated and the AML scorecard is silently the
     detect-only subset."""
     code = _code_only(_read("src/lakebench/spark/scripts/bronze_verify_financial.py"))
     assert "MANIFEST_TABLE" in code, (
         "bronze_verify_financial no longer references MANIFEST_TABLE. "
-        "The FAML benchmark's manifest reads will fail."
+        "The AML benchmark's manifest reads will fail."
     )
     assert DATAGEN_SUBPATHS["manifest_file"] in code, (
         "bronze_verify_financial no longer knows about "

@@ -1,11 +1,11 @@
-"""FAML reference-detector metrics + leakage gate.
+"""AML reference-detector metrics + leakage gate.
 
 Two independent checks that answer the standing rule
 "distribution checks do not prove semantics -- must run reference
 detector + leakage check" (recorded in the maintainer's MEMORY as
 `feedback_distribution_checks_dont_prove_semantics`).
 
-**Leakage gate.** The FAML audit found that datagen writes typology
+**Leakage gate.** The AML audit found that datagen writes typology
 "structuring" transactions into a narrow currency-specific band
 (USD ``9500..9999``) and that W2's detector filters on the same
 band. Every planted structuring row lands in the exact window the
@@ -176,7 +176,7 @@ class ReferenceModelReport:
 # ---------------------------------------------------------------------------
 
 
-#: Default threshold ratio from the FAML audit. A band passes if
+#: Default threshold ratio from the AML audit. A band passes if
 #: ``baseline_count / typology_count >= 0.10``. Below that ratio the
 #: band is essentially a label indicator and a raw-amount feature
 #: alone would perfectly predict typology membership. Not a hard

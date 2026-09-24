@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("sklearn")
 
-from lakebench.faml.reference_score import train_reference_gbt  # noqa: E402
+from lakebench.aml.reference_score import train_reference_gbt  # noqa: E402
 
 
 def _data(n_ent=400, seed=0):

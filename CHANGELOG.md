@@ -7,7 +7,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- **LB-116: per-rule FAML alert counts + errors surfaced into
+- **LB-116: per-rule AML alert counts + errors surfaced into
   `metrics.json`.** ``JobMetrics`` gains ``alerts_by_rule: dict[str,
   int]`` and ``rule_errors: dict[str, str]`` fields. Populated from the
   ``[detection] {rule_id}: alerts=N ...`` lines the driver already
@@ -18,26 +18,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   review caught the earlier non-greedy slurp truncating error text).
 
 ### Fixed
-- **LB-117 (P2): FAML analytical query QpH unstable.** Three S1 iters
+- **LB-117 (P2): AML analytical query QpH unstable.** Three S1 iters
   saw QpH 6.6 / 0.0 / 8.2 -- the 0.0 was a spark-thrift OOM mid-benchmark
-  on ``aggregate_typology_coverage.sql`` at the FAML 16g target, and
+  on ``aggregate_typology_coverage.sql`` at the AML 16g target, and
   the successful iters clipped queries that overran the 300s default.
-  Fix: (a) FAML ``spark_thrift.memory`` target 16g -> 24g in
+  Fix: (a) AML ``spark_thrift.memory`` target 16g -> 24g in
   ``_apply_schema_overrides``; (b) benchmark ``query_timeout`` 300s ->
   900s (post-compaction) and 60s -> 180s (pre-compaction) when
   ``workload.schema=financial``; (c) small-cluster cap threshold
   reworked to leave ~8 GiB headroom for Spark overhead + kubelet: below
   36 GiB allocatable target = ``max(4, min(20, allocatable - 8))g``.
-- **LB-118 (P1): FAML bronze-verify ran out of scratch disk at scale
+- **LB-118 (P1): AML bronze-verify ran out of scratch disk at scale
   >= 5.** `bronze_verify_financial.py` trips its CTAS fallback path
   above `ADD_FILES_MAX_BYTES` / `ADD_FILES_MAX_FILES` and rewrites the
   full pacs.008 source through an Iceberg CTAS, spilling ~2x the
   per-executor input to local disk. The c360-shaped base profile
   gave bronze-verify only 50Gi/executor -- fine for the thin
-  add_files register c360 does, blown out at 78 min for FAML scale
+  add_files register c360 does, blown out at 78 min for AML scale
   10 with `No space left on device`. Fix: added
   `_SCHEMA_PROFILE_OVERRIDES` and `_resolve_job_profile()` in
-  `modules/pipeline_engines/spark/job.py`. FAML bronze-verify now
+  `modules/pipeline_engines/spark/job.py`. AML bronze-verify now
   gets 500Gi scratch, `executors_per_100_scale: 8` (vs c360's 4),
   and `max_executors: 28` (vs 20) so per-executor input load
   halves at scale 100 and stays under the fabric8 ceiling. Base
@@ -46,9 +46,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   optional `schema_type` arg and route through the resolver; the
   capacity-preflight in `cli/_prerequisites.py` reads
   `cfg.architecture.workload.schema_type` and plumbs it down so
-  documented cluster minimums reflect FAML sizing when the workload
+  documented cluster minimums reflect AML sizing when the workload
   is financial.
-- **LB-112 (P0): batch FAML pipeline never invoked the detection
+- **LB-112 (P0): batch AML pipeline never invoked the detection
   rules.** `lakebench run` on a batch financial config completed
   bronze-verify + silver-build + gold-finalize and emitted an empty
   `gold.alerts` table. Baseline population required a separate
@@ -71,7 +71,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   when `workload.schema=financial` so gold-finalize + detection
   fits at scale ~5+.
 
-- **LB-113 (P0): Spark Thrift default 4Gi OOMs every FAML benchmark
+- **LB-113 (P0): Spark Thrift default 4Gi OOMs every AML benchmark
   query at scale 1.** First live S1 run 2026-09-21 showed exit 137
   on query 1 (silver full aggregation) cascading to "container not
   found" on 7/7 remaining queries as the thrift pod terminated,
@@ -107,33 +107,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on every S1 run.** Two independent defects combined into one hard
   failure: (a) the caller (both `replay_financial` and the new
   gold-finalize detection loop) did not pass `silver_entities`, and
-  (b) `_faml_data_path()` tried `import lakebench.spark.data` which
+  (b) `_aml_data_path()` tried `import lakebench.spark.data` which
   raises ImportError inside the apache/spark image (lakebench pkg
   not installed there), and that ImportError was uncaught -- the
   whole rule dispatcher stack-traced. Fix has four parts: (i)
-  `_faml_data_candidates()` walks env-override -> pkg-import ->
+  `_aml_data_candidates()` walks env-override -> pkg-import ->
   script-dir-subfolder -> script-dir with import-error tolerance,
-  and returns `[override]` early when `LB_FAML_DATA_DIR` is set so
+  and returns `[override]` early when `LB_AML_DATA_DIR` is set so
   a partial override does not silently mix with pkg data (split-
   brain reference state); (ii) `w7_cross_border_high_risk`
   auto-loads `silver.entities` from `LB_ICEBERG_CATALOG` +
   `LB_FINANCIAL_SILVER_ENTITIES` when the caller passes None,
   catching `AnalysisException` so a missing table degrades to
   empty alerts rather than crashing the rule dispatcher; (iii)
-  `deploy_scripts_configmap` ships the three FAML JSON sidecars
+  `deploy_scripts_configmap` ships the three AML JSON sidecars
   (`sanctions_list.json`, `pep_list.json`,
   `high_risk_jurisdictions.json`, ~8 KB total) alongside the .py
   scripts using flat keys since ConfigMap keys cannot contain
   slashes -- they mount under `/opt/spark/scripts/` where the
   script-dir candidate finds them; (iv) new
-  `get_faml_data_dir()` helper in `lakebench._resources`. Also
+  `get_aml_data_dir()` helper in `lakebench._resources`. Also
   fixed in W7: `dropDuplicates(['entity_id'])` on
   `silver.entities` was shuffle-order-dependent, so an entity
   with multiple country values produced different W7 alert
   counts across runs; replaced with deterministic
   `groupBy + min(country)`.
 
-- **LB-089 (P0): FAML pipeline broken end-to-end since the datagen
+- **LB-089 (P0): AML pipeline broken end-to-end since the datagen
   Rust rewrite.** `bronze_verify_financial.py` and
   `bronze_ingest_financial.py` read pacs.008 transactions from
   `LB_BRONZE_URI + LB_FINANCIAL_BRONZE_PREFIX` (default `pacs008/`)
@@ -145,7 +145,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `{root}/manifest/manifest.parquet`). Spark listing the root
   hits three subdirs with different schemas and refuses with
   `UNABLE_TO_INFER_SCHEMA`. Found live on 2026-09-21 during the
-  first end-to-end FAML deploy attempt. Same systemic pattern as
+  first end-to-end AML deploy attempt. Same systemic pattern as
   LB-088: shipped through PR-A/B/C/D/E because no unit test read
   real datagen v2 output and no live pipeline run gated the
   branch. C360 was unaffected -- its datagen writes flat and its
@@ -156,19 +156,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LB_FINANCIAL_PACS_PATH` is the escape hatch for a bespoke
   layout without leaking that concern into every reader.
   Adversarial pass on round 1 found round 2: `bronze.manifest`
-  Iceberg table was never registered so 4 of 7 FAML benchmark
+  Iceberg table was never registered so 4 of 7 AML benchmark
   queries (`rule_precision`, `rule_recall`, `rule_ttd`,
   `aggregate_typology_coverage`) failed at Trino with "Table does
   not exist" -- fixed by extending `bronze_verify_financial` to
   register `{catalog}.bronze.manifest` from the manifest sidecar
   via CTAS (small table, unconditional; failure is logged and
   non-fatal so batch alerts still ship). Added
-  `tests/test_faml_datagen_reader_layout.py` (5 tests): AST-based
+  `tests/test_aml_datagen_reader_layout.py` (5 tests): AST-based
   cross-language lock-step gate between the Rust writer and the
   Python reader; docstrings stripped so a comment mentioning the
   string cannot satisfy the check while the code path reverts.
   Not live-verified post-fix -- unit-tested only; live re-run
-  pending on `faml-baseline-s1`. LB-090 and LB-091 opened for
+  pending on `aml-baseline-s1`. LB-090 and LB-091 opened for
   sustained-mode-only follow-ups (env-var contract drift on
   streaming, and `bronze_verify` never scheduled by the sustained
   CLI).
@@ -191,7 +191,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `GetBucketTagging` and `PutBucketTagging`.** The primary tested S3
   target does not implement the tagging APIs that PR-1's ownership
   discipline uses as the identity mechanism. Found live on 2026-09-21
-  when the first end-to-end FAML deploy failed at the `s3-buckets`
+  when the first end-to-end AML deploy failed at the `s3-buckets`
   step. Shipped through unit tests, PR-1 code review, PR-2 adversarial
   review, and PR-C regression tests because the tests used moto (which
   implements tagging cleanly); no path exercised a backend that
@@ -277,11 +277,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regardless of the flag.
 - **Root `--version` / `-V` flag.** Both `lakebench --version` and
   the existing `lakebench version` subcommand now work.
-- **FAML product-surface docs.** Marcus's roleplay-persona pass in
-  `dev-artifacts/roleplay/COLLATED.md` flagged that FAML was invisible
+- **AML product-surface docs.** Marcus's roleplay-persona pass in
+  `dev-artifacts/roleplay/COLLATED.md` flagged that AML was invisible
   from the front door: no mention in `README.md`, no getting-started
   section, and `docs/financial-benchmark-baselines.md` reads as
-  "not run yet." New `docs/faml-scoring.md` explains what benchmark
+  "not run yet." New `docs/aml-scoring.md` explains what benchmark
   precision measures vs what an AML ops team's FP rate measures, the
   W1/W2/W3/W4/W7/W8 rule to typology mapping, the leakage gate + the
   scikit-learn reference detector shipped in PR-A, `UNMAPPED_TYPOLOGIES`
@@ -289,7 +289,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   metric-trust caveats Marcus surfaced (`compute_efficiency_gb_per_core_hour`
   reports requested cores, `ingest_ratio` denominator is scale-derived,
   `qph_degradation_pct` wants at least four rounds). README now names
-  the two workloads (Customer 360 and FAML) as a first-class distinction
+  the two workloads (Customer 360 and AML) as a first-class distinction
   above Quick Start, adds `financial` to the commands table, and links
   the new doc. Getting-started grows a "Choosing a Workload" section
   after "Choosing a Recipe" with a worked deploy -> generate -> run ->
@@ -297,11 +297,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `financial reproduce`. The one populated baseline row in
   `docs/financial-benchmark-baselines.md` remains deferred until a live
   scale-10 and scale-100 UAT run.
-- **FAML leakage gate + reference detector (`score_financial_reference.py`,
-  `lakebench.faml.reference_score`).** Closes the "distribution checks
+- **AML leakage gate + reference detector (`score_financial_reference.py`,
+  `lakebench.aml.reference_score`).** Closes the "distribution checks
   do not prove semantics -- must run reference detector + leakage
   check" standing rule that came out of a prior review pass and
-  reappeared in the FAML audit. The gate compares baseline
+  reappeared in the AML audit. The gate compares baseline
   (log-normal) transaction density against typology density inside
   each currency-specific structuring band; a ratio below 10 % means
   the band effectively IS the label, and an all-empty report is not

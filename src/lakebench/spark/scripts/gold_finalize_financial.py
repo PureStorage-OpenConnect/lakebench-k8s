@@ -15,7 +15,7 @@ this). Steps:
    rule -- a broken rule does not abort the pipeline; a stderr line
    surfaces the error for postmortem.
 
-The detection step means `lakebench run` on a batch FAML config produces
+The detection step means `lakebench run` on a batch AML config produces
 alerts as part of the pipeline itself, so the baseline row is populated
 from `metrics.json` without a separate `lakebench financial replay`
 invocation (LB-092).

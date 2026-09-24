@@ -567,7 +567,7 @@ architecture:
     schema: customer360   # default; can be omitted
 ```
 
-### Financial-crime / AML (FAML)
+### Financial crime (AML)
 
 pacs.008 wire-message pipeline with six W-rule detectors scoring against
 planted AML typologies. The scorecard reports per-rule recall, precision,
@@ -605,11 +605,11 @@ Two additional operator subcommands cover the retention scenarios:
 
 `CONFIG` in both cases is the same YAML you passed to `deploy`.
 
-The FAML precision numbers on this benchmark are not a claim about a
+The AML precision numbers on this benchmark are not a claim about a
 production ops-queue false-positive rate -- the datagen has one baseline
 distribution and roughly a dozen planted typology shapes, and the rules
 were tuned against it. Use them for stack comparison and regression
-detection. See [FAML Scoring](faml-scoring.md) for the full explanation
+detection. See [AML Scoring](aml-scoring.md) for the full explanation
 of what the metrics measure, the leakage gate, the reference detector,
 and the current untargeted typologies.
 
@@ -619,6 +619,6 @@ and the current untargeted typologies.
 
 - [Recipes Guide](recipes.md) -- all supported component combinations
 - [Polaris Quick Start](quickstart-polaris.md) -- use Apache Polaris instead of Hive
-- [FAML Scoring](faml-scoring.md) -- financial-crime / AML workload: what precision and recall measure here, the leakage gate, and the reference detector
+- [AML Scoring](aml-scoring.md) -- financial-crime / AML workload: what precision and recall measure here, the leakage gate, and the reference detector
 - [Configuration Reference](configuration.md) -- full YAML schema with all options
 - [Operators and Catalogs](operators-and-catalogs.md) -- tested versions and troubleshooting

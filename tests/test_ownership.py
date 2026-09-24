@@ -467,10 +467,10 @@ class TestBucketOwnershipTag:
         s3.get_bucket_tagging.return_value = {
             "TagSet": [
                 {"Key": TAG_DEPLOYMENT_NAME, "Value": "my-config"},
-                {"Key": TAG_WORKLOAD_SCHEMA, "Value": "faml"},
+                {"Key": TAG_WORKLOAD_SCHEMA, "Value": "aml"},
             ]
         }
-        write_bucket_ownership_tag(s3, "b1", "my-config", workload_schema="faml")
+        write_bucket_ownership_tag(s3, "b1", "my-config", workload_schema="aml")
         s3.put_bucket_tagging.assert_called_once()
 
     def test_readback_returns_none_when_no_tags(self):

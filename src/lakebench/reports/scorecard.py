@@ -112,13 +112,13 @@ class FinancialScorecardBlock:
         if not source_jobs:
             rule_errors = {}
 
-        # Nothing FAML-specific to show (e.g. a c360 run mislabelled, or a
+        # Nothing AML-specific to show (e.g. a c360 run mislabelled, or a
         # financial run before detection wired) -- stay silent.
         if not alerts_by_rule and not rules_skipped and not scoring:
             return ""
 
         try:
-            from lakebench.benchmark.faml_queries import RULE_TARGETS
+            from lakebench.benchmark.aml_queries import RULE_TARGETS
         except Exception:  # noqa: BLE001 -- render must never crash the report
             RULE_TARGETS = {}
 

@@ -2,7 +2,7 @@
 
 Closes the standing rule "distribution checks do not prove semantics
 -- must run reference detector + leakage check" that came out of a
-prior review pass and was reaffirmed by the FAML audit in
+prior review pass and was reaffirmed by the AML audit in
 ``dev-artifacts/roleplay/COLLATED.md``.
 
 Two independent things this script does:
@@ -178,7 +178,7 @@ def _build_reference_feature_frame(spark: SparkSession, silver_txns_name: str, m
     become label proxies against THIS datagen's deterministic
     typology shapes:
 
-    - ``txn_count`` and ``unique_counterparties``: FAML typologies
+    - ``txn_count`` and ``unique_counterparties``: AML typologies
       plant known participant counts and rows-per-instance (see
       ``datagen_rs/src/typology.rs::SPECS``), so these cardinality
       features fingerprint the typology by construction. Adding
@@ -222,7 +222,7 @@ def _build_reference_feature_frame(spark: SparkSession, silver_txns_name: str, m
     # NOT ``dayofmonth`` -- the latter collapses Jan 15 + Feb 15
     # into a single ``day=15`` groupBy key, mashing unrelated
     # transactions and destroying the signal the model tries to
-    # learn (P1 finding from PR-A adversarial review). FAML datagen
+    # learn (P1 finding from PR-A adversarial review). AML datagen
     # spans multi-week windows by design (CLAUDE.md gotcha 17).
     # Group by entity-day ONLY. Grouping by the label as well split a planted
     # entity-day into a typology-only row and a baseline-only row, so the
@@ -308,7 +308,7 @@ def _cap_and_pull(features_df, cap_rows: int):
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Leakage gate + reference-detector metrics for FAML. "
+            "Leakage gate + reference-detector metrics for AML. "
             "See docs/design/namespace-isolation.md for context on why."
         )
     )
@@ -342,7 +342,7 @@ def main() -> None:
 
     spark = SparkSession.builder.appName("lb-score-financial-reference").getOrCreate()
     log("=" * 60)
-    log("FAML reference detector + leakage gate")
+    log("AML reference detector + leakage gate")
     log(f"Manifest:        {args.manifest}")
     log(f"Output prefix:   {args.output_prefix}")
     log(f"Silver table:    {CATALOG}.{args.silver_txns}")

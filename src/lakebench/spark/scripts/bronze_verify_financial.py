@@ -36,12 +36,12 @@ PACS_PREFIX = env(
     "LB_FINANCIAL_PACS_PATH",
     BRONZE_ROOT_PREFIX.rstrip("/") + "/bronze/pacs008/",
 )
-# Manifest sidecar (typology ground truth). The FAML benchmark queries
+# Manifest sidecar (typology ground truth). The AML benchmark queries
 # rule_precision, rule_recall, rule_pattern_span, and aggregate_typology_coverage
 # all read `{catalog}.bronze.manifest`; without a registration here the
 # whole scoring stack fails at Trino with 'Table does not exist'.
 # LB-089 round 1 fixed only the pacs.008 read; round 2 (this) adds the
-# manifest registration so a FAML benchmark actually produces recall.
+# manifest registration so a AML benchmark actually produces recall.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
     BRONZE_ROOT_PREFIX.rstrip("/") + "/manifest/manifest.parquet",

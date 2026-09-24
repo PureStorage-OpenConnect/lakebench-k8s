@@ -19,11 +19,11 @@ Working specs that are still evolving live under `docs/` as `lakebench.next-spec
 
 Currently under active spec work:
 
-- `docs/lakebench.next-spec.md` -- FAML (financial crime / AML) workload domain, plus Spark 4.2 upgrade path.
+- `docs/lakebench.next-spec.md` -- AML (financial crime / AML) workload domain, plus Spark 4.2 upgrade path.
 - `docs/lakebench.next-spec-datagen-v2-plan.md`, `-execution.md`, `-memo.md` -- Rust datagen v2 (shipped as of the [Unreleased] CHANGELOG entry).
-- `docs/lakebench.next-spec-eng-2c3-memo.md`, `-addendum.md` -- engineering addenda to the FAML spec.
+- `docs/lakebench.next-spec-eng-2c3-memo.md`, `-addendum.md` -- engineering addenda to the AML spec.
 
-Once FAML v1 ships, the FAML design will be curated here.
+Once AML v1 ships, the AML design will be curated here.
 
 ## Reading order for new contributors
 

@@ -92,11 +92,11 @@ recall will step up once LB-101 lands.
 Not populated in this row: QpH. Post-compaction QpH across the three
 runs was 6.6 / 0.0 / 8.2. The zero was a spark-thrift pod crash
 mid-benchmark on iter 2, not a pipeline failure. The other two runs
-had four of eight FAML queries timing out at 300 s (FQ1 full silver
+had four of eight AML queries timing out at 300 s (FQ1 full silver
 scan, FQ2 top corridors, FQ4 running balance, FQ5 alert triage, FQ8
 alert-to-entity join). Pre-compaction QpH was 38.8 / 39.1 / 39.0
 (4/8 queries succeeded, cadre stable). LB-113 fixed the 4 Gi OOM;
-LB-117 tracks the remaining query-timeout tune for FAML analytical
+LB-117 tracks the remaining query-timeout tune for AML analytical
 queries. QpH will populate here after LB-117 lands.
 
 [4] Single scale-10 batch run (n=1, run-20260923-120258-b71af2,
@@ -116,7 +116,7 @@ volume and are the two precision blockers (LB-130). Recall is the
 unweighted mean across 15 scored typologies (min corridor_high_risk
 0.043, max fan_out 0.911); all 15 rendered as 'scored', none faked as
 0%/skipped. scale_ratio reported 0.0 -- the scorecard's expected-bronze
-denominator is not wired for FAML (LB-131), cosmetic, does not affect
+denominator is not wired for AML (LB-131), cosmetic, does not affect
 the pipeline.
 
 ## Sustained pipeline (bronze_ingest -> silver_stream -> gold_refresh)
@@ -133,10 +133,10 @@ the pipeline.
 ran concurrently for the 30-min window, and detection wrote 752,422 alerts
 (W2/W3/W4; W1/W7/W8 skipped in continuous). But the per-stage throughput /
 freshness / ingest-rate metrics all read 0/None: the collector's streaming
-parsers do not match FAML's gold_refresh logs and ingest_ratio uses the c360
+parsers do not match AML's gold_refresh logs and ingest_ratio uses the c360
 denominator (LB-136, Phase 4). So the pipeline is proven at scale 10 but these
 sustained rate columns cannot be populated with real numbers until Phase 4
-wires real freshness/TTD + the FAML ingest denominator. Cores ~18 = 2+2+2
+wires real freshness/TTD + the AML ingest denominator. Cores ~18 = 2+2+2
 streaming executors x ~cores, excluding the one-shot bronze-verify preflight.
 
 ## Replay (W8, `lakebench financial replay`)
@@ -179,10 +179,10 @@ Follow this after each release UAT:
 
 ## History
 
-**2026-09-21 (v1.5.0.dev0, run-20260921-220243-fea608)** -- first live end-to-end FAML pipeline on the reference cluster. Scale-1 row populated in the batch table. Not a release measurement -- the run surfaced five real defects (LB-088 FlashBlade tagging, LB-089 datagen v2 layout drift, LB-090 sustained-mode env-var drift, LB-091 sustained CLI missing bronze_verify, LB-112 gold_finalize does not invoke detection rules, LB-113 spark-thrift undersized) and the fixes are still in flight. Scale-10 and above will not be measured until the batch pipeline runs three times cleanly.
+**2026-09-21 (v1.5.0.dev0, run-20260921-220243-fea608)** -- first live end-to-end AML pipeline on the reference cluster. Scale-1 row populated in the batch table. Not a release measurement -- the run surfaced five real defects (LB-088 FlashBlade tagging, LB-089 datagen v2 layout drift, LB-090 sustained-mode env-var drift, LB-091 sustained CLI missing bronze_verify, LB-112 gold_finalize does not invoke detection rules, LB-113 spark-thrift undersized) and the fixes are still in flight. Scale-10 and above will not be measured until the batch pipeline runs three times cleanly.
 
-**2026-09-22 (v1.5.0.dev0, three consecutive S1 runs)** -- first clean three-iter S1 baseline on the reference cluster after PR-G (LB-112/113/114/115) and PR-H (Google Maven mirror fallback for repo1.maven.org rate-limits) landed. All three pipelines completed rc=0, gold_finalize wrote an identical 1.068 GB to `gold.alerts` in every run, and per-stage timings were within 0.1s except for iter-1's Ivy jar-resolution cold start. Scale-1 row repopulated with p50 = 930.5s and n=3 max = 1065.6s. LB-116 and LB-117 track two remaining follow-ups (missing per-rule alert counts in metrics.json, FAML analytical query timeouts); LB-094 (bipartite silver-build entity split) still depresses recall structurally.
+**2026-09-22 (v1.5.0.dev0, three consecutive S1 runs)** -- first clean three-iter S1 baseline on the reference cluster after PR-G (LB-112/113/114/115) and PR-H (Google Maven mirror fallback for repo1.maven.org rate-limits) landed. All three pipelines completed rc=0, gold_finalize wrote an identical 1.068 GB to `gold.alerts` in every run, and per-stage timings were within 0.1s except for iter-1's Ivy jar-resolution cold start. Scale-1 row repopulated with p50 = 930.5s and n=3 max = 1065.6s. LB-116 and LB-117 track two remaining follow-ups (missing per-rule alert counts in metrics.json, AML analytical query timeouts); LB-094 (bipartite silver-build entity split) still depresses recall structurally.
 
-**2026-09-22 (v1.5.0.dev0, scale-10 attempt)** -- first live scale-10 FAML batch attempt failed at bronze-verify with `java.io.IOException: No space left on device` after 78 minutes (three attempts, same failure). Per-executor scratch PVC (50 Gi) is undersized for the bronze_verify_financial CTAS + DISTINCT ORDER BY on 100 GB of pacs.008 raw. Filed as LB-118; scale 10 row stays TBD pending the fix. All lower-scale rows (scale 1) unaffected -- 50 Gi is comfortable at that volume. This is per-job local disk, unrelated to the LB-113 spark-thrift heap bump.
+**2026-09-22 (v1.5.0.dev0, scale-10 attempt)** -- first live scale-10 AML batch attempt failed at bronze-verify with `java.io.IOException: No space left on device` after 78 minutes (three attempts, same failure). Per-executor scratch PVC (50 Gi) is undersized for the bronze_verify_financial CTAS + DISTINCT ORDER BY on 100 GB of pacs.008 raw. Filed as LB-118; scale 10 row stays TBD pending the fix. All lower-scale rows (scale 1) unaffected -- 50 Gi is comfortable at that volume. This is per-job local disk, unrelated to the LB-113 spark-thrift heap bump.
 
-**2026-09-23 (v1.5.0.dev0, scale-10 batch, run-20260923-120258-b71af2)** -- first clean scale-10 FAML batch run end to end after LB-118. Pipeline completed rc=0 in 7971s (bronze_verify 4278s, silver_build 1216s, gold_finalize 2477s), zero OOMKilled, no disk-full. Financial scoring ran inline inside `lakebench run` (Phase 1a fold -- no separate `financial score` invocation) and the scorecard rendered all 15 typologies as scored with a real recall spread (mean 0.322, fan_out 0.911 down to corridor_high_risk 0.043). The unflattering honest numbers it surfaced: 1,665,017 alerts at 98.8% false-positive rate, driven by W4 (1.05M) and W8 (614K) over-firing -- filed LB-130 as the top credibility blocker. W7 fired 0 alerts (high-risk entity plumbing gap) and scale_ratio reported 0.0 (LB-131, cosmetic). Scale-10 batch row populated (n=1); p95 pending n>=3.
+**2026-09-23 (v1.5.0.dev0, scale-10 batch, run-20260923-120258-b71af2)** -- first clean scale-10 AML batch run end to end after LB-118. Pipeline completed rc=0 in 7971s (bronze_verify 4278s, silver_build 1216s, gold_finalize 2477s), zero OOMKilled, no disk-full. Financial scoring ran inline inside `lakebench run` (Phase 1a fold -- no separate `financial score` invocation) and the scorecard rendered all 15 typologies as scored with a real recall spread (mean 0.322, fan_out 0.911 down to corridor_high_risk 0.043). The unflattering honest numbers it surfaced: 1,665,017 alerts at 98.8% false-positive rate, driven by W4 (1.05M) and W8 (614K) over-firing -- filed LB-130 as the top credibility blocker. W7 fired 0 alerts (high-risk entity plumbing gap) and scale_ratio reported 0.0 (LB-131, cosmetic). Scale-10 batch row populated (n=1); p95 pending n>=3.

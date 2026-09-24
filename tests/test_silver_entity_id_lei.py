@@ -154,12 +154,12 @@ def test_silver_entities_lei_still_null_pending_enrichment():
     assert "lit(None)" in body_src, "silver.entities.lei still expected to project as NULL"
 
 
-def test_faml_multicycle_is_full_rebuild_not_append():
-    """LB-121: FAML silver_build must NOT append on LB_SILVER_INCREMENTAL.
-    FAML bronze is cumulative across cycles, so appending would double-count
+def test_aml_multicycle_is_full_rebuild_not_append():
+    """LB-121: AML silver_build must NOT append on LB_SILVER_INCREMENTAL.
+    AML bronze is cumulative across cycles, so appending would double-count
     the prior corpus. The mode contract is a full rebuild (overwrite) every
     cycle; this test locks that in so nobody copies the Customer 360 append
-    pattern into the FAML silver builder.
+    pattern into the AML silver builder.
     """
     body = _SRC_PATH.read_text()
     # The flag is acknowledged (not silently ignored)...
@@ -169,6 +169,6 @@ def test_faml_multicycle_is_full_rebuild_not_append():
     # .append() on the silver tables in the main build path.
     assert ".overwrite(lit(True))" in body
     assert ".append()" not in body, (
-        "silver_build_financial must not append; FAML multi-cycle is a full "
+        "silver_build_financial must not append; AML multi-cycle is a full "
         "rebuild from cumulative bronze (LB-121)"
     )

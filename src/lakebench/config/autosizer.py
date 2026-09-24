@@ -290,7 +290,7 @@ def _apply_schema_overrides(
     Financial (FinServ-Crime, AML) bumps the shared scratch PVC to 200 Gi
     for silver_build headroom on pacs.008 rows (spec §2C.21) and lifts
     the Spark Thrift default from 4g toward 16g -- LB-093, first live
-    S1 run OOM'd every FAML benchmark query at 4g because the silver
+    S1 run OOM'd every AML benchmark query at 4g because the silver
     aggregation and rule-target joins are heavier than C360's silver.
     Only fields the user did not explicitly set are touched.
 
@@ -321,7 +321,7 @@ def _apply_schema_overrides(
 
     if config.architecture.query_engine.type.value == "spark-thrift":
         thrift = config.architecture.query_engine.spark_thrift
-        # LB-117: 16g was on the edge for FAML analytical queries -- three
+        # LB-117: 16g was on the edge for AML analytical queries -- three
         # S1 iters saw QpH 6.6 / 0.0 / 8.2 with the 0.0 being a thrift-pod
         # OOM mid-benchmark on aggregate_typology_coverage.sql. 24g clears
         # it with headroom. Cluster-cap threshold is 36 GiB *allocatable*:

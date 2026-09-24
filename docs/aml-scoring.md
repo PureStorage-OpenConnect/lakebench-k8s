@@ -1,6 +1,6 @@
-# FAML: Financial-crime / AML Workload
+# AML: Financial-crime / AML Workload
 
-Lakebench's FAML workload measures a lakehouse stack against a
+Lakebench's AML workload measures a lakehouse stack against a
 Financial-crime / Anti-Money-Laundering (AML) detection pipeline: read
 pacs.008 wire messages from bronze, build silver entity / account /
 counterparty tables, aggregate risk in gold, then score six W-rule
@@ -16,7 +16,7 @@ quantity, **pattern-span**, is published alongside them but is a
 description of the injected data, not a platform measurement -- see the
 metric-trust caveats below before quoting it. All are computed by the
 SQL templates registered in
-[`src/lakebench/benchmark/faml_queries.py`](../src/lakebench/benchmark/faml_queries.py)
+[`src/lakebench/benchmark/aml_queries.py`](../src/lakebench/benchmark/aml_queries.py)
 and joined against the datagen manifest at `bronze.manifest`. Two
 aggregates round out the primary view:
 
@@ -43,7 +43,7 @@ The rule set:
 | W5_sanctions_match, W6_pep_counterparty | -- | detect-only; no planted typology today (party-flag targets are datagen follow-up) |
 
 Every planted typology that no shipped rule targets is documented in
-`UNMAPPED_TYPOLOGIES` in `faml_queries.py` with a one-line reason. That
+`UNMAPPED_TYPOLOGIES` in `aml_queries.py` with a one-line reason. That
 list is the difference between "we plant this but no detector scores
 it" and "we forgot to hook this up." Recall for an unmapped typology is
 untestable rather than zero.
@@ -89,7 +89,7 @@ labelled data from the bank.
 
 ## The leakage gate and the reference detector
 
-FAML shipped with a standing risk: a rule tuned tightly against the
+AML shipped with a standing risk: a rule tuned tightly against the
 same distribution the datagen plants will read high recall even when it
 has learned nothing generalisable. The audit that motivated
 [PR-A](../CHANGELOG.md) called this "distribution checks do not prove
@@ -130,7 +130,7 @@ gate now catches that shape and fails the run.
 ### Reference detector
 
 `train_reference_gbt` in
-[`src/lakebench/faml/reference_score.py`](../src/lakebench/faml/reference_score.py)
+[`src/lakebench/aml/reference_score.py`](../src/lakebench/aml/reference_score.py)
 trains a scikit-learn Gradient Boosted Classifier per typology on a
 deliberately narrow feature set:
 
@@ -169,15 +169,15 @@ The verdicts:
 |---|---|
 | `ok` | trained and scored; `overall_f1` and per-typology recall/precision/f1 are meaningful. |
 | `insufficient_labels` | one or more typology classes had fewer than `min_positive_per_class` rows in the sampled frame. Per-typology rows still populate but treat them as directional. |
-| `no_sklearn` | the driver image did not ship scikit-learn. The FAML pipeline still produces rule scores; the reference detector row is empty and the `aggregate_reference_vs_rule` query labels it `not_run`. |
+| `no_sklearn` | the driver image did not ship scikit-learn. The AML pipeline still produces rule scores; the reference detector row is empty and the `aggregate_reference_vs_rule` query labels it `not_run`. |
 
 ## Metric-trust caveats
 
 Marcus's roleplay pass flagged three places where the scorecard names
 suggest more than they measure. They apply to the whole pipeline
-benchmark, not FAML specifically. `compute_efficiency_gb_per_core_hour`
-shows up in every FAML run; the other two only appear in sustained
-mode, and the shipped FAML example is batch mode.
+benchmark, not AML specifically. `compute_efficiency_gb_per_core_hour`
+shows up in every AML run; the other two only appear in sustained
+mode, and the shipped AML example is batch mode.
 
 - **`compute_efficiency_gb_per_core_hour`** is `GB / core_hours
   REQUESTED`, not `/ core_hours utilised`. A pod that requests 8 cores
@@ -188,8 +188,8 @@ mode, and the shipped FAML example is batch mode.
 - **`ingest_ratio`** (sustained mode only) divides bronze row count by
   a scale-derived estimate of what datagen would have produced, not a
   measurement of what it did produce. The estimate is a
-  Customer 360 constant, so in a sustained FAML run the denominator is
-  off by roughly the ratio of FAML's per-scale-unit row count to
+  Customer 360 constant, so in a sustained AML run the denominator is
+  off by roughly the ratio of AML's per-scale-unit row count to
   Customer 360's; treat the number as "did the pipeline keep pace at
   all" rather than as a precise fraction.
 - **`qph_degradation_pct`** (sustained mode only) wants at least four
@@ -211,14 +211,14 @@ mode, and the shipped FAML example is batch mode.
   pattern-span to sanity-check that a rule fires inside its typology
   window, never as a speed comparison between stacks.
 
-Precision and recall for FAML themselves are honest measurements of
+Precision and recall for AML themselves are honest measurements of
 what they say -- rule alerts joined against manifest rows -- with the
 label-proxy risks the leakage gate now catches.
 
-## Running a FAML pipeline
+## Running a AML pipeline
 
 The full loop is `deploy -> generate -> run -> financial score`. Every
-FAML config points to a `workload.schema=financial` config; the
+AML config points to a `workload.schema=financial` config; the
 example that ships is
 [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml)
 (and `polaris-iceberg-spark-financial-local.yaml` for developer sanity
@@ -259,7 +259,7 @@ The Pydantic schema accepts up to scale 10000, but scale 500 (~50 TB)
 is the tested ceiling; runs above it have not been verified end-to-end
 and are on the user.
 
-## What the FAML workload deliberately does not measure
+## What the AML workload deliberately does not measure
 
 - **Real production alert queues.** The datagen has one baseline
   distribution and roughly a dozen planted typology shapes. A bank's
@@ -281,7 +281,7 @@ and are on the user.
 ## Where to look next
 
 - [`src/lakebench/spark/scripts/detection_rules.py`](../src/lakebench/spark/scripts/detection_rules.py) -- the six W-rule implementations.
-- [`src/lakebench/benchmark/faml_queries.py`](../src/lakebench/benchmark/faml_queries.py) -- rule -> typology mapping and query catalogue.
-- [`src/lakebench/faml/reference_score.py`](../src/lakebench/faml/reference_score.py) -- leakage gate + reference detector library.
+- [`src/lakebench/benchmark/aml_queries.py`](../src/lakebench/benchmark/aml_queries.py) -- rule -> typology mapping and query catalogue.
+- [`src/lakebench/aml/reference_score.py`](../src/lakebench/aml/reference_score.py) -- leakage gate + reference detector library.
 - [`src/lakebench/spark/scripts/score_financial_reference.py`](../src/lakebench/spark/scripts/score_financial_reference.py) -- Spark driver for both, called by `lakebench financial score`.
 - [`docs/financial-benchmark-baselines.md`](financial-benchmark-baselines.md) -- reference-cluster wall-clock and recall numbers, populated per release.

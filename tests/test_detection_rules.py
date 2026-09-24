@@ -183,19 +183,19 @@ def test_rule_ids_stable(rule_id):
     assert rule_id in src, f"{rule_id} disappeared from detection_rules"
 
 
-def test_faml_reference_files_exist_and_parse():
-    """The packaged FAML reference JSON files must exist, be valid JSON,
+def test_aml_reference_files_exist_and_parse():
+    """The packaged AML reference JSON files must exist, be valid JSON,
     and carry the entries array the rules expect."""
     import json
 
-    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/faml"
+    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
     for filename in (
         "high_risk_jurisdictions.json",
         "sanctions_list.json",
         "pep_list.json",
     ):
         p = ref_dir / filename
-        assert p.exists(), f"missing FAML reference {p}"
+        assert p.exists(), f"missing AML reference {p}"
         payload = json.loads(p.read_text())
         assert "entries" in payload
         assert isinstance(payload["entries"], list)
@@ -204,11 +204,11 @@ def test_faml_reference_files_exist_and_parse():
         assert "license" in payload
 
 
-def test_faml_reference_shapes():
+def test_aml_reference_shapes():
     """Reference tables' entries must carry the columns the rule joins on."""
     import json
 
-    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/faml"
+    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
     hrj = json.loads((ref_dir / "high_risk_jurisdictions.json").read_text())["entries"]
     for row in hrj:
         assert "country_code" in row and len(row["country_code"]) == 2
@@ -309,7 +309,7 @@ def test_w1_aliases_propagation_join():
     label-propagation loop, Spark raises ``AnalysisException: Column
     dst#NNN are ambiguous`` on the second iteration because ``labels``'
     attribute IDs trace back to ``edges_u`` via the prior unionByName.
-    Surfaced by the first live S1 run of the FAML batch pipeline.
+    Surfaced by the first live S1 run of the AML batch pipeline.
     Assertion is AST-scoped: the join call in the loop body must use
     ``col("lbl.id") == col("eg.src")``-style qualified references so
     the aliases are load-bearing.
@@ -369,14 +369,14 @@ def test_w7_auto_loads_silver_entities_when_none():
 def test_load_reference_uses_candidate_dirs():
     """Regression: inside the driver pod the ``lakebench`` package is
     not installed, so ``import lakebench.spark.data`` raises
-    ImportError. The prior _faml_data_path re-raised that ImportError
+    ImportError. The prior _aml_data_path re-raised that ImportError
     from inside every W5/W6/W7 invocation. `_load_reference` must now
     walk a list of candidate directories (env override, package data,
     same-dir fallback) and return None only when no candidate contains
     the requested file.
     """
     src = DETECTION_RULES_PATH.read_text()
-    assert "_faml_data_candidates" in src, (
+    assert "_aml_data_candidates" in src, (
         "candidate-directory search helper missing; W7 will crash on "
         "cluster driver when lakebench.spark.data cannot be imported"
     )
@@ -415,23 +415,23 @@ def test_gold_finalize_invokes_detection_rules():
     )
 
 
-def test_deploy_scripts_configmap_ships_faml_json():
+def test_deploy_scripts_configmap_ships_aml_json():
     """LB-092 second-order: gold_finalize invokes W7 which needs the
     high_risk_jurisdictions.json reference file. That file lives under
-    src/lakebench/spark/data/faml/ and is NOT under spark/scripts/, so
+    src/lakebench/spark/data/aml/ and is NOT under spark/scripts/, so
     the pre-fix deploy_scripts_configmap did not ship it. Without it,
     W7 previously crashed inside the driver.
     """
     p = Path(__file__).resolve().parents[1] / "src/lakebench/modules/pipeline_engines/spark/job.py"
     src = p.read_text()
-    assert "get_faml_data_dir" in src, (
-        "deploy_scripts_configmap must ship FAML reference JSONs alongside "
+    assert "get_aml_data_dir" in src, (
+        "deploy_scripts_configmap must ship AML reference JSONs alongside "
         "the pipeline scripts; W7 crashes in the driver otherwise"
     )
 
 
 def test_autosizer_bumps_spark_thrift_memory_for_financial():
-    """LB-093: spark-thrift default 4g OOMs on every FAML benchmark
+    """LB-093: spark-thrift default 4g OOMs on every AML benchmark
     query at scale 1. Autosizer must actually bump the resolved
     config's ``spark_thrift.memory`` field to 16g when
     ``workload.schema=financial`` AND the user did not override.
@@ -444,7 +444,7 @@ def test_autosizer_bumps_spark_thrift_memory_for_financial():
     from lakebench.config.schema import LakebenchConfig
 
     cfg_yaml = {
-        "name": "faml-autosizer-test",
+        "name": "aml-autosizer-test",
         "recipe": "polaris-iceberg-spark-thrift",
         "platform": {
             "storage": {
@@ -453,9 +453,9 @@ def test_autosizer_bumps_spark_thrift_memory_for_financial():
                     "access_key": "x",
                     "secret_key": "y",
                     "buckets": {
-                        "bronze": "faml-autosizer-test-bronze",
-                        "silver": "faml-autosizer-test-silver",
-                        "gold": "faml-autosizer-test-gold",
+                        "bronze": "aml-autosizer-test-bronze",
+                        "silver": "aml-autosizer-test-silver",
+                        "gold": "aml-autosizer-test-gold",
                     },
                 },
             },
@@ -466,17 +466,17 @@ def test_autosizer_bumps_spark_thrift_memory_for_financial():
         },
     }
     cfg = LakebenchConfig.model_validate(cfg_yaml)
-    # No cluster capacity: the guard's fallback keeps the FAML default 24g
+    # No cluster capacity: the guard's fallback keeps the AML default 24g
     # (LB-117: 16g was on the edge; three-iter S1 crashed thrift mid-query).
     resolve_auto_sizing(cfg, cluster_capacity=None)
     assert cfg.architecture.query_engine.spark_thrift.memory == "24g", (
-        f"expected spark_thrift.memory=24g on FAML, got "
+        f"expected spark_thrift.memory=24g on AML, got "
         f"{cfg.architecture.query_engine.spark_thrift.memory!r}"
     )
 
 
 def test_autosizer_thrift_memory_caps_on_small_node():
-    """The 16g FAML bump must not push spark_thrift beyond a small
+    """The 16g AML bump must not push spark_thrift beyond a small
     cluster's largest node. Adversarial-review finding: a user on a
     laptop-scale cluster (16 GiB nodes) would get a Pending pod
     forever.
@@ -487,7 +487,7 @@ def test_autosizer_thrift_memory_caps_on_small_node():
 
     cfg = LakebenchConfig.model_validate(
         {
-            "name": "faml-tiny-cluster",
+            "name": "aml-tiny-cluster",
             "recipe": "polaris-iceberg-spark-thrift",
             "platform": {
                 "storage": {
@@ -496,9 +496,9 @@ def test_autosizer_thrift_memory_caps_on_small_node():
                         "access_key": "x",
                         "secret_key": "y",
                         "buckets": {
-                            "bronze": "faml-tiny-bronze",
-                            "silver": "faml-tiny-silver",
-                            "gold": "faml-tiny-gold",
+                            "bronze": "aml-tiny-bronze",
+                            "silver": "aml-tiny-silver",
+                            "gold": "aml-tiny-gold",
                         },
                     },
                 },
@@ -535,7 +535,7 @@ def test_autosizer_thrift_capped_on_24gi_node():
 
     cfg = LakebenchConfig.model_validate(
         {
-            "name": "faml-24g-node",
+            "name": "aml-24g-node",
             "recipe": "polaris-iceberg-spark-thrift",
             "platform": {
                 "storage": {
@@ -544,9 +544,9 @@ def test_autosizer_thrift_capped_on_24gi_node():
                         "access_key": "x",
                         "secret_key": "y",
                         "buckets": {
-                            "bronze": "faml-24g-bronze",
-                            "silver": "faml-24g-silver",
-                            "gold": "faml-24g-gold",
+                            "bronze": "aml-24g-bronze",
+                            "silver": "aml-24g-silver",
+                            "gold": "aml-24g-gold",
                         },
                     },
                 },
@@ -578,7 +578,7 @@ def test_autosizer_thrift_at_36gi_uses_full_24g():
 
     cfg = LakebenchConfig.model_validate(
         {
-            "name": "faml-36g-node",
+            "name": "aml-36g-node",
             "recipe": "polaris-iceberg-spark-thrift",
             "platform": {
                 "storage": {
@@ -587,9 +587,9 @@ def test_autosizer_thrift_at_36gi_uses_full_24g():
                         "access_key": "x",
                         "secret_key": "y",
                         "buckets": {
-                            "bronze": "faml-36g-bronze",
-                            "silver": "faml-36g-silver",
-                            "gold": "faml-36g-gold",
+                            "bronze": "aml-36g-bronze",
+                            "silver": "aml-36g-silver",
+                            "gold": "aml-36g-gold",
                         },
                     },
                 },
@@ -701,21 +701,21 @@ def test_gold_finalize_crashed_rules_emit_alerts_line():
     )
 
 
-def test_faml_data_candidates_env_override_is_authoritative():
+def test_aml_data_candidates_env_override_is_authoritative():
     """Adversarial-review finding G: iterating candidate directories
-    per-file lets a partial LB_FAML_DATA_DIR override silently mix
+    per-file lets a partial LB_AML_DATA_DIR override silently mix
     with the installed pkg (only sanctions_list.json in the override
     shadows that file while pep/hrj read from pkg). Env override must
     be the ONLY candidate when set.
     """
     tree = _module_ast()
     fn = next(
-        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_faml_data_candidates"
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_aml_data_candidates"
     )
     body = ast.unparse(fn)
     # Env-override path must return early with a single-element list.
     assert "if override:" in body and "return [override]" in body, (
-        "_faml_data_candidates must return [override] when LB_FAML_DATA_DIR "
+        "_aml_data_candidates must return [override] when LB_AML_DATA_DIR "
         "is set; anything that adds more candidates enables split-brain "
         "reference data (finding G)"
     )
@@ -723,23 +723,23 @@ def test_faml_data_candidates_env_override_is_authoritative():
 
 def test_configmap_size_guardrail():
     """Adversarial-review test coverage #4: adding a large future
-    FAML reference file (e.g. a real ~5 MB OFAC SDN list) would
+    AML reference file (e.g. a real ~5 MB OFAC SDN list) would
     silently break deploy with an opaque `Request entity too large`
     since K8s hard-rejects ConfigMap >1 MiB. Cap the shipped set of
-    (scripts + FAML reference JSONs) at 900 KiB total so the failure
+    (scripts + AML reference JSONs) at 900 KiB total so the failure
     mode is a test rather than a broken deploy.
     """
-    from lakebench._resources import get_faml_data_dir, get_scripts_dir
+    from lakebench._resources import get_aml_data_dir, get_scripts_dir
 
     total = 0
     for p in get_scripts_dir().glob("*.py"):
         total += p.stat().st_size
-    faml_dir = get_faml_data_dir()
-    if faml_dir is not None:
-        for p in faml_dir.glob("*.json"):
+    aml_dir = get_aml_data_dir()
+    if aml_dir is not None:
+        for p in aml_dir.glob("*.json"):
             total += p.stat().st_size
     assert total < 900 * 1024, (
-        f"combined scripts + FAML data size {total} bytes exceeds 900 KiB; "
+        f"combined scripts + AML data size {total} bytes exceeds 900 KiB; "
         f"K8s ConfigMap limit is 1 MiB and the deploy will fail with "
         f"`Request entity too large`. Trim reference files or split the "
         f"ConfigMap."
@@ -864,17 +864,17 @@ def _module_const_dict(tree, name):
     return None
 
 
-def test_rule_target_typology_matches_faml_queries():
+def test_rule_target_typology_matches_aml_queries():
     """The driver-side RULE_TARGET_TYPOLOGY must stay in lock-step with the
     orchestrator-side RULE_TARGETS -- they live on opposite sides of the
     package boundary and score_financial relies on them agreeing."""
-    from lakebench.benchmark.faml_queries import RULE_TARGETS
+    from lakebench.benchmark.aml_queries import RULE_TARGETS
 
     tree = _module_ast()
     driver_map = _module_const_dict(tree, "RULE_TARGET_TYPOLOGY")
     assert driver_map is not None, "RULE_TARGET_TYPOLOGY must be defined"
     assert driver_map == RULE_TARGETS, (
-        "RULE_TARGET_TYPOLOGY (detection_rules) and RULE_TARGETS (faml_queries) "
+        "RULE_TARGET_TYPOLOGY (detection_rules) and RULE_TARGETS (aml_queries) "
         f"drifted: {driver_map} vs {RULE_TARGETS}"
     )
 
