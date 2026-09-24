@@ -60,6 +60,22 @@ def table_exists(spark, table_name):
         raise
 
 
+def ensure_column(spark, fq_table, name, sql_type):
+    """Add a nullable column to an existing table when it is missing.
+
+    Reads the live schema first: Spark has no ``ADD COLUMN IF NOT EXISTS``
+    for columns (that clause is for partitions), so the unconditional form
+    failed with a parse error on every run and was silently swallowed. For a
+    reused catalog whose table predates the column, that left the next write
+    to fail on a schema mismatch. Returns True when the column was added.
+    """
+    if name in spark.table(fq_table).columns:
+        return False
+    spark.sql(f"ALTER TABLE {fq_table} ADD COLUMNS ({name} {sql_type})")
+    log(f"[startup] added {name} to {fq_table} (reused-catalog upgrade)")
+    return True
+
+
 def path_size_gb(spark, uri):
     """Total bytes under a Hadoop-FS path, in GiB; 0.0 if it cannot be measured."""
     try:

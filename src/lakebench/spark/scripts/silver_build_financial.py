@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 
-from common import env, iceberg_table_stats, log, log_job_metrics
+from common import ensure_column, env, iceberg_table_stats, log, log_job_metrics
 from pyspark.sql import SparkSession, Window
 from pyspark.sql.functions import (
     abs as abs_,
@@ -108,7 +108,8 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
     rptd_beneficiary_name   STRING,
     rptd_beneficiary_address STRING,
     source_message_ref      STRING,
-    _batch_id               BIGINT
+    _batch_id               BIGINT,
+    ingest_ts               TIMESTAMP
 ) USING iceberg PARTITIONED BY (days(txn_timestamp))
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
@@ -347,6 +348,11 @@ def build_transactions(bronze):
         # Present in every DataFrame that writes silver.transactions so the
         # DataFrameWriterV2.overwrite() column set matches the target schema.
         lit(None).cast("bigint").alias("_batch_id"),
+        # Continuous clock: bronze-ingest stamps each micro-batch; batch
+        # bronze has no ingest time, so freshness stays undefined there.
+        (col("ingest_ts") if "ingest_ts" in bronze.columns else lit(None).cast("timestamp")).alias(
+            "ingest_ts"
+        ),
     )
 
 
@@ -827,23 +833,12 @@ def main() -> None:
         spark.sql(ddl)
         log(f"Bootstrapped silver.{name}")
 
-    # LB-109: upgrade-path safety. If the tables were created by an
-    # older silver_build_financial or by deploy/financial_ddl.py before
-    # `_batch_id` was added, `CREATE TABLE IF NOT EXISTS` above is a
-    # no-op and the subsequent `.writeTo(...).overwrite(lit(True))`
-    # would reject with a schema mismatch (the DataFrame now includes
-    # `_batch_id` from build_transactions/build_edges). ADD COLUMN IF
-    # NOT EXISTS is idempotent -- a no-op on fresh tables where the
-    # column already exists.
+    # LB-109 upgrade path: on a reused catalog whose tables predate these
+    # columns, CREATE TABLE IF NOT EXISTS above is a no-op and the writes
+    # below (which carry them) would fail on a schema mismatch.
     for table in (SILVER_TRANSACTIONS, SILVER_EDGES):
-        try:
-            spark.sql(f"ALTER TABLE {CATALOG}.{table} ADD COLUMN IF NOT EXISTS _batch_id BIGINT")
-        except Exception as e:  # noqa: BLE001
-            # Some catalogs don't accept ADD COLUMN IF NOT EXISTS on a
-            # table that already has the column; that's the desired
-            # end state, so swallow. If the column truly is missing
-            # the write below will fail loud with the schema mismatch.
-            log(f"[startup] ADD COLUMN _batch_id on {table} skipped: {e}")
+        ensure_column(spark, f"{CATALOG}.{table}", "_batch_id", "BIGINT")
+    ensure_column(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "ingest_ts", "TIMESTAMP")
 
     bronze = spark.table(f"{CATALOG}.{BRONZE_TABLE}")
     bronze_rows = bronze.count()

@@ -1140,6 +1140,64 @@ class TableNamesConfig(BaseModel):
         description="Gold daily-aggregate dashboard table (Financial): namespace.table",
     )
 
+    def financial_env(self) -> dict[str, str]:
+        """Env vars the financial Spark scripts read their table names from.
+
+        Without these the scripts fell back to their own hard-coded defaults,
+        so a table override in config changed what the benchmark, maintenance
+        and destroy touched but not what the pipeline wrote.
+        """
+        return {
+            "LB_FINANCIAL_SILVER_TRANSACTIONS": self.silver,
+            "LB_FINANCIAL_SILVER_TXNS": self.silver,
+            "LB_FINANCIAL_SILVER_ENTITIES": self.silver_entities,
+            "LB_FINANCIAL_SILVER_ACCOUNTS": self.silver_accounts,
+            "LB_FINANCIAL_SILVER_STATEMENTS": self.silver_account_statements,
+            "LB_FINANCIAL_SILVER_EDGES": self.silver_counterparty_edges,
+            "LB_FINANCIAL_SILVER_PROFILES": self.silver_entity_profiles,
+            "LB_FINANCIAL_GOLD_ALERTS": self.gold_alerts,
+            "LB_FINANCIAL_GOLD_RISK_SCORES": self.gold_risk_scores,
+            "LB_FINANCIAL_GOLD_CLUSTERS": self.gold_entity_clusters,
+            "LB_FINANCIAL_GOLD_DASHBOARDS": self.gold_daily_dashboards,
+        }
+
+    def workload_tables(
+        self, schema: str, *, layers: tuple[str, ...] = ("bronze", "silver", "gold")
+    ) -> list[str]:
+        """Every table the pipeline writes for ``schema``, bronze first.
+
+        Customer 360 writes one table per layer. Financial writes several per
+        layer; maintenance, compaction and destroy that only looked at
+        ``silver``/``gold`` missed all but two of them.
+        """
+        if schema != "financial":
+            by_layer = {"bronze": [self.bronze], "silver": [self.silver], "gold": [self.gold]}
+        else:
+            by_layer = {
+                "bronze": [self.bronze, "bronze.manifest"],
+                "silver": [
+                    self.silver,
+                    self.silver_entities,
+                    self.silver_accounts,
+                    self.silver_account_statements,
+                    self.silver_counterparty_edges,
+                    self.silver_entity_profiles,
+                ],
+                "gold": [
+                    self.gold_alerts,
+                    self.gold_risk_scores,
+                    self.gold_entity_clusters,
+                    self.gold_daily_dashboards,
+                    "gold.detection_status",
+                ],
+            }
+        out: list[str] = []
+        for layer in layers:
+            for t in by_layer[layer]:
+                if t not in out:
+                    out.append(t)
+        return out
+
 
 class BenchmarkConfig(BaseModel):
     """Benchmark configuration.
@@ -1199,6 +1257,25 @@ class ArchitectureConfig(BaseModel):
             else:
                 data.pop("processing")  # pipeline takes precedence
         return data
+
+    @model_validator(mode="after")
+    def financial_table_defaults(self) -> ArchitectureConfig:
+        """Point ``tables.silver``/``tables.gold`` at the financial tables.
+
+        Their defaults are the Customer 360 names. The financial scripts
+        write ``silver.transactions`` and ``gold.alerts``, so on an AML run
+        the benchmark queried ``silver.customer_interactions_enriched`` (7 of
+        8 queries failed TABLE_NOT_FOUND) and maintenance, compaction and
+        destroy targeted tables that did not exist. Explicit values win.
+        """
+        if self.workload.schema_type.value != "financial":
+            return self
+        explicit = self.tables.model_fields_set
+        if "silver" not in explicit:
+            self.tables.silver = "silver.transactions"
+        if "gold" not in explicit:
+            self.tables.gold = self.tables.gold_alerts
+        return self
 
     @model_validator(mode="after")
     def validate_component_combination(self) -> ArchitectureConfig:

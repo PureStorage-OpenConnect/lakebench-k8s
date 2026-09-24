@@ -522,9 +522,10 @@ class TestRunIcebergMaintenance:
         cfg.architecture.query_engine.type.value = engine_type
         cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
         cfg.architecture.query_engine.spark_thrift.catalog_name = "lakehouse"
-        cfg.architecture.tables.bronze = "default.bronze_raw"
-        cfg.architecture.tables.silver = "silver.customer_interactions_enriched"
-        cfg.architecture.tables.gold = "gold.customer_executive_dashboard"
+        from lakebench.config.schema import TableNamesConfig
+
+        cfg.architecture.tables = TableNamesConfig()
+        cfg.architecture.workload.schema_type.value = "customer360"
         return cfg
 
     def test_runs_maintenance_on_all_tables_trino(self):
@@ -693,8 +694,10 @@ class TestRunIcebergCompaction:
         cfg.architecture.query_engine.type.value = engine_type
         cfg.architecture.query_engine.trino.catalog_name = "lakehouse"
         cfg.architecture.query_engine.spark_thrift.catalog_name = "lakehouse"
-        cfg.architecture.tables.silver = "silver.customer_interactions_enriched"
-        cfg.architecture.tables.gold = "gold.customer_executive_dashboard"
+        from lakebench.config.schema import TableNamesConfig
+
+        cfg.architecture.tables = TableNamesConfig()
+        cfg.architecture.workload.schema_type.value = "customer360"
         return cfg
 
     def test_runs_compaction_trino(self):

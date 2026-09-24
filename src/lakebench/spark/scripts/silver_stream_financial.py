@@ -62,7 +62,7 @@ from __future__ import annotations
 import signal
 import time
 
-from common import env, log
+from common import ensure_column, env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
 from silver_build_financial import (
@@ -83,22 +83,6 @@ CHECKPOINT_URI = env(
     "LB_FINANCIAL_SILVER_CHECKPOINT", "s3a://lb-bronze/_checkpoints/silver_stream_financial/"
 )
 TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "30"))
-
-
-def _ensure_batch_id_column(spark, table: str) -> None:
-    """Add the `_batch_id` column if the target table was created by an
-    older silver_build_financial (pre-LB-109). Iceberg's ADD COLUMN IF
-    NOT EXISTS is idempotent, so running this every stream startup costs
-    one metadata read on subsequent restarts.
-    """
-    try:
-        spark.sql(f"ALTER TABLE {CATALOG}.{table} ADD COLUMN IF NOT EXISTS _batch_id BIGINT")
-    except Exception as e:  # noqa: BLE001
-        # Some catalog implementations reject ADD COLUMN IF NOT EXISTS
-        # against a table that already has the column. Fall through: if
-        # the column really is missing the first INSERT below will fail
-        # loud, which is the desired behavior for a stale table.
-        log(f"[startup] ADD COLUMN _batch_id on {table} skipped: {e}")
 
 
 def _merge_batch(batch_df, batch_id: int) -> None:
@@ -184,8 +168,9 @@ def main() -> None:
 
     # LB-109: guarantee the idempotency-key column exists on the target
     # tables before the first micro-batch fires. Idempotent on re-runs.
-    _ensure_batch_id_column(spark, SILVER_TXNS)
-    _ensure_batch_id_column(spark, SILVER_EDGES)
+    ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_batch_id", "BIGINT")
+    ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_batch_id", "BIGINT")
+    ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
 
     # LB-127: the bronze table carries an OVERWRITE snapshot from the
     # bronze-verify preflight (LB_REGISTER_TABLE=1 does a full CTAS/register

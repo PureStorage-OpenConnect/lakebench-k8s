@@ -35,4 +35,4 @@ SELECT
   COUNT(ra.alert_id) AS total_alerts,
   COUNT(m.alert_id) AS true_positives
 FROM rule_alerts ra
-LEFT JOIN matched m USING (alert_id);
+LEFT JOIN matched m ON m.alert_id = ra.alert_id;

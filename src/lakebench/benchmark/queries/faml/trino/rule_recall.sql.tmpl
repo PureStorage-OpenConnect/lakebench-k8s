@@ -39,4 +39,4 @@ SELECT
   COUNT(i.typology_id) AS total_typologies,
   COUNT(d.typology_id) AS detected
 FROM instances i
-LEFT JOIN detected d USING (typology_id);
+LEFT JOIN detected d ON d.typology_id = i.typology_id;
