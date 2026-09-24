@@ -37,6 +37,11 @@ Rule set in continuous mode:
   silver_stream does not maintain -- Phase 5a builds continuous dimensions),
   W8 (needs a >=90-day dormancy gap a narrow continuous corpus cannot hold).
 
+A rule that errors or skips on a tick loses the rows it wrote on earlier
+ticks of the run, and its status for the tick is 'error' or 'skipped'. So a
+transient failure on the last tick scores that rule's typologies as not run,
+never as the previous tick's alerts under a status that says otherwise.
+
 detected_ts semantics in continuous (LB-127): because each tick rewrites a
 rule's alerts, detected_ts carries the LAST re-detection time, not the first.
 That is sufficient for Phase 3 (alerts exist, recall is scorable); the

@@ -441,9 +441,10 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # Persist before counting, so the rule is computed exactly once.
             # The loop used to count the frame and then INSERT from a temp
             # view, which is not materialised: every rule ran twice, each run
-            # re-reading silver and redoing its joins. Counting before the
-            # DELETE keeps the old failure semantics: a rule that fails while
-            # computing leaves its committed rows in place.
+            # re-reading silver and redoing its joins. A rule that fails
+            # while computing has its rows removed by the error handler
+            # below, so gold.alerts never shows alerts for a rule whose
+            # status is not 'ran'.
             alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
