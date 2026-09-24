@@ -22,7 +22,7 @@ Rules implemented in this file:
   black list jurisdiction.
 - W8_dormant_reactivation: originator account inactive > 90 days then
   a transaction >= $5,000-equivalent.
-- W9_layering_chain: open chains of 3+ transfers where each hop forwards
+- W17_layering_chain: open chains of 3+ transfers where each hop forwards
   80-100% of the previous one within 7 days (temporal path search).
 
 W5_splink_resolution (probabilistic entity resolution) is a separate
@@ -107,7 +107,7 @@ RULE_TARGET_TYPOLOGY = {
     "W6_pep_counterparty": None,
     "W7_cross_border_high_risk": "corridor_high_risk",
     "W8_dormant_reactivation": "dormant_reactivation",
-    "W9_layering_chain": "stack",
+    "W17_layering_chain": "stack",
 }
 
 
@@ -297,10 +297,10 @@ def w2_structuring(
 
 
 # ---------------------------------------------------------------------------
-# Temporal path search shared by W3 (cycles) and W9 (open layering chains).
+# Temporal path search shared by W3 (cycles) and W17 (open layering chains).
 # ---------------------------------------------------------------------------
 
-# Cumulative persisted path rows above which W3/W9 decline to run. Measured
+# Cumulative persisted path rows above which W3/W17 decline to run. Measured
 # on a local scale-0.1 corpus, a persisted W3 level costs about 70 bytes per
 # row (Spark's compressed in-memory columns), and each W3 level holds 0.65 to
 # 0.92 rows per transfer; at scale 10 (267M transfers) the four W3 levels
@@ -550,7 +550,7 @@ def w3_round_tripping(
     )
 
 
-def w9_layering_chain(
+def w17_layering_chain(
     silver_txns: DataFrame,
     min_hops: int = 3,
     max_hops: int = 6,
@@ -590,7 +590,7 @@ def w9_layering_chain(
     """
     from pyspark.sql.functions import array_contains, concat, element_at
 
-    edges = _edges_or_skip(_flow_edges(silver_txns, with_amount=True), "W9", max_edges)
+    edges = _edges_or_skip(_flow_edges(silver_txns, with_amount=True), "W17", max_edges)
     hop_us = hop_window_hours * 3_600_000_000
     step = _path_search_step(edges, hop_us, max_out_degree)
 
@@ -624,7 +624,7 @@ def w9_layering_chain(
     # transfer (into its sender, and not straight back to that transfer's
     # sender) is not a head; chains start only at heads.
     ext = _carries(_extend_paths(one_hop, step, hop_us))
-    _persist_counted(ext, "W9", total, max_paths)
+    _persist_counted(ext, "W17", total, max_paths)
     not_head = (
         ext.filter(col("e_dst") != col("start")).select(col("e_uetr").alias("uetr")).distinct()
     )
@@ -640,11 +640,11 @@ def w9_layering_chain(
         # ``paths`` holds chains of ``hop`` transfers.
         if hop < min_hops:
             ext = _carries(_extend_paths(paths, step, hop_us))
-            _persist_counted(ext, "W9", total, max_paths)
+            _persist_counted(ext, "W17", total, max_paths)
             paths = _advance(ext)
             continue
         ext = _carries(_extend_paths(paths, step, hop_us))
-        _persist_counted(ext, "W9", total, max_paths)
+        _persist_counted(ext, "W17", total, max_paths)
         returns = ext.filter(col("e_dst") == col("start")).select("uetrs")
         onward = ext.filter(~array_contains(col("nodes"), col("e_dst"))).select("uetrs")
         done = paths.join(returns, "uetrs", "left_anti")
@@ -658,7 +658,7 @@ def w9_layering_chain(
     alerts = chains.withColumn("hops", size(col("uetrs")))
     return alerts.select(
         expr("uuid()").alias("alert_id"),
-        lit("W9_layering_chain").alias("rule_id"),
+        lit("W17_layering_chain").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
         lit(MODEL_VERSION).alias("model_version"),
@@ -690,7 +690,7 @@ def w9_layering_chain(
                 lit("max_out_degree"),
             ),
             array(
-                lit("W9_layering_chain"),
+                lit("W17_layering_chain"),
                 col("hops").cast("string"),
                 lit(str(hop_window_hours)),
                 lit(str(min_forward_ratio)),
@@ -1752,7 +1752,7 @@ _RULE_DISPATCH = {
     "W6_pep_counterparty": w6_pep_counterparty,
     "W7_cross_border_high_risk": w7_cross_border_high_risk,
     "W8_dormant_reactivation": w8_dormant_reactivation,
-    "W9_layering_chain": w9_layering_chain,
+    "W17_layering_chain": w17_layering_chain,
 }
 
 

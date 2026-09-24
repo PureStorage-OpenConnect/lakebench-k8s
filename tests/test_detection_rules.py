@@ -59,7 +59,7 @@ def test_dispatcher_covers_documented_rules():
         "W6_pep_counterparty",
         "W7_cross_border_high_risk",
         "W8_dormant_reactivation",
-        "W9_layering_chain",
+        "W17_layering_chain",
     ):
         assert expected in keys, f"missing rule {expected} in dispatcher"
 
@@ -172,7 +172,7 @@ def test_w2_structuring_takes_expected_kwargs():
         "W6_pep_counterparty",
         "W7_cross_border_high_risk",
         "W8_dormant_reactivation",
-        "W9_layering_chain",
+        "W17_layering_chain",
     ],
 )
 def test_rule_ids_stable(rule_id):

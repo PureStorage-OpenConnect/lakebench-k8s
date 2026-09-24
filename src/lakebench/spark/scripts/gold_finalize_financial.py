@@ -78,7 +78,7 @@ except ValueError:
 DEFAULT_DETECTION_RULES = (
     "W2_structuring",
     "W3_round_tripping",
-    "W9_layering_chain",
+    "W17_layering_chain",
     "W4_risk_propagation",
     "W7_cross_border_high_risk",
     "W8_dormant_reactivation",
@@ -367,7 +367,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     from detection_rules import RULE_TARGET_TYPOLOGY, RuleSkipped, get_rule
 
     # Which rules to run this invocation. Batch passes None (the full default
-    # set); the continuous gold loop passes a bounded set (W2/W3/W4/W9) plus a
+    # set); the continuous gold loop passes a bounded set (W2/W3/W4/W17) plus a
     # skipped_rules list for the rules it deliberately does NOT run there --
     # W1 (per-tick graph recompute too costly), W7 (silver.entities is not
     # maintained by silver_stream, so it would false-report 0% recall), and
@@ -490,7 +490,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
             status_rows.append((rule_id, "error", err, target_typology, None))
         finally:
-            # The alerts frame and W1/W3/W9's intermediate frames (edges,
+            # The alerts frame and W1/W3/W17's intermediate frames (edges,
             # step, path levels) are persisted. Nothing outlives the rule's
             # write, and left cached they hold executor memory and scratch
             # through every later rule.

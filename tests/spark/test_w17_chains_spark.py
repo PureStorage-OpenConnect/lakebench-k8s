@@ -1,4 +1,4 @@
-"""Executed: W9 finds an open layering chain once, requires the amount to carry
+"""Executed: W17 finds an open layering chain once, requires the amount to carry
 through each hop and each hop to follow within the window, excludes hubs as
 intermediaries, leaves cycles to W3, and skips honestly at its path cap (D2:
 no rule could detect `stack`)."""
@@ -44,9 +44,9 @@ def _df(spark, rows):
 
 
 def _found(spark, rows, **kw):
-    from detection_rules import w9_layering_chain
+    from detection_rules import w17_layering_chain
 
-    out = w9_layering_chain(_df(spark, rows), run_id="r", **kw).collect()
+    out = w17_layering_chain(_df(spark, rows), run_id="r", **kw).collect()
     return out, [tuple(a["related_txn_ids"]) for a in out]
 
 
@@ -64,7 +64,7 @@ def test_planted_chain_found_once(spark):
     out, found = _found(spark, rows)
     assert found == [("s1", "s2", "s3", "s4")]
     assert out[0]["entity_id"] == 1
-    assert out[0]["rule_id"] == "W9_layering_chain"
+    assert out[0]["rule_id"] == "W17_layering_chain"
     assert list(out[0]["related_entity_ids"]) == [1, 2, 3, 4, 5]
 
 
@@ -118,11 +118,11 @@ def test_cycle_is_left_to_w3(spark):
 
 
 def test_path_cap_skips_honestly(spark):
-    from detection_rules import RuleSkipped, w9_layering_chain
+    from detection_rules import RuleSkipped, w17_layering_chain
 
     rows = [("s1", 1, 2, 0, 1000), ("s2", 2, 3, 24, 950), ("s3", 3, 4, 48, 900)]
     with pytest.raises(RuleSkipped) as exc:
-        w9_layering_chain(_df(spark, rows), max_paths=0, run_id="r")
+        w17_layering_chain(_df(spark, rows), max_paths=0, run_id="r")
     assert exc.value.reason == "path-cap"
 
 

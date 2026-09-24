@@ -41,8 +41,10 @@ _ALL_PLANTED_TYPOLOGIES = frozenset(
 
 
 def test_all_w_rules_have_target_entry():
-    """Every W1-W9 rule must have a target (or explicit None) entry."""
-    for i in range(1, 10):
+    """Every shipped rule (W1-W8, W17) must have a target (or explicit None)
+    entry. W9-W16 are workload ids the spec reserves (writeback, reproduce,
+    ingest, ML), not detection rules."""
+    for i in (*range(1, 9), 17):
         matches = [k for k in RULE_TARGETS if k.startswith(f"W{i}_")]
         assert len(matches) == 1, f"W{i} has {len(matches)} entries: {matches}"
 

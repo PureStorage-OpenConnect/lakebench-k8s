@@ -59,7 +59,7 @@ RULE_TARGETS: dict[str, str | None] = {
     "W7_cross_border_high_risk": "corridor_high_risk",
     "W8_dormant_reactivation": "dormant_reactivation",
     # Open multi-day chain forwarding 80-100% per hop (not a return).
-    "W9_layering_chain": "stack",
+    "W17_layering_chain": "stack",
 }
 
 

@@ -45,7 +45,7 @@ def _tuple_values(tree: ast.Module, name: str) -> set[str]:
 
 def test_continuous_runs_w2w3w4_and_marks_w1w7w8_skipped():
     """Continuous runs only the rules that need silver.transactions alone
-    (W2/W3/W4/W9). W1 (per-tick graph too costly), W7 (silver.entities not
+    (W2/W3/W4/W17). W1 (per-tick graph too costly), W7 (silver.entities not
     maintained in continuous), and W8 (90-day dormancy gap) are recorded as
     SKIPPED -- not omitted -- so score renders their typologies "not run"
     instead of a false 0% recall."""
@@ -56,7 +56,7 @@ def test_continuous_runs_w2w3w4_and_marks_w1w7w8_skipped():
         "W2_structuring",
         "W3_round_tripping",
         "W4_risk_propagation",
-        "W9_layering_chain",
+        "W17_layering_chain",
     }
     assert skip == {
         "W1_connected_components",
