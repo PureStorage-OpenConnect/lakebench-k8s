@@ -54,3 +54,23 @@ def test_paired_qph_ignores_queries_that_failed_in_either_run():
     post = [r("A", 5.0), r("B", 5.0), r("C", 200.0)]
     pre_q, post_q, n = _paired_qph(pre, post)
     assert n == 2 and post_q == 2 * pre_q  # C is excluded from both
+
+
+def _qr(name, ok, secs):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(query=SimpleNamespace(name=name), success=ok, elapsed_seconds=secs)
+
+
+def test_paired_qph_none_paths():
+    from lakebench.cli._run import _paired_qph
+
+    assert _paired_qph([_qr("Q1", True, 2.0)], [_qr("Q2", True, 2.0)]) is None
+    assert _paired_qph([_qr("Q1", True, 0.0)], [_qr("Q1", True, 0.0)]) is None
+    assert _paired_qph([_qr("Q1", False, 2.0)], [_qr("Q1", True, 2.0)]) is None
+
+
+def test_maintenance_value_is_null_when_unmeasured():
+    from lakebench.metrics.collector import PipelineBenchmark
+
+    assert PipelineBenchmark.__dataclass_fields__["maintenance_value_pct"].default is None

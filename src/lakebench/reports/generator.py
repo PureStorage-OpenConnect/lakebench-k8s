@@ -442,7 +442,7 @@ class ReportGenerator:
             rows.append(f"<tr><td>Pre-compaction QpH</td><td>{pre_qph:.1f}</td></tr>")
         if post_qph > 0:
             rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
-        if value_pct != 0 and pre_qph > 0:
+        if value_pct is not None and pre_qph > 0:
             color = "var(--success)" if value_pct > 0 else "var(--danger)"
             rows.append(
                 f"<tr><td>QpH improvement</td>"
