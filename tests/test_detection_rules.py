@@ -917,8 +917,12 @@ def test_score_financial_consumes_detection_status():
     p = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts/score_financial.py"
     body = p.read_text()
     assert "GOLD_STATUS" in body and "detection_status" in body
-    assert "rule_skipped" in body
-    assert 'status") == lit("skipped")' in body
+    assert "rule_skipped" in body and "rule_error" in body
+    # Recall is per designated rule (behaviour covered by the executed Spark
+    # tests in tests/spark/test_score_financial_spark.py).
+    assert "def compute_scores(" in body
+    # A missing or ambiguous status must fail, never fall back to all alerts.
+    assert "expected exactly one" in body
 
 
 def test_replay_threads_w1_vertex_cap():
