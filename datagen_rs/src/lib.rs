@@ -12,6 +12,7 @@ pub mod ids;
 pub mod metrics;
 pub mod model;
 pub mod party;
+pub mod placement;
 pub mod realism;
 pub mod s3sink;
 pub mod schema;

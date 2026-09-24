@@ -20,7 +20,7 @@ use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_ex;
 use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
 use datagen_rs::s3sink::{S3Cfg, S3Sink};
-use datagen_rs::timing::{sample_ts_on_day, shape_fixed_day, DayCal};
+use datagen_rs::timing::{sample_ts_on_day, DayCal};
 use datagen_rs::world::ring_member;
 use datagen_rs::writer::{
     customer360_bytes_per_row_default, pacs008_bytes_per_row_default, writer_properties,
@@ -306,38 +306,8 @@ fn pacs008_main() {
     let t_typ0 = std::time::Instant::now();
     let mut instances =
         datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
-    // The schedule picks instance start days uniformly in time, while
-    // baseline volume follows the day-of-week and salary-day weights; weekend
-    // starts then rolled to Monday, so planted rows were 41% Mondays against
-    // 25% for baseline (a label leak, LB-103 class). Shift each instance, as
-    // a unit (window, suppression window, anchor offsets), so its start day
-    // is drawn from the same calendar mass as baseline rows.
-    for inst in instances.iter_mut() {
-        let p = ((inst.start_us - start_us) as f64 / span_us as f64).clamp(0.0, 0.999_999);
-        let want_day = gcal.day_for_mass(p) as i64;
-        let have_day = (inst.start_us - start_us) / US_PER_DAY;
-        let mut delta = (want_day - have_day) * US_PER_DAY;
-        // Keep the whole instance (including a pre-window anchor) in the corpus.
-        let has_suppress = inst.suppress_end_us > inst.suppress_start_us;
-        let earliest = if has_suppress {
-            inst.start_us.min(inst.suppress_start_us)
-        } else {
-            inst.start_us
-        };
-        let lo = earliest - 3 * US_PER_DAY;
-        if lo + delta < start_us {
-            delta = start_us - lo;
-        }
-        if inst.end_us + delta > end_us {
-            delta = end_us - inst.end_us;
-        }
-        inst.start_us += delta;
-        inst.end_us += delta;
-        if has_suppress {
-            inst.suppress_start_us += delta;
-            inst.suppress_end_us += delta;
-        }
-    }
+    // Place every instance on the baseline calendar (see placement.rs).
+    datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
     // Instance-id -> list of uids for the rows emitted for that instance.
     // Populated at typology-scheduling time so it's deterministic (both
@@ -366,38 +336,18 @@ fn pacs008_main() {
         }
     }
     let mut trng = Rng::new((seed as u64) ^ 0x7791);
+    // Shaped [first, last] in-window row per instance, for the manifest.
+    let mut inst_bounds: HashMap<String, (i64, i64)> = HashMap::new();
     for inst in &instances {
         let is_dormant = inst.typ == "dormant_reactivation";
         // Shape every row of the instance once, here, with an instance-keyed
-        // RNG: roll to the originator country's next business day and draw a
-        // business-hours time. Then hand the shaped times back in emit order
-        // (sorted), so a leg emitted after another never ends up earlier:
-        // shaping rows independently per file let about half of rapid-
-        // layering mules forward money before they received it.
+        // RNG, preserving the rows' time order (see placement.rs).
         let mut rows = datagen_rs::typology::emit_instance(inst);
         let mut srng = Rng::new(splitmix64((inst.seed as u64) ^ 0x5A4E_0000_0000_0001));
-        // Rows inside the instance window get their day from the window's
-        // calendar mass (relative position preserved), so planted rows follow
-        // the same weekday/salary-day weights as baseline. Rows outside it
-        // (the dormancy anchor before the burst) keep their day.
-        let (ws, we) = (inst.start_us, inst.end_us.max(inst.start_us + 1));
-        let (ms, me) = (gcal.mass_at(ws), gcal.mass_at(we));
-        let mut shaped: Vec<i64> = rows
-            .iter()
-            .map(|r| {
-                let cc = w.country[r.orig as usize];
-                if r.ts_us >= ws && r.ts_us < we && me > ms {
-                    let frac = (r.ts_us - ws) as f64 / (we - ws) as f64;
-                    let day = gcal.day_for_mass((ms + frac * (me - ms)).min(0.999_999_999));
-                    sample_ts_on_day(&mut srng, &gcal, day, cc)
-                } else {
-                    shape_fixed_day(&mut srng, r.ts_us, cc)
-                }
-            })
-            .collect();
-        shaped.sort_unstable();
-        for (r, t) in rows.iter_mut().zip(shaped) {
-            r.ts_us = t;
+        if let Some(b) = datagen_rs::placement::shape_instance_rows(
+            &mut rows, inst, &gcal, span_us, &w.country, &mut srng,
+        ) {
+            inst_bounds.insert(inst.id.clone(), b);
         }
         for (row_idx, r) in rows.into_iter().enumerate() {
             // A NON-dormant typology row whose originator is a dormant
@@ -434,6 +384,16 @@ fn pacs008_main() {
                 uid,
             });
             inst_uids.entry(inst.id.clone()).or_default().push(uid);
+        }
+    }
+
+    // The manifest reports the window the rows actually occupy. The
+    // scheduled window did not contain them: intraday redraws and business-
+    // day rolls left 25% of fan_in rows and 35% of dormancy bursts outside it.
+    for inst in instances.iter_mut() {
+        if let Some(&(a, b)) = inst_bounds.get(&inst.id) {
+            inst.start_us = a;
+            inst.end_us = b;
         }
     }
 

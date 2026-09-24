@@ -326,7 +326,12 @@ pub fn schedule(
             };
         let n_inst = ((budget / emitted_per_instance as f64).round() as i64).max(1);
         for j in 0..n_inst {
-            let iseed = seed + 0xF100 + spec.tid as i64 * TID_SEED_STRIDE + j;
+            // Hashed, not added: `seed + tid * stride + j` made seed s+1's
+            // instance j the same draw as seed s's instance j+1, so different
+            // seeds produced shifted copies of one schedule (LB-139).
+            let iseed = splitmix64(
+                (seed as u64) ^ splitmix64(0xF100 + (spec.tid as i64 * TID_SEED_STRIDE + j) as u64),
+            ) as i64;
             let mut rng = Rng::new(iseed as u64);
             let mut participants = pick_distinct(&mut rng, src_pool, spec.participants);
             // Dormant instances: re-draw until the originator is unused, so each
@@ -647,17 +652,21 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
         // forwards on the same business day.
         "rapid_layering" => {
             let (a, m, b) = (p[0], p[1], p[2]);
+            // The mule forwards money it has received: the inbound leg is
+            // never later than the outbound one. The driver shapes rows by
+            // the rank of these times, so the order here is what survives.
+            let (t1, t2) = (uu(&mut rng, s, e), uu(&mut rng, s, e));
             rows.push(TxRow {
                 orig: a,
                 bene: m,
-                ts_us: uu(&mut rng, s, e),
+                ts_us: t1.min(t2),
                 structuring: false,
                 min_amount_usd: None,
             });
             rows.push(TxRow {
                 orig: m,
                 bene: b,
-                ts_us: uu(&mut rng, s, e),
+                ts_us: t1.max(t2),
                 structuring: false,
                 min_amount_usd: None,
             });
