@@ -983,3 +983,345 @@ fn shaping_preserves_time_order_and_uses_each_rows_country() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Monitored population and KYC (kyc.rs, GOALS P10 stages 0 and 2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reporting_fi_is_exactly_two_pool_entries() {
+    use datagen_rs::ids::bic_pool;
+    use datagen_rs::kyc::{REPORTING_FI, REPORTING_FI_POOL_IDX};
+    let pool = bic_pool();
+    let hits: Vec<usize> = (0..pool.len())
+        .filter(|&i| pool[i].starts_with(REPORTING_FI))
+        .collect();
+    assert_eq!(hits, REPORTING_FI_POOL_IDX.to_vec());
+    assert_eq!(pool[0], "MERIUS2LXXX");
+    assert_eq!(pool[320], "MERIUS2LNYC");
+}
+
+#[test]
+fn reporting_fi_bic_marks_customers_and_only_customers() {
+    use datagen_rs::ids::bic_pool;
+    use datagen_rs::kyc::{entity_bic_idx, is_customer, REPORTING_FI};
+    let pool = bic_pool();
+    let (mut cust, mut n) = (0usize, 0usize);
+    for id in 1..=200_000u64 {
+        let c = is_customer(id, 42);
+        let ours = pool[entity_bic_idx(id, 42, pool.len())].starts_with(REPORTING_FI);
+        assert_eq!(c, ours, "id {id}: customer {c} but reporting-FI BIC {ours}");
+        cust += c as usize;
+        n += 1;
+    }
+    let f = cust as f64 / n as f64;
+    assert!((f - 0.5).abs() < 0.01, "customer share {f}");
+}
+
+#[test]
+fn customer_status_is_independent_of_type_and_country() {
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::world::{entity_type, home_country_idx, HOME_CODES};
+    let mut by_type = [(0usize, 0usize); 3];
+    let (mut us, mut us_c, mut fo, mut fo_c) = (0usize, 0usize, 0usize, 0usize);
+    for id in 1..=300_000u64 {
+        let c = is_customer(id, 7) as usize;
+        let t = entity_type(id, 7) as usize;
+        by_type[t].0 += 1;
+        by_type[t].1 += c;
+        if HOME_CODES[home_country_idx(id, 7)] == "US" {
+            us += 1;
+            us_c += c;
+        } else {
+            fo += 1;
+            fo_c += c;
+        }
+    }
+    for (n, c) in by_type {
+        let f = c as f64 / n as f64;
+        assert!((f - 0.5).abs() < 0.02, "customer share by type {f}");
+    }
+    let (fu, ff) = (us_c as f64 / us as f64, fo_c as f64 / fo as f64);
+    assert!((fu - ff).abs() < 0.02, "US {fu} vs foreign {ff}");
+}
+
+fn kyc_schedule(seed: i64) -> (Vec<datagen_rs::typology::Instance>, Vec<&'static str>) {
+    use datagen_rs::typology::schedule;
+    use datagen_rs::world::{home_country_idx, HOME_CODES};
+    let pop = 20_000usize;
+    let day = 86_400_000_000i64;
+    let start = 1_600_000_000i64 * 1_000_000;
+    let country: Vec<&'static str> = (0..=pop as u64)
+        .map(|i| HOME_CODES[home_country_idx(i.max(1), seed)])
+        .collect();
+    let insts = schedule(
+        seed,
+        (pop as i64) * 4 * 60,
+        pop,
+        start,
+        start + 1800 * day,
+        &country,
+    );
+    (insts, country)
+}
+
+#[test]
+fn every_typology_subject_is_a_customer_and_others_are_at_base_rate() {
+    use datagen_rs::kyc::is_customer;
+    use datagen_rs::typology::subject_index;
+    let seed = 42;
+    let (insts, _) = kyc_schedule(seed);
+    assert!(insts.len() > 500);
+    let (mut others, mut others_c) = (0usize, 0usize);
+    for inst in &insts {
+        let s = subject_index(inst.typ, inst.participants.len(), inst.seed);
+        assert!(
+            is_customer(inst.participants[s], seed),
+            "{}: subject {} is not a customer",
+            inst.id,
+            inst.participants[s]
+        );
+        // Participants stay distinct after the subject swap / replacement.
+        let mut p = inst.participants.clone();
+        p.sort_unstable();
+        p.dedup();
+        assert_eq!(
+            p.len(),
+            inst.participants.len(),
+            "{}: duplicate participant",
+            inst.id
+        );
+        for (j, &q) in inst.participants.iter().enumerate() {
+            if j != s {
+                others += 1;
+                others_c += is_customer(q, seed) as usize;
+            }
+        }
+    }
+    // Swapping keeps each instance's drawn customer count, so the non-subject
+    // share sits below 0.5 (the subject took a customer when one was drawn).
+    // It must stay a population-like mix, not all customers or none.
+    let f = others_c as f64 / others as f64;
+    assert!((0.30..=0.55).contains(&f), "non-subject customer share {f}");
+}
+
+#[test]
+fn subject_roles_match_the_emitted_chain() {
+    use datagen_rs::typology::{emit_instance, subject_index};
+    let (insts, _) = kyc_schedule(42);
+    for inst in insts.iter().take(2000) {
+        let s = inst.participants[subject_index(inst.typ, inst.participants.len(), inst.seed)];
+        let rows = emit_instance(inst);
+        match inst.typ {
+            // The subject originates at least one row ...
+            "fan_out"
+            | "random"
+            | "bipartite"
+            | "tbml_repeated_invoice"
+            | "cycle"
+            | "cross_border_cycle"
+            | "gather_scatter"
+            | "scatter_gather"
+            | "dormant_reactivation"
+            | "corridor_high_risk" => {
+                assert!(rows.iter().any(|r| r.orig == s), "{}", inst.id)
+            }
+            // ... receives the structured credits ...
+            "fan_in" | "micro_structuring" => {
+                assert!(rows.iter().all(|r| r.bene == s), "{}", inst.id)
+            }
+            // ... or receives and forwards.
+            "stack" | "rapid_layering" => {
+                assert!(rows.iter().any(|r| r.bene == s), "{}", inst.id);
+                assert!(rows.iter().any(|r| r.orig == s), "{}", inst.id);
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
+    use datagen_rs::kyc::{crr, expected_monthly_volume_usd, is_customer};
+    use datagen_rs::model::build_world;
+    use datagen_rs::typology::subject_index;
+    let w = build_world(0.2, 42, 60);
+    let tier_of = |i: usize| -> &'static str {
+        let v = expected_monthly_volume_usd(
+            i as u64,
+            w.seed,
+            w.amount_logshift[i],
+            w.activity[i] / w.total_activity,
+            w.population,
+            w.dims.txn_per_entity_per_month,
+        );
+        crr(w.ty[i], w.country[i], w.pep[i], v).1
+    };
+    let mut all = [0usize; 3];
+    let mut person_us = [0usize; 3];
+    let idx = |t: &str| match t {
+        "low" => 0,
+        "medium" => 1,
+        _ => 2,
+    };
+    for i in 1..=w.population {
+        if !is_customer(i as u64, w.seed) {
+            continue;
+        }
+        let t = idx(tier_of(i));
+        all[t] += 1;
+        if w.ty[i] == datagen_rs::world::TYPE_PERSON && w.country[i] == "US" {
+            person_us[t] += 1;
+        }
+    }
+    let n: usize = all.iter().sum();
+    let share = |c: [usize; 3]| {
+        let n: usize = c.iter().sum();
+        [
+            c[0] as f64 / n as f64,
+            c[1] as f64 / n as f64,
+            c[2] as f64 / n as f64,
+        ]
+    };
+    let s = share(all);
+    eprintln!(
+        "CRR tiers over {n} customers: low {:.3} medium {:.3} high {:.3}",
+        s[0], s[1], s[2]
+    );
+    assert!(s[0] > 0.5 && s[2] < 0.10 && s[2] > 0.0, "tier shares {s:?}");
+
+    // Typology subjects from the person pool are US persons ~88% of the time;
+    // their tiers must look like baseline US-person customers' tiers, since
+    // selection never looks at anything the CRR uses beyond type and country.
+    let country: Vec<&'static str> = w.country.clone();
+    let insts = datagen_rs::typology::schedule(
+        42,
+        w.dims.total_txns(),
+        w.population,
+        0,
+        1800 * 86_400_000_000,
+        &country,
+    );
+    let mut subj = [0usize; 3];
+    for inst in &insts {
+        if matches!(inst.typ, "corridor_high_risk" | "cross_border_cycle") {
+            continue;
+        }
+        let s =
+            inst.participants[subject_index(inst.typ, inst.participants.len(), inst.seed)] as usize;
+        if w.country[s] == "US" {
+            subj[idx(tier_of(s))] += 1;
+        }
+    }
+    let (a, b) = (share(person_us), share(subj));
+    eprintln!(
+        "US-person customers {a:?} vs US subjects {b:?} (n={})",
+        subj.iter().sum::<usize>()
+    );
+    for k in 0..3 {
+        assert!(
+            (a[k] - b[k]).abs() < 0.08,
+            "tier {k}: baseline {} vs subjects {}",
+            a[k],
+            b[k]
+        );
+    }
+}
+
+#[test]
+fn customer_since_precedes_the_corpus_and_the_accounts() {
+    use datagen_rs::kyc::{
+        account_opened_day, corpus_start_day, customer_since_day, days_from_civil,
+    };
+    assert_eq!(corpus_start_day(60), days_from_civil(2021, 1, 1));
+    assert_eq!(corpus_start_day(18), days_from_civil(2024, 7, 1));
+    let start = corpus_start_day(60) as i32;
+    let mut sum = 0.0;
+    for id in 1..=50_000u64 {
+        let d = customer_since_day(id, 42, 60);
+        assert!(d < start && d <= account_opened_day(id));
+        assert!(d > start - (31.0 * 365.25) as i32);
+        sum += (start - d) as f64 / 365.25;
+    }
+    let mean = sum / 50_000.0;
+    assert!((5.0..9.0).contains(&mean), "mean tenure {mean} years");
+}
+
+#[test]
+fn kyc_attributes_are_pure_functions_of_id_and_seed() {
+    use datagen_rs::kyc::{customer_since_day, entity_bic_idx, is_customer};
+    for id in [1u64, 17, 99_999, 1 << 40] {
+        assert_eq!(is_customer(id, 5), is_customer(id, 5));
+        assert_eq!(entity_bic_idx(id, 5, 500), entity_bic_idx(id, 5, 500));
+        assert_eq!(customer_since_day(id, 5, 60), customer_since_day(id, 5, 60));
+    }
+    // Different seeds select different customer sets.
+    let diff = (1..=10_000u64)
+        .filter(|&id| is_customer(id, 1) != is_customer(id, 2))
+        .count();
+    assert!(diff > 4000, "seeds share the customer set ({diff} differ)");
+}
+
+#[test]
+fn party_and_account_zones_carry_kyc_and_join_to_payments() {
+    use arrow::array::{Array, BooleanArray, StringArray};
+    use datagen_rs::kyc::REPORTING_FI;
+    use datagen_rs::model::build_world;
+    use datagen_rs::party::{write_account_to, write_party_to};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let w = build_world(0.01, 42, 60);
+    // The writers read DG_COMPRESSION; hold the env lock so a concurrent
+    // compression test cannot swap in an invalid codec mid-write.
+    let (pbuf, abuf) = with_env("DG_COMPRESSION", None, || {
+        let mut pbuf = Vec::new();
+        write_party_to(&w, &[], &mut pbuf);
+        let mut abuf = Vec::new();
+        write_account_to(&w, &mut abuf);
+        (pbuf, abuf)
+    });
+    let read = |b: Vec<u8>| {
+        ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(b))
+            .unwrap()
+            .build()
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect::<Vec<_>>()
+    };
+    let col =
+        |rb: &arrow::record_batch::RecordBatch, n: &str| rb.column_by_name(n).unwrap().clone();
+    for rb in read(pbuf) {
+        let cust = col(&rb, "is_customer");
+        let cust = cust.as_any().downcast_ref::<BooleanArray>().unwrap();
+        let home = col(&rb, "home_fi");
+        let home = home.as_any().downcast_ref::<StringArray>().unwrap();
+        let tier = col(&rb, "crr_tier");
+        let since = col(&rb, "customer_since");
+        for r in 0..rb.num_rows() {
+            let c = cust.value(r);
+            assert_eq!(c, home.value(r) == REPORTING_FI);
+            assert_eq!(c, tier.is_valid(r), "tier present only for customers");
+            assert_eq!(c, since.is_valid(r));
+        }
+    }
+    let mut seen_primary = 0;
+    for rb in read(abuf) {
+        let iban = col(&rb, "iban");
+        let iban = iban.as_any().downcast_ref::<StringArray>().unwrap();
+        let holder = col(&rb, "holder_entity_id");
+        let holder = holder
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap();
+        let home = col(&rb, "home_fi");
+        let home = home.as_any().downcast_ref::<StringArray>().unwrap();
+        for r in 0..rb.num_rows() {
+            let h = holder.value(r) as usize;
+            assert_eq!(home.value(r), &w.bic[h][..8]);
+            if iban.value(r) == w.iban[h] {
+                seen_primary += 1;
+            }
+        }
+    }
+    // Every entity's payment IBAN appears exactly once in the account zone.
+    assert_eq!(seen_primary, w.population);
+}

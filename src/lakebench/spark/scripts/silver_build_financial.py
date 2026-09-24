@@ -81,6 +81,31 @@ SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
 STRATEGY = env("spark.lb.silver.strategy", "simple")
 
+# Reference zones the datagen writes next to pacs.008 (party = the reporting
+# FI's party master with KYC, account = account master). Same root the bronze
+# jobs read: LB_BRONZE_URI + LB_FINANCIAL_BRONZE_PREFIX.
+_BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
+_BRONZE_ROOT = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/").rstrip("/")
+PARTY_PATH = env("LB_FINANCIAL_PARTY_PATH", f"{_BRONZE_URI}{_BRONZE_ROOT}/bronze/party.parquet")
+ACCOUNT_PATH = env(
+    "LB_FINANCIAL_ACCOUNT_PATH", f"{_BRONZE_URI}{_BRONZE_ROOT}/bronze/account.parquet"
+)
+
+# Columns silver.entities takes from the party master (GOALS P10 stages 0 and
+# 2). The KYC columns are NULL for non-customers: the reporting FI holds no
+# CDD file on another bank's customer.
+KYC_ENTITY_COLUMNS = (
+    ("is_customer", "boolean"),
+    ("home_fi", "string"),
+    ("customer_since", "date"),
+    ("customer_type", "string"),
+    ("expected_monthly_volume_usd", "decimal(18,2)"),
+    ("crr_score", "int"),
+    ("crr_tier", "string"),
+    ("crr_factors", "string"),
+)
+KYC_ACCOUNT_COLUMNS = (("home_fi", "string"), ("is_customer", "boolean"))
+
 # Reference USD rates by settlement currency, mirroring
 # datagen_rs::amounts::fx_to_usd (a drift test keeps the two in step). The
 # generator expresses each amount in its account's currency, so silver needs a
@@ -166,7 +191,15 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_ENTITIES} (
     bic                 STRING,
     sanctions_status    STRING,
     pep_status          BOOLEAN,
-    initial_risk_score  DOUBLE
+    initial_risk_score  DOUBLE,
+    is_customer         BOOLEAN,
+    home_fi             STRING,
+    customer_since      DATE,
+    customer_type       STRING,
+    expected_monthly_volume_usd DECIMAL(18, 2),
+    crr_score           INT,
+    crr_tier            STRING,
+    crr_factors         STRING
 ) USING iceberg
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
@@ -180,7 +213,9 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_ACCOUNTS} (
     currency           STRING NOT NULL,
     opened_date        DATE   NOT NULL,
     closed_date        DATE,
-    current_balance    DECIMAL(38, 2)
+    current_balance    DECIMAL(38, 2),
+    home_fi            STRING,
+    is_customer        BOOLEAN
 ) USING iceberg
 TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
 """
@@ -387,7 +422,7 @@ def build_transactions(bronze):
     )
 
 
-def _entity_countries(bronze):
+def _entity_countries(bronze, with_iban=False):
     """entity_id -> country of residence, from both sides of every payment.
 
     silver.transactions does not store the parties' countries (they only feed
@@ -395,32 +430,67 @@ def _entity_countries(bronze):
     the same entity_id expression build_transactions uses. Country is part of
     the name-hash key, so each non-LEI entity has exactly one country; for
     LEI-keyed entities the lexically smallest is taken (deterministic).
+
+    ``with_iban`` also returns the IBAN the entity's payments use (smallest if
+    several; the datagen gives each entity one), which is the key to its KYC
+    file. Same pass, so KYC costs no extra bronze scan.
     """
     from pyspark.sql.functions import min as _min
 
     sides = []
     for side in ("dbtr", "cdtr"):
-        sides.append(
-            bronze.select(
-                _entity_id_from(
-                    col(f"{side}.nm"),
-                    col(f"{side}.ctry_of_res"),
-                    col(f"{side}.pstl_adr.twn_nm"),
-                    col(f"{side}.id.lei"),
-                ).alias("entity_id"),
-                col(f"{side}.ctry_of_res").alias("country"),
-            )
-        )
-    return (
-        sides[0]
-        .unionByName(sides[1])
-        .where(col("country").isNotNull())
-        .groupBy("entity_id")
-        .agg(_min("country").alias("country"))
+        cols = [
+            _entity_id_from(
+                col(f"{side}.nm"),
+                col(f"{side}.ctry_of_res"),
+                col(f"{side}.pstl_adr.twn_nm"),
+                col(f"{side}.id.lei"),
+            ).alias("entity_id"),
+            col(f"{side}.ctry_of_res").alias("country"),
+        ]
+        if with_iban:
+            cols.append(col(f"{side}_acct.iban").alias("iban"))
+        sides.append(bronze.select(*cols))
+    aggs = [_min("country").alias("country")]
+    if with_iban:
+        aggs.append(_min("iban").alias("iban"))
+    # min() skips NULLs, so an entity with no country (or IBAN) on any row
+    # gets NULL, the same as a missing row on the left join below.
+    return sides[0].unionByName(sides[1]).groupBy("entity_id").agg(*aggs)
+
+
+def build_kyc(party, account):
+    """KYC per payment IBAN, from the datagen's party and account masters.
+
+    A payment names its parties' accounts, so the bank links a payment to its
+    customer file through the account: IBAN -> account holder -> party. The
+    datagen writes each entity's payment IBAN as its first account, so the
+    join is one-to-one. Returns None when the reference files predate the
+    KYC columns (older corpora), so silver writes NULLs instead of failing.
+    """
+    if party is None or account is None or "is_customer" not in party.columns:
+        return None
+    acct = account.select(
+        col("iban"),
+        col("holder_entity_id").alias("_dg_id"),
+        col("home_fi").alias("_acct_home_fi"),
     )
+    kyc_cols = [
+        col(name).cast(sql_type).alias(name)
+        for name, sql_type in KYC_ENTITY_COLUMNS
+        if name != "home_fi"
+    ]
+    prt = party.select(
+        col("entity_id").alias("_dg_id"),
+        col("pep_status").cast("boolean").alias("pep_status"),
+        col("sanctions_status").alias("sanctions_status"),
+        col("home_fi").alias("home_fi"),
+        *kyc_cols,
+    )
+    return acct.join(prt, "_dg_id", "inner").drop("_dg_id")
 
 
-def build_entities(txns_df, bronze=None):
+def build_entities(txns_df, bronze=None, kyc=None):
     """Distinct entity dimension from originator+beneficiary sides.
 
     Determinism note: `dropDuplicates(["entity_id"])` picks arbitrarily on
@@ -449,10 +519,24 @@ def build_entities(txns_df, bronze=None):
     # Country was a NULL literal, so W7 (high-risk corridor), which inner-joins
     # on a non-NULL beneficiary country, could never fire and reported
     # "ran, 0 alerts" (2026-09-24 audit).
+    use_kyc = kyc is not None and bronze is not None
     if bronze is not None:
-        picked = picked.join(_entity_countries(bronze), "entity_id", "left")
+        picked = picked.join(_entity_countries(bronze, with_iban=use_kyc), "entity_id", "left")
     else:
         picked = picked.withColumn("country", lit(None).cast("string"))
+    if use_kyc:
+        # Prefix the KYC columns so they cannot collide with the name-derived
+        # columns above; the final select renames them.
+        k = kyc.select(
+            col("iban"),
+            *[col(c).alias(f"_{c}") for c in kyc.columns if c != "iban"],
+        )
+        picked = picked.join(k, "iban", "left")
+        # sanctions_status / pep_status default when an entity has no party row.
+        picked = picked.withColumn(
+            "_sanctions_status",
+            when(col("_sanctions_status") == lit("SDN"), lit("sdn")).otherwise(lit("clear")),
+        ).withColumn("_pep_status", coalesce(col("_pep_status"), lit(False)))
     return picked.select(
         col("entity_id"),
         # We can't tell Person from Company from FI from pacs.008 name alone;
@@ -484,13 +568,17 @@ def build_entities(txns_df, bronze=None):
         col("country").cast("string").alias("country"),
         lit(None).cast("string").alias("lei"),
         lit(None).cast("string").alias("bic"),
-        lit("clear").alias("sanctions_status"),
-        lit(False).alias("pep_status"),
+        (col("_sanctions_status") if use_kyc else lit("clear")).alias("sanctions_status"),
+        (col("_pep_status") if use_kyc else lit(False)).alias("pep_status"),
         lit(0.0).alias("initial_risk_score"),
+        *[
+            (col(f"_{name}") if use_kyc else lit(None)).cast(sql_type).alias(name)
+            for name, sql_type in KYC_ENTITY_COLUMNS
+        ],
     )
 
 
-def build_accounts(bronze):
+def build_accounts(bronze, kyc=None):
     """Distinct IBAN -> holder_entity from the pacs.008 payload.
 
     Fixes LB-104-shape non-determinism: an IBAN that appears both as a
@@ -538,6 +626,16 @@ def build_accounts(bronze):
             _min("opened_date").alias("opened_date"),
         )
     )
+    if kyc is not None:
+        all_accts = all_accts.join(
+            kyc.select(
+                col("iban"),
+                col("_acct_home_fi").alias("_home_fi"),
+                col("is_customer").alias("_is_customer"),
+            ),
+            "iban",
+            "left",
+        )
     return all_accts.select(
         xxhash64(col("iban")).alias("account_id"),
         col("iban"),
@@ -547,6 +645,10 @@ def build_accounts(bronze):
         col("opened_date"),
         lit(None).cast("date").alias("closed_date"),
         lit(None).cast("decimal(38,2)").alias("current_balance"),
+        *[
+            (col(f"_{name}") if kyc is not None else lit(None)).cast(sql_type).alias(name)
+            for name, sql_type in KYC_ACCOUNT_COLUMNS
+        ],
     )
 
 
@@ -683,6 +785,8 @@ def update_accounts_balance(accounts_df, statements_df):
         # the target column; do NOT default to 0.
         .withColumn("current_balance", col("_cb").cast("decimal(38,2)"))
         .drop("_cb")
+        # Back to the DDL column order (the drop/join moved current_balance).
+        .select(*accounts_df.columns)
     )
 
 
@@ -812,6 +916,15 @@ def build_entity_profiles(txns_df):
     )
 
 
+def _read_reference(spark):
+    """(party, account) DataFrames, or (None, None) when either is missing."""
+    try:
+        return spark.read.parquet(PARTY_PATH), spark.read.parquet(ACCOUNT_PATH)
+    except Exception as e:  # noqa: BLE001 -- missing path surfaces as AnalysisException
+        log(f"reference zones unreadable: {str(e).splitlines()[0][:200]}")
+        return None, None
+
+
 def main() -> None:
     spark = SparkSession.builder.appName("lb-silver-build-financial").getOrCreate()
     start = time.time()
@@ -870,6 +983,12 @@ def main() -> None:
     for table in (SILVER_TRANSACTIONS, SILVER_EDGES):
         ensure_column(spark, f"{CATALOG}.{table}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "ingest_ts", "TIMESTAMP")
+    for table, columns in (
+        (SILVER_ENTITIES, KYC_ENTITY_COLUMNS),
+        (SILVER_ACCOUNTS, KYC_ACCOUNT_COLUMNS),
+    ):
+        for name, sql_type in columns:
+            ensure_column(spark, f"{CATALOG}.{table}", name, sql_type.upper())
 
     bronze = spark.table(f"{CATALOG}.{BRONZE_TABLE}")
     bronze_rows = bronze.count()
@@ -889,7 +1008,14 @@ def main() -> None:
     _replace_data(txns, SILVER_TRANSACTIONS)
     log("Wrote silver.transactions")
 
-    _replace_data(build_entities(txns, bronze), SILVER_ENTITIES)
+    kyc = build_kyc(*_read_reference(spark))
+    if kyc is None:
+        log(
+            "WARNING: no KYC party/account master under "
+            f"{PARTY_PATH} / {ACCOUNT_PATH}; silver.entities and silver.accounts "
+            "KYC columns are NULL"
+        )
+    _replace_data(build_entities(txns, bronze, kyc), SILVER_ENTITIES)
     log("Wrote silver.entities")
 
     # Build silver.accounts first (placeholder current_balance = NULL) so we
@@ -897,7 +1023,7 @@ def main() -> None:
     # rescanning bronze twice (build_accounts is a bronze->distinct-IBAN pass)
     # and gives update_accounts_balance a durable input independent of cache
     # eviction between the two writes.
-    _replace_data(build_accounts(bronze), SILVER_ACCOUNTS)
+    _replace_data(build_accounts(bronze, kyc), SILVER_ACCOUNTS)
     log("Wrote silver.accounts (placeholder current_balance)")
 
     accounts = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
