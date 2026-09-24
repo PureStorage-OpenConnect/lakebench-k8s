@@ -19,6 +19,7 @@ from lakebench.cli._helpers import (
     DEFAULT_CONFIG as DEFAULT_CONFIG,
 )
 from lakebench.cli._helpers import (
+    DEPRECATED_SHORT_F_HELP,
     _journal_safe,
     _strip_ansi,
     console,
@@ -28,6 +29,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
     resolve_config_path,
+    warn_deprecated_short_f,
 )
 from lakebench.cli._helpers import (
     get_journal as get_journal,
@@ -311,9 +313,12 @@ def init(
         bool,
         typer.Option(
             "--force",
-            "-f",
             help="Overwrite existing file",
         ),
+    ] = False,
+    force_short_f: Annotated[
+        bool,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
     advanced: Annotated[
         bool,
@@ -343,6 +348,9 @@ def init(
 
     Use 'lakebench config recommend' for cluster sizing guidance.
     """
+    if force_short_f:
+        warn_deprecated_short_f("--force")
+        force = True
     if output.exists() and not force:
         print_error(f"File already exists: {output}")
         print_info("Use --force to overwrite")
@@ -1617,13 +1625,17 @@ def results(
         ),
     ] = None,
     output_format: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--format",
-            "-f",
-            help="Output format: table, json, csv",
+            "-o",
+            help="Output format: table, json, csv (default: table)",
         ),
-    ] = "table",
+    ] = None,
+    format_short_f: Annotated[
+        str | None,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
+    ] = None,
 ) -> None:
     """Display pipeline benchmark results.
 
@@ -1634,6 +1646,14 @@ def results(
     Accepts an optional config file argument (ignored, for command-line
     consistency with other lakebench commands).
     """
+    if format_short_f is not None:
+        warn_deprecated_short_f("--format / -o")
+        if output_format is not None and output_format != format_short_f:
+            print_error(f"both --format {output_format} and -f {format_short_f} given")
+            raise typer.Exit(2)
+        output_format = format_short_f
+    if output_format is None:
+        output_format = "table"
     import json as _json
 
     from lakebench.metrics import MetricsStorage
@@ -1656,8 +1676,10 @@ def results(
         print_info("Pipeline benchmark is generated for runs after this feature was added.")
         raise typer.Exit(1)
 
+    # Machine-readable formats go to stdout with plain print: Rich wraps long
+    # lines at the terminal width and inserts markup, which breaks parsers.
     if output_format == "json":
-        console.print(_json.dumps(pb.to_dict(), indent=2))
+        print(_json.dumps(pb.to_dict(), indent=2))
         return
 
     if output_format == "csv":
@@ -1676,7 +1698,7 @@ def results(
         for key in metric_keys:
             row = [key] + [matrix[stage].get(key, "") for stage in matrix]
             writer.writerow(row)
-        console.print(buf.getvalue())
+        print(buf.getvalue(), end="")
         return
 
     # Table format (default)
@@ -1764,9 +1786,13 @@ def logs(
         bool,
         typer.Option(
             "--follow",
-            "-f",
+            "-F",
             help="Follow log output",
         ),
+    ] = False,
+    follow_short_f: Annotated[
+        bool,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
     lines: Annotated[
         int,
@@ -1783,6 +1809,9 @@ def logs(
 
     Valid components: postgres, hive, polaris, trino, spark-driver
     """
+    if follow_short_f:
+        warn_deprecated_short_f("--follow / -F")
+        follow = True
     # Map component names to pod selectors
     COMPONENT_SELECTORS = {
         "postgres": ("app.kubernetes.io/component=postgres", None),

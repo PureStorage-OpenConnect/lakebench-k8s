@@ -73,10 +73,32 @@ def _apply_flat_fields(data: dict[str, Any]) -> dict[str, Any]:
             continue
         value = data.pop(flat_key)
 
-        # Walk the nested path, creating intermediate dicts as needed
+        # A config still using the deprecated 'architecture.processing' key
+        # gets flat pipeline fields there, rather than a new 'pipeline'
+        # block that would collide with it. An empty 'processing:' is None.
+        arch = data.get("architecture")
+        if (
+            nested_path[:2] == ("architecture", "pipeline")
+            and isinstance(arch, dict)
+            and "processing" in arch
+            and (arch["processing"] is None or isinstance(arch["processing"], dict))
+            and "pipeline" not in arch
+        ):
+            nested_path = ("architecture", "processing", *nested_path[2:])
+
+        # Walk the nested path, creating intermediate dicts as needed. An
+        # empty YAML mapping ('architecture:' with nothing under it) is None.
         target = data
         for key in nested_path[:-1]:
-            target = target.setdefault(key, {})
+            nxt = target.get(key)
+            if nxt is None:
+                nxt = target[key] = {}
+            if not isinstance(nxt, dict):
+                raise ConfigError(
+                    f"flat field '{flat_key}' belongs under '{'.'.join(nested_path[:-1])}', "
+                    f"but '{key}' is not a mapping"
+                )
+            target = nxt
 
         final_key = nested_path[-1]
         if final_key in target:

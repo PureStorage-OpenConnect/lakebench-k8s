@@ -1587,7 +1587,6 @@ class TestPolarisSparkManifest:
                         },
                     }
                 },
-                "compute": {"spark": {"image": "apache/spark:4.0.0-python3"}},
             },
             architecture=_POLARIS_ARCH,
             images={"spark": "apache/spark:4.0.0-python3"},

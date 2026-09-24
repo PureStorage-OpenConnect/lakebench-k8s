@@ -45,7 +45,6 @@ platform:
       enabled: true
       # ENG-2C.10 autosizer bumps this to 200Gi for financial silver_build.
       storage_class: <YOUR_SCRATCH_STORAGE_CLASS>
-      create_storage_class: false
 
   compute:
     postgres:
