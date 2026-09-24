@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use parquet::arrow::ArrowWriter;
 
-use datagen_rs::amounts::{floored_lognormal, lognormal_amount_shifted, structuring_amount};
+use datagen_rs::amounts::{native_amount, structuring_amount};
 use datagen_rs::customer360;
 use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::emit::{build_batch, Batch};
@@ -358,19 +358,13 @@ fn pacs008_main() {
                 continue;
             }
             let ccy = w.ccy[r.orig as usize];
-            // Typology rows carry the ORIGINATOR's persona amount shift, the
-            // same as that account's baseline rows, so a typology participant's
-            // amounts stay consistent with its own history and do not create a
-            // marginal amount artifact that separates typology from baseline.
-            // A row with min_amount_usd (dormant burst) is rejection-sampled
-            // into the account's OWN upper tail until it clears the USD floor,
-            // so it reliably trips W8 without a fixed-constant amount artifact.
+            // Typology rows carry the ORIGINATOR's persona amount shift and
+            // currency, the same as that account's baseline rows, so a
+            // participant's amounts stay consistent with its own history.
             let amount = if r.structuring {
                 structuring_amount(&mut trng, ccy)
-            } else if let Some(floor_native) = r.min_amount_usd {
-                floored_lognormal(&mut trng, w.amount_logshift[r.orig as usize], floor_native)
             } else {
-                lognormal_amount_shifted(&mut trng, w.amount_logshift[r.orig as usize])
+                native_amount(&mut trng, w.amount_logshift[r.orig as usize], ccy)
             };
             let fid = ((gcal.mass_at(r.ts_us) * total_files as f64) as i64)
                 .clamp(0, total_files - 1) as usize;
@@ -536,10 +530,7 @@ fn pacs008_main() {
             orig.push(o);
             bene.push(b);
             ts_us.push(t);
-            amount.push(lognormal_amount_shifted(
-                &mut rng,
-                w.amount_logshift[o as usize],
-            ));
+            amount.push(native_amount(&mut rng, w.amount_logshift[o as usize], cc));
             ccy.push(cc);
             uid_pre.push(gi);
         }

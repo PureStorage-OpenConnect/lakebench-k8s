@@ -34,6 +34,7 @@ from pyspark.sql.functions import (
     coalesce,
     col,
     concat_ws,
+    create_map,
     current_timestamp,
     date_format,
     datediff,
@@ -79,6 +80,37 @@ SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statem
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
 STRATEGY = env("spark.lb.silver.strategy", "simple")
+
+# Reference USD rates by settlement currency, mirroring
+# datagen_rs::amounts::fx_to_usd (a drift test keeps the two in step). The
+# generator expresses each amount in its account's currency, so silver needs a
+# reference rate to put every row on one USD scale (LB-137).
+_FX_TO_USD = {
+    "USD": 1.0,
+    "GBP": 1.30,
+    "EUR": 1.10,
+    "CHF": 1.15,
+    "JPY": 0.0068,
+    "AED": 0.27,
+    "SGD": 0.74,
+    "CAD": 0.73,
+    "MXN": 0.055,
+    "CNY": 0.14,
+    "INR": 0.012,
+    "AUD": 0.66,
+    "HKD": 0.128,
+    "KRW": 0.00075,
+    "BRL": 0.19,
+}
+
+
+def _usd_rate(ccy_col):
+    """Reference USD rate for a currency column; unknown currencies get 1.0,
+    matching the generator's fallback."""
+    pairs = []
+    for k, v in _FX_TO_USD.items():
+        pairs += [lit(k), lit(v)]
+    return coalesce(create_map(*pairs)[ccy_col], lit(1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -284,12 +316,11 @@ def build_transactions(bronze):
     """Flatten pacs.008 -> silver.transactions shape.
 
     Notes on approximations:
-    - `txn_amount_usd` uses `xchg_rate` as if it converts settlement currency
-      to USD. In real pacs.008, xchg_rate is the settlement<->instructed rate
-      and may point at any reference currency. A NULL xchg_rate coalesces to
-      1.0 so downstream sums don't NULL-propagate; where currency == USD the
-      value is exact, otherwise it is an approximation good enough for
-      distribution-band scoring but NOT for real settlement.
+    - `txn_amount_usd` is the settlement amount times a fixed reference rate
+      for the settlement currency (`_FX_TO_USD`). `xchg_rate` is the
+      settlement-to-instructed rate in pacs.008, not a USD rate, so it is not
+      used here. Fixed rates are fine for a benchmark; a bank would use a
+      dated FX table.
     - `cross_border` defaults to False when either country column is NULL,
       matching the DDL NOT NULL constraint (a NULL country is more likely a
       data-quality issue than a signal of cross-border-ness).
@@ -318,7 +349,7 @@ def build_transactions(bronze):
         col("cdtr_agt.bicfi").alias("beneficiary_bank_bic"),
         col("intr_bk_sttlm_amt").cast("decimal(18,2)").alias("txn_amount"),
         col("intr_bk_sttlm_ccy").alias("txn_currency"),
-        (col("intr_bk_sttlm_amt") * coalesce(col("xchg_rate"), lit(1.0)))
+        (col("intr_bk_sttlm_amt") * _usd_rate(col("intr_bk_sttlm_ccy")))
         .cast("decimal(18,2)")
         .alias("txn_amount_usd"),
         col("cre_dt_tm").alias("txn_timestamp"),
