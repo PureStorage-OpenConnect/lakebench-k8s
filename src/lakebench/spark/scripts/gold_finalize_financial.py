@@ -77,6 +77,7 @@ except ValueError:
 DEFAULT_DETECTION_RULES = (
     "W2_structuring",
     "W3_round_tripping",
+    "W9_layering_chain",
     "W4_risk_propagation",
     "W7_cross_border_high_risk",
     "W8_dormant_reactivation",
@@ -365,7 +366,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     from detection_rules import RULE_TARGET_TYPOLOGY, RuleSkipped, get_rule
 
     # Which rules to run this invocation. Batch passes None (the full default
-    # set); the continuous gold loop passes a bounded set (W2/W3/W4) plus a
+    # set); the continuous gold loop passes a bounded set (W2/W3/W4/W9) plus a
     # skipped_rules list for the rules it deliberately does NOT run there --
     # W1 (per-tick graph recompute too costly), W7 (silver.entities is not
     # maintained by silver_stream, so it would false-report 0% recall), and

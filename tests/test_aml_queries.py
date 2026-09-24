@@ -41,27 +41,27 @@ _ALL_PLANTED_TYPOLOGIES = frozenset(
 
 
 def test_all_w_rules_have_target_entry():
-    """Every W1-W8 rule must have a target (or explicit None) entry."""
-    for i in range(1, 9):
+    """Every W1-W9 rule must have a target (or explicit None) entry."""
+    for i in range(1, 10):
         matches = [k for k in RULE_TARGETS if k.startswith(f"W{i}_")]
         assert len(matches) == 1, f"W{i} has {len(matches)} entries: {matches}"
 
 
 def test_query_count_matches_documented():
-    """6 rules with typology targets * 4 kinds (detect + precision +
+    """7 rules with typology targets * 4 kinds (detect + precision +
     recall + pattern_span) + 2 rules with no target * 1 kind (detect only) +
-    4 aggregate queries = 30. W5/W6 have `None` target because
+    4 aggregate queries = 34. W5/W6 have `None` target because
     sanctions and PEP are party attributes in the datagen, not
     typology_type rows, so precision/recall/pattern_span would silently report
     0/0 -- omitted rather than misleading. See RULE_TARGETS docstring.
     The 4th aggregate is `aggregate_reference_vs_rule` from PR-A
     (reference-detector + leakage-gate wiring)."""
-    assert query_count() == 30
+    assert query_count() == 34
 
 
 def test_load_aml_queries_returns_expected_count():
     qs = load_aml_queries("iceberg")
-    assert len(qs) == 30
+    assert len(qs) == 34
 
 
 def test_reference_vs_rule_aggregate_present():

@@ -22,6 +22,8 @@ Rules implemented in this file:
   black list jurisdiction.
 - W8_dormant_reactivation: originator account inactive > 90 days then
   a transaction >= $5,000-equivalent.
+- W9_layering_chain: open chains of 3+ transfers where each hop forwards
+  80-100% of the previous one within 7 days (temporal path search).
 
 W5_splink_resolution (probabilistic entity resolution) is a separate
 research effort tracked as ENH; it is not a "fix" and is intentionally
@@ -105,6 +107,7 @@ RULE_TARGET_TYPOLOGY = {
     "W6_pep_counterparty": None,
     "W7_cross_border_high_risk": "corridor_high_risk",
     "W8_dormant_reactivation": "dormant_reactivation",
+    "W9_layering_chain": "stack",
 }
 
 
@@ -259,6 +262,130 @@ def w2_structuring(
     return alerts
 
 
+# ---------------------------------------------------------------------------
+# Temporal path search shared by W3 (cycles) and W9 (open layering chains).
+# ---------------------------------------------------------------------------
+
+# Cumulative persisted path rows above which W3/W9 decline to run. Sized from
+# the gold-finalize profile at scale 10 (4 executors x 100 Gi scratch): at
+# roughly 300 bytes per path row, 400M rows is about 120 GB, a third of the
+# scratch the stage has, leaving the rest for shuffle. This is a resource
+# guard, not a detection threshold.
+PATH_SEARCH_MAX_PATHS = 400_000_000
+
+
+def _flow_edges(silver_txns: DataFrame, with_amount: bool = False) -> DataFrame:
+    """Directed transfer edges for the path searches.
+
+    Times are epoch microseconds so two hops inside the same second still
+    order correctly. With ``with_amount`` only transfers with a positive USD
+    amount are kept (amount continuity needs one).
+    """
+    cols = [
+        col("uetr"),
+        col("originator_id").alias("src"),
+        col("beneficiary_id").alias("dst"),
+        expr("unix_micros(txn_timestamp)").alias("t"),
+        col("txn_timestamp").alias("ts"),
+    ]
+    if with_amount:
+        cols.append(col("txn_amount_usd").cast("double").alias("amt"))
+    edges = silver_txns.select(*cols).filter(
+        col("src").isNotNull() & col("dst").isNotNull() & (col("src") != col("dst"))
+    )
+    if with_amount:
+        edges = edges.filter(col("amt").isNotNull() & (col("amt") > lit(0)))
+    return edges
+
+
+def _path_search_step(edges: DataFrame, bucket_us: int, max_out_degree: int) -> DataFrame:
+    """The extension frame: every non-hub transfer, keyed for a bucketed join.
+
+    Hubs are accounts sending more than ``max_out_degree`` transfers in any
+    hop-window bucket (payment processors); they are excluded as
+    intermediaries so one processor does not multiply every path.
+
+    Each transfer appears twice, under bucket ``floor(t / hop)`` and the one
+    before it. A path ending at time ``t_last`` in bucket ``b`` can only be
+    extended by a transfer in ``(t_last, t_last + hop]``, whose bucket is
+    ``b`` or ``b + 1``; joining on ``(node, b)`` therefore finds every valid
+    extension exactly once. Without the bucket the join key is the node
+    alone, and a busy beneficiary pairs every transfer it received over 60
+    months with every one it sent before the time filter runs.
+    """
+    from pyspark import StorageLevel
+
+    bucket = (col("t") / lit(bucket_us)).cast("long")
+    hubs = (
+        edges.groupBy("src", bucket.alias("_w"))
+        .agg(count(lit(1)).alias("_n"))
+        .filter(col("_n") > max_out_degree)
+        .select(col("src").alias("hub"))
+        .distinct()
+    )
+    non_hub = edges.join(hubs, edges["src"] == hubs["hub"], "left_anti")
+    renamed = [
+        col("uetr").alias("e_uetr"),
+        col("src").alias("e_src"),
+        col("dst").alias("e_dst"),
+        col("t").alias("e_t"),
+        col("ts").alias("e_ts"),
+    ]
+    if "amt" in edges.columns:
+        renamed.append(col("amt").alias("e_amt"))
+    base = non_hub.select(*renamed)
+    e_bucket = (col("e_t") / lit(bucket_us)).cast("long")
+    step = base.withColumn("_b", e_bucket).unionByName(base.withColumn("_b", e_bucket - lit(1)))
+    return step.persist(StorageLevel.MEMORY_AND_DISK)
+
+
+def _extend_paths(paths: DataFrame, step: DataFrame, bucket_us: int) -> DataFrame:
+    """Join each path to the transfers that can follow its last hop."""
+    p_bucket = (col("t_last") / lit(bucket_us)).cast("long")
+    return (
+        paths.withColumn("_pb", p_bucket)
+        .join(step, (col("end") == col("e_src")) & (col("_pb") == col("_b")), "inner")
+        .filter(col("e_t") > col("t_last"))
+        .filter(col("e_t") <= col("t_last") + lit(bucket_us))
+        .drop("_pb", "_b")
+    )
+
+
+def _persist_counted(df: DataFrame, rule: str, total: list, max_paths: int) -> int:
+    """Persist ``df``, count it, and add the count to ``total[0]``.
+
+    Raises RuleSkipped("path-cap") once the search holds more than
+    ``max_paths`` rows in total, so a scale where the search would exhaust
+    the stage's scratch reports "not run" instead of failing the stage.
+    """
+    from pyspark import StorageLevel
+
+    df.persist(StorageLevel.MEMORY_AND_DISK)
+    n = df.count()
+    total[0] += n
+    if total[0] > max_paths:
+        raise RuleSkipped(
+            "path-cap",
+            f"{rule} path search reached {total[0]} rows (max {max_paths}); "
+            "raise max_paths when the stage has the scratch for it",
+        )
+    return n
+
+
+def _edges_or_skip(edges: DataFrame, rule: str, max_edges: int) -> DataFrame:
+    """Persist and count the edge frame; RuleSkipped("edge-cap") above max."""
+    from pyspark import StorageLevel
+
+    edges = edges.persist(StorageLevel.MEMORY_AND_DISK)
+    n_edges = edges.count()
+    if n_edges > max_edges:
+        raise RuleSkipped(
+            "edge-cap",
+            f"edges={n_edges} max={max_edges} (raise max_edges to run {rule} at this scale)",
+        )
+    return edges
+
+
 def w3_round_tripping(
     silver_txns: DataFrame,
     max_hops: int = 5,
@@ -266,6 +393,7 @@ def w3_round_tripping(
     total_window_days: int = 30,
     max_out_degree: int = 200,
     max_edges: int = 3_000_000_000,
+    max_paths: int = PATH_SEARCH_MAX_PATHS,
     run_id: str = "unknown",
 ) -> DataFrame:
     """Round-tripping: funds that return to their originator through 2 to
@@ -284,69 +412,37 @@ def w3_round_tripping(
     each cycle is found once (starting from its earliest transfer, since hop
     times strictly increase). Entities sending more than ``max_out_degree``
     transfers in any hop window are treated as hubs (payment processors)
-    and excluded as intermediaries. Above ``max_edges`` transfers the rule
-    raises RuleSkipped("edge-cap").
+    and excluded as intermediaries. The extension join is keyed on (entity,
+    hop-window bucket) so its size follows each account's activity within a
+    window, not over the corpus. Above ``max_edges`` transfers the rule
+    raises RuleSkipped("edge-cap"), and once the persisted paths exceed
+    ``max_paths`` rows RuleSkipped("path-cap").
 
     Emits one alert per cycle: entity_id is the originator, related_txn_ids
     the transfers in hop order.
     """
-    from pyspark import StorageLevel
-    from pyspark.sql.functions import array_contains, concat, size, unix_timestamp
+    from pyspark.sql.functions import array_contains, concat
 
-    edges = silver_txns.select(
-        col("uetr"),
-        col("originator_id").alias("src"),
-        col("beneficiary_id").alias("dst"),
-        unix_timestamp(col("txn_timestamp")).alias("t"),
-        col("txn_timestamp").alias("ts"),
-    ).filter(col("src").isNotNull() & col("dst").isNotNull() & (col("src") != col("dst")))
-    n_edges = edges.count()
-    if n_edges > max_edges:
-        raise RuleSkipped(
-            "edge-cap",
-            f"edges={n_edges} max={max_edges} (raise max_edges to run W3 at this scale)",
-        )
-    hop_s = hop_window_hours * 3600
-    total_s = total_window_days * 86400
-
-    # Hubs: busiest accounts by sends per hop window, excluded as
-    # intermediaries so one processor does not multiply every path.
-    per_window = edges.withColumn("_w", (col("t") / lit(hop_s)).cast("long"))
-    hubs = (
-        per_window.groupBy("src", "_w")
-        .agg(count(lit(1)).alias("_n"))
-        .filter(col("_n") > max_out_degree)
-        .select(col("src").alias("hub"))
-        .distinct()
-    )
-    step = edges.join(hubs, edges["src"] == hubs["hub"], "left_anti").select(
-        col("uetr").alias("e_uetr"),
-        col("src").alias("e_src"),
-        col("dst").alias("e_dst"),
-        col("t").alias("e_t"),
-        col("ts").alias("e_ts"),
-    )
-    # persist, not checkpoint: the lineage is at most max_hops deep, and the
-    # union of closed cycles below would otherwise recompute earlier hops.
-    step = step.persist(StorageLevel.MEMORY_AND_DISK)
+    edges = _edges_or_skip(_flow_edges(silver_txns), "W3", max_edges)
+    hop_us = hop_window_hours * 3_600_000_000
+    total_us = total_window_days * 86_400_000_000
+    step = _path_search_step(edges, hop_us, max_out_degree)
 
     paths = edges.select(
         col("src").alias("start"),
         col("dst").alias("end"),
         col("t").alias("t_first"),
         col("t").alias("t_last"),
-        col("ts").alias("ts_last"),
         array(col("uetr")).alias("uetrs"),
         array(col("src"), col("dst")).alias("nodes"),
     )
+    total = [0]
     cycles = None
     for _hop in range(2, max_hops + 1):
-        ext = (
-            paths.join(step, paths["end"] == step["e_src"], "inner")
-            .filter(col("e_t") > col("t_last"))
-            .filter(col("e_t") <= col("t_last") + lit(hop_s))
-            .filter(col("e_t") <= col("t_first") + lit(total_s))
+        ext = _extend_paths(paths, step, hop_us).filter(
+            col("e_t") <= col("t_first") + lit(total_us)
         )
+        _persist_counted(ext, "W3", total, max_paths)
         closed = ext.filter(col("e_dst") == col("start")).select(
             col("start"),
             concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
@@ -357,18 +453,13 @@ def w3_round_tripping(
         cycles = closed if cycles is None else cycles.unionByName(closed)
         if _hop == max_hops:
             break
-        paths = (
-            ext.filter(~array_contains(col("nodes"), col("e_dst")))
-            .select(
-                col("start"),
-                col("e_dst").alias("end"),
-                col("t_first"),
-                col("e_t").alias("t_last"),
-                col("e_ts").alias("ts_last"),
-                concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
-                concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
-            )
-            .persist(StorageLevel.MEMORY_AND_DISK)
+        paths = ext.filter(~array_contains(col("nodes"), col("e_dst"))).select(
+            col("start"),
+            col("e_dst").alias("end"),
+            col("t_first"),
+            col("e_t").alias("t_last"),
+            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+            concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
         )
 
     alerts = cycles.withColumn("hops", size(col("uetrs")))
@@ -416,6 +507,160 @@ def w3_round_tripping(
         # continuous = the far end of detected_ts - ingest_ts (freshness /
         # time-to-detect). Appended LAST to match the gold.alerts DDL column
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
+        current_timestamp().alias("detected_ts"),
+    )
+
+
+def w9_layering_chain(
+    silver_txns: DataFrame,
+    min_hops: int = 3,
+    max_hops: int = 6,
+    hop_window_hours: int = 168,
+    min_forward_ratio: float = 0.8,
+    max_forward_ratio: float = 1.0,
+    max_out_degree: int = 200,
+    max_edges: int = 3_000_000_000,
+    max_paths: int = PATH_SEARCH_MAX_PATHS,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Layering chain: funds passed along an open chain of at least
+    ``min_hops`` transfers A -> B -> C -> D, where each hop starts after the
+    previous one and within ``hop_window_hours`` of it, forwards between
+    ``min_forward_ratio`` and ``max_forward_ratio`` of the previous hop's USD
+    amount, and the chain never returns to its start (that is W3's cycle).
+
+    Thresholds: 80-100% pass-through is the practitioner pass-through norm
+    (the same figure as W4's forward_ratio), and seven days per hop is a
+    scenario window. Neither is derived from the generator's stack windows
+    or skim range.
+
+    Each chain is reported once, from its head: a transfer is a head when no
+    earlier transfer into its sender could have been the previous hop (same
+    time and amount conditions). A chain is emitted when it cannot be
+    extended further, or at ``max_hops`` (then truncated). A chain whose last
+    account can send the funds back to its start is dropped, as is every
+    prefix of a longer chain.
+
+    Cost control is the same as W3: hubs excluded as intermediaries, a join
+    keyed on (entity, hop-window bucket), the persisted step frame, and the
+    ``max_edges`` / ``max_paths`` skips. Amount continuity prunes each level
+    to the small share of onward transfers that carry the amount.
+
+    Emits one alert per chain: entity_id is the first sender,
+    related_txn_ids the transfers in hop order.
+    """
+    from pyspark.sql.functions import array_contains, concat, element_at
+
+    edges = _edges_or_skip(_flow_edges(silver_txns, with_amount=True), "W9", max_edges)
+    hop_us = hop_window_hours * 3_600_000_000
+    step = _path_search_step(edges, hop_us, max_out_degree)
+
+    def _carries(ext: DataFrame) -> DataFrame:
+        return ext.filter(col("e_amt") >= col("amt_last") * lit(min_forward_ratio)).filter(
+            col("e_amt") <= col("amt_last") * lit(max_forward_ratio)
+        )
+
+    def _advance(ext: DataFrame) -> DataFrame:
+        return ext.filter(~array_contains(col("nodes"), col("e_dst"))).select(
+            col("start"),
+            col("e_dst").alias("end"),
+            col("e_t").alias("t_last"),
+            col("e_amt").alias("amt_last"),
+            col("e_ts").alias("ts_last"),
+            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+            concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
+        )
+
+    one_hop = edges.select(
+        col("src").alias("start"),
+        col("dst").alias("end"),
+        col("t").alias("t_last"),
+        col("amt").alias("amt_last"),
+        col("ts").alias("ts_last"),
+        array(col("uetr")).alias("uetrs"),
+        array(col("src"), col("dst")).alias("nodes"),
+    )
+    total = [0]
+    # Second hops from every transfer. A transfer that follows some earlier
+    # transfer (into its sender, and not straight back to that transfer's
+    # sender) is not a head; chains start only at heads.
+    ext = _carries(_extend_paths(one_hop, step, hop_us))
+    _persist_counted(ext, "W9", total, max_paths)
+    not_head = (
+        ext.filter(col("e_dst") != col("start")).select(col("e_uetr").alias("uetr")).distinct()
+    )
+    heads = edges.select("uetr").join(not_head, "uetr", "left_anti")
+    paths = _advance(ext).join(
+        heads.select(col("uetr").alias("_head")),
+        element_at(col("uetrs"), 1) == col("_head"),
+        "left_semi",
+    )
+
+    chains = None
+    for hop in range(2, max_hops + 1):
+        # ``paths`` holds chains of ``hop`` transfers.
+        if hop < min_hops:
+            ext = _carries(_extend_paths(paths, step, hop_us))
+            _persist_counted(ext, "W9", total, max_paths)
+            paths = _advance(ext)
+            continue
+        ext = _carries(_extend_paths(paths, step, hop_us))
+        _persist_counted(ext, "W9", total, max_paths)
+        returns = ext.filter(col("e_dst") == col("start")).select("uetrs")
+        onward = ext.filter(~array_contains(col("nodes"), col("e_dst"))).select("uetrs")
+        done = paths.join(returns, "uetrs", "left_anti")
+        if hop < max_hops:
+            done = done.join(onward, "uetrs", "left_anti")
+        chains = done if chains is None else chains.unionByName(done)
+        if hop == max_hops:
+            break
+        paths = _advance(ext)
+
+    alerts = chains.withColumn("hops", size(col("uetrs")))
+    return alerts.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W9_layering_chain").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("start").alias("entity_id"),
+        col("uetrs").alias("related_txn_ids"),
+        col("nodes").alias("related_entity_ids"),
+        col("ts_last").alias("alert_ts"),
+        # Longer chains are more deliberate. Bounded [0.6, 0.9].
+        expr("least(0.9, 0.3 + 0.1 * hops)").cast("double").alias("alert_score"),
+        when(col("hops") >= 5, lit("HIGH"))
+        .when(col("hops") >= 4, lit("MED"))
+        .otherwise(lit("LOW"))
+        .alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit("layering_chain").alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Funds from entity ', cast(start as string), ' passed along ', "
+            "cast(hops as string), ' transfers ending ', cast(ts_last as string))"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(
+                lit("rule"),
+                lit("hops"),
+                lit("hop_window_hours"),
+                lit("min_forward_ratio"),
+                lit("max_forward_ratio"),
+                lit("max_out_degree"),
+            ),
+            array(
+                lit("W9_layering_chain"),
+                col("hops").cast("string"),
+                lit(str(hop_window_hours)),
+                lit(str(min_forward_ratio)),
+                lit(str(max_forward_ratio)),
+                lit(str(max_out_degree)),
+            ),
+        ).alias("evidence"),
+        # LB-125: wall-clock at rule execution, appended LAST to match the
+        # gold.alerts DDL column order (positional INSERT ... SELECT *).
         current_timestamp().alias("detected_ts"),
     )
 
@@ -1457,6 +1702,7 @@ _RULE_DISPATCH = {
     "W6_pep_counterparty": w6_pep_counterparty,
     "W7_cross_border_high_risk": w7_cross_border_high_risk,
     "W8_dormant_reactivation": w8_dormant_reactivation,
+    "W9_layering_chain": w9_layering_chain,
 }
 
 
