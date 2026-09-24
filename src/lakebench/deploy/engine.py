@@ -611,11 +611,27 @@ class DeploymentEngine:
             for n in _kclient.CoreV1Api().list_namespace().items:
                 if n.metadata.name == namespace:
                     continue
+                if getattr(n.metadata, "deletion_timestamp", None):
+                    continue  # being deleted; its buckets go with it
                 anns = n.metadata.annotations or {}
+                labels = n.metadata.labels or {}
                 if anns.get(ANNOTATION_DEPLOYMENT_NAME) == self.config.name:
                     return str(n.metadata.name)
+                # Pre-annotation (legacy) deployments are identified by the
+                # managed-by label and their namespace name.
+                if (
+                    not anns.get(ANNOTATION_DEPLOYMENT_NAME)
+                    and labels.get("app.kubernetes.io/managed-by") == "lakebench"
+                    and n.metadata.name == self.config.name
+                ):
+                    return str(n.metadata.name)
         except Exception as e:  # noqa: BLE001
-            logger.debug("deployment-name uniqueness check skipped: %s", e)
+            logger.warning(
+                "Could not check that deployment name %r is unique on the cluster "
+                "(%s). Two deployments with one name share buckets.",
+                self.config.name,
+                e,
+            )
         return None
 
     def _deploy_namespace(self, force_legacy: bool = False) -> DeploymentResult:
@@ -1198,6 +1214,7 @@ class DeploymentEngine:
                 namespace=spark_op_cfg.namespace,
                 version=spark_op_cfg.version,
                 job_namespace=job_ns,
+                kube_context=self.config.platform.kubernetes.context,
             )
 
             if spark_op_cfg.install:

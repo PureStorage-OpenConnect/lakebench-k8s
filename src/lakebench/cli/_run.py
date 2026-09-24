@@ -994,6 +994,7 @@ def run(
             namespace=spark_op_cfg.namespace,
             version=spark_op_cfg.version if spark_op_cfg.install else None,
             job_namespace=cfg.get_namespace(),
+            kube_context=cfg.platform.kubernetes.context,
         )
         status = operator.check_status()
 

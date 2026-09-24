@@ -1116,11 +1116,21 @@ class TestOwnershipHooksFire:
         assert s3.empty_bucket.call_count == 0
 
     @pytest.mark.parametrize("target", ["bronze", "silver", "gold"])
+    @patch("lakebench.deploy.ownership.verify_namespace_identity")
+    @patch("lakebench.deploy.ownership.build_identity_from_config")
+    @patch("kubernetes.client.CoreV1Api")
     @patch("kubernetes.client.BatchV1Api")
     @patch("lakebench.deploy.ownership.verify_bucket_ownership")
     @patch("lakebench.s3.S3Client")
     def test_clean_individual_target_uses_same_gate(
-        self, mock_s3_cls, mock_verify, _mock_batch, target
+        self,
+        mock_s3_cls,
+        mock_verify,
+        _mock_batch,
+        _mock_core,
+        _mock_ident,
+        _mock_ns_identity,
+        target,
     ):
         """F-1 test gap: prove the ownership gate fires for individual
         bronze/silver/gold targets, not only the aggregate 'data' target.
@@ -1161,6 +1171,12 @@ class TestOwnershipHooksFire:
 
         import typer
 
+        from lakebench.deploy.ownership import IdentityReport as _IR
+        from lakebench.deploy.ownership import IdentityVerdict as _IV
+
+        _mock_ns_identity.return_value = _IR(
+            verdict=_IV.MATCH, resource_name="ns", expected_deployment="my-clean", hint=""
+        )
         with pytest.raises(typer.Exit):
             clean(
                 target=target,

@@ -921,3 +921,104 @@ def list_lakebench_deployment_names(core_v1: Any, exclude: str | None = None) ->
         if labels.get("app.kubernetes.io/name") == "lakebench":
             names.append(ns.metadata.name)
     return names
+
+
+@dataclass
+class DataOwnershipDecision:
+    """Whether a command may drop tables or empty buckets for a deployment."""
+
+    allowed: bool
+    #: Why not (or, when allowed, any caveat worth printing). Never empty
+    #: when ``allowed`` is False.
+    hint: str = ""
+
+
+def check_data_ownership(
+    core_v1: Any,
+    *,
+    namespace: str,
+    deployment_name: str,
+    namespace_present: bool,
+    namespace_verified: bool,
+    force_legacy: bool,
+    context_name: str = "",
+) -> DataOwnershipDecision:
+    """Decide whether destroy/clean may touch a deployment's tables and buckets.
+
+    Shared by ``destroy`` and ``clean`` so neither can bypass the other.
+
+    Rules, in order:
+    1. Another live namespace carrying the same deployment name refuses, with
+       no bypass: the two share the same buckets (ownership is keyed on the
+       name), so cleaning them from either side deletes the other's data.
+       ``force_legacy`` does not waive this.
+    2. A missing namespace refuses unless ``force_legacy``: with a stale or
+       wrong kube context a live deployment's namespace looks absent while
+       its buckets are still reachable by name.
+    3. Otherwise the namespace identity must have been verified by the
+       caller (``namespace_verified``).
+
+    If the namespace list is forbidden (namespace-scoped RBAC), rule 1
+    cannot be checked; that is allowed but returned as a caveat so callers
+    print it.
+    """
+    caveat = ""
+    try:
+        for n in core_v1.list_namespace().items:
+            name = n.metadata.name
+            if name == namespace or getattr(n.metadata, "deletion_timestamp", None):
+                continue
+            anns = n.metadata.annotations or {}
+            labels = n.metadata.labels or {}
+            legacy_same = (
+                not anns.get(ANNOTATION_DEPLOYMENT_NAME)
+                and labels.get("app.kubernetes.io/managed-by") == "lakebench"
+                and name == deployment_name
+            )
+            if anns.get(ANNOTATION_DEPLOYMENT_NAME) == deployment_name or legacy_same:
+                return DataOwnershipDecision(
+                    allowed=False,
+                    hint=(
+                        f"Namespace {name!r} is a live lakebench deployment with the "
+                        f"same name {deployment_name!r}. The two share the same "
+                        "buckets, so cleaning them from either namespace would "
+                        "delete the other's data. Tables and buckets were left "
+                        "untouched. Destroy or retire the other deployment first; "
+                        "--force-legacy does not override this."
+                    ),
+                )
+    except Exception as e:  # noqa: BLE001
+        caveat = (
+            "Could not list namespaces to check for another deployment with the "
+            f"same name ({e}); proceeding on the namespace identity alone."
+        )
+        logger.warning(caveat)
+
+    if not namespace_present:
+        if force_legacy:
+            return DataOwnershipDecision(
+                allowed=True,
+                hint=(
+                    f"--force-legacy: namespace {namespace!r} is absent; tables and "
+                    "buckets are handled by name without an identity record."
+                ),
+            )
+        ctx = context_name or "(current context)"
+        return DataOwnershipDecision(
+            allowed=False,
+            hint=(
+                f"Namespace {namespace!r} does not exist on kubeconfig context "
+                f"{ctx}, so ownership of the tables and buckets it names cannot be "
+                "proven: with a stale or wrong context they may belong to a live "
+                "deployment on another cluster that shares the object store. They "
+                "were left untouched. If you have confirmed they are yours (for "
+                "example a previous destroy removed the namespace but not the "
+                "buckets), re-run with --force-legacy."
+            ),
+        )
+    if not namespace_verified:
+        return DataOwnershipDecision(
+            allowed=False,
+            hint=f"Namespace {namespace!r} ownership was not verified.",
+        )
+    return DataOwnershipDecision(allowed=True, hint=caveat)

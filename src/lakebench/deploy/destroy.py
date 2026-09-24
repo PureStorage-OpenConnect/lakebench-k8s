@@ -190,53 +190,23 @@ def destroy_all(
                 f"Verified deployment: {identity.name}",
             )
 
-    data_steps_allowed = ownership_proven or force_legacy
-    no_ns_hint = ""
-    # Deployments created before names were enforced unique may share a name
-    # across namespaces. They then share buckets, so cleaning them from one
-    # namespace deletes the other's data.
-    if data_steps_allowed and not force_legacy:
-        from lakebench.deploy.ownership import ANNOTATION_DEPLOYMENT_NAME
+    from lakebench.deploy.ownership import check_data_ownership
 
-        try:
-            for n in k8s_client.CoreV1Api().list_namespace().items:
-                if n.metadata.name == namespace:
-                    continue
-                if (n.metadata.annotations or {}).get(
-                    ANNOTATION_DEPLOYMENT_NAME
-                ) == engine.config.name:
-                    data_steps_allowed = False
-                    no_ns_hint = (
-                        f"Namespace {n.metadata.name!r} carries the same deployment "
-                        f"name {engine.config.name!r}, so the tables and buckets "
-                        "this destroy names are shared with it. They were left "
-                        "untouched. Destroy one deployment with --force-legacy "
-                        "only after moving the other to a unique name."
-                    )
-                    logger.warning(no_ns_hint)
-                    break
-        except Exception as e:  # noqa: BLE001
-            logger.debug("shared-name check skipped: %s", e)
-    if not namespace_present:
-        context_name = engine.config.platform.kubernetes.context or "(current context)"
-        no_ns_hint = (
-            f"Namespace {namespace!r} does not exist on kubeconfig context "
-            f"{context_name}, so this destroy cannot prove the tables and "
-            "buckets it names are yours: with a stale or wrong context they "
-            "may belong to a live deployment on another cluster that shares "
-            "the object store. Tables and buckets were left untouched. If you "
-            "have confirmed they are yours (for example a previous destroy "
-            "removed the namespace but failed to clean the buckets), re-run "
-            "with --force-legacy."
-        )
-        if force_legacy:
-            logger.warning(
-                "destroy --force-legacy: namespace %s absent; cleaning tables "
-                "and buckets by name without an identity record",
-                namespace,
-            )
-        else:
-            logger.warning(no_ns_hint)
+    decision = check_data_ownership(
+        k8s_client.CoreV1Api(),
+        namespace=namespace,
+        deployment_name=engine.config.name,
+        namespace_present=namespace_present,
+        namespace_verified=ownership_proven,
+        force_legacy=force_legacy,
+        context_name=engine.config.platform.kubernetes.context or "",
+    )
+    data_steps_allowed = decision.allowed
+    no_ns_hint = decision.hint
+    if not data_steps_allowed:
+        logger.warning(no_ns_hint)
+    elif decision.hint:
+        report("ownership-check", DeploymentStatus.IN_PROGRESS, decision.hint)
 
     # Step 1: Delete SparkApplications
     report("spark-jobs", DeploymentStatus.IN_PROGRESS, "Deleting SparkApplications...")
@@ -423,11 +393,11 @@ def destroy_all(
         results.append(
             DeploymentResult(
                 component="table-cleanup",
-                status=DeploymentStatus.SKIPPED,
+                status=DeploymentStatus.FAILED,
                 message=no_ns_hint,
             )
         )
-        report("table-cleanup", DeploymentStatus.SKIPPED, "Skipped: ownership not provable")
+        report("table-cleanup", DeploymentStatus.FAILED, no_ns_hint)
     else:
         table_format = engine.config.architecture.table_format.type.value
         report("table-cleanup", DeploymentStatus.IN_PROGRESS, f"Dropping {table_format} tables...")
@@ -515,15 +485,21 @@ def destroy_all(
             )
 
     # Step 4: Clean S3 buckets (optional)
+    # Set when the bucket step failed for a reason a retry can fix (S3
+    # unreachable, an error while emptying). The namespace is then kept as
+    # the buckets' ownership record. Ownership refusals do not set it: those
+    # buckets are not provably ours, so keeping the namespace gains nothing
+    # and would block destroy forever.
+    bucket_transient_failure = False
     if clean_buckets and not data_steps_allowed:
         results.append(
             DeploymentResult(
                 component="s3-buckets",
-                status=DeploymentStatus.SKIPPED,
+                status=DeploymentStatus.FAILED,
                 message=no_ns_hint,
             )
         )
-        report("s3-buckets", DeploymentStatus.SKIPPED, "Skipped: ownership not provable")
+        report("s3-buckets", DeploymentStatus.FAILED, no_ns_hint)
     elif clean_buckets:
         report("s3-buckets", DeploymentStatus.IN_PROGRESS, "Cleaning S3 buckets...")
         try:
@@ -540,6 +516,7 @@ def destroy_all(
                 verify_ssl=s3_cfg.verify_ssl,
             )
             if s3._init_error:
+                bucket_transient_failure = True
                 bucket_names = (
                     f"{s3_cfg.buckets.bronze}, {s3_cfg.buckets.silver}, {s3_cfg.buckets.gold}"
                 )
@@ -765,6 +742,7 @@ def destroy_all(
                         f"S3 buckets cleaned ({total_deleted} objects)" + summary_note,
                     )
         except Exception as e:
+            bucket_transient_failure = True
             results.append(
                 DeploymentResult(
                     component="s3-buckets",
@@ -1274,28 +1252,29 @@ def destroy_all(
     # `kubectl delete storageclass <name>`.
 
     # Finally, delete namespace if we created it
-    bucket_step_failed = any(
-        r.component == "s3-buckets" and r.status is DeploymentStatus.FAILED for r in results
-    )
-    if engine.config.platform.kubernetes.create_namespace and bucket_step_failed:
+    if engine.config.platform.kubernetes.create_namespace and bucket_transient_failure:
         # The namespace's identity annotations are the only proof that the
         # buckets belong to this deployment. Deleting it after the bucket step
         # failed would leave full buckets that no later destroy can prove it
         # owns. Keep the namespace (and its watch-list entry, so it still
         # works) until the bucket problem is fixed and destroy is re-run.
         keep_msg = (
-            f"Namespace {namespace!r} NOT deleted because the S3 bucket step "
-            "failed; it is the ownership record for those buckets. Fix the "
-            "bucket error above and re-run destroy."
+            f"Namespace {namespace!r} NOT deleted because emptying the S3 "
+            "buckets failed; the namespace is the ownership record for them. "
+            "Fix the S3 error above and re-run destroy. Do not delete this "
+            "namespace by hand: it is still in the Spark Operator watch list, "
+            "and deleting a watched namespace crash-loops the operator for "
+            "every deployment on the cluster."
         )
+        logger.error(keep_msg)
         results.append(
             DeploymentResult(
                 component="namespace",
-                status=DeploymentStatus.SKIPPED,
+                status=DeploymentStatus.FAILED,
                 message=keep_msg,
             )
         )
-        report("namespace", DeploymentStatus.SKIPPED, keep_msg)
+        report("namespace", DeploymentStatus.FAILED, keep_msg)
         return results
     if engine.config.platform.kubernetes.create_namespace:
         # Drop the namespace from the Spark Operator's watch list FIRST. The
@@ -1322,6 +1301,7 @@ def destroy_all(
                 namespace=spark_op_cfg.namespace,
                 version=spark_op_cfg.version,
                 job_namespace=namespace,
+                kube_context=engine.config.platform.kubernetes.context,
             ).remove_namespace_from_watch(namespace, strict=True)
             report(
                 "spark-operator-watch",
