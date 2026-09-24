@@ -60,7 +60,14 @@ account masters. The anti-join makes a retried batch a no-op for rows it
 already wrote. The masters are read once, when they appear: the datagen
 writes them before its first bronze file, and a batch that arrives first
 waits for them (LB_FINANCIAL_KYC_WAIT_S), so no entity is written with
-NULL KYC that a moment later would have had it.
+NULL KYC that a moment later would have had it; if they never appear,
+the stream fails unless the manifest proves a pre-KYC corpus.
+
+Known differences from batch mode: an entity's name, type and (for
+LEI-keyed entities) country, and an account's holder and opened_date, come
+from the first micro-batch that sees them rather than from the whole
+corpus. The datagen gives each entity one name and country, so the
+difference is limited to opened_date (first date the stream saw).
 """
 
 from __future__ import annotations
@@ -85,6 +92,7 @@ from silver_build_financial import (
     build_entities,
     build_kyc,
     build_transactions,
+    reference_frames,
 )
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
@@ -107,25 +115,29 @@ _KYC_LOADED = False
 
 
 def _kyc(spark):
-    """The KYC-by-IBAN frame, read once. Waits up to KYC_WAIT_S for the
-    masters to appear (the datagen writes them before bronze, but a
-    dedicated reference pod can lag); after that _read_reference decides:
-    it raises for a KYC-era corpus whose masters are missing and returns
-    None for an older one."""
+    """The KYC-by-IBAN frame, read once. Waits up to KYC_WAIT_S for both
+    masters to be visible (a dedicated reference pod, or other pods' bronze,
+    can beat them; the datagen writes party last, so a visible party means
+    the rest is there). After the wait _read_reference decides, and raises
+    unless the manifest proves a pre-KYC corpus: the stream fails loudly
+    rather than write a run's dimensions with NULL KYC."""
     global _KYC, _KYC_LOADED
     if _KYC_LOADED:
         return _KYC
     deadline = time.time() + KYC_WAIT_S
     while True:
-        party, account = _read_reference(spark)
-        if party is not None or time.time() >= deadline:
+        party, account = reference_frames(spark)
+        if party is not None and account is not None:
+            break
+        if time.time() >= deadline:
+            party, account = _read_reference(spark)
             break
         log(f"[kyc] party/account masters not there yet; waiting (up to {KYC_WAIT_S}s)")
         time.sleep(10)
     kyc = build_kyc(party, account)
     _KYC = kyc.cache() if kyc is not None else None
     _KYC_LOADED = True
-    log(f"[kyc] masters {'loaded' if _KYC is not None else 'absent: KYC columns NULL'}")
+    log(f"[kyc] masters {'loaded' if _KYC is not None else 'absent (pre-KYC corpus): KYC NULL'}")
     return _KYC
 
 
@@ -140,8 +152,10 @@ def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
     accts = build_accounts(batch_df, kyc)
     have_a = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}").select(col("iban").alias("_have"))
     new_accts = accts.join(have_a, accts["iban"] == have_a["_have"], "left_anti")
-    new_ents = new_ents.cache()
-    new_accts = new_accts.cache()
+    # One small file per table per batch, not one per shuffle partition: the
+    # dimensions are append-only in continuous mode and nothing compacts them.
+    new_ents = new_ents.coalesce(1).cache()
+    new_accts = new_accts.coalesce(1).cache()
     try:
         n_e, n_a = new_ents.count(), new_accts.count()
         if n_e:

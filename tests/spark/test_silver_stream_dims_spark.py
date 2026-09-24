@@ -80,10 +80,20 @@ def _check_kyc_absent(spark, tmp: Path) -> None:
 
     sb.PARTY_PATH = str(tmp / "nope/party.parquet")
     sb.ACCOUNT_PATH = str(tmp / "nope/account.parquet")
-    sb.MANIFEST_GLOB = str(tmp / "nope/manifest*.parquet")
+    sb.MANIFEST_GLOB = str(tmp / "man/manifest*.parquet")
     ss.KYC_WAIT_S = 0
+    # Nothing there and no manifest: after the wait the stream fails loudly.
     ss._KYC, ss._KYC_LOADED = None, False
-    # No masters and no manifest (a pre-KYC layout): no hang, NULL KYC, loaded once.
+    try:
+        ss._kyc(spark)
+        raise AssertionError("missing masters with no manifest did not raise")
+    except RuntimeError as e:
+        assert "pre-KYC" in str(e)
+    # A pre-KYC manifest: NULL KYC, loaded once, no hang.
+    spark.createDataFrame([("datagen-v2-rs-0.1",)], "model_version string").write.parquet(
+        str(tmp / "man/manifest.parquet")
+    )
+    ss._KYC, ss._KYC_LOADED = None, False
     assert ss._kyc(spark) is None and ss._KYC_LOADED is True
     print("OK kyc")
 
