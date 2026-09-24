@@ -4,7 +4,9 @@ build-backend = "hatchling.build"
 
 [project]
 name = "lakebench-k8s"
-version = "1.6.0.dev0"
+# Single source: src/lakebench/__init__.py (read by hatch below). The
+# PyInstaller binary has no dist-info, so __version__ must stay a literal.
+dynamic = ["version"]
 description = "Deploy and benchmark lakehouse stacks on Kubernetes"
 readme = {file = "README.md", content-type = "text/markdown"}
 license = "Apache-2.0"
@@ -73,6 +75,9 @@ lakebench = "lakebench.cli:app"
 Homepage = "https://github.com/PureStorage-OpenConnect/lakebench-k8s"
 Documentation = "https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/docs"
 Repository = "https://github.com/PureStorage-OpenConnect/lakebench-k8s"
+
+[tool.hatch.version]
+path = "src/lakebench/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lakebench"]
