@@ -16,8 +16,21 @@ Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
         --bucket bronze --prefix pacs008/ --seed 42 --scale 1
     python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 42 --out gate.json
 
-``--seed`` is recorded as provenance only; the corpus does not carry its
-top-level seed.
+``--seed`` is checked against the manifest's instance seeds and recorded.
+
+Library versions must match the cluster's (A6 compares like with like): the
+runner refuses to score when numpy, scipy, pandas, scikit-learn, joblib or
+threadpoolctl differ from REFERENCE_PY_DEPS in
+src/lakebench/modules/pipeline_engines/spark/job.py, unless
+``--allow-version-mismatch`` is given, in which case the mismatch is recorded
+and ``passes.library_versions_match`` fails. Build a matching environment
+with (Python 3.11; the cluster driver runs 3.10, which the report records):
+
+    python3.11 -m venv /scratch/aml-gate-venv
+    /scratch/aml-gate-venv/bin/pip install pyspark==4.0.1 pyarrow \
+        $(python3.11 scripts/aml_gate.py --print-pinned-deps)
+
+and point JAVA_HOME at a JDK 17.
 """
 
 from __future__ import annotations
@@ -33,6 +46,40 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "src/lakebench/spark/scripts"))
+
+
+JOB_PY = ROOT / "src/lakebench/modules/pipeline_engines/spark/job.py"
+#: Pinned packages whose version must match; the rest of REFERENCE_PY_DEPS are
+#: pure-Python helpers that do not change a number.
+_CHECKED = {"numpy", "scipy", "pandas", "scikit-learn", "joblib", "threadpoolctl"}
+_MODULE_OF = {"scikit-learn": "sklearn"}
+
+
+def pinned_deps() -> dict[str, str]:
+    """REFERENCE_PY_DEPS from job.py, read from source (importing job.py
+    would pull the whole CLI dependency tree into the Spark venv)."""
+    import ast
+
+    tree = ast.parse(JOB_PY.read_text())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "REFERENCE_PY_DEPS" for t in node.targets
+        ):
+            pins = [e.value for e in node.value.elts]
+            return dict(p.split("==", 1) for p in pins)
+    raise RuntimeError(f"REFERENCE_PY_DEPS not found in {JOB_PY}")
+
+
+def version_mismatches(installed: dict) -> dict[str, dict]:
+    """{package: {pinned, installed}} for every checked package that differs."""
+    out = {}
+    for pkg, want in pinned_deps().items():
+        if pkg not in _CHECKED:
+            continue
+        have = installed.get(_MODULE_OF.get(pkg, pkg))
+        if have != want:
+            out[pkg] = {"pinned": want, "installed": have}
+    return out
 
 
 def _git_sha() -> str:
@@ -56,6 +103,9 @@ def _git_sha() -> str:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    if argv is None and "--print-pinned-deps" in sys.argv[1:]:
+        print(" ".join(f"{k}=={v}" for k, v in pinned_deps().items()))
+        return 0
     ap.add_argument("corpus", type=Path, help="corpus root (contains bronze/ and manifest/)")
     ap.add_argument("--seed", type=int, default=None, help="corpus seed (provenance only)")
     ap.add_argument("--out", type=Path, default=None, help="write the JSON report here")
@@ -68,6 +118,12 @@ def main(argv=None) -> int:
         default=None,
         help="override the pre-registered unit_of_scoring.label_role (diagnostic only; "
         "the report records the override)",
+    )
+    ap.add_argument(
+        "--allow-version-mismatch",
+        action="store_true",
+        help="score even when library versions differ from the cluster pins (recorded, fails "
+        "passes.library_versions_match)",
     )
     ap.add_argument(
         "--require-pass",
@@ -85,10 +141,17 @@ def main(argv=None) -> int:
         add_pass,
         evaluate_gate,
         in_scope_typologies,
+        library_versions,
         load_preregistration,
         summary_lines,
     )
 
+    mismatch = version_mismatches(library_versions())
+    if mismatch:
+        print(f"LIBRARY VERSION MISMATCH vs REFERENCE_PY_DEPS: {mismatch}", file=sys.stderr)
+        if not args.allow_version_mismatch:
+            print("refusing to score; see the docstring for a pinned env", file=sys.stderr)
+            return 1
     prereg, sha = load_preregistration(args.prereg)
     typologies = in_scope_typologies(prereg)
     corpus = args.corpus.resolve()
@@ -140,6 +203,7 @@ def main(argv=None) -> int:
             "manifest": manifest_src,
             "label_role": role,
             "label_role_overridden": role != registered_role,
+            "library_version_mismatch": mismatch,
             "unkeyed_rows": unkeyed,
             "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
@@ -169,6 +233,7 @@ def main(argv=None) -> int:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
         add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
+        add_pass(report, "library_versions_match", not mismatch)
         if args.seed is not None:
             add_pass(report, "corpus_seed_verified", seed_ok)
         # A diagnostic run under another label role is never a pass.
