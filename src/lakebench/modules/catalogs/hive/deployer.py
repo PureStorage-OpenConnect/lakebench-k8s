@@ -60,7 +60,7 @@ class HiveDeployer:
         "secretclasses.secrets.stackable.tech": "secret-operator",
     }
 
-    def _check_stackable_crds(self) -> dict[str, bool]:
+    def _check_stackable_crds_raw(self) -> dict[str, bool]:
         """Check which required Stackable CRDs are present.
 
         Returns:
@@ -79,12 +79,38 @@ class HiveDeployer:
             logger.warning("Could not list CRDs to check Stackable availability: %s", e)
         return result
 
-    def _is_stackable_available(self) -> bool:
-        """Check if all required Stackable CRDs are available.
+    def _operator_running(self, operator: str) -> bool | None:
+        """Whether a Stackable operator has a Running pod anywhere.
 
-        Returns:
-            True if HiveCluster and SecretClass CRDs both exist
+        None when that cannot be determined (listing pods is forbidden).
+        CRDs alone are not enough: helm leaves CRDs behind when an operator
+        is uninstalled, and a HiveCluster with no operator is never
+        reconciled, so deploy used to wait out the full 600 s timeout.
         """
+        try:
+            from kubernetes import client as k8s_client
+
+            pods = k8s_client.CoreV1Api().list_pod_for_all_namespaces(
+                label_selector=f"app.kubernetes.io/name={operator}",
+                field_selector="status.phase=Running",
+                limit=1,
+            )
+            return bool(pods.items)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not check whether %s is running: %s", operator, e)
+            return None
+
+    def _check_stackable_crds(self) -> dict[str, bool]:
+        """Per required CRD: present AND its operator not known to be absent."""
+        crds = self._check_stackable_crds_raw()
+        return {
+            crd: present and self._operator_running(self._REQUIRED_CRDS[crd]) is not False
+            for crd, present in crds.items()
+        }
+
+    def _is_stackable_available(self) -> bool:
+        """True if the HiveCluster and SecretClass CRDs exist and their
+        operators are running (or their state cannot be read)."""
         return all(self._check_stackable_crds().values())
 
     # Stackable operators in required install order
@@ -223,7 +249,7 @@ class HiveDeployer:
                     status=DeploymentStatus.FAILED,
                     message=(
                         f"Stackable platform not fully installed "
-                        f"(missing: {', '.join(missing)}). "
+                        f"(missing or not running: {', '.join(missing)}). "
                         f"Option 1: Set architecture.catalog.hive.operator.install: true\n"
                         f"Option 2: Install manually:\n  {install_cmds}"
                     ),
