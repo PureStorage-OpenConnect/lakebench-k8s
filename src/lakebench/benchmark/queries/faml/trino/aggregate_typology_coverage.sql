@@ -5,7 +5,7 @@
 -- Equi-join on unnested uetrs; alerts scoped to the run in
 -- gold.detection_status.
 WITH run AS (
-  SELECT MAX(run_id) AS run_id FROM {catalog}.gold.detection_status
+  SELECT max_by(run_id, computed_ts) AS run_id FROM {catalog}.gold.detection_status
 ),
 typ_uetrs AS (
   SELECT m.typology_type, m.typology_id, u.uetr

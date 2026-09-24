@@ -14,7 +14,7 @@
 --
 -- Placeholders: {catalog}, {rule_id}, {typology_type}.
 WITH run AS (
-  SELECT MAX(run_id) AS run_id FROM {catalog}.gold.detection_status
+  SELECT max_by(run_id, computed_ts) AS run_id FROM {catalog}.gold.detection_status
 ),
 typ_uetrs AS (
   SELECT m.typology_id, m.injection_ts_start, u.uetr

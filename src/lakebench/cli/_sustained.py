@@ -58,13 +58,63 @@ def _c360_continuous_gate_problems(rows_by_job: dict[str, int | None]) -> list[s
     return problems
 
 
-def _clear_stream_checkpoints(cfg) -> None:
-    """Delete the bronze-ingest, silver-stream and gold-refresh checkpoints.
+def _reset_ownership_problem(cfg) -> str | None:
+    """Why this run may not delete continuous state, or None when it may.
 
-    Raises on failure: a continuous run that silently resumed old
-    checkpoints would ingest nothing new and still report success.
+    Same verification destroy and clean use: the namespace must exist and
+    carry this deployment's identity, and no other namespace may use the
+    deployment name (they would share its buckets). Anything short of a
+    verified match refuses, so a config pointing at another deployment's
+    buckets cannot wipe that deployment's live checkpoints.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.deploy.ownership import (
+        IdentityVerdict,
+        build_identity_from_config,
+        check_data_ownership,
+        verify_namespace_identity,
+    )
+
+    ns = cfg.get_namespace()
+    kube_ctx = cfg.platform.kubernetes.context or ""
+    core_v1 = k8s_client.CoreV1Api()
+    try:
+        core_v1.read_namespace(ns)
+    except ApiException as e:
+        return f"namespace {ns} not readable ({e.status}); cannot verify bucket ownership"
+    identity = build_identity_from_config(cfg, context=kube_ctx)
+    v = verify_namespace_identity(core_v1, ns, identity.name, identity.api_server)
+    if v.verdict is not IdentityVerdict.MATCH:
+        return f"namespace {ns} identity not verified ({v.verdict.name}): {v.hint}"
+    decision = check_data_ownership(
+        core_v1,
+        namespace=ns,
+        deployment_name=cfg.name,
+        namespace_present=True,
+        namespace_verified=True,
+        force_legacy=False,
+        context_name=kube_ctx,
+    )
+    return None if decision.allowed else decision.hint
+
+
+def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
+    """Start a continuous AML run clean: delete the stream checkpoints and,
+    when this run generates its own data, the previous raw datagen files.
+
+    Must run BEFORE datagen starts. Stale checkpoints made a rerun ingest
+    nothing and still pass; stale raw files from a larger earlier run were
+    streamed in next to the new corpus (ingest_ratio above 1). Raises
+    typer.Exit on an ownership refusal or any delete failure.
     """
     from lakebench.s3 import S3Client
+
+    problem = _reset_ownership_problem(cfg)
+    if problem:
+        print_error(f"Refusing to reset continuous state: {problem}")
+        raise typer.Exit(1)
 
     s3_cfg = cfg.platform.storage.s3
     base = cfg.architecture.pipeline.sustained.checkpoint_base.strip("/")
@@ -78,14 +128,24 @@ def _clear_stream_checkpoints(cfg) -> None:
         verify_ssl=s3_cfg.verify_ssl,
     )
     b = s3_cfg.buckets
-    for bucket, sub in (
-        (b.bronze, "bronze-ingest"),
-        (b.silver, "silver-stream"),
-        (b.gold, "gold-refresh"),
-    ):
-        n = client.delete_prefix(bucket, f"{base}/{sub}")
+    targets = [
+        (b.bronze, f"{base}/bronze-ingest"),
+        (b.silver, f"{base}/silver-stream"),
+        (b.gold, f"{base}/gold-refresh"),
+    ]
+    if clear_raw:
+        raw = cfg.architecture.pipeline.medallion.bronze.path_template
+        if raw == "customer/interactions":
+            raw = "pacs008"
+        targets.append((b.bronze, raw.strip("/")))
+    for bucket, prefix in targets:
+        try:
+            n = client.delete_prefix(bucket, prefix)
+        except Exception as e:
+            print_error(f"Could not clear {bucket}/{prefix}: {e}")
+            raise typer.Exit(1) from e
         if n:
-            print_info(f"Cleared {n} stale checkpoint objects in {bucket}/{base}/{sub}")
+            print_info(f"Cleared {n} objects from {bucket}/{prefix}")
 
 
 def _find_prometheus_svc(namespace: str) -> str | None:
@@ -385,8 +445,13 @@ def _run_iceberg_compaction(
     console: Console,
     j,
     file_size_threshold: str = "128MB",
+    live_streams: bool = False,
 ) -> None:
     """Run table compaction (format-aware).
+
+    ``live_streams``: continuous jobs are writing. For AML the gold tables
+    are then skipped: gold-refresh deletes and rewrites each rule's alerts
+    every tick, so a concurrent rewrite conflicts with it and buys nothing.
 
     - Iceberg: rewrite_data_files / optimize
     - Delta: OPTIMIZE
@@ -430,9 +495,10 @@ def _run_iceberg_compaction(
     # Bronze is never compacted: for AML it holds add_files-registered
     # datagen files, and a rewrite followed by expire_snapshots would
     # delete the raw corpus (see bronze_verify_financial).
-    table_names = [
-        f"{catalog}.{t}" for t in tables.workload_tables(schema, layers=("silver", "gold"))
-    ]
+    layers: tuple[str, ...] = ("silver", "gold")
+    if live_streams and schema == "financial":
+        layers = ("silver",)
+    table_names = [f"{catalog}.{t}" for t in tables.workload_tables(schema, layers=layers)]
 
     # Build SQL based on table format
     if table_format == "delta":
@@ -1006,7 +1072,7 @@ def _run_sustained(
             namespace=cfg.get_namespace(),
         )
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
-        monitor = SparkJobMonitor(cfg, k8s)
+        monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
         # Deploy scripts ConfigMap (includes streaming scripts) -- must succeed
         print_info("Deploying Spark scripts...")
@@ -1022,6 +1088,10 @@ def _run_sustained(
         # Skipping is only sensible when bronze is already being populated by
         # another process; otherwise the continuous stages have no input.
         engine = DeploymentEngine(cfg)
+        if cfg.architecture.workload.schema_type.value == "financial":
+            # Every continuous AML run starts clean; see _reset_continuous_state
+            # and bronze_verify_financial CONTINUOUS_RESET.
+            _reset_continuous_state(cfg, clear_raw=not skip_generate)
         if skip_generate:
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")
@@ -1071,11 +1141,6 @@ def _run_sustained(
             console.print()
             print_info("Waiting for first parquet to land in bronze before preflight...")
             _wait_for_bronze_data(cfg, timeout_seconds=300)
-
-            # Every continuous AML run starts clean (bronze_verify_financial
-            # CONTINUOUS_RESET): stale checkpoints made a rerun on the same
-            # deployment ingest nothing, and still pass.
-            _clear_stream_checkpoints(cfg)
 
             console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
             preflight_status = job_manager.submit_job(
@@ -1135,6 +1200,16 @@ def _run_sustained(
                 raise typer.Exit(1)
             print_success(f"Submitted: lakebench-{job_name}")
             submitted.append((job_type, job_name))
+
+        # A streaming submission that failed used to go unnoticed until the
+        # end-of-run gates reported zero rows. Confirm each driver is running
+        # first; dependency-download races on the shared operator are retried.
+        for _job_type, job_name in submitted:
+            running = monitor.wait_until_running(f"lakebench-{job_name}")
+            if not running.success:
+                print_error(f"lakebench-{job_name} did not start: {running.message}")
+                pipeline_success = False
+                raise typer.Exit(1)
 
         # Monitor for configured duration, running benchmark rounds at intervals
         console.print()
@@ -1275,7 +1350,7 @@ def _run_sustained(
 
             # Iceberg compaction (v1.1.0)
             if compaction_enabled and elapsed >= next_compaction_at:
-                _run_iceberg_compaction(cfg, k8s, console, j)
+                _run_iceberg_compaction(cfg, k8s, console, j, live_streams=True)
                 next_compaction_at = (time.time() - start) + compaction_interval
 
             # Sleep until next event (health check, benchmark round, maintenance, or compaction)
