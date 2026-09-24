@@ -1989,6 +1989,18 @@ class SparkJobManager:
             for container in executor_pod_template["spec"]["containers"]:
                 container["volumeMounts"].append({"name": "truststore", "mountPath": "/truststore"})
 
+            # JVM truststore args for driver and executor
+            _ts_opts = (
+                " -Djavax.net.ssl.trustStore=/truststore/truststore.jks"
+                " -Djavax.net.ssl.trustStorePassword=changeit"
+            )
+            spark_conf["spark.driver.extraJavaOptions"] = (
+                spark_conf.get("spark.driver.extraJavaOptions", "") + _ts_opts
+            ).strip()
+            spark_conf["spark.executor.extraJavaOptions"] = (
+                spark_conf.get("spark.executor.extraJavaOptions", "") + _ts_opts
+            ).strip()
+
         # The reference detector trains on the driver only; executors do not
         # need the packages. Driver-side only: the volume is added to the
         # driver template's own copy of the volume list.
@@ -2017,17 +2029,6 @@ class SparkJobManager:
             )
             for container in driver_pod_template["spec"]["containers"]:
                 container["volumeMounts"] = [*container["volumeMounts"], _deps_mount]
-            # JVM truststore args for driver and executor
-            _ts_opts = (
-                " -Djavax.net.ssl.trustStore=/truststore/truststore.jks"
-                " -Djavax.net.ssl.trustStorePassword=changeit"
-            )
-            spark_conf["spark.driver.extraJavaOptions"] = (
-                spark_conf.get("spark.driver.extraJavaOptions", "") + _ts_opts
-            ).strip()
-            spark_conf["spark.executor.extraJavaOptions"] = (
-                spark_conf.get("spark.executor.extraJavaOptions", "") + _ts_opts
-            ).strip()
 
         # Check for scratch storage (Portworx) configuration
         scratch = cfg.platform.storage.scratch
