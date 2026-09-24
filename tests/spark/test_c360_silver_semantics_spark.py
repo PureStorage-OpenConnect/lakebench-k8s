@@ -68,6 +68,15 @@ def test_missing_column_fails(spark):
     assert any("missing required columns" in p and "transaction_amount" in p for p in problems)
 
 
+def test_missing_passthrough_column_only_warns(spark):
+    """schema: custom runs this job too; silver only carries these through."""
+    from bronze_verify import verify_bronze
+
+    _, problems, warnings = verify_bronze(_bronze(spark).drop("interaction_payload", "zip_code"))
+    assert problems == []
+    assert any("missing pass-through columns" in w and "zip_code" in w for w in warnings)
+
+
 def test_wrong_type_fails(spark):
     """A string event_timestamp would give NULL dates in silver."""
     from bronze_verify import verify_bronze
@@ -216,3 +225,27 @@ def test_every_c360_job_pins_utc(script):
     src = (_HERE.parents[1] / "src/lakebench/spark/scripts" / script).read_text()
     assert "set_utc_session(spark)" in src
     assert "current_date()" not in src
+
+
+# ---------------------------------------------------------------- Q6 (E4b)
+
+
+def test_q6_rfm_recency_is_relative_to_the_data(spark):
+    """Q6 measured recency from CURRENT_DATE, so every 2024 customer was
+    'Lost' and the answer changed daily. Run through the Spark Thrift
+    rewrite, it now measures from MAX(interaction_date) of silver."""
+    from common import apply_silver_transformations, set_utc_session
+
+    from lakebench.benchmark.queries import _Q6
+    from lakebench.modules.query_engines.spark_thrift.executor import SparkThriftExecutor
+
+    set_utc_session(spark)
+    apply_silver_transformations(_bronze(spark, 40)).createOrReplaceGlobalTempView("q6_silver")
+    sql = _Q6.sql.format(catalog="global_temp", silver_table="q6_silver")
+    sql = SparkThriftExecutor.adapt_query(object.__new__(SparkThriftExecutor), sql)
+    assert "CURRENT_DATE" not in sql.upper()
+    rows = spark.sql(sql).collect()
+    assert rows
+    # The fixture spans 12 days, so nobody is more than 12 days from the clock.
+    assert max(r["avg_recency"] for r in rows) <= 12
+    assert "Lost" not in {r["rfm_segment"] for r in rows}
