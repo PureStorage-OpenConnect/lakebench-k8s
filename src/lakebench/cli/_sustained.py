@@ -84,6 +84,8 @@ def _reset_ownership_problem(cfg) -> str | None:
         core_v1.read_namespace(ns)
     except ApiException as e:
         return f"namespace {ns} not readable ({e.status}); cannot verify bucket ownership"
+    except Exception as e:  # noqa: BLE001
+        return f"cannot reach the cluster to verify ownership: {e}"
     identity = build_identity_from_config(cfg, context=kube_ctx)
     v = verify_namespace_identity(core_v1, ns, identity.name, identity.api_server)
     if v.verdict is not IdentityVerdict.MATCH:
@@ -97,7 +99,85 @@ def _reset_ownership_problem(cfg) -> str | None:
         force_legacy=False,
         context_name=kube_ctx,
     )
-    return None if decision.allowed else decision.hint
+    if not decision.allowed:
+        return decision.hint
+    return _bucket_ownership_problem(cfg, core_v1)
+
+
+def _bucket_ownership_problem(cfg, core_v1) -> str | None:
+    """Per-bucket check, same rules destroy applies before emptying buckets.
+
+    The namespace check alone only catches another namespace with the SAME
+    deployment name; two deployments with different names sharing bucket
+    names would still pass it and one reset would delete the other's live
+    checkpoints and raw data.
+    """
+    from lakebench.deploy.ownership import (
+        IdentityVerdict,
+        bucket_name_matches_deployment,
+        list_lakebench_deployment_names,
+        verify_bucket_ownership,
+    )
+    from lakebench.s3 import S3Client
+
+    s3_cfg = cfg.platform.storage.s3
+    raw = S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    ).raw_client
+    others = None
+    b = s3_cfg.buckets
+    for bucket in (b.bronze, b.silver, b.gold):
+        v = verify_bucket_ownership(raw, bucket, cfg.name)
+        if v.verdict is IdentityVerdict.MATCH:
+            continue
+        if v.verdict is IdentityVerdict.UNSUPPORTED:
+            if others is None:
+                others = list_lakebench_deployment_names(core_v1, exclude=cfg.get_namespace())
+            if others is not None and bucket_name_matches_deployment(bucket, cfg.name, others):
+                continue
+            return (
+                f"bucket {bucket}: backend has no bucket tagging and the name does not "
+                f"prove it belongs to deployment {cfg.name!r}"
+            )
+        return f"bucket {bucket}: {v.verdict.name} ({v.hint})"
+    return None
+
+
+_STREAM_APPS = ("lakebench-bronze-ingest", "lakebench-silver-stream", "lakebench-gold-refresh")
+
+
+def _stop_leftover_streams(job_manager, namespace: str, timeout_s: int = 120) -> None:
+    """Delete stream apps left by an earlier run and wait for their drivers.
+
+    A stream still alive during the reset could write its checkpoint right
+    after it was deleted, and the new stream would resume stale offsets.
+    Raises typer.Exit if a driver is still present after ``timeout_s``.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    for app in _STREAM_APPS:
+        job_manager._delete_job(app)
+    core = k8s_client.CoreV1Api()
+    deadline = time.time() + timeout_s
+    for app in _STREAM_APPS:
+        while True:
+            try:
+                core.read_namespaced_pod(f"{app}-driver", namespace)
+            except ApiException as e:
+                if e.status == 404:
+                    break
+                raise
+            if time.time() > deadline:
+                print_error(f"{app}-driver still running {timeout_s}s after deletion")
+                raise typer.Exit(1)
+            time.sleep(3)
 
 
 def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
@@ -1091,6 +1171,7 @@ def _run_sustained(
         if cfg.architecture.workload.schema_type.value == "financial":
             # Every continuous AML run starts clean; see _reset_continuous_state
             # and bronze_verify_financial CONTINUOUS_RESET.
+            _stop_leftover_streams(job_manager, cfg.get_namespace())
             _reset_continuous_state(cfg, clear_raw=not skip_generate)
         if skip_generate:
             console.print()

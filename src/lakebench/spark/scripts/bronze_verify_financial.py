@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 
-from common import env, log, log_job_metrics, path_size_gb
+from common import env, log, log_job_metrics, one_line, path_size_gb
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, current_timestamp
 
@@ -141,6 +141,34 @@ def _delete_dir_if_disjoint(spark, location, raw_uri):
         log(f"Continuous reset: deleted old bronze data at {location}")
 
 
+def register_manifest(spark) -> bool:
+    """(Re)register the typology manifest as an Iceberg table from its file.
+
+    Returns False, with a warning, when the file is not there or the CTAS
+    fails. Not fatal: score_financial reads the manifest file directly; the
+    Trino recall/precision queries then fail loudly on the missing table.
+    """
+    manifest_ns = MANIFEST_TABLE.split(".", 1)[0] if "." in MANIFEST_TABLE else "bronze"
+    try:
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{manifest_ns}")
+        spark.sql(f"""
+            CREATE OR REPLACE TABLE {CATALOG}.{MANIFEST_TABLE}
+            USING iceberg
+            TBLPROPERTIES ('format-version' = '2')
+            AS SELECT * FROM parquet.`{BRONZE_URI}{MANIFEST_PATH}`
+        """)
+        log(f"Registered manifest Iceberg table: {CATALOG}.{MANIFEST_TABLE}")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(
+            f"WARNING: manifest registration failed ({one_line(e)}). "
+            "AML precision/recall/pattern_span/coverage queries will fail "
+            "at benchmark time; alert-volume queries and score_financial "
+            "(reads manifest via --manifest arg) are unaffected."
+        )
+        return False
+
+
 def _continuous_reset(spark, df):
     """Drop the stream-written tables and create an empty bronze table."""
     # Bronze: plain DROP, never PURGE. After a batch run it may hold
@@ -170,6 +198,12 @@ def _continuous_reset(spark, df):
         f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
         f"dropped {SILVER_TXNS}, {SILVER_EDGES}"
     )
+    # The previous run's manifest table must not outlive the reset: this
+    # run's datagen writes a new schedule, and scoring against the old one
+    # is silently wrong. Register now if the new file is already there;
+    # gold-refresh registers it once it appears otherwise.
+    spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{MANIFEST_TABLE}")
+    register_manifest(spark)
 
 
 def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
@@ -384,23 +418,7 @@ def main() -> None:
         # not fatal to bronze itself -- we log and continue so batch
         # can still emit alerts; the benchmark scoring queries will
         # then fail loudly at their own `bronze.manifest` reads.
-        manifest_ns = MANIFEST_TABLE.split(".", 1)[0] if "." in MANIFEST_TABLE else "bronze"
-        try:
-            spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {CATALOG}.{manifest_ns}")
-            spark.sql(f"""
-                CREATE OR REPLACE TABLE {CATALOG}.{MANIFEST_TABLE}
-                USING iceberg
-                TBLPROPERTIES ('format-version' = '2')
-                AS SELECT * FROM parquet.`{BRONZE_URI}{MANIFEST_PATH}`
-            """)
-            log(f"Registered manifest Iceberg table: {CATALOG}.{MANIFEST_TABLE}")
-        except Exception as e:  # noqa: BLE001
-            log(
-                f"WARNING: manifest registration failed ({e}). "
-                "FAML precision/recall/pattern_span/coverage queries will fail "
-                "at benchmark time; alert-volume queries and score_financial "
-                "(reads manifest via --manifest arg) are unaffected."
-            )
+        register_manifest(spark)
 
     elapsed = time.time() - start_time
     log("=" * 60)

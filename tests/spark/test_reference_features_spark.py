@@ -25,7 +25,7 @@ def spark():
     s.stop()
 
 
-def test_mixed_entity_day_is_one_positive_row(spark, monkeypatch):
+def test_mixed_entity_day_is_one_positive_row(spark, monkeypatch, tmp_path):
     import score_financial_reference as ref
 
     t = datetime(2024, 3, 5, 10)
@@ -38,7 +38,10 @@ def test_mixed_entity_day_is_one_positive_row(spark, monkeypatch):
     )
     monkeypatch.setattr(ref, "CATALOG", "spark_catalog")
     spark.sql("CREATE DATABASE IF NOT EXISTS default")
-    spark.table("ref_txns").write.mode("overwrite").saveAsTable("default.ref_txns_t")
+    spark.sql("DROP TABLE IF EXISTS default.ref_txns_t")
+    spark.table("ref_txns").write.option("path", str(tmp_path / "t")).saveAsTable(
+        "default.ref_txns_t"
+    )
     rows = {
         r["originator_id"]: r
         for r in ref._build_reference_feature_frame(spark, "default.ref_txns_t", manifest).collect()

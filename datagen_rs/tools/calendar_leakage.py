@@ -13,6 +13,16 @@ window contains the rows it describes.
 Exit status 1 when any gate fails. Needs duckdb and scipy. The row-level
 LR tables are printed for inspection; the calendar gate is the
 instance-level test, because rows of one instance cluster on a few days.
+
+Power, stated plainly: the per-typology tests have roughly one observation
+per instance, so at scale 0.5 (50 to 900 instances per typology) they only
+catch large per-typology leaks; a single typology at LR 1.5 with 50
+instances can pass. The pooled tests (about 4,000 instances) are the ones
+with real power, and they separated the old generator (p 1e-5 to 1e-9) from
+the new one. Run at a larger scale, or several seeds, for per-typology
+claims. Window containment is close to definitional now that the manifest
+window is the rows' own span; it guards against the manifest drifting from
+the rows again.
 """
 
 from __future__ import annotations
@@ -140,10 +150,12 @@ def main(root: str) -> int:
 
     pooled_gate("dayofweek(ts)", "weekday")
     pooled_gate("day(ts)", "day of month")
+    pooled_gate("hour(ts)", "hour of day")
     lr_table("dayofweek(ts)", "weekday (rows, informational)")
     lr_table("day(ts)", "day of month (rows, informational)")
     instance_test("dayofweek(ts)", "weekday")
     instance_test("day(ts)", "day of month")
+    instance_test("hour(ts)", "hour of day")
 
     (orphans,) = c.sql("""
         WITH cells AS (

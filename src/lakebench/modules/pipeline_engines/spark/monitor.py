@@ -6,7 +6,6 @@ Provides waiting and progress tracking for Spark jobs.
 from __future__ import annotations
 
 import logging
-import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -18,7 +17,6 @@ from lakebench.modules.pipeline_engines.spark.job import (
     JobState,
     JobStatus,
     SparkJobManager,
-    is_transient_submission_failure,
 )
 
 if TYPE_CHECKING:
@@ -27,11 +25,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Resubmissions allowed for a dependency-download submission failure, and the
-# base backoff (grows per attempt, plus up to 30s of jitter so racing
-# deployments spread out).
-_MAX_SUBMISSION_RETRIES = 3
-_SUBMISSION_RETRY_BASE_S = 20
+# SUBMISSION_FAILED is not final: the operator resubmits on its own
+# (restartPolicy onSubmissionFailureRetries) and settles on FAILED once the
+# retries run out. Treating it as final gave up on jobs the operator was
+# about to resubmit, e.g. after a shared-Ivy-cache download race. Waiting is
+# bounded in case the operator never settles.
+_SUBMISSION_FAILED_GRACE_S = 900
 
 
 @dataclass
@@ -59,9 +58,8 @@ class SparkJobMonitor:
         Args:
             config: Lakebench configuration
             k8s: Kubernetes client
-            job_manager: The manager that submits the jobs being watched.
-                Needed to resubmit after a transient submission failure; a
-                private manager has no record of what was submitted.
+            job_manager: Optional shared job manager (a private one is
+                built otherwise).
         """
         self.config = config
         self.k8s = k8s
@@ -88,7 +86,7 @@ class SparkJobMonitor:
         """
         start = time.time()
         last_state = None
-        resubmits = 0
+        sub_failed_since: float | None = None
 
         while True:
             elapsed = time.time() - start
@@ -132,25 +130,13 @@ class SparkJobMonitor:
                     driver_logs=self._get_driver_logs(job_name, tail_lines=None),
                 )
 
-            if (
-                status.state in FAILURE_STATES
-                and resubmits < _MAX_SUBMISSION_RETRIES
-                and is_transient_submission_failure(status.message or "")
-            ):
-                resubmits += 1
-                delay = _SUBMISSION_RETRY_BASE_S * resubmits + random.uniform(0, 30)
-                logger.warning(
-                    "%s: dependency download failed during submission (shared Ivy "
-                    "cache race); resubmitting in %.0fs (%d/%d)",
-                    job_name,
-                    delay,
-                    resubmits,
-                    _MAX_SUBMISSION_RETRIES,
-                )
-                time.sleep(delay)
-                if self.job_manager.resubmit(job_name) is not None:
-                    last_state = None
+            if status.state == JobState.SUBMISSION_FAILED:
+                sub_failed_since = sub_failed_since or time.time()
+                if time.time() - sub_failed_since < _SUBMISSION_FAILED_GRACE_S:
+                    time.sleep(poll_interval)
                     continue
+            else:
+                sub_failed_since = None
 
             if status.state in FAILURE_STATES:
                 return JobResult(
@@ -172,13 +158,12 @@ class SparkJobMonitor:
         """Wait until a long-lived (continuous) job's driver is running.
 
         Streaming jobs never complete, so wait_for_completion does not fit.
-        Retries a dependency-download submission failure like
-        wait_for_completion does; any other failure, or a timeout, is
-        returned as unsuccessful. ``success`` means RUNNING (or already
+        SUBMISSION_FAILED is waited through (the operator retries); any
+        settled failure, or a timeout, is returned as unsuccessful. ``success`` means RUNNING (or already
         finished successfully).
         """
         start = time.time()
-        resubmits = 0
+        sub_failed_since: float | None = None
         while True:
             elapsed = time.time() - start
             status = self.job_manager.get_job_status(job_name)
@@ -189,23 +174,14 @@ class SparkJobMonitor:
                     message=f"{job_name} running",
                     elapsed_seconds=elapsed,
                 )
+            if status.state == JobState.SUBMISSION_FAILED:
+                sub_failed_since = sub_failed_since or time.time()
+                if time.time() - sub_failed_since < _SUBMISSION_FAILED_GRACE_S:
+                    time.sleep(poll_interval)
+                    continue
+            else:
+                sub_failed_since = None
             if status.state in FAILURE_STATES:
-                if resubmits < _MAX_SUBMISSION_RETRIES and is_transient_submission_failure(
-                    status.message or ""
-                ):
-                    resubmits += 1
-                    delay = _SUBMISSION_RETRY_BASE_S * resubmits + random.uniform(0, 30)
-                    logger.warning(
-                        "%s: dependency download failed during submission; "
-                        "resubmitting in %.0fs (%d/%d)",
-                        job_name,
-                        delay,
-                        resubmits,
-                        _MAX_SUBMISSION_RETRIES,
-                    )
-                    time.sleep(delay)
-                    if self.job_manager.resubmit(job_name) is not None:
-                        continue
                 return JobResult(
                     job_name=job_name,
                     success=False,
