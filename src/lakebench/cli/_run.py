@@ -393,6 +393,28 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.rules_skipped = parsed.rules_skipped
 
 
+def _aml_batch_gate_problems(gold_jobs: list) -> list[str]:
+    """Reasons an AML batch run must not be reported as a success.
+
+    Uses the last gold-finalize job (it re-detects over the whole corpus, so
+    last-cycle-wins). Crashed rules and zero total alerts both mean detection
+    measured nothing; skipped rules are reported as "not run" instead.
+    """
+    if not gold_jobs:
+        return []
+    last = gold_jobs[-1]
+    problems = [
+        f"Detection rule {rule} failed: {err}"
+        for rule, err in sorted((getattr(last, "rule_errors", None) or {}).items())
+    ]
+    if sum((getattr(last, "alerts_by_rule", None) or {}).values()) == 0:
+        problems.append(
+            "AML batch run produced zero alerts: detection did not measure "
+            "anything. Check the gold-finalize driver log."
+        )
+    return problems
+
+
 def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
     """Fold ``financial score`` into a batch run (LB-123).
 
@@ -1435,6 +1457,25 @@ def run(
             },
         )
 
+        # AML batch honesty gate (LB-044 class). A run whose rules crashed, or
+        # that produced no alerts at all, has not measured detection, whatever
+        # the stage exit codes say. Skipped rules (e.g. W1 above its vertex
+        # cap) are reported as "not run" and do not fail the run.
+        if (
+            cfg.architecture.workload.schema_type.value == "financial"
+            and not stage
+            and pipeline_success
+            and collector.current_run is not None
+        ):
+            _gold_jobs = [
+                jm
+                for jm in collector.current_run.jobs
+                if getattr(jm, "job_type", "") == "gold-finalize"
+            ]
+            for _problem in _aml_batch_gate_problems(_gold_jobs):
+                print_error(_problem)
+                pipeline_success = False
+
         # LB-123: fold financial recall scoring into the batch run so the
         # scorecard shows real recall/precision, not just alert counts. Only
         # for a full financial pipeline run (not a single --stage), and only
@@ -1771,3 +1812,7 @@ def run(
             )
 
         _journal_safe(j.end_command, success=pipeline_success)
+        if not pipeline_success:
+            # Metrics are saved above for diagnosis; the exit code must still
+            # say the run did not succeed.
+            raise typer.Exit(1)

@@ -472,8 +472,10 @@ def _write_detection_status(spark, status_rows: list, run_id: str) -> None:
     """Persist per-rule detection status to gold.detection_status (LB-119).
 
     Overwrites the table with this run's status so it reflects the run that
-    produced the current gold.alerts. Best-effort: a failure here is logged
-    and does not fail the pipeline (the log lines still carry the status).
+    produced the current gold.alerts. Not best-effort: scoring scopes alerts
+    to the run_id recorded here, so if this write failed silently the table
+    would still name the PREVIOUS run and scoring would read that run's
+    alerts as this run's results. A failure fails gold-finalize.
     """
     from pyspark.sql.functions import current_timestamp, lit
 
@@ -503,6 +505,7 @@ def _write_detection_status(spark, status_rows: list, run_id: str) -> None:
         log(f"[detection] wrote {GOLD_STATUS} ({len(status_rows)} rule rows)")
     except Exception as e:  # noqa: BLE001
         log(f"[detection] detection_status write failed: {type(e).__name__}: {e}")
+        raise
 
 
 def _project_derived_gold(spark, run_id: str) -> None:

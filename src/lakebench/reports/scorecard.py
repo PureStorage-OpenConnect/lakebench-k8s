@@ -106,8 +106,11 @@ class FinancialScorecardBlock:
             last = source_jobs[-1]
             alerts_by_rule = dict(getattr(last, "alerts_by_rule", None) or {})
             rules_skipped = dict(getattr(last, "rules_skipped", None) or {})
+            rule_errors = dict(getattr(last, "rule_errors", None) or {})
 
         scoring = getattr(metrics, "financial_scoring", None)
+        if not source_jobs:
+            rule_errors = {}
 
         # Nothing FAML-specific to show (e.g. a c360 run mislabelled, or a
         # financial run before detection wired) -- stay silent.
@@ -122,6 +125,8 @@ class FinancialScorecardBlock:
         recall_by_typology: dict[str, dict] = {}
         total_alerts = None
         fp_rate = None
+        fp_by_rule: dict = {}
+        random_floor = None
         if scoring:
             for t in scoring.get("typologies", []) or []:
                 tt = t.get("typology_type")
@@ -129,20 +134,30 @@ class FinancialScorecardBlock:
                     recall_by_typology[tt] = t
             total_alerts = scoring.get("total_alerts")
             fp_rate = scoring.get("fp_rate")
+            fp_by_rule = dict(scoring.get("fp_rate_by_rule") or {})
+            random_floor = scoring.get("random_control_floor")
 
         # Known rules first (in RULE_TARGETS order), then any rule that
         # emitted alerts or skipped but is not yet in RULE_TARGETS -- so a
         # newly added detection rule's alerts are never silently dropped from
         # the report (LB-123 review).
         known = list(RULE_TARGETS)
-        extra = sorted((set(alerts_by_rule) | set(rules_skipped)) - set(known))
+        extra = sorted((set(alerts_by_rule) | set(rules_skipped) | set(rule_errors)) - set(known))
         rules = known + extra
 
         body_rows: list[str] = []
         for rule in rules:
             typ = RULE_TARGETS.get(rule)
             alerts = alerts_by_rule.get(rule)
-            if rule in rules_skipped:
+            incidental_cell = "-"
+            fp_val = fp_by_rule.get(rule)
+            fp_cell = f"{float(fp_val) * 100:.1f}%" if fp_val is not None else "-"
+            if rule in rule_errors:
+                # A crashed rule is not "ran, 0 alerts".
+                status = '<span style="color: var(--danger, red);">error</span>'
+                recall_cell = "n/a"
+                alerts_cell = "-"
+            elif rule in rules_skipped:
                 status = (
                     f'<span style="color: var(--warning);">not run</span> ({rules_skipped[rule]})'
                 )
@@ -157,7 +172,12 @@ class FinancialScorecardBlock:
             else:
                 alerts_cell = f"{alerts:,}" if alerts is not None else "0"
                 trow = recall_by_typology.get(typ)
-                if trow and trow.get("detection_status") == "rule_skipped":
+                if trow and trow.get("incidental_recall") is not None:
+                    incidental_cell = f"{float(trow['incidental_recall']) * 100:.1f}%"
+                if trow and trow.get("detection_status") == "rule_error":
+                    status = '<span style="color: var(--danger, red);">error</span>'
+                    recall_cell = "n/a"
+                elif trow and trow.get("detection_status") == "rule_skipped":
                     status = '<span style="color: var(--warning);">not run</span>'
                     recall_cell = "n/a"
                 elif trow and trow.get("recall") is not None:
@@ -169,12 +189,13 @@ class FinancialScorecardBlock:
             typ_cell = typ if typ is not None else "&mdash;"
             body_rows.append(
                 f"<tr><td>{rule}</td><td>{typ_cell}</td>"
-                f"<td>{alerts_cell}</td><td>{recall_cell}</td><td>{status}</td></tr>"
+                f"<td>{alerts_cell}</td><td>{recall_cell}</td>"
+                f"<td>{incidental_cell}</td><td>{fp_cell}</td><td>{status}</td></tr>"
             )
 
-        # Global false-positive rate: score_financial computes FP at the alert
-        # level, not per rule (per-rule precision needs per-alert labels we do
-        # not have), so it is reported once for the run.
+        # Recall counts only alerts from each typology's designated rule.
+        # "Incidental" is recall credited by any rule; the random control's
+        # incidental recall is the chance floor to read both against.
         footer = ""
         if total_alerts is not None:
             fp_str = f"{fp_rate * 100:.1f}%" if fp_rate is not None else "n/a"
@@ -182,8 +203,14 @@ class FinancialScorecardBlock:
                 '<div style="margin-top: 0.5rem; color: var(--text-muted); '
                 'font-size: 0.8125rem;">'
                 f"Total alerts: <strong>{total_alerts:,}</strong> | "
-                f"False-positive rate (alert-level): <strong>{fp_str}</strong>"
-                "</div>"
+                f"False-positive rate (alerts touching no planted txn): <strong>{fp_str}</strong>"
+                + (
+                    f" | Chance floor (random control, incidental): "
+                    f"<strong>{float(random_floor) * 100:.1f}%</strong>"
+                    if random_floor is not None
+                    else ""
+                )
+                + "</div>"
             )
 
         return f"""
@@ -195,7 +222,9 @@ class FinancialScorecardBlock:
                         <th>Rule</th>
                         <th>Target typology</th>
                         <th title="Alerts emitted by this rule">Alerts</th>
-                        <th title="Fraction of planted instances detected">Recall</th>
+                        <th title="Fraction of planted instances detected by this rule">Recall</th>
+                        <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
+                        <th title="Share of this rule's alerts that touch none of its target typology's txns">FP</th>
                         <th>Status</th>
                     </tr>
                 </thead>

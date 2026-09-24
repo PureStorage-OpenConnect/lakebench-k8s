@@ -6,8 +6,14 @@ detection alerts written by workloads W2/W3/W4/etc. Joins on
 related_txn_ids and computes recall + FP rate per typology_type. Writes
 recall.parquet under the run's output prefix.
 
-Recall definition: fraction of typology instances for which at least
-one participant_uetr appears in some alert's related_txn_ids.
+Recall definition (per typology): fraction of typology instances for which
+at least one participant_uetr appears in an alert raised by one of the
+typology's DESIGNATED rules (the rules whose target_typology it is, taken
+from gold.detection_status for this run). Alerts from other rules count only
+toward ``incidental_recall``, published separately; the ``random`` control
+typology's incidental recall is the chance floor. Before 2026-09-24 any alert
+from any rule counted, so one broad rule (W1's giant component) made every
+typology score 1.0.
 
 Rewritten 2026-09-19 to avoid a crossJoin between manifest and alerts.
 The original design paired every typology instance with every alert row
@@ -27,16 +33,166 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     coalesce,
     col,
-    countDistinct,
     explode,
     explode_outer,
     lit,
     when,
 )
+from pyspark.sql.functions import max as smax
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
+
+
+def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
+    """Per-typology recall and per-rule false positives for one run.
+
+    ``manifest``: typology_id, typology_type, expected_workload,
+    participant_uetrs. ``alerts``: alert_id, rule_id, related_txn_ids, already
+    scoped to the run. ``status_rows``: gold.detection_status rows (rule_id,
+    status, target_typology, ...).
+
+    Returns ``(per_typology_df, summary_dict)``.
+    """
+    designated: dict[str, list[str]] = {}
+    rule_status: dict[str, str] = {}
+    for r in status_rows:
+        rule_status[r["rule_id"]] = r["status"]
+        if r.get("target_typology"):
+            designated.setdefault(r["target_typology"], []).append(r["rule_id"])
+
+    def _typology_state(typ: str) -> str:
+        rules = designated.get(typ, [])
+        if not rules:
+            return "no_rule"
+        states = {rule_status.get(rid) for rid in rules}
+        if "ran" in states:
+            return "scored"
+        if "error" in states:
+            return "rule_error"
+        return "rule_skipped"
+
+    manifest_uetrs = manifest.select(
+        "typology_id",
+        "typology_type",
+        "expected_workload",
+        explode_outer(col("participant_uetrs")).alias("uetr"),
+    ).distinct()
+    alert_uetrs = alerts.select(
+        "alert_id", "rule_id", explode(col("related_txn_ids")).alias("uetr")
+    ).distinct()
+
+    # (typology_type, rule_id) for designated rules that actually ran.
+    pairs = [
+        (typ, rid)
+        for typ, rids in designated.items()
+        for rid in rids
+        if rule_status.get(rid) == "ran"
+    ]
+    pair_df = spark.createDataFrame(pairs, "typology_type STRING, rule_id STRING")
+
+    designated_hits = (
+        manifest_uetrs.join(pair_df, "typology_type")
+        .join(alert_uetrs.select("rule_id", "uetr").distinct(), ["rule_id", "uetr"])
+        .select("typology_id")
+        .distinct()
+        .withColumn("designated_hit", lit(1))
+    )
+    incidental_hits = (
+        manifest_uetrs.join(alert_uetrs.select("uetr").distinct(), "uetr")
+        .select("typology_id")
+        .distinct()
+        .withColumn("any_hit", lit(1))
+    )
+    per_instance = (
+        manifest_uetrs.select("typology_id", "typology_type", "expected_workload")
+        .distinct()
+        .join(designated_hits, "typology_id", "left")
+        .join(incidental_hits, "typology_id", "left")
+        .select(
+            "typology_id",
+            "typology_type",
+            "expected_workload",
+            coalesce(col("designated_hit"), lit(0)).alias("designated_hit"),
+            coalesce(col("any_hit"), lit(0)).alias("any_hit"),
+        )
+    )
+    agg = (
+        per_instance.groupBy("typology_type", "expected_workload")
+        .agg(
+            {"designated_hit": "avg", "any_hit": "avg", "typology_id": "count"},
+        )
+        .withColumnRenamed("avg(designated_hit)", "recall_raw")
+        .withColumnRenamed("avg(any_hit)", "incidental_recall")
+        .withColumnRenamed("count(typology_id)", "instance_count")
+    )
+    state_rows = [
+        (typ, _typology_state(typ), ",".join(sorted(designated.get(typ, []))) or None)
+        for typ in sorted({r["typology_type"] for r in agg.select("typology_type").collect()})
+    ]
+    state_df = spark.createDataFrame(
+        state_rows, "typology_type STRING, detection_status STRING, designated_rules STRING"
+    )
+    per_typology = (
+        agg.join(state_df, "typology_type", "left")
+        .withColumn(
+            "recall",
+            when(col("detection_status") == lit("scored"), col("recall_raw")).otherwise(
+                lit(None).cast("double")
+            ),
+        )
+        .drop("recall_raw")
+    )
+
+    # False positives. Global: alerts touching no planted txn at all. Per
+    # rule: alerts of a rule touching no txn of that rule's target typology.
+    total_alerts = alerts.count()
+    fp_by_rule: dict[str, float | None] = {}
+    if total_alerts > 0:
+        manifest_all = manifest_uetrs.select("uetr").where(col("uetr").isNotNull()).distinct()
+        tp_global = alert_uetrs.join(manifest_all, "uetr").select("alert_id").distinct().count()
+        fp_alerts = total_alerts - tp_global
+        fp_rate: float | None = fp_alerts / total_alerts
+        tagged = alert_uetrs.join(
+            manifest_uetrs.select("uetr", "typology_type").where(col("uetr").isNotNull()),
+            "uetr",
+            "left",
+        )
+        target_df = spark.createDataFrame(
+            [(rid, typ) for typ, rids in designated.items() for rid in rids],
+            "rule_id STRING, target STRING",
+        )
+        per_alert = (
+            tagged.join(target_df, "rule_id", "left")
+            .withColumn(
+                "on_target",
+                when(col("typology_type") == col("target"), lit(1)).otherwise(lit(0)),
+            )
+            .groupBy("alert_id", "rule_id")
+            .agg(smax("on_target").alias("on_target"))
+        )
+        for row in per_alert.groupBy("rule_id").agg({"on_target": "avg"}).collect():
+            fp_by_rule[row["rule_id"]] = 1.0 - float(row["avg(on_target)"])
+    else:
+        fp_alerts = 0
+        fp_rate = None  # no alerts: there is no false-positive rate to report
+
+    per_typology = (
+        per_typology.withColumn("total_alerts", lit(total_alerts))
+        .withColumn("fp_alerts", lit(fp_alerts))
+        .withColumn("fp_rate", lit(fp_rate).cast("double"))
+        .withColumn("computed_by", lit("lb-score-financial"))
+    )
+    random_row = per_typology.filter(col("typology_type") == lit("random")).collect()
+    summary = {
+        "total_alerts": int(total_alerts),
+        "fp_alerts": int(fp_alerts),
+        "fp_rate": fp_rate,
+        "fp_rate_by_rule": fp_by_rule,
+        "random_control_floor": (float(random_row[0]["incidental_recall"]) if random_row else None),
+    }
+    return per_typology, summary
 
 
 def main() -> None:
@@ -81,154 +237,40 @@ def main() -> None:
             "must run before scoring."
         ) from e
 
-    # LB-119: read gold.detection_status ONCE up front for two things --
-    # (1) the run_id that produced the current gold.alerts, and (2) which
-    # rules skipped. Scoping the alert read to that run_id is essential:
-    # on a reused catalog a rule that SKIPPED (W1 above the vertex cap)
-    # never runs its DELETE, so a PRIOR run's alerts survive with a foreign
-    # run_id. Without this filter those stale rows inflate total_alerts and
-    # fp_rate here even though recall is protected -- the same stale-row
-    # hazard, one consumer further on. It also excludes any foreign rows a
-    # `financial replay` wrote into gold.alerts with its own run_id.
-    # detection_status is overwritten every gold_finalize run, so it carries
-    # exactly one run_id; if it is absent (older run) we fall back to the
-    # unscoped read, preserving prior behaviour.
-    current_run_id: str | None = None
-    skipped_typologies: list[str] = []
+    # Run scoping. gold.detection_status is overwritten by every
+    # gold_finalize run and names the run that produced the current alerts.
+    # Scoring against anything else would mix runs, so a missing or
+    # ambiguous status is a hard failure (it used to fall back to scoring
+    # every alert in the table).
     try:
         status = spark.table(f"{CATALOG}.{GOLD_STATUS}")
-        run_ids = [r["run_id"] for r in status.select("run_id").distinct().collect()]
-        if len(run_ids) == 1:
-            current_run_id = run_ids[0]
-        elif len(run_ids) > 1:
-            log(
-                f"gold.detection_status has {len(run_ids)} run_ids "
-                f"{run_ids}; expected one. Not scoping alerts by run_id."
-            )
-        skipped_typologies = [
-            r["target_typology"]
-            for r in status.filter(
-                (col("status") == lit("skipped")) & col("target_typology").isNotNull()
-            )
-            .select("target_typology")
-            .distinct()
-            .collect()
-        ]
+        status_rows = [r.asDict() for r in status.collect()]
     except Exception as e:  # noqa: BLE001
-        log(f"gold.detection_status not readable ({e}); alerts unscoped, all typologies scored.")
-
-    alerts = (
-        alerts_all.filter(col("run_id") == lit(current_run_id))
-        if current_run_id is not None
-        else alerts_all
-    )
-    total_alerts = alerts.count()
-    log(f"gold.alerts rows (run_id={current_run_id or 'unscoped'}): {total_alerts:,}")
-
-    # Explode manifest to (typology_id, typology_type, expected_workload, uetr) pairs.
-    # explode_outer, not explode: a manifest row with a NULL/empty participant_uetrs
-    # array must still contribute to the denominator with detected=0. explode
-    # would silently drop the whole instance, inflating recall by removing
-    # the "we never fired for this instance" data points.
-    manifest_uetrs = manifest.select(
-        "typology_id",
-        "typology_type",
-        "expected_workload",
-        explode_outer(col("participant_uetrs")).alias("uetr"),
-    ).distinct()
-
-    # Explode alerts to (alert_id, uetr) pairs. On empty alerts, this frame is
-    # empty and the left-join below leaves detected=0 everywhere -- the correct
-    # answer, which matters because the pipeline runs early UAT with empty
-    # alerts before rules are wired.
-    alert_uetrs = (
-        alerts.select(
-            col("alert_id"),
-            explode(col("related_txn_ids")).alias("uetr"),
-        ).distinct()
-        if total_alerts > 0
-        else spark.createDataFrame([], "alert_id STRING, uetr STRING")
-    )
-
-    # A typology instance is "detected" if any of its uetrs appears in any
-    # alert -- so for each (typology_id, uetr), left-join and mark hit=1 if
-    # the alert row is present. Then per typology_id: detected = max(hit).
-    # coalesce(hit, 0) covers instances whose participant_uetrs was NULL
-    # (explode_outer emits NULL uetr; the join leaves alert_id NULL too).
-    per_instance = (
-        manifest_uetrs.join(alert_uetrs, on="uetr", how="left")
-        .withColumn(
-            "hit",
-            coalesce(when(col("alert_id").isNotNull(), 1).otherwise(0), lit(0)),
+        raise SystemExit(
+            f"Cannot read {CATALOG}.{GOLD_STATUS} ({e}); cannot tell which run "
+            "produced gold.alerts, so recall would mix runs. Re-run gold-finalize."
+        ) from e
+    run_ids = sorted({r["run_id"] for r in status_rows})
+    if len(run_ids) != 1:
+        raise SystemExit(
+            f"{CATALOG}.{GOLD_STATUS} holds {len(run_ids)} run_ids {run_ids}; "
+            "expected exactly one. Re-run gold-finalize."
         )
-        .groupBy("typology_id", "typology_type", "expected_workload")
-        .agg({"hit": "max"})
-        .withColumnRenamed("max(hit)", "detected")
+    current_run_id = run_ids[0]
+    alerts = alerts_all.filter(col("run_id") == lit(current_run_id))
+
+    per_typology, summary = compute_scores(spark, manifest, alerts, status_rows)
+    summary["run_id"] = current_run_id
+    total_alerts = summary["total_alerts"]
+    fp_alerts = summary["fp_alerts"]
+    fp_rate = summary["fp_rate"]
+    log(f"gold.alerts rows (run_id={current_run_id}): {total_alerts:,}")
+    log(
+        f"Alerts: total={total_alerts:,} FP={fp_alerts:,} "
+        f"FP_rate={'n/a' if fp_rate is None else f'{fp_rate:.4f}'}"
     )
+    log(f"Random-control floor (incidental recall of 'random'): {summary['random_control_floor']}")
 
-    per_typology = (
-        per_instance.groupBy("typology_type", "expected_workload")
-        .agg(
-            {"detected": "avg", "typology_id": "count"},
-        )
-        .withColumnRenamed("avg(detected)", "recall")
-        .withColumnRenamed("count(typology_id)", "instance_count")
-    )
-
-    # LB-119: mark typologies whose sole detector rule was SKIPPED this run
-    # as "not run" rather than reporting recall 0 (skipped_typologies was
-    # read from gold.detection_status up front). A typology whose targeting
-    # rule skipped has no chance of a recall signal, so a 0 there measures
-    # the cap, not the stack; we override recall to NULL +
-    # detection_status='rule_skipped'. This is a deliberate "score against
-    # the DESIGNATED rule only" choice (RULE_TARGET_TYPOLOGY is 1:1): if a
-    # future second detector for a shared typology exists, revisit this so
-    # its incidental detections are not masked. Today only W1 skips, so only
-    # gather_scatter is ever marked rule_skipped.
-    if skipped_typologies:
-        log(f"Rules skipped this run; typologies marked not-run: {skipped_typologies}")
-        per_typology = per_typology.withColumn(
-            "detection_status",
-            when(col("typology_type").isin(skipped_typologies), lit("rule_skipped")).otherwise(
-                lit("scored")
-            ),
-        ).withColumn(
-            "recall",
-            when(col("typology_type").isin(skipped_typologies), lit(None).cast("double")).otherwise(
-                col("recall")
-            ),
-        )
-    else:
-        per_typology = per_typology.withColumn("detection_status", lit("scored"))
-
-    # False-positive rate is a global stat, not per-typology: fraction of
-    # alerts that touch no manifest UETR. Precision would need per-alert
-    # per-typology labels, which we don't have here.
-    if total_alerts > 0:
-        all_manifest_uetrs = manifest.select(
-            explode(col("participant_uetrs")).alias("uetr")
-        ).distinct()
-        alert_ids_with_hits = (
-            alert_uetrs.join(all_manifest_uetrs, on="uetr", how="inner")
-            .select("alert_id")
-            .distinct()
-        )
-        tp_alerts = alert_ids_with_hits.count()
-        fp_alerts = total_alerts - tp_alerts
-        fp_rate = fp_alerts / total_alerts if total_alerts else 0.0
-    else:
-        tp_alerts = 0
-        fp_alerts = 0
-        fp_rate = 0.0
-
-    log(f"Alerts: total={total_alerts:,} TP={tp_alerts:,} FP={fp_alerts:,} FP_rate={fp_rate:.4f}")
-
-    per_typology = (
-        per_typology.withColumn("total_alerts", lit(total_alerts))
-        .withColumn("fp_alerts", lit(fp_alerts))
-        .withColumn("fp_rate", lit(fp_rate))
-        .withColumn("computed_by", lit("lb-score-financial"))
-    )
     per_typology.write.mode("overwrite").parquet(args.output)
     n_rows = per_typology.count()
     log(f"Wrote recall.parquet: {n_rows} typology rows")
@@ -242,23 +284,19 @@ def main() -> None:
     import json as _json
 
     rows = [r.asDict() for r in per_typology.collect()]
-    summary = {
-        "typologies": [
-            {
-                "typology_type": r.get("typology_type"),
-                "expected_workload": r.get("expected_workload"),
-                "recall": r.get("recall"),
-                "instance_count": r.get("instance_count"),
-                "detection_status": r.get("detection_status"),
-            }
-            for r in rows
-        ],
-        "total_alerts": int(total_alerts),
-        "fp_alerts": int(fp_alerts),
-        "fp_rate": float(fp_rate),
-        "run_id": current_run_id,
-        "computed_by": "lb-score-financial",
-    }
+    summary["typologies"] = [
+        {
+            "typology_type": r.get("typology_type"),
+            "expected_workload": r.get("expected_workload"),
+            "designated_rules": r.get("designated_rules"),
+            "recall": r.get("recall"),
+            "incidental_recall": r.get("incidental_recall"),
+            "instance_count": r.get("instance_count"),
+            "detection_status": r.get("detection_status"),
+        }
+        for r in rows
+    ]
+    summary["computed_by"] = "lb-score-financial"
     # Keep the parquet's directory; swap the basename for recall.json.
     out = args.output.rstrip("/")
     json_uri = (out.rsplit("/", 1)[0] + "/recall.json") if "/" in out else "recall.json"
@@ -273,8 +311,6 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         log(f"Could not write recall.json sidecar ({e}); recall.parquet still written.")
 
-    # Guard against ruff unused-import warning for countDistinct kept for future use.
-    _ = countDistinct
     spark.stop()
 
 
