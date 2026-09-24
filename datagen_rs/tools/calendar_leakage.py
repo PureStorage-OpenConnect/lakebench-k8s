@@ -10,7 +10,7 @@ window contains the rows it describes.
 
     python3.11 tools/calendar_leakage.py <dir containing pacs008/ and manifest/>
 
-Exit status 1 when any gate fails. Needs duckdb and scipy. The row-level
+Exit status 1 when any gate fails. Needs duckdb and numpy. The row-level
 LR tables are printed for inspection; the calendar gate is the
 instance-level test, because rows of one instance cluster on a few days.
 
@@ -31,43 +31,54 @@ import sys
 from pathlib import Path
 
 import duckdb
-from scipy import stats
 
 LR_LIMIT = 1.3  # a cell whose planted share is 1.3x the baseline share is a signal
 MIN_PLANTED = 40  # ignore cells with fewer planted rows than this (noise)
 P_LIMIT = 0.01  # family-wise false-alarm rate for the per-typology calendar tests
 
 
-MIN_EXPECTED = 5.0  # chi-square validity: every tested bin needs this many expected
+SIMULATIONS = 20000  # Monte Carlo draws for each calendar test (p floor 1e-4)
 
 
-def chi2_merged(base: dict, cells: dict, n: float):
-    """Chi-square of observed ``cells`` against ``n * base`` shares, merging
-    the sparsest bins into one until every expected count is >= MIN_EXPECTED.
+def chi2_sim(base: dict, cells: dict, n: float, seed: int = 0):
+    """Chi-square statistic with a Monte Carlo p-value, no bin merging.
 
-    Returns (chi2, dof) or None when fewer than two bins remain (the test is
-    not meaningful at this sample size). Without merging, 24 hour bins or 31
-    day bins at a few dozen instances have expected counts below 1, where
-    the chi-square approximation is invalid and fails falsely.
+    Merging sparse bins would pool, for example, all night hours, and a
+    typology concentrated at 02:00 against a background spread over 00-05
+    would then pass: the pooled count matches. Instead the statistic is
+    computed on the raw bins and its null distribution is simulated by
+    drawing round(n) observations from the baseline shares, which stays
+    valid however small the expected counts are. Planted mass in a bin the
+    baseline never uses returns p = 0 (it is a label by itself).
+
+    Returns (chi2, p) or None when n < 1.
     """
-    keys = sorted((k for k in base if base[k] > 0), key=lambda k: base[k])
-    bins: list[tuple[float, float]] = []  # (expected, observed)
-    acc_e = acc_o = 0.0
-    for k in keys:
-        acc_e += n * base[k]
-        acc_o += cells.get(k, 0.0)
-        if acc_e >= MIN_EXPECTED:
-            bins.append((acc_e, acc_o))
-            acc_e = acc_o = 0.0
-    if acc_e > 0:
-        if bins:
-            e, o = bins.pop()
-            bins.append((e + acc_e, o + acc_o))
-        else:
-            return None
-    if len(bins) < 2:
+    import numpy as np
+
+    keys = sorted(set(base) | set(cells))
+    if any(cells.get(k, 0.0) > 0 and base.get(k, 0.0) == 0 for k in keys):
+        return float("inf"), 0.0
+    keys = [k for k in keys if base.get(k, 0.0) > 0]
+    n_int = int(round(n))
+    if n_int < 1:
         return None
-    return sum((o - e) ** 2 / e for e, o in bins), len(bins) - 1
+    p = np.array([base[k] for k in keys], dtype=float)
+    p = p / p.sum()
+    obs = np.array([cells.get(k, 0.0) for k in keys], dtype=float) * (n_int / n)
+    exp = n_int * p
+    stat = float(((obs - exp) ** 2 / exp).sum())
+    # Chi-square spreads a single hot bin over every degree of freedom; the
+    # largest standardised excess is the statistic that sees concentration
+    # (all planted night rows at 02:00). Both come from the same draws; the
+    # smaller p-value is reported with a factor 2 for testing twice.
+    peak = float(((obs - exp) / np.sqrt(exp)).max())
+    rng = np.random.default_rng(seed)
+    sims = rng.multinomial(n_int, p, size=SIMULATIONS)
+    null_chi2 = ((sims - exp) ** 2 / exp).sum(axis=1)
+    null_peak = ((sims - exp) / np.sqrt(exp)).max(axis=1)
+    p_chi2 = (1 + int((null_chi2 >= stat).sum())) / (SIMULATIONS + 1)
+    p_peak = (1 + int((null_peak >= peak).sum())) / (SIMULATIONS + 1)
+    return stat, min(1.0, 2 * min(p_chi2, p_peak))
 
 
 def main(root: str) -> int:
@@ -138,11 +149,10 @@ def main(root: str) -> int:
         flagged = False
         for t, cells in sorted(by_t.items()):
             n = sum(cells.values())
-            res = chi2_merged(base, cells, n)
+            res = chi2_sim(base, cells, n)
             if res is None:
                 continue
-            chi2, dof = res
-            p = stats.chi2.sf(chi2, dof)
+            chi2, p = res
             if p < alpha:
                 flagged = True
                 print(f"  {t:24s} instances={n:.0f} chi2={chi2:.1f} p={p:.1e}")
@@ -168,12 +178,11 @@ def main(root: str) -> int:
             """).fetchall()
         )
         n = sum(cells.values())
-        res = chi2_merged(base, cells, n)
+        res = chi2_sim(base, cells, n)
         if res is None:
             print(f"\n{label}: too few instances to test")
             return
-        chi2, dof = res
-        p = stats.chi2.sf(chi2, dof)
+        chi2, p = res
         lrs = {k: cells.get(k, 0.0) / (n * sh) for k, sh in base.items() if sh > 0}
         k_worst = max(lrs, key=lambda k: abs(lrs[k] - 1))
         print(

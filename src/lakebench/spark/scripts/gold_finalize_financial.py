@@ -288,7 +288,13 @@ def main() -> None:
     baseline.writeTo(f"{CATALOG}.{GOLD_DASH}").append()
     log(f"Wrote {GOLD_DASH} baseline rows")
 
-    run_detection_rules(spark, txns, RUN_ID)
+    try:
+        run_detection_rules(spark, txns, RUN_ID)
+    finally:
+        # W1's reliable checkpoints; see detection_rules.cleanup_w1_checkpoints.
+        from detection_rules import cleanup_w1_checkpoints
+
+        cleanup_w1_checkpoints(spark)
 
     elapsed = time.time() - start
     log("=" * 60)

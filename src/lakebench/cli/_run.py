@@ -464,7 +464,36 @@ def _aml_batch_gate_problems(
             "Could not confirm that detection produced alerts: no per-rule "
             "counts in the gold-finalize driver log and no scoring result."
         )
+    # A skipped rule is honest ("not run"), but when its designated typology
+    # is in the pre-registered behavioural subset the benchmark has no
+    # detector for a typology it claims to measure. Say so every run.
+    skipped = dict(getattr(last, "rules_skipped", None) or {})
+    if skipped:
+        from lakebench.benchmark.aml_queries import RULE_TARGETS
+
+        behavioural = _behavioural_subset()
+        for rule, reason in sorted(skipped.items()):
+            target = RULE_TARGETS.get(rule)
+            if target in behavioural:
+                warnings.append(
+                    f"{rule} not run ({reason}): pre-registered behavioural "
+                    f"typology {target} has no detector in this run."
+                )
     return problems, warnings
+
+
+def _behavioural_subset() -> set[str]:
+    """Behavioural typologies from the AML pre-registration file."""
+    import json
+
+    from lakebench._resources import get_aml_data_dir
+
+    d = get_aml_data_dir()
+    try:
+        data = json.loads((d / "aml_preregistration.json").read_text()) if d else {}
+    except (OSError, ValueError):
+        return set()
+    return set(data.get("behavioural_subset", []))
 
 
 def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):

@@ -488,20 +488,48 @@ def w4_risk_propagation(
 def _truncate_lineage(df: DataFrame) -> DataFrame:
     """Materialise ``df`` and cut its lineage.
 
-    A reliable checkpoint under ``LB_GOLD_URI`` when that is set (the
-    cluster path): unlike localCheckpoint it survives losing an executor,
-    which would otherwise fail the rule with "checkpoint block not found".
-    localCheckpoint otherwise (local runs and tests).
+    A reliable checkpoint under ``LB_GOLD_URI`` when that is set (cluster
+    and local lakebench runs): unlike localCheckpoint it survives losing an
+    executor, which would otherwise fail the rule with "checkpoint block not
+    found". localCheckpoint only when no gold URI is set (tests). The
+    directory is removed by cleanup_w1_checkpoints after the rule loop.
     """
+    path = _w1_checkpoint_dir()
+    sc = df.sparkSession.sparkContext
+    if path:
+        if not sc.getCheckpointDir():
+            sc.setCheckpointDir(path)
+        return df.checkpoint(eager=True)
+    return df.localCheckpoint(eager=True)
+
+
+def _w1_checkpoint_dir() -> str | None:
+    """Where W1 writes its reliable checkpoints, or None (localCheckpoint)."""
     import os
 
     base = os.getenv("LB_GOLD_URI")
-    sc = df.sparkSession.sparkContext
-    if base:
-        if not sc.getCheckpointDir():
-            sc.setCheckpointDir(base.rstrip("/") + "/_checkpoints/w1")
-        return df.checkpoint(eager=True)
-    return df.localCheckpoint(eager=True)
+    return base.rstrip("/") + "/_checkpoints/w1" if base else None
+
+
+def cleanup_w1_checkpoints(spark) -> None:
+    """Delete W1's checkpoint directory. Call once the alerts are written.
+
+    Nothing else removes it (Spark's cleaner does not delete reliable
+    checkpoints by default), and left in place it grew with every run and
+    was counted in the measured gold size.
+    """
+    path = _w1_checkpoint_dir()
+    if not path:
+        return
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(path), hconf)
+        p = jvm.org.apache.hadoop.fs.Path(path)
+        if fs.exists(p):
+            fs.delete(p, True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[W1] checkpoint cleanup of {path} failed: {e}")
 
 
 def w1_connected_components(

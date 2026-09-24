@@ -530,6 +530,25 @@ class TrinoWorkerConfig(BaseModel):
     storage: str = "50Gi"
     storage_class: str = ""
 
+    @model_validator(mode="after")
+    def spill_fits_storage(self) -> TrinoWorkerConfig:
+        """The spill cap must fit the worker's storage volume: a worker that
+        spills past it is evicted by the kubelet mid-query. Also require Gi,
+        the only unit the Trino config template converts."""
+        if not self.spill_enabled:
+            return self
+        for field in ("spill_max_per_node", "storage"):
+            if not str(getattr(self, field)).endswith("Gi"):
+                raise ValueError(
+                    f"trino.worker.{field} must be in Gi (got {getattr(self, field)!r})"
+                )
+        if float(self.spill_max_per_node[:-2]) > float(self.storage[:-2]):
+            raise ValueError(
+                f"trino.worker.spill_max_per_node ({self.spill_max_per_node}) exceeds "
+                f"trino.worker.storage ({self.storage}); a spilling worker would be evicted"
+            )
+        return self
+
 
 class TrinoConfig(BaseModel):
     """Trino query engine configuration."""
