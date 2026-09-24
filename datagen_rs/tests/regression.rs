@@ -1584,3 +1584,22 @@ fn account_ibans_and_ids_are_unique_at_scale_10() {
     assert_eq!(ibans.len(), n, "duplicate IBANs");
     assert_eq!(ids.len(), n, "duplicate account ids");
 }
+
+#[test]
+fn no_amount_rounds_to_zero() {
+    use datagen_rs::amounts::{forwarded_amount, native_amount};
+    use datagen_rs::hash::Rng;
+    let mut rng = Rng::new(3);
+    for ccy in ["USD", "JPY", "KRW", "EUR"] {
+        // A low persona shift makes small amounts common; before the fix
+        // round-number snapping sent some of them to 0.00.
+        for _ in 0..200_000 {
+            assert!(native_amount(&mut rng, -6.0, ccy) > 0.0, "{ccy}");
+        }
+        let mut v = 1.0;
+        for _ in 0..500 {
+            v = forwarded_amount(&mut rng, v, ccy);
+            assert!(v > 0.0, "{ccy} chain forwarded nothing");
+        }
+    }
+}
