@@ -865,11 +865,15 @@ class DatagenConfig(BaseModel):
 
     mode: DatagenMode = DatagenMode.AUTO
     parallelism: int = Field(default=4, ge=1)
-    file_size: str = "512mb"
+    # Datagen output file size. 64mb is the size the measured generator
+    # throughput (338-600 MB/s per 8-core pod) came from; per-thread memory
+    # scales with it (about 5.2x for financial, 3.0x for c360), so 512mb
+    # needed 12-26 GiB per pod.
+    file_size: str = "64mb"
     dirty_data_ratio: float = 0.08
     cpu: str = "2"
     memory: str = "4Gi"
-    generators: int = 0  # per-pod generator processes (0 = auto: 1 for batch, 8 for continuous)
+    generators: int = 0  # generator threads per pod (0 = auto: follow the pod CPU)
     uploaders: int = 0  # per-pod uploader threads   (0 = auto: 1 for batch, 2 for continuous)
     checkpoint: DatagenCheckpointConfig = Field(default_factory=DatagenCheckpointConfig)
     timestamp_start: str | None = Field(

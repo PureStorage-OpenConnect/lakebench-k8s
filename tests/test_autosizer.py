@@ -213,9 +213,11 @@ class TestAutoSizingScaleOnly:
         assert config.architecture.query_engine.trino.worker.memory == "8Gi"
         assert config.architecture.workload.datagen.parallelism == 2
         # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        # the pod CPU request); memory from the measured RSS model, which for
+        # c360 at 64 MB files is under the 4Gi floor. See
+        # test_datagen_template_entrypoint_contract.
         assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.memory == "4Gi"
         assert config.architecture.workload.datagen.generators == 0
 
     def test_balanced_scale_sizing(self):
@@ -231,9 +233,11 @@ class TestAutoSizingScaleOnly:
         assert config.architecture.query_engine.trino.worker.replicas == 2
         assert config.architecture.workload.datagen.parallelism == 4
         # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        # the pod CPU request); memory from the measured RSS model, which for
+        # c360 at 64 MB files is under the 4Gi floor. See
+        # test_datagen_template_entrypoint_contract.
         assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.memory == "4Gi"
         assert config.architecture.workload.datagen.generators == 0
 
     def test_performance_scale_sizing(self):
@@ -250,9 +254,11 @@ class TestAutoSizingScaleOnly:
         assert config.architecture.query_engine.trino.worker.memory == "48Gi"
         assert config.architecture.workload.datagen.parallelism >= 8
         # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        # the pod CPU request); memory from the measured RSS model, which for
+        # c360 at 64 MB files is under the 4Gi floor. See
+        # test_datagen_template_entrypoint_contract.
         assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.memory == "4Gi"
         assert config.architecture.workload.datagen.generators == 0
 
     def test_extreme_scale_sizing(self):
@@ -267,9 +273,11 @@ class TestAutoSizingScaleOnly:
         assert config.platform.compute.spark.executor.memory == "48g"
         assert config.architecture.query_engine.trino.worker.replicas >= 8
         # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        # the pod CPU request); memory from the measured RSS model, which for
+        # c360 at 64 MB files is under the 4Gi floor. See
+        # test_datagen_template_entrypoint_contract.
         assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.memory == "4Gi"
         assert config.architecture.workload.datagen.generators == 0
 
     def test_memory_overhead_derived(self):
@@ -349,9 +357,11 @@ class TestAutoSizingUserOverride:
         resolve_auto_sizing(config)
 
         # Datagen: 8 CPU per pod; generators stays 0 ("auto": threads follow
-        # the pod CPU request). See test_datagen_template_entrypoint_contract.
+        # the pod CPU request); memory from the measured RSS model, which for
+        # c360 at 64 MB files is under the 4Gi floor. See
+        # test_datagen_template_entrypoint_contract.
         assert config.architecture.workload.datagen.cpu == "8"
-        assert config.architecture.workload.datagen.memory == "8Gi"
+        assert config.architecture.workload.datagen.memory == "4Gi"
         assert config.architecture.workload.datagen.generators == 0
 
     def test_datagen_memory_user_value_honoured_continuous(self):

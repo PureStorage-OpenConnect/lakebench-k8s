@@ -94,23 +94,49 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
     return int(float(s) * 1000)
 
 
-def _datagen_memory_default(config: LakebenchConfig) -> str:
-    """Per-pod datagen memory default by schema and scale.
+# Datagen memory model, fitted to measured peak RSS of the real generator
+# binary at 64 MB and 512 MB files, 1 and 8 threads (2026-09-24): each worker
+# thread holds about 4.8x the output file size for financial (row vectors,
+# sorted copies, the Arrow batch, writer buffers) and about 3.0x for c360; a
+# pod carries a fixed ~1.7 GiB (financial) or ~0.3 GiB (c360); node 0 builds
+# the full financial world at about 575 B per entity. The same
+# coefficients are used by datagen_rs/entrypoint.py to cap threads, so the
+# two never disagree.
+DATAGEN_PER_THREAD_FILE_MULTIPLIER = {"financial": 4.8, "customer360": 3.0}
+DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 = 575
+DATAGEN_ENTITIES_PER_SCALE = 111_111
+DATAGEN_BASE_GIB = {"financial": 1.7, "customer360": 0.3}
+DATAGEN_HEADROOM = 1.25
 
-    Financial pods build the entity world (about 175 B/entity at peak,
-    111,111 entities per scale unit) plus per-thread file buffers; c360 pods
-    hold only the buffers.
-    """
-    schema = getattr(config.architecture.workload.schema_type, "value", "")
-    scale = float(config.architecture.workload.datagen.scale or 1)
+
+def _parse_size_mb(size: str) -> float:
+    """'64mb' / '1GB' / '512MB' -> MiB (same units as the datagen deployer)."""
+    t = size.strip().upper()
+    for suffix, mult in (("TB", 2**20), ("GB", 2**10), ("MB", 1.0), ("KB", 2**-10)):
+        if t.endswith(suffix):
+            return float(t[: -len(suffix)]) * mult
+    return float(t.rstrip("B") or 0) / 2**20
+
+
+def datagen_memory_gib(schema: str, scale: float, threads: int, file_size_mb: float) -> float:
+    """Estimated peak RSS in GiB for the busiest datagen pod (node 0)."""
+    per_thread = (file_size_mb / 1024.0) * DATAGEN_PER_THREAD_FILE_MULTIPLIER.get(schema, 3.0)
+    world = 0.0
     if schema == "financial":
-        if scale > 300:
-            return "24Gi"
-        if scale > 100:
-            return "16Gi"
-        if scale > 10:
-            return "12Gi"
-    return "8Gi"
+        world = DATAGEN_ENTITIES_PER_SCALE * scale * DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 / 2**30
+    return (world + threads * per_thread + DATAGEN_BASE_GIB.get(schema, 0.3)) * DATAGEN_HEADROOM
+
+
+def _datagen_memory_default(config: LakebenchConfig, cpu: str) -> str:
+    """Per-pod datagen memory limit that fits the measured peak RSS."""
+    import math
+
+    datagen = config.architecture.workload.datagen
+    schema = getattr(config.architecture.workload.schema_type, "value", "customer360")
+    threads = max(1, _parse_cpu_millicores(cpu) // 1000)
+    file_mb = _parse_size_mb(datagen.file_size)
+    gib = datagen_memory_gib(schema, float(datagen.scale or 1), threads, file_mb)
+    return f"{max(4, math.ceil(gib))}Gi"
 
 
 def _resolve_datagen_mode(config: LakebenchConfig) -> str:
@@ -216,12 +242,11 @@ def resolve_auto_sizing(
     # generators stays 0 ("auto"), so the entrypoint sizes threads from the
     # pod's CPU request.
     #
-    # Memory: each worker thread buffers about file_size * 1.125 bytes, and
-    # the financial world model holds about 130-175 B per entity (111,111
-    # entities per scale unit), so large financial scales need more.
+    # Memory: derived from measured peak RSS (see datagen_memory_gib), for
+    # the CPU (thread count) actually used.
     datagen = config.architecture.workload.datagen
-    dg_cpu = "8"
-    dg_memory = _datagen_memory_default(config)
+    dg_cpu = datagen.cpu if "cpu" in datagen.model_fields_set else "8"
+    dg_memory = _datagen_memory_default(config, dg_cpu)
     if _set_if_default(datagen, "cpu", dg_cpu):
         changes.append(f"datagen.cpu={dg_cpu}")
     if _set_if_default(datagen, "memory", dg_memory):
