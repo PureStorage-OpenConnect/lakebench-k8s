@@ -350,7 +350,7 @@ class TestScaleConfig:
     def test_datagen_image_default(self):
         """Default datagen image uses :latest tag."""
         config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:d841bcc"
+        assert config.images.datagen == "docker.io/sillidata/lb-datagen:14c4eee"
 
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""

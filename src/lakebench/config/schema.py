@@ -189,7 +189,7 @@ class ImagesConfig(ConfigModel):
 
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
     # every datagen_rs change; :latest drifted from the code it claimed to be.
-    datagen: str = "docker.io/sillidata/lb-datagen:d841bcc"
+    datagen: str = "docker.io/sillidata/lb-datagen:14c4eee"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
