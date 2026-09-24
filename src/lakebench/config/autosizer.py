@@ -99,11 +99,12 @@ def _parse_cpu_millicores(cpu: str | int | float) -> int:
 # thread holds about 4.8x the output file size for financial (row vectors,
 # sorted copies, the Arrow batch, writer buffers) and about 3.0x for c360; a
 # pod carries a fixed ~1.7 GiB (financial) or ~0.3 GiB (c360); node 0 builds
-# the full financial world at about 575 B per entity. The same
+# the full financial world at about 650 B per entity (measured scale 1-100:
+# node-0 peak 3.54, 4.66, 7.62, 10.69 GiB at scale 1, 10, 50, 100). The same
 # coefficients are used by datagen_rs/entrypoint.py to cap threads, so the
 # two never disagree.
 DATAGEN_PER_THREAD_FILE_MULTIPLIER = {"financial": 4.8, "customer360": 3.0}
-DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 = 575
+DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0 = 650
 DATAGEN_ENTITIES_PER_SCALE = 111_111
 DATAGEN_BASE_GIB = {"financial": 1.7, "customer360": 0.3}
 DATAGEN_HEADROOM = 1.25

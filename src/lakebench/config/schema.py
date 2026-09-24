@@ -865,10 +865,10 @@ class DatagenConfig(BaseModel):
 
     mode: DatagenMode = DatagenMode.AUTO
     parallelism: int = Field(default=4, ge=1)
-    # Datagen output file size. 64mb is the size the measured generator
-    # throughput (338-600 MB/s per 8-core pod) came from; per-thread memory
-    # scales with it (about 5.2x for financial, 3.0x for c360), so 512mb
-    # needed 12-26 GiB per pod.
+    # Datagen output file size. Per-thread generator memory scales with it
+    # (about 4.8x for financial, 3.0x for c360, measured), so the old 512mb
+    # default needed 12-26 GiB per 8-thread pod. At 64mb, measured single-pod
+    # throughput at 8 threads was c360 982 MB/s, financial 221-309 MB/s.
     file_size: str = "64mb"
     dirty_data_ratio: float = 0.08
     cpu: str = "2"

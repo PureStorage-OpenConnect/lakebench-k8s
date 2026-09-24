@@ -570,7 +570,7 @@ architecture:
       scale: 10                    # 1 unit ~ 10 GB bronze (10 = ~100 GB)
       # mode: auto                    # auto | batch | continuous
       parallelism: 1                 # Number of datagen pods
-      # file_size: 512mb
+      # file_size: 64mb
       # dirty_data_ratio: 0.08
       ## CPU and memory are hard-locked per mode (cannot be overridden):
       ##   batch:      4 CPU, 4Gi   (scale <= 10)

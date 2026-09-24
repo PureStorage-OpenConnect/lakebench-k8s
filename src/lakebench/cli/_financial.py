@@ -119,10 +119,10 @@ def replay(
         typer.Option(
             help=(
                 "Fully-qualified output alerts table (catalog.namespace.table). "
-                "Defaults to the config's gold_alerts table so score_financial's "
-                "join finds the rows without extra plumbing. Multiple rules can "
-                "share the same table -- replay does DELETE WHERE rule_id=X "
-                "before appending, so each rule owns its rows."
+                "Defaults to the config's gold alerts table with an _replay "
+                "suffix, so a replay never overwrites the batch run's alerts. "
+                "Multiple rules can share the table: replay does DELETE WHERE "
+                "rule_id=X before appending, so each rule owns its rows."
             ),
         ),
     ] = "",
@@ -133,13 +133,14 @@ def replay(
 
     cfg = _load_config(config)
 
-    # Default target = config's gold_alerts, fully qualified with the active
-    # catalog. score_financial reads exactly this table, so defaulting here
-    # removes the "why is my recall 0" foot-gun of writing to a different
-    # table than what score reads.
+    # Default target is a SEPARATE table (gold alerts + "_replay"). Replay
+    # deletes its rule's rows in the target and writes new ones under a fresh
+    # run_id; defaulting to gold.alerts wiped the batch run's rows for that
+    # rule, and scoring (scoped to the batch run's run_id) then read that
+    # typology as 0% recall. Pass --output-alerts to write elsewhere.
     if not output_alerts:
         catalog = cfg.architecture.query_engine.trino.catalog_name
-        output_alerts = f"{catalog}.{cfg.architecture.tables.gold_alerts}"
+        output_alerts = f"{catalog}.{cfg.architecture.tables.gold_alerts}_replay"
 
     args = [
         "--rule",

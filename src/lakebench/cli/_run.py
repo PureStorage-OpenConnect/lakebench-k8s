@@ -393,26 +393,41 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.rules_skipped = parsed.rules_skipped
 
 
-def _aml_batch_gate_problems(gold_jobs: list) -> list[str]:
+def _aml_batch_gate_problems(
+    gold_jobs: list, scoring: dict | None = None
+) -> tuple[list[str], list[str]]:
     """Reasons an AML batch run must not be reported as a success.
 
-    Uses the last gold-finalize job (it re-detects over the whole corpus, so
-    last-cycle-wins). Crashed rules and zero total alerts both mean detection
-    measured nothing; skipped rules are reported as "not run" instead.
+    Returns ``(problems, warnings)``. Uses the last gold-finalize job (it
+    re-detects over the whole corpus, so last-cycle-wins). A crashed rule
+    fails the run. Zero alerts fails it, judged from the scorer's own alert
+    count when scoring ran; per-rule counts parsed from driver logs are the
+    fallback. Missing logs with no scoring result is unknown, a warning, not
+    proof that nothing was detected.
     """
     if not gold_jobs:
-        return []
+        return [], []
     last = gold_jobs[-1]
-    problems = [
-        f"Detection rule {rule} failed: {err}"
-        for rule, err in sorted((getattr(last, "rule_errors", None) or {}).items())
-    ]
-    if sum((getattr(last, "alerts_by_rule", None) or {}).values()) == 0:
-        problems.append(
-            "AML batch run produced zero alerts: detection did not measure "
-            "anything. Check the gold-finalize driver log."
+    errors = dict(getattr(last, "rule_errors", None) or {})
+    by_rule = dict(getattr(last, "alerts_by_rule", None) or {})
+    problems = [f"Detection rule {rule} failed: {err}" for rule, err in sorted(errors.items())]
+    warnings: list[str] = []
+    zero = (
+        "AML batch run produced zero alerts: detection did not measure "
+        "anything. Check the gold-finalize driver log."
+    )
+    if scoring is not None and scoring.get("total_alerts") is not None:
+        if int(scoring["total_alerts"]) == 0:
+            problems.append(zero)
+    elif by_rule:
+        if sum(by_rule.values()) == 0:
+            problems.append(zero)
+    elif not errors:
+        warnings.append(
+            "Could not confirm that detection produced alerts: no per-rule "
+            "counts in the gold-finalize driver log and no scoring result."
         )
-    return problems
+    return problems, warnings
 
 
 def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
@@ -1457,10 +1472,21 @@ def run(
             },
         )
 
-        # AML batch honesty gate (LB-044 class). A run whose rules crashed, or
-        # that produced no alerts at all, has not measured detection, whatever
-        # the stage exit codes say. Skipped rules (e.g. W1 above its vertex
-        # cap) are reported as "not run" and do not fail the run.
+        # LB-123: fold financial recall scoring into the batch run so the
+        # scorecard shows real recall/precision, not just alert counts. Only
+        # for a full financial pipeline run (not a single --stage), and only
+        # when the pipeline succeeded (gold.alerts + manifest must both exist).
+        if (
+            cfg.architecture.workload.schema_type.value == "financial"
+            and not stage
+            and pipeline_success
+        ):
+            _financial_scoring = _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout)
+
+        # AML batch honesty gate (LB-044 class), after scoring so a single
+        # crashed rule does not also throw away the other rules' recall.
+        # Crashed rules or zero alerts mean detection measured nothing,
+        # whatever the stage exit codes say; skipped rules are "not run".
         if (
             cfg.architecture.workload.schema_type.value == "financial"
             and not stage
@@ -1472,20 +1498,12 @@ def run(
                 for jm in collector.current_run.jobs
                 if getattr(jm, "job_type", "") == "gold-finalize"
             ]
-            for _problem in _aml_batch_gate_problems(_gold_jobs):
+            _problems, _warnings = _aml_batch_gate_problems(_gold_jobs, _financial_scoring)
+            for _w in _warnings:
+                print_warning(_w)
+            for _problem in _problems:
                 print_error(_problem)
                 pipeline_success = False
-
-        # LB-123: fold financial recall scoring into the batch run so the
-        # scorecard shows real recall/precision, not just alert counts. Only
-        # for a full financial pipeline run (not a single --stage), and only
-        # when the pipeline succeeded (gold.alerts + manifest must both exist).
-        if (
-            cfg.architecture.workload.schema_type.value == "financial"
-            and not stage
-            and pipeline_success
-        ):
-            _financial_scoring = _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout)
 
         # -- Phase 5/7: Maintenance ------------------------------------------------
         console.print()

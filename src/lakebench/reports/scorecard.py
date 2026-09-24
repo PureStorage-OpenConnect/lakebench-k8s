@@ -126,7 +126,8 @@ class FinancialScorecardBlock:
         total_alerts = None
         fp_rate = None
         fp_by_rule: dict = {}
-        random_floor = None
+        chance_by_rule: dict = {}
+        txn_prec_by_rule: dict = {}
         if scoring:
             for t in scoring.get("typologies", []) or []:
                 tt = t.get("typology_type")
@@ -135,7 +136,8 @@ class FinancialScorecardBlock:
             total_alerts = scoring.get("total_alerts")
             fp_rate = scoring.get("fp_rate")
             fp_by_rule = dict(scoring.get("fp_rate_by_rule") or {})
-            random_floor = scoring.get("random_control_floor")
+            chance_by_rule = dict(scoring.get("chance_by_rule") or {})
+            txn_prec_by_rule = dict(scoring.get("txn_precision_by_rule") or {})
 
         # Known rules first (in RULE_TARGETS order), then any rule that
         # emitted alerts or skipped but is not yet in RULE_TARGETS -- so a
@@ -152,6 +154,10 @@ class FinancialScorecardBlock:
             incidental_cell = "-"
             fp_val = fp_by_rule.get(rule)
             fp_cell = f"{float(fp_val) * 100:.1f}%" if fp_val is not None else "-"
+            chance_val = chance_by_rule.get(rule)
+            chance_cell = f"{float(chance_val) * 100:.1f}%" if chance_val is not None else "-"
+            txn_val = txn_prec_by_rule.get(rule)
+            txn_cell = f"{float(txn_val) * 100:.2f}%" if txn_val is not None else "-"
             if rule in rule_errors:
                 # A crashed rule is not "ran, 0 alerts".
                 status = '<span style="color: var(--danger, red);">error</span>'
@@ -177,6 +183,13 @@ class FinancialScorecardBlock:
                 if trow and trow.get("detection_status") == "rule_error":
                     status = '<span style="color: var(--danger, red);">error</span>'
                     recall_cell = "n/a"
+                elif trow and trow.get("detection_status") == "partial":
+                    status = '<span style="color: var(--warning);">partial</span>'
+                    recall_cell = (
+                        f"{float(trow['recall']) * 100:.1f}%"
+                        if trow.get("recall") is not None
+                        else "n/a"
+                    )
                 elif trow and trow.get("detection_status") == "rule_skipped":
                     status = '<span style="color: var(--warning);">not run</span>'
                     recall_cell = "n/a"
@@ -190,12 +203,13 @@ class FinancialScorecardBlock:
             body_rows.append(
                 f"<tr><td>{rule}</td><td>{typ_cell}</td>"
                 f"<td>{alerts_cell}</td><td>{recall_cell}</td>"
-                f"<td>{incidental_cell}</td><td>{fp_cell}</td><td>{status}</td></tr>"
+                f"<td>{chance_cell}</td><td>{incidental_cell}</td>"
+                f"<td>{fp_cell}</td><td>{txn_cell}</td><td>{status}</td></tr>"
             )
 
-        # Recall counts only alerts from each typology's designated rule.
-        # "Incidental" is recall credited by any rule; the random control's
-        # incidental recall is the chance floor to read both against.
+        # Recall counts only alerts from each typology's designated rule;
+        # "Chance" is that rule's hit rate on the random control, the floor
+        # its recall must beat. "Incidental" is recall credited by any rule.
         footer = ""
         if total_alerts is not None:
             fp_str = f"{fp_rate * 100:.1f}%" if fp_rate is not None else "n/a"
@@ -204,12 +218,6 @@ class FinancialScorecardBlock:
                 'font-size: 0.8125rem;">'
                 f"Total alerts: <strong>{total_alerts:,}</strong> | "
                 f"False-positive rate (alerts touching no planted txn): <strong>{fp_str}</strong>"
-                + (
-                    f" | Chance floor (random control, incidental): "
-                    f"<strong>{float(random_floor) * 100:.1f}%</strong>"
-                    if random_floor is not None
-                    else ""
-                )
                 + "</div>"
             )
 
@@ -223,8 +231,10 @@ class FinancialScorecardBlock:
                         <th>Target typology</th>
                         <th title="Alerts emitted by this rule">Alerts</th>
                         <th title="Fraction of planted instances detected by this rule">Recall</th>
+                        <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
                         <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>
                         <th title="Share of this rule's alerts that touch none of its target typology's txns">FP</th>
+                        <th title="Share of the txns in this rule's alerts that are planted target txns">Txn precision</th>
                         <th>Status</th>
                     </tr>
                 </thead>
