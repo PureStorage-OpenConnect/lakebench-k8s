@@ -11,7 +11,7 @@ use rayon::prelude::*;
 
 use parquet::arrow::ArrowWriter;
 
-use datagen_rs::amounts::{native_amount, structuring_amount};
+use datagen_rs::amounts::{instance_amounts, native_amount};
 use datagen_rs::customer360;
 use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::emit::{build_batch, Batch};
@@ -349,7 +349,20 @@ fn pacs008_main() {
         ) {
             inst_bounds.insert(inst.id.clone(), b);
         }
-        for (row_idx, r) in rows.into_iter().enumerate() {
+        // Typology rows carry the ORIGINATOR's persona amount shift and
+        // currency, the same as that account's baseline rows, so a
+        // participant's amounts stay consistent with its own history; chained
+        // legs forward the previous leg less a skim (amounts::instance_amounts).
+        // Amounts are assigned before the suppression drop below, so a dropped
+        // leg still carries the chain forward.
+        let amounts = instance_amounts(
+            inst.typ,
+            &rows,
+            |o| w.ccy[o as usize],
+            |o| w.amount_logshift[o as usize],
+            &mut trng,
+        );
+        for (row_idx, (r, amount)) in rows.into_iter().zip(amounts).enumerate() {
             // A NON-dormant typology row whose originator is a dormant
             // participant inside its suppression window would fill the dormancy
             // gap -- drop it. Dormant-instance rows (anchor + burst) are exempt.
@@ -358,14 +371,6 @@ fn pacs008_main() {
                 continue;
             }
             let ccy = w.ccy[r.orig as usize];
-            // Typology rows carry the ORIGINATOR's persona amount shift and
-            // currency, the same as that account's baseline rows, so a
-            // participant's amounts stay consistent with its own history.
-            let amount = if r.structuring {
-                structuring_amount(&mut trng, ccy)
-            } else {
-                native_amount(&mut trng, w.amount_logshift[r.orig as usize], ccy)
-            };
             let fid = ((gcal.mass_at(r.ts_us) * total_files as f64) as i64)
                 .clamp(0, total_files - 1) as usize;
             let uid = typology_uid(inst.seed, row_idx);
