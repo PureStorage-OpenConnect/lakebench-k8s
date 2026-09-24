@@ -7,12 +7,47 @@ matching the specification in lakebench-spec.md Section 4.
 from __future__ import annotations
 
 import logging
+import warnings
 from enum import Enum
-from typing import Any
+from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
+
+
+class ConfigModel(BaseModel):
+    """Base for every user-facing config model: unknown keys are errors.
+
+    A misspelt or misplaced key used to be dropped silently, so the run went
+    ahead on the default and the user never learned their setting was
+    ignored. Deprecated spellings stay accepted because each is migrated by a
+    ``mode="before"`` validator, which runs before the extra-key check.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Keys that were once valid and now do nothing. They are dropped with a
+    # DeprecationWarning instead of rejected, so existing configs keep
+    # loading. Maps key -> what to do instead.
+    _removed_keys: ClassVar[dict[str, str]] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_removed_keys(cls, data: object) -> object:
+        if not isinstance(data, dict) or not cls._removed_keys:
+            return data
+        present = [k for k in cls._removed_keys if k in data]
+        if not present:
+            return data
+        data = dict(data)
+        for key in present:
+            data.pop(key)
+            msg = f"'{key}' ({cls.__name__}) is no longer used and is ignored. {cls._removed_keys[key]}"
+            logger.warning(msg)
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        return data
+
 
 # =============================================================================
 # Enums
@@ -145,8 +180,12 @@ class ReportFormat(str, Enum):
 # =============================================================================
 
 
-class ImagesConfig(BaseModel):
+class ImagesConfig(ConfigModel):
     """Container image configuration for all Lakebench components."""
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "pull_secrets": "No deployer ever applied it; removed in v1.5.",
+    }
 
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
     # every datagen_rs change; :latest drifted from the code it claimed to be.
@@ -182,7 +221,7 @@ class ImagesConfig(BaseModel):
 # =============================================================================
 
 
-class KubernetesConfig(BaseModel):
+class KubernetesConfig(ConfigModel):
     """Kubernetes connection and namespace configuration."""
 
     context: str = ""  # Empty = use current context
@@ -190,7 +229,7 @@ class KubernetesConfig(BaseModel):
     create_namespace: bool = True
 
 
-class S3BucketsConfig(BaseModel):
+class S3BucketsConfig(ConfigModel):
     """S3 bucket names for each data layer."""
 
     bronze: str = "lakebench-bronze"
@@ -198,7 +237,7 @@ class S3BucketsConfig(BaseModel):
     gold: str = "lakebench-gold"
 
 
-class S3Config(BaseModel):
+class S3Config(ConfigModel):
     """S3/object storage configuration."""
 
     endpoint: str = Field(
@@ -239,7 +278,7 @@ class S3Config(BaseModel):
         return self
 
 
-class ScratchStorageConfig(BaseModel):
+class ScratchStorageConfig(ConfigModel):
     """Scratch storage configuration for Spark shuffle.
 
     The StorageClass is Category 2 shared infrastructure: lakebench uses
@@ -250,6 +289,13 @@ class ScratchStorageConfig(BaseModel):
     command via the ``storageclass/px-csi-scratch.yaml.j2`` template.
     """
 
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "create_storage_class": (
+            "lakebench no longer creates StorageClasses; a cluster admin runs "
+            "'lakebench admin install-scratch-storage-class' once."
+        ),
+    }
+
     enabled: bool = False
     storage_class: str = "px-csi-scratch"
     size: str = "100Gi"
@@ -259,21 +305,21 @@ class ScratchStorageConfig(BaseModel):
     )
 
 
-class StorageConfig(BaseModel):
+class StorageConfig(ConfigModel):
     """Storage configuration including S3 and scratch volumes."""
 
     s3: S3Config = Field(default_factory=S3Config)
     scratch: ScratchStorageConfig = Field(default_factory=ScratchStorageConfig)
 
 
-class SparkDriverConfig(BaseModel):
+class SparkDriverConfig(ConfigModel):
     """Spark driver resource configuration."""
 
     cores: int = 4
     memory: str = "8g"
 
 
-class SparkExecutorConfig(BaseModel):
+class SparkExecutorConfig(ConfigModel):
     """Spark executor resource configuration."""
 
     instances: int = 8
@@ -282,7 +328,7 @@ class SparkExecutorConfig(BaseModel):
     memory_overhead: str = "12g"
 
 
-class SparkOperatorConfig(BaseModel):
+class SparkOperatorConfig(ConfigModel):
     """Spark operator installation configuration."""
 
     install: bool = False
@@ -290,7 +336,7 @@ class SparkOperatorConfig(BaseModel):
     version: str = "2.5.1"  # webhook volume injection gap (gotcha 3) unchanged from 2.4.0; template workaround stays
 
 
-class SparkComputeConfig(BaseModel):
+class SparkComputeConfig(ConfigModel):
     """Spark compute configuration."""
 
     operator: SparkOperatorConfig = Field(default_factory=SparkOperatorConfig)
@@ -340,21 +386,21 @@ class SparkComputeConfig(BaseModel):
     )
 
 
-class PostgresConfig(BaseModel):
+class PostgresConfig(ConfigModel):
     """PostgreSQL configuration for metadata backend."""
 
     storage: str = "10Gi"
     storage_class: str = ""  # Empty = default storage class
 
 
-class ComputeConfig(BaseModel):
+class ComputeConfig(ConfigModel):
     """Compute resource configuration."""
 
     spark: SparkComputeConfig = Field(default_factory=SparkComputeConfig)
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
 
 
-class PlatformConfig(BaseModel):
+class PlatformConfig(ConfigModel):
     """Layer 1: Platform configuration."""
 
     kubernetes: KubernetesConfig = Field(default_factory=KubernetesConfig)
@@ -367,7 +413,7 @@ class PlatformConfig(BaseModel):
 # =============================================================================
 
 
-class HiveThriftConfig(BaseModel):
+class HiveThriftConfig(ConfigModel):
     """Hive Metastore thrift server configuration."""
 
     min_threads: int = 10
@@ -375,7 +421,7 @@ class HiveThriftConfig(BaseModel):
     client_timeout: str = "300s"
 
 
-class HiveResourcesConfig(BaseModel):
+class HiveResourcesConfig(ConfigModel):
     """Hive Metastore resource configuration."""
 
     cpu_min: str = "500m"
@@ -383,7 +429,7 @@ class HiveResourcesConfig(BaseModel):
     memory: str = "4Gi"
 
 
-class StackableOperatorConfig(BaseModel):
+class StackableOperatorConfig(ConfigModel):
     """Stackable operator installation configuration."""
 
     install: bool = False
@@ -391,7 +437,7 @@ class StackableOperatorConfig(BaseModel):
     version: str = "25.7.0"
 
 
-class HiveConfig(BaseModel):
+class HiveConfig(ConfigModel):
     """Hive Metastore configuration."""
 
     operator: StackableOperatorConfig = Field(default_factory=StackableOperatorConfig)
@@ -399,14 +445,14 @@ class HiveConfig(BaseModel):
     resources: HiveResourcesConfig = Field(default_factory=HiveResourcesConfig)
 
 
-class PolarisResourcesConfig(BaseModel):
+class PolarisResourcesConfig(ConfigModel):
     """Polaris resource configuration."""
 
     cpu: str = "1"
     memory: str = "2Gi"
 
 
-class PolarisConfig(BaseModel):
+class PolarisConfig(ConfigModel):
     """Apache Polaris REST catalog configuration.
 
     Polaris is an open-source Iceberg REST catalog (port 8181).
@@ -430,7 +476,7 @@ class PolarisConfig(BaseModel):
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
 
-class UnityConfig(BaseModel):
+class UnityConfig(ConfigModel):
     """Unity Catalog configuration.
 
     OSS Unity Catalog is a self-hosted REST catalog server (Apache-licensed).
@@ -443,7 +489,7 @@ class UnityConfig(BaseModel):
     resources: PolarisResourcesConfig = Field(default_factory=PolarisResourcesConfig)
 
 
-class CatalogConfig(BaseModel):
+class CatalogConfig(ConfigModel):
     """Catalog service configuration."""
 
     type: CatalogType = CatalogType.HIVE
@@ -485,7 +531,7 @@ def require_polaris_client_secret(cfg: Any) -> str:
     return secret
 
 
-class IcebergConfig(BaseModel):
+class IcebergConfig(ConfigModel):
     """Apache Iceberg table format configuration."""
 
     # 1.11.0 is the first release compiled for Java 17 and the first to publish
@@ -497,29 +543,33 @@ class IcebergConfig(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
-class DeltaConfig(BaseModel):
+class DeltaConfig(ConfigModel):
     """Delta Lake table format configuration."""
 
     version: str = "auto"
     properties: dict[str, Any] = Field(default_factory=dict)
 
 
-class TableFormatConfig(BaseModel):
+class TableFormatConfig(ConfigModel):
     """Table format configuration."""
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "hudi": "Hudi is not a supported table format; removed in v1.2.",
+    }
 
     type: TableFormatType = TableFormatType.ICEBERG
     iceberg: IcebergConfig = Field(default_factory=IcebergConfig)
     delta: DeltaConfig = Field(default_factory=DeltaConfig)
 
 
-class TrinoCoordinatorConfig(BaseModel):
+class TrinoCoordinatorConfig(ConfigModel):
     """Trino coordinator resource configuration."""
 
     cpu: str = "2"
     memory: str = "8Gi"
 
 
-class TrinoWorkerConfig(BaseModel):
+class TrinoWorkerConfig(ConfigModel):
     """Trino worker configuration."""
 
     replicas: int = 2
@@ -578,7 +628,7 @@ class TrinoWorkerConfig(BaseModel):
         return self
 
 
-class TrinoConfig(BaseModel):
+class TrinoConfig(ConfigModel):
     """Trino query engine configuration."""
 
     coordinator: TrinoCoordinatorConfig = Field(default_factory=TrinoCoordinatorConfig)
@@ -586,7 +636,7 @@ class TrinoConfig(BaseModel):
     catalog_name: str = "lakehouse"
 
 
-class SparkThriftConfig(BaseModel):
+class SparkThriftConfig(ConfigModel):
     """Spark Thrift Server configuration."""
 
     cores: int = 2
@@ -594,7 +644,7 @@ class SparkThriftConfig(BaseModel):
     catalog_name: str = "lakehouse"
 
 
-class DuckDBConfig(BaseModel):
+class DuckDBConfig(ConfigModel):
     """DuckDB query engine configuration."""
 
     cores: int = 2
@@ -608,7 +658,7 @@ class DuckDBConfig(BaseModel):
     version: str = "1.5.5"
 
 
-class QueryEngineConfig(BaseModel):
+class QueryEngineConfig(ConfigModel):
     """Query engine configuration."""
 
     type: QueryEngineType = QueryEngineType.TRINO
@@ -617,15 +667,19 @@ class QueryEngineConfig(BaseModel):
     duckdb: DuckDBConfig = Field(default_factory=DuckDBConfig)
 
 
-class BronzeLayerConfig(BaseModel):
+class BronzeLayerConfig(ConfigModel):
     """Bronze layer configuration."""
 
     format: str = "parquet"
     path_template: str = "customer/interactions"
 
 
-class SilverLayerConfig(BaseModel):
+class SilverLayerConfig(ConfigModel):
     """Silver layer configuration."""
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "strategy": "The silver build never read it; removed in v1.5.",
+    }
 
     format: str = "iceberg"
     table_name: str = "customer_interactions_enriched"
@@ -641,7 +695,7 @@ class SilverLayerConfig(BaseModel):
     )
 
 
-class GoldTableConfig(BaseModel):
+class GoldTableConfig(ConfigModel):
     """Gold layer table configuration."""
 
     name: str
@@ -649,7 +703,7 @@ class GoldTableConfig(BaseModel):
     aggregations: list[str] = Field(default_factory=list)
 
 
-class GoldLayerConfig(BaseModel):
+class GoldLayerConfig(ConfigModel):
     """Gold layer configuration."""
 
     format: str = "iceberg"
@@ -669,7 +723,7 @@ class GoldLayerConfig(BaseModel):
     )
 
 
-class MedallionConfig(BaseModel):
+class MedallionConfig(ConfigModel):
     """Medallion processing pattern configuration."""
 
     bronze: BronzeLayerConfig = Field(default_factory=BronzeLayerConfig)
@@ -677,7 +731,7 @@ class MedallionConfig(BaseModel):
     gold: GoldLayerConfig = Field(default_factory=GoldLayerConfig)
 
 
-class SustainedConfig(BaseModel):
+class SustainedConfig(ConfigModel):
     """Sustained pipeline configuration.
 
     Controls trigger intervals for streaming jobs, run duration,
@@ -805,7 +859,7 @@ class SustainedConfig(BaseModel):
         return self
 
 
-class ProcessingConfig(BaseModel):
+class ProcessingConfig(ConfigModel):
     """Processing pattern configuration."""
 
     pattern: ProcessingPattern = ProcessingPattern.MEDALLION
@@ -842,10 +896,14 @@ class ProcessingConfig(BaseModel):
                 DeprecationWarning,
                 stacklevel=2,
             )
-            if "sustained" not in data:
-                data["sustained"] = data.pop("continuous")
-            else:
-                data.pop("continuous")
+            if "sustained" in data:
+                # Dropping one silently would lose settings without a trace.
+                raise ValueError(
+                    "both 'pipeline.continuous' (deprecated) and 'pipeline.sustained' are "
+                    "set; move the settings under 'sustained' and remove 'continuous'"
+                )
+            data = dict(data)
+            data["sustained"] = data.pop("continuous")
         return data
 
     @field_validator("mode", mode="before")
@@ -874,14 +932,14 @@ class ProcessingConfig(BaseModel):
         return self
 
 
-class DatagenCheckpointConfig(BaseModel):
+class DatagenCheckpointConfig(ConfigModel):
     """Data generation checkpoint configuration."""
 
     enabled: bool = True
     path: str = ".lakebench_checkpoint.json"
 
 
-class DatagenConfig(BaseModel):
+class DatagenConfig(ConfigModel):
     """Data generation configuration.
 
     Uses an abstract scale factor instead of explicit data sizes.
@@ -965,13 +1023,19 @@ class DatagenConfig(BaseModel):
         return self.scale
 
 
-class Customer360Config(BaseModel):
+class Customer360Config(ConfigModel):
     """Customer360 workload schema configuration.
 
     Domain dimensions (customers, date_range) are derived from
     ``datagen.scale``.  These fields allow manual overrides for
     advanced use cases.
     """
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "channels": "The customer360 generator never read it; removed in v1.5.",
+        "event_types": "The customer360 generator never read it; removed in v1.5.",
+        "quality_distribution": "The customer360 generator never read it; removed in v1.5.",
+    }
 
     unique_customers: int | None = Field(
         default=None,
@@ -983,8 +1047,19 @@ class Customer360Config(BaseModel):
     )
 
 
-class WorkloadConfig(BaseModel):
+class WorkloadConfig(ConfigModel):
     """Workload/data generation configuration."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _one_schema_spelling(cls, data: object) -> object:
+        # 'schema' is the documented key and 'schema_type' the field name;
+        # with both set pydantic reports the second as an unknown key.
+        if isinstance(data, dict) and "schema" in data and "schema_type" in data:
+            raise ValueError(
+                "both 'workload.schema' and 'workload.schema_type' are set; set only 'schema'"
+            )
+        return data
 
     schema_type: WorkloadSchema = Field(default=WorkloadSchema.CUSTOMER360, alias="schema")
     datagen: DatagenConfig = Field(default_factory=DatagenConfig)
@@ -1008,7 +1083,7 @@ class WorkloadConfig(BaseModel):
     # gold_finalize_financial via LB_FINANCIAL_W1_MAX_VERTICES.
     w1_max_vertices: int = Field(default=8_000_000, ge=1, le=200_000_000)
 
-    model_config = {"populate_by_name": True}
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
 
 # Supported component combinations (catalog, table_format, query_engine).
@@ -1115,7 +1190,7 @@ def nearest_supported(
     return best
 
 
-class TableNamesConfig(BaseModel):
+class TableNamesConfig(ConfigModel):
     """Fully-qualified Iceberg table names (namespace.table).
 
     Defaults match the Customer 360 pipeline.  Override these when using a
@@ -1248,7 +1323,7 @@ class TableNamesConfig(BaseModel):
         return out
 
 
-class BenchmarkConfig(BaseModel):
+class BenchmarkConfig(ConfigModel):
     """Benchmark configuration.
 
     Controls how the Trino query benchmark is executed.
@@ -1275,7 +1350,7 @@ class BenchmarkConfig(BaseModel):
     )
 
 
-class ArchitectureConfig(BaseModel):
+class ArchitectureConfig(ConfigModel):
     """Layer 2: Data architecture configuration."""
 
     catalog: CatalogConfig = Field(default_factory=CatalogConfig)
@@ -1301,10 +1376,13 @@ class ArchitectureConfig(BaseModel):
                 DeprecationWarning,
                 stacklevel=2,
             )
-            if "pipeline" not in data:
-                data["pipeline"] = data.pop("processing")
-            else:
-                data.pop("processing")  # pipeline takes precedence
+            if "pipeline" in data:
+                raise ValueError(
+                    "both 'architecture.processing' (deprecated) and 'architecture.pipeline' "
+                    "are set; move the settings under 'pipeline' and remove 'processing'"
+                )
+            data = dict(data)
+            data["pipeline"] = data.pop("processing")
         return data
 
     @model_validator(mode="after")
@@ -1384,7 +1462,7 @@ class ArchitectureConfig(BaseModel):
 # =============================================================================
 
 
-class ReportIncludeConfig(BaseModel):
+class ReportIncludeConfig(ConfigModel):
     """Report content configuration."""
 
     summary: bool = True
@@ -1395,7 +1473,7 @@ class ReportIncludeConfig(BaseModel):
     platform_metrics: bool = True
 
 
-class ReportsConfig(BaseModel):
+class ReportsConfig(ConfigModel):
     """Reports configuration.
 
     Reports are written into per-run directories under the metrics output_dir.
@@ -1409,15 +1487,13 @@ class ReportsConfig(BaseModel):
     include: ReportIncludeConfig = Field(default_factory=ReportIncludeConfig)
 
 
-class ObservabilityConfig(BaseModel):
+class ObservabilityConfig(ConfigModel):
     """Layer 3: Observability configuration.
 
     Flat model -- use top-level keys (enabled, prometheus_stack_enabled, etc.).
     Deeply nested YAML (metrics.prometheus.enabled) is rejected to prevent
     silent data loss (see BUG-029).
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     prometheus_stack_enabled: bool = True
@@ -1463,7 +1539,7 @@ class ObservabilityConfig(BaseModel):
 # =============================================================================
 
 
-class SparkConfOverrides(BaseModel):
+class SparkConfOverrides(ConfigModel):
     """Spark configuration overrides.
 
     These are proven defaults that can be customized.
@@ -1495,7 +1571,7 @@ class SparkConfOverrides(BaseModel):
 # =============================================================================
 
 
-class LakebenchConfig(BaseModel):
+class LakebenchConfig(ConfigModel):
     """Root configuration for Lakebench.
 
     This is the master configuration that matches Section 4 of the spec.

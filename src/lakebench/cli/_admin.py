@@ -175,7 +175,7 @@ def doctor(
     ] = None,
     file_option: Annotated[
         Path | None,
-        typer.Option("--file", help="Alternative to positional argument."),
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
 ) -> None:
     """Read-only preflight report for Category 2/3/4 shared cluster state."""
@@ -311,7 +311,7 @@ def install_scratch_storage_class(
     ] = None,
     file_option: Annotated[
         Path | None,
-        typer.Option("--file", help="Alternative to positional argument."),
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
 ) -> None:
     """Install the scratch StorageClass named by config.
@@ -398,7 +398,7 @@ def install_spark_operator(
     ] = None,
     file_option: Annotated[
         Path | None,
-        typer.Option("--file", help="Alternative to positional argument."),
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
     version: Annotated[
         str | None,
@@ -464,7 +464,7 @@ def migrate_deployment(
     ] = None,
     file_option: Annotated[
         Path | None,
-        typer.Option("--file", help="Alternative to positional argument."),
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
     api_server: Annotated[
         str | None,
@@ -692,7 +692,7 @@ def repair_operator(
     ] = None,
     file_option: Annotated[
         Path | None,
-        typer.Option("--file", help="Alternative to positional argument."),
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
     dry_run: Annotated[
         bool,
@@ -825,7 +825,7 @@ def reclaim_bucket(
     ] = None,
     file_option: Annotated[
         Path | None,
-        typer.Option("--file", help="Alternative to positional argument."),
+        typer.Option("--file", "-f", help="Alternative to positional argument."),
     ] = None,
     force_nonempty: Annotated[
         bool,

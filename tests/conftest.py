@@ -63,6 +63,17 @@ import pytest  # noqa: E402
 from lakebench.config import LakebenchConfig  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _journal_in_tmp(tmp_path, monkeypatch):
+    """CLI commands journal to ./lakebench-output/journal by default, which
+    left session files in the repository after every test run. Point the
+    shared journal at a per-test directory instead."""
+    import lakebench.cli._helpers as helpers
+    from lakebench.journal import Journal
+
+    monkeypatch.setattr(helpers, "_journal", Journal(tmp_path / "lakebench-journal"))
+
+
 def make_config(**overrides) -> LakebenchConfig:
     """Create a LakebenchConfig with sensible defaults for testing.
 

@@ -275,17 +275,15 @@ class TestPipelineRename:
             assert len(deprecation_msgs) >= 1
             assert "processing" in str(deprecation_msgs[0].message).lower()
 
-    def test_pipeline_takes_precedence(self):
-        """When both 'processing' and 'pipeline' are present, pipeline wins."""
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            cfg = _make_config(
+    def test_processing_and_pipeline_together_is_refused(self):
+        """Both spellings at once is an error; dropping one silently lost settings."""
+        with pytest.raises(ValueError, match="processing.*pipeline"):
+            _make_config(
                 architecture={
                     "processing": {"pattern": "streaming"},
                     "pipeline": {"pattern": "medallion"},
                 }
             )
-            assert cfg.architecture.pipeline.pattern.value == "medallion"
 
 
 # ===========================================================================

@@ -22,13 +22,16 @@ from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
 from ._helpers import (
+    DEPRECATED_SHORT_F_HELP,
     _journal_safe,
     console,
+    deprecated_short_f_force,
     journal_open,
     print_error,
     print_info,
     print_success,
     resolve_config_path,
+    stdin_is_tty,
 )
 
 
@@ -55,14 +58,13 @@ def _build_destroy_list(cfg) -> str:
 
 def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
     """Tear down the local stack. Raises typer.Exit on failure."""
-    import sys
 
     from lakebench.cli._local import default_workdir, destroy_local, status_local
 
     resolved = workdir or default_workdir(cfg.name)
     running = status_local(cfg, workdir=resolved)["running"]
 
-    if not force and sys.stdin.isatty():
+    if not force and stdin_is_tty():
         detail = (
             f"Containers: {', '.join(str(r) for r in running)}" if running else "Nothing is running"
         )
@@ -113,9 +115,14 @@ def destroy(
         bool,
         typer.Option(
             "--force",
-            "-f",
+            "--yes",
+            "-y",
             help="Skip confirmation prompt",
         ),
+    ] = False,
+    force_short_f: Annotated[
+        bool,
+        typer.Option("-f", hidden=True, help=DEPRECATED_SHORT_F_HELP),
     ] = False,
     local: Annotated[
         bool,
@@ -174,6 +181,8 @@ def destroy(
 
     Removes all Lakebench resources from the cluster.
     """
+    if force_short_f:
+        force = deprecated_short_f_force("--force or -y", force)
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 
     config_file = resolve_config_path(config_file, file_option)
@@ -202,9 +211,7 @@ def destroy(
 
     # Confirmation
     if not force:
-        import sys
-
-        if sys.stdin.isatty():
+        if stdin_is_tty():
             console.print(
                 Panel(
                     f"[red]WARNING[/red]: This will destroy all Lakebench resources in namespace [bold]{namespace}[/bold]\n\n"
