@@ -90,6 +90,12 @@ def check(
             )
         if parsed.is_devrelease or tag_version.is_devrelease:
             problems.append(f"version {version!r} is a dev release; bump it before tagging")
+        elif parsed.is_prerelease or tag_version.is_prerelease:
+            # release.yml publishes to PyPI and makes a normal GitHub Release;
+            # there is no pre-release channel, so rc/alpha/beta are refused.
+            problems.append(
+                f"version {version!r} is a pre-release; release.yml publishes finals only"
+            )
     return problems
 
 

@@ -73,11 +73,11 @@ def test_malformed_or_unnormalised_tag_fails(tree, tag):
     assert cv.check(tag, init, pp), tag
 
 
-def test_prerelease_tag_matches_normalised(tree):
-    init, pp = tree("1.6.0rc1")
-    assert cv.check("v1.6.0rc1", init, pp) == []
-    # Same version, non-normalised spelling: refused so one version has one tag.
-    assert cv.check("v1.6.0-rc1", init, pp)
+@pytest.mark.parametrize(("version", "tag"), [("1.6.0rc1", "v1.6.0rc1"), ("1.6.0b2", "v1.6.0b2")])
+def test_prerelease_cannot_be_tagged(tree, version, tag):
+    init, pp = tree(version)
+    problems = cv.check(tag, init, pp)
+    assert any("pre-release" in p for p in problems), problems
 
 
 def test_invalid_package_version(tree):

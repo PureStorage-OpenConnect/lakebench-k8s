@@ -2,7 +2,8 @@ name: Release
 
 # One workflow per v* tag, in this order:
 #
-#   ci -> verify-tag + gate -> build-dist + build-binary -> github-release -> publish (PyPI)
+#   ci -> verify-tag + gate -> build-dist + build-binary-{linux,macos} -> github-release
+#      -> publish (PyPI)
 #
 # The GitHub Release is created before the PyPI upload, so a version on PyPI
 # always has its binaries; if the upload fails the tag has binaries only and
@@ -99,19 +100,66 @@ jobs:
           name: dist
           path: dist/
 
-  build-binary:
+  # RHEL 8 (glibc 2.28) is the oldest platform lakebench supports, and a
+  # binary runs only on a glibc at least as new as the one it was built
+  # against, so the Linux binary is built on Rocky Linux 8 rather than on the
+  # runner's Ubuntu (glibc 2.39). RHEL 8's python3.11 is built with a shared
+  # libpython, which PyInstaller needs; the manylinux images' Pythons are not.
+  build-binary-linux:
+    name: Build binary (linux-amd64, glibc 2.28)
+    needs: [verify-tag, gate]
+    runs-on: ubuntu-latest
+    container: rockylinux:8
+    steps:
+      - name: Install build tools
+        run: dnf install -y python3.11 python3.11-pip python3.11-devel git binutils
+
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: python3.11 -m pip install -e ".[build]"
+
+      - name: Build binary
+        run: python3.11 -m PyInstaller lakebench.spec
+
+      # objdump sees the PyInstaller bootloader; the libraries it unpacks at
+      # run time come from this same Rocky 8 build root.
+      - name: Smoke test and glibc ceiling
+        run: |
+          ./dist/lakebench version
+          ./dist/lakebench --help
+          ./dist/lakebench init --name smoketest -o /tmp/smoke.yaml
+          test -f /tmp/smoke.yaml
+          need="$(objdump -T dist/lakebench | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -1)"
+          if [ -z "$need" ]; then
+            echo "::error::could not read GLIBC symbol versions from the binary"
+            exit 1
+          fi
+          echo "binary requires glibc ${need}"
+          if [ "$(printf '%s\n2.28\n' "$need" | sort -V | tail -1)" != "2.28" ]; then
+            echo "::error::binary needs glibc ${need}, newer than RHEL 8's 2.28"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lakebench-linux-amd64
+          path: dist/lakebench
+
+  build-binary-macos:
     name: Build binary (${{ matrix.os }})
     needs: [verify-tag, gate]
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
-          - os: linux-amd64
-            runner: ubuntu-latest
+          # macos-latest is arm64; the Intel binary needs an Intel runner.
           - os: macos-amd64
-            runner: macos-latest
+            runner: macos-15-intel
+            arch: x86_64
           - os: macos-arm64
-            runner: macos-14
+            runner: macos-15
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -125,12 +173,20 @@ jobs:
       - name: Build binary
         run: pyinstaller lakebench.spec
 
-      - name: Smoke test
+      - name: Smoke test and architecture
+        env:
+          WANT_ARCH: ${{ matrix.arch }}
         run: |
           ./dist/lakebench version
           ./dist/lakebench --help
           ./dist/lakebench init --name smoketest -o /tmp/smoke.yaml
           test -f /tmp/smoke.yaml
+          got="$(lipo -archs dist/lakebench)"
+          echo "binary architectures: ${got}"
+          if [ "$got" != "$WANT_ARCH" ]; then
+            echo "::error::expected a ${WANT_ARCH}-only binary, got: ${got}"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
@@ -139,7 +195,7 @@ jobs:
 
   github-release:
     name: Create GitHub Release
-    needs: [build-dist, build-binary]
+    needs: [build-dist, build-binary-linux, build-binary-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write  # create the release

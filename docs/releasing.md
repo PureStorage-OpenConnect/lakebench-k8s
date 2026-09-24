@@ -6,7 +6,8 @@ A release is a `v*` tag on a commit that is on `main`. Pushing the tag runs
 1. the full CI workflow (`ci.yml`) on the tagged commit;
 2. `verify-tag`: the tested commit (`$GITHUB_SHA`) is reachable from
    `origin/main`, and the tag is exactly `v` plus the normalised package
-   version, which is not a dev release (`scripts/check_version.py`);
+   version, which must be a final release: no dev or pre-release suffix
+   (`scripts/check_version.py`);
 3. `gate`: the release-only checks of `scripts/release_gate.py` with
    `--require-all` (examples, version, changelog, em dashes, UAT results);
 4. the wheel and sdist, and the PyInstaller binaries for linux-amd64,
@@ -52,12 +53,13 @@ pull request to `main`.
 ### UAT results
 
 The gate requires `uat/results-<version>.md`, for example
-`uat/results-1.6.0.md`, containing the version string. It is the record of
-the live-cluster runs behind the release: one row per recipe, workload and
-mode tested, with its result and the run id that resolves to
-`lakebench-output/runs/run-<id>/metrics.json`. The gate checks the file
-exists and names the version; the maintainer who tags is responsible for
-its content.
+`uat/results-1.6.0.md`, with a heading line that is exactly
+`# UAT results <version>` and a markdown table with at least one data row.
+It is the record of the live-cluster runs behind the release: one row per
+recipe, workload and mode tested, with its result and the run id that
+resolves to `lakebench-output/runs/run-<id>/metrics.json`. The gate checks
+the heading and that a row exists; the maintainer who tags is responsible
+for the content.
 
 ## After tagging
 
