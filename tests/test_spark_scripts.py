@@ -77,7 +77,8 @@ class TestScriptImports:
 
     @pytest.fixture(
         params=[
-            p for p in _get_script_files()
+            p
+            for p in _get_script_files()
             if p.name != "common.py" and p.name not in _LIBRARY_SCRIPTS
         ],
         ids=lambda p: p.stem,

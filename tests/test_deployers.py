@@ -502,9 +502,7 @@ class TestDatagenDeployerSchemaWireThrough:
                 "workload": {"schema": "financial"},
                 "pipeline": {
                     "mode": "batch",
-                    "medallion": {
-                        "bronze": {"format": "parquet", "path_template": "custom/pacs"}
-                    },
+                    "medallion": {"bronze": {"format": "parquet", "path_template": "custom/pacs"}},
                 },
             }
         )

@@ -352,7 +352,7 @@ pub fn sample_distinct(rng: &mut Rng, n: usize, k: usize, out: &mut Vec<u32>) {
             let bit = 1u64 << (idx as u64 % 64);
             // The bit-set is only unique within its 64-bit window; validate by
             // scanning `out` for exact match to catch collisions past 64 ids.
-            if seen & bit != 0 && out.iter().any(|&x| x == idx) {
+            if seen & bit != 0 && out.contains(&idx) {
                 continue;
             }
             seen |= bit;
@@ -808,7 +808,7 @@ mod tests {
         let mut rng = Rng::new(1234);
         for _ in 0..10_000 {
             let id = sampler.sample(&mut rng);
-            assert!(id >= 1 && id <= 500_000, "id {} out of range", id);
+            assert!((1..=500_000).contains(&id), "id {} out of range", id);
         }
     }
 
@@ -830,7 +830,7 @@ mod tests {
         let mut rng = Rng::new(99);
         for _ in 0..500 {
             let id = sampler.sample(&mut rng);
-            assert!(id >= 1 && id <= 100);
+            assert!((1..=100).contains(&id));
         }
     }
 
@@ -1049,7 +1049,7 @@ mod tests {
             // must be non-empty.
             let v = state_variants(s);
             if !v.is_empty() {
-                assert!(!v.iter().any(|x| *x == *s), "variant equals key for {}", s);
+                assert!(!v.contains(s), "variant equals key for {}", s);
             }
         }
     }
