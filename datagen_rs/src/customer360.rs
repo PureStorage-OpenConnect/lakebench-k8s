@@ -103,8 +103,8 @@ pub const CUSTOMERS_PER_SCALE_UNIT: u64 = 100_000;
 /// rounding half to even like Python's `round` so the Rust and Python
 /// customer counts agree for every scale. Ids are drawn from
 /// `1..=customer_id_max`. Errors on a non-positive or non-finite scale, or
-/// one whose id space does not fit the per-pod loyalty lookup (2 bytes per
-/// customer, so the cap of 2^32 ids is 8 GiB).
+/// one above 2^32 ids. Use `customer_id_max_for_scale_within` on a pod, which
+/// also checks the loyalty lookup fits the memory limit.
 pub fn customer_id_max_for_scale(scale: f64) -> Result<u64, String> {
     if !scale.is_finite() || scale <= 0.0 {
         return Err(format!(
@@ -115,13 +115,79 @@ pub fn customer_id_max_for_scale(scale: f64) -> Result<u64, String> {
     let n = (scale * CUSTOMERS_PER_SCALE_UNIT as f64).round_ties_even();
     if n > u32::MAX as f64 {
         return Err(format!(
-            "scale {} gives {} customers, above the {} the loyalty lookup supports",
+            "scale {} gives {} customers, above the {} supported",
             scale,
             n,
             u32::MAX
         ));
     }
     Ok((n as u64).max(1))
+}
+
+/// Bytes the per-pod `LoyaltyLookup` holds per customer id (one `bool`, one
+/// `u8`).
+pub const LOYALTY_BYTES_PER_CUSTOMER: u64 = 2;
+
+/// Share of the pod memory limit the loyalty lookup may take. The rest is
+/// for the per-thread file buffers, which dominate a datagen pod's RSS.
+pub const LOYALTY_MEMORY_SHARE: f64 = 0.25;
+
+/// Error unless a lookup for `customer_id_max` fits `LOYALTY_MEMORY_SHARE`
+/// of `mem_limit_bytes`. No limit (None) always fits.
+pub fn check_id_space_fits_memory(
+    customer_id_max: u64,
+    mem_limit_bytes: Option<u64>,
+) -> Result<(), String> {
+    let Some(limit) = mem_limit_bytes else {
+        return Ok(());
+    };
+    let need = customer_id_max.saturating_add(1) * LOYALTY_BYTES_PER_CUSTOMER;
+    let budget = (limit as f64 * LOYALTY_MEMORY_SHARE) as u64;
+    if need > budget {
+        return Err(format!(
+            "customer_id_max={} needs a {:.2} GiB loyalty lookup, over the {:.2} GiB \
+             ({}% of the {:.2} GiB pod memory limit) it may use; raise the datagen \
+             pod memory or lower the scale / unique_customers",
+            customer_id_max,
+            need as f64 / (1u64 << 30) as f64,
+            budget as f64 / (1u64 << 30) as f64,
+            (LOYALTY_MEMORY_SHARE * 100.0) as u32,
+            limit as f64 / (1u64 << 30) as f64
+        ));
+    }
+    Ok(())
+}
+
+/// `customer_id_max_for_scale`, refused when the lookup would not fit the
+/// pod memory limit (`pod_memory_limit_bytes()`, or None off a pod).
+pub fn customer_id_max_for_scale_within(
+    scale: f64,
+    mem_limit_bytes: Option<u64>,
+) -> Result<u64, String> {
+    let n = customer_id_max_for_scale(scale)?;
+    check_id_space_fits_memory(n, mem_limit_bytes)?;
+    Ok(n)
+}
+
+/// The container memory limit from cgroup v2 (`memory.max`) or v1
+/// (`memory.limit_in_bytes`); None when unlimited or unreadable.
+pub fn pod_memory_limit_bytes() -> Option<u64> {
+    for path in [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let t = text.trim();
+            if t == "max" {
+                return None;
+            }
+            if let Ok(v) = t.parse::<u64>() {
+                // cgroup v1 reports "unlimited" as a huge page-aligned value.
+                return if v >= (1u64 << 60) { None } else { Some(v) };
+            }
+        }
+    }
+    None
 }
 
 // Named indices into INTERACTION_TYPES so the conditional-null and page-view
@@ -893,6 +959,23 @@ mod tests {
         for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e6] {
             assert!(customer_id_max_for_scale(bad).is_err(), "scale {}", bad);
         }
+    }
+
+    #[test]
+    fn id_space_is_capped_by_pod_memory() {
+        let gib = 1u64 << 30;
+        // 4 GiB pod: 1 GiB for the lookup, 2 bytes per id -> ~536M ids.
+        assert!(customer_id_max_for_scale_within(1000.0, Some(4 * gib)).is_ok());
+        let err = customer_id_max_for_scale_within(10_000.0, Some(4 * gib)).unwrap_err();
+        assert!(err.contains("pod memory limit"), "{}", err);
+        // The u32 ceiling (8 GiB lookup) must not pass on a 4 GiB pod.
+        assert!(check_id_space_fits_memory(u32::MAX as u64, Some(4 * gib)).is_err());
+        // Boundary: exactly the budget fits, one id more does not.
+        let max_ids = (4 * gib / 4) / LOYALTY_BYTES_PER_CUSTOMER - 1;
+        assert!(check_id_space_fits_memory(max_ids, Some(4 * gib)).is_ok());
+        assert!(check_id_space_fits_memory(max_ids + 1, Some(4 * gib)).is_err());
+        // No limit known: only the u32 ceiling applies.
+        assert!(customer_id_max_for_scale_within(10_000.0, None).is_ok());
     }
 
     fn build_for_scale(seed: u64, scale: f64, file_id: u64, rows: usize) -> RecordBatch {
