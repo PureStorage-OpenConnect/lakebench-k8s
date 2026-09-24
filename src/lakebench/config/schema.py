@@ -1108,6 +1108,10 @@ class TableNamesConfig(BaseModel):
         default="silver.counterparty_edges",
         description="Silver entity-to-entity edge table (Financial): namespace.table",
     )
+    silver_entity_profiles: str = Field(
+        default="silver.entity_profiles",
+        description="Silver per-entity behavioural baseline table (Financial, C-PROFILES): namespace.table",
+    )
     gold_alerts: str = Field(
         default="gold.alerts",
         description="Gold alerts table (Financial): namespace.table",

@@ -123,6 +123,7 @@ class TestRegistry:
             "silver_accounts",
             "silver_account_statements",
             "silver_counterparty_edges",
+            "silver_entity_profiles",
             "gold_alerts",
             "gold_risk_scores",
             "gold_entity_clusters",

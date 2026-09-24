@@ -254,6 +254,57 @@ TBLPROPERTIES (
 # USD (already possible at scale 100+).
 
 
+# Entity profiles: rolling per-entity behavioural baseline (C-PROFILES). One row
+# per entity_id, aggregating both sides (as originator and as beneficiary) so a
+# detection rule can ask "is this behaviour anomalous FOR THIS ENTITY" instead of
+# applying a population-wide absolute threshold. This is the enabler for reducing
+# W4/W8 over-firing (LB-130): W8 compares a reactivation gap against the entity's
+# own typical inter-transaction gap; W4 compares pass-through behaviour against
+# the entity's own baseline (a payment intermediary that always forwards funds is
+# not anomalous). Full-rebuild in batch; MERGE in continuous.
+SILVER_ENTITY_PROFILES_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    entity_id                  BIGINT NOT NULL,
+    first_seen_ts              TIMESTAMP,
+    last_seen_ts               TIMESTAMP,
+    active_span_days           DOUBLE,
+    txn_count_out              BIGINT NOT NULL,
+    txn_count_in               BIGINT NOT NULL,
+    txn_count_total            BIGINT NOT NULL,
+    total_sent_usd             DECIMAL(38, 2),
+    total_received_usd         DECIMAL(38, 2),
+    avg_amount_usd             DOUBLE,
+    stddev_amount_usd          DOUBLE,
+    avg_gap_days               DOUBLE,
+    distinct_counterparties_out BIGINT NOT NULL,
+    distinct_counterparties_in  BIGINT NOT NULL,
+    passthrough_ratio          DOUBLE,
+    profile_updated_ts         TIMESTAMP,
+    _batch_id                  BIGINT
+)
+USING iceberg
+PARTITIONED BY (bucket(64, entity_id))
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy'
+)
+""".strip()
+# Sizing notes:
+# * total_*_usd are decimal(38, 2) (aggregator entities cross 10^16 USD at
+#   scale 100+, same reason SILVER_COUNTERPARTY_EDGES widened).
+# * avg_gap_days = originator_span / (txn_count_out - 1), where originator_span
+#   is (last send - first send) on the ORIGINATOR side only (NOT active_span_days,
+#   which spans both sides). This is exactly the baseline W8 needs to judge whether
+#   a >=90-day reactivation gap is anomalous for the entity. NULL when
+#   txn_count_out < 2 (no gap defined; W8 already declines first-ever activity).
+# * passthrough_ratio = total_sent_usd / total_received_usd -- W4's baseline for
+#   "does this entity normally forward what it receives". A receive-only entity
+#   gets 0.0 (a real low baseline, so a sudden forward is a deviation); NULL only
+#   when the entity never received (ratio undefined).
+# * _batch_id mirrors the other silver tables for the continuous DELETE+append
+#   idempotency protocol.
+
+
 # ---------------------------------------------------------------------------
 # Gold
 # ---------------------------------------------------------------------------
@@ -380,6 +431,7 @@ FINANCIAL_TABLE_DDLS: dict[str, str] = {
     "silver_accounts": SILVER_ACCOUNTS_DDL,
     "silver_account_statements": SILVER_ACCOUNT_STATEMENTS_DDL,
     "silver_counterparty_edges": SILVER_COUNTERPARTY_EDGES_DDL,
+    "silver_entity_profiles": SILVER_ENTITY_PROFILES_DDL,
     "gold_alerts": GOLD_ALERTS_DDL,
     "gold_risk_scores": GOLD_RISK_SCORES_DDL,
     "gold_entity_clusters": GOLD_ENTITY_CLUSTERS_DDL,
