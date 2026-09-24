@@ -14,12 +14,17 @@ choices follow the query patterns in ENG-2C.4:
   in place with add_files, which cannot map files onto a ``days()``
   transform; the flat, date-clustered file layout still prunes on per-file
   min/max of ``intr_bk_sttlm_dt``.
-- Silver transactions: ``days(txn_timestamp)`` -- W2/W3 motif scans are
-  window-bounded; W8 replay walks historical snapshots.
+- Silver transactions, account_statements and gold alerts: ``months(...)``.
+  Daily partitions over the 60-month corpus gave 1,339 partitions of
+  about 20k rows at scale 1 (account_statements, with bucket(64) on top,
+  about 85k partitions of ~600 rows), so every read opened thousands of
+  tiny files and the running-balance query timed out. Months still prune
+  the date-window filters and keep continuous micro-batches to a few
+  partitions each.
 - Silver counterparty_edges: ``bucket(64, source_entity_id)`` -- keeps
   per-entity edge fan-in reads local.
 - Silver entities/accounts: unpartitioned; low cardinality vs facts.
-- Gold: unpartitioned; per-day rollup tables are small enough to scan.
+- Other gold tables: unpartitioned; per-day rollups are small enough to scan.
 
 The DDL strings are parameterised with ``{catalog}`` and ``{table}``
 placeholders that the deployer templates from
@@ -142,7 +147,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     ingest_ts               TIMESTAMP
 )
 USING iceberg
-PARTITIONED BY (days(txn_timestamp))
+PARTITIONED BY (months(txn_timestamp))
 TBLPROPERTIES (
     'format-version' = '2',
     'write.parquet.compression-codec' = 'snappy'
@@ -216,7 +221,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     bk_tx_cd       STRING NOT NULL
 )
 USING iceberg
-PARTITIONED BY (days(book_ts), bucket(64, account_id))
+PARTITIONED BY (months(book_ts))
 TBLPROPERTIES (
     'format-version' = '2',
     'write.parquet.compression-codec' = 'snappy'
@@ -339,7 +344,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     detected_ts        TIMESTAMP                 -- LB-125: wall-clock at rule execution (freshness/TTD)
 )
 USING iceberg
-PARTITIONED BY (days(alert_ts))
+PARTITIONED BY (months(alert_ts))
 TBLPROPERTIES (
     'format-version' = '2',
     'write.parquet.compression-codec' = 'snappy'

@@ -400,6 +400,23 @@ _KNOWN_QUERY_FAILURES = {
 }
 
 
+def _paired_qph(pre, post) -> tuple[float, float, int] | None:
+    """(pre QpH, post QpH, n) over the queries that succeeded in BOTH runs.
+
+    Each run's own QpH averages over its own successful queries, so a query
+    that failed before and passed after changed the query set, not the speed.
+    None when no query succeeded in both.
+    """
+    pre_ok = {q.query.name: q.elapsed_seconds for q in pre if q.success}
+    post_ok = {q.query.name: q.elapsed_seconds for q in post if q.success}
+    common = sorted(set(pre_ok) & set(post_ok))
+    pre_s = sum(pre_ok[n] for n in common)
+    post_s = sum(post_ok[n] for n in common)
+    if not common or pre_s <= 0 or post_s <= 0:
+        return None
+    return len(common) / pre_s * 3600, len(common) / post_s * 3600, len(common)
+
+
 def _benchmark_gate_problems(cfg, queries) -> list[str]:
     """Reasons the benchmark result is not a valid score.
 
@@ -1587,6 +1604,7 @@ def run(
         # Pre-compaction benchmark only runs at scale < 50 (OOMs at higher scales
         # due to 200K+ uncompacted files overwhelming Trino memory).
         pre_compaction_qph = 0.0
+        _paired = None
         pre_file_count = 0
         post_file_count = 0
         maint_elapsed = 0.0
@@ -1643,8 +1661,12 @@ def run(
                     _pre_runner = _BR(cfg)
                     # LB-117: 60s is too tight for AML pre-compaction
                     # queries even at small scale; bump to 180s for AML.
+                    # Same timeout as the post-compaction run: with 180 s here
+                    # and 900 s there, a query that timed out before counted
+                    # only after, and the maintenance delta read -40% on a
+                    # run where every query got faster.
                     _pre_timeout = (
-                        180 if cfg.architecture.workload.schema_type.value == "financial" else 60
+                        900 if cfg.architecture.workload.schema_type.value == "financial" else 300
                     )
                     _pre_result = _pre_runner.run_power(
                         cache="hot",
@@ -1746,10 +1768,17 @@ def run(
                 benchmark_qph = bench_result.qph
 
                 # Maintenance summary
-                if pre_compaction_qph > 0 and benchmark_qph > 0 and maint_elapsed > 0:
-                    improvement = ((benchmark_qph - pre_compaction_qph) / pre_compaction_qph) * 100
+                _paired = (
+                    _paired_qph(_pre_result.queries, bench_result.queries)
+                    if pre_compaction_qph > 0
+                    else None
+                )
+                if _paired and maint_elapsed > 0:
+                    _pre_q, _post_q, _n_pair = _paired
+                    improvement = ((_post_q - _pre_q) / _pre_q) * 100
                     console.print(
-                        f"  [bold]Maintenance value: {improvement:+.1f}% QpH improvement[/bold]"
+                        f"  [bold]Maintenance value: {improvement:+.1f}% QpH improvement[/bold] "
+                        f"(over the {_n_pair} queries that succeeded in both runs)"
                     )
                 if maint_elapsed > 0 and pre_file_count > 0:
                     ratio = pre_file_count / max(post_file_count, 1)
@@ -1873,9 +1902,10 @@ def run(
                     if pre_compaction_qph > 0 and benchmark_qph:
                         pb.pre_compaction_qph = pre_compaction_qph
                         pb.post_compaction_qph = benchmark_qph
-                        pb.maintenance_value_pct = (
-                            (benchmark_qph - pre_compaction_qph) / pre_compaction_qph
-                        ) * 100
+                        if _paired:
+                            pb.maintenance_value_pct = (
+                                (_paired[1] - _paired[0]) / _paired[0]
+                            ) * 100
                 except Exception:
                     pass  # Maintenance metrics are best-effort
 

@@ -10,8 +10,8 @@ Rules implemented in this file:
   propagation, O(graph-diameter) iterations, no GraphFrames dependency.
 - W2_structuring: entities making N>=3 transactions in a rolling window
   where every amount is within 90-100% of the local reporting threshold.
-- W3_round_tripping: sequences of transactions where money returns to
-  origin within a short window.
+- W3_round_tripping: funds that return to their originator through 2-5
+  transfers within a bounded window (temporal cycle search).
 - W4_risk_propagation: high-velocity entity-to-entity chains.
 - W5_sanctions_match: transactions with a counterparty entity name that
   fuzzy-matches an OFAC SDN entry (Phase 3D).
@@ -99,8 +99,8 @@ MODEL_VERSION = "1.0.0"
 RULE_TARGET_TYPOLOGY = {
     "W1_connected_components": "gather_scatter",
     "W2_structuring": "micro_structuring",
-    "W3_round_tripping": "rapid_layering",
-    "W4_risk_propagation": "stack",
+    "W3_round_tripping": "cycle",
+    "W4_risk_propagation": "rapid_layering",
     "W5_sanctions_match": None,
     "W6_pep_counterparty": None,
     "W7_cross_border_high_risk": "corridor_high_risk",
@@ -261,100 +261,131 @@ def w2_structuring(
 
 def w3_round_tripping(
     silver_txns: DataFrame,
-    window_hours: int = 72,
+    max_hops: int = 5,
+    hop_window_hours: int = 168,
+    total_window_days: int = 30,
+    max_out_degree: int = 200,
+    max_edges: int = 3_000_000_000,
     run_id: str = "unknown",
 ) -> DataFrame:
-    """Detect 2-hop round-trips: entity A -> entity B -> entity A within
-    window_hours. This catches the `cycle` typology (at participants=4
-    the intermediate hops produce direct back-and-forth pairs as a side
-    effect) and `corridor_high_risk` / `cross_border_cycle` at their
-    simplest instances.
+    """Round-tripping: funds that return to their originator through 2 to
+    ``max_hops`` transfers. Each hop must start after the previous one and
+    within ``hop_window_hours`` of it, and the whole cycle within
+    ``total_window_days``. Paths are simple (no entity repeats before the
+    return).
 
-    Real N-hop cycle detection requires GraphFrames / iterative BFS which
-    isn't wired in this build; the 2-hop approximation is the minimum
-    that still fires on the datagen's cycle instances.
+    The earlier form only found A -> B -> A, which none of the planted cycle
+    typologies contain (cycle and cross_border_cycle route A -> B -> C -> D
+    -> A), so it could not detect its designated typology. No amount
+    condition is applied: the parameters are scenario-style windows, not
+    derived from the generator.
 
-    Emits one alert per (A, B) pair with related_txn_ids = UETRs of the
-    A->B and B->A transactions inside the window.
+    Cost control: paths are extended hop by hop from every transfer, and
+    each cycle is found once (starting from its earliest transfer, since hop
+    times strictly increase). Entities sending more than ``max_out_degree``
+    transfers in any hop window are treated as hubs (payment processors)
+    and excluded as intermediaries. Above ``max_edges`` transfers the rule
+    raises RuleSkipped("edge-cap").
+
+    Emits one alert per cycle: entity_id is the originator, related_txn_ids
+    the transfers in hop order.
     """
-    from pyspark.sql.functions import greatest, least, unix_timestamp
+    from pyspark import StorageLevel
+    from pyspark.sql.functions import array_contains, concat, size, unix_timestamp
 
-    left = silver_txns.select(
-        col("uetr").alias("uetr_l"),
-        col("originator_id").alias("a"),
-        col("beneficiary_id").alias("b"),
-        col("txn_amount_usd").alias("amt_l"),
-        col("txn_timestamp").alias("ts_l"),
-    )
-    right = silver_txns.select(
-        col("uetr").alias("uetr_r"),
-        col("originator_id").alias("b_r"),
-        col("beneficiary_id").alias("a_r"),
-        col("txn_timestamp").alias("ts_r"),
-    )
-    # Round-trip: (a -> b) then (b -> a) within +/- window_hours,
-    # ts_r >= ts_l (b returns to a AFTER a sends to b). Filter
-    # a != b so degenerate self-loops don't count.
-    seconds = window_hours * 3600
-    pairs = (
-        left.join(
-            right,
-            (col("a") == col("a_r")) & (col("b") == col("b_r")) & (col("a") != col("b")),
-            "inner",
+    edges = silver_txns.select(
+        col("uetr"),
+        col("originator_id").alias("src"),
+        col("beneficiary_id").alias("dst"),
+        unix_timestamp(col("txn_timestamp")).alias("t"),
+        col("txn_timestamp").alias("ts"),
+    ).filter(col("src").isNotNull() & col("dst").isNotNull() & (col("src") != col("dst")))
+    n_edges = edges.count()
+    if n_edges > max_edges:
+        raise RuleSkipped(
+            "edge-cap",
+            f"edges={n_edges} max={max_edges} (raise max_edges to run W3 at this scale)",
         )
-        .filter(col("ts_r") >= col("ts_l"))
-        .filter((unix_timestamp(col("ts_r")) - unix_timestamp(col("ts_l"))) <= seconds)
+    hop_s = hop_window_hours * 3600
+    total_s = total_window_days * 86400
+
+    # Hubs: busiest accounts by sends per hop window, excluded as
+    # intermediaries so one processor does not multiply every path.
+    per_window = edges.withColumn("_w", (col("t") / lit(hop_s)).cast("long"))
+    hubs = (
+        per_window.groupBy("src", "_w")
+        .agg(count(lit(1)).alias("_n"))
+        .filter(col("_n") > max_out_degree)
+        .select(col("src").alias("hub"))
+        .distinct()
     )
-    # Aggregate per (a, b): collect all round-trip UETRs and count them.
-    # Alerting once per direction (a<b canonicalized) so we don't double-
-    # emit for each direction of the same underlying cycle.
-    canon = pairs.select(
-        least(col("a"), col("b")).alias("e1"),
-        greatest(col("a"), col("b")).alias("e2"),
-        col("uetr_l"),
-        col("uetr_r"),
-        col("ts_l"),
-        col("ts_r"),
+    step = edges.join(hubs, edges["src"] == hubs["hub"], "left_anti").select(
+        col("uetr").alias("e_uetr"),
+        col("src").alias("e_src"),
+        col("dst").alias("e_dst"),
+        col("t").alias("e_t"),
+        col("ts").alias("e_ts"),
     )
-    # roundtrip_count is triangular-inflated by the self-join (for k
-    # matching pairs each direction, the join produces up to
-    # k*(k+1)/2 rows because every earlier ts_l matches every later
-    # ts_r). Dedupe by taking the SIZE OF THE DISTINCT UETR SET / 2:
-    # each real round-trip pair contributes exactly 2 UETRs (l, r).
-    alerts = (
-        canon.groupBy("e1", "e2")
-        .agg(
-            collect_list(col("uetr_l")).alias("uetrs_l"),
-            collect_list(col("uetr_r")).alias("uetrs_r"),
-            max_("ts_r").alias("last_ts"),
-            min_("ts_l").alias("first_ts"),
-        )
-        .withColumn(
-            "related_txn_ids",
-            array_distinct(expr("concat(uetrs_l, uetrs_r)")),
-        )
-        # 2 UETRs per real round-trip; divide the deduped uetr count.
-        .withColumn(
-            "roundtrip_count",
-            (expr("size(related_txn_ids)") / lit(2)).cast("int"),
-        )
-        .filter(col("roundtrip_count") >= 1)
+    # persist, not checkpoint: the lineage is at most max_hops deep, and the
+    # union of closed cycles below would otherwise recompute earlier hops.
+    step = step.persist(StorageLevel.MEMORY_AND_DISK)
+
+    paths = edges.select(
+        col("src").alias("start"),
+        col("dst").alias("end"),
+        col("t").alias("t_first"),
+        col("t").alias("t_last"),
+        col("ts").alias("ts_last"),
+        array(col("uetr")).alias("uetrs"),
+        array(col("src"), col("dst")).alias("nodes"),
     )
+    cycles = None
+    for _hop in range(2, max_hops + 1):
+        ext = (
+            paths.join(step, paths["end"] == step["e_src"], "inner")
+            .filter(col("e_t") > col("t_last"))
+            .filter(col("e_t") <= col("t_last") + lit(hop_s))
+            .filter(col("e_t") <= col("t_first") + lit(total_s))
+        )
+        closed = ext.filter(col("e_dst") == col("start")).select(
+            col("start"),
+            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+            col("nodes"),
+            col("t_first"),
+            col("e_ts").alias("ts_last"),
+        )
+        cycles = closed if cycles is None else cycles.unionByName(closed)
+        if _hop == max_hops:
+            break
+        paths = (
+            ext.filter(~array_contains(col("nodes"), col("e_dst")))
+            .select(
+                col("start"),
+                col("e_dst").alias("end"),
+                col("t_first"),
+                col("e_t").alias("t_last"),
+                col("e_ts").alias("ts_last"),
+                concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+                concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
+            )
+            .persist(StorageLevel.MEMORY_AND_DISK)
+        )
+
+    alerts = cycles.withColumn("hops", size(col("uetrs")))
     return alerts.select(
         expr("uuid()").alias("alert_id"),
         lit("W3_round_tripping").alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
         lit(MODEL_VERSION).alias("model_version"),
-        col("e1").alias("entity_id"),
-        col("related_txn_ids"),
-        array(col("e1"), col("e2")).alias("related_entity_ids"),
-        col("last_ts").alias("alert_ts"),
-        # Score clamped to [0, 0.95] so aggregate percentiles don't
-        # exceed the [0,1] domain analysts expect.
-        expr("least(0.95, 0.6 + roundtrip_count * 0.05)").cast("double").alias("alert_score"),
-        when(col("roundtrip_count") >= 3, lit("HIGH"))
-        .when(col("roundtrip_count") >= 2, lit("MED"))
+        col("start").alias("entity_id"),
+        col("uetrs").alias("related_txn_ids"),
+        col("nodes").alias("related_entity_ids"),
+        col("ts_last").alias("alert_ts"),
+        # Longer cycles are more deliberate. Bounded [0.6, 0.9].
+        expr("least(0.9, 0.5 + 0.1 * hops)").cast("double").alias("alert_score"),
+        when(col("hops") >= 4, lit("HIGH"))
+        .when(col("hops") >= 3, lit("MED"))
         .otherwise(lit("LOW"))
         .alias("priority"),
         lit("OPEN").alias("status"),
@@ -362,14 +393,24 @@ def w3_round_tripping(
         lit("round_tripping").alias("alert_type"),
         lit(run_id).alias("run_id"),
         expr(
-            "concat('Round-trip between entities ', cast(e1 as string), ' and ', "
-            "cast(e2 as string), ' -- ', cast(roundtrip_count as string), "
-            "' back-and-forth pairs between ', cast(first_ts as string), ' and ', "
-            "cast(last_ts as string))"
+            "concat('Funds returned to entity ', cast(start as string), ' through ', "
+            "cast(hops as string), ' transfers ending ', cast(ts_last as string))"
         ).alias("narrative"),
         map_from_arrays(
-            array(lit("rule"), lit("window_hours")),
-            array(lit("W3_round_tripping"), lit(str(window_hours))),
+            array(
+                lit("rule"),
+                lit("hops"),
+                lit("hop_window_hours"),
+                lit("total_window_days"),
+                lit("max_out_degree"),
+            ),
+            array(
+                lit("W3_round_tripping"),
+                col("hops").cast("string"),
+                lit(str(hop_window_hours)),
+                lit(str(total_window_days)),
+                lit(str(max_out_degree)),
+            ),
         ).alias("evidence"),
         # LB-125: wall-clock at rule execution. Batch = detection time;
         # continuous = the far end of detected_ts - ingest_ts (freshness /

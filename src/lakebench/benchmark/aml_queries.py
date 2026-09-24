@@ -43,8 +43,8 @@ from pathlib import Path
 RULE_TARGETS: dict[str, str | None] = {
     "W1_connected_components": "gather_scatter",  # multi-entity graph clusters
     "W2_structuring": "micro_structuring",
-    "W3_round_tripping": "rapid_layering",  # round-trip signal
-    "W4_risk_propagation": "stack",  # high-velocity chain
+    "W3_round_tripping": "cycle",  # funds return to origin via 2-5 hops
+    "W4_risk_propagation": "rapid_layering",  # pass-through within hours
     # W5/W6 target no planted typology today. Sanctions and PEP hits
     # live as party attributes in the datagen (see
     # `datagen_rs/src/party.rs::party_flags`), not as typology_type
@@ -82,10 +82,11 @@ UNMAPPED_TYPOLOGIES: dict[str, str] = {
         "W1_connected_components co-detects some instances via graph "
         "closure but that is not a scored precision/recall target."
     ),
-    "cycle": (
-        "2-hop and 3-hop transaction cycles; targeted approximately by "
-        "W3_round_tripping via self-join but scored against rapid_layering "
-        "as the primary target. cycle recall is untestable today."
+    "stack": (
+        "Multi-day layering chain (hops hours to days apart). W4 only sees "
+        "pass-through within 6 h and W3 needs a return to the originator; "
+        "an aggregate pass-through rule (in/out balance over days) is the "
+        "planned detector. Until then stack has no designated rule."
     ),
     "cross_border_cycle": (
         "Cross-border variant of `cycle`; same gap -- W7 targets "
