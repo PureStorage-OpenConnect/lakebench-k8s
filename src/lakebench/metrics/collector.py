@@ -1043,7 +1043,8 @@ def build_pipeline_benchmark(
     # empty fleet dict (all pods failed to emit) is truthy and would
     # append a bogus zero-length stage that gets counted in CPU-hour
     # aggregations. Require `pods_reported > 0` on the fleet path.
-    fleet_has_data = bool(datagen_fleet) and int(datagen_fleet.get("pods_reported", 0)) > 0
+    fleet: dict[str, Any] = datagen_fleet or {}
+    fleet_has_data = int(fleet.get("pods_reported", 0)) > 0
     if datagen_elapsed > 0 or fleet_has_data:
         elapsed = datagen_elapsed
         output_gb = datagen_output_gb
@@ -1051,21 +1052,21 @@ def build_pipeline_benchmark(
         exec_count = 0
         exec_cores = 0
         if fleet_has_data:
-            elapsed = elapsed or float(datagen_fleet.get("wall_elapsed_max_s", 0.0))
-            fleet_bytes = float(datagen_fleet.get("total_bytes_written", 0))
+            elapsed = elapsed or float(fleet.get("wall_elapsed_max_s", 0.0))
+            fleet_bytes = float(fleet.get("total_bytes_written", 0))
             if fleet_bytes > 0:
                 output_gb = output_gb or fleet_bytes / 1e9
-            fleet_rows = int(datagen_fleet.get("total_rows_written", 0))
+            fleet_rows = int(fleet.get("total_rows_written", 0))
             if fleet_rows > 0:
                 output_rows = output_rows or fleet_rows
-            exec_count = int(datagen_fleet.get("pods_reported", 0))
+            exec_count = int(fleet.get("pods_reported", 0))
             # Per-pod cores: total cores / reported pods, rounded. All pods
             # are sized identically so this is exact modulo integer division.
             # Downstream CPU-hours derives from executor_count * executor_cores
             # * elapsed_seconds, so this fields lets datagen roll into the
             # existing pipeline core-hours computation.
             if exec_count > 0:
-                exec_cores = int(datagen_fleet.get("cores_total", 0)) // exec_count
+                exec_cores = int(fleet.get("cores_total", 0)) // exec_count
         dg = StageMetrics(
             stage_name="datagen",
             stage_type="datagen",
