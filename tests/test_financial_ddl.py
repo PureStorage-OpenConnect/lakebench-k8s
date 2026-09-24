@@ -62,8 +62,9 @@ class TestBronzeSchema:
     def test_carries_settlement_date_partition_column(self):
         assert "intr_bk_sttlm_dt             DATE" in BRONZE_PACS008_DDL
 
-    def test_partitioned_by_settlement_date(self):
-        assert "PARTITIONED BY (days(intr_bk_sttlm_dt))" in BRONZE_PACS008_DDL
+    def test_bronze_is_unpartitioned(self):
+        # Unpartitioned: add_files cannot register into a days() transform.
+        assert "PARTITIONED BY" not in BRONZE_PACS008_DDL
 
     def test_carries_party_chain(self):
         # Debtor, creditor, ultimate parties: essential for entity resolution (W5).

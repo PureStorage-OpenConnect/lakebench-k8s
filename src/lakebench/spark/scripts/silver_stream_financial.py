@@ -121,6 +121,12 @@ def _merge_batch(batch_df, batch_id: int) -> None:
     try:
         n_txns = tagged_txns.count()
         log(f"[batch {batch_id}] {n_txns} txns")
+        if n_txns == 0:
+            # Collector line format (LB-136); counts the batch, adds no rows.
+            log(f"Batch {batch_id}: empty, skipping")
+            return
+        log(f"Batch {batch_id}: transforming {n_txns:,} rows")
+        t0 = time.time()
 
         # PHASE 1: silver.transactions.
         # DELETE first so a retry after a partial append doesn't leave
@@ -141,6 +147,7 @@ def _merge_batch(batch_df, batch_id: int) -> None:
         edges_batch.writeTo(f"{CATALOG}.{SILVER_EDGES}").append()
 
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
+        log(f"Batch {batch_id}: committed to {SILVER_TXNS} in {time.time() - t0:.1f}s")
     finally:
         tagged_txns.unpersist(blocking=False)
 

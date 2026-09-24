@@ -10,7 +10,10 @@ regulator-facing metadata for FinCEN SAR / EBA STR mapping.
 All tables are Iceberg format-version=2, snappy-compressed. Partitioning
 choices follow the query patterns in ENG-2C.4:
 
-- Bronze pacs.008: ``days(intr_bk_sttlm_dt)`` -- date-range scans dominate.
+- Bronze pacs.008: unpartitioned. bronze-verify registers the datagen files
+  in place with add_files, which cannot map files onto a ``days()``
+  transform; the flat, date-clustered file layout still prunes on per-file
+  min/max of ``intr_bk_sttlm_dt``.
 - Silver transactions: ``days(txn_timestamp)`` -- W2/W3 motif scans are
   window-bounded; W8 replay walks historical snapshots.
 - Silver counterparty_edges: ``bucket(64, source_entity_id)`` -- keeps
@@ -102,7 +105,6 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     rmt_inf_strd                 ARRAY<STRUCT<ref_doc: STRING, amt: DECIMAL(18, 5)>>
 )
 USING iceberg
-PARTITIONED BY (days(intr_bk_sttlm_dt))
 TBLPROPERTIES (
     'format-version' = '2',
     'write.parquet.compression-codec' = 'snappy'

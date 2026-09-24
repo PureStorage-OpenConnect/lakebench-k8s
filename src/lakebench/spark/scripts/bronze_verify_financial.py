@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 
-from common import env, log, log_job_metrics, path_size_gb
+from common import env, log, log_job_metrics, path_size_gb, table_exists
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 
@@ -54,7 +54,19 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 # once per pipeline and expects registration as a side effect. Setting
 # LB_REGISTER_TABLE=0 turns off the register when the operator wants
 # a verify-only pass without CTAS/add_files side effects.
-REGISTER = env("LB_REGISTER_TABLE", "1") == "1"
+#
+# LB_REGISTER_TABLE=schema (continuous preflight) creates the table with the
+# inferred schema and NO data, only if it does not exist yet. In continuous
+# mode bronze_ingest_financial streams every file under the prefix from the
+# start, so registering the files present at preflight time as well would put
+# each of them in bronze twice. With add_files the duplicate commit is an
+# append snapshot, which silver-stream consumes, so the duplicates would reach
+# silver.transactions and every rule. A restart must also keep the rows the
+# stream already ingested, hence create-if-absent rather than drop.
+_REGISTER_MODE = env("LB_REGISTER_TABLE", "1")
+REGISTER = _REGISTER_MODE == "1"
+SCHEMA_ONLY = _REGISTER_MODE == "schema"
+INGEST_CHECKPOINT = env("LB_FINANCIAL_BRONZE_CHECKPOINT", "")
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
@@ -92,6 +104,26 @@ REQUIRED_FLAT_COLS = (
     "cdtr_agt",
     "purp_cd",
 )
+
+
+def _checkpoint_exists(spark, uri):
+    """True when the ingest stream has a checkpoint, i.e. this is a restart.
+
+    An unreadable location counts as present. Of the two possible mistakes,
+    keeping a stale table leaves duplicates that show up in the bronze row
+    count, while dropping a live stream's table loses rows for good: its
+    checkpoint already marks those files as ingested.
+    """
+    if not uri:
+        return True
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(uri), hconf)
+        return bool(fs.exists(jvm.org.apache.hadoop.fs.Path(uri.rstrip("/") + "/commits")))
+    except Exception as e:  # noqa: BLE001
+        log(f"Checkpoint probe failed ({e}); treating as a restart")
+        return True
 
 
 def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
@@ -154,7 +186,7 @@ def main() -> None:
     if n_null_sttlm_dt:
         log(
             f"ERROR: {n_null_sttlm_dt} rows have NULL intr_bk_sttlm_dt; "
-            "bronze registration will fail on the days() partition transform."
+            "every date-range read and the per-day rollups would silently drop them."
         )
         spark.stop()
         raise SystemExit(3)
@@ -163,7 +195,28 @@ def main() -> None:
     log(f"Partition days present: {partition_days}")
 
     source_bytes = None
-    if REGISTER:
+    if SCHEMA_ONLY:
+        fq = f"{CATALOG}.{BRONZE_TABLE}"
+        exists = table_exists(spark, fq)
+        if exists and not _checkpoint_exists(spark, INGEST_CHECKPOINT):
+            # Rows from an earlier batch run or an abandoned stream: a fresh
+            # stream re-reads every file, so keeping them would double-count.
+            spark.sql(f"DROP TABLE {fq}")
+            log(f"Schema-only register: dropped stale {fq} (no ingest checkpoint)")
+            exists = False
+        if exists:
+            log(f"Schema-only register: {fq} exists and the stream is resuming; left as is")
+        else:
+            (
+                df.limit(0)
+                .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
+                .using("iceberg")
+                .tableProperty("format-version", "2")
+                .tableProperty("write.parquet.compression-codec", "snappy")
+                .create()
+            )
+            log(f"Schema-only register: created empty {CATALOG}.{BRONZE_TABLE}")
+    elif REGISTER:
         # Register the Iceberg table over the datagen Parquet files. Two
         # implementations are attempted in order:
         #
@@ -229,7 +282,6 @@ def main() -> None:
             spark.sql(f"""
                 CREATE TABLE {CATALOG}.{BRONZE_TABLE}
                 USING iceberg
-                PARTITIONED BY (days(intr_bk_sttlm_dt))
                 TBLPROPERTIES ('format-version' = '2')
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
@@ -250,6 +302,16 @@ def main() -> None:
             # every column of the parquet source under its real name.
             spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
             src = spark.read.parquet(BRONZE_URI + PACS_PREFIX)
+            # Every register path (add_files, and both CTAS fallbacks below)
+            # produces the same unpartitioned layout, so benchmark numbers do
+            # not change with the path taken.
+            #
+            # OWNERSHIP HAZARD: add_files makes Iceberg treat the datagen files
+            # as its own. A DELETE / rewrite_data_files / compaction on this
+            # table followed by expire_snapshots, or DROP TABLE ... PURGE,
+            # physically deletes the raw datagen corpus. Keep bronze out of
+            # compaction; destroy is the only place allowed to do this.
+            #
             # The target is UNPARTITIONED on purpose. add_files can only map
             # source files onto identity partitions read from Hive-style
             # directories; against a days(intr_bk_sttlm_dt) spec it fails
@@ -283,7 +345,6 @@ def main() -> None:
             spark.sql(f"""
                 CREATE OR REPLACE TABLE {CATALOG}.{BRONZE_TABLE}
                 USING iceberg
-                PARTITIONED BY (days(intr_bk_sttlm_dt))
                 TBLPROPERTIES ('format-version' = '2')
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
