@@ -27,6 +27,7 @@ import time
 import uuid
 
 from common import env, iceberg_table_stats, log, log_job_metrics, one_line
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     array,
@@ -432,6 +433,13 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             if "max_vertices" in sig.parameters and _W1_MAX_VERTICES > 0:
                 params["max_vertices"] = _W1_MAX_VERTICES
             alerts = fn(txns, **params)
+            # Persist before counting, so the rule is computed exactly once.
+            # The loop used to count the frame and then INSERT from a temp
+            # view, which is not materialised: every rule ran twice, each run
+            # re-reading silver and redoing its joins. Counting before the
+            # DELETE keeps the old failure semantics: a rule that fails while
+            # computing leaves its committed rows in place.
+            alerts = alerts.persist(StorageLevel.MEMORY_AND_DISK)
             alert_count = alerts.count()
             # Snapshot prior alert count for this rule_id so that a
             # partial-write incident (DELETE commits, INSERT throws)
@@ -447,15 +455,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
                 prior_count = int(prior_row[0]["c"]) if prior_row else 0
             except Exception:  # noqa: BLE001 -- diagnostic only
                 prior_count = -1
-            # Materialise the alerts frame so the write half does not
-            # re-execute the rule on retry. Also lets us fail with a
-            # clear signal if the count/write disagrees.
-            tmp_view = f"_lb_alerts_{rule_id}"
-            alerts.createOrReplaceTempView(tmp_view)
-            spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'")
-            if alert_count > 0:
-                spark.sql(f"INSERT INTO {CATALOG}.{GOLD_ALERTS} SELECT * FROM {tmp_view}")
-            spark.catalog.dropTempView(tmp_view)
+            _write_rule_alerts(spark, alerts, rule_id, alert_count)
             elapsed = time.time() - rule_start
             log(
                 f"[detection] {rule_id}: alerts={alert_count} "
@@ -489,6 +489,12 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             err = one_line(f"{type(e).__name__}: {e}")
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
             status_rows.append((rule_id, "error", err, target_typology, None))
+        finally:
+            # The alerts frame and W1/W3/W9's intermediate frames (edges,
+            # step, path levels) are persisted. Nothing outlives the rule's
+            # write, and left cached they hold executor memory and scratch
+            # through every later rule.
+            spark.catalog.clearCache()
     log(f"[detection] total alerts written: {total_alerts}")
 
     for rule_id in skipped_rules:
@@ -505,6 +511,22 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     # source (e.g. W1 skipped at high scale) writes an empty derived table,
     # which is the correct "nothing to project" state, not a bug.
     _project_derived_gold(spark, run_id)
+
+
+def _write_rule_alerts(spark, alerts, rule_id: str, alert_count: int) -> None:
+    """Replace ``rule_id``'s rows in gold.alerts with ``alerts`` (persisted).
+
+    DELETE then INSERT: two Iceberg commits, see run_detection_rules for the
+    partial-write semantics.
+    """
+    tmp_view = f"_lb_alerts_{rule_id}"
+    alerts.createOrReplaceTempView(tmp_view)
+    try:
+        spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE rule_id = '{rule_id}'")
+        if alert_count > 0:
+            spark.sql(f"INSERT INTO {CATALOG}.{GOLD_ALERTS} SELECT * FROM {tmp_view}")
+    finally:
+        spark.catalog.dropTempView(tmp_view)
 
 
 def _write_detection_status(spark, status_rows: list, run_id: str) -> None:
@@ -599,7 +621,8 @@ def _project_derived_gold(spark, run_id: str) -> None:
             )
         )
         clusters.writeTo(f"{CATALOG}.{GOLD_CLUSTERS}").overwrite(lit(True))
-        log(f"[derived] wrote {GOLD_CLUSTERS} from W1 alerts ({clusters.count()} rows)")
+        n = spark.table(f"{CATALOG}.{GOLD_CLUSTERS}").count()
+        log(f"[derived] wrote {GOLD_CLUSTERS} from W1 alerts ({n} rows)")
     except Exception as e:  # noqa: BLE001
         log(f"[derived] entity_clusters projection failed: {type(e).__name__}: {e}")
 
@@ -625,7 +648,8 @@ def _project_derived_gold(spark, run_id: str) -> None:
             )
         )
         risk.writeTo(f"{CATALOG}.{GOLD_RISK}").overwrite(lit(True))
-        log(f"[derived] wrote {GOLD_RISK} from W4 alerts ({risk.count()} rows)")
+        n = spark.table(f"{CATALOG}.{GOLD_RISK}").count()
+        log(f"[derived] wrote {GOLD_RISK} from W4 alerts ({n} rows)")
     except Exception as e:  # noqa: BLE001
         log(f"[derived] risk_scores projection failed: {type(e).__name__}: {e}")
 
