@@ -20,7 +20,7 @@ use datagen_rs::hash::{hash_frac, splitmix64, Rng};
 use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_ex;
 use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
-use datagen_rs::s3sink::{S3Cfg, S3Sink};
+use datagen_rs::s3sink::S3Sink;
 use datagen_rs::timing::{sample_ts_on_day, DayCal};
 use datagen_rs::world::ring_member;
 use datagen_rs::writer::{
@@ -88,27 +88,41 @@ fn arg<T: std::str::FromStr>(flag: &str, default: T) -> T {
 /// as a cycle number exits 2. The lenient `arg()` would turn `--cycle -1` or a
 /// typo into cycle 0 and overwrite cycle 0's objects.
 fn cycle_arg() -> u64 {
+    strict_u64_arg("--cycle", 0, cycle::MAX_CYCLE)
+}
+
+/// (--cycle n, --cycles N), strictly parsed; n must be below N.
+fn cycle_args() -> (u64, u64) {
+    let n = cycle_arg();
+    let total = strict_u64_arg("--cycles", 1, cycle::MAX_CYCLE + 1);
+    if total == 0 || n >= total {
+        eprintln!("--cycle must be in 0..--cycles; got --cycle {n} --cycles {total}");
+        std::process::exit(2);
+    }
+    (n, total)
+}
+
+/// A u64 flag in 0..=max: absent gives `default`; a present value that does
+/// not parse (including `-1` and typos) exits 2 rather than falling back.
+fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
     let args: Vec<String> = std::env::args().collect();
     // Accept `--cycle N` and `--cycle=N`; anything else that names the flag
     // but does not parse is an error, never a silent cycle 0.
+    let eq = format!("{flag}=");
     let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
-        if a == "--cycle" {
+        if a == flag {
             Some(args.get(i + 1).cloned().unwrap_or_default())
         } else {
-            a.strip_prefix("--cycle=").map(str::to_string)
+            a.strip_prefix(eq.as_str()).map(str::to_string)
         }
     });
     let Some(raw) = raw else {
-        return 0;
+        return default;
     };
     match raw.parse::<u64>() {
-        Ok(c) if c <= cycle::MAX_CYCLE => c,
+        Ok(c) if c <= max => c,
         _ => {
-            eprintln!(
-                "--cycle must be an integer in 0..={}; got {:?}",
-                cycle::MAX_CYCLE,
-                raw
-            );
+            eprintln!("{flag} must be an integer in 0..={max}; got {raw:?}");
             std::process::exit(2);
         }
     }
@@ -177,11 +191,13 @@ fn pacs008_main() {
         std::process::exit(2);
     }
     let seed: i64 = arg("--seed", 42);
-    // Multi-cycle runs (datagen_rs::cycle): cycle n > 0 draws its event
-    // streams from a cycle-mixed seed and writes cycle-suffixed keys. The
-    // world keeps --seed. 0 reproduces a run without --cycle byte for byte.
-    let cycle_n: u64 = cycle_arg();
-    let sseed: i64 = cycle::stream_seed(seed, cycle_n);
+    // Multi-cycle runs (datagen_rs::cycle): cycle n of --cycles N emits the
+    // one-shot corpus rows whose calendar mass lies in [n/N, (n+1)/N), so the
+    // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a
+    // one-shot run.
+    let (cycle_n, cycles) = cycle_args();
+    let (slice_lo, slice_hi) = cycle::mass_slice(cycle_n, cycles);
+    let in_slice = move |m: f64| m >= slice_lo && m < slice_hi;
     let scale: f64 = arg("--scale", 0.01);
     let corpus_months: i64 = arg("--corpus-months", 60);
     let file_size_mb: i64 = arg("--file-size-mb", 32);
@@ -301,14 +317,7 @@ fn pacs008_main() {
     // Validate S3 config + build the sink BEFORE the multi-minute world build,
     // so bad creds / missing endpoint surface in milliseconds. Building the
     // sink also proves the tokio runtime and object_store client init cleanly.
-    let s3_cfg = match S3Cfg::try_from_env(bucket.clone(), prefix.clone()) {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("s3 config error: {}", msg);
-            std::process::exit(2);
-        }
-    };
-    let sink = S3Sink::new(&s3_cfg);
+    let sink = S3Sink::from_env(&bucket, &prefix);
 
     let t0 = std::time::Instant::now();
     // A dedicated-bronze pod (writes no reference zones) can skip the
@@ -340,12 +349,8 @@ fn pacs008_main() {
 
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
-    let mut instances = datagen_rs::typology::schedule_ex(
-        seed, sseed, total_txns, pop, start_us, end_us, &w.country,
-    );
-    for inst in instances.iter_mut() {
-        inst.id = cycle::instance_id(&inst.id, cycle_n);
-    }
+    let mut instances =
+        datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
@@ -375,9 +380,13 @@ fn pacs008_main() {
                 .push((inst.suppress_start_us, inst.suppress_end_us));
         }
     }
-    let mut trng = Rng::new((sseed as u64) ^ 0x7791);
+    let mut trng = Rng::new((seed as u64) ^ 0x7791);
     // Shaped [first, last] in-window row per instance, for the manifest.
     let mut inst_bounds: HashMap<String, (i64, i64)> = HashMap::new();
+    // Calendar mass of each instance's last emitted row: a multi-cycle run
+    // lists the instance in the manifest of the cycle that emits that row,
+    // so each pattern's ground truth appears once, when it is complete.
+    let mut inst_last_mass: HashMap<String, f64> = HashMap::new();
     for inst in &instances {
         let is_dormant = inst.typ == "dormant_reactivation";
         // Shape every row of the instance once, here, with an instance-keyed
@@ -411,8 +420,10 @@ fn pacs008_main() {
                 continue;
             }
             let ccy = w.ccy[r.orig as usize];
-            let fid = ((gcal.mass_at(r.ts_us) * total_files as f64) as i64)
-                .clamp(0, total_files - 1) as usize;
+            let m = gcal.mass_at(r.ts_us);
+            let last = inst_last_mass.entry(inst.id.clone()).or_insert(m);
+            *last = last.max(m);
+            let fid = ((m * total_files as f64) as i64).clamp(0, total_files - 1) as usize;
             let uid = typology_uid(inst.seed, row_idx);
             typ_by_file[fid].push(TypRow {
                 orig: r.orig,
@@ -443,25 +454,18 @@ fn pacs008_main() {
     // mass falls in [fid/F, (fid+1)/F).
     let n_typ_total: i64 = typ_by_file.iter().map(|v| v.len() as i64).sum();
     let n_base_total: u64 = (total_txns - n_typ_total).max(0) as u64;
-    // base_uid packs the cycle above bit 40; the global row index must stay
-    // below it or cycles would share uids (and UETRs).
-    assert!(
-        n_base_total < 1 << 40,
-        "corpus too large for cycle uid packing"
-    );
-    let base_seed = splitmix64((sseed as u64) ^ 0xBA5E_0000_0000_0001);
+    let base_seed = splitmix64((seed as u64) ^ 0xBA5E_0000_0000_0001);
     let base_mass = move |i: u64| -> f64 {
         (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
     };
-    // First base row whose mass is >= fid/F.
-    let base_start = |fid: i64| -> u64 {
-        if fid <= 0 {
+    // First base row whose mass is >= target (base_mass is increasing).
+    let first_at_mass = |target: f64| -> u64 {
+        if target <= 0.0 {
             return 0;
         }
-        if fid >= total_files {
+        if target >= 1.0 {
             return n_base_total;
         }
-        let target = fid as f64 / total_files as f64;
         let mut i = ((target * n_base_total as f64) as u64).min(n_base_total);
         while i > 0 && base_mass(i - 1) >= target {
             i -= 1;
@@ -471,6 +475,18 @@ fn pacs008_main() {
         }
         i
     };
+    // First base row of file fid (mass >= fid/F).
+    let base_start = |fid: i64| -> u64 {
+        if fid <= 0 {
+            0
+        } else if fid >= total_files {
+            n_base_total
+        } else {
+            first_at_mass(fid as f64 / total_files as f64)
+        }
+    };
+    // The cycle's slice of the base rows.
+    let (slice_i0, slice_i1) = (first_at_mass(slice_lo), first_at_mass(slice_hi));
     let rows_per_file = (n_base_total as i64 / total_files).max(1);
 
     // Activity-weighted originator sampling: prefix sums.
@@ -507,19 +523,35 @@ fn pacs008_main() {
     let write_ns = AtomicU64::new(0);
     let t_gen0 = std::time::Instant::now();
 
+    // Files cover equal slices of calendar mass, [fid/F, (fid+1)/F); a cycle
+    // generates only the files that intersect its slice, and only the rows of
+    // those files that fall inside it (a straddling file is split).
     let my_files: Vec<i64> = if do_bronze {
         (0..total_files)
             .filter(|fid| fid % total_nodes == node_id)
+            .filter(|&fid| {
+                let (a, b) = (
+                    fid as f64 / total_files as f64,
+                    (fid + 1) as f64 / total_files as f64,
+                );
+                a < slice_hi && b > slice_lo
+            })
             .collect()
     } else {
         Vec::new()
     };
     my_files.par_iter().for_each(|&fid| {
-        let typ = &typ_by_file[fid as usize];
+        let typ: Vec<&TypRow> = typ_by_file[fid as usize]
+            .iter()
+            .filter(|r| in_slice(gcal.mass_at(r.ts_us)))
+            .collect();
         let n_typ = typ.len();
-        let i0 = base_start(fid);
-        let i1 = base_start(fid + 1);
+        let i0 = base_start(fid).max(slice_i0);
+        let i1 = base_start(fid + 1).min(slice_i1).max(i0);
         let n_base = (i1 - i0) as usize;
+        if cycles > 1 && n_base + n_typ == 0 {
+            return;
+        }
 
         let cap = n_base + n_typ;
         let mut orig = Vec::with_capacity(cap);
@@ -583,7 +615,7 @@ fn pacs008_main() {
             ts_us.push(t);
             amount.push(native_amount(&mut rng, w.amount_logshift[o as usize], cc));
             ccy.push(cc);
-            uid_pre.push(cycle::base_uid(gi, cycle_n));
+            uid_pre.push(gi);
         }
         for r in typ {
             orig.push(r.orig);
@@ -650,6 +682,8 @@ fn pacs008_main() {
     let mut ref_bytes: u64 = 0;
     let mut ref_files: u64 = 0;
     if do_reference {
+        // Party and account are the same for every cycle (the world and the
+        // schedule are the one-shot ones), so only cycle 0 writes them.
         // Party and account stream through a real S3 multipart upload
         // (LB-107 fix). ArrowWriter emits parquet in row-group chunks
         // into MpuWriter, which enqueues 5 MiB parts against S3 as they
@@ -663,31 +697,43 @@ fn pacs008_main() {
         // finish() is fail-loud: on error we panic so the pod exits
         // non-zero and the datagen Job restarts (same semantics as the
         // single-PUT path). Drop's best-effort abort covers panics.
-        let mut party_mpu = sink.put_multipart(&cycle::ref_key("bronze/party.parquet", cycle_n));
-        write_party_to(&w, &instances, &mut party_mpu);
-        let party_bytes = party_mpu.bytes_written();
-        party_mpu
-            .finish()
-            .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
-        ref_bytes += party_bytes;
-        ref_files += 1;
+        if cycle_n == 0 {
+            let mut party_mpu = sink.put_multipart("bronze/party.parquet");
+            write_party_to(&w, &instances, &mut party_mpu);
+            let party_bytes = party_mpu.bytes_written();
+            party_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("party.parquet mpu finish: {}", e));
+            ref_bytes += party_bytes;
+            ref_files += 1;
 
-        let mut acct_mpu = sink.put_multipart(&cycle::ref_key("bronze/account.parquet", cycle_n));
-        write_account_to(&w, &mut acct_mpu);
-        let acct_bytes = acct_mpu.bytes_written();
-        acct_mpu
-            .finish()
-            .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
-        ref_bytes += acct_bytes;
-        ref_files += 1;
+            let mut acct_mpu = sink.put_multipart("bronze/account.parquet");
+            write_account_to(&w, &mut acct_mpu);
+            let acct_bytes = acct_mpu.bytes_written();
+            acct_mpu
+                .finish()
+                .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
+            ref_bytes += acct_bytes;
+            ref_files += 1;
+        }
 
         // Manifest stays on the single-PUT path: it's a handful of MB
         // even at scale 1000 (one row per typology instance), so
         // multipart adds request overhead with no benefit.
-        let man_bytes = encode_parquet(
-            &build_manifest(&instances, seed, &inst_uids),
-            8 * 1024 * 1024,
-        );
+        // This cycle's instances: those whose last emitted row is in its
+        // slice (an instance with no emitted rows goes by its window end).
+        let mine: Vec<datagen_rs::typology::Instance> = instances
+            .iter()
+            .filter(|i| {
+                let m = inst_last_mass
+                    .get(&i.id)
+                    .copied()
+                    .unwrap_or_else(|| gcal.mass_at(i.end_us));
+                in_slice(m)
+            })
+            .cloned()
+            .collect();
+        let man_bytes = encode_parquet(&build_manifest(&mine, seed, &inst_uids), 8 * 1024 * 1024);
         ref_bytes += man_bytes.len() as u64;
         ref_files += 1;
         sink.put(
@@ -889,14 +935,7 @@ fn customer360_main() {
             .expect("failed to size rayon pool");
     }
 
-    let s3_cfg = match S3Cfg::try_from_env(bucket.clone(), prefix.clone()) {
-        Ok(c) => c,
-        Err(msg) => {
-            eprintln!("s3 config error: {}", msg);
-            std::process::exit(2);
-        }
-    };
-    let sink = S3Sink::new(&s3_cfg);
+    let sink = S3Sink::from_env(&bucket, &prefix);
 
     let t0 = std::time::Instant::now();
     let file_size_bytes = (file_size_mb as usize) * 1024 * 1024;

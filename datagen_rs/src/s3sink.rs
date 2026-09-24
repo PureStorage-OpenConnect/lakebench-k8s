@@ -15,7 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use object_store::aws::{AmazonS3, AmazonS3Builder};
+use object_store::aws::AmazonS3Builder;
+use object_store::local::LocalFileSystem;
 use object_store::path::Path;
 use object_store::{
     ClientOptions, Error as OsError, MultipartUpload, ObjectStore, PutPayload, RetryConfig,
@@ -60,7 +61,7 @@ impl S3Cfg {
 
 /// Async S3 client + owning tokio runtime, shared across rayon workers.
 pub struct S3Sink {
-    store: Arc<AmazonS3>,
+    store: Arc<dyn ObjectStore>,
     prefix: String,
     // `_rt` keeps the runtime alive for the sink's lifetime; workers call the
     // handle. Dropping the sink drops the runtime, so we do not leak threads.
@@ -69,6 +70,45 @@ pub struct S3Sink {
 }
 
 impl S3Sink {
+    /// A sink that writes `<dir>/<bucket>/<prefix>/<key>` on the local
+    /// filesystem, for tests and local corpora (DG_LOCAL_DIR). Same keys and
+    /// bytes as the S3 path; only the store differs.
+    pub fn local(dir: &str, bucket: &str, prefix: &str) -> Self {
+        let root = std::path::Path::new(dir).join(bucket);
+        std::fs::create_dir_all(&root).expect("create DG_LOCAL_DIR bucket dir");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .worker_threads(4)
+            .thread_name("local-io")
+            .build()
+            .expect("build tokio runtime");
+        let handle = rt.handle().clone();
+        let store = LocalFileSystem::new_with_prefix(&root).expect("local object store");
+        S3Sink {
+            store: Arc::new(store),
+            prefix: prefix.trim_end_matches('/').to_string(),
+            _rt: rt,
+            handle,
+        }
+    }
+
+    /// DG_LOCAL_DIR set: a local sink (no S3 credentials needed); otherwise
+    /// the S3 sink from the environment. Exits 2 on a bad S3 config.
+    pub fn from_env(bucket: &str, prefix: &str) -> Self {
+        if let Ok(dir) = env::var("DG_LOCAL_DIR") {
+            if !dir.is_empty() {
+                return Self::local(&dir, bucket, prefix);
+            }
+        }
+        match S3Cfg::try_from_env(bucket.to_string(), prefix.to_string()) {
+            Ok(c) => Self::new(&c),
+            Err(msg) => {
+                eprintln!("s3 config error: {}", msg);
+                std::process::exit(2);
+            }
+        }
+    }
+
     pub fn new(cfg: &S3Cfg) -> Self {
         // S3 upload concurrency = number of tokio worker threads. Previously
         // hardcoded to 4, which throttled aggregate upload rate to ~4 in-flight

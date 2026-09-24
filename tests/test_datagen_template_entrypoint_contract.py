@@ -164,7 +164,7 @@ def test_cycle_is_forwarded_only_when_nonzero(schema, cycle, monkeypatch):
 
     argv = ["entrypoint.py", "--schema", schema, "--bucket", "b"]
     if cycle:
-        argv += ["--cycle", str(cycle)]
+        argv += ["--cycle", str(cycle), "--cycles", "5"]
     with patch.object(sys, "argv", argv):
         with patch.object(ep.os, "execvp", _fake_exec):
             with pytest.raises(SystemExit):
@@ -172,13 +172,15 @@ def test_cycle_is_forwarded_only_when_nonzero(schema, cycle, monkeypatch):
     cmd = captured["cmd"]
     if cycle:
         assert cmd[cmd.index("--cycle") + 1] == str(cycle)
+        assert cmd[cmd.index("--cycles") + 1] == "5"
     else:
-        assert "--cycle" not in cmd
+        assert "--cycle" not in cmd and "--cycles" not in cmd
 
 
 def test_negative_cycle_is_rejected(monkeypatch):
     ep = _entrypoint()
     monkeypatch.setenv("CPU_LIMIT", "8")
-    with patch.object(sys, "argv", ["entrypoint.py", "--bucket", "b", "--cycle", "-1"]):
-        with patch.object(ep.os, "execvp", lambda *_: pytest.fail("exec'd")):
-            assert ep.main() == 2
+    for bad in (["--cycle", "-1"], ["--cycle", "3", "--cycles", "3"], ["--cycles", "0"]):
+        with patch.object(sys, "argv", ["entrypoint.py", "--bucket", "b", *bad]):
+            with patch.object(ep.os, "execvp", lambda *_: pytest.fail("exec'd")):
+                assert ep.main() == 2

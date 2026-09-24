@@ -1,57 +1,42 @@
-//! Multi-cycle generation (`--cycle n`, WORKPLAN B4).
+//! Multi-cycle generation (`--cycle n --cycles N`, WORKPLAN B4).
 //!
-//! A multi-cycle run invokes the generator once per cycle with the same
-//! --seed. Before this every cycle wrote the same object keys and replayed the
-//! same id streams, so cycle k overwrote cycle k-1's bronze files and N cycles
-//! gave N copies of every c360 event_id. Cycle n > 0 now draws from its own
-//! streams and writes its own keys, so bronze accumulates. Cycle 0 is the
-//! identity everywhere: its bytes and keys are exactly what a run without
-//! --cycle produces.
+//! A multi-cycle run invokes the generator once per cycle. Before this every
+//! cycle wrote the same object keys and replayed the same rows, so cycle k
+//! overwrote cycle k-1's bronze files.
 //!
-//! What a cycle changes and what it keeps:
-//! - The world (entities, names, KYC, customer status, persona) keeps the
-//!   plain --seed. A bank's customers do not change between daily cycles, and
-//!   silver's entity keys must line up across cycles.
-//! - Every event stream mixes the cycle in: the AML typology schedule,
-//!   typology amounts and base rows (via `stream_seed`), the base-row uids
-//!   that seed UETRs and message ids (`base_uid`), typology instance ids
-//!   (`instance_id`), and the c360 per-file stream and row ids (`c360_file_id`).
+//! AML: cycle n of N emits exactly the one-shot corpus rows whose calendar
+//! mass lies in [n/N, (n+1)/N) (`mass_slice`). The world, the typology
+//! schedule, every amount and the dormancy suppression are computed exactly
+//! as in one shot, so the union of the N cycles is the one-shot corpus, row
+//! for row, and cross-row truth (dormancy gaps, chains) is preserved. Files
+//! are already laid out by mass, so a cycle generates only the files that
+//! intersect its slice and splits a straddling one. Each cycle's manifest
+//! lists the instances whose last row it emits. Cycle 0 of 1 is a one-shot
+//! run, byte for byte.
+//!
+//! c360 has no cross-row labels and its per-cycle window comes from
+//! --timestamp-start/end, so there cycle n > 0 shifts the per-file stream
+//! and row ids instead (`c360_file_id`).
 
-use crate::hash::splitmix64;
-
-/// Largest supported cycle: base_uid keeps it in bits 40..62, below the
-/// typology-uid bit 63. The c360 row ids (file_id * rows_per_file with
+/// Largest supported cycle. The c360 row ids (file_id * rows_per_file with
 /// file_id offset by cycle << 32) stay in i64 only while rows_per_file is
 /// below 2^31 / n; bin/generate.rs refuses a c360 cycle that would overflow.
 pub const MAX_CYCLE: u64 = (1 << 23) - 1;
 
-/// Seed for the cycle's event streams. Identity for cycle 0.
-#[inline]
-pub fn stream_seed(seed: i64, cycle: u64) -> i64 {
-    if cycle == 0 {
-        seed
+/// Calendar-mass slice [lo, hi) of cycle n of N. The first slice starts at
+/// -inf and the last ends at +inf, so no row is lost to a rounding edge.
+pub fn mass_slice(cycle: u64, cycles: u64) -> (f64, f64) {
+    let lo = if cycle == 0 {
+        f64::NEG_INFINITY
     } else {
-        splitmix64((seed as u64) ^ splitmix64(0xC7C1_E000_0000_0000 ^ cycle)) as i64
-    }
-}
-
-/// Base-row uid: the global row index with the cycle in bits 40..62. Base
-/// uids keep the top bit clear (typology uids set it), and the global index
-/// stays below 2^40 at every supported scale, so cycles never share a uid.
-#[inline]
-pub fn base_uid(gi: u64, cycle: u64) -> u64 {
-    debug_assert!(gi < 1 << 40 && cycle <= MAX_CYCLE);
-    gi | (cycle << 40)
-}
-
-/// Typology instance id, suffixed with the cycle for n > 0 so manifest
-/// typology_ids stay unique across cycles.
-pub fn instance_id(id: &str, cycle: u64) -> String {
-    if cycle == 0 {
-        id.to_string()
+        cycle as f64 / cycles as f64
+    };
+    let hi = if cycle + 1 >= cycles {
+        f64::INFINITY
     } else {
-        format!("{id}_C{cycle:03}")
-    }
+        (cycle + 1) as f64 / cycles as f64
+    };
+    (lo, hi)
 }
 
 /// Object key of an AML bronze file.

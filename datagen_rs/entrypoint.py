@@ -103,10 +103,13 @@ def main() -> int:
     ap.add_argument("--schema", default="financial", choices=SUPPORTED_SCHEMAS)
     # Shared args -- both schemas consume these.
     ap.add_argument("--seed", type=int, default=42)
-    # Multi-cycle runs: cycle n > 0 draws disjoint event streams and writes
-    # cycle-suffixed object keys, so bronze accumulates across cycles instead
-    # of being overwritten (datagen_rs/src/cycle.rs). 0 = a single run.
+    # Multi-cycle runs (datagen_rs/src/cycle.rs). AML: cycle n of --cycles N
+    # emits the one-shot corpus rows in calendar-mass slice [n/N, (n+1)/N),
+    # so the union of all cycles is the one-shot corpus. c360: cycle n > 0
+    # shifts the per-file streams. Keys are cycle-suffixed for n > 0, so
+    # bronze accumulates. The defaults (0 of 1) are a single run.
     ap.add_argument("--cycle", type=int, default=0)
+    ap.add_argument("--cycles", type=int, default=1)
     # NOTE: default is 32 to match the pre-M6 entrypoint (existing financial
     # K8s Job YAMLs assume 32). c360 K8s Job templates that want a different
     # file size pass --file-size-mb explicitly.
@@ -213,12 +216,17 @@ def main() -> int:
     # bucket root, breaking Silver's read path.
     if args.prefix:
         common += ["--prefix", args.prefix]
-    if args.cycle < 0:
-        print(f"[entrypoint] --cycle must be >= 0; got {args.cycle}", file=sys.stderr)
+    if args.cycles < 1 or not 0 <= args.cycle < args.cycles:
+        print(
+            f"[entrypoint] need 0 <= --cycle < --cycles; got {args.cycle} of {args.cycles}",
+            file=sys.stderr,
+        )
         return 2
-    # Forwarded only when non-zero so a single-cycle argv is unchanged.
+    # Forwarded only when not the defaults, so a single-run argv is unchanged.
     if args.cycle:
         common += ["--cycle", str(args.cycle)]
+    if args.cycles != 1:
+        common += ["--cycles", str(args.cycles)]
 
     if args.schema == "financial":
         # Rust driver only knows all/bronze/reference. Map the K8s
