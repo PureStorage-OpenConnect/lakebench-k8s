@@ -138,7 +138,8 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     rptd_beneficiary_name   STRING,
     rptd_beneficiary_address STRING,
     source_message_ref      STRING,
-    _batch_id               BIGINT
+    _batch_id               BIGINT,
+    ingest_ts               TIMESTAMP
 )
 USING iceberg
 PARTITIONED BY (days(txn_timestamp))

@@ -384,6 +384,32 @@ class S3Client:
                 f"Failed to get bucket size for {bucket_name}: {e}"
             )
 
+    def delete_prefix(self, bucket_name: str, prefix: str) -> int:
+        """Delete every object under ``prefix``. Returns the count deleted.
+
+        Refuses an empty or root prefix: this is for scoped state such as
+        stream checkpoints, and emptying a whole bucket is ``empty_bucket``.
+        """
+        if not prefix.strip("/"):
+            raise ValueError("delete_prefix needs a non-empty prefix")
+        prefix = prefix.rstrip("/") + "/"
+        deleted = 0
+        try:
+            paginator = self._client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket_name, Prefix=prefix):
+                keys = [{"Key": o["Key"]} for o in page.get("Contents", [])]
+                for i in range(0, len(keys), 1000):
+                    chunk = keys[i : i + 1000]
+                    self._client.delete_objects(
+                        Bucket=bucket_name, Delete={"Objects": chunk, "Quiet": True}
+                    )
+                    deleted += len(chunk)
+        except ClientError as e:
+            raise S3BucketError(  # noqa: B904
+                f"Failed to delete {bucket_name}/{prefix}: {e}"
+            )
+        return deleted
+
     def empty_bucket(
         self,
         bucket_name: str,

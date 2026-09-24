@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import time
 
-from common import env, log, log_job_metrics, path_size_gb, table_exists
+from common import env, log, log_job_metrics, path_size_gb
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import col, current_timestamp
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 # datagen_rs is the only shipping datagen after the Python generator was
@@ -55,18 +55,22 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 # LB_REGISTER_TABLE=0 turns off the register when the operator wants
 # a verify-only pass without CTAS/add_files side effects.
 #
-# LB_REGISTER_TABLE=schema (continuous preflight) creates the table with the
-# inferred schema and NO data, only if it does not exist yet. In continuous
-# mode bronze_ingest_financial streams every file under the prefix from the
-# start, so registering the files present at preflight time as well would put
-# each of them in bronze twice. With add_files the duplicate commit is an
-# append snapshot, which silver-stream consumes, so the duplicates would reach
-# silver.transactions and every rule. A restart must also keep the rows the
-# stream already ingested, hence create-if-absent rather than drop.
+# LB_REGISTER_TABLE=schema is the continuous preflight, and it resets the
+# stream's tables for a fresh run. Every continuous run starts clean: the CLI
+# deletes the stream checkpoints first, and this drops and recreates
+#   - bronze, empty, with the inferred schema plus ingest_ts. Registering the
+#     files present at preflight time would ingest each of them twice, since
+#     bronze-ingest streams every file under the prefix itself.
+#   - silver.transactions and silver.counterparty_edges, which silver-stream
+#     recreates. Rows left by an earlier batch or continuous run would
+#     otherwise be counted again next to the re-ingested corpus.
+# A pod restart inside a run does not re-run the preflight, so it keeps its
+# checkpoints and tables.
 _REGISTER_MODE = env("LB_REGISTER_TABLE", "1")
 REGISTER = _REGISTER_MODE == "1"
-SCHEMA_ONLY = _REGISTER_MODE == "schema"
-INGEST_CHECKPOINT = env("LB_FINANCIAL_BRONZE_CHECKPOINT", "")
+CONTINUOUS_RESET = _REGISTER_MODE == "schema"
+SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
+SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
@@ -106,24 +110,29 @@ REQUIRED_FLAT_COLS = (
 )
 
 
-def _checkpoint_exists(spark, uri):
-    """True when the ingest stream has a checkpoint, i.e. this is a restart.
-
-    An unreadable location counts as present. Of the two possible mistakes,
-    keeping a stale table leaves duplicates that show up in the bronze row
-    count, while dropping a live stream's table loses rows for good: its
-    checkpoint already marks those files as ingested.
-    """
-    if not uri:
-        return True
-    try:
-        jvm = spark._jvm  # type: ignore[attr-defined]
-        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(uri), hconf)
-        return bool(fs.exists(jvm.org.apache.hadoop.fs.Path(uri.rstrip("/") + "/commits")))
-    except Exception as e:  # noqa: BLE001
-        log(f"Checkpoint probe failed ({e}); treating as a restart")
-        return True
+def _continuous_reset(spark, df):
+    """Drop the stream-written tables and create an empty bronze table."""
+    # Bronze: plain DROP, never PURGE. After a batch run it may hold
+    # add_files-registered datagen files, and PURGE would delete the corpus
+    # the stream is about to read.
+    spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{BRONZE_TABLE}")
+    # Silver stream tables own their files, so PURGE them rather than leave
+    # orphaned data in the silver bucket on every rerun.
+    for t in (SILVER_TXNS, SILVER_EDGES):
+        spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{t} PURGE")
+    (
+        df.limit(0)
+        .withColumn("ingest_ts", current_timestamp())
+        .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
+        .using("iceberg")
+        .tableProperty("format-version", "2")
+        .tableProperty("write.parquet.compression-codec", "snappy")
+        .create()
+    )
+    log(
+        f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
+        f"dropped {SILVER_TXNS}, {SILVER_EDGES}"
+    )
 
 
 def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
@@ -195,27 +204,8 @@ def main() -> None:
     log(f"Partition days present: {partition_days}")
 
     source_bytes = None
-    if SCHEMA_ONLY:
-        fq = f"{CATALOG}.{BRONZE_TABLE}"
-        exists = table_exists(spark, fq)
-        if exists and not _checkpoint_exists(spark, INGEST_CHECKPOINT):
-            # Rows from an earlier batch run or an abandoned stream: a fresh
-            # stream re-reads every file, so keeping them would double-count.
-            spark.sql(f"DROP TABLE {fq}")
-            log(f"Schema-only register: dropped stale {fq} (no ingest checkpoint)")
-            exists = False
-        if exists:
-            log(f"Schema-only register: {fq} exists and the stream is resuming; left as is")
-        else:
-            (
-                df.limit(0)
-                .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
-                .using("iceberg")
-                .tableProperty("format-version", "2")
-                .tableProperty("write.parquet.compression-codec", "snappy")
-                .create()
-            )
-            log(f"Schema-only register: created empty {CATALOG}.{BRONZE_TABLE}")
+    if CONTINUOUS_RESET:
+        _continuous_reset(spark, df)
     elif REGISTER:
         # Register the Iceberg table over the datagen Parquet files. Two
         # implementations are attempted in order:

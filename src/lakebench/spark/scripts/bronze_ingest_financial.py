@@ -23,6 +23,8 @@ import time
 
 from common import env, log, stream_batch_lines
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import current_timestamp
+from pyspark.sql.types import StructType
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 # LB-089: honor LB_FINANCIAL_BRONZE_PREFIX with the same semantics as
@@ -51,13 +53,18 @@ def _log_new_progress(query, logged_batch: int) -> int:
     parses (LB-136: without these the continuous scorecard read zero rows
     ingested for a healthy AML stream). Returns the last batch id logged."""
     for p in query.recentProgress:
+        rows = int(p.get("numInputRows") or 0)
+        # Idle triggers report the NEXT batch id with zero rows. Advancing
+        # past them would skip the real batch that later reuses that id.
+        if rows <= 0:
+            continue
         batch_id = int(p.get("batchId", -1))
         if batch_id <= logged_batch:
             continue
         logged_batch = batch_id
         for line in stream_batch_lines(
             batch_id,
-            int(p.get("numInputRows") or 0),
+            rows,
             (p.get("durationMs") or {}).get("triggerExecution", 0) / 1000.0,
             f"{CATALOG}.{BRONZE_TABLE}",
         ):
@@ -93,11 +100,16 @@ def main() -> None:
         )
         sys.exit(2)
 
+    # The datagen files carry no ingest_ts; the stream stamps it per
+    # micro-batch (current_timestamp is fixed per batch). It is the start of
+    # the continuous freshness clock that gold_refresh reports.
+    source_schema = StructType([f for f in target_schema.fields if f.name != "ingest_ts"])
     df = (
         spark.readStream.format("parquet")
-        .schema(target_schema)
+        .schema(source_schema)
         .option("maxFilesPerTrigger", MAX_FILES)
         .load(BRONZE_URI + PACS_PREFIX)
+        .withColumn("ingest_ts", current_timestamp())
     )
 
     query = (

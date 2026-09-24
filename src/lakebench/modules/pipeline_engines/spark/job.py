@@ -2162,6 +2162,9 @@ class SparkJobManager:
                     "value": cfg.architecture.tables.bronze,
                 }
             )
+            env.extend(
+                {"name": k, "value": v} for k, v in cfg.architecture.tables.financial_env().items()
+            )
             # W1 connected-components vertex cap (LB-119/LB-120). Read by
             # gold_finalize_financial and threaded into the W1 rule so the
             # graph detector runs at scale 10 by default and can be raised

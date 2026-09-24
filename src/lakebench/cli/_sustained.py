@@ -58,6 +58,36 @@ def _c360_continuous_gate_problems(rows_by_job: dict[str, int | None]) -> list[s
     return problems
 
 
+def _clear_stream_checkpoints(cfg) -> None:
+    """Delete the bronze-ingest, silver-stream and gold-refresh checkpoints.
+
+    Raises on failure: a continuous run that silently resumed old
+    checkpoints would ingest nothing new and still report success.
+    """
+    from lakebench.s3 import S3Client
+
+    s3_cfg = cfg.platform.storage.s3
+    base = cfg.architecture.pipeline.sustained.checkpoint_base.strip("/")
+    client = S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    )
+    b = s3_cfg.buckets
+    for bucket, sub in (
+        (b.bronze, "bronze-ingest"),
+        (b.silver, "silver-stream"),
+        (b.gold, "gold-refresh"),
+    ):
+        n = client.delete_prefix(bucket, f"{base}/{sub}")
+        if n:
+            print_info(f"Cleared {n} stale checkpoint objects in {bucket}/{base}/{sub}")
+
+
 def _find_prometheus_svc(namespace: str) -> str | None:
     """Find the Prometheus service name in the given namespace.
 
@@ -299,11 +329,8 @@ def _run_iceberg_maintenance(
         return
 
     tables = cfg.architecture.tables
-    table_names = [
-        f"{catalog}.{tables.bronze}",
-        f"{catalog}.{tables.silver}",
-        f"{catalog}.{tables.gold}",
-    ]
+    schema = cfg.architecture.workload.schema_type.value
+    table_names = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
 
     # Build SQL based on table format
     if table_format == "delta":
@@ -399,9 +426,12 @@ def _run_iceberg_compaction(
         return
 
     tables = cfg.architecture.tables
+    schema = cfg.architecture.workload.schema_type.value
+    # Bronze is never compacted: for AML it holds add_files-registered
+    # datagen files, and a rewrite followed by expire_snapshots would
+    # delete the raw corpus (see bronze_verify_financial).
     table_names = [
-        f"{catalog}.{tables.silver}",
-        f"{catalog}.{tables.gold}",
+        f"{catalog}.{t}" for t in tables.workload_tables(schema, layers=("silver", "gold"))
     ]
 
     # Build SQL based on table format
@@ -904,7 +934,6 @@ def _run_sustained(
     from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
     from lakebench.engine import get_engine
     from lakebench.metrics import MetricsCollector, MetricsStorage, StreamingJobMetrics
-    from lakebench.modules.pipeline_engines.spark.job import bronze_ingest_checkpoint_uri
     from lakebench.spark import SparkJobMonitor, SparkOperatorManager
     from lakebench.spark.job import (
         JobState,
@@ -1043,16 +1072,17 @@ def _run_sustained(
             print_info("Waiting for first parquet to land in bronze before preflight...")
             _wait_for_bronze_data(cfg, timeout_seconds=300)
 
+            # Every continuous AML run starts clean (bronze_verify_financial
+            # CONTINUOUS_RESET): stale checkpoints made a rerun on the same
+            # deployment ingest nothing, and still pass.
+            _clear_stream_checkpoints(cfg)
+
             console.print("[bold]Preflight: registering bronze table via bronze-verify...[/bold]")
             preflight_status = job_manager.submit_job(
                 JobType.BRONZE_VERIFY,
-                # Schema only: bronze-ingest streams every file under the
-                # prefix itself, so registering data here would ingest the
-                # early files twice. See bronze_verify_financial.SCHEMA_ONLY.
-                cycle_env={
-                    "LB_REGISTER_TABLE": "schema",
-                    "LB_FINANCIAL_BRONZE_CHECKPOINT": bronze_ingest_checkpoint_uri(cfg),
-                },
+                # Reset, not register: see bronze_verify_financial
+                # CONTINUOUS_RESET.
+                cycle_env={"LB_REGISTER_TABLE": "schema"},
             )
             if preflight_status.state == JobState.FAILED:
                 print_error(f"bronze-verify preflight submit failed: {preflight_status.message}")
@@ -1302,9 +1332,11 @@ def _run_sustained(
             logger.warning("Could not measure streaming bronze bucket size: %s", e)
 
         # LB-136: when every datagen pod has finished and reported, their
-        # summed rows_written IS the produced-row count. The AML corpus is
-        # finite and usually completes well inside the window; c360 datagen
-        # keeps generating, never reports, and stays unmeasured.
+        # summed rows_written IS the produced-row count, for either workload
+        # (both generators are finite and emit LB_METRICS_JSON). A window
+        # that ends before the corpus is consumed then honestly reads as
+        # saturated. Unmeasured (None) when any pod has not reported, or the
+        # pods were already garbage-collected (ttlSecondsAfterFinished).
         try:
             from lakebench.metrics.datagen_aggregator import collect_from_k8s
 

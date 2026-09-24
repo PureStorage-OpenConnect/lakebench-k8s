@@ -70,6 +70,7 @@ from gold_finalize_financial import (
     run_detection_rules,
 )
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
@@ -134,15 +135,17 @@ def _bootstrap_gold_tables(spark) -> None:
         log(f"[startup] detected_ts upgrade check on {GOLD_ALERTS} skipped: {e}")
 
 
-def _last_commit_epoch_s(spark, fq_table):
-    """Commit time of the table's newest snapshot, in epoch seconds."""
+def _newest_ingest_epoch_s(spark, fq_table):
+    """Newest ingest_ts in the table, in epoch seconds (None if unknown).
+
+    Captured before the tick reads silver, so the tick saw at least this row.
+    Iceberg answers MAX from file metadata, so this does not scan the data.
+    """
     try:
-        row = spark.sql(
-            f"SELECT unix_micros(MAX(committed_at)) AS t FROM {fq_table}.snapshots"
-        ).collect()[0]
+        row = spark.sql(f"SELECT unix_micros(MAX(ingest_ts)) AS t FROM {fq_table}").collect()[0]
         return row["t"] / 1e6 if row["t"] is not None else None
     except Exception as e:  # noqa: BLE001
-        log(f"[metrics] snapshot time for {fq_table} unavailable: {one_line(e)}")
+        log(f"[metrics] newest ingest_ts of {fq_table} unavailable: {one_line(e)}")
         return None
 
 
@@ -162,6 +165,7 @@ def main() -> None:
 
     consecutive_failures = 0
     cycle = 0
+    last_ingest_s = 0.0
 
     while not _SHUTDOWN:
         tick = time.time()
@@ -169,7 +173,7 @@ def main() -> None:
         try:
             # Captured BEFORE the read, so the data this tick sees is at least
             # this fresh and the reported freshness is an upper bound.
-            silver_commit_s = _last_commit_epoch_s(spark, f"{CATALOG}.{SILVER_TXNS}")
+            newest_ingest_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{SILVER_TXNS}")
             silver_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_TXNS}")
             if silver_rows == 0:
                 log(f"Cycle {cycle}: Silver table is empty, skipping")
@@ -197,15 +201,25 @@ def main() -> None:
                 skipped_rules=CONTINUOUS_SKIPPED_RULES,
             )
 
-            total_alerts = int(spark.table(f"{CATALOG}.{GOLD_ALERTS}").count())
+            # This run's alerts only. Rules skipped in continuous mode keep
+            # alerts from earlier runs, and counting those let the continuous
+            # gate pass with no continuous detection at all.
+            total_alerts = int(
+                spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == RUN_ID).count()
+            )
             elapsed = time.time() - tick
             log(f"[detection] cumulative gold.alerts rows: {total_alerts}")
             log(f"Tick complete in {elapsed:.1f}s (gold.alerts rows: {total_alerts})")
-            # Collector line formats (LB-136). Freshness matches c360's
-            # definition: age of the newest silver data once gold reflects it.
+            # Collector line formats (LB-136). Freshness: how long ago the
+            # newest row this tick's detection saw entered bronze, i.e. how
+            # stale the alerts are against the input. A silver backlog shows
+            # up because the newest silver row was ingested long ago. Ticks
+            # that saw no new data are not reported, so idle time after the
+            # finite corpus drains does not read as staleness.
             log(f"Cycle {cycle}: refreshed {GOLD_ALERTS} in {elapsed:.1f}s")
-            if silver_rows > 0 and silver_commit_s is not None:
-                log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - silver_commit_s):.0f}s")
+            if newest_ingest_s is not None and newest_ingest_s > last_ingest_s:
+                log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
+                last_ingest_s = newest_ingest_s
             consecutive_failures = 0
         except Exception as e:  # noqa: BLE001
             consecutive_failures += 1

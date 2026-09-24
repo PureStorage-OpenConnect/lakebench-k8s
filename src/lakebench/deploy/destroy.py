@@ -462,11 +462,8 @@ def destroy_all(
             )
             if maint_engine and pod_name and catalog:
                 tables = engine.config.architecture.tables
-                tables_to_drop = [
-                    f"{catalog}.{tables.bronze}",
-                    f"{catalog}.{tables.silver}",
-                    f"{catalog}.{tables.gold}",
-                ]
+                schema = engine.config.architecture.workload.schema_type.value
+                tables_to_drop = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
                 # Run maintenance before dropping tables to clean S3
                 for table in tables_to_drop:
                     if table_format == "delta":

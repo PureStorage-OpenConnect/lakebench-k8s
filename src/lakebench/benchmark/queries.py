@@ -337,7 +337,7 @@ SELECT
   s.bal_after,
   ROW_NUMBER() OVER (PARTITION BY s.account_id ORDER BY s.book_ts) AS entry_ord
 FROM {catalog}.{silver_account_statements} s
-JOIN top_accts t USING (account_id)
+JOIN top_accts t ON t.account_id = s.account_id
 ORDER BY s.account_id, entry_ord""",
 )
 
