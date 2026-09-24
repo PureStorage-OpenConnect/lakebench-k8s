@@ -128,3 +128,24 @@ def test_schema_and_schema_type_together_is_a_clear_error(tmp_path):
     }
     with pytest.raises(ConfigValidationError, match="set only 'schema'"):
         load_config(_write(tmp_path, data))
+
+
+@pytest.mark.parametrize("processing", [None, {}])
+def test_flat_mode_with_empty_processing_block(tmp_path, processing):
+    data = {"name": "t", "mode": "batch", "cycles": 2, "architecture": {"processing": processing}}
+    with pytest.warns(DeprecationWarning, match="processing"):
+        cfg = load_config(_write(tmp_path, data))
+    assert cfg.architecture.pipeline.cycles == 2
+
+
+def test_flat_field_under_empty_architecture(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text("name: t\nmode: batch\narchitecture:\n")
+    assert load_config(p).architecture.pipeline.mode.value == "batch"
+
+
+def test_flat_field_under_non_mapping_is_a_clear_error(tmp_path):
+    from lakebench.config.loader import ConfigError
+
+    with pytest.raises(ConfigError, match="not a mapping"):
+        load_config(_write(tmp_path, {"name": "t", "mode": "batch", "architecture": "oops"}))
