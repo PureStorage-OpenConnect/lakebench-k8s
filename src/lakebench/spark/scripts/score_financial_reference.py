@@ -35,7 +35,7 @@ import sys
 
 from common import env, log
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, explode, lit, when
+from pyspark.sql.functions import col, explode, lit, pmod, when, xxhash64
 from pyspark.sql.functions import count as count_
 
 # numpy/pandas/scikit-learn (imported inside functions) are installed per job into this directory by an
@@ -142,32 +142,58 @@ def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest)
     return rows
 
 
-def _cap_customers(features, labels, typologies, cap_rows: int):
-    """Keep every labelled customer and a seeded sample of the rest when the
-    customer count exceeds ``cap_rows`` (driver memory). Each kept negative
-    carries weight 1 / fraction, which the gate uses in fitting and in AP, so
-    AP reflects the true prevalence."""
+def _capped_pull(cap_rows: int, sampling: dict):
+    """A gate-frame builder for aml_features.build_gate_inputs that bounds
+    the driver pull at about ``cap_rows`` units.
+
+    Every positive unit (a unit labelled positive for any in-scope typology)
+    is kept with weight 1. The other units are kept by sampling customers
+    whole, at the fraction that fills the rest of the cap, each with weight
+    1 / fraction, which the gate uses in fitting and in AP. Sampling by
+    customer keeps a customer's months together for the grouped CV; keeping
+    only positive units (not every unit of a labelled customer) keeps the
+    fraction positive at scale. ``sampling`` gets the counts for provenance."""
     import aml_features as af
 
-    cust = features.filter(col("is_customer")).cache()
-    n = cust.count()
-    if n <= cap_rows:
-        pdf = af.gate_frame(cust, labels, typologies)
-        pdf["weight"] = 1.0
-        return pdf, n, 1.0
-    pos_keys = labels.filter(col("typology_type").isin(*typologies)).select("key").distinct()
-    pos = cust.join(pos_keys, "key", "left_semi")
-    neg = cust.join(pos_keys, "key", "left_anti")
-    n_pos = pos.count()
-    frac = min(1.0, max(0.0, (cap_rows - n_pos) / max(1, n - n_pos)))
-    kept = pos.withColumn("weight", lit(1.0)).unionByName(
-        neg.sample(withReplacement=False, fraction=frac, seed=0).withColumn(
-            "weight", lit(1.0 / frac) if frac > 0 else lit(0.0)
+    def pull(features, labels, typologies, monthly):
+        unit = ["key", "month"] if monthly else ["key"]
+        cust = features.filter(col("is_customer")).cache()
+        n = cust.count()
+        name = "monthly" if monthly else "lifetime"
+        if n <= cap_rows:
+            pdf = af.default_pull(cust, labels, typologies, monthly)
+            pdf["weight"] = 1.0
+            sampling[name] = {"n_units": n, "n_pulled": len(pdf), "negative_fraction": 1.0}
+            cust.unpersist()
+            return pdf
+        lab = labels.filter(col("typology_type").isin(*typologies))
+        if "kind" in lab.columns:
+            lab = lab.filter(col("kind") == "positive")
+        pos_units = lab.select(*unit).distinct()
+        pos = cust.join(pos_units, unit, "left_semi")
+        rest = cust.join(pos_units, unit, "left_anti")
+        n_pos = pos.count()
+        # At least half the cap must be left for sampled units, or the frame
+        # would be almost all positives at enormous negative weights.
+        if n_pos * 2 > cap_rows:
+            raise ValueError(
+                f"{n_pos} positive units leave too little of the driver cap {cap_rows} for "
+                "negatives; raise --driver-sample-cap"
+            )
+        frac = (cap_rows - n_pos) / max(1, n - n_pos)
+        # Deterministic in the key (a hash threshold), unlike sample(), whose
+        # pick depends on row order after a shuffle.
+        u = pmod(xxhash64(col("key")), lit(1 << 31)) / lit(float(1 << 31))
+        keys = rest.select("key").distinct().filter(u < lit(frac))
+        kept = pos.withColumn("weight", lit(1.0)).unionByName(
+            rest.join(keys, "key", "left_semi").withColumn("weight", lit(1.0 / frac))
         )
-    )
-    pdf = af.gate_frame(kept, labels, typologies)
-    cust.unpersist()
-    return pdf, n, frac
+        pdf = af.default_pull(kept, labels, typologies, monthly)
+        cust.unpersist()
+        sampling[name] = {"n_units": n, "n_pulled": len(pdf), "negative_fraction": frac}
+        return pdf
+
+    return pull
 
 
 def _write_text(spark, uri: str, text: str) -> None:
@@ -182,6 +208,44 @@ def _write_text(spark, uri: str, text: str) -> None:
         out.close()
 
 
+def _write_model_outputs(spark, prefix: str, outputs: dict) -> dict:
+    """oof_scores.parquet, feature_importance.parquet and model_card.json
+    under ``prefix``. The driver has pandas but no pyarrow, so the scores go
+    to Spark as row chunks; the pull is already capped at --driver-sample-cap
+    units, which bounds the table at that many units per typology."""
+    import json as _json
+
+    out = {}
+    scores = outputs["scores"]
+    if len(scores):
+        cols = list(scores.columns)
+        types = {"group": "long", "month": "int", "typology": "string"}
+        types |= {"label": "tinyint", "score": "float", "fold": "tinyint"}
+        schema = ", ".join(f"`{c}` {types.get(c, 'string')}" for c in cols)
+        chunk = 200_000
+        df = None
+        for lo in range(0, len(scores), chunk):
+            part = scores.iloc[lo : lo + chunk]
+            rows = [
+                tuple(v.item() if hasattr(v, "item") else v for v in r)
+                for r in part.astype({"typology": str}).itertuples(index=False, name=None)
+            ]
+            piece = spark.createDataFrame(rows, schema)
+            df = piece if df is None else df.unionByName(piece)
+        path = f"{prefix}/oof_scores.parquet"
+        df.write.mode("overwrite").option("compression", "snappy").parquet(path)
+        out["oof_scores"] = {"path": path, "rows": int(len(scores))}
+    imp = outputs["importance"]
+    if len(imp):
+        path = f"{prefix}/feature_importance.parquet"
+        spark.createDataFrame(imp.to_dict("records")).write.mode("overwrite").parquet(path)
+        out["feature_importance"] = {"path": path}
+    path = f"{prefix}/model_card.json"
+    _write_text(spark, path, _json.dumps(outputs["card"], indent=2, default=str))
+    out["model_card"] = {"path": path}
+    return out
+
+
 def _metric_rows(report: dict) -> list[dict]:
     feats = json.dumps(report.get("features", []))
     header = {
@@ -191,7 +255,7 @@ def _metric_rows(report: dict) -> list[dict]:
         "precision": None,
         "recall": None,
         "f1": None,
-        "support": report.get("n_scored_customers"),
+        "support": report.get("n_scored_units"),
         "r_precision": None,
         "ap": None,
         "ap_ci_lo": None,
@@ -244,11 +308,23 @@ def _write_metrics(spark, output_prefix: str, rows: list[dict]) -> None:
 
 
 def run_fidelity_gate(
-    spark, manifest, *, cap_rows: int, provenance: dict, silver_txns: str | None = None
+    spark,
+    manifest,
+    *,
+    cap_rows: int,
+    provenance: dict,
+    silver_txns: str | None = None,
+    score: bool = True,
 ) -> dict:
     """Build silver features and evaluate the gate. Returns the report dict."""
     import aml_features as af
-    from fidelity_gate import add_pass, evaluate_gate, in_scope_typologies, load_preregistration
+    from fidelity_gate import (
+        add_pass,
+        evaluate_gate,
+        in_scope_typologies,
+        lifetime_prereg,
+        load_preregistration,
+    )
 
     prereg, sha = load_preregistration()
     typologies = in_scope_typologies(prereg)
@@ -261,9 +337,20 @@ def run_fidelity_gate(
         account_path=ACCOUNT_PATH,
     )
     txns = txns.cache()
-    features = af.entity_features(txns, ents).cache()
     role = prereg["unit_of_scoring"]["label_role"]
-    labels = af.labels_for_role(spark, manifest, id_map, role).cache()
+    sampling: dict = {}
+    inputs = af.build_gate_inputs(
+        spark,
+        prereg,
+        txns=txns,
+        ents=ents,
+        id_map=id_map,
+        manifest=manifest,
+        role=role,
+        typologies=typologies,
+        pull=_capped_pull(cap_rows, sampling),
+    )
+    features = inputs["lifetime_features"]
     tm = prereg["timing_mixture"]
     timing = af.timing_mixture_counts(
         features,
@@ -276,6 +363,7 @@ def run_fidelity_gate(
     # The id map goes through the account master's IBANs, so a duplicate IBAN
     # there would label the wrong silver entity.
     dup_ibans = af.duplicate_ibans(spark, ACCOUNT_PATH)
+    scale_info = af.corpus_scale(spark, ACCOUNT_PATH, prereg["corpora"]["entities_per_scale_unit"])
     seed = provenance.get("corpus_seed")
     seed_check = af.corpus_seed_check(manifest, int(seed) if seed not in (None, "") else None)
     agreement = af.label_agreement(
@@ -286,10 +374,9 @@ def run_fidelity_gate(
             features.filter(col("is_customer")).select("key"), "key", "left_semi"
         ),
     )
-    pdf, n_customers, frac = _cap_customers(features, labels, typologies, cap_rows)
-    log(f"Customers: {n_customers:,}; pulled to driver: {len(pdf):,} (negative fraction {frac})")
+    log(f"Driver pull: {sampling}")
     report = evaluate_gate(
-        pdf,
+        inputs["primary"],
         prereg,
         prereg_sha256=sha,
         timing_counts=timing,
@@ -302,17 +389,38 @@ def run_fidelity_gate(
             "unkeyed_rows": unkeyed,
             "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
+            "corpus_scale": scale_info,
             "aml_features_sha256": af.source_sha256(),
-            "n_customers": n_customers,
-            "negative_sample_fraction": frac,
+            "sampling": sampling,
             "label_route_agreement_customers": agreement,
         },
+        score=score,
+        collect_outputs=score,
     )
+    report["unit_detail"] = inputs["unit"]
+    if "secondary_lifetime_error" in inputs:
+        report["secondary_lifetime"] = {
+            "gated": False,
+            "verdict": "error",
+            "note": inputs["secondary_lifetime_error"],
+        }
+    if "secondary_lifetime" in inputs:
+        # Ungated: the lifetime unit kept for comparison, never in passes. Its
+        # failure must not void the gated result.
+        try:
+            sec = evaluate_gate(inputs["secondary_lifetime"], lifetime_prereg(prereg), score=score)
+            keys = ("unit", "verdict", "n_scored_customers", "n_scored_units", "typologies")
+            report["secondary_lifetime"] = {"gated": False, **{k: sec.get(k) for k in keys}}
+        except Exception as e:  # noqa: BLE001
+            report["secondary_lifetime"] = {"gated": False, "verdict": "error", "note": str(e)}
     seed_ok = seed_check["matched_share"] == 1
     if seed_check["claimed_seed"] is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
-        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
+        # Recorded, not refused: the cluster scores whatever was deployed.
+        add_pass(report, "corpus_at_gate_scale", af.at_gate_scale(scale_info, prereg))
+        n_unres = af.unresolved_subjects(inputs["unit"])
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0 and n_unres == 0)
         if seed_check["claimed_seed"] is not None:
             add_pass(report, "corpus_seed_verified", seed_ok)
     return report
@@ -338,8 +446,15 @@ def main() -> None:
         "--driver-sample-cap",
         type=int,
         default=1_000_000,
-        help="Maximum customers pulled to the driver. Above it every labelled "
-        "customer is kept and the rest are sampled with inverse-fraction weights.",
+        help="Maximum scoring units (customers, or customer-months) pulled to the driver. "
+        "Above it every positive unit is kept and the other customers are sampled whole "
+        "with inverse-fraction weights.",
+    )
+    parser.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="units, labels and counts only: no model and no AP anywhere (smoke tests of a "
+        "unit before its first registered gate run)",
     )
     parser.add_argument(
         "--silver-txns",
@@ -403,6 +518,7 @@ def main() -> None:
             cap_rows=args.driver_sample_cap,
             provenance=provenance,
             silver_txns=args.silver_txns,
+            score=not args.counts_only,
         )
     except Exception as e:  # noqa: BLE001 -- the band gate has shipped; record why this did not
         log(f"WARN: fidelity gate failed: {e}")
@@ -416,6 +532,13 @@ def main() -> None:
             log(line)
     except Exception:  # noqa: BLE001 -- logging only
         pass
+    outputs = report.pop("_model_outputs", None)
+    if outputs is not None:
+        try:
+            report["model_outputs"] = _write_model_outputs(spark, prefix, outputs)
+        except Exception as e:  # noqa: BLE001 -- the gate numbers still ship
+            log(f"WARN: model outputs not written: {e}")
+            report["model_outputs"] = {"error": str(e)}
     text = json.dumps(report, indent=2, default=str)
     report_out = f"{prefix}/aml_gate_report.json"
     _write_text(spark, report_out, text)
@@ -427,7 +550,9 @@ def main() -> None:
             "The band leakage gate still ran."
         )
     spark.stop()
-    if report.get("verdict") in ("error", "empty_frame"):
+    if report.get("verdict") in ("error", "empty_frame") or (
+        args.counts_only and report.get("verdict") != "counts_only"
+    ):
         # Outputs are written, but a crashed gate, or one that scored no
         # customer (a broken key or id map looks like this), must not read as
         # a pass (R6). no_sklearn stays a soft skip: the band gate still ran.

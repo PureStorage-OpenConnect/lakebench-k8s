@@ -126,6 +126,18 @@ def main(argv=None) -> int:
         "passes.library_versions_match)",
     )
     ap.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="allow a corpus whose scale is not corpora.gate_scale; the report is marked "
+        "diagnostic and passes.corpus_at_gate_scale fails",
+    )
+    ap.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="build units and labels and report counts only: no model, no AP (smoke tests "
+        "on a unit that must not be looked at before its first registered gate run)",
+    )
+    ap.add_argument(
         "--require-pass",
         action="store_true",
         help="exit 2 unless every gate passes (passes.all); default exit 0 when the gate ran",
@@ -142,8 +154,10 @@ def main(argv=None) -> int:
         evaluate_gate,
         in_scope_typologies,
         library_versions,
+        lifetime_prereg,
         load_preregistration,
         summary_lines,
+        write_model_outputs,
     )
 
     mismatch = version_mismatches(library_versions())
@@ -159,8 +173,17 @@ def main(argv=None) -> int:
         SparkSession.builder.master(args.master)
         .appName("lb-aml-gate-local")
         .config("spark.driver.memory", args.driver_memory)
+        # The monthly unit's frame is collected whole: at scale 2 its Arrow
+        # batches pass 1 GiB (Spark's default cap), so the cap follows the
+        # driver's memory instead.
+        .config("spark.driver.maxResultSize", args.driver_memory)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.session.timeZone", "UTC")
+        # Arrow for toPandas: the monthly unit pulls millions of units, which
+        # the row-by-row path converts far more slowly. Measured at scale 0.1
+        # (seed 7777): identical primary and lifetime frames, values and
+        # dtypes, with build_gate_inputs at 27 s against 107 s.
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("ERROR")
@@ -170,6 +193,19 @@ def main(argv=None) -> int:
         manifest = af.read_manifest(spark, manifest_src)
         af.check_manifest(manifest)
         seed_check = af.corpus_seed_check(manifest, args.seed)
+        scale_info = af.corpus_scale(
+            spark,
+            str(corpus / "bronze/account.parquet"),
+            prereg["corpora"]["entities_per_scale_unit"],
+        )
+        at_scale = af.at_gate_scale(scale_info, prereg)
+        if not at_scale and not args.diagnostic:
+            print(
+                f"corpus scale {scale_info['scale']} is not the gate scale "
+                f"{prereg['corpora']['gate_scale']}; refusing (use --diagnostic)",
+                file=sys.stderr,
+            )
+            return 1
         txns, ents, id_map = af.bronze_frames(
             spark,
             pacs_path=str(corpus / "bronze/pacs008"),
@@ -177,10 +213,19 @@ def main(argv=None) -> int:
             account_path=str(corpus / "bronze/account.parquet"),
         )
         txns = txns.cache()
-        features = af.entity_features(txns, ents).cache()
         registered_role = prereg["unit_of_scoring"]["label_role"]
         role = args.label_role or registered_role
-        labels = af.labels_for_role(spark, manifest, id_map, role).cache()
+        inputs = af.build_gate_inputs(
+            spark,
+            prereg,
+            txns=txns,
+            ents=ents,
+            id_map=id_map,
+            manifest=manifest,
+            role=role,
+            typologies=typologies,
+        )
+        features = inputs["lifetime_features"]
         by_participant = af.labels_from_participants(manifest, id_map)
         tm = prereg["timing_mixture"]
         timing = af.timing_mixture_counts(
@@ -197,7 +242,6 @@ def main(argv=None) -> int:
             by_participant.join(cust_keys, "key", "left_semi"),
             af.labels_from_uetrs(manifest, txns).join(cust_keys, "key", "left_semi"),
         )
-        pdf = af.gate_frame(features, labels, typologies)
         prov = {
             "adapter": "bronze",
             "manifest": manifest_src,
@@ -207,12 +251,15 @@ def main(argv=None) -> int:
             "unkeyed_rows": unkeyed,
             "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
+            "corpus_scale": scale_info,
+            "diagnostic": bool(args.diagnostic),
             "aml_features_sha256": af.source_sha256(),
             "corpus": str(corpus),
             "corpus_seed": args.seed,
             "git_sha": _git_sha(),
             **af.manifest_provenance(manifest),
             "n_entities": int(features.count()),
+            "n_payments": int(txns.count()),
             "label_route_agreement_customers": agreement,
         }
         t_spark = time.time() - t0
@@ -220,20 +267,67 @@ def main(argv=None) -> int:
         spark.stop()
 
     report = evaluate_gate(
-        pdf,
+        inputs["primary"],
         prereg,
         prereg_sha256=sha,
         timing_counts=timing,
         density_counts=density,
         provenance={**prov, "spark_seconds": round(t_spark, 1)},
+        score=not args.counts_only,
+        collect_outputs=args.out is not None and not args.counts_only,
     )
+    outputs = report.pop("_model_outputs", None)
+    if outputs is not None:
+        base = str(args.out.with_suffix(""))
+        # Written before the report, so a failure here (a full disk) must be
+        # recorded rather than lose the gate numbers.
+        try:
+            paths = write_model_outputs(outputs, base)
+            report["model_outputs"] = {
+                name: {"path": p, "bytes": os.path.getsize(p)} for name, p in paths.items()
+            }
+            report["model_outputs"]["oof_scores"]["rows"] = int(len(outputs["scores"]))
+        except Exception as e:  # noqa: BLE001
+            report["model_outputs"] = {"error": str(e)}
+    report["unit_detail"] = inputs["unit"]
+    if "secondary_lifetime_error" in inputs:
+        report["secondary_lifetime"] = {
+            "gated": False,
+            "verdict": "error",
+            "note": inputs["secondary_lifetime_error"],
+        }
+    if "secondary_lifetime" in inputs:
+        # Ungated: the lifetime unit kept for comparison, never in passes; its
+        # failure must not lose the gated report.
+        try:
+            sec = evaluate_gate(
+                inputs["secondary_lifetime"], lifetime_prereg(prereg), score=not args.counts_only
+            )
+        except Exception as e:  # noqa: BLE001
+            sec = {"verdict": "error", "note": str(e)}
+        report["secondary_lifetime"] = {
+            "gated": False,
+            **{
+                k: sec.get(k)
+                for k in (
+                    "unit",
+                    "verdict",
+                    "note",
+                    "n_scored_customers",
+                    "n_scored_units",
+                    "typologies",
+                )
+            },
+        }
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
     seed_ok = seed_check["matched_share"] == 1
     if args.seed is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
-        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
+        n_unres = af.unresolved_subjects(inputs["unit"])
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0 and n_unres == 0)
         add_pass(report, "library_versions_match", not mismatch)
+        add_pass(report, "corpus_at_gate_scale", at_scale)
         if args.seed is not None:
             add_pass(report, "corpus_seed_verified", seed_ok)
         # A diagnostic run under another label role is never a pass.
@@ -246,6 +340,8 @@ def main(argv=None) -> int:
         print(f"wrote {args.out}")
     else:
         print(text)
+    if args.counts_only:
+        return 0 if report.get("verdict") == "counts_only" else 1
     if report.get("verdict") != "ok":
         return 1
     if args.require_pass and not report["passes"]["all"]:
