@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -101,27 +102,38 @@ def jvm_heap_for_limit(limit: str, fraction: float = JVM_HEAP_FRACTION) -> str:
 THRIFT_OVERHEAD_FACTOR = 0.10
 THRIFT_MIN_OVERHEAD_BYTES = 2**30
 
-_SPARK_MEM_UNITS_BYTES = {"k": 2**10, "m": 2**20, "g": 2**30, "t": 2**40}
+_SPARK_MEM_UNITS_BYTES = {
+    "b": 1,
+    "k": 2**10,
+    "kb": 2**10,
+    "m": 2**20,
+    "mb": 2**20,
+    "g": 2**30,
+    "gb": 2**30,
+    "t": 2**40,
+    "tb": 2**40,
+    "p": 2**50,
+    "pb": 2**50,
+}
+_SPARK_MEM_RE = re.compile(r"([0-9]+)([a-z]+)?")
 
 
 def spark_memory_bytes(value: str) -> int:
     """Parse a Spark memory string (``4g``, ``4096m``, ``24G``, ``8gb``) to bytes.
 
-    Spark units are binary. A bare number is MiB, matching how Spark reads
-    ``spark.driver.memory``. Anything else raises.
+    Follows Spark's ``JavaUtils.byteStringAs``: a whole number with an
+    optional binary suffix, case-insensitive, no fractions. A bare number is
+    MiB, which is how Spark reads ``spark.driver.memory``. Anything Spark
+    would reject raises ``ValueError`` here, before a pod is rendered.
     """
     s = str(value).strip().lower()
-    if len(s) > 1 and s.endswith("b") and s[-2] in _SPARK_MEM_UNITS_BYTES:
-        s = s[:-1]
-    unit = s[-1:] if s[-1:] in _SPARK_MEM_UNITS_BYTES else ""
-    number = s[:-1] if unit else s
-    try:
-        amount = float(number)
-    except ValueError:
-        raise ValueError(f"unparseable Spark memory {value!r}") from None
+    m = _SPARK_MEM_RE.fullmatch(s)
+    if not m or (m.group(2) and m.group(2) not in _SPARK_MEM_UNITS_BYTES):
+        raise ValueError(f"unparseable Spark memory {value!r}")
+    amount = int(m.group(1))
     if amount <= 0:
         raise ValueError(f"Spark memory must be positive, got {value!r}")
-    return int(amount * _SPARK_MEM_UNITS_BYTES.get(unit, 2**20))
+    return amount * _SPARK_MEM_UNITS_BYTES[m.group(2) or "m"]
 
 
 def thrift_pod_memory_limit(heap: str) -> str:

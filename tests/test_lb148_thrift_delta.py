@@ -116,7 +116,9 @@ def test_spark_job_iceberg_leaves_flag_alone():
         ("4gb", 4 * GIB),
         ("4096m", 4 * GIB),
         ("4096", 4 * GIB),
-        ("1.5g", 1536 * MIB),
+        ("1536M", 1536 * MIB),
+        ("4194304k", 4 * GIB),
+        ("4294967296b", 4 * GIB),
         ("1t", 1024 * GIB),
     ],
 )
@@ -124,7 +126,9 @@ def test_spark_memory_bytes(value, expected):
     assert spark_memory_bytes(value) == expected
 
 
-@pytest.mark.parametrize("value", ["", "abc", "4Gi", "0g", "-1g"])
+@pytest.mark.parametrize(
+    "value", ["", "abc", "4Gi", "0g", "-1g", "1.5g", "1e1g", "1_0g", "4 g", "infg", "4x"]
+)
 def test_spark_memory_bytes_rejects(value):
     with pytest.raises(ValueError):
         spark_memory_bytes(value)

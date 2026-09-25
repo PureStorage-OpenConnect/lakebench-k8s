@@ -60,8 +60,8 @@ architecture:
 
   query_engine:
     type: spark-thrift
-    spark_thrift:
-      # LB-148: Delta is not compacted before the Thrift benchmark, and at
-      # 2 cores / 4g three c360 queries exceed the 300 s query timeout.
-      cores: 8
-      memory: 16g
+    # spark_thrift cores/memory are left unset so the autosizer picks them:
+    # 8 cores / 16g heap on Delta, fitted down on small nodes, 24g heap on the
+    # financial schema (LB-148, LB-117). At 2 cores / 4g, Delta is not
+    # compacted before the Thrift benchmark and three c360 queries exceed the
+    # 300 s query timeout.
