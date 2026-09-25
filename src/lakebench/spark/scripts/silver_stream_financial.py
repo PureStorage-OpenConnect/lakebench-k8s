@@ -75,7 +75,7 @@ from __future__ import annotations
 import signal
 import time
 
-from common import ensure_column, env, log
+from common import ensure_column, ensure_namespaces, env, log
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
 from silver_build_financial import (
@@ -251,6 +251,7 @@ def main() -> None:
     # stage with nothing to scan. Mirrors silver_build_financial.main()'s
     # bootstrap loop (same DDL constants) so both modes converge on one
     # schema. All CREATE TABLE IF NOT EXISTS -- idempotent on restart.
+    ensure_namespaces(spark, CATALOG, (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS))
     for _name, _ddl in (
         ("transactions", DDL_TXNS),
         ("entities", DDL_ENTITIES),
