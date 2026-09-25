@@ -1418,6 +1418,9 @@ def _run_sustained(
         )
 
         submitted = []
+        # Executors each stream actually requested (after the concurrent
+        # budget), for the scorecard's CPU-hours.
+        requested_executors: dict[str, int] = {}
         stream_env = _streaming_job_env(run_id, run_duration)
         for job_type, job_name in streaming_jobs:
             job_status = job_manager.submit_job(job_type, cycle_env=stream_env)
@@ -1426,6 +1429,12 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(1)
             print_success(f"Submitted: lakebench-{job_name}")
+            for warning in getattr(job_manager, "budget_warnings", None) or []:
+                print_warning(warning)
+            if isinstance(getattr(job_manager, "budget_warnings", None), list):
+                job_manager.budget_warnings.clear()
+            if isinstance(job_status.executor_count, int) and job_status.executor_count > 0:
+                requested_executors[job_name] = job_status.executor_count
             submitted.append((job_type, job_name))
 
         # A streaming submission that failed used to go unnoticed until the
@@ -1841,6 +1850,7 @@ def _run_sustained(
                 )
 
             streaming_metrics.elapsed_seconds = run_duration
+            streaming_metrics.requested_executors = requested_executors.get(job_name)
             streaming_metrics.success = pipeline_success
             if streaming_metrics.elapsed_seconds > 0 and streaming_metrics.total_rows_processed > 0:
                 streaming_metrics.throughput_rps = (
