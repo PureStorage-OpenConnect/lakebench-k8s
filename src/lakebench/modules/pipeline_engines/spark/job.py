@@ -257,25 +257,39 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
         # trigger for fixed per-batch cost, and hold 557K rows/s, 1.76x bronze
         # intake, so a backlog cannot build. 8 executors (43 s of work) would
         # leave only 17 s. Per-executor sizing stays at the base 4 cores / 32g
-        # / 8g; scaling keeps the base 8 per 100 scale, to the 28 cap.
+        # / 8g; scaling keeps the base 8 per 100 scale, to the 28 cap. The
+        # base 32 shuffle partitions would leave 8 of the 40 cores idle in
+        # every shuffle stage (43 s, the 8-executor case), so base_partitions
+        # is 2x the cores, as _scale_partitions uses above scale 10.
         "silver-stream": {
             "base_executors": 10,
             "executors_per_100_scale": 8,
             "max_executors": _MAX_EXECUTORS_SAFE,
+            "base_partitions": 80,
         },
         # AML continuous gold-refresh. Same run: 4 ticks at 349.5 s mean on
         # the base 2 x 4 = 8 cores, over the 300 s refresh interval, so ticks
         # ran back to back. Every tick recomputes all of silver (windowing
-        # loses recall, LB-127) and path searches are ~80% of a tick. Taking
-        # the other 20% as not scaling with cores, 6 x 4 = 24 cores run a tick
-        # in ~163 s, inside the refresh interval, so ticks start on the timer
-        # and an alert waits about half an interval plus one tick. 8 executors
-        # would save ~23 s more for 80 GB. Silver grows with scale and so does
-        # the tick; 8 per 100 scale to the 28 cap.
+        # loses recall, LB-127), so tick cost follows silver's size, and those
+        # ticks read a lagging silver: 58.4M rows on average. Once silver keeps
+        # up it holds the whole scale-10 corpus, 266.7M rows, by the time
+        # bronze drains. Lane U's local ticks (84 s at 3.4M rows, 122 s at
+        # 6.7M) put the fixed per-tick cost near 45 s, which leaves 5.2 s of
+        # row work per million rows at 8 cores, taken as scaling with cores
+        # (path searches, ~80% of a tick, are shuffle joins). A full-silver
+        # tick is then 1,389 s of row work at 8 cores: 12 x 4 = 48 cores run
+        # it in ~276 s, inside the refresh interval, so ticks start on the
+        # timer. 10 executors (~323 s) would not. Per-executor sizing stays at
+        # the base. The tick grows with scale, so 8 more per 100 scale to the
+        # 28 cap. Above scale 10 a full-silver tick outgrows the interval at
+        # these counts (scale 20 would need the 28 cap, scale 100 ~990 s at
+        # it). base_partitions follows 2x the cores, as _scale_partitions uses
+        # above scale 10.
         "gold-refresh": {
-            "base_executors": 6,
+            "base_executors": 12,
             "executors_per_100_scale": 8,
             "max_executors": _MAX_EXECUTORS_SAFE,
+            "base_partitions": 96,
         },
     },
 }
@@ -672,12 +686,14 @@ def _streaming_concurrent_budget(
     # overridden job first gets a floor, the whole executors that fit in the
     # cores its base allocation had (at least one); rounding down, because
     # rounding up to whole larger executors would request more than the base
-    # split did. Only then is the headroom above the kept stages and the
-    # floors shared, in proportion to what each job still wants. Sharing the
-    # whole headroom by demand instead would let a job whose share fell below
-    # its floor keep the floor while the others kept their full share, past
-    # the budget (AML overrides all three stages, and silver's share of the
-    # demand is smaller than its share of the base split).
+    # split did. The headroom above the kept stages and the floors then goes
+    # upstream first, bronze before silver before gold: a stage runs no
+    # faster than its input arrives, so cores given to silver while bronze
+    # sits at its floor idle (AML at scale 10 on 60-80 cores: bronze at one
+    # executor is the intake the bronze override was sized to fix, and
+    # silver's extra cores would wait on it). Granting floors before sharing
+    # also keeps the total inside the budget when a schema overrides several
+    # stages.
     caps = {jt: base_caps[jt] for jt in _STREAMING_JOB_TYPES if jt not in overridden}
     kept_m = sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in caps)
     want = {jt: _scale_executor_count(resolved[jt], scale) for jt in overridden}
@@ -687,41 +703,13 @@ def _streaming_concurrent_budget(
         caps[jt] = min(want[jt], floor)
     used_m = kept_m + sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in overridden)
     headroom_m = max(0, streaming_budget_m - used_m)
-    # Water-fill: a job that reaches its uncapped count hands the rest of its
-    # share back to the others. Each pass either finishes or retires a job.
-    open_jobs = [jt for jt in overridden if caps[jt] < want[jt]]
-    while open_jobs and headroom_m > 0:
-        extra = {
-            jt: (want[jt] - caps[jt]) * resolved[jt]["executor_cores"] * 1000 for jt in open_jobs
-        }
-        total = sum(extra.values())
-        granted_m = 0
-        for jt in open_jobs:
-            exec_cpu_m = resolved[jt]["executor_cores"] * 1000
-            add = min(want[jt] - caps[jt], int(headroom_m * extra[jt] / total // exec_cpu_m))
-            caps[jt] += add
-            granted_m += add * exec_cpu_m
-        headroom_m -= granted_m
-        still_open = [jt for jt in open_jobs if caps[jt] < want[jt]]
-        if len(still_open) == len(open_jobs):
-            break
-        open_jobs = still_open
-    # Per-job rounding leaves up to one executor per job unspent: hand whole
-    # executors out one at a time, most-wanting job first, while they fit.
-    while True:
-        fits = [
-            jt
-            for jt in overridden
-            if caps[jt] < want[jt] and resolved[jt]["executor_cores"] * 1000 <= headroom_m
-        ]
-        if not fits:
-            break
-        jt = max(
-            fits,
-            key=lambda j: ((want[j] - caps[j]) * resolved[j]["executor_cores"], j.value),
-        )
-        caps[jt] += 1
-        headroom_m -= resolved[jt]["executor_cores"] * 1000
+    for jt in _STREAMING_PIPELINE_ORDER:
+        if jt not in overridden:
+            continue
+        exec_cpu_m = resolved[jt]["executor_cores"] * 1000
+        add = min(want[jt] - caps[jt], headroom_m // exec_cpu_m)
+        caps[jt] += add
+        headroom_m -= add * exec_cpu_m
     return caps
 
 
@@ -1223,6 +1211,9 @@ _STREAMING_JOB_TYPES = frozenset(
         JobType.GOLD_REFRESH,
     }
 )
+# The same jobs in data-flow order, upstream first (the concurrent budget
+# grants spare cores in this order).
+_STREAMING_PIPELINE_ORDER = (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
 
 
 class JobState(Enum):
