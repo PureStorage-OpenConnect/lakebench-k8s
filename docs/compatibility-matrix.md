@@ -120,17 +120,20 @@ architecture:
 
 ## Known Limitations
 
+### Delta + Spark Thrift
+
+- **Q2 and Q7 benchmark queries**: `MIN(interaction_date)` triggers the delta-spark
+  `OptimizeMetadataOnlyDeltaQuery` bug (`ClassCastException: LocalDate -> java.sql.Date`)
+  through Spark. Trino is not affected (different optimizer). lakebench sets
+  `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta + Hive on the
+  Thrift server and Spark jobs (LB-148), so these queries run, at the cost of scanning
+  instead of answering MIN/MAX/COUNT from the Delta log. A Q2 failure on Delta + Thrift
+  is now treated as a regression, not a known failure.
+
 ### Delta + Trino
 
-- **Q2 and RFM benchmark queries**: `MIN(interaction_date)` triggers the delta-spark
-  `OptimizeMetadataOnlyDeltaQuery` bug (`ClassCastException: LocalDate -> java.sql.Date`)
-  via Spark Thrift. Not reproducible via Trino (different optimizer). lakebench sets
-  `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta + Hive on the
-  Thrift server and Spark jobs (LB-148), which avoids the rewrite at the cost of scanning
-  instead of answering MIN/MAX/COUNT from the Delta log.
-
-- **OPTIMIZE OOM**: `ALTER TABLE ... EXECUTE optimize` rewrites the entire table in one pass.
-  Exhausts Trino worker (8Gi) and Spark Thrift (4Gi) memory at scale 1+.
+- **OPTIMIZE OOM**: `ALTER TABLE ... EXECUTE optimize` rewrites the entire table in one pass
+  and has exhausted Trino worker and Spark Thrift memory at scale 1+.
   Pre-benchmark OPTIMIZE is skipped for Delta. VACUUM still runs.
 
 - **VACUUM requires catalog prefix**: `CALL {catalog}.system.vacuum(...)`, not
