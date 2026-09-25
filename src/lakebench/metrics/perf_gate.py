@@ -529,7 +529,18 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
 
     stale = _datagen_stale(run)
     if stale:
+        # datagen_seconds is the in-run generate time when there was one
+        # (`lakebench run --generate`, which writes no sidecar but still
+        # attaches an old one); the collector only falls back to the
+        # sidecar's wall_elapsed_max_s when the run did not generate. Keep
+        # it unless it is the sidecar's number.
+        fleet = run.raw.get("datagen_fleet") or {}
+        in_run = "datagen_seconds" in numbers and numbers["datagen_seconds"] != fleet.get(
+            "wall_elapsed_max_s"
+        )
         for key in _DATAGEN_METRICS:
+            if key == "datagen_seconds" and in_run:
+                continue
             if key in numbers:
                 del numbers[key]
                 excluded[key] = stale
@@ -542,6 +553,10 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
     reasons: list[str] = []
     if not run.raw.get("success"):
         reasons.append("run did not succeed")
+    # `lakebench run --local` records every stage ending at the same moment
+    # and runs on a workstation; the fingerprint does not include the flag.
+    if run.snapshot.get("local"):
+        reasons.append("local run (--local); only cluster runs are comparable")
     if run.mode != pinned.mode:
         reasons.append(f"run mode {run.mode} but pinned config is {pinned.mode}")
     run_fp = run.fingerprint
