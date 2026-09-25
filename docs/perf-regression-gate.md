@@ -144,6 +144,13 @@ be what is being compared.
 (`pre_compaction_qph`, `composite_qph`); it has no good direction, since a
 better write layout raises pre-maintenance QpH and so lowers it.
 
+The storage settle wait before the post-maintenance round
+(`maintenance_settle_seconds`) is not gated and is not a stage, so it does
+not enter the recomputed time to value. It does raise `composite_qph` on
+storage that settles slowly: a baseline recorded before the wait existed
+(LB-150) measured the post round on unsettled storage, and should be
+re-recorded rather than compared against.
+
 `gate` and the release check also fail a required config whose run is not
 newer than the baseline run (run ids are timestamp-prefixed): a baseline
 compared with itself, or with an older run, proves nothing.
