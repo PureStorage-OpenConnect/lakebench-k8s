@@ -114,6 +114,8 @@ class TrinoExecutor:
                 subprocess.run(
                     self._exec_cmd(
                         pod,
+                        "--session",
+                        f"query_max_run_time={server_run_time_limit(_CLEANUP_TIMEOUT_SECONDS)}s",
                         "--execute",
                         f"CALL system.runtime.kill_query(query_id => '{query_id}', "
                         "message => 'lakebench client timeout')",

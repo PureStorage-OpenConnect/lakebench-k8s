@@ -79,6 +79,7 @@ def test_trino_timeout_cancels_the_query_server_side():
     assert len(calls) == 3  # the junk line is not treated as a query id
     # The cleanup calls are themselves bounded server side.
     assert _arg_after(calls[1], "--session") == "query_max_run_time=5s"
+    assert _arg_after(calls[2], "--session") == "query_max_run_time=5s"
     kill = _arg_after(calls[2], "--execute")
     assert kill.startswith("CALL system.runtime.kill_query(") and f"'{_QID}'" in kill
 
