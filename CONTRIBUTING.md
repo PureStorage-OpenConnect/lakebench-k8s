@@ -170,11 +170,10 @@ needed. Reference commits (`abc123`) rather than PR numbers so the
 message survives repository migrations.
 
 Never include Co-Authored-By: Claude or similar AI attribution.
-Commits are authored under a real name (`AndrewSillifant`, not
-`root`).
+Commits are authored under your real name and email, not `root`.
 
-Never skip hooks (`--no-verify`) or bypass signing unless
-explicitly asked. If a hook fails, fix the underlying issue.
+Do not skip hooks (`--no-verify`) or bypass signing. If a hook fails,
+fix the underlying issue.
 
 ## Style
 
@@ -204,7 +203,6 @@ If you are new here, start with `README.md`, `docs/recipes.md` and
 
 ## What NOT to do
 
-- Do not commit unless the change was explicitly requested.
 - Do not push to `main`. Open a PR from a feature branch.
 - Do not force-push a branch other people are reviewing.
 - Do not include real customer data anywhere. Every synthetic

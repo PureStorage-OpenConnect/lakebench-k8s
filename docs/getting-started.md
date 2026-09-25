@@ -143,7 +143,7 @@ helm install spark-operator spark-operator/spark-operator \
   --set webhook.enable=true
 ```
 
-but note that no lock is taken, so two parallel Helm installs may still stomp each other. Prefer the `admin` command on any cluster used by more than one engineer.
+but no lock is taken, so two parallel Helm installs may still stomp each other. Prefer the `admin` command on any cluster used by more than one engineer.
 
 ### Catalog operator (depends on your recipe)
 

@@ -9,7 +9,7 @@ help:
 	@echo "  dev              Install with dev deps + pre-commit hooks"
 	@echo ""
 	@echo "Testing:"
-	@echo "  test             Run all tests"
+	@echo "  test             Run tests that need no cluster"
 	@echo "  test-unit        Run unit tests only (fast, no cluster needed)"
 	@echo "  test-integration Run integration tests (requires K8s/S3)"
 	@echo "  test-e2e         Run end-to-end tests (full workflow)"
@@ -35,7 +35,7 @@ dev:
 	@echo "Run 'make test' to verify setup."
 
 test:
-	pytest tests/ -v -m "not e2e and not extended and not stress"
+	pytest tests/ -v -m "not e2e and not integration and not extended and not stress"
 
 test-unit:
 	pytest tests/ -v -m "not integration and not e2e"
@@ -61,7 +61,7 @@ lint:
 	ruff check src/ tests/
 
 typecheck:
-	mypy src/
+	mypy src/lakebench/
 
 fmt:
 	ruff format src/ tests/
