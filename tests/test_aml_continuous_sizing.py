@@ -328,6 +328,22 @@ class TestPreflightBetweenOldAndNewMinimum:
             get_client.return_value.get_cluster_capacity.return_value = cap
             assert not _check_cluster_capacity(cfg).passed
 
+    def test_a_driver_override_is_counted(self):
+        from unittest import mock
+
+        from lakebench.cli._prerequisites import _check_cluster_capacity
+
+        def run(driver_cores):
+            cfg = _config("financial", 10)
+            cfg.platform.compute.spark.driver_cores = driver_cores
+            cap = ClusterCapacity(57_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+            with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+                get_client.return_value.get_cluster_capacity.return_value = cap
+                return _check_cluster_capacity(cfg).passed
+
+        assert run(None)
+        assert not run(8)
+
     def test_a_failing_estimate_keeps_the_hard_failure(self):
         from unittest import mock
 

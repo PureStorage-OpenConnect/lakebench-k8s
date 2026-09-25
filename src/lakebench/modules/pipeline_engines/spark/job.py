@@ -712,7 +712,11 @@ def _streaming_concurrent_budget(
     # overridden stages outgrow: take the drivers out before sharing, or a
     # capped AML run asks for a few cores more than the cluster has (100
     # cores at scale 10: 101 with Trino and datagen).
-    driver_m = sum(resolved[jt]["driver_cores"] * 1000 for jt in _STREAMING_JOB_TYPES)
+    forced_driver = config.platform.compute.spark.driver_cores
+    driver_m = sum(
+        (forced_driver if forced_driver is not None else resolved[jt]["driver_cores"]) * 1000
+        for jt in _STREAMING_JOB_TYPES
+    )
     override_budget_m = min(streaming_budget_m, int(max(0, remaining_m - driver_m) * 0.90))
     headroom_m = max(0, override_budget_m - used_m)
     # A stage with ``keep_up_executors`` is filled only to that count on the
@@ -783,8 +787,11 @@ def streaming_request_under_budget(
         exec_bytes = parse_spark_memory(prof["executor_memory"]) + parse_spark_memory(
             prof["executor_memory_overhead"]
         )
-        cores_m += (n * prof["executor_cores"] + prof["driver_cores"]) * 1000
-        mem += n * exec_bytes + parse_spark_memory(prof["driver_memory"])
+        # The manifest applies the global driver overrides to every job.
+        drv_cores = spark_cfg.driver_cores or prof["driver_cores"]
+        drv_mem = spark_cfg.driver_memory or prof["driver_memory"]
+        cores_m += (n * prof["executor_cores"] + drv_cores) * 1000
+        mem += n * exec_bytes + parse_spark_memory(drv_mem)
 
     trino = config.architecture.query_engine.trino
     datagen = config.architecture.workload.datagen
