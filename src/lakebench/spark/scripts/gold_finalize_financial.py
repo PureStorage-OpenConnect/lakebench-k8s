@@ -27,7 +27,7 @@ import time
 import uuid
 
 from common import (
-    ensure_namespaces,
+    ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
     iceberg_table_stats,
@@ -257,8 +257,8 @@ def main() -> None:
     log(f"Session TZ: {spark.conf.get('spark.sql.session.timeZone')}")
     log("=" * 60)
 
-    ensure_namespaces(
-        spark, CATALOG, (GOLD_ALERTS, GOLD_RISK, GOLD_CLUSTERS, GOLD_DASH, GOLD_STATUS)
+    ensure_namespaces_for_ddl(
+        spark, CATALOG, (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS)
     )
     for name, ddl in (
         ("alerts", DDL_ALERTS),

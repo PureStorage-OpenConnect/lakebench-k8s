@@ -56,3 +56,29 @@ def test_polaris_bronze_table_keeps_the_catalog_default(monkeypatch):
     mod = _bvf(monkeypatch, "polaris")
     assert mod._bronze_location() is None
     assert mod._location_clause() == ""
+
+
+def test_namespaces_come_from_the_ddl_itself():
+    from common import ensure_namespaces_for_ddl
+
+    spark = _RecordingSpark()
+    ddls = (
+        "CREATE TABLE IF NOT EXISTS lakehouse.gold.alerts (a INT)",
+        "\nCREATE TABLE IF NOT EXISTS lakehouse.ops.risk_scores (a INT)",
+        "not a create statement",
+    )
+    ensure_namespaces_for_ddl(spark, "lakehouse", ddls)
+    assert spark.sql_calls == [
+        "CREATE NAMESPACE IF NOT EXISTS lakehouse.gold",
+        "CREATE NAMESPACE IF NOT EXISTS lakehouse.ops",
+    ]
+
+
+def test_single_part_bronze_name_uses_default_namespace(monkeypatch):
+    monkeypatch.setenv("LB_CATALOG_TYPE", "hive")
+    monkeypatch.setenv("LB_BRONZE_URI", "s3a://ns-bronze/")
+    monkeypatch.setenv("LB_FINANCIAL_BRONZE_TABLE", "bronze_raw")
+    import bronze_verify_financial
+
+    mod = importlib.reload(bronze_verify_financial)
+    assert mod._bronze_location() == "s3a://ns-bronze/warehouse/default.db/bronze_raw"

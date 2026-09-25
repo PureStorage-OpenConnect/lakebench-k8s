@@ -66,7 +66,7 @@ import uuid
 
 from bronze_verify_financial import MANIFEST_TABLE, register_manifest
 from common import (
-    ensure_namespaces,
+    ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
     iceberg_table_stats,
@@ -140,7 +140,9 @@ def _bootstrap_gold_tables(spark) -> None:
     gold_finalize_financial.main() bootstraps so both modes converge on one
     schema. All CREATE TABLE IF NOT EXISTS -- idempotent on restart.
     """
-    ensure_namespaces(spark, CATALOG, (GOLD_ALERTS, GOLD_DASH))
+    ensure_namespaces_for_ddl(
+        spark, CATALOG, (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS)
+    )
     for ddl in (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS):
         spark.sql(ddl)
     ensure_partition_transform(
