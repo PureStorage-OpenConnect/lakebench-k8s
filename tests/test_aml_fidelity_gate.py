@@ -556,3 +556,43 @@ def test_model_outputs_scores_importance_and_card(tmp_path):
     ]
     # Not collected unless asked, and never in counts-only mode.
     assert "_model_outputs" not in fg.evaluate_gate(df, _prereg())
+
+
+def _grouped_frame():
+    df = _frame(n=1200, separable=False)
+    df["group"] = [f"c{i // 3:04d}" for i in range(len(df))]
+    df["month"] = [14 + i % 3 for i in range(len(df))]
+    return df
+
+
+def _numbers(rep):
+    return {
+        t: (r.get("ap"), tuple(r.get("ap_cis") or r.get("ap_ci")))
+        for t, r in rep["typologies"].items()
+    }
+
+
+def test_gate_numbers_do_not_depend_on_pulled_row_order(monkeypatch):
+    """toPandas() row order depends on the partition count; the bootstrap and
+    the model's binning subsample are positional, so the evaluator sorts by the
+    unit key first."""
+    df = _grouped_frame()
+    shuffled = df.sample(frac=1, random_state=7)
+    a = _numbers(fg.evaluate_gate(df, _prereg()))
+    assert a == _numbers(fg.evaluate_gate(shuffled, _prereg()))
+    # Without the sort the shuffle does move the numbers (the test has teeth).
+    monkeypatch.setattr(fg, "UNIT_KEY_COLUMNS", ())
+    assert a != _numbers(fg.evaluate_gate(shuffled, _prereg()))
+
+
+def test_importance_failure_keeps_the_gate_numbers(monkeypatch):
+    def boom(*a, **k):
+        raise MemoryError("no room")
+
+    monkeypatch.setattr(fg, "_permutation_importance", boom)
+    df = _grouped_frame()
+    rep = fg.evaluate_gate(df, _prereg(), collect_outputs=True)
+    assert rep["verdict"] == "ok" and rep["typologies"]["beh"]["ap"] is not None
+    card = rep["_model_outputs"]["card"]
+    assert card["importance_errors"]["beh"] == "no room"
+    assert len(rep["_model_outputs"]["scores"]) > 0
