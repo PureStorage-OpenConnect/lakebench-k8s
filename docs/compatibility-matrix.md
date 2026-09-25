@@ -122,10 +122,12 @@ architecture:
 
 ### Delta + Trino
 
-- **Q2 benchmark query**: `MIN(interaction_date)` subquery triggers delta-spark 4.0.0
-  `OptimizeMetadataOnlyDeltaQuery` bug (`ClassCastException: LocalDate -> java.sql.Date`).
-  Q2 returns 0 rows via Spark Thrift. Not reproducible via Trino (different optimizer).
-  Upstream bug in delta-spark 4.0.0.
+- **Q2 and RFM benchmark queries**: `MIN(interaction_date)` triggers the delta-spark
+  `OptimizeMetadataOnlyDeltaQuery` bug (`ClassCastException: LocalDate -> java.sql.Date`)
+  via Spark Thrift. Not reproducible via Trino (different optimizer). lakebench sets
+  `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta + Hive on the
+  Thrift server and Spark jobs (LB-148), which avoids the rewrite at the cost of scanning
+  instead of answering MIN/MAX/COUNT from the Delta log.
 
 - **OPTIMIZE OOM**: `ALTER TABLE ... EXECUTE optimize` rewrites the entire table in one pass.
   Exhausts Trino worker (8Gi) and Spark Thrift (4Gi) memory at scale 1+.

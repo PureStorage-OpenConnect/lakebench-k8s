@@ -27,12 +27,13 @@ def test_any_failure_fails_the_run():
     assert probs and "1 of 2" in probs[0] and "FQ1" in probs[0]
 
 
-def test_documented_delta_thrift_q2_is_tolerated():
-    cfg = make_config(recipe="hive-delta-spark-thrift")
-    assert _benchmark_gate_problems(cfg, [_q("Q2_filtered_aggregation", False)]) == []
-    # The same failure on Iceberg is a real defect.
-    cfg2 = make_config(recipe="hive-iceberg-spark-thrift")
-    assert _benchmark_gate_problems(cfg2, [_q("Q2_filtered_aggregation", False)])
+def test_delta_thrift_q2_failure_fails_the_run():
+    """LB-148: the Q2/Q7 crash is worked around, so Delta + Thrift Q2 is no
+    longer tolerated."""
+    for recipe in ("hive-delta-spark-thrift", "hive-iceberg-spark-thrift"):
+        cfg = make_config(recipe=recipe)
+        for name in ("Q2_filtered_aggregation", "Q6_customer_rfm"):
+            assert _benchmark_gate_problems(cfg, [_q(name, False)]), (recipe, name)
 
 
 def test_in_stream_round_dicts_are_gated():
