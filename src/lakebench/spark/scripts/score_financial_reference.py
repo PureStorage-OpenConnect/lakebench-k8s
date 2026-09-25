@@ -325,6 +325,7 @@ def run_fidelity_gate(
     # The id map goes through the account master's IBANs, so a duplicate IBAN
     # there would label the wrong silver entity.
     dup_ibans = af.duplicate_ibans(spark, ACCOUNT_PATH)
+    scale_info = af.corpus_scale(spark, ACCOUNT_PATH, prereg["corpora"]["entities_per_scale_unit"])
     seed = provenance.get("corpus_seed")
     seed_check = af.corpus_seed_check(manifest, int(seed) if seed not in (None, "") else None)
     agreement = af.label_agreement(
@@ -350,6 +351,7 @@ def run_fidelity_gate(
             "unkeyed_rows": unkeyed,
             "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
+            "corpus_scale": scale_info,
             "aml_features_sha256": af.source_sha256(),
             "sampling": sampling,
             "label_route_agreement_customers": agreement,
@@ -376,6 +378,8 @@ def run_fidelity_gate(
     if seed_check["claimed_seed"] is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
+        # Recorded, not refused: the cluster scores whatever was deployed.
+        add_pass(report, "corpus_at_gate_scale", af.at_gate_scale(scale_info, prereg))
         n_unres = af.unresolved_subjects(inputs["unit"])
         add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0 and n_unres == 0)
         if seed_check["claimed_seed"] is not None:
