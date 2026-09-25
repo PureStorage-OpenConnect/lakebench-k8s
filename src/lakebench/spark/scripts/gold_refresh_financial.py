@@ -85,7 +85,7 @@ from gold_finalize_financial import (
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
-from tm_operations import bootstrap_tm_tables, run_tm_operations
+from tm_operations import bootstrap_tm_tables, params_from_env, run_tm_operations
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
@@ -93,6 +93,7 @@ BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 REFRESH_S = int(env("LB_FINANCIAL_GOLD_REFRESH_S", "60"))
+TM_PARAMS = params_from_env()
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
 
@@ -193,6 +194,7 @@ def main() -> None:
     manifest_ready = table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}")
     cycle = 0
     last_ingest_s = 0.0
+    last_tm_s = None
 
     while not _SHUTDOWN:
         tick = time.time()
@@ -232,16 +234,6 @@ def main() -> None:
                 rules=CONTINUOUS_RULES,
                 skipped_rules=CONTINUOUS_SKIPPED_RULES,
             )
-            # P10 operations layer over this tick's alerts: rebuilt in full
-            # each tick (a projection of the alerts), one reconciliation set
-            # per tick with cycle = tick. Waits for data and for the manifest
-            # (dispositions are simulated from it). Never raises; a failure is
-            # logged as the 'workflow' invariant and fails the continuous gate.
-            if silver_rows > 0 and manifest_ready:
-                run_tm_operations(spark, txns, RUN_ID, cycle=cycle, continuous=True)
-            else:
-                log(f"Cycle {cycle}: [tm] waiting for silver rows and the manifest")
-
             # This run's alerts only. Rules skipped in continuous mode keep
             # alerts from earlier runs, and counting those let the continuous
             # gate pass with no continuous detection at all.
@@ -269,6 +261,28 @@ def main() -> None:
             if newest_ingest_s is not None and (newest_ingest_s > last_ingest_s or backlog):
                 log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
                 last_ingest_s = newest_ingest_s
+            # P10 operations layer, after the tick's freshness is logged so its
+            # cost does not count as detection staleness. It runs every
+            # continuous_interval_seconds, not every tick: one pass over the
+            # full corpus costs minutes at scale 10. Waits for data and for
+            # the manifest (dispositions are simulated from it); a window that
+            # ends first reports the layer as not run. Never raises.
+            now = time.time()
+            if TM_PARAMS["enabled"] and (
+                last_tm_s is None or now - last_tm_s >= TM_PARAMS["continuous_interval_seconds"]
+            ):
+                if silver_rows > 0 and manifest_ready:
+                    last_tm_s = now
+                    run_tm_operations(
+                        spark, txns, RUN_ID, cycle=cycle, continuous=True, params=TM_PARAMS
+                    )
+                else:
+                    log(
+                        f"[tm-status] status=waiting cycle={cycle} reason="
+                        + ("silver is empty" if silver_rows == 0 else "no manifest yet")
+                    )
+            elif not TM_PARAMS["enabled"] and cycle == 1:
+                run_tm_operations(spark, txns, RUN_ID, cycle=cycle, params=TM_PARAMS)
             consecutive_failures = 0
         except Exception as e:  # noqa: BLE001
             consecutive_failures += 1

@@ -170,7 +170,7 @@ def _delete_dir_if_disjoint(spark, location, raw_uri):
     path = jvm.org.apache.hadoop.fs.Path(target)
     if fs.exists(path):
         fs.delete(path, True)
-        log(f"Continuous reset: deleted old bronze data at {location}")
+        log(f"Continuous reset: deleted {location}")
 
 
 def register_manifest(spark) -> bool:
@@ -218,21 +218,9 @@ def _continuous_reset(spark, df):
     # too: the continuous stream only appends dimension rows it has not seen,
     # so rows from an earlier run (another seed, scale or a pre-KYC corpus)
     # would otherwise survive the reset.
-    # Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which
-    # the bootstrap does not do; fall back to a plain DROP and delete the
-    # table's own directory, as common.reset_stream_tables does for c360.
+    # _drop_owned_table falls back to a plain DROP where Polaris refuses PURGE.
     for t in (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS):
-        fq = f"{CATALOG}.{t}"
-        try:
-            spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
-        except Exception as e:  # noqa: BLE001
-            log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
-            silver_loc = _table_location(spark, fq)
-            spark.sql(f"DROP TABLE IF EXISTS {fq}")
-            # Only a directory named after the table: never a namespace or
-            # warehouse root that other tables share.
-            if silver_loc and silver_loc.rstrip("/").rsplit("/", 1)[-1] == t.rsplit(".", 1)[-1]:
-                _delete_dir_if_disjoint(spark, silver_loc, BRONZE_URI + PACS_PREFIX)
+        _drop_owned_table(spark, t)
     _with_location(
         df.limit(0)
         .withColumn("ingest_ts", current_timestamp())
@@ -255,11 +243,34 @@ def _continuous_reset(spark, df):
     # (cases, dispositions, the reconciliation ledger). gold-refresh rebuilds
     # them from its first tick, but until then a reader would see the old
     # run's queue as this run's.
-    from tm_operations import GOLD_CASES, GOLD_COVERAGE, GOLD_DISPOSITIONS, GOLD_RECON
+    from tm_operations import TM_TABLES
 
-    for t in (GOLD_RECON, GOLD_COVERAGE, GOLD_DISPOSITIONS, GOLD_CASES):
-        spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{t} PURGE")
+    for t in TM_TABLES:
+        _drop_owned_table(spark, t)
     log("Continuous reset: dropped the TM operations tables")
+
+
+def _drop_owned_table(spark, table):
+    """DROP ... PURGE a table whose files only it owns.
+
+    Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which
+    the bootstrap does not do; fall back to a plain DROP and delete the
+    table's own directory, as common.reset_stream_tables does for c360. Only
+    a directory named after the table and disjoint from the raw datagen path:
+    never a namespace or warehouse root that other tables share.
+    """
+    fq = f"{CATALOG}.{table}"
+    try:
+        spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
+        return
+    except Exception as e:  # noqa: BLE001
+        log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
+    loc = _table_location(spark, fq)
+    spark.sql(f"DROP TABLE IF EXISTS {fq}")
+    if loc and loc.rstrip("/").rsplit("/", 1)[-1] == table.rsplit(".", 1)[-1]:
+        _delete_dir_if_disjoint(spark, loc, BRONZE_URI + PACS_PREFIX)
+    elif loc:
+        log(f"Continuous reset: kept {loc}; it is not named after {table}")
 
 
 def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):

@@ -494,38 +494,50 @@ TBLPROPERTIES (
 """.strip()
 
 
-# Stage 6 L1 triage: one row per alert. triage_priority = scenario weight x
-# CRR tier (low, medium, high, critical). disposition: escalated, closed_nfa,
-# attached (suppressed into the customer's open case), out_of_scope (alert on
-# a non-customer), NULL while awaiting L1. simulated_truth and the analyst and
-# QA columns come from the simulated analyst, not a person.
+# Stage 6 L1 triage: one row per alert, including alerts detection no longer
+# emits (in_current_detection false; carried, never erased). triage_priority =
+# scenario weight x CRR tier (low, medium, high, critical). disposition, never
+# NULL: escalated, closed_nfa, attached (suppressed into the customer's open
+# case), pending_l1 (waiting for L1), out_of_scope (alert on a non-customer;
+# declared_counterparty says whether its scenario may alert on one),
+# over_capacity (past the per-customer replay cap). alert_key is the identity
+# first seen, stable across cycles. simulated_truth and the analyst and QA
+# columns come from the simulated analyst, not a person.
 GOLD_ALERT_DISPOSITIONS_DDL = """
 CREATE TABLE IF NOT EXISTS {catalog}.{table} (
-    alert_id           STRING NOT NULL,
-    alert_key          STRING NOT NULL,
-    rule_id            STRING NOT NULL,
-    entity_id          BIGINT NOT NULL,
-    is_customer        BOOLEAN NOT NULL,
-    crr_tier           STRING,
-    scenario_weight    DOUBLE NOT NULL,
-    priority_score     DOUBLE NOT NULL,
-    triage_priority    STRING NOT NULL,
-    generated_date     DATE NOT NULL,
-    l1_decision_date   DATE,
-    disposition        STRING,
-    queue_status       STRING NOT NULL,
-    case_id            STRING,
-    decision_date      DATE,
-    aging_days         INT NOT NULL,
-    sla_breached       BOOLEAN NOT NULL,
-    simulated_truth    BOOLEAN NOT NULL,
-    analyst_correct    BOOLEAN,
-    qa_sampled         BOOLEAN NOT NULL,
-    qa_disposition     STRING,
-    qa_disagrees       BOOLEAN,
-    as_of_date         DATE NOT NULL,
-    run_id             STRING NOT NULL,
-    computed_ts        TIMESTAMP NOT NULL
+    alert_id                       STRING NOT NULL,
+    alert_key                      STRING NOT NULL,
+    rule_id                        STRING NOT NULL,
+    entity_id                      BIGINT NOT NULL,
+    is_customer                    BOOLEAN NOT NULL,
+    declared_counterparty          BOOLEAN NOT NULL,
+    crr_tier                       STRING,
+    scenario_weight                DOUBLE NOT NULL,
+    priority_score                 DOUBLE NOT NULL,
+    triage_priority                STRING NOT NULL,
+    alert_ts                       TIMESTAMP,
+    content_hash                   STRING,
+    first_seen_cycle               INT,
+    first_seen_as_of               DATE,
+    in_current_detection           BOOLEAN NOT NULL,
+    generated_date                 DATE NOT NULL,
+    l1_decision_date               DATE,
+    disposition                    STRING NOT NULL,
+    queue_status                   STRING NOT NULL,
+    case_id                        STRING,
+    decision_date                  DATE,
+    aging_days                     INT NOT NULL,
+    sla_breached                   BOOLEAN NOT NULL,
+    simulated_truth                BOOLEAN NOT NULL,
+    analyst_correct                BOOLEAN,
+    qa_sampled                     BOOLEAN NOT NULL,
+    qa_disposition                 STRING,
+    qa_disagrees                   BOOLEAN,
+    as_of_date                     DATE NOT NULL,
+    cycle                          INT NOT NULL,
+    base_run_id                    STRING NOT NULL,
+    run_id                         STRING NOT NULL,
+    computed_ts                    TIMESTAMP NOT NULL
 )
 USING iceberg
 TBLPROPERTIES (
@@ -538,7 +550,10 @@ TBLPROPERTIES (
 # Stages 7-8: customer-keyed cases, at most one open per customer. case_type:
 # alert_escalation or continuing_activity (the 90-day review after a SAR).
 # case_status: open, pending_filing (determined suspicious, SAR not yet
-# filed), closed. sar_decision: sar_filed or no_sar.
+# filed), closed. sar_decision: sar_filed or no_sar. regulatory_limit:
+# 30_day, 60_day_no_suspect, or 120_day_continuing (FinCEN: 120 days after the
+# prior SAR). continuing_review_status on a SAR: opened, folded (into a case
+# still under investigation), deferred (behind a case waiting to file).
 GOLD_CASES_DDL = """
 CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     case_id                        STRING NOT NULL,
@@ -561,16 +576,21 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     determination_date             DATE,
     sar_decision                   STRING,
     suspect_identified             BOOLEAN NOT NULL,
+    regulatory_limit               STRING,
     filing_deadline_date           DATE,
     filing_date                    DATE,
     determination_to_filing_days   INT,
+    days_since_prior_sar           INT,
     filed_late                     BOOLEAN,
     alert_to_decision_days         INT,
     sla_breached                   BOOLEAN NOT NULL,
     continuing_review_due_date     DATE,
+    continuing_review_status       STRING,
     continuing_review_case_id      STRING,
     simulated_truth                BOOLEAN NOT NULL,
     as_of_date                     DATE NOT NULL,
+    cycle                          INT NOT NULL,
+    base_run_id                    STRING NOT NULL,
     run_id                         STRING NOT NULL,
     computed_ts                    TIMESTAMP NOT NULL
 )
