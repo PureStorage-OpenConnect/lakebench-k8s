@@ -882,13 +882,15 @@ class PipelineBenchmark:
 
         # Time to detect (AML continuous): the gold stage's merged histogram.
         gold = next((s for s in streaming if s.stage_name == "gold"), None)
+        is_aml = self.config_snapshot.get("workload_schema") == "financial"
+        if gold is not None and (gold.ttd_alerts is not None or is_aml):
+            self.time_to_detect_unmeasured_cycles = gold.ttd_unmeasured_cycles
         if gold is not None and gold.ttd_alerts is not None:
             self.time_to_detect_alerts = gold.ttd_alerts
             self.time_to_detect_seconds = gold.ttd_p50_seconds
             self.time_to_detect_p95_seconds = gold.ttd_p95_seconds
             self.time_to_detect_max_seconds = gold.ttd_max_seconds
             self.time_to_detect_late_alerts = gold.ttd_late
-            self.time_to_detect_unmeasured_cycles = gold.ttd_unmeasured_cycles
 
         # Drained: every datagen row reached bronze and silver COMMITTED all
         # of it, so the trailing idle gold cycles measured an empty feed, not a
@@ -1701,6 +1703,9 @@ def _apply_ttd(metrics: StreamingJobMetrics, lines: list[re.Match[str]], cycles:
     all.
     """
     if not lines:
+        # Cycles ran but none logged a measurement: say so, the percentiles
+        # stay None.
+        metrics.ttd_unmeasured_cycles = len(cycles)
         return
     bin_s = int(lines[0]["bin"])
     bins: dict[int, int] = {}

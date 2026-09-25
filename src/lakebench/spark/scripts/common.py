@@ -401,9 +401,13 @@ class TtdBaseline:
     newly raised alerts would sit in the next tick's snapshot and never be
     measured, and the ticks lost that way are the slow ones. So the baseline
     of an unmeasured tick is carried to the next tick, whose alerts are then
-    measured against it: late by the lost tick, never dropped. After
-    ``max_carry`` ticks in a row without a measurement the carried snapshot
-    may have been expired by in-stream maintenance, so the fresh one is used.
+    measured against it: late by the lost tick, never dropped. A baseline is
+    carried at most ``max_carry`` times in a row, since in-stream maintenance
+    may expire the snapshot; then the fresh one is used.
+
+    A failed lookup (TTD_SNAPSHOT_UNKNOWN) falls back to the snapshot read
+    right after the last measured tick, which is the same point in the
+    table's history unless something else wrote to it since.
 
     Each baseline carries ``late_before_s``: the newest silver ingest time
     the tick before the baseline had read. An alert whose evidence was all
@@ -413,25 +417,36 @@ class TtdBaseline:
     def __init__(self, max_carry=3):
         self.max_carry = max_carry
         self._carry = None
-        self._misses = 0
+        self._carries = 0
+        self._last_good = None
 
     def begin(self, prior, late_before_s):
         """Start a tick: ``prior`` is its pre-detection snapshot id (None:
         no snapshot; TTD_SNAPSHOT_UNKNOWN: lookup failed). Returns the
         (snapshot, late_before_s) to measure against."""
+        if prior == TTD_SNAPSHOT_UNKNOWN and self._last_good is not None:
+            prior = self._last_good
         carry = self._carry
-        if carry is not None and carry[0] != TTD_SNAPSHOT_UNKNOWN and self._misses < self.max_carry:
+        if (
+            carry is not None
+            and carry[0] != TTD_SNAPSHOT_UNKNOWN
+            and self._carries < self.max_carry
+        ):
             base = carry
+            self._carries += 1
         else:
             base = (prior, late_before_s)
+            self._carries = 0
         self._carry = base
-        self._misses += 1
         return base
 
-    def measured(self):
-        """The tick logged its measurement: the next tick starts fresh."""
+    def measured(self, after_snapshot=TTD_SNAPSHOT_UNKNOWN):
+        """The tick logged its measurement: the next tick starts fresh.
+        ``after_snapshot`` is gold.alerts' snapshot once the tick's alerts
+        were written, kept as the fallback for a failed lookup."""
         self._carry = None
-        self._misses = 0
+        self._carries = 0
+        self._last_good = None if after_snapshot == TTD_SNAPSHOT_UNKNOWN else after_snapshot
 
 
 def parse_size_gb(s):

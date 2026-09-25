@@ -266,13 +266,19 @@ def new_alert_txns(current, prior):
 def new_alert_arrivals(new_txns, txns, small=False):
     """Per new alert, the newest ingest_ts among its related transactions
     (``arrival_ts``; NULL when none of them is in ``txns``). ``small``
-    broadcasts ``new_txns`` so silver is filtered in place, not shuffled."""
+    broadcasts ``new_txns`` so silver is filtered in place, not shuffled:
+    an inner join with the broadcast on the build side (Spark will not
+    broadcast the preserved side of an outer join), then the unmatched
+    alerts are added back from the distinct keys."""
     side = broadcast(new_txns) if small else new_txns
-    return (
-        side.join(txns.select("uetr", "ingest_ts"), "uetr", "left")
+    matched = (
+        txns.select("uetr", "ingest_ts")
+        .join(side, "uetr", "inner")
         .groupBy("_key")
         .agg(max_("ingest_ts").alias("arrival_ts"))
     )
+    keys = new_txns.select("_key").distinct()
+    return keys.join(matched, "_key", "left")
 
 
 def ttd_stats(arrivals, detected_s, late_before_s=None, bin_s=TTD_BIN_S):
@@ -476,7 +482,7 @@ def main() -> None:
                 last_ingest_s = newest_ingest_s
                 fresh_sampled = True
             if _log_time_to_detect(spark, cycle, ttd_base, detection_end_s):
-                ttd_baseline.measured()
+                ttd_baseline.measured(_prior_alerts_snapshot(spark))
             # P10 operations layer. It runs every continuous_interval_seconds,
             # measured from the end of the last pass, so detection ticks always
             # run between passes however long a pass takes; plus one final pass

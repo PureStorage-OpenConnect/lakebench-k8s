@@ -208,7 +208,7 @@ def test_unknown_bronze_timing_keeps_the_ratio_verdict():
 def test_gold_refresh_logs_time_to_detect():
     src = (SCRIPTS / "gold_refresh_financial.py").read_text()
     assert "if _log_time_to_detect(spark, cycle, ttd_base, detection_end_s):" in src
-    assert "ttd_baseline.measured()" in src
+    assert "ttd_baseline.measured(_prior_alerts_snapshot(spark))" in src
     assert "log(ttd_line(cycle, stats))" in src
 
 
@@ -225,11 +225,23 @@ def test_an_unmeasured_tick_is_carried_not_dropped():
     assert b.begin(40, 300.0) == (40, 300.0)
 
 
-def test_a_failed_lookup_is_not_carried():
+def test_a_failed_lookup_falls_back_to_the_last_good_snapshot():
+    """A transient lookup failure must not drop the tick: the snapshot read
+    after the last measured tick is the same point in history."""
+    c = _common()
+    b = c.TtdBaseline()
+    assert b.begin(5, 1.0) == (5, 1.0)
+    b.measured(6)
+    assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 2.0) == (6, 2.0)
+
+
+def test_a_failed_lookup_with_no_fallback_is_not_carried():
     c = _common()
     b = c.TtdBaseline()
     assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 1.0) == (c.TTD_SNAPSHOT_UNKNOWN, 1.0)
     assert b.begin(7, 2.0) == (7, 2.0)
+    # The unknown tick did not use up the carry budget.
+    assert b.begin(8, 3.0) == (7, 2.0)
 
 
 def test_a_carried_baseline_gives_way_after_max_carry():
@@ -238,7 +250,40 @@ def test_a_carried_baseline_gives_way_after_max_carry():
     b = c.TtdBaseline(max_carry=2)
     assert b.begin(1, None) == (1, None)
     assert b.begin(2, 5.0) == (1, None)
-    assert b.begin(3, 6.0) == (3, 6.0)
+    assert b.begin(3, 6.0) == (1, None)
+    assert b.begin(4, 7.0) == (4, 7.0)
+
+
+def test_every_cycle_unmeasured_is_counted():
+    log = _prefixed(
+        [
+            "Cycle 1: aggregating 10 Silver records",
+            "Cycle 2: aggregating 20 Silver records",
+        ]
+    )
+    m = MetricsCollector().parse_streaming_logs(log, "gold-refresh")
+    assert m.ttd_alerts is None
+    assert m.ttd_unmeasured_cycles == 2
+    stage = StageMetrics(
+        stage_name="gold",
+        stage_type="streaming",
+        engine="spark",
+        elapsed_seconds=1800,
+        ttd_unmeasured_cycles=2,
+    )
+    pb = PipelineBenchmark(
+        run_id="t",
+        deployment_name="t",
+        pipeline_mode="sustained",
+        start_time=_T0,
+        end_time=_T0 + timedelta(seconds=1800),
+        stages=[stage],
+        config_snapshot={"workload_schema": "financial"},
+    )
+    pb.compute_aggregates()
+    scores = pb.to_dict()["scores"]
+    assert scores["time_to_detect_unmeasured_cycles"] == 2
+    assert scores["time_to_detect_seconds"] is None
 
 
 def test_streaming_job_metrics_default_to_unmeasured():

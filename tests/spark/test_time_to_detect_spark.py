@@ -126,3 +126,17 @@ def test_empty_tick_logs_a_parseable_line(spark):
     assert ttd_line(7, stats) == (
         "Cycle 7: time to detect alerts=0 late=0 unmatched=0 max=-s bin=10s bins="
     )
+
+
+def test_small_lookup_broadcasts_instead_of_shuffling_silver(spark):
+    from gold_refresh_financial import new_alert_arrivals, new_alert_txns
+
+    current = spark.createDataFrame([("u", "W2_structuring", 1, ["t4"])], _ALERTS)
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+    try:
+        df = new_alert_arrivals(new_alert_txns(current, None), _txns(spark), small=True)
+        plan = df._jdf.queryExecution().executedPlan().toString()
+    finally:
+        spark.conf.unset("spark.sql.autoBroadcastJoinThreshold")
+    assert "BroadcastHashJoin" in plan
+    assert [r["arrival_ts"].timestamp() for r in df.collect()] == [1_000_300]
