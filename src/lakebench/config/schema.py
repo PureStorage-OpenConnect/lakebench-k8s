@@ -1057,6 +1057,13 @@ class TmOperationsConfig(ConfigModel):
     Read by tm_operations.py through the LB_TM_* env vars.
     """
 
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Run the TM operations layer. When it cannot run (no manifest, an error) the "
+            "run reports it as not run; only violated workflow invariants fail a run"
+        ),
+    )
     seed: int = Field(default=20260924, description="Seed for every simulated decision")
     analyst_accuracy: float = Field(default=0.90, ge=0.5, le=1.0)
     investigator_accuracy: float = Field(default=0.95, ge=0.5, le=1.0)
@@ -1072,9 +1079,50 @@ class TmOperationsConfig(ConfigModel):
     late_filing_rate: float = Field(
         default=0.03, ge=0.0, le=1.0, description="Share of SARs filed after the deadline"
     )
+    no_suspect_rate: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Share of new cases with no suspect identified (60-day filing clock)",
+    )
+    max_alerts_per_customer: int = Field(
+        default=50_000,
+        ge=100,
+        le=10_000_000,
+        description=(
+            "Alerts replayed per customer; a hub customer's alerts past this are "
+            "dispositioned over_capacity and counted in the report"
+        ),
+    )
+    continuous_interval_seconds: int = Field(
+        default=1800,
+        ge=0,
+        le=86_400,
+        description=(
+            "Continuous mode: seconds between operations passes. One pass costs minutes "
+            "at scale 10, so running it every gold-refresh tick would wreck freshness"
+        ),
+    )
+    counterparty_scenarios: list[str] = Field(
+        default_factory=lambda: [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain",
+        ],
+        description=(
+            "Scenarios declared to alert on counterparties as well as customers (graph "
+            "overlays). An alert on a non-customer from any other scenario fails an invariant"
+        ),
+    )
 
     def env(self) -> dict[str, str]:
         return {
+            "LB_TM_ENABLED": str(self.enabled).lower(),
+            "LB_TM_NO_SUSPECT_RATE": str(self.no_suspect_rate),
+            "LB_TM_MAX_ALERTS_PER_CUSTOMER": str(self.max_alerts_per_customer),
+            "LB_TM_CONTINUOUS_INTERVAL_S": str(self.continuous_interval_seconds),
+            "LB_TM_COUNTERPARTY_SCENARIOS": ",".join(self.counterparty_scenarios),
             "LB_TM_SEED": str(self.seed),
             "LB_TM_ANALYST_ACCURACY": str(self.analyst_accuracy),
             "LB_TM_INVESTIGATOR_ACCURACY": str(self.investigator_accuracy),

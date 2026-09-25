@@ -4,8 +4,11 @@
 Covers each stage and each invariant on the tables as written: stage 1
 reconciliation and scenario coverage, stage 6 dispositions (priority,
 suppression, out-of-population alerts), stage 7 cases with the activity
-pull, stage 8 SAR clocks, the reconciliation history across cycles and runs,
-and the invariant gate failing when the written tables are inconsistent.
+pull, stage 8 SAR clocks, alert identity and decided history across
+cycles, the reconciliation ledger across cycles, ticks and runs, the silver
+snapshot pinned against a concurrent stream commit, the not-run and disabled
+paths, the Polaris PURGE fallback, and each read-back invariant failing when
+the written tables are inconsistent.
 
 Needs the Iceberg Spark runtime jar (LB_TEST_ICEBERG_JAR or
 LB_SPARK_TEST_JARS); skipped otherwise.
@@ -169,19 +172,22 @@ def _setup(spark):
     return spark.table("lakehouse.silver.transactions"), len(rows)
 
 
-def _alerts(spark, run_id):
+_BASE_SPECS = [
+    # (alert_id, rule, entity, alert_ts, related)
+    ("A1", "W3_round_tripping", 1, (2024, 1, 11), ["u1", "u2"]),  # planted: true
+    ("A2", "W4_risk_propagation", 1, (2024, 1, 20), ["u4"]),  # arrives into A1's case
+    ("A3", "W2_structuring", 2, (2024, 5, 10), ["u27"]),  # random control: false
+    # Non-customer, from a scenario declared customer-and-counterparty.
+    ("A4", "W4_risk_propagation", 4, (2024, 1, 21), ["u20"]),
+    ("A5", "W4_risk_propagation", 3, (2024, 12, 30), ["u30"]),  # still open at as-of
+]
+
+
+def _alerts(spark, run_id, specs=None):
     from datetime import datetime
 
     from pyspark.sql.functions import lit
 
-    specs = [
-        # (alert_id, rule, entity, alert_ts, related)
-        ("A1", "W3_round_tripping", 1, datetime(2024, 1, 11), ["u1", "u2"]),  # planted: true
-        ("A2", "W4_risk_propagation", 1, datetime(2024, 1, 20), ["u4"]),  # arrives into A1's case
-        ("A3", "W2_structuring", 2, datetime(2024, 5, 10), ["u27"]),  # random control: false
-        ("A4", "W7_cross_border_high_risk", 4, datetime(2024, 1, 21), ["u20"]),  # non-customer
-        ("A5", "W4_risk_propagation", 3, datetime(2024, 12, 30), ["u30"]),  # still open at as-of
-    ]
     rows = [
         (
             a,
@@ -192,7 +198,7 @@ def _alerts(spark, run_id):
             e,
             rel,
             [e],
-            ts,
+            datetime(*ts),
             0.5,
             "HIGH",
             "new",
@@ -201,9 +207,9 @@ def _alerts(spark, run_id):
             run_id,
             None,
             None,
-            ts,
+            datetime(*ts),
         )
-        for a, r, e, ts, rel in specs
+        for a, r, e, ts, rel in (specs or _BASE_SPECS)
     ]
     spark.createDataFrame(rows, spark.table("lakehouse.gold.alerts").schema).writeTo(
         "lakehouse.gold.alerts"
@@ -223,6 +229,7 @@ def _alerts(spark, run_id):
 
 
 PARAMS = {
+    "enabled": True,
     "seed": 11,
     "analyst_accuracy": 1.0,
     "investigator_accuracy": 1.0,
@@ -230,7 +237,18 @@ PARAMS = {
     "alert_sla_days": 60,
     "lookback_months": 12,
     "late_filing_rate": 0.0,
+    "no_suspect_rate": 0.0,
+    "max_alerts_per_customer": 50_000,
+    "continuous_interval_seconds": 0,
 }
+
+
+def _st(inv):
+    return {n: s for n, s, _ in inv}
+
+
+def _disp(spark):
+    return {r["alert_id"]: r for r in spark.table("lakehouse.gold.alert_dispositions").collect()}
 
 
 def _check(spark):
@@ -246,7 +264,13 @@ def _check(spark):
     )
     status = {n: (s, d) for n, s, d in inv}
     assert all(s == "pass" for s, _ in status.values()), status
-    assert "workflow" not in status
+    assert {
+        "monitored_population",
+        "noncustomer_alerts_declared",
+        "no_null_disposition",
+        "review_not_folded_into_determined",
+    } <= set(status)
+    assert "history_stable" not in status  # first cycle: nothing to compare
 
     # Stage 1: reconciliation. 31 payments: 5 between non-customers, 1 with no
     # USD amount (customer 2), 25 monitored.
@@ -254,6 +278,7 @@ def _check(spark):
         (r["section"], r["item"]): r["item_count"]
         for r in spark.table("lakehouse.gold.tm_reconciliation").collect()
     }
+    assert rec[("completeness", "customers")] == 3
     assert rec[("completeness", "source")] == n_rows == 31
     assert rec[("completeness", "bronze")] == 31
     assert rec[("completeness", "monitored")] == 25
@@ -264,6 +289,7 @@ def _check(spark):
     assert rec[("dq", "dq_unconvertible_currency")] == 1
     assert rec[("funnel", "alerts")] == 4  # A4 is on a non-customer
     assert rec[("funnel", "alerts_out_of_scope")] == 1
+    assert rec[("funnel", "alerts_noncustomer_undeclared")] == 0
 
     # Scenario coverage: designated rows with this run's status, a gap row
     # for the planted fan_in no scenario targets, no row for the control.
@@ -278,9 +304,10 @@ def _check(spark):
     assert ("random", None) not in cov
     assert cov[(None, "W5_sanctions_match")]["coverage"] == "attribute"
 
-    # Stage 6: dispositions, one per alert.
-    d = {r["alert_id"]: r for r in spark.table("lakehouse.gold.alert_dispositions").collect()}
+    # Stage 6: dispositions, one per alert, none NULL.
+    d = _disp(spark)
     assert set(d) == {"A1", "A2", "A3", "A4", "A5"}
+    assert all(r["disposition"] for r in d.values())
     assert d["A1"]["triage_priority"] == "critical"  # W3 weight 3 x CRR high 3
     assert d["A1"]["priority_score"] == 9.0
     assert d["A3"]["triage_priority"] == "high"  # W2 weight 2 x CRR medium 2
@@ -291,12 +318,16 @@ def _check(spark):
     assert d["A2"]["case_id"] == d["A1"]["case_id"]
     assert d["A3"]["disposition"] == "closed_nfa"
     assert d["A4"]["disposition"] == "out_of_scope" and d["A4"]["is_customer"] is False
-    assert d["A5"]["disposition"] is None and d["A5"]["queue_status"] == "open"
+    assert d["A4"]["declared_counterparty"] is True
+    assert d["A5"]["disposition"] == "pending_l1" and d["A5"]["queue_status"] == "open"
     assert d["A5"]["aging_days"] == (date(2025, 1, 1) - date(2024, 12, 31)).days
+    assert d["A1"]["first_seen_cycle"] == 1 and d["A1"]["in_current_detection"]
+    assert str(d["A1"]["alert_ts"]) == "2024-01-11 00:00:00"
     # QA at rate 1 samples every L1 decision; a perfect QA agrees with a
     # perfect analyst.
     assert d["A1"]["qa_sampled"] and d["A3"]["qa_sampled"] and not d["A2"]["qa_sampled"]
     assert not d["A1"]["qa_disagrees"]
+    keys_c1 = {a: r["alert_key"] for a, r in d.items()}
 
     # Stage 7 and 8: one alert-driven case on customer 1, SAR filed inside
     # 30 days, activity pulled from the 12 months before opening, and the
@@ -309,18 +340,21 @@ def _check(spark):
     assert c["priority"] == "critical"
     assert sorted(c["rule_ids"]) == ["W3_round_tripping", "W4_risk_propagation"]
     assert c["sar_decision"] == "sar_filed" and c["case_status"] == "closed"
+    assert c["regulatory_limit"] == "30_day" and c["suspect_identified"] is True
     assert c["filing_deadline_date"] == c["determination_date"].fromordinal(
         c["determination_date"].toordinal() + 30
     )
     assert c["filed_late"] is False
     # Customer 1's payments before the case opened (u0..u2 at most, by
-    # 2024-01-11 plus the L1 turnaround).
-    assert c["activity_txn_count"] >= 3
+    # 2024-01-11 plus the L1 turnaround), counted once each.
+    assert 3 <= c["activity_txn_count"] <= 3 + 1
     assert c["activity_window_start"].year == c["opened_date"].year - 1
     reviews = [r for r in cases if r["case_type"] == "continuing_activity"]
     assert reviews and reviews[0]["parent_case_id"] == c["case_id"]
     assert c["continuing_review_case_id"] == reviews[0]["case_id"]
+    assert c["continuing_review_status"] == "opened"
     assert all(r["as_of_date"] == date(2025, 1, 1) for r in cases)
+    case_c1 = {r["case_id"]: r for r in cases}
 
     # Stage 9: the investigator queries run on these tables through the
     # Spark Thrift dialect adapter, as the benchmark runs them.
@@ -341,6 +375,7 @@ def _check(spark):
             gold_cases="gold.cases",
         )
         got[q.name] = spark.sql(adapt(sql)).collect()
+    assert len(got) == 4
     (c360,) = got["IQ1_customer_360"]
     assert c360["entity_id"] == 1 and c360["alert_count"] == 2 and c360["sars"] >= 1
     assert c360["accounts"] == 1
@@ -349,29 +384,76 @@ def _check(spark):
     assert {r["hop2_entity_id"] for r in got["IQ3_counterparty_two_hop"]} == {5}
     assert got["IQ4_open_cases_over_60_days"] == []
 
-    # Reconciliation history: cycle 2 of the same run keeps cycle 1's rows; a
-    # rerun of cycle 2 replaces its own; a new run clears the old run's.
-    spark.sql("UPDATE lakehouse.gold.alerts SET run_id = 'run-x-c2'")
-    spark.sql("UPDATE lakehouse.gold.detection_status SET run_id = 'run-x-c2'")
-    for _ in range(2):
-        tm.run_tm_operations(
-            spark, txns, "run-x-c2", params=PARAMS, source_rows_fn=lambda s: n_rows
-        )
-    cyc = spark.table("lakehouse.gold.tm_reconciliation").groupBy("cycle").count().collect()
-    per = {r["cycle"]: r["count"] for r in cyc}
+    # Cycle 2 of the same run. A1's window grew (later last payment, one more
+    # payment); A3 is no longer emitted; A6 is new but its payment predates
+    # cycle 1. Identity and decided history carry over.
+    specs2 = [s for s in _BASE_SPECS if s[0] not in ("A1", "A3")]
+    specs2.append(("A1b", "W3_round_tripping", 1, (2024, 1, 16), ["u1", "u2", "u3"]))
+    specs2.append(("A6", "W2_structuring", 3, (2024, 6, 1), ["u26"]))
+    _alerts(spark, "run-x-c2", specs2)
+    inv = tm.run_tm_operations(
+        spark, txns, "run-x-c2", params=PARAMS, source_rows_fn=lambda s: n_rows
+    )
+    st = _st(inv)
+    assert all(v == "pass" for v in st.values()), inv
+    assert st["history_stable"] == "pass"
+    d2 = {r["alert_key"]: r for r in spark.table("lakehouse.gold.alert_dispositions").collect()}
+    a1 = d2[keys_c1["A1"]]
+    assert a1["alert_id"] == "A1b" and a1["first_seen_cycle"] == 1
+    assert a1["generated_date"] == date(2024, 1, 12)  # as first seen, not re-dated
+    assert a1["disposition"] == "escalated" and a1["case_id"] == d["A1"]["case_id"]
+    a3 = d2[keys_c1["A3"]]
+    assert a3["in_current_detection"] is False and a3["disposition"] == "closed_nfa"
+    a6 = [r for r in d2.values() if r["alert_id"] == "A6"][0]
+    assert a6["first_seen_cycle"] == 2 and a6["generated_date"] == date(2025, 1, 1)
+    case_c2 = {r["case_id"]: r for r in spark.table("lakehouse.gold.cases").collect()}
+    for cid, old in case_c1.items():
+        assert case_c2[cid]["sar_decision"] == old["sar_decision"]
+        assert case_c2[cid]["filing_date"] == old["filing_date"]
+    # A rerun of cycle 2 reproduces it and replaces its own ledger rows.
+    inv = tm.run_tm_operations(
+        spark, txns, "run-x-c2", params=PARAMS, source_rows_fn=lambda s: n_rows
+    )
+    assert _st(inv)["history_stable"] == "pass", inv
+    per = {
+        r["cycle"]: r["count"]
+        for r in spark.table("lakehouse.gold.tm_reconciliation").groupBy("cycle").count().collect()
+    }
     assert set(per) == {1, 2} and per[1] == per[2]
     # The projections are rebuilt per cycle, so they hold one cycle only.
     assert {r["run_id"] for r in spark.table("lakehouse.gold.cases").collect()} == {"run-x-c2"}
 
-    # Continuous: payments datagen wrote that silver does not hold yet are
-    # excluded as in_flight; silver holding more than the source is not.
-    spark.sql("UPDATE lakehouse.gold.alerts SET run_id = 'run-cont'")
-    spark.sql("UPDATE lakehouse.gold.detection_status SET run_id = 'run-cont'")
+    # history_stable can fail: a decided alert whose recorded outcome differs
+    # from what the replay reproduces is history rewritten.
+    spark.sql(
+        "UPDATE lakehouse.gold.alert_dispositions SET disposition = 'closed_nfa' "
+        f"WHERE alert_key = '{keys_c1['A1']}'"
+    )
+    _alerts(spark, "run-x-c3", specs2)
+    inv = tm.run_tm_operations(
+        spark, txns, "run-x-c3", params=PARAMS, source_rows_fn=lambda s: n_rows
+    )
+    assert _st(inv)["history_stable"] == "fail", inv
+
+    # noncustomer_alerts_declared can fail: a customer-only scenario (W7)
+    # alerting on a non-customer is reported, not relabelled away.
+    _alerts(
+        spark, "run-x-c4", specs2 + [("A7", "W7_cross_border_high_risk", 5, (2024, 3, 1), ["u21"])]
+    )
+    inv = tm.run_tm_operations(
+        spark, txns, "run-x-c4", params=PARAMS, source_rows_fn=lambda s: n_rows
+    )
+    detail = {n: (s, dd) for n, s, dd in inv}["noncustomer_alerts_declared"]
+    assert detail[0] == "fail" and detail[1].startswith("1 alerts"), detail
+
+    # Continuous: one ledger set per operations pass, appended. Payments
+    # datagen wrote that silver does not hold yet are excluded as in_flight.
+    _alerts(spark, "run-cont")
     inv = tm.run_tm_operations(
         spark,
         txns,
         "run-cont",
-        cycle=3,
+        cycle=7,
         continuous=True,
         params=PARAMS,
         source_rows_fn=lambda s: n_rows + 4,
@@ -379,61 +461,119 @@ def _check(spark):
     assert all(s == "pass" for _, s, _ in inv), inv
     rec = {
         (r["section"], r["item"]): r["item_count"]
-        for r in spark.table("lakehouse.gold.tm_reconciliation").where("cycle = 3").collect()
+        for r in spark.table("lakehouse.gold.tm_reconciliation").where("cycle = 1").collect()
     }
     assert rec[("exclusion", "in_flight")] == 4
+
+    # Race: the stream commits more payments to silver while the source is
+    # being counted. Silver was pinned before the count, so the ledger
+    # balances instead of showing a negative in_flight.
+    def count_then_stream(s):
+        extra = s.table("lakehouse.silver.transactions").limit(3)
+        extra = extra.selectExpr(
+            "concat(txn_id, '-late') AS txn_id",
+            "concat(uetr, '-late') AS uetr",
+            *[c for c in extra.columns if c not in ("txn_id", "uetr")],
+        )
+        extra.writeTo("lakehouse.silver.transactions").append()
+        return n_rows
+
     inv = tm.run_tm_operations(
         spark,
-        txns,
+        spark.table("lakehouse.silver.transactions"),
         "run-cont",
-        cycle=4,
+        cycle=8,
+        continuous=True,
+        params=PARAMS,
+        source_rows_fn=count_then_stream,
+    )
+    assert _st(inv)["reconciliation"] == "pass", inv
+    cyc = {
+        r["cycle"]: r["cycle_run_id"]
+        for r in spark.table("lakehouse.gold.tm_reconciliation").collect()
+    }
+    assert cyc == {1: "run-cont-t1", 2: "run-cont-t2"}
+    # Silver holding more than the source is a duplication, not in flight.
+    inv = tm.run_tm_operations(
+        spark,
+        spark.table("lakehouse.silver.transactions"),
+        "run-cont",
+        cycle=9,
         continuous=True,
         params=PARAMS,
         source_rows_fn=lambda s: n_rows - 2,
     )
-    assert {n: s for n, s, _ in inv}["reconciliation"] == "fail"
+    assert _st(inv)["reconciliation"] == "fail"
+    spark.sql("DELETE FROM lakehouse.silver.transactions WHERE txn_id LIKE '%-late'")
 
-    # Invariant failures. (a) Source says more payments than silver holds.
-    spark.sql("UPDATE lakehouse.gold.alerts SET run_id = 'run-x-c2'")
-    spark.sql("UPDATE lakehouse.gold.detection_status SET run_id = 'run-x-c2'")
-    spark.sql("UPDATE lakehouse.gold.alerts SET run_id = 'run-y-c1'")
-    spark.sql("UPDATE lakehouse.gold.detection_status SET run_id = 'run-y-c1'")
+    # A new run clears the old run's ledger. (a) Source says more payments
+    # than silver holds.
+    _alerts(spark, "run-y-c1")
     inv = tm.run_tm_operations(
         spark, txns, "run-y-c1", params=PARAMS, source_rows_fn=lambda s: n_rows + 5
     )
-    st = {n: s for n, s, _ in inv}
+    st = _st(inv)
     assert st["reconciliation"] == "fail" and st["funnel_monotone"] == "pass"
     assert {r["run_id"] for r in spark.table("lakehouse.gold.tm_reconciliation").collect()} == {
         "run-y"
     }
     # (b) A second open case on one customer, written behind the workflow's
     # back, is caught on read-back.
-    spark.sql(
-        "INSERT INTO lakehouse.gold.cases SELECT concat(case_id, '-dup'), customer_id, case_type, "
-        "parent_case_id, opened_date, crr_tier, priority, alert_count, escalated_alert_count, "
-        "rule_ids, first_alert_date, activity_window_start, activity_window_end, "
-        "activity_txn_count, activity_amount_usd, 'open', determination, determination_date, "
-        "sar_decision, suspect_identified, filing_deadline_date, filing_date, "
-        "determination_to_filing_days, filed_late, alert_to_decision_days, sla_breached, "
-        "continuing_review_due_date, continuing_review_case_id, simulated_truth, as_of_date, "
-        "run_id, computed_ts FROM lakehouse.gold.cases"
-    )
-    counts = tm.read_back_counts(spark, "run-y-c1", "run-y", 1, date(2025, 1, 1))
-    st = {n: s for n, s, _ in tm.evaluate_invariants(counts)}
+    cols = ", ".join(spark.table("lakehouse.gold.cases").columns)
+    dup = cols.replace("case_id, customer_id", "concat(case_id, '-dup'), customer_id", 1)
+    dup = dup.replace("case_status", "'open'", 1)
+    spark.sql(f"INSERT INTO lakehouse.gold.cases SELECT {dup} FROM lakehouse.gold.cases")
+    counts = tm.read_back(spark, "run-y-c1", date(2025, 1, 1))
+    counts.update(source=31, customers=3, silver=31, monitored=25, excluded=6)
+    st = _st(tm.evaluate_invariants(counts))
     assert st["one_open_case_per_customer"] == "fail"
     assert st["cases_le_escalated"] == "fail"  # the duplicate alert-driven case had no escalation
+    # (c) A review credited to a case determined before the review was due.
+    spark.sql("DELETE FROM lakehouse.gold.cases WHERE case_id LIKE '%-dup'")
+    sar = spark.table("lakehouse.gold.cases").where("sar_decision = 'sar_filed'").first()
+    spark.sql(
+        "UPDATE lakehouse.gold.cases SET continuing_review_status = 'folded', "
+        f"continuing_review_case_id = '{sar['case_id']}' WHERE case_id = '{sar['case_id']}'"
+    )
+    counts = tm.read_back(spark, "run-y-c1", date(2025, 1, 1))
+    assert counts["reviews_folded_into_determined"] == 1
 
-    # (c) No manifest: dispositions cannot be simulated; reported, not raised.
+    # (d) No manifest: the layer reports not run, with the reason, and
+    # leaves detection's alerts alone.
     spark.sql("DROP TABLE lakehouse.bronze.manifest")
     inv = tm.run_tm_operations(spark, txns, "run-y-c1", params=PARAMS, source_rows_fn=lambda s: 1)
-    assert [(n, s) for n, s, _ in inv] == [("workflow", "error")]
+    assert [(n, s) for n, s, _ in inv] == [("workflow", "not_run")]
+    assert "manifest" in inv[0][2]
     assert spark.table("lakehouse.gold.alerts").where(col("run_id") == "run-y-c1").count() == 5
+    # (e) Disabled: says so and does nothing else.
+    inv = tm.run_tm_operations(spark, txns, "run-y-c1", params=dict(PARAMS, enabled=False))
+    assert [(n, s) for n, s, _ in inv] == [("workflow", "disabled")]
 
-    # The continuous reset drops every TM table, so a new continuous run
-    # never shows the previous run's queue before its first tick.
+    # Polaris refuses DROP ... PURGE: the reset falls back to a plain DROP and
+    # removes only the table's own directory.
     import bronze_verify_financial as bvf
     from common import table_exists
 
+    class NoPurge:
+        def __init__(self, inner):
+            self._inner = inner
+            self._jvm = inner._jvm
+            self._jsc = inner._jsc
+
+        def sql(self, q):
+            if "PURGE" in q:
+                raise RuntimeError("403 Forbidden: DROP_WITH_PURGE_ENABLED is false")
+            return self._inner.sql(q)
+
+    loc = bvf._table_location(spark, "lakehouse.gold.cases")
+    assert loc and os.path.isdir(loc.replace("file:", "", 1))
+    bvf._drop_owned_table(NoPurge(spark), "gold.cases")
+    assert not table_exists(spark, "lakehouse.gold.cases")
+    assert not os.path.exists(loc.replace("file:", "", 1))
+    assert os.path.isdir(os.path.dirname(loc.replace("file:", "", 1)))  # the namespace stays
+
+    # The continuous reset drops every TM table, so a new continuous run
+    # never shows the previous run's queue before its first tick.
     bvf._continuous_reset(spark, spark.table("lakehouse.default.pacs008_raw"))
     for t in ("tm_reconciliation", "scenario_coverage", "alert_dispositions", "cases"):
         assert not table_exists(spark, f"lakehouse.gold.{t}"), t
@@ -441,6 +581,9 @@ def _check(spark):
 
 if __name__ == "__main__":
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+    # A path-based (hadoop) catalog places tables itself, like Polaris; the
+    # Hive-only explicit bronze location does not apply.
+    os.environ["LB_CATALOG_TYPE"] = "polaris"
     # Keep the continuous reset's raw-path handling on local disk.
     os.environ["LB_BRONZE_URI"] = f"file://{sys.argv[1]}/raw/"
     _spark = _session(sys.argv[1])
