@@ -157,20 +157,20 @@ def test_peak_requirements(scale, cores, memory):
 
 # Budget split per cluster size: (bronze, silver, gold) executors.
 _BUDGET = [
-    (1, 60, (3, 4, 2)),
-    (1, 80, (5, 6, 2)),
-    (1, 100, (5, 7, 6)),
+    (1, 60, (1, 4, 2)),
+    (1, 80, (5, 4, 2)),
+    (1, 100, (5, 7, 3)),
     (1, 150, (5, 10, 12)),
     (1, 434, (5, 10, 12)),
-    (10, 60, (3, 4, 2)),
-    (10, 80, (5, 6, 2)),
-    (10, 100, (5, 7, 6)),
+    (10, 60, (1, 4, 2)),
+    (10, 80, (5, 4, 2)),
+    (10, 100, (5, 7, 3)),
     (10, 150, (5, 10, 12)),
     (10, 434, (5, 10, 12)),
-    (100, 60, (2, 5, 2)),
-    (100, 80, (2, 8, 3)),
-    (100, 100, (4, 10, 4)),
-    (100, 150, (8, 11, 10)),
+    (100, 60, (1, 5, 2)),
+    (100, 80, (1, 8, 3)),
+    (100, 100, (2, 10, 4)),
+    (100, 150, (8, 11, 8)),
     (100, 434, (8, 17, 28)),
 ]
 
@@ -186,7 +186,9 @@ def _budget_cores(cfg, cores):
     )
     dg = cfg.architecture.workload.datagen
     dg_m = dg.parallelism * _parse_cpu_millicores(dg.cpu)
-    return int(max(0, cores * 1000 - co - dg_m) * 0.9) // 1000
+    # The overridden stages share the budget net of the three drivers
+    # (2 + 4 + 4 cores under the AML profiles).
+    return int(max(0, cores * 1000 - co - dg_m - 10_000) * 0.9) // 1000
 
 
 @pytest.mark.parametrize(("scale", "cores", "expected"), _BUDGET)
@@ -295,6 +297,45 @@ class TestPreflightBetweenOldAndNewMinimum:
         assert r.passed
         assert r.message.startswith("WARNING")
         assert "silver-stream" in r.message or "gold-refresh" in r.message
+
+    def test_the_old_minimum_fails_once_trino_and_datagen_are_counted(self):
+        """At 54 cores the capped streams plus Trino, Hive/Postgres and
+        datagen need 57: the run would hang Pending, so preflight fails."""
+        assert not self._check(54).passed
+        assert self._check(57).passed
+
+    @pytest.mark.parametrize("cores", [30, 37])
+    def test_c360_below_the_capped_request_still_fails(self, cores):
+        from unittest import mock
+
+        from lakebench.cli._prerequisites import _check_cluster_capacity
+
+        cap = ClusterCapacity(cores * 1000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+            get_client.return_value.get_cluster_capacity.return_value = cap
+            assert not _check_cluster_capacity(_config("customer360", 10)).passed
+
+    def test_an_explicit_count_is_counted_uncapped(self):
+        """The manifest applies gold_refresh_executors after the budget."""
+        from unittest import mock
+
+        from lakebench.cli._prerequisites import _check_cluster_capacity
+
+        cfg = _config("financial", 10)
+        cfg.platform.compute.spark.gold_refresh_executors = 28
+        cap = ClusterCapacity(80_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+            get_client.return_value.get_cluster_capacity.return_value = cap
+            assert not _check_cluster_capacity(cfg).passed
+
+    def test_a_failing_estimate_keeps_the_hard_failure(self):
+        from unittest import mock
+
+        with mock.patch(
+            "lakebench.modules.pipeline_engines.spark.job.streaming_request_under_budget",
+            side_effect=RuntimeError("boom"),
+        ):
+            assert not self._check(80).passed
 
     def test_full_cluster_is_not_warned(self):
         r = self._check(434)

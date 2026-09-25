@@ -202,9 +202,9 @@ def test_a_capped_stage_is_warned_about_by_name(caplog):
     mgr = SparkJobManager(_config("financial", 10), _capacity_k8s(60))
     with caplog.at_level(logging.WARNING):
         manifest = mgr._build_manifest(JobType.BRONZE_INGEST)
-    assert manifest["spec"]["executor"]["instances"] == 3
+    assert manifest["spec"]["executor"]["instances"] == 1
     assert mgr.budget_warnings == [
-        "Concurrent budget: bronze-ingest capped from 5 to 3 executors "
+        "Concurrent budget: bronze-ingest capped from 5 to 1 executors "
         "(cluster too small for the profile)"
     ]
     assert any(

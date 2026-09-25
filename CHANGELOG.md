@@ -519,8 +519,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   222 cores / 1,948 GB / 4,660 Gi at scale 100 (was 106 / 788 / 1,760).
 - **Smaller clusters run degraded rather than failing preflight.** In
   continuous mode the capacity check passes with a WARNING naming the capped
-  stages when the request after the concurrent budget fits, and fails only
-  when that does not fit or a single pod fits no node. The budget gives each
+  stages when the request after the concurrent budget, plus Trino,
+  Hive/Postgres and datagen, fits (AML scale 1-10: 57 cores), and fails
+  only when that does not fit or a single pod fits no node. With schema
+  overrides the budget now nets out the three drivers before sharing, so a
+  capped run does not ask for more cores than the cluster has. The budget gives each
   overridden stage its base-split floor first, then spare cores upstream
   first: bronze, silver up to its keep-up count (7 for AML), gold, then the
   rest of silver.
