@@ -150,6 +150,8 @@ class BenchmarkRunner:
             "gold_risk_scores": t.gold_risk_scores,
             "gold_entity_clusters": t.gold_entity_clusters,
             "gold_daily_dashboards": t.gold_daily_dashboards,
+            "gold_alert_dispositions": t.gold_alert_dispositions,
+            "gold_cases": t.gold_cases,
         }
 
     def run(

@@ -346,9 +346,10 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     related_entity_ids ARRAY<BIGINT>,            -- other entities in the pattern
     alert_ts           TIMESTAMP NOT NULL,
     alert_score        DOUBLE,                   -- normalised 0.0-1.0
-    priority           STRING,                   -- low, medium, high, critical
-    status             STRING,                   -- new, under_review, escalated, sar_filed, closed
-    disposition        STRING,                   -- true_positive, false_positive, inconclusive
+    priority           STRING,                   -- rule severity as the scenario emits it (HIGH, MED);
+                                                 -- triage priority (low..critical) is in alert_dispositions
+    status             STRING,                   -- as the scenario emits it; the workflow state is
+    disposition        STRING,                   -- in alert_dispositions and cases (P10), not here
     alert_type         STRING,                   -- typology label (structuring, cycle, fan_in, ...)
     run_id             STRING NOT NULL,          -- lakebench execution id
     narrative          STRING,                   -- regulator-facing summary (optional in v1)
@@ -438,6 +439,150 @@ TBLPROPERTIES (
 
 
 # ---------------------------------------------------------------------------
+# Gold: transaction-monitoring operations (GOALS P10)
+# ---------------------------------------------------------------------------
+# Written by spark/scripts/tm_operations.py after detection, which carries the
+# same DDL inline (tests hold the column lists in lock-step). All unpartitioned:
+# alert_dispositions has one row per alert, the rest are far smaller.
+
+# Stage 1 cycle ledger: one row per (run, cycle, section, item). Sections:
+# completeness (source, bronze, silver, monitored, excluded), exclusion (one
+# row per reason), dq (rule failures, not exclusive), funnel (alerts,
+# escalated, cases, sars). item_count is NULL when a count was unavailable.
+GOLD_TM_RECONCILIATION_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    run_id         STRING NOT NULL,
+    cycle          INT NOT NULL,
+    cycle_run_id   STRING NOT NULL,
+    as_of_date     DATE,
+    section        STRING NOT NULL,
+    item           STRING NOT NULL,
+    unit           STRING NOT NULL,
+    item_count     BIGINT,
+    amount_usd     DECIMAL(38, 2),
+    computed_ts    TIMESTAMP NOT NULL
+)
+USING iceberg
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy'
+)
+""".strip()
+
+
+# Scenario-to-typology coverage matrix: designated rows (rule -> target
+# typology, with this cycle's rule status and alert volume), attribute rows
+# (list-match rules with no planted typology) and gap rows (planted typology
+# no scenario targets).
+GOLD_SCENARIO_COVERAGE_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    typology             STRING,
+    rule_id              STRING,
+    coverage             STRING NOT NULL,
+    rule_status          STRING,
+    alert_count          BIGINT,
+    customer_alert_count BIGINT,
+    planted_instances    BIGINT,
+    run_id               STRING NOT NULL,
+    computed_ts          TIMESTAMP NOT NULL
+)
+USING iceberg
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy'
+)
+""".strip()
+
+
+# Stage 6 L1 triage: one row per alert. triage_priority = scenario weight x
+# CRR tier (low, medium, high, critical). disposition: escalated, closed_nfa,
+# attached (suppressed into the customer's open case), out_of_scope (alert on
+# a non-customer), NULL while awaiting L1. simulated_truth and the analyst and
+# QA columns come from the simulated analyst, not a person.
+GOLD_ALERT_DISPOSITIONS_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    alert_id           STRING NOT NULL,
+    alert_key          STRING NOT NULL,
+    rule_id            STRING NOT NULL,
+    entity_id          BIGINT NOT NULL,
+    is_customer        BOOLEAN NOT NULL,
+    crr_tier           STRING,
+    scenario_weight    DOUBLE NOT NULL,
+    priority_score     DOUBLE NOT NULL,
+    triage_priority    STRING NOT NULL,
+    generated_date     DATE NOT NULL,
+    l1_decision_date   DATE,
+    disposition        STRING,
+    queue_status       STRING NOT NULL,
+    case_id            STRING,
+    decision_date      DATE,
+    aging_days         INT NOT NULL,
+    sla_breached       BOOLEAN NOT NULL,
+    simulated_truth    BOOLEAN NOT NULL,
+    analyst_correct    BOOLEAN,
+    qa_sampled         BOOLEAN NOT NULL,
+    qa_disposition     STRING,
+    qa_disagrees       BOOLEAN,
+    as_of_date         DATE NOT NULL,
+    run_id             STRING NOT NULL,
+    computed_ts        TIMESTAMP NOT NULL
+)
+USING iceberg
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy'
+)
+""".strip()
+
+
+# Stages 7-8: customer-keyed cases, at most one open per customer. case_type:
+# alert_escalation or continuing_activity (the 90-day review after a SAR).
+# case_status: open, pending_filing (determined suspicious, SAR not yet
+# filed), closed. sar_decision: sar_filed or no_sar.
+GOLD_CASES_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    case_id                        STRING NOT NULL,
+    customer_id                    BIGINT NOT NULL,
+    case_type                      STRING NOT NULL,
+    parent_case_id                 STRING,
+    opened_date                    DATE NOT NULL,
+    crr_tier                       STRING,
+    priority                       STRING NOT NULL,
+    alert_count                    INT NOT NULL,
+    escalated_alert_count          INT NOT NULL,
+    rule_ids                       ARRAY<STRING>,
+    first_alert_date               DATE,
+    activity_window_start          DATE NOT NULL,
+    activity_window_end            DATE NOT NULL,
+    activity_txn_count             BIGINT,
+    activity_amount_usd            DECIMAL(38, 2),
+    case_status                    STRING NOT NULL,
+    determination                  STRING,
+    determination_date             DATE,
+    sar_decision                   STRING,
+    suspect_identified             BOOLEAN NOT NULL,
+    filing_deadline_date           DATE,
+    filing_date                    DATE,
+    determination_to_filing_days   INT,
+    filed_late                     BOOLEAN,
+    alert_to_decision_days         INT,
+    sla_breached                   BOOLEAN NOT NULL,
+    continuing_review_due_date     DATE,
+    continuing_review_case_id      STRING,
+    simulated_truth                BOOLEAN NOT NULL,
+    as_of_date                     DATE NOT NULL,
+    run_id                         STRING NOT NULL,
+    computed_ts                    TIMESTAMP NOT NULL
+)
+USING iceberg
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy'
+)
+""".strip()
+
+
+# ---------------------------------------------------------------------------
 # Table -> DDL registry
 # ---------------------------------------------------------------------------
 
@@ -456,6 +601,10 @@ FINANCIAL_TABLE_DDLS: dict[str, str] = {
     "gold_risk_scores": GOLD_RISK_SCORES_DDL,
     "gold_entity_clusters": GOLD_ENTITY_CLUSTERS_DDL,
     "gold_daily_dashboards": GOLD_DAILY_DASHBOARDS_DDL,
+    "gold_tm_reconciliation": GOLD_TM_RECONCILIATION_DDL,
+    "gold_scenario_coverage": GOLD_SCENARIO_COVERAGE_DDL,
+    "gold_alert_dispositions": GOLD_ALERT_DISPOSITIONS_DDL,
+    "gold_cases": GOLD_CASES_DDL,
 }
 
 

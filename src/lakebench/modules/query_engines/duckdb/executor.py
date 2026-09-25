@@ -169,7 +169,10 @@ class DuckDBExecutor:
     def adapt_query(self, sql: str) -> str:
         """Rewrite Trino SQL to DuckDB dialect."""
         for layer, fq_name in self.table_names.items():
-            bucket = self.s3_buckets.get(layer, "")
+            # Financial tables are keyed "silver_entities", "gold_cases", ...;
+            # their bucket is the layer prefix. Looking up the full key found
+            # no bucket and left those tables unrewritten.
+            bucket = self.s3_buckets.get(layer) or self.s3_buckets.get(layer.split("_", 1)[0], "")
             if not bucket or not fq_name:
                 continue
             parts = fq_name.split(".", 1)
