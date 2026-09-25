@@ -417,6 +417,7 @@ class MetricsStorage:
                     elapsed_seconds=s_data.get("elapsed_seconds", 0.0),
                     success=s_data.get("success", False),
                     error_message=s_data.get("error_message"),
+                    requested_executors=s_data.get("requested_executors"),
                 )
             )
 

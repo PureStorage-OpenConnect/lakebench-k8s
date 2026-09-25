@@ -121,7 +121,38 @@ def test_the_override_never_takes_cores_from_silver_or_gold(scale, cores):
     base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
     assert aml[JobType.SILVER_STREAM] == base[JobType.SILVER_STREAM]
     assert aml[JobType.GOLD_REFRESH] == base[JobType.GOLD_REFRESH]
-    assert aml[JobType.BRONZE_INGEST] * 4 >= base[JobType.BRONZE_INGEST] * 2
+    # Bronze keeps at least the whole 4-core executors its base cores hold.
+    assert aml[JobType.BRONZE_INGEST] >= max(1, base[JobType.BRONZE_INGEST] * 2 // 4)
+
+
+@pytest.mark.parametrize("scale", [1, 10, 50, 100, 200, 500])
+@pytest.mark.parametrize("cores", range(20, 502, 2))
+def test_the_override_never_requests_more_than_the_budget_or_the_old_split(scale, cores):
+    """Rounding bronze up to whole 4-core executors used to push the total
+    past both the budget and what the base split requested."""
+    cfg = _config("financial", scale)
+    aml = _streaming_concurrent_budget(cfg, cores * 1000)
+    base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
+    per_core = {JobType.BRONZE_INGEST: 4, JobType.SILVER_STREAM: 4, JobType.GOLD_REFRESH: 4}
+    base_cores = {JobType.BRONZE_INGEST: 2, JobType.SILVER_STREAM: 4, JobType.GOLD_REFRESH: 4}
+    aml_total = sum(aml[j] * per_core[j] for j in aml)
+    base_total = sum(base[j] * base_cores[j] for j in base)
+    budget_cores = _budget_cores(cfg, cores)
+    assert aml_total <= max(budget_cores, base_total)
+
+
+def _budget_cores(cfg, cores):
+    from lakebench.config.autosizer import _parse_cpu_millicores
+
+    trino = cfg.architecture.query_engine.trino
+    co = (
+        _parse_cpu_millicores(trino.coordinator.cpu)
+        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
+        + 1000
+    )
+    dg = cfg.architecture.workload.datagen
+    dg_m = dg.parallelism * _parse_cpu_millicores(dg.cpu)
+    return int(max(0, cores * 1000 - co - dg_m) * 0.9) // 1000
 
 
 @pytest.mark.parametrize(
@@ -151,6 +182,15 @@ def _capacity_k8s(cores):
         largest_node_memory_bytes=432 * 1024**3,
     )
     return k8s
+
+
+def test_an_explicit_count_is_not_warned_as_capped():
+    cfg = _config("financial", 10)
+    cfg.platform.compute.spark.bronze_ingest_executors = 6
+    mgr = SparkJobManager(cfg, _capacity_k8s(60))
+    manifest = mgr._build_manifest(JobType.BRONZE_INGEST)
+    assert manifest["spec"]["executor"]["instances"] == 6
+    assert mgr.budget_warnings == []
 
 
 def test_a_capped_stage_is_warned_about_by_name(caplog):
