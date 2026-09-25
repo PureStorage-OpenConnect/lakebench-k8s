@@ -37,6 +37,10 @@ from lakebench.cli._reproduce import (
 # Fixtures
 # ---------------------------------------------------------------------------
 
+# The fixture packages carry one sample per query, so the verify config must
+# ask for one or the sample-count check refuses before anything else runs.
+_ONE_SAMPLE_CFG = "name: x\narchitecture:\n  benchmark:\n    iterations: 1\n"
+
 
 def _stage(name: str, elapsed: float) -> SimpleNamespace:
     return SimpleNamespace(stage_name=name, elapsed_seconds=elapsed)
@@ -410,14 +414,14 @@ class TestResolveConfigPath:
     def test_override_wins(self, tmp_path):
         pkg = {"reproduction_metadata": {"config_reference": "unused.yaml"}}
         cfg = tmp_path / "real.yaml"
-        cfg.write_text("name: x")
+        cfg.write_text(_ONE_SAMPLE_CFG)
         got = _resolve_config_path(pkg, cfg, tmp_path / "pkg.yaml")
         assert got == cfg
 
     def test_reference_relative_to_package_dir(self, tmp_path):
         cfg = tmp_path / "sub" / "cfg.yaml"
         cfg.parent.mkdir()
-        cfg.write_text("name: x")
+        cfg.write_text(_ONE_SAMPLE_CFG)
         pkg = {"reproduction_metadata": {"config_reference": "sub/cfg.yaml"}}
         got = _resolve_config_path(pkg, None, tmp_path / "pkg.yaml")
         assert got == cfg.resolve()
@@ -487,7 +491,7 @@ class TestReproduceCli:
     def test_verify_dry_run_parses_and_returns(self, tmp_path):
         """--dry-run must never call deploy/generate/run."""
         cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: x")
+        cfg.write_text(_ONE_SAMPLE_CFG)
         pkg_dict = _build_package(
             _metrics(),
             config_reference="cfg.yaml",
@@ -639,7 +643,7 @@ class TestF3CommitDriftIsCorrectnessFailure:
 
     def test_commit_drift_exits_2_by_default(self, tmp_path):
         cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: x")
+        cfg.write_text(_ONE_SAMPLE_CFG)
         pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="AAA1111")
         pkg_path = tmp_path / "pkg.yaml"
         pkg_path.write_text(yaml.safe_dump(pkg))
@@ -651,7 +655,7 @@ class TestF3CommitDriftIsCorrectnessFailure:
 
     def test_allow_commit_drift_bypasses(self, tmp_path):
         cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: x")
+        cfg.write_text(_ONE_SAMPLE_CFG)
         pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="AAA1111")
         pkg_path = tmp_path / "pkg.yaml"
         pkg_path.write_text(yaml.safe_dump(pkg))
@@ -1101,7 +1105,7 @@ class TestR4CommitShaLengthNormalisation:
 
     def test_full_sha_and_short_sha_of_same_commit_do_not_drift(self, tmp_path):
         cfg = tmp_path / "cfg.yaml"
-        cfg.write_text("name: x")
+        cfg.write_text(_ONE_SAMPLE_CFG)
         pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="abcdef123")
         # Overwrite with a 40-char SHA that shares the 7-char prefix.
         pkg["reproduction_metadata"]["commit_sha"] = "abcdef1234567890abcdef1234567890abcdef12"
@@ -1157,3 +1161,64 @@ class TestR5LegitZeroFreshnessPreserved:
             DEFAULT_TOLERANCES,
         )
         assert exit_code == 0
+
+
+class TestBenchmarkSampleCount:
+    """A package's QpH must be verified with the same samples per query (LB-150)."""
+
+    @staticmethod
+    def _qb(samples):
+        q = {"name": "Q1", "elapsed_seconds": 2.0, "success": True}
+        if samples:
+            q["samples"] = [2.0] * samples
+        return SimpleNamespace(qph=1800.0, queries=[q])
+
+    def test_package_records_samples(self):
+        pkg = _build_package(
+            _metrics(pipeline_benchmark=_pb(query_benchmark=self._qb(3))),
+            config_reference=None,
+            commit_sha=None,
+        )
+        assert pkg["reproduction_metadata"]["benchmark_samples_per_query"] == 3
+
+    def test_old_record_reads_as_one_sample(self):
+        pkg = _build_package(
+            _metrics(pipeline_benchmark=_pb(query_benchmark=self._qb(None))),
+            config_reference=None,
+            commit_sha=None,
+        )
+        assert pkg["reproduction_metadata"]["benchmark_samples_per_query"] == 1
+
+    def test_mismatch_is_refused_and_match_passes(self):
+        from lakebench.cli._reproduce import _sample_mismatch
+
+        meta = {"pipeline_mode": "batch", "expected_numbers": {"composite_qph": 100.0}}
+        # A package without the key predates repeats: one sample.
+        assert "iterations: 1" in _sample_mismatch(meta, 3)
+        assert _sample_mismatch(meta, 1) is None
+        meta["benchmark_samples_per_query"] = 3
+        assert _sample_mismatch(meta, 3) is None
+        assert _sample_mismatch(meta, None) is None
+        # No QpH to compare, or a continuous package: nothing to refuse.
+        assert _sample_mismatch({"expected_numbers": {"scale_ratio": 1.0}}, 1) is None
+        sustained = dict(meta, pipeline_mode="sustained")
+        assert _sample_mismatch(sustained, 1) is None
+
+
+def test_verify_refuses_config_with_other_sample_count_before_running(tmp_path):
+    """The check fires before the pipeline, not after hours of it (LB-150)."""
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text("name: x\n")  # default iterations: 3
+    pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="abc")
+    pkg_path = tmp_path / "pkg.yaml"
+    pkg_path.write_text(yaml.safe_dump(pkg))
+    with (
+        mock.patch("lakebench.cli._reproduce._current_commit_sha", return_value="abc"),
+        mock.patch(
+            "lakebench.cli._reproduce._run_pipeline",
+            side_effect=AssertionError("must refuse before running"),
+        ),
+        pytest.raises(typer.Exit) as exc,
+    ):
+        reproduce(package=pkg_path)
+    assert exc.value.exit_code == 2

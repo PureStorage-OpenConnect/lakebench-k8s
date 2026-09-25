@@ -10,18 +10,26 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from lakebench.benchmark.queries import BenchmarkQuery
 from lakebench.benchmark.runner import QueryResult
 from lakebench.cli._run import _data_file_total, _maintenance_value, _warm_benchmark
 
 
-def _qr(name, ok, secs):
+def _qr(name, ok, secs, samples=None):
     return QueryResult(
         query=BenchmarkQuery(name=name, display_name=name, query_class="scan", sql="select 1"),
         elapsed_seconds=secs,
         rows_returned=1,
         success=ok,
+        samples=list(samples) if samples is not None else [],
     )
+
+
+def _qr3(name, ok, secs, jitter=0.05):
+    """Three samples within +-jitter of secs, median secs."""
+    return _qr(name, ok, secs, [secs * (1 - jitter), secs, secs * (1 + jitter)])
 
 
 # The c360 scale-10 run (run-20260924-125512-9f7711): 1,201 -> 1,201 files.
@@ -36,11 +44,47 @@ def test_unchanged_file_count_is_not_measured():
 
 
 def test_file_reduction_is_measured_over_paired_queries():
-    pre = [_qr("Q1", True, 10.0), _qr("Q2", True, 10.0), _qr("Q3", False, 300.0)]
-    post = [_qr("Q1", True, 5.0), _qr("Q2", True, 5.0), _qr("Q3", True, 1.0)]
+    pre = [_qr3("Q1", True, 10.0), _qr3("Q2", True, 10.0), _qr("Q3", False, 300.0)]
+    post = [_qr3("Q1", True, 5.0), _qr3("Q2", True, 5.0), _qr3("Q3", True, 1.0)]
     value, n, reason = _maintenance_value(pre, post, 66, 61, 180.0)
     assert n == 2 and reason == ""
     assert round(value, 1) == 100.0
+
+
+def test_single_sample_rounds_are_not_reported():
+    """One sample per query has no spread to judge the difference against (LB-150)."""
+    pre = [_qr("Q1", True, 10.0), _qr("Q2", True, 10.0)]
+    post = [_qr("Q1", True, 5.0), _qr("Q2", True, 5.0)]
+    value, n, reason = _maintenance_value(pre, post, 66, 61, 180.0)
+    assert value is None and n == 2
+    assert "one sample per query" in reason and "+100.0%" in reason
+
+
+def test_difference_inside_the_spread_is_within_noise():
+    # The live AML s10 shape: the post round reads slower, but repeats of
+    # each query range more widely than the difference between the rounds.
+    pre = [_qr("Q1", True, 60.0, [50.0, 60.0, 90.0]), _qr("Q5", True, 20.0, [18.0, 20.0, 40.0])]
+    post = [_qr("Q1", True, 70.0, [55.0, 70.0, 85.0]), _qr("Q5", True, 25.0, [19.0, 25.0, 38.0])]
+    value, n, reason = _maintenance_value(pre, post, 900, 300, 120.0)
+    assert value is None and n == 2
+    assert reason.startswith("within noise:") and "-" in reason
+
+
+def test_difference_beyond_the_spread_is_reported():
+    pre = [_qr3("Q1", True, 60.0), _qr3("Q5", True, 20.0)]
+    post = [_qr3("Q1", True, 83.0), _qr3("Q5", True, 37.0)]
+    value, n, reason = _maintenance_value(pre, post, 900, 300, 120.0)
+    assert reason == "" and n == 2
+    assert value == pytest.approx((80 / 120 - 1) * 100)
+
+
+def test_noise_uses_only_paired_queries():
+    # Q9 is wildly noisy but failed in the post round, so it is not paired
+    # and must not widen the band.
+    pre = [_qr3("Q1", True, 10.0), _qr("Q9", True, 10.0, [1.0, 10.0, 100.0])]
+    post = [_qr3("Q1", True, 5.0), _qr("Q9", False, 900.0)]
+    value, n, reason = _maintenance_value(pre, post, 66, 61, 180.0)
+    assert reason == "" and n == 1 and round(value, 1) == 100.0
 
 
 def test_other_unmeasurable_cases():
@@ -54,7 +98,7 @@ def test_other_unmeasurable_cases():
 def test_warm_pass_runs_once_and_swallows_failure():
     runner = MagicMock()
     _warm_benchmark(runner, 300)
-    runner.run_power.assert_called_once_with(cache="hot", query_timeout=300)
+    runner.run_power.assert_called_once_with(cache="hot", query_timeout=300, iterations=1)
     runner.run_power.side_effect = RuntimeError("trino down")
     _warm_benchmark(runner, 300)  # must not raise
 
@@ -64,3 +108,25 @@ def test_failed_probe_makes_the_file_count_unknown():
     assert _data_file_total({"silver_data_file_count": 1200, "gold_data_file_count": -1}) == 0
     assert _data_file_total({"silver_snapshot_count": 3}) == 0
     assert _data_file_total({}) == 0
+
+
+def test_difference_under_the_round_drift_floor_is_within_noise():
+    """Tight within-round ranges do not make a between-round drift real."""
+    pre = [_qr3("Q1", True, 60.0, jitter=0.01), _qr3("Q5", True, 20.0, jitter=0.01)]
+    post = [_qr3("Q1", True, 57.0, jitter=0.01), _qr3("Q5", True, 19.0, jitter=0.01)]
+    value, n, reason = _maintenance_value(pre, post, 900, 300, 120.0)
+    assert value is None and n == 2
+    assert "drift between rounds" in reason and "+5.3%" in reason
+
+
+def test_run_scores_both_rounds_with_the_configured_iterations():
+    """The pre and post rounds of `lakebench run` take benchmark.iterations samples.
+
+    Before LB-150 neither call passed it, so a config asking for 3 took one.
+    """
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod)
+    assert src.count("iterations=cfg.architecture.benchmark.iterations") == 2

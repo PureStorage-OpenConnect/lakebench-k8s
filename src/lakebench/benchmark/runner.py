@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .queries import BenchmarkQuery, get_benchmark_queries
+from .spread import spread as spread_of_dicts
 
 if TYPE_CHECKING:
     from lakebench.config.schema import LakebenchConfig
@@ -36,9 +37,19 @@ class QueryResult:
     rows_returned: int
     success: bool
     error_message: str = ""
+    # Every timed execution of this query in the round, in run order. The
+    # score (elapsed_seconds) is their median. Empty means one untracked
+    # sample, which is how records written before LB-150 read.
+    samples: list[float] = field(default_factory=list)
+
+    def sample_times(self) -> list[float]:
+        """The timed samples, or [elapsed_seconds] for a single-sample result."""
+        return list(self.samples) if self.samples else [self.elapsed_seconds]
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
+        times = self.sample_times()
+        lo, hi = min(times), max(times)
         return {
             "name": self.query.name,
             "display_name": self.query.display_name,
@@ -47,7 +58,20 @@ class QueryResult:
             "rows_returned": self.rows_returned,
             "success": self.success,
             "error_message": self.error_message,
+            "samples": [round(t, 3) for t in times],
+            "min_seconds": round(lo, 3),
+            "max_seconds": round(hi, 3),
+            # (max - min) / median: how far apart repeats of the same query
+            # landed. 0.0 for a single sample, which measured no spread.
+            "relative_range": (
+                round((hi - lo) / self.elapsed_seconds, 4) if self.elapsed_seconds > 0 else 0.0
+            ),
         }
+
+
+def round_spread(queries: list[QueryResult]) -> dict[str, Any]:
+    """Within-round spread of one round's results; see ``spread.spread``."""
+    return spread_of_dicts([q.to_dict() for q in queries])
 
 
 @dataclass
@@ -113,6 +137,7 @@ class BenchmarkResult:
             "iterations": self.iterations,
             "streams": self.streams,
             "queries": [q.to_dict() for q in self.queries],
+            "spread": round_spread(self.queries),
         }
         if self.stream_results:
             d["stream_results"] = [s.to_dict() for s in self.stream_results]
@@ -366,8 +391,12 @@ class BenchmarkRunner:
         # Sort by stream_id for deterministic output
         stream_results.sort(key=lambda s: s.stream_id)
 
-        # Throughput QpH: successful queries across all streams / wall clock
-        total_queries = sum(sum(1 for q in s.queries if q.success) for s in stream_results)
+        # Throughput QpH: successful executions across all streams / wall
+        # clock. Each query ran once per sample, so counting queries rather
+        # than samples would divide QpH by ``iterations``.
+        total_queries = sum(
+            sum(len(q.sample_times()) for q in s.queries if q.success) for s in stream_results
+        )
         throughput_qph = (
             (total_queries / wall_seconds) * 3600 if wall_seconds > 0 and total_queries else 0
         )
@@ -465,30 +494,8 @@ class BenchmarkRunner:
             if cache == "cold":
                 self.executor.flush_cache()
 
-            if iterations > 1:
-                times: list[float] = []
-                last_result: QueryResult | None = None
-                for _ in range(iterations):
-                    if cache == "cold":
-                        self.executor.flush_cache()
-                    result = self._execute_single_query(query, timeout=query_timeout)
-                    times.append(result.elapsed_seconds)
-                    last_result = result
-
-                median_time = statistics.median(times)
-                assert last_result is not None
-                final = QueryResult(
-                    query=query,
-                    elapsed_seconds=median_time,
-                    rows_returned=last_result.rows_returned,
-                    success=last_result.success,
-                    error_message=last_result.error_message,
-                )
-                results.append(final)
-            else:
-                result = self._execute_single_query(query, timeout=query_timeout)
-                results.append(result)
-                final = result
+            final = self._repeat_query(query, cache, iterations, query_timeout)
+            results.append(final)
 
             if progress_callback:
                 progress_callback(
@@ -499,9 +506,51 @@ class BenchmarkRunner:
                     elapsed=final.elapsed_seconds,
                     success=final.success,
                     error=final.error_message,
+                    samples=final.samples,
                 )
 
         return results
+
+    def _repeat_query(
+        self,
+        query: BenchmarkQuery,
+        cache: str,
+        iterations: int,
+        query_timeout: int,
+    ) -> QueryResult:
+        """Run one query ``iterations`` times and score it by the median.
+
+        The first failed execution ends the repeats and fails the query: a
+        timed-out sample is the timeout, not a measurement, and repeating a
+        timeout would cost another full ``query_timeout`` each time. Before
+        this, the median mixed failed and successful timings and the result
+        took the success flag of the last repeat only.
+        """
+        times: list[float] = []
+        last: QueryResult | None = None
+        for k in range(max(1, iterations)):
+            if cache == "cold" and k > 0:
+                self.executor.flush_cache()
+            last = self._execute_single_query(query, timeout=query_timeout)
+            if not last.success:
+                return QueryResult(
+                    query=query,
+                    elapsed_seconds=last.elapsed_seconds,
+                    rows_returned=last.rows_returned,
+                    success=False,
+                    error_message=last.error_message,
+                    samples=times + [last.elapsed_seconds],
+                )
+            times.append(last.elapsed_seconds)
+        assert last is not None
+        return QueryResult(
+            query=query,
+            elapsed_seconds=statistics.median(times),
+            rows_returned=last.rows_returned,
+            success=True,
+            error_message="",
+            samples=times,
+        )
 
     def _execute_single_query(
         self,

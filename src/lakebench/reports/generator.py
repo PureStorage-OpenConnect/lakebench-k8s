@@ -454,6 +454,13 @@ class ReportGenerator:
                 f"<tr><td>QpH improvement</td>"
                 f'<td style="color: {color}; font-weight: 600">{value_pct:+.1f}%</td></tr>'
             )
+        elif pre_qph > 0 and pb.maintenance_value_reason:
+            from html import escape
+
+            rows.append(
+                "<tr><td>QpH improvement</td>"
+                f"<td>not reported ({escape(pb.maintenance_value_reason)})</td></tr>"
+            )
 
         if not rows:
             return ""

@@ -124,6 +124,21 @@ whose datagen sidecar is stale or which has no datagen stage, because such a
 baseline would leave every later run's datagen ungated ("present on one side
 only").
 
+QpH is the median of `architecture.benchmark.iterations` samples per query
+(3 in the batch pinned configs). The gate refuses a batch run whose recorded
+samples per query differ from the pinned config's `iterations`, and reads a
+run written before per-query repeats (no `samples` in its query records) as
+one sample whatever its config snapshot says, because `lakebench run` did not
+pass `iterations` to the runner before then. A single sample and a median of
+three are different estimators: with right-skewed query noise the median
+reads faster, so the drift between them is a bias, and a gate that exits
+nonzero on regression should refuse rather than warn. `lakebench reproduce`
+applies the same rule against the package's `benchmark_samples_per_query`
+(1 for packages recorded before it existed) and refuses before running the
+pipeline when the config asks for a different count. `lakebench compare`
+warns instead: it runs two configs the user chose, and the sample count may
+be what is being compared.
+
 `maintenance_value_pct` is reported by `lakebench run` but not gated. It is
 (post - pre) / pre, and both halves are gated on their own
 (`pre_compaction_qph`, `composite_qph`); it has no good direction, since a

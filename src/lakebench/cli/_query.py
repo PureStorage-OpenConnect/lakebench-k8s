@@ -593,13 +593,17 @@ def benchmark(
         ),
     ] = False,
     iterations: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--iterations",
             "-n",
-            help="Number of iterations per query (>1 uses median)",
+            min=1,
+            help=(
+                "Timed runs per query, scored by the median "
+                "(overrides architecture.benchmark.iterations, default 3)"
+            ),
         ),
-    ] = 1,
+    ] = None,
     query_class: Annotated[
         str | None,
         typer.Option(
@@ -655,6 +659,7 @@ def benchmark(
     effective_mode = mode or bench_cfg.mode.value
     effective_streams = streams if streams is not None else bench_cfg.streams
     effective_cache = cache_mode or bench_cfg.cache
+    iterations = iterations if iterations is not None else bench_cfg.iterations
 
     console.print(
         Panel(

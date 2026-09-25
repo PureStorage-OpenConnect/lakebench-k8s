@@ -61,8 +61,15 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
     )
     executors = over.get("executors", {"bronze": 4, "silver": 8, "gold": 4})
     q_scale = over.get("query_scale", 1.0)
+    # Batch pinned configs score the median of 3 samples per query (LB-150).
+    n_samples = over.get("samples", 3)
     queries = [
-        {"name": n, "elapsed_seconds": s * q_scale, "success": n not in over.get("failed", ())}
+        {
+            "name": n,
+            "elapsed_seconds": s * q_scale,
+            "success": n not in over.get("failed", ()),
+            **({"samples": [s * q_scale] * n_samples} if n_samples else {}),
+        }
         for n, s in QUERIES.items()
     ]
     scores = {
@@ -1068,7 +1075,10 @@ def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
         scale=10,
         qph=400.0,
         total_seconds=30.0,
-        queries=[{"name": "Q1", "elapsed_seconds": 30.0, "success": True}],
+        queries=[
+            {"name": "Q1", "elapsed_seconds": 30.0, "success": True, "samples": [29.0, 30.0, 31.0]}
+        ],
+        iterations=3,
     )
     pm.end_time = t + timedelta(seconds=30)
     pods = snap["datagen"]["parallelism"]
@@ -1192,3 +1202,19 @@ def test_pre_compaction_qph_regression_detected(env):
     c = _compare(env, "c360-batch-s10", worse)
     assert c.verdict == pg.REGRESSION
     assert _row(c, "pre_compaction_qph").status == "regression"
+
+
+@pytest.mark.parametrize("samples", [0, 1, 5])
+def test_other_sample_count_is_refused(env, samples):
+    """A median of 3 and a single sample are different estimators (LB-150).
+
+    samples=0 is a record written before per-query repeats: no samples key,
+    read as one sample whatever its snapshot says.
+    """
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260925-100000-bbbbbb", samples=samples))
+    assert c.verdict == pg.REFUSED
+    assert any("sample(s) per query" in r for r in c.reasons), c.reasons
+    if samples <= 1:
+        assert any("predates" in r for r in c.reasons)

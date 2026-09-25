@@ -6,7 +6,7 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.panel import Panel
@@ -456,7 +456,84 @@ def _maintenance_value(
     if paired is None:
         return None, 0, "no query succeeded in both rounds"
     pre_q, post_q, n = paired
-    return (post_q - pre_q) / pre_q * 100, n, ""
+    value = (post_q - pre_q) / pre_q * 100
+    noise = _paired_noise(pre, post)
+    if noise is None:
+        return (
+            None,
+            n,
+            f"one sample per query, so the within-round spread is unmeasured "
+            f"(raw difference {value:+.1f}%); set architecture.benchmark.iterations >= 2",
+        )
+    if noise["overlap"]:
+        return (
+            None,
+            n,
+            f"within noise: {value:+.1f}% is inside the within-round spread "
+            f"(pre {noise['pre_range_pct']:.1f}%, post {noise['post_range_pct']:.1f}% "
+            "of median seconds)",
+        )
+    if abs(value) <= _ROUND_DRIFT_FLOOR_PCT:
+        return (
+            None,
+            n,
+            f"within noise: {value:+.1f}% is under the {_ROUND_DRIFT_FLOOR_PCT:g}% "
+            "drift between rounds of the same run",
+        )
+    return value, n, ""
+
+
+# Samples inside a round run back to back, so their range misses drift
+# between rounds: two rounds of the same run with nothing changed between
+# them differed 3-11% in QpH on the live cluster (GOALS repeatability entry,
+# 2026-09-25). A difference within this floor is not reported as a
+# maintenance effect even when the within-round ranges do not overlap.
+# Replace with the measured spread once the repeatability runs land.
+_ROUND_DRIFT_FLOOR_PCT = 11.0
+
+
+def _paired_noise(pre, post) -> dict[str, Any] | None:
+    """Within-round spread of the paired queries, or None when unmeasured.
+
+    For the queries that succeeded in both rounds, each round's total seconds
+    can land anywhere between the sum of per-query fastest samples and the
+    sum of per-query slowest samples. When those two ranges overlap, the
+    rounds are not distinguishable at the repeats taken and the difference is
+    reported as noise. With one sample per query there is no range to
+    compare, so the spread is unmeasured (None).
+    """
+    pre_ok = {q.query.name: q for q in pre if q.success}
+    post_ok = {q.query.name: q for q in post if q.success}
+    common = sorted(set(pre_ok) & set(post_ok))
+    if not common:
+        return None
+    if (
+        min(len(pre_ok[c].sample_times()) for c in common) < 2
+        or min(len(post_ok[c].sample_times()) for c in common) < 2
+    ):
+        return None
+
+    def _band(results: dict) -> tuple[float, float, float]:
+        lo = sum(min(results[c].sample_times()) for c in common)
+        hi = sum(max(results[c].sample_times()) for c in common)
+        med = sum(results[c].elapsed_seconds for c in common)
+        return lo, hi, med
+
+    pre_lo, pre_hi, pre_med = _band(pre_ok)
+    post_lo, post_hi, post_med = _band(post_ok)
+    return {
+        "overlap": not (post_hi < pre_lo or post_lo > pre_hi),
+        "pre_range_pct": (pre_hi - pre_lo) / pre_med * 100 if pre_med > 0 else 0.0,
+        "post_range_pct": (post_hi - post_lo) / post_med * 100 if post_med > 0 else 0.0,
+    }
+
+
+def _sample_note(kwargs: dict) -> str:
+    """ " (median of 3, 9.8-12.1s)" for a repeated query; "" for one sample."""
+    samples = kwargs.get("samples") or []
+    if len(samples) < 2:
+        return ""
+    return f" [dim](median of {len(samples)}, {min(samples):.1f}-{max(samples):.1f}s)[/dim]"
 
 
 def _warm_benchmark(runner, query_timeout: int) -> None:
@@ -468,7 +545,8 @@ def _warm_benchmark(runner, query_timeout: int) -> None:
     first-touch costs, and the difference was read as the maintenance value.
     """
     try:
-        runner.run_power(cache="hot", query_timeout=query_timeout)
+        # One sample: the pass exists to touch every table, not to be timed.
+        runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1)
     except Exception as e:  # noqa: BLE001
         logger.warning("benchmark warm-up pass failed: %s", e)
 
@@ -1763,6 +1841,7 @@ def run(
         # Pre-compaction benchmark only runs at scale < 50 (OOMs at higher scales
         # due to 200K+ uncompacted files overwhelming Trino memory).
         pre_compaction_qph = 0.0
+        _pre_record = None
         _maint_value = None
         pre_file_count = 0
         post_file_count = 0
@@ -1793,7 +1872,7 @@ def run(
                     success = kwargs.get("success", False)
                     error = kwargs.get("error", "")
                     if success:
-                        console.print(f"[green]{elapsed:.1f}s OK[/green]")
+                        console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
                     else:
                         short_err = (error[:60] + "...") if len(error) > 60 else error
                         console.print(f"[red]FAIL[/red] ({short_err})")
@@ -1827,10 +1906,12 @@ def run(
                     _warm_benchmark(_pre_runner, _pre_timeout)
                     _pre_result = _pre_runner.run_power(
                         cache="hot",
+                        iterations=cfg.architecture.benchmark.iterations,
                         progress_callback=_bench_progress,
                         query_timeout=_pre_timeout,
                     )
                     pre_compaction_qph = _pre_result.qph
+                    _pre_record = _pre_result.to_dict()
                     _succeeded = sum(1 for q in _pre_result.queries if q.success)
                     console.print(
                         f"  Pre-compaction QpH: {pre_compaction_qph:.1f} "
@@ -1876,6 +1957,7 @@ def run(
         if not skip_benchmark:
             try:
                 from lakebench.benchmark import BenchmarkRunner
+                from lakebench.benchmark.runner import round_spread
                 from lakebench.metrics import BenchmarkMetrics
 
                 console.print()
@@ -1898,7 +1980,7 @@ def run(
                         success = kwargs.get("success", False)
                         error = kwargs.get("error", "")
                         if success:
-                            console.print(f"[green]{elapsed:.1f}s OK[/green]")
+                            console.print(f"[green]{elapsed:.1f}s OK[/green]{_sample_note(kwargs)}")
                         else:
                             short_err = (error[:60] + "...") if len(error) > 60 else error
                             console.print(f"[red]FAIL[/red] ({short_err})")
@@ -1918,12 +2000,20 @@ def run(
                     _warm_benchmark(bench_runner, _bench_timeout)
                 bench_result = bench_runner.run_power(
                     cache="hot",
+                    iterations=cfg.architecture.benchmark.iterations,
                     progress_callback=_post_bench_progress,
                     query_timeout=_bench_timeout,
                 )
 
                 console.print(f"\n  Total: {bench_result.total_seconds:.2f}s")
                 console.print(f"  [bold]QpH:   {bench_result.qph:.1f}[/bold]")
+                _spread = round_spread(bench_result.queries)
+                if _spread["samples_per_query"] >= 2:
+                    console.print(
+                        f"  Spread: QpH {_spread['qph_low']:.1f}-{_spread['qph_high']:.1f} "
+                        f"over {_spread['samples_per_query']} samples per query "
+                        f"(median-scored)"
+                    )
                 benchmark_qph = bench_result.qph
 
                 # Maintenance summary
@@ -2071,6 +2161,10 @@ def run(
                         if _maint_value is not None and _maint_value[0] is not None:
                             pb.maintenance_value_pct = _maint_value[0]
                             pb.maintenance_paired_queries = _maint_value[1]
+                        elif _maint_value is not None:
+                            pb.maintenance_value_reason = _maint_value[2]
+                            pb.maintenance_paired_queries = _maint_value[1]
+                        pb.pre_compaction_benchmark = _pre_record
                 except Exception:
                     pass  # Maintenance metrics are best-effort
 
