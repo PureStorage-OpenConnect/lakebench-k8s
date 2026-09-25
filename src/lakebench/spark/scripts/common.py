@@ -682,6 +682,18 @@ def _is_unity_catalog():
     return os.getenv("LB_CATALOG_TYPE", "hive") == "unity"
 
 
+def ensure_namespaces(spark, catalog, tables):
+    """CREATE NAMESPACE IF NOT EXISTS for every namespace in ``tables``.
+
+    Polaris creates the medallion namespaces at bootstrap; the Hive catalog
+    does not, so a first CREATE TABLE there fails with NoSuchNamespace. No
+    LOCATION: Iceberg's HiveCatalog then derives one from the catalog's S3
+    warehouse, as silver_build.py and gold_finalize.py already rely on.
+    """
+    for ns in sorted({t.split(".", 1)[0] for t in tables if "." in t}):
+        spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{ns}")
+
+
 def _s3_table_path(bucket_uri, fq_table):
     """Build the S3 path for an EXTERNAL Delta table.
 

@@ -10,6 +10,7 @@ register (create-if-not-exists) the Iceberg table under
 
 from __future__ import annotations
 
+import os
 import time
 
 from common import env, log, log_job_metrics, one_line, path_size_gb
@@ -76,6 +77,33 @@ SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
+
+
+def _bronze_location():
+    """Explicit S3 location for the bronze table on Hive, None on Polaris.
+
+    Hive's ``default`` database already exists with the Stackable metastore's
+    local warehouse (file:/stackable/warehouse), so a table created there
+    without a location lands on the metastore pod's disk and every write fails
+    with "Invalid S3 URI, cannot determine scheme: file:". Polaris places the
+    table under its S3 warehouse. Same layout as the c360 bronze_ingest.
+    """
+    if os.getenv("LB_CATALOG_TYPE", "hive") == "polaris":
+        return None
+    ns, _, table = BRONZE_TABLE.partition(".")
+    return f"{BRONZE_URI.rstrip('/')}/warehouse/{ns}.db/{table}"
+
+
+def _location_clause():
+    loc = _bronze_location()
+    return f"LOCATION '{loc}'" if loc else ""
+
+
+def _with_location(writer):
+    loc = _bronze_location()
+    return writer.tableProperty("location", loc) if loc else writer
+
+
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 
 # add_files preflight thresholds (LB-110). At scale 100+ the pacs008/
@@ -192,15 +220,14 @@ def _continuous_reset(spark, df):
     # would otherwise survive the reset.
     for t in (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS):
         spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{t} PURGE")
-    (
+    _with_location(
         df.limit(0)
         .withColumn("ingest_ts", current_timestamp())
         .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
         .using("iceberg")
         .tableProperty("format-version", "2")
         .tableProperty("write.parquet.compression-codec", "snappy")
-        .create()
-    )
+    ).create()
     log(
         f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
         f"dropped {SILVER_TXNS}, {SILVER_EDGES}, {SILVER_ENTITIES}, {SILVER_ACCOUNTS}"
@@ -350,6 +377,7 @@ def main() -> None:
             spark.sql(f"""
                 CREATE TABLE {CATALOG}.{BRONZE_TABLE}
                 USING iceberg
+                {_location_clause()}
                 TBLPROPERTIES ('format-version' = '2')
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
@@ -390,14 +418,13 @@ def main() -> None:
             # flat, date-clustered file layout, so Iceberg's per-file min/max
             # on intr_bk_sttlm_dt still prunes date filters at file level,
             # and silver-build scans the whole table regardless.
-            (
+            _with_location(
                 src.limit(0)
                 .writeTo(f"{CATALOG}.{BRONZE_TABLE}")
                 .using("iceberg")
                 .tableProperty("format-version", "2")
                 .tableProperty("write.parquet.compression-codec", "snappy")
-                .create()
-            )
+            ).create()
             spark.sql(
                 f"CALL {CATALOG}.system.add_files("
                 f"  table => '{BRONZE_TABLE}', "
@@ -413,6 +440,7 @@ def main() -> None:
             spark.sql(f"""
                 CREATE OR REPLACE TABLE {CATALOG}.{BRONZE_TABLE}
                 USING iceberg
+                {_location_clause()}
                 TBLPROPERTIES ('format-version' = '2')
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
