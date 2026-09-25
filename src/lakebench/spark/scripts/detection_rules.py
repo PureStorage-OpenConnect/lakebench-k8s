@@ -215,7 +215,10 @@ def _customer_ids(spark, silver_entities: DataFrame | None, rule: str) -> DataFr
     ents = _entities_frame(spark, silver_entities, rule)
     if "is_customer" not in ents.columns:
         raise RuleSkipped("no-kyc", f"{rule}: silver.entities has no is_customer column")
-    cust = ents.filter(col("is_customer") == lit(True)).select("entity_id").distinct()
+    # No distinct(): the left semi join in _customers_only is duplicate-safe,
+    # and a distinct would add an aggregate shuffle of every customer per rule.
+    # take(1) stops at the first partition holding a customer.
+    cust = ents.filter(col("is_customer") == lit(True)).select("entity_id")
     if not cust.take(1):
         raise RuleSkipped("no-customers", f"{rule}: no entity in silver.entities is a customer")
     return cust
