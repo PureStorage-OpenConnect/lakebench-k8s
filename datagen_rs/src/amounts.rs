@@ -111,13 +111,61 @@ pub fn native_amount(rng: &mut Rng, mu_shift: f64, ccy: &str) -> f64 {
     ((amt * m).round() / m).max(1.0 / m)
 }
 
-/// Amount tight against the local structuring band.
+/// Local cash-reporting threshold (USD 10,000 CTR and local equivalents),
+/// the same figures as detection_rules._STRUCTURING_THRESHOLDS: it is the
+/// regulation both sides read, not a rule parameter.
+pub fn reporting_threshold(ccy: &str) -> f64 {
+    match ccy {
+        "USD" | "CAD" | "AUD" => 10_000.0,
+        "GBP" | "EUR" | "CHF" => 15_000.0,
+        "JPY" | "INR" => 1_000_000.0,
+        "AED" => 55_000.0,
+        "SGD" => 20_000.0,
+        "MXN" => 100_000.0,
+        "CNY" | "BRL" => 50_000.0,
+        "HKD" => 75_000.0,
+        "KRW" => 10_000_000.0,
+        _ => 10_000.0,
+    }
+}
+
+/// Deepest a structured payment goes below the threshold, as a fraction of
+/// it. Self-chosen (no primary source gives a distribution): structurers stay
+/// under the threshold, most of them close to it, and some well below so the
+/// deposits do not all look alike (the FFIEC BSA/AML manual's structuring
+/// examples are "just under" amounts, and it also describes varying amounts to
+/// avoid an obvious pattern).
+pub const STRUCTURED_MAX_DEPTH: f64 = 0.4;
+
+/// A structured payment: under the local reporting threshold by a depth of
+/// `STRUCTURED_MAX_DEPTH * (1 - sqrt(u))` of it. The depth's density is
+/// triangular, highest at the threshold and falling linearly to zero at the
+/// maximum depth: dense near the threshold but finite there (no pile-up on the
+/// threshold itself), no step at W2's 90% band floor (R2), and it stops at the
+/// threshold, which is what structuring is. About 44% of structured payments
+/// land in W2's band. One RNG draw, as the old fixed-band draw took.
 pub fn structuring_amount(rng: &mut Rng, ccy: &str) -> f64 {
-    let (lo, hi) = structuring_band(ccy);
-    let v = lo + rng.unit() * (hi - lo);
+    let t = reporting_threshold(ccy);
+    let u = rng.unit();
+    let v = t * (1.0 - STRUCTURED_MAX_DEPTH * (1.0 - u.sqrt()));
     // In the currency's minor units: a fractional yen or won would be a label.
     let m = minor_units(ccy);
-    (v * m).round() / m
+    // Strictly under the threshold: a payment at it is reported.
+    ((v * m).round() / m).min(t - 1.0 / m)
+}
+
+/// Typologies whose amounts come from their own instance-keyed stream, with
+/// the number of shared-stream draws each of their rows took before they were
+/// reworked. The driver replays (discards) that many draws on the shared
+/// stream, so every other typology keeps exactly the amounts it had. Each of
+/// the three still emits the same total number of rows, so the replay matches
+/// the old consumption (3 draws for a persona amount, 1 for a band amount).
+pub fn own_amount_stream(typ: &str) -> Option<usize> {
+    match typ {
+        "corridor_high_risk" | "dormant_reactivation" => Some(3),
+        "micro_structuring" => Some(1),
+        _ => None,
+    }
 }
 
 /// Typologies that move one pot of money along a chain: each leg after the
