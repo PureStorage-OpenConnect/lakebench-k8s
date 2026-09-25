@@ -338,34 +338,50 @@ def test_w1_aliases_propagation_join():
 def test_w7_auto_loads_silver_entities_when_none():
     """Regression: when the caller (e.g. replay_financial) does not
     pass silver_entities, W7 must auto-load ``silver.entities`` from
-    the catalog rather than silently returning empty. The prior
-    behavior returned empty AND, when the high-risk-jurisdiction
-    reference JSON was not mounted, crashed with an opaque ImportError
-    from ``import lakebench.spark.data``. Both failure modes are
-    covered by the check below: the function body must contain the
-    auto-load fallback path AND its catch for a missing table.
+    the catalog rather than silently returning empty. The load lives in
+    ``_entities_frame`` (shared with the other customer-scoped rules); a
+    missing table raises RuleSkipped so the rule reads "not run", not a
+    crash of the dispatcher and not a 0% recall.
     """
     tree = _module_ast()
-    fn = next(
-        (
-            n
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == "w7_cross_border_high_risk"
-        ),
-        None,
+    fns = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+    w7 = ast.unparse(fns["w7_cross_border_high_risk"])
+    assert "_entities_frame(spark, silver_entities" in w7, (
+        "w7 must resolve silver.entities through _entities_frame"
     )
-    assert fn is not None
-    body = ast.unparse(fn)
-    assert "silver_entities is None" in body, (
-        "w7 must auto-load silver.entities when the caller does not pass it"
+    load = ast.unparse(fns["_entities_frame"])
+    assert "silver_entities is not None" in load
+    assert "spark.table" in load, "silver.entities must be resolved via spark.table when None"
+    assert "AnalysisException" in load and "RuleSkipped" in load, (
+        "a missing silver.entities table must become a RuleSkipped, not a crash"
     )
-    assert "spark.table" in body, (
-        "w7 must resolve silver.entities via spark.table when silver_entities is None"
-    )
-    assert "AnalysisException" in body, (
-        "w7 must catch AnalysisException so a missing silver.entities table "
-        "degrades to empty alerts rather than crashing the whole rule dispatcher"
-    )
+
+
+def test_customer_scope_lists_agree_across_the_package_boundary():
+    """detection_rules (driver side), tm_operations and the config default
+    must name the same counterparty scenarios, and every rule is either
+    customer-scoped or declared. Drift here fails noncustomer_alerts_declared
+    on every live run, or lets a customer-only rule's non-customer alerts
+    pass as declared."""
+    from lakebench.config.schema import TmOperationsConfig
+
+    def _lit(path, name):
+        tree = ast.parse(Path(path).read_text())
+        for n in tree.body:
+            if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == name:
+                v = n.value
+                if isinstance(v, ast.Call):  # frozenset({...})
+                    v = v.args[0]
+                return set(ast.literal_eval(v))
+        raise AssertionError(f"{name} not found in {path}")
+
+    scripts = DETECTION_RULES_PATH.parent
+    counterparty = _lit(DETECTION_RULES_PATH, "COUNTERPARTY_SCENARIOS")
+    scoped = _lit(DETECTION_RULES_PATH, "CUSTOMER_SCOPED_RULES")
+    dispatch = set(_lit(DETECTION_RULES_PATH, "RULE_TARGET_TYPOLOGY"))
+    assert counterparty | scoped == dispatch and not counterparty & scoped
+    assert _lit(scripts / "tm_operations.py", "DEFAULT_COUNTERPARTY_SCENARIOS") == counterparty
+    assert set(TmOperationsConfig().counterparty_scenarios) == counterparty
 
 
 def test_load_reference_uses_candidate_dirs():

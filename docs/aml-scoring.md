@@ -335,6 +335,16 @@ architecture:
                                W4_risk_propagation, W17_layering_chain]
 ```
 
+**Who a scenario alerts on.** The bank monitors its own customers. W2, W5,
+W6, W7 and W8 raise an alert only when its subject (`entity_id`) is a customer
+in `silver.entities`; the counterparty stays in `related_entity_ids`. The
+graph scenarios (W1, W3, W4, W17) run across the whole payment network and can
+alert on an account at another bank, which is why they are the declared
+`counterparty_scenarios`. The scope is fixed in `detection_rules.py`
+(`CUSTOMER_SCOPED_RULES`); the config list only tells the invariant which
+non-customer alerts to expect. A customer-scoped rule on a silver with no
+customer flag, or no customer, reports `skipped`, not zero alerts.
+
 **Workflow invariants.** Checked on the tables as written, every cycle: the
 monitored population is not empty; monitored + excluded = source; every alert
 has a disposition row and none is NULL; alerts on non-customers come only
