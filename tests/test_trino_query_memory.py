@@ -117,12 +117,10 @@ def test_query_memory_sized_from_workers(scale):
     assert "query.max-total-memory" not in c_props
     assert "query.max-total-memory" not in w_props
     # Cluster user cap = workers x worker per-node and never above the pool.
-    # Trino's effective query.max-total-memory (unset, so 2 x max-memory)
-    # must exceed the user cap; it does by construction whenever max-memory
-    # is positive.
+    # Trino's effective query.max-total-memory is then its default,
+    # 2 x max-memory (the property is unset, asserted above).
     assert max_memory == workers * w_per_node
     assert max_memory <= workers * (w_heap - w_headroom)
-    assert 0 < max_memory < 2 * max_memory
     # Never below the cap Trino's defaults gave: min(20GB, workers x 30% heap).
     assert max_memory > min(_TRINO_DEFAULT_MAX_MEMORY, workers * 0.3 * w_heap)
 

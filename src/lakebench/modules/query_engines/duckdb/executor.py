@@ -165,7 +165,9 @@ class DuckDBExecutor:
             )
 
         if result.returncode != 0:
-            if result.returncode in _SIGALRM_EXIT_CODES and not (result.stderr or "").strip():
+            # kubectl exec reports the remote exit on stderr ("command
+            # terminated with exit code 142"), so the code alone decides.
+            if result.returncode in _SIGALRM_EXIT_CODES:
                 error = f"Query timed out ({timeout}s, ended in the pod)"
             else:
                 error = summarise_engine_error(result.stderr or "")

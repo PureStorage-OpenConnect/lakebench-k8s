@@ -77,6 +77,8 @@ def test_trino_timeout_cancels_the_query_server_side():
     lookup = _arg_after(calls[1], "--execute")
     assert "system.runtime.queries" in lookup and f"source = '{source}'" in lookup
     assert len(calls) == 3  # the junk line is not treated as a query id
+    # The cleanup calls are themselves bounded server side.
+    assert _arg_after(calls[1], "--session") == "query_max_run_time=5s"
     kill = _arg_after(calls[2], "--execute")
     assert kill.startswith("CALL system.runtime.kill_query(") and f"'{_QID}'" in kill
 
@@ -120,7 +122,9 @@ def test_duckdb_alarm_prefix_terminates_a_blocked_process():
     prefix = script.split("import duckdb", 1)[0]
     assert prefix == "import signal; signal.alarm(1); "
     proc = subprocess.run(
-        [sys.executable, "-c", prefix + "import time; time.sleep(30)"],
+        # libc sleep() blocks in C and never returns to the interpreter, as a
+        # long DuckDB query does; only the default SIGALRM action can end it.
+        [sys.executable, "-c", prefix + "import ctypes; ctypes.CDLL(None).sleep(30)"],
         capture_output=True,
         timeout=20,
     )
@@ -129,7 +133,9 @@ def test_duckdb_alarm_prefix_terminates_a_blocked_process():
 
 def test_duckdb_alarm_exit_reads_as_timeout():
     with patch("subprocess.run") as run:
-        run.return_value = subprocess.CompletedProcess([], 142, "", "")
+        run.return_value = subprocess.CompletedProcess(
+            [], 142, "", "command terminated with exit code 142\n"
+        )
         result = _duckdb().execute_query("SELECT 1", timeout=300)
     assert result.error == "Query timed out (300s, ended in the pod)"
 
