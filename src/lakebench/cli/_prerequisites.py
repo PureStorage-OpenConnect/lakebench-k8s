@@ -406,6 +406,31 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
             f"{peak.memory_gb} GB, driven by {peak.driving_job}"
         )
 
+        # Continuous mode: the run caps the streams to the cluster's concurrent
+        # budget and warns naming each capped stage, so an aggregate shortfall
+        # is fatal only if even the capped request does not fit. A pod that
+        # fits no node stays fatal: capping counts does not shrink a pod.
+        pod_fits = peak.max_pod_cpu_cores <= node_cores and peak.max_pod_memory_gb <= node_gb
+        if shortfalls and pod_fits and str(mode).lower() == "sustained":
+            from lakebench.modules.pipeline_engines.spark.job import (
+                streaming_request_under_budget,
+            )
+
+            capped = streaming_request_under_budget(cfg, capacity.total_cpu_millicores)
+            if capped.capped and capped.cpu_cores <= avail_cores and capped.memory_gb <= avail_gb:
+                names = ", ".join(capped.capped)
+                logger.warning("Continuous streams will be capped to fit the cluster: %s", names)
+                return PrereqResult(
+                    name="cluster-capacity",
+                    passed=True,
+                    message=(
+                        f"WARNING: cluster below the full request ({summary}); "
+                        f"running degraded at ~{capped.cpu_cores} cores / "
+                        f"{capped.memory_gb} GB, capped: {names}"
+                    ),
+                    hint="\n".join(f"  {s}" for s in shortfalls),
+                )
+
         if shortfalls:
             return PrereqResult(
                 name="cluster-capacity",
