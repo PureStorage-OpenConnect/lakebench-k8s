@@ -12,9 +12,27 @@ import re
 import subprocess
 import time
 
-from lakebench.benchmark.result import QueryExecutorResult
+from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
 
 logger = logging.getLogger(__name__)
+
+# Python statement that turns ``rel`` (a DuckDB relation, or None for a
+# statement with no result) into ``rows``. Spark writes TIMESTAMP columns as
+# Iceberg timestamptz, and DuckDB can only hand a TIMESTAMP WITH TIME ZONE
+# back to Python through pytz, which the query pod does not install. Every
+# query that returned one (FQ4, FQ6, FQ8) failed after it had finished
+# running. The cast to text happens inside DuckDB instead; positional
+# references keep duplicate or quoted column names intact, and a projection
+# does not disturb the query's ORDER BY.
+# String literals (with '' escapes), double-quoted identifiers and comments.
+_SQL_NON_CODE = re.compile(r"('(?:[^']|'')*'|\"(?:[^\"]|\"\")*\"|--[^\n]*|/\*.*?\*/)", re.DOTALL)
+
+FETCH_ROWS = (
+    "cols = [('CAST(#%d AS VARCHAR)' if 'TIME ZONE' in str(t) else '#%d') % (i + 1) "
+    "for i, t in enumerate(rel.types)] if rel is not None else []; "
+    "rel = rel.project(', '.join(cols)) if any(c.startswith('CAST') for c in cols) else rel; "
+    "rows = rel.fetchall() if rel is not None else []"
+)
 
 
 class DuckDBExecutor:
@@ -88,8 +106,8 @@ class DuckDBExecutor:
             "conn.execute(\"SET s3_access_key_id='\" + os.environ['AWS_ACCESS_KEY_ID'] + \"'\"); "
             "conn.execute(\"SET s3_secret_access_key='\" + os.environ['AWS_SECRET_ACCESS_KEY'] + \"'\"); "
             "conn.execute('SET unsafe_enable_version_guessing = true'); "
-            f"result = conn.execute('{escaped_sql}'); "
-            "rows = result.fetchall(); "
+            f"rel = conn.sql('{escaped_sql}'); "
+            f"{FETCH_ROWS}; "
             "print(json.dumps({'rows': len(rows), 'data': [str(r) for r in rows[:100]]}))"
         )
 
@@ -129,7 +147,7 @@ class DuckDBExecutor:
             )
 
         if result.returncode != 0:
-            error = result.stderr.strip()[:200] if result.stderr else "Unknown error"
+            error = summarise_engine_error(result.stderr or "")
             return QueryExecutorResult(
                 sql=sql,
                 engine="duckdb",
@@ -169,7 +187,13 @@ class DuckDBExecutor:
     def adapt_query(self, sql: str) -> str:
         """Rewrite Trino SQL to DuckDB dialect."""
         for layer, fq_name in self.table_names.items():
-            bucket = self.s3_buckets.get(layer, "")
+            # The auxiliary financial tables are keyed by name
+            # ("silver_entities", "gold_alerts"), not by layer. They live in
+            # the bucket of the job that writes them, which the key's prefix
+            # names. Looking the key up directly found no bucket, left the
+            # catalog-qualified name in place, and DuckDB then failed with
+            # 'Catalog "lakehouse" does not exist' (FQ3, FQ4, FQ5, FQ8).
+            bucket = self.s3_buckets.get(layer) or self.s3_buckets.get(layer.split("_", 1)[0], "")
             if not bucket or not fq_name:
                 continue
             parts = fq_name.split(".", 1)
@@ -191,7 +215,26 @@ class DuckDBExecutor:
 
         sql = self._rewrite_date_add(sql)
         sql = self._rewrite_date_diff(sql)
+        sql = self._rewrite_cardinality(sql)
         return sql
+
+    @staticmethod
+    def _rewrite_cardinality(sql: str) -> str:
+        """Rewrite Trino ``cardinality(array)`` to DuckDB ``len(array)``.
+
+        DuckDB's ``cardinality`` accepts only MAPs and raises a Binder Error
+        on a list. Every benchmark use is on an array column
+        (``related_txn_ids`` in FQ8); ``len`` returns NULL for a NULL list,
+        as Trino's ``cardinality`` does. A MAP argument would break (``len``
+        rejects it); no benchmark query passes one. String literals, quoted
+        identifiers and comments are left alone.
+        """
+        # The capture group makes re.split keep the literals, quoted
+        # identifiers and comments at odd indices; only code is rewritten.
+        pieces = _SQL_NON_CODE.split(sql)
+        for i in range(0, len(pieces), 2):
+            pieces[i] = re.sub(r"\bcardinality\s*\(", "len(", pieces[i], flags=re.IGNORECASE)
+        return "".join(pieces)
 
     @staticmethod
     def _rewrite_date_diff(sql: str) -> str:
