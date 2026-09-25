@@ -82,6 +82,8 @@ import uuid
 
 from bronze_verify_financial import MANIFEST_TABLE, register_manifest
 from common import (
+    TTD_SNAPSHOT_UNKNOWN,
+    TtdBaseline,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
@@ -104,6 +106,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     array_join,
     array_sort,
+    broadcast,
     coalesce,
     col,
     concat_ws,
@@ -117,6 +120,8 @@ from pyspark.sql.functions import (
     when,
 )
 from pyspark.sql.functions import max as max_
+from pyspark.sql.functions import sum as spark_sum
+from pyspark.storagelevel import StorageLevel
 from tm_operations import (
     bootstrap_tm_tables,
     params_from_env,
@@ -144,6 +149,9 @@ MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
 # Time-to-detect histogram resolution. Percentiles are reported at the bin's
 # upper edge, so they overstate by less than one bin.
 TTD_BIN_S = 10
+# New-alert transaction rows up to which the silver lookup broadcasts them
+# instead of shuffling silver (a tick normally raises a few thousand).
+TTD_BROADCAST_ROWS = 2_000_000
 
 # Rules run every tick over the full corpus. W2 is customer-scoped and also
 # reads silver.entities; silver_stream commits a batch's entities after its
@@ -244,48 +252,67 @@ def _alert_content_keys(alerts):
     return alerts.select(key.alias("_key"), col("related_txn_ids")).dropDuplicates(["_key"])
 
 
-def new_alert_arrivals(current, prior, txns):
-    """Alerts in ``current`` whose content was not in ``prior``, with the
-    newest ingest_ts among their related transactions (``arrival_ts``; NULL
-    when none of them is in ``txns``).
-
-    ``prior`` is gold.alerts as of the snapshot before the tick, or None when
-    the table had no snapshot (every current alert is new).
-    """
+def new_alert_txns(current, prior):
+    """(_key, uetr) for each related transaction of the alerts in
+    ``current`` whose content was not in ``prior`` (None: the table had no
+    snapshot, so every alert is new). An alert without related transactions
+    keeps one row with a NULL uetr."""
     cur = _alert_content_keys(current)
     if prior is not None:
         cur = cur.join(_alert_content_keys(prior).select("_key"), "_key", "left_anti")
-    exploded = cur.select("_key", explode_outer("related_txn_ids").alias("uetr"))
-    ingest = txns.select("uetr", "ingest_ts")
+    return cur.select("_key", explode_outer("related_txn_ids").alias("uetr"))
+
+
+def new_alert_arrivals(new_txns, txns, small=False):
+    """Per new alert, the newest ingest_ts among its related transactions
+    (``arrival_ts``; NULL when none of them is in ``txns``). ``small``
+    broadcasts ``new_txns`` so silver is filtered in place, not shuffled."""
+    side = broadcast(new_txns) if small else new_txns
     return (
-        exploded.join(ingest, "uetr", "left")
+        side.join(txns.select("uetr", "ingest_ts"), "uetr", "left")
         .groupBy("_key")
         .agg(max_("ingest_ts").alias("arrival_ts"))
     )
 
 
-def ttd_stats(arrivals, detected_s, bin_s=TTD_BIN_S):
+def ttd_stats(arrivals, detected_s, late_before_s=None, bin_s=TTD_BIN_S):
     """Histogram of ``detected_s - arrival_ts`` over ``arrivals``.
 
-    Returns {"alerts", "unmatched", "max_s", "bin_s", "bins"}: bins maps
-    floor(ttd / bin_s) to a count. Clock skew between the bronze and gold
+    Returns {"alerts", "late", "unmatched", "max_s", "bin_s", "bins"}: bins
+    maps floor(ttd / bin_s) to a count; ``late`` counts measured alerts with
+    arrival_ts <= ``late_before_s`` (their evidence was in silver before the
+    previous detection pass read it: a re-raise after a rule error, or
+    evidence outside related_txn_ids). They stay in the histogram, so it
+    never reads shorter for them. Clock skew between the bronze and gold
     drivers can make a ttd slightly negative; it is clamped to 0.
     """
-    ttd = greatest(lit(0.0), lit(float(detected_s)) - unix_micros(col("arrival_ts")) / 1e6)
+    arrival_s = unix_micros(col("arrival_ts")) / 1e6
+    ttd = greatest(lit(0.0), lit(float(detected_s)) - arrival_s)
     matched = col("arrival_ts").isNotNull()
+    late = (
+        when(matched & (arrival_s <= lit(float(late_before_s))), lit(1)).otherwise(lit(0))
+        if late_before_s is not None
+        else lit(0)
+    )
     rows = (
         arrivals.select(
             when(matched, floor(ttd / bin_s)).otherwise(lit(-1)).cast("long").alias("b"),
             when(matched, ttd).alias("t"),
+            late.alias("late"),
         )
         .groupBy("b")
-        .agg(count(lit(1)).alias("n"), max_("t").alias("mx"))
+        .agg(
+            count(lit(1)).alias("n"),
+            max_("t").alias("mx"),
+            spark_sum("late").alias("late"),
+        )
         .collect()
     )
     bins = {int(r["b"]): int(r["n"]) for r in rows if r["b"] >= 0}
     peaks = [float(r["mx"]) for r in rows if r["b"] >= 0 and r["mx"] is not None]
     return {
         "alerts": sum(bins.values()),
+        "late": sum(int(r["late"] or 0) for r in rows if r["b"] >= 0),
         "unmatched": sum(int(r["n"]) for r in rows if r["b"] < 0),
         "max_s": max(peaks) if peaks else None,
         "bin_s": int(bin_s),
@@ -293,32 +320,33 @@ def ttd_stats(arrivals, detected_s, bin_s=TTD_BIN_S):
     }
 
 
-# _prior_alerts_snapshot's answer when the snapshot could not be read: the
-# tick's new alerts are then unknown, and treating every alert as new would
-# report the whole run's backlog as one tick's time to detect.
-_SNAPSHOT_UNKNOWN = object()
+def _empty_ttd_stats():
+    return {"alerts": 0, "late": 0, "unmatched": 0, "max_s": None, "bin_s": TTD_BIN_S, "bins": {}}
 
 
 def _prior_alerts_snapshot(spark):
-    """gold.alerts' newest snapshot id; None when it has none yet (every
-    alert is new); _SNAPSHOT_UNKNOWN when the lookup failed."""
+    """gold.alerts' current snapshot id; None when it has none yet (every
+    alert is new); TTD_SNAPSHOT_UNKNOWN when the lookup failed."""
     try:
         rows = spark.sql(
-            f"SELECT snapshot_id FROM {CATALOG}.{GOLD_ALERTS}.snapshots "
-            "ORDER BY committed_at DESC LIMIT 1"
+            f"SELECT snapshot_id FROM {CATALOG}.{GOLD_ALERTS}.history "
+            "WHERE is_current_ancestor ORDER BY made_current_at DESC LIMIT 1"
         ).collect()
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] snapshot of {GOLD_ALERTS} unavailable: {one_line(e)}")
-        return _SNAPSHOT_UNKNOWN
+        return TTD_SNAPSHOT_UNKNOWN
     return int(rows[0][0]) if rows else None
 
 
-def _log_time_to_detect(spark, cycle, prior_sid, detected_s) -> None:
-    """Log this tick's time-to-detect line. Best effort: a failure costs the
-    tick's sample, never the tick."""
-    if prior_sid is _SNAPSHOT_UNKNOWN:
+def _log_time_to_detect(spark, cycle, base, detected_s) -> bool:
+    """Log this tick's time-to-detect line against ``base`` (TtdBaseline).
+    Returns True when the line was logged. Best effort: a failure costs the
+    measurement, never the tick; the collector counts cycles without a line
+    as unmeasured."""
+    prior_sid, late_before_s = base
+    if prior_sid == TTD_SNAPSHOT_UNKNOWN:
         log(f"[metrics] time to detect unavailable on cycle {cycle}: no prior snapshot")
-        return
+        return False
     try:
         fq_alerts = f"{CATALOG}.{GOLD_ALERTS}"
         current = spark.table(fq_alerts).where(col("run_id") == RUN_ID)
@@ -327,10 +355,23 @@ def _log_time_to_detect(spark, cycle, prior_sid, detected_s) -> None:
             if prior_sid is not None
             else None
         )
-        arrivals = new_alert_arrivals(current, prior, spark.table(f"{CATALOG}.{SILVER_TXNS}"))
-        log(ttd_line(cycle, ttd_stats(arrivals, detected_s)))
+        new_txns = new_alert_txns(current, prior).persist(StorageLevel.MEMORY_AND_DISK)
+        try:
+            n = new_txns.count()
+            if n == 0:
+                stats = _empty_ttd_stats()
+            else:
+                arrivals = new_alert_arrivals(
+                    new_txns, spark.table(f"{CATALOG}.{SILVER_TXNS}"), small=n <= TTD_BROADCAST_ROWS
+                )
+                stats = ttd_stats(arrivals, detected_s, late_before_s)
+        finally:
+            new_txns.unpersist(blocking=False)
+        log(ttd_line(cycle, stats))
+        return True
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] time to detect unavailable on cycle {cycle}: {one_line(e)}")
+        return False
 
 
 def main() -> None:
@@ -353,6 +394,8 @@ def main() -> None:
     manifest_ready = table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}")
     cycle = 0
     last_ingest_s = 0.0
+    ttd_baseline = TtdBaseline()
+    prev_tick_ingest_s = None
     tm_clock = {"run_start": time.time(), "start": None, "end": None, "elapsed": 0.0}
     window_end_s = (
         window_start_marker(spark, GOLD_CHECKPOINT, tm_clock["run_start"]) + WINDOW_S
@@ -393,7 +436,8 @@ def main() -> None:
             # only a failure to read silver at all raises up to here.
             # The snapshot before the rewrite is what this tick's alerts are
             # compared against to find the newly raised ones.
-            prior_alerts_sid = _prior_alerts_snapshot(spark)
+            ttd_base = ttd_baseline.begin(_prior_alerts_snapshot(spark), prev_tick_ingest_s)
+            prev_tick_ingest_s = newest_ingest_s
             run_detection_rules(
                 spark,
                 txns,
@@ -431,7 +475,8 @@ def main() -> None:
                 log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
                 last_ingest_s = newest_ingest_s
                 fresh_sampled = True
-            _log_time_to_detect(spark, cycle, prior_alerts_sid, detection_end_s)
+            if _log_time_to_detect(spark, cycle, ttd_base, detection_end_s):
+                ttd_baseline.measured()
             # P10 operations layer. It runs every continuous_interval_seconds,
             # measured from the end of the last pass, so detection ticks always
             # run between passes however long a pass takes; plus one final pass

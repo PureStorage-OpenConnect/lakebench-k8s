@@ -50,7 +50,7 @@ def _txns(spark):
 
 
 def test_only_new_content_is_measured_from_its_newest_transaction(spark):
-    from gold_refresh_financial import new_alert_arrivals, ttd_stats
+    from gold_refresh_financial import new_alert_arrivals, new_alert_txns, ttd_stats
 
     prior = spark.createDataFrame(
         [
@@ -78,7 +78,7 @@ def test_only_new_content_is_measured_from_its_newest_transaction(spark):
     )
     arrivals = {
         r["_key"]: r["arrival_ts"]
-        for r in new_alert_arrivals(current, prior, _txns(spark)).collect()
+        for r in new_alert_arrivals(new_alert_txns(current, prior), _txns(spark)).collect()
     }
     assert len(arrivals) == 4
     # collect() returns naive local times; timestamp() reads them as local.
@@ -86,33 +86,43 @@ def test_only_new_content_is_measured_from_its_newest_transaction(spark):
     assert got == [1_000_160, 1_000_300]
     assert sum(v is None for v in arrivals.values()) == 2
 
-    stats = ttd_stats(new_alert_arrivals(current, prior, _txns(spark)), 1_000_425.0, bin_s=10)
-    # ttd: c = 425 - 160 = 265 -> bin 26; b = 425 - 300 = 125 -> bin 12.
-    assert stats == {
-        "alerts": 2,
-        "unmatched": 2,
-        "max_s": pytest.approx(265.0),
-        "bin_s": 10,
-        "bins": {12: 1, 26: 1},
-    }
+    # Broadcast and shuffled lookups agree. late_before_s = 200: alert c's
+    # newest transaction (160) was in silver before the previous pass.
+    for small in (True, False):
+        arrivals = new_alert_arrivals(new_alert_txns(current, prior), _txns(spark), small=small)
+        stats = ttd_stats(arrivals, 1_000_425.0, late_before_s=1_000_200.0, bin_s=10)
+        # ttd: c = 425 - 160 = 265 -> bin 26; b = 425 - 300 = 125 -> bin 12.
+        assert stats == {
+            "alerts": 2,
+            "late": 1,
+            "unmatched": 2,
+            "max_s": pytest.approx(265.0),
+            "bin_s": 10,
+            "bins": {12: 1, 26: 1},
+        }
 
 
 def test_no_prior_snapshot_means_every_alert_is_new(spark):
-    from gold_refresh_financial import new_alert_arrivals, ttd_stats
+    from gold_refresh_financial import new_alert_arrivals, new_alert_txns, ttd_stats
 
     current = spark.createDataFrame([("u", "W2_structuring", 1, ["t4"])], _ALERTS)
-    stats = ttd_stats(new_alert_arrivals(current, None, _txns(spark)), 1_000_290.0)
+    stats = ttd_stats(new_alert_arrivals(new_alert_txns(current, None), _txns(spark)), 1_000_290.0)
     # Bronze and gold driver clocks can disagree by a little: clamped at 0.
     assert stats["alerts"] == 1 and stats["max_s"] == 0.0 and stats["bins"] == {0: 1}
 
 
 def test_empty_tick_logs_a_parseable_line(spark):
     from common import ttd_line
-    from gold_refresh_financial import new_alert_arrivals, ttd_stats
+    from gold_refresh_financial import (
+        _empty_ttd_stats,
+        new_alert_arrivals,
+        new_alert_txns,
+        ttd_stats,
+    )
 
     empty = spark.createDataFrame([], _ALERTS)
-    stats = ttd_stats(new_alert_arrivals(empty, empty, _txns(spark)), 1.0)
-    assert stats == {"alerts": 0, "unmatched": 0, "max_s": None, "bin_s": 10, "bins": {}}
+    stats = ttd_stats(new_alert_arrivals(new_alert_txns(empty, empty), _txns(spark)), 1.0)
+    assert stats == _empty_ttd_stats()
     assert ttd_line(7, stats) == (
-        "Cycle 7: time to detect alerts=0 unmatched=0 max=-s bin=10s bins="
+        "Cycle 7: time to detect alerts=0 late=0 unmatched=0 max=-s bin=10s bins="
     )
