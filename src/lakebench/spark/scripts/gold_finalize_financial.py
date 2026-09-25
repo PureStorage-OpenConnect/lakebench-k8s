@@ -373,7 +373,13 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     """
     import inspect
 
-    from detection_rules import RULE_TARGET_TYPOLOGY, RuleSkipped, get_rule
+    from detection_rules import (
+        RULE_TARGET_TYPOLOGY,
+        RuleSkipped,
+        cleanup_path_search_spill,
+        get_rule,
+        sweep_stale_path_spill,
+    )
 
     # Which rules to run this invocation. Batch passes None (the full default
     # set); the continuous gold loop passes a bounded set (W2/W3/W4/W17) plus a
@@ -394,6 +400,9 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     except Exception as e:  # noqa: BLE001 -- broad catch on catalog errors
         log(f"[detection] silver.entities not readable ({e}); W7 will skip.")
         silver_entities = None
+
+    # W3/W17 path levels a killed earlier driver left under the gold bucket.
+    sweep_stale_path_spill(spark)
 
     log("=" * 60)
     log(f"Running detection rules: {list(rules)}")
@@ -518,6 +527,9 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # write, and left cached they hold executor memory and scratch
             # through every later rule.
             spark.catalog.clearCache()
+            # W3/W17 write their path levels and results under the gold
+            # bucket; the alerts are written (or dropped) by now.
+            cleanup_path_search_spill(spark)
     log(f"[detection] total alerts written: {total_alerts}")
 
     for rule_id in skipped_rules:
