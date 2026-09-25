@@ -733,6 +733,48 @@ REFERENCE_PY_DEPS = (
 REFERENCE_PY_DEPS_DIR = "/opt/lb-pydeps"
 
 
+def _lakebench_git_sha() -> str:
+    """HEAD of the git checkout the lakebench package runs from, with a
+    -dirty suffix for tracked changes; "unknown" for an installed wheel or
+    when git is unavailable."""
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        # A wheel installed inside some other repository (a venv under a repo)
+        # must not report that repository's HEAD.
+        if top.returncode != 0 or not (Path(top.stdout.strip()) / "src/lakebench").is_dir():
+            return "unknown"
+        sha = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if sha.returncode != 0 or not sha.stdout.strip():
+            return "unknown"
+        dirty = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if dirty.returncode != 0:
+            suffix = "-dirty-unknown"
+        else:
+            suffix = "-dirty" if dirty.stdout.strip() else ""
+        return sha.stdout.strip() + suffix
+    except (OSError, subprocess.TimeoutExpired):
+        return "unknown"
+
+
 def _spark_interval_to_seconds(interval: str) -> int:
     """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
     ``"1 hour"``) to an integer seconds value. Returns 10 on unparseable
@@ -2341,6 +2383,14 @@ class SparkJobManager:
                         }
                     )
 
+        # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
+        # the report scored and which lakebench revision produced it.
+        if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
+            from lakebench.deploy.datagen import DATAGEN_SEED
+
+            env.append({"name": "LB_DATAGEN_SEED", "value": str(DATAGEN_SEED)})
+            env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
+
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
         if cycle_env:
             env.extend({"name": k, "value": v} for k, v in cycle_env.items())
@@ -2391,6 +2441,10 @@ class SparkJobManager:
             # entry point but must be mounted alongside so the local
             # import resolves inside the driver pod).
             "detection_rules.py",
+            # Library module imported by score_financial_reference: the
+            # pre-registered AML gate features (shared with the local
+            # harness scripts/aml_gate.py).
+            "aml_features.py",
         ]
 
         # Build ConfigMap data
@@ -2412,10 +2466,14 @@ class SparkJobManager:
         # flat mount resolves with no lakebench package on the driver.
         from lakebench._resources import _package_dir
 
-        _ref_score_path = _package_dir() / "aml" / "reference_score.py"
-        if _ref_score_path.exists():
-            data["reference_score.py"] = _ref_score_path.read_text()
-            logger.info("Loaded script: reference_score.py (from lakebench.aml)")
+        # fidelity_gate.py (the pre-registered AML gate evaluation) ships the
+        # same way, for the same reason; it reads aml_preregistration.json,
+        # which the AML data loop below also mounts flat.
+        for _aml_mod in ("reference_score.py", "fidelity_gate.py"):
+            _mod_path = _package_dir() / "aml" / _aml_mod
+            if _mod_path.exists():
+                data[_aml_mod] = _mod_path.read_text()
+                logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
 
         # AML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via

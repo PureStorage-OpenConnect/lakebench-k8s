@@ -11,4 +11,8 @@ Current members:
   detector (scikit-learn GBT) training/evaluation. Used by
   ``spark/scripts/score_financial_reference.py`` and directly tested
   in ``tests/test_aml_reference_score.py``.
+- :mod:`fidelity_gate` -- the pre-registered AML fidelity gate (AP per
+  typology, D5 shortcuts, band and Level-2 summary, D2, D11), reading every
+  constant from ``aml_preregistration.json``. Used by the same Spark script
+  (silver) and by ``scripts/aml_gate.py`` (bronze, local).
 """

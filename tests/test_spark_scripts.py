@@ -63,7 +63,7 @@ class TestCommonModule:
         assert "parse_size_gb" in func_names
 
 
-_LIBRARY_SCRIPTS = {"detection_rules.py"}
+_LIBRARY_SCRIPTS = {"detection_rules.py", "aml_features.py"}
 
 
 class TestScriptImports:

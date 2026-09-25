@@ -34,6 +34,7 @@ a = Analysis(
         # Shipped as source into the driver ConfigMap, so it must exist as a
         # file, not only as bytecode in the archive.
         ("src/lakebench/aml/reference_score.py", "lakebench/aml"),
+        ("src/lakebench/aml/fidelity_gate.py", "lakebench/aml"),
     ]
     + pydantic_datas
     + pydantic_settings_datas,
