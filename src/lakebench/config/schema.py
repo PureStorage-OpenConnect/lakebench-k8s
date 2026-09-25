@@ -1927,9 +1927,9 @@ class LakebenchConfig(ConfigModel):
         See ``derived_name_violations`` for the objects and limits checked.
         Without this, a namespace a few characters too long deploys up to
         the Hive metastore and then hangs until the readiness timeout
-        (LB-153). ``destroy`` loads with ``allow_long_names`` in the
-        validation context so a deployment that failed this way can still
-        be torn down.
+        (LB-153). Teardown and diagnostic commands load with
+        ``allow_long_names`` in the validation context (see ``load_config``)
+        so a deployment that failed this way can still be torn down.
         """
         if info.context and info.context.get("allow_long_names"):
             return self

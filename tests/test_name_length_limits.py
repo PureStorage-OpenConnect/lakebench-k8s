@@ -151,7 +151,15 @@ class TestLoader:
         assert seen, f"{argv} never loaded the config"
         assert seen[0].get("allow_long_names") is True
 
-    def test_deploy_path_keeps_the_check(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        ("module", "argv"),
+        [
+            ("lakebench.cli._deploy", ["deploy"]),
+            ("lakebench.cli._run", ["run"]),
+            ("lakebench.cli._generate", ["generate"]),
+        ],
+    )
+    def test_commands_that_create_objects_keep_the_check(self, module, argv, tmp_path, monkeypatch):
         import importlib
 
         from typer.testing import CliRunner
@@ -166,15 +174,23 @@ class TestLoader:
             seen.append(kwargs)
             raise ConfigFileNotFoundError(str(path))
 
-        monkeypatch.setattr(importlib.import_module("lakebench.cli._deploy"), "load_config", spy)
-        CliRunner().invoke(app, ["deploy", str(self._write(tmp_path, "x"))])
+        monkeypatch.setattr(importlib.import_module(module), "load_config", spy)
+        CliRunner().invoke(app, [*argv, str(self._write(tmp_path, "x"))])
         assert seen and not seen[0].get("allow_long_names")
 
 
+_PINNED = sorted(
+    p
+    for p in (Path(__file__).parent.parent / "benchmarks" / "perf").glob("*.yaml")
+    if p.name != "baselines.yaml"
+)
+
+
 class TestPinnedPerfConfigs:
-    @pytest.mark.parametrize(
-        "path", sorted(Path(__file__).parent.parent.glob("benchmarks/perf/*-s*.yaml"))
-    )
+    def test_pinned_configs_found(self):
+        assert len(_PINNED) >= 3
+
+    @pytest.mark.parametrize("path", _PINNED)
     def test_gate_loads_with_a_long_perf_name_in_the_env(self, path, monkeypatch):
         # The fingerprint does not depend on the name, so the gate must not
         # refuse because a too-long LAKEBENCH_PERF_NAME is still exported.
@@ -183,9 +199,7 @@ class TestPinnedPerfConfigs:
         monkeypatch.setenv("LAKEBENCH_PERF_NAME", "ov-perf-c360-continuous-s10")
         load_pinned(path)
 
-    @pytest.mark.parametrize(
-        "path", sorted(Path(__file__).parent.parent.glob("benchmarks/perf/*-s*.yaml"))
-    )
+    @pytest.mark.parametrize("path", _PINNED)
     def test_default_names_fit(self, path, monkeypatch):
         from lakebench.metrics.perf_gate import _PLACEHOLDER_ENV
 
@@ -194,4 +208,5 @@ class TestPinnedPerfConfigs:
             if k != "LAKEBENCH_PERF_NAME":
                 monkeypatch.setenv(k, v)
         cfg = load_config(path)
+        assert derived_name_violations(cfg) == []
         assert len(cfg.get_namespace()) <= max_namespace_length(cfg)
