@@ -173,11 +173,51 @@ def _check(spark):
     ]
 
 
+def _check_late_entity(spark):
+    """Continuous mode: silver_stream commits a batch's transactions before its
+    entities, so a gold tick can see a structuring subject's payments while the
+    subject is not yet in silver.entities. That tick drops the W2 alert (the
+    subject is not a known customer); the next tick re-detects the full corpus
+    and raises it, because nothing about a drop is carried between ticks."""
+    from datetime import datetime, timedelta
+    from decimal import Decimal
+
+    import gold_finalize_financial as gf
+
+    t0 = datetime(2024, 3, 1)
+    txns = spark.createDataFrame(
+        [(f"s{i}", 1, 9, t0 + timedelta(hours=i), Decimal("9500.00"), "USD") for i in range(3)],
+        "uetr string, originator_id bigint, beneficiary_id bigint, "
+        "txn_timestamp timestamp, txn_amount decimal(18,2), txn_currency string",
+    )
+    spark.sql(
+        "CREATE TABLE lakehouse.silver.entities (entity_id BIGINT, is_customer BOOLEAN) "
+        "USING iceberg"
+    )
+    # Tick 1: another customer is known, the subject (1) is not yet.
+    spark.sql("INSERT INTO lakehouse.silver.entities VALUES (5, true)")
+
+    def w2_alerts():
+        gf.run_detection_rules(spark, txns, "run-c", rules=("W2_structuring",))
+        return [
+            r["entity_id"]
+            for r in spark.table("lakehouse.gold.alerts")
+            .where("run_id = 'run-c' AND rule_id = 'W2_structuring'")
+            .collect()
+        ]
+
+    assert w2_alerts() == []
+    # The stream's dimension append lands; tick 2 raises the alert.
+    spark.sql("INSERT INTO lakehouse.silver.entities VALUES (1, true), (9, false)")
+    assert w2_alerts() == [1]
+
+
 if __name__ == "__main__":
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     _spark = _session(sys.argv[1])
     try:
         _check(_spark)
+        _check_late_entity(_spark)
     finally:
         _spark.stop()
     print("CHECK OK")

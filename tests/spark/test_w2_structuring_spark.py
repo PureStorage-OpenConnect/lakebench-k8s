@@ -42,10 +42,18 @@ def _df(spark, rows):
     )
 
 
+def _everyone(spark, df):
+    """silver.entities marking every party a customer: these tests are about
+    the counting, not the monitored population (test_customer_scope_spark)."""
+    ids = df.select("originator_id").union(df.select("beneficiary_id")).distinct()
+    return ids.selectExpr("originator_id as entity_id", "true as is_customer")
+
+
 def _alerts(spark, rows):
     from detection_rules import w2_structuring
 
-    return w2_structuring(_df(spark, rows), run_id="r").collect()
+    df = _df(spark, rows)
+    return w2_structuring(df, silver_entities=_everyone(spark, df), run_id="r").collect()
 
 
 def test_several_senders_into_one_beneficiary(spark):
@@ -115,7 +123,10 @@ def test_steady_stream_is_one_alert(spark):
     from detection_rules import w2_structuring
 
     rows = [(f"q{i:02d}", 1 + i % 3, 9, 2 * i, 9500, "USD") for i in range(60)]
-    out = w2_structuring(_df(spark, rows), max_txns_per_alert=10, run_id="r").collect()
+    df = _df(spark, rows)
+    out = w2_structuring(
+        df, max_txns_per_alert=10, silver_entities=_everyone(spark, df), run_id="r"
+    ).collect()
     bene = [a for a in out if a["alert_type"] == "structuring_beneficiary"]
     # 120 h of credits: one alert per day-long chunk of the burst.
     assert 4 <= len(bene) <= 6

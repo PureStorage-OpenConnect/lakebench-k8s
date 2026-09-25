@@ -91,7 +91,9 @@ MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 # payment network (GOALS P10 stage 4), so they are declared to alert on
 # counterparties as well as customers. Every other scenario alerts on
 # customers only; an alert from one of them on a non-customer fails the
-# ``noncustomer_alerts_declared`` invariant.
+# ``noncustomer_alerts_declared`` invariant. detection_rules restricts every
+# other rule's subject to customers (CUSTOMER_SCOPED_RULES) and carries the
+# same list as COUNTERPARTY_SCENARIOS; tests assert the copies match.
 DEFAULT_COUNTERPARTY_SCENARIOS = (
     "W1_connected_components",
     "W3_round_tripping",

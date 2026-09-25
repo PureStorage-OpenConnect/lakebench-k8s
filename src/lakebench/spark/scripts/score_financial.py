@@ -44,6 +44,133 @@ from pyspark.sql.functions import max as smax
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 GOLD_STATUS = env("LB_FINANCIAL_GOLD_DETECTION_STATUS", "gold.detection_status")
+SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+_BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
+_BRONZE_ROOT = env("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/").rstrip("/")
+ACCOUNT_PATH = env(
+    "LB_FINANCIAL_ACCOUNT_PATH", f"{_BRONZE_URI}{_BRONZE_ROOT}/bronze/account.parquet"
+)
+
+
+def subject_customer_check(spark, manifest, entities, id_map, scoped_typologies) -> dict:
+    """Whether every planted subject is a customer in silver (GOALS P10 stage 0).
+
+    Customer-scoped rules drop alerts on non-customers, so a subject that
+    silver does not mark is_customer (an IBAN -> holder -> party join that
+    missed, or an entity id collision) loses its designated alert and its
+    typology's recall falls with no other sign. The subject is the role
+    typology::subject_index names (aml_features.subject_index mirrors it),
+    resolved from the manifest's participant_entity_ids and instance seed;
+    ``id_map`` maps the datagen id to the silver entity_id. ``unmapped`` counts
+    subjects with no silver entity at all, ``not_customer`` those whose entity
+    is not a customer (an entity listed twice is a customer if any row says
+    so, as the rules' semi join treats it). Only ``scoped_typologies`` count
+    toward the status (targets of a customer-scoped rule that ran):
+    ``fail`` when a subject is not a customer; else ``incomplete`` when a
+    subject has no silver entity (a continuous run whose silver has not caught
+    up, or a join miss); else ``unchecked`` when some instance names no
+    participants or seed; else ``ok``.
+    """
+    from aml_features import subject_index
+
+    need = {"typology_type", "participant_entity_ids", "seed"}
+    missing = sorted(need - set(manifest.columns))
+    if missing:
+        return {"status": "unchecked", "reason": f"manifest has no {', '.join(missing)}"}
+    rows = []
+    unresolved = set()
+    for r in manifest.select("typology_type", "participant_entity_ids", "seed").collect():
+        ids = r["participant_entity_ids"] or []
+        if not ids or r["seed"] is None:
+            unresolved.add(r["typology_type"])
+            continue
+        idx = subject_index(r["typology_type"], len(ids), int(r["seed"]))
+        rows.append((r["typology_type"], int(ids[idx])))
+    if not rows:
+        return {"status": "unchecked", "reason": "no manifest row names its participants"}
+    subj = spark.createDataFrame(rows, "typology_type string, dg_id long")
+    ents = (
+        entities.select(
+            col("entity_id").alias("key"),
+            coalesce(col("is_customer"), lit(False)).cast("int").alias("_c"),
+        )
+        .groupBy("key")
+        .agg(smax("_c").alias("_c"))
+        .select("key", (col("_c") == lit(1)).alias("is_customer"))
+    )
+    joined = subj.join(id_map, "dg_id", "left").join(ents, "key", "left")
+    by_typology = {}
+    for r in (
+        joined.groupBy("typology_type")
+        .agg(
+            {"dg_id": "count"},
+        )
+        .withColumnRenamed("count(dg_id)", "subjects")
+        .join(
+            joined.where(col("key").isNull()).groupBy("typology_type").count(),
+            "typology_type",
+            "left",
+        )
+        .withColumnRenamed("count", "unmapped")
+        .join(
+            joined.where(col("key").isNotNull() & ~coalesce(col("is_customer"), lit(False)))
+            .groupBy("typology_type")
+            .count()
+            .withColumnRenamed("count", "not_customer"),
+            "typology_type",
+            "left",
+        )
+        .collect()
+    ):
+        by_typology[r["typology_type"]] = {
+            "subjects": int(r["subjects"]),
+            "unmapped": int(r["unmapped"] or 0),
+            "not_customer": int(r["not_customer"] or 0),
+        }
+    scoped = {t: v for t, v in by_typology.items() if t in scoped_typologies}
+    bad = {t for t, v in scoped.items() if v["not_customer"]}
+    gaps = {t for t, v in scoped.items() if v["unmapped"]}
+    if bad:
+        status = "fail"
+    elif gaps:
+        status = "incomplete"
+    elif unresolved & set(scoped_typologies):
+        status = "unchecked"
+    else:
+        status = "ok"
+    return {
+        "status": status,
+        "subjects": sum(v["subjects"] for v in by_typology.values()),
+        "unmapped": sum(v["unmapped"] for v in by_typology.values()),
+        "not_customer": sum(v["not_customer"] for v in by_typology.values()),
+        "failing_typologies": sorted(bad | gaps),
+        "unresolved_typologies": sorted(unresolved),
+        "by_typology": by_typology,
+    }
+
+
+def _run_subject_check(spark, manifest, status_rows) -> dict:
+    """subject_customer_check against the lakehouse silver tables; any read
+    failure is reported as ``unchecked`` with the reason, never as ok."""
+    try:
+        from aml_features import _account_id_map
+        from detection_rules import CUSTOMER_SCOPED_RULES, RULE_TARGET_TYPOLOGY
+
+        entities = spark.table(f"{CATALOG}.{SILVER_ENTITIES}")
+        iban_to_key = (
+            spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
+            .select(col("iban"), col("holder_entity_id").alias("key"))
+            .filter(col("iban").isNotNull())
+        )
+        id_map = _account_id_map(spark.read.parquet(ACCOUNT_PATH), iban_to_key)
+        # Only rules that ran this run: a mode-excluded rule (W7/W8 in
+        # continuous) drops nothing.
+        ran = {r["rule_id"] for r in status_rows if r.get("status") == "ran"}
+        scoped = {RULE_TARGET_TYPOLOGY[r] for r in CUSTOMER_SCOPED_RULES & ran} - {None}
+        return subject_customer_check(spark, manifest, entities, id_map, scoped)
+    except Exception as e:  # noqa: BLE001 -- reported, not raised
+        return {"status": "unchecked", "reason": f"{type(e).__name__}: {e}"[:300]}
 
 
 def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
@@ -308,6 +435,23 @@ def main() -> None:
 
     per_typology, summary = compute_scores(spark, manifest, alerts, status_rows)
     summary["run_id"] = current_run_id
+    # Loud on purpose: a subject silver does not call a customer has its
+    # designated alert dropped by the customer-scoped rules.
+    check = _run_subject_check(spark, manifest, status_rows)
+    summary["subject_customer_check"] = check
+    log(
+        f"[score] subject-customer-check status={check['status']} "
+        f"subjects={check.get('subjects')} unmapped={check.get('unmapped')} "
+        f"not_customer={check.get('not_customer')} "
+        f"failing={','.join(check.get('failing_typologies') or []) or '-'}"
+        + (f" reason={check['reason']}" if check.get("reason") else "")
+    )
+    if check["status"] in ("fail", "incomplete"):
+        log(
+            "WARNING: planted subjects that silver does not hold as customers; the "
+            "customer-scoped rules cannot alert on them, so recall for "
+            f"{check['failing_typologies']} is understated."
+        )
     total_alerts = summary["total_alerts"]
     fp_alerts = summary["fp_alerts"]
     fp_rate = summary["fp_rate"]
@@ -340,6 +484,9 @@ def main() -> None:
             "incidental_recall": r.get("incidental_recall"),
             "instance_count": r.get("instance_count"),
             "detection_status": r.get("detection_status"),
+            "subjects_not_customer": (
+                (check.get("by_typology") or {}).get(r.get("typology_type"), {})
+            ).get("not_customer"),
         }
         for r in rows
     ]
