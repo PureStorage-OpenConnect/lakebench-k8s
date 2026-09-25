@@ -29,13 +29,15 @@ ingestion. It is more expensive per tick (bounded by the batch detection
 cost), which is the honest cost of keeping gold fresh under a growing corpus.
 
 Rule set in continuous mode:
-- RUN: W2/W3/W4/W17 -- they need only silver.transactions, which silver_stream
-  maintains.
+- RUN: W2/W3/W4/W17. All read silver.transactions; W2 is customer-scoped and
+  also reads silver.entities, which silver_stream appends per micro-batch
+  (after the batch's transactions, so a tick can miss a new customer's alert
+  until the next tick).
 - SKIPPED (recorded as status='skipped' so score renders "not run", not a
   false 0%): W1 (per-tick connected-components recompute is too costly; the
-  windowed-recompute variant is Phase 5b), W7 (needs silver.entities, which
-  silver_stream does not maintain -- Phase 5a builds continuous dimensions),
-  W8 (needs a >=90-day dormancy gap a narrow continuous corpus cannot hold).
+  windowed-recompute variant is Phase 5b), W7 (skipped since before
+  silver_stream appended silver.entities; that original reason no longer
+  holds, and enabling it here has not been tested), W8 (needs a >=90-day dormancy gap a narrow continuous corpus cannot hold).
 
 A rule that errors or skips on a tick loses the rows it wrote on earlier
 ticks of the run, and its status for the tick is 'error' or 'skipped'. So a
@@ -97,7 +99,10 @@ TM_PARAMS = params_from_env()
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
 
-# Rules run every tick over the full corpus (need only silver.transactions).
+# Rules run every tick over the full corpus. W2 is customer-scoped and also
+# reads silver.entities; silver_stream commits a batch's entities after its
+# transactions, so a tick can miss a new customer's alert, and the next tick's
+# full re-detection raises it.
 CONTINUOUS_RULES = (
     "W2_structuring",
     "W3_round_tripping",

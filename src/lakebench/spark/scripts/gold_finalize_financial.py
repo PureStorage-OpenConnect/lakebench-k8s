@@ -389,21 +389,25 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     # Which rules to run this invocation. Batch passes None (the full default
     # set); the continuous gold loop passes a bounded set (W2/W3/W4/W17) plus a
     # skipped_rules list for the rules it deliberately does NOT run there --
-    # W1 (per-tick graph recompute too costly), W7 (silver.entities is not
-    # maintained by silver_stream, so it would false-report 0% recall), and
+    # W1 (per-tick graph recompute too costly), W7 (skipped from before
+    # silver_stream appended silver.entities; see gold_refresh_financial), and
     # W8 (needs a 90-day dormancy gap a narrow continuous corpus cannot hold).
     # Marking them 'skipped' (not simply omitting them) is what lets
     # score_financial render their typologies "not run" instead of a false 0%.
     rules = tuple(rules) if rules is not None else DEFAULT_DETECTION_RULES
     skipped_rules = tuple(skipped_rules or ())
 
-    # Load silver.entities once. W7 needs it; loading up-front is cheap
+    # Load silver.entities once. The customer-scoped rules (W2, W5-W8) and
+    # W7's country lookup need it; loading up-front is cheap
     # (Iceberg metadata read) and avoids each rule invocation paying its
     # own catalog resolution cost.
     try:
         silver_entities = spark.table(f"{CATALOG}.{SILVER_ENTITIES}")
     except Exception as e:  # noqa: BLE001 -- broad catch on catalog errors
-        log(f"[detection] silver.entities not readable ({e}); W7 will skip.")
+        log(
+            f"[detection] silver.entities not readable ({e}); "
+            "customer-scoped rules (W2, W5-W8) will skip."
+        )
         silver_entities = None
 
     log("=" * 60)
