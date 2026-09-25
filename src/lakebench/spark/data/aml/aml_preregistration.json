@@ -45,6 +45,9 @@
     "calibration_seed": 42,
     "evaluation_seed": 50000042,
     "robustness_seed": 90000042,
+    "gate_scale": 2,
+    "entities_per_scale_unit": 111111,
+    "gate_scale_note": "AML-GOALS section 9 #36: calibration corpora and D0 run at scale 2 (the local runner refuses another scale unless --diagnostic); D8 still compares scale 10 against the gate scale. entities_per_scale_unit mirrors datagen_rs world.rs (population = round(111111 x scale)) and is how a corpus's scale is read back from its account master.",
     "robustness_perturbation": {
       "median_amount_multiplier": 1.2,
       "persona_sd_multiplier": 1.2,

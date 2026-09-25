@@ -126,6 +126,12 @@ def main(argv=None) -> int:
         "passes.library_versions_match)",
     )
     ap.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="allow a corpus whose scale is not corpora.gate_scale; the report is marked "
+        "diagnostic and passes.corpus_at_gate_scale fails",
+    )
+    ap.add_argument(
         "--counts-only",
         action="store_true",
         help="build units and labels and report counts only: no model, no AP (smoke tests "
@@ -177,6 +183,19 @@ def main(argv=None) -> int:
         manifest = af.read_manifest(spark, manifest_src)
         af.check_manifest(manifest)
         seed_check = af.corpus_seed_check(manifest, args.seed)
+        scale_info = af.corpus_scale(
+            spark,
+            str(corpus / "bronze/account.parquet"),
+            prereg["corpora"]["entities_per_scale_unit"],
+        )
+        at_scale = af.at_gate_scale(scale_info, prereg)
+        if not at_scale and not args.diagnostic:
+            print(
+                f"corpus scale {scale_info['scale']} is not the gate scale "
+                f"{prereg['corpora']['gate_scale']}; refusing (use --diagnostic)",
+                file=sys.stderr,
+            )
+            return 1
         txns, ents, id_map = af.bronze_frames(
             spark,
             pacs_path=str(corpus / "bronze/pacs008"),
@@ -222,6 +241,8 @@ def main(argv=None) -> int:
             "unkeyed_rows": unkeyed,
             "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
+            "corpus_scale": scale_info,
+            "diagnostic": bool(args.diagnostic),
             "aml_features_sha256": af.source_sha256(),
             "corpus": str(corpus),
             "corpus_seed": args.seed,
@@ -282,6 +303,7 @@ def main(argv=None) -> int:
         n_unres = af.unresolved_subjects(inputs["unit"])
         add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0 and n_unres == 0)
         add_pass(report, "library_versions_match", not mismatch)
+        add_pass(report, "corpus_at_gate_scale", at_scale)
         if args.seed is not None:
             add_pass(report, "corpus_seed_verified", seed_ok)
         # A diagnostic run under another label role is never a pass.

@@ -1020,6 +1020,20 @@ def duplicate_ibans(spark, account_path: str) -> int:
     )
 
 
+def corpus_scale(spark, account_path: str, entities_per_scale_unit: int) -> dict:
+    """The corpus's scale, read back from its account master: the generator
+    makes round(entities_per_scale_unit x scale) entities, every one with an
+    account."""
+    n = int(spark.read.parquet(account_path).select("holder_entity_id").distinct().count())
+    return {"n_entities": n, "scale": n / entities_per_scale_unit}
+
+
+def at_gate_scale(scale_info: dict, prereg: dict) -> bool:
+    """True when the corpus was generated at corpora.gate_scale."""
+    c = prereg["corpora"]
+    return scale_info["n_entities"] == round(c["entities_per_scale_unit"] * c["gate_scale"])
+
+
 def unkeyed_rows(txns: DataFrame) -> int:
     """Payments with a NULL party key (an IBAN or entity the adapter could not
     resolve). Nonzero means features are computed on a partial corpus."""
