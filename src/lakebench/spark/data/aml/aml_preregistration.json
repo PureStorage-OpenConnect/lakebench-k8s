@@ -7,7 +7,7 @@
     "entity": "customer",
     "window": "utc_calendar_month",
     "lead_in_days": 14,
-    "burn_in_months": 13,
+    "burn_in_months": 14,
     "history_days": 395,
     "label_role": "subject",
     "history_features": [
@@ -19,7 +19,8 @@
     "label": "positive for T when the customer is the subject (typology::subject_index) of a T instance whose latest planted row by UETR timestamp falls in the month (dormant_reactivation: rows at or after the burst start only, anchor excluded); one-vs-rest over all scored (customer, month) units",
     "exclusions": "not scored for T, and counted: months whose window holds that instance's planted rows with the subject as a party while the instance completes in another month; months where the customer is a non-subject participant of T (its planted-row months and the completion month)",
     "unit_exists": "customer has at least one payment in A = [start(M) - lead_in_days, end(M)); months before burn_in_months are history only",
-    "secondary": "the entity-lifetime unit (features minus history_features, same label role) is reported as an ungated secondary block"
+    "secondary": "the entity-lifetime unit (features minus history_features, same label role) is reported as an ungated secondary block",
+    "burn_in_note": "14 months (not 13) so the first scored month's history window, lead_in_days + history_days = 409 days before its start, lies inside the corpus"
   },
   "cv": {
     "folds": 5,

@@ -301,7 +301,7 @@ def test_prereg_version_and_model_blocks():
     assert p["version"] == "3.4"
     u = p["unit_of_scoring"]
     assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
-    assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 13, 395)
+    assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 14, 395)
     assert p["leakage"]["relative_cap_formula"] == "lift_over_prevalence"
     assert p["band"] == {**p["band"], "ap_min": 0.3, "ap_max": 0.8}
     assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
