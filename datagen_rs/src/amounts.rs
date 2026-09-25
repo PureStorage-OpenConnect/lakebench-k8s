@@ -29,7 +29,9 @@ pub fn fx_to_usd(ccy: &str) -> f64 {
     }
 }
 
-/// (lo, hi) structuring band just under the local reporting threshold.
+/// (lo, hi): the old fixed planting band, [95%, 99.99%] of the local reporting
+/// threshold. No longer used for planting (see `structuring_amount`); kept as
+/// the narrow band the baseline-density leakage tests measure against.
 pub fn structuring_band(ccy: &str) -> (f64, f64) {
     match ccy {
         "USD" | "CAD" | "AUD" => (9_500.0, 9_999.0),

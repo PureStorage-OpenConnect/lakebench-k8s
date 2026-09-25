@@ -1662,7 +1662,7 @@ fn structured_amounts_stay_under_the_threshold_without_a_band_edge_cliff() {
         }
         let r = above as f64 / below as f64;
         assert!(
-            (0.8..1.25).contains(&r),
+            (0.95..1.2).contains(&r),
             "{ccy}: step at 0.9T, ratio {r:.3}"
         );
         // No pile-up on the threshold: the top 1% of the range holds about
