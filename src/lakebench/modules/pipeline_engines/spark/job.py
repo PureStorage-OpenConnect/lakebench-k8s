@@ -634,7 +634,8 @@ def _streaming_concurrent_budget(
     # A schema override (AML bronze-ingest) must not take cores from the
     # stages it does not touch: they keep the split they had on the base
     # profiles, and the overridden jobs share only what is left, never less
-    # than the cores their base allocation had.
+    # than the whole executors that fit in the cores their base allocation
+    # had (at least one).
     caps = {jt: base_caps[jt] for jt in _STREAMING_JOB_TYPES if jt not in overridden}
     kept_m = sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in caps)
     headroom_m = max(0, streaming_budget_m - kept_m)
@@ -647,7 +648,9 @@ def _streaming_concurrent_budget(
         prof = resolved[jt]
         exec_cpu_m = prof["executor_cores"] * 1000
         floor_cores = base_caps[jt] * _JOB_PROFILES[jt.value]["executor_cores"]
-        floor = -(-floor_cores // prof["executor_cores"])  # ceil
+        # Round down: rounding up to whole larger executors would request
+        # more than the base split did, past the budget's own headroom.
+        floor = max(1, floor_cores // prof["executor_cores"])
         share = int(headroom_m * demands[jt] / total // exec_cpu_m)
         caps[jt] = min(_scale_executor_count(prof, scale), max(floor, share))
     return caps
@@ -1465,6 +1468,7 @@ class SparkJobManager:
         executor_count = _scale_executor_count(profile, scale)
 
         # Streaming: cap to concurrent budget (all 3 jobs + datagen share cluster)
+        capped_from = executor_count
         if job_type in _STREAMING_JOB_TYPES and self._cluster_cpu_m is not None:
             budget = _streaming_concurrent_budget(cfg, self._cluster_cpu_m)
             if job_type in budget and budget[job_type] < executor_count:
@@ -1474,10 +1478,7 @@ class SparkJobManager:
                     executor_count,
                     budget[job_type],
                 )
-                self.budget_warnings.append(
-                    f"Concurrent budget: {job_type.value} capped from {executor_count} "
-                    f"to {budget[job_type]} executors (cluster too small for the profile)"
-                )
+                capped_from = executor_count
                 executor_count = budget[job_type]
 
         # Per-job executor override (user escape hatch)
@@ -1490,6 +1491,13 @@ class SparkJobManager:
             JobType.GOLD_REFRESH: cfg.platform.compute.spark.gold_refresh_executors,
         }
         override = override_map.get(job_type)
+        if job_type in _STREAMING_JOB_TYPES and override is None and capped_from != executor_count:
+            # After the override check: an explicit count wins over the
+            # budget, so there is nothing to warn about then.
+            self.budget_warnings.append(
+                f"Concurrent budget: {job_type.value} capped from {capped_from} "
+                f"to {executor_count} executors (cluster too small for the profile)"
+            )
         if override is not None:
             logger.info(
                 "Using executor override for %s: %d (auto would be %d)",
