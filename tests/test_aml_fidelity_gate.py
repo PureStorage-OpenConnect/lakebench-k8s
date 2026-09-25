@@ -389,6 +389,7 @@ def test_bootstrap_resamples_groups():
 def test_report_records_groups_and_libraries():
     df = _frame()
     df["group"] = np.arange(len(df)) // 3
+    df["month"] = np.arange(len(df)) % 3  # a unit is (group, month)
     rep = fg.evaluate_gate(df, _prereg())
     assert rep["n_groups"] == len(df) // 3
     libs = rep["libraries"]
@@ -596,3 +597,10 @@ def test_importance_failure_keeps_the_gate_numbers(monkeypatch):
     card = rep["_model_outputs"]["card"]
     assert card["importance_errors"]["beh"] == "no room"
     assert len(rep["_model_outputs"]["scores"]) > 0
+
+
+def test_duplicate_units_are_refused():
+    df = _grouped_frame()
+    df.loc[1, ["group", "month"]] = df.loc[0, ["group", "month"]].to_numpy()
+    with pytest.raises(ValueError, match="duplicate units"):
+        fg.evaluate_gate(df, _prereg())

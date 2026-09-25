@@ -641,6 +641,10 @@ def evaluate_gate(
     # depend on that order. Sort by the unit key (unique per unit).
     order = [c for c in UNIT_KEY_COLUMNS if c in frame.columns]
     if order:
+        if GROUP_COLUMN in frame.columns and frame[GROUP_COLUMN].isna().any():
+            raise ValueError(f"gate frame has NULL {GROUP_COLUMN} values")
+        if frame.duplicated(order).any():
+            raise ValueError(f"gate frame has duplicate units on {order}")
         frame = frame.sort_values(order, kind="mergesort")
     frame = frame.reset_index(drop=True)
     report["n_scored_units"] = int(len(frame))
