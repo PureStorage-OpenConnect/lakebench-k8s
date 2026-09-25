@@ -813,11 +813,8 @@ class PipelineBenchmark:
         # slow pipeline (LB-145). A stall (rows missing, silver behind or its
         # last commit unlogged) is not drained and keeps its full staleness.
         silver = [s for s in streaming if s.stage_name == "silver"]
-        silver_committed = (
-            sum(s.committed_rows for s in silver)
-            if silver and all(s.committed_rows is not None for s in silver)
-            else None
-        )
+        committed = [s.committed_rows for s in silver if s.committed_rows is not None]
+        silver_committed = sum(committed) if silver and len(committed) == len(silver) else None
         if self.ingest_ratio is None:
             self.corpus_drained = None
         else:
@@ -836,9 +833,9 @@ class PipelineBenchmark:
         # every cycle was idle).
         freshness_vals = []
         for st in streaming:
-            val = st.freshness_active_seconds if self.corpus_drained else st.freshness_seconds
-            if val is not None and val > 0:
-                freshness_vals.append(val)
+            fresh = st.freshness_active_seconds if self.corpus_drained else st.freshness_seconds
+            if fresh is not None and fresh > 0:
+                freshness_vals.append(fresh)
         if freshness_vals:
             self.data_freshness_seconds = max(freshness_vals)
 

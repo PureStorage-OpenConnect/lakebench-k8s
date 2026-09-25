@@ -146,6 +146,10 @@ module = [
     "pandas.*",
     "sklearn",
     "sklearn.*",
+    "joblib",
+    "joblib.*",
+    "scipy",
+    "scipy.*",
 ]
 ignore_missing_imports = true
 

@@ -184,8 +184,9 @@ def wait_for_settle(
                 False,
                 f"probe {probe_query} failed {failures} times in a row ({p.error})",
             )
-        window = [q.seconds for q in probes[-need:]]
-        if len(window) == need and all(t is not None for t in window):
+        recent = probes[-need:]
+        window = [q.seconds for q in recent if q.seconds is not None]
+        if len(recent) == need and len(window) == need:
             stable = all(_within(window[0], t, tolerance_pct) for t in window[1:]) and all(
                 _within(a, b, tolerance_pct) for a, b in zip(window, window[1:], strict=False)
             )
