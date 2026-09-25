@@ -1047,6 +1047,92 @@ class Customer360Config(ConfigModel):
     )
 
 
+class TmOperationsConfig(ConfigModel):
+    """Simulated TM operations on top of the AML alerts (GOALS P10 stages 6-8).
+
+    Dispositions are simulated from the datagen ground truth: the L1 analyst
+    decides an alert correctly with probability ``analyst_accuracy``, the L2
+    investigator (and the QA reviewer) with ``investigator_accuracy``. Every
+    operations metric the report publishes is conditional on these values.
+    Read by tm_operations.py through the LB_TM_* env vars.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Run the TM operations layer. When it cannot run (no manifest, an error) the "
+            "run reports it as not run; only violated workflow invariants fail a run"
+        ),
+    )
+    seed: int = Field(default=20260924, description="Seed for every simulated decision")
+    analyst_accuracy: float = Field(default=0.90, ge=0.5, le=1.0)
+    investigator_accuracy: float = Field(default=0.95, ge=0.5, le=1.0)
+    qa_sample_rate: float = Field(
+        default=0.05, ge=0.0, le=1.0, description="Share of L1 decisions QA re-reviews"
+    )
+    alert_sla_days: int = Field(
+        default=60, ge=1, le=365, description="Policy SLA from alert to final decision"
+    )
+    case_lookback_months: int = Field(
+        default=12, ge=6, le=12, description="Activity a case pulls in before its opening"
+    )
+    late_filing_rate: float = Field(
+        default=0.03, ge=0.0, le=1.0, description="Share of SARs filed after the deadline"
+    )
+    no_suspect_rate: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Share of new cases with no suspect identified (60-day filing clock)",
+    )
+    max_alerts_per_customer: int = Field(
+        default=50_000,
+        ge=100,
+        le=10_000_000,
+        description=(
+            "Alerts replayed per customer; a hub customer's alerts past this are "
+            "dispositioned over_capacity and counted in the report"
+        ),
+    )
+    continuous_interval_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=86_400,
+        description=(
+            "Continuous mode: seconds between operations passes. One pass costs minutes "
+            "at scale 10, so running it every gold-refresh tick would wreck freshness"
+        ),
+    )
+    counterparty_scenarios: list[str] = Field(
+        default_factory=lambda: [
+            "W1_connected_components",
+            "W3_round_tripping",
+            "W4_risk_propagation",
+            "W17_layering_chain",
+        ],
+        description=(
+            "Scenarios declared to alert on counterparties as well as customers (graph "
+            "overlays). An alert on a non-customer from any other scenario fails an invariant"
+        ),
+    )
+
+    def env(self) -> dict[str, str]:
+        return {
+            "LB_TM_ENABLED": str(self.enabled).lower(),
+            "LB_TM_NO_SUSPECT_RATE": str(self.no_suspect_rate),
+            "LB_TM_MAX_ALERTS_PER_CUSTOMER": str(self.max_alerts_per_customer),
+            "LB_TM_CONTINUOUS_INTERVAL_S": str(self.continuous_interval_seconds),
+            "LB_TM_COUNTERPARTY_SCENARIOS": ",".join(self.counterparty_scenarios),
+            "LB_TM_SEED": str(self.seed),
+            "LB_TM_ANALYST_ACCURACY": str(self.analyst_accuracy),
+            "LB_TM_INVESTIGATOR_ACCURACY": str(self.investigator_accuracy),
+            "LB_TM_QA_SAMPLE_RATE": str(self.qa_sample_rate),
+            "LB_TM_ALERT_SLA_DAYS": str(self.alert_sla_days),
+            "LB_TM_CASE_LOOKBACK_MONTHS": str(self.case_lookback_months),
+            "LB_TM_LATE_FILING_RATE": str(self.late_filing_rate),
+        }
+
+
 class WorkloadConfig(ConfigModel):
     """Workload/data generation configuration."""
 
@@ -1082,6 +1168,9 @@ class WorkloadConfig(ConfigModel):
     # ceiling stays generous rather than unbounded. Consumed by
     # gold_finalize_financial via LB_FINANCIAL_W1_MAX_VERTICES.
     w1_max_vertices: int = Field(default=8_000_000, ge=1, le=200_000_000)
+
+    # Financial transaction-monitoring operations layer (GOALS P10).
+    tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -1263,6 +1352,24 @@ class TableNamesConfig(ConfigModel):
         default="gold.daily_dashboards",
         description="Gold daily-aggregate dashboard table (Financial): namespace.table",
     )
+    # Transaction-monitoring operations layer (GOALS P10), written by
+    # tm_operations.py after detection.
+    gold_tm_reconciliation: str = Field(
+        default="gold.tm_reconciliation",
+        description="Per-cycle monitoring completeness and funnel ledger (Financial)",
+    )
+    gold_scenario_coverage: str = Field(
+        default="gold.scenario_coverage",
+        description="Scenario-to-typology coverage matrix (Financial)",
+    )
+    gold_alert_dispositions: str = Field(
+        default="gold.alert_dispositions",
+        description="L1 triage priority and disposition per alert (Financial)",
+    )
+    gold_cases: str = Field(
+        default="gold.cases",
+        description="Customer-keyed L2 cases with SAR decisions (Financial)",
+    )
 
     def financial_env(self) -> dict[str, str]:
         """Env vars the financial Spark scripts read their table names from.
@@ -1283,6 +1390,10 @@ class TableNamesConfig(ConfigModel):
             "LB_FINANCIAL_GOLD_RISK_SCORES": self.gold_risk_scores,
             "LB_FINANCIAL_GOLD_CLUSTERS": self.gold_entity_clusters,
             "LB_FINANCIAL_GOLD_DASHBOARDS": self.gold_daily_dashboards,
+            "LB_FINANCIAL_GOLD_TM_RECONCILIATION": self.gold_tm_reconciliation,
+            "LB_FINANCIAL_GOLD_SCENARIO_COVERAGE": self.gold_scenario_coverage,
+            "LB_FINANCIAL_GOLD_ALERT_DISPOSITIONS": self.gold_alert_dispositions,
+            "LB_FINANCIAL_GOLD_CASES": self.gold_cases,
         }
 
     def workload_tables(
@@ -1313,6 +1424,10 @@ class TableNamesConfig(ConfigModel):
                     self.gold_entity_clusters,
                     self.gold_daily_dashboards,
                     "gold.detection_status",
+                    self.gold_tm_reconciliation,
+                    self.gold_scenario_coverage,
+                    self.gold_alert_dispositions,
+                    self.gold_cases,
                 ],
             }
         out: list[str] = []

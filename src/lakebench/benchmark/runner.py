@@ -122,16 +122,26 @@ class BenchmarkResult:
 class BenchmarkRunner:
     """Runs the query benchmark suite against the configured engine."""
 
-    def __init__(self, config: LakebenchConfig, namespace: str | None = None):
+    def __init__(
+        self,
+        config: LakebenchConfig,
+        namespace: str | None = None,
+        tm_run_id: str | None = None,
+    ):
         """Initialize benchmark runner.
 
         Args:
             config: Lakebench configuration
             namespace: Override namespace (default: from config)
+            tm_run_id: The run whose TM operations tables the investigator
+                queries read. None leaves the investigator class out: the
+                caller passes it only when this run's TM layer ran (verdict
+                pass or fail).
         """
         from .executor import get_executor
 
         self.config = config
+        self.tm_run_id = tm_run_id
         self.namespace = namespace or config.get_namespace()
         self.executor = get_executor(config, self.namespace)
         self.catalog = self.executor.catalog_name
@@ -150,7 +160,20 @@ class BenchmarkRunner:
             "gold_risk_scores": t.gold_risk_scores,
             "gold_entity_clusters": t.gold_entity_clusters,
             "gold_daily_dashboards": t.gold_daily_dashboards,
+            "gold_alert_dispositions": t.gold_alert_dispositions,
+            "gold_cases": t.gold_cases,
         }
+
+    def _queries(self) -> list[BenchmarkQuery]:
+        """The schema's query set. The investigator queries read this run's
+        TM operations tables; they are left out when the layer is disabled or
+        did not run for this run (no ``tm_run_id``), and the query-set id
+        records the difference."""
+        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
+        workload = self.config.architecture.workload
+        if not workload.tm_operations.enabled or not self.tm_run_id:
+            queries = [q for q in queries if q.query_class != "investigator"]
+        return queries
 
     def run(
         self,
@@ -229,7 +252,7 @@ class BenchmarkRunner:
         Returns:
             BenchmarkResult with mode="power"
         """
-        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
+        queries = self._queries()
         if query_class:
             queries = [q for q in queries if q.query_class == query_class]
 
@@ -294,7 +317,7 @@ class BenchmarkRunner:
         Returns:
             BenchmarkResult with mode="throughput" and stream_results
         """
-        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
+        queries = self._queries()
         if query_class:
             queries = [q for q in queries if q.query_class == query_class]
 
@@ -498,6 +521,7 @@ class BenchmarkRunner:
             catalog=self.catalog,
             silver_table=self.silver_table,
             gold_table=self.gold_table,
+            tm_run_id=(self.tm_run_id or "").replace("'", "''"),
             **self._extra_tables,
         )
 

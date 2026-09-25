@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
+from lakebench.benchmark.queries import legacy_query_set_id
 
 from .collector import (
     BenchmarkMetrics,
@@ -62,7 +63,9 @@ def _deserialize_stage_latency_profile(raw: Any) -> list[float]:
     return []
 
 
-def _deserialize_benchmark_rounds(raw_rounds: list[dict[str, Any]]) -> list[BenchmarkMetrics]:
+def _deserialize_benchmark_rounds(
+    raw_rounds: list[dict[str, Any]], recorded_at: str | None = None
+) -> list[BenchmarkMetrics]:
     """Deserialize benchmark_rounds from JSON into BenchmarkMetrics objects."""
     rounds: list[BenchmarkMetrics] = []
     for r in raw_rounds:
@@ -98,6 +101,8 @@ def _deserialize_benchmark_rounds(raw_rounds: list[dict[str, Any]]) -> list[Benc
                 qph=r.get("qph", 0.0),
                 total_seconds=r.get("total_seconds", 0.0),
                 queries=r.get("queries", []),
+                query_set_id=r.get("query_set_id")
+                or legacy_query_set_id(r.get("queries"), recorded_at),
                 iterations=r.get("iterations", 1),
                 streams=r.get("streams", 1),
                 stream_results=r.get("stream_results", []),
@@ -107,7 +112,9 @@ def _deserialize_benchmark_rounds(raw_rounds: list[dict[str, Any]]) -> list[Benc
     return rounds
 
 
-def _deserialize_cycles(raw_cycles: list[dict[str, Any]]) -> list[CycleMetrics]:
+def _deserialize_cycles(
+    raw_cycles: list[dict[str, Any]], recorded_at: str | None = None
+) -> list[CycleMetrics]:
     """Deserialize cycle metrics from JSON."""
     cycles: list[CycleMetrics] = []
     for c in raw_cycles:
@@ -136,6 +143,8 @@ def _deserialize_cycles(raw_cycles: list[dict[str, Any]]) -> list[CycleMetrics]:
                 qph=bd.get("qph", 0.0),
                 total_seconds=bd.get("total_seconds", 0.0),
                 queries=bd.get("queries", []),
+                query_set_id=bd.get("query_set_id")
+                or legacy_query_set_id(bd.get("queries"), recorded_at),
                 iterations=bd.get("iterations", 1),
             )
         cycles.append(
@@ -329,6 +338,9 @@ class MetricsStorage:
         Returns:
             PipelineMetrics instance
         """
+        # When the run was recorded: a benchmark from before query-set ids
+        # gets a pinned legacy id only if it is newer than the last SQL change.
+        recorded_at = data.get("start_time")
         jobs = []
         for job_data in data.get("jobs", []):
             job = JobMetrics(
@@ -364,6 +376,9 @@ class MetricsStorage:
                 alerts_by_rule=job_data.get("alerts_by_rule") or {},
                 rule_errors=job_data.get("rule_errors") or {},
                 rules_skipped=job_data.get("rules_skipped") or {},
+                tm_invariants=job_data.get("tm_invariants") or {},
+                tm_ops=job_data.get("tm_ops"),
+                tm_status=job_data.get("tm_status") or {},
             )
 
             if job_data.get("start_time"):
@@ -406,7 +421,7 @@ class MetricsStorage:
             )
 
         # Deserialize top-level benchmark rounds
-        top_rounds = _deserialize_benchmark_rounds(data.get("benchmark_rounds", []))
+        top_rounds = _deserialize_benchmark_rounds(data.get("benchmark_rounds", []), recorded_at)
 
         metrics = PipelineMetrics(
             run_id=data.get("run_id", ""),
@@ -423,9 +438,10 @@ class MetricsStorage:
             config_snapshot=data.get("config_snapshot", {}),
             benchmark_rounds=top_rounds,
             platform_metrics=data.get("platform_metrics"),
-            cycles=_deserialize_cycles(data.get("cycles", [])),
+            cycles=_deserialize_cycles(data.get("cycles", []), recorded_at),
             datagen_fleet=data.get("datagen_fleet"),
             financial_scoring=data.get("financial_scoring"),
+            tm_operations=data.get("tm_operations"),
         )
 
         if data.get("end_time"):
@@ -441,6 +457,8 @@ class MetricsStorage:
                 qph=bench_data.get("qph", 0.0),
                 total_seconds=bench_data.get("total_seconds", 0.0),
                 queries=bench_data.get("queries", []),
+                query_set_id=bench_data.get("query_set_id")
+                or legacy_query_set_id(bench_data.get("queries"), recorded_at),
                 iterations=bench_data.get("iterations", 1),
                 streams=bench_data.get("streams", 1),
                 stream_results=bench_data.get("stream_results", []),
@@ -495,6 +513,8 @@ class MetricsStorage:
                     qph=qb_data.get("qph", 0.0),
                     total_seconds=qb_data.get("total_seconds", 0.0),
                     queries=qb_data.get("queries", []),
+                    query_set_id=qb_data.get("query_set_id")
+                    or legacy_query_set_id(qb_data.get("queries"), recorded_at),
                     iterations=qb_data.get("iterations", 1),
                     streams=qb_data.get("streams", 1),
                     stream_results=qb_data.get("stream_results", []),
@@ -539,8 +559,10 @@ class MetricsStorage:
                 query_benchmark=query_benchmark,
                 config_snapshot=pb_data.get("config_snapshot", {}),
                 success=pb_data.get("success", False),
-                benchmark_rounds=_deserialize_benchmark_rounds(pb_data.get("benchmark_rounds", [])),
-                cycles=_deserialize_cycles(pb_data.get("cycles", [])),
+                benchmark_rounds=_deserialize_benchmark_rounds(
+                    pb_data.get("benchmark_rounds", []), recorded_at
+                ),
+                cycles=_deserialize_cycles(pb_data.get("cycles", []), recorded_at),
                 qph_degradation_pct=scores.get("qph_degradation_pct"),
                 # Maintenance metrics (v1.3)
                 maintenance_elapsed_seconds=scores.get("maintenance_elapsed_seconds", 0.0),

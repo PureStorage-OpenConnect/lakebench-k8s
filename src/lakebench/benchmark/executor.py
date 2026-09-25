@@ -101,6 +101,8 @@ def get_executor(config: LakebenchConfig, namespace: str | None = None) -> Query
                 "gold_risk_scores": tables.gold_risk_scores,
                 "gold_entity_clusters": tables.gold_entity_clusters,
                 "gold_daily_dashboards": tables.gold_daily_dashboards,
+                "gold_alert_dispositions": tables.gold_alert_dispositions,
+                "gold_cases": tables.gold_cases,
             },
             table_format=table_format,
             catalog_type=catalog_type,

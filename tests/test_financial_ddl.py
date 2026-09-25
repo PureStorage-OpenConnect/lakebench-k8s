@@ -129,6 +129,10 @@ class TestRegistry:
             "gold_risk_scores",
             "gold_entity_clusters",
             "gold_daily_dashboards",
+            "gold_tm_reconciliation",
+            "gold_scenario_coverage",
+            "gold_alert_dispositions",
+            "gold_cases",
         }
         assert set(FINANCIAL_TABLE_DDLS) == expected
 
@@ -225,6 +229,46 @@ class TestKycLockstep:
         acc = [n for n, _ in _ddl_columns(SILVER_ACCOUNTS_DDL)]
         assert [n for n, _ in consts["KYC_ENTITY_COLUMNS"]] == ent[ent.index("is_customer") :]
         assert [n for n, _ in consts["KYC_ACCOUNT_COLUMNS"]] == acc[acc.index("home_fi") :]
+
+
+class TestTmOperationsLockstep:
+    """P10 gold tables: the deployer DDL and tm_operations.py's inline DDL
+    agree column for column, name and type."""
+
+    @pytest.mark.parametrize(
+        "key,inline_name",
+        [
+            ("gold_tm_reconciliation", "DDL_RECON"),
+            ("gold_scenario_coverage", "DDL_COVERAGE"),
+            ("gold_alert_dispositions", "DDL_DISPOSITIONS"),
+            ("gold_cases", "DDL_CASES"),
+        ],
+    )
+    def test_inline_ddl_matches_deployer_ddl(self, key, inline_name):
+        from pathlib import Path
+
+        src = Path("src/lakebench/spark/scripts/tm_operations.py").read_text()
+        inline = src[src.index(f"{inline_name} = ") :].split('"""')[1]
+        assert _ddl_columns(FINANCIAL_TABLE_DDLS[key]) == _ddl_columns(inline)
+        assert _ddl_columns(inline), f"{inline_name} parsed to no columns"
+
+    def test_every_tm_table_is_destroyed_and_named_in_config(self):
+        from lakebench.config.schema import TableNamesConfig
+
+        t = TableNamesConfig()
+        env = t.financial_env()
+        gold = t.workload_tables("financial", layers=("gold",))
+        for key in (
+            "gold_tm_reconciliation",
+            "gold_scenario_coverage",
+            "gold_alert_dispositions",
+            "gold_cases",
+        ):
+            assert getattr(t, key) in gold
+            assert getattr(t, key) in env.values()
+
+    def test_alert_priority_comment_names_both_vocabularies(self):
+        assert "HIGH, MED" in GOLD_ALERTS_DDL and "triage priority" in GOLD_ALERTS_DDL
 
 
 def test_datagen_fatf_list_matches_the_reference_file():

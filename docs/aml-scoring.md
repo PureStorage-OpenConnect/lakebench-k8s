@@ -266,6 +266,142 @@ The Pydantic schema accepts up to scale 10000, but scale 500 (~50 TB)
 is the tested ceiling; runs above it have not been verified end-to-end
 and are on the user.
 
+## The transaction-monitoring operations layer
+
+After detection, the gold stage runs the work a bank's TM operation does
+with the alerts (`spark/scripts/tm_operations.py`, GOALS P10). One reporting
+institution monitors its own customers (`silver.entities.is_customer`);
+everyone else is a counterparty. The unit of work is the business day: an
+alert is generated the day after its last payment, and the queue is replayed
+day by day up to the cycle's as-of date (the day after the newest payment).
+Anything that would be decided later is the open backlog.
+
+| Table | Stage | What it holds |
+|---|---|---|
+| `gold.tm_reconciliation` | 1 | One set of rows per cycle (batch) or operations pass (continuous), appended: customers; source, bronze and silver payments; monitored vs excluded by reason (`no_customer_party`, `dq_unconvertible_currency`, and `in_flight` in continuous); DQ rule failures; the funnel alerts -> escalated -> cases -> SARs |
+| `gold.scenario_coverage` | 1 | Scenario-to-typology matrix with this cycle's rule status, alert volume and planted instances; planted typologies no scenario targets appear as `gap` |
+| `gold.alert_dispositions` | 6 | Triage priority (scenario weight x CRR tier: low, medium, high, critical) and a disposition that is never NULL: `escalated`, `closed_nfa`, `attached` to the customer's open case, `pending_l1`, `out_of_scope` (non-customer), `over_capacity` (past the per-customer cap, applied after identity matching so an alert already in
+the workflow is never capped); aging against the SLA; QA re-review; the alert's first-seen cycle |
+| `gold.cases` | 7, 8 | Customer-keyed cases, at most one open per customer, with the alerts they pulled in and the payments of the lookback window; determination, `sar_filed` / `no_sar`, the filing limit that applied, the continuing-activity review and what happened to it |
+
+**Dispositions are simulated, not made by people.** An alert is truly
+suspicious when it touches a planted (non-control) typology payment. The L1
+analyst decides correctly with probability `analyst_accuracy`, the L2
+investigator and the QA reviewer with `investigator_accuracy`. Every draw is
+a hash of the seed and a stable key (the alert's identity, the case id), so
+a rerun reproduces the same decisions. Every operations number in the report
+is conditional on these values, and the report says so.
+
+**Regulatory clocks.** 31 CFR 1020.320: file within 30 days of the
+determination, 60 when no suspect is identified (`no_suspect_rate` of new
+cases). FinCEN continuing activity: review 90 days after each SAR and file
+the continuing SAR within 120 days of the prior one. A review that falls due
+while the customer's case is still under investigation is folded into it; a
+review that falls due while that case is already determined and only waiting
+to file is never credited to its investigation; the SAR that case then files
+covers the activity and is recorded as the continuing-activity filing
+(`superseded_by_sar`). Late filings are
+drawn at `late_filing_rate` and flagged `filed_late`.
+
+**Alert identity across cycles.** Detection re-runs over the whole corpus
+each cycle, so an alert's window can grow as payments arrive. The layer
+matches each alert to the last completed cycle's (read at the table
+snapshots that cycle recorded in the ledger): same content first, else the
+same rule on the same customer, its last payment moved forward by at most
+31 days, and holding at least a quarter of the payments the prior was first
+raised on (a frozen 32-hash sketch of them, checked against all of the new
+alert's payments) and never fewer than two, largest overlap first. A new
+alert sharing a single payment with a prior never takes its identity. Rules cap the related-payment
+list by payment id, so an alert that grows past about three times that cap
+between cycles can lose its identity: it is then carried as withdrawn and
+raised again as new, which inflates alert counts but never moves a decision.
+A matched alert keeps its key, generated date, truth and
+priority as first seen; an alert detection stops emitting is kept
+(`in_current_detection` false); a new alert whose payments predate the
+previous cycle is dated on this cycle, the first day it could have been
+raised. The day-by-day replay is causal and its inputs for seen alerts are
+frozen, so recomputing it reproduces every earlier decision; the
+`history_stable` invariant checks that against the previous cycle's table.
+Case activity counts are recomputed each cycle from silver.
+
+```yaml
+architecture:
+  workload:
+    tm_operations:
+      enabled: true
+      seed: 20260924
+      analyst_accuracy: 0.90
+      investigator_accuracy: 0.95
+      qa_sample_rate: 0.05
+      alert_sla_days: 60          # policy SLA, alert to final decision
+      case_lookback_months: 12    # 6-12
+      late_filing_rate: 0.03
+      no_suspect_rate: 0.05
+      max_alerts_per_customer: 50000
+      continuous_interval_seconds: 1800
+      counterparty_scenarios: [W1_connected_components, W3_round_tripping,
+                               W4_risk_propagation, W17_layering_chain]
+```
+
+**Workflow invariants.** Checked on the tables as written, every cycle: the
+monitored population is not empty; monitored + excluded = source; every alert
+has a disposition row and none is NULL; alerts on non-customers come only
+from scenarios declared customer-and-counterparty; escalated <= alerts;
+alert-driven cases <= escalated; SARs <= cases; at most one open case per
+customer; one disposition row per alert identity; the funnel is monotone; every SAR past 90 days has its review (or
+is waiting on a case pending filing); no review is credited to an
+already-determined case; decided history is unchanged from the previous
+cycle.
+
+**The P10 verdict is separate from detection.** `fail` (the layer ran and an
+invariant is violated) fails the run. `not_run` (no manifest, a layer error,
+a continuous window that ended before the manifest was ready) says why and
+leaves detection scoring alone. `unknown` means no driver log was captured
+for some cycle, or an invariant could not be checked (the raw source files
+failed to list).
+`disabled` skips the gate. The verdict is kept in `metrics.json` as
+`tm_operations` and heads the report section.
+
+**Continuous.** gold-refresh runs the layer every
+`continuous_interval_seconds` (at least 60), counted from the end of the
+last pass so detection ticks always run between passes, plus one final pass
+timed to finish before the window closes. One pass over the full corpus
+takes minutes at scale 10, and gold is not refreshed meanwhile, so a
+freshness sample is logged after each pass and the pass time counts in the
+freshness score (sampled after a pass while data is moving). The final pass
+is timed from the first gold-refresh driver's start, persisted in its
+checkpoint, plus the window length. The continuous jobs carry the CLI run
+id, so a restarted driver appends to the same ledger. Each pass takes its cycle number in the
+ledger before it writes; a pass that fails after writing is reported as a
+failure and never carried from.
+
+Silver, then bronze, are pinned before the raw files are counted.
+In-flight payments are bounded, not inferred: bronze must hold exactly the
+rows of the raw files its stream's checkpoint log says it took up to the
+pinned snapshot's batch (`spark.sql.streaming.epochId`), so the rest are
+files not yet taken; and rows silver has not taken must be newer than
+silver's ingest watermark. Anything else is `unaccounted` and fails
+reconciliation. Freshness samples taken after a pass follow the tick's own
+rule (only while data is moving), so a drained corpus's idle time never
+becomes the score. The continuous reset drops all four tables.
+
+**Investigator queries.** The AML benchmark set includes four timed
+investigator queries (class `investigator`): customer 360 for the top open
+case, the 12-month activity review of the newest case, the counterparty and
+two-hop view, and open cases older than 60 days. They read only this run's
+rows, and are left out unless this run's TM verdict is pass or fail (the
+standalone `benchmark` command includes them only when the deployment's
+newest run had a pass or fail verdict, since each run overwrites the tables) (so a
+disabled or not-run layer never times empty or stale tables), and from the
+in-window rounds of a continuous run. QpH is recorded with its query-set id; `compare` and
+`reproduce` refuse to compare QpH across different query sets, so an 8-query
+AML run is never set against a 12-query one. A run recorded before the id
+existed gets a pinned historical id when its query names are the c360 set or
+the 8-query AML set and was recorded after that set's last SQL change (so
+it stays comparable with runs over the same SQL); older records and any other
+legacy set are `unknown`. A run of an older branch recorded after that date
+is the one case this cannot tell apart.
+
 ## What the AML workload deliberately does not measure
 
 - **Real production alert queues.** The datagen has one baseline
