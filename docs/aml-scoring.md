@@ -266,6 +266,62 @@ The Pydantic schema accepts up to scale 10000, but scale 500 (~50 TB)
 is the tested ceiling; runs above it have not been verified end-to-end
 and are on the user.
 
+## The transaction-monitoring operations layer
+
+After detection, the gold stage runs the work a bank's TM operation does
+with the alerts (`spark/scripts/tm_operations.py`, GOALS P10). One reporting
+institution monitors its own customers (`silver.entities.is_customer`);
+everyone else is a counterparty. The unit of work is the business day: an
+alert is generated the day after its last payment, and the queue is replayed
+day by day up to the cycle's as-of date (the day after the newest payment).
+Anything that would be decided later is the open backlog.
+
+| Table | Stage | What it holds |
+|---|---|---|
+| `gold.tm_reconciliation` | 1 | Per cycle: source, bronze and silver payments; monitored vs excluded by reason (`no_customer_party`, `dq_unconvertible_currency`, and `in_flight` in continuous); DQ rule failures; the funnel alerts -> escalated -> cases -> SARs |
+| `gold.scenario_coverage` | 1 | Scenario-to-typology matrix with this cycle's rule status, alert volume and planted instances; planted typologies no scenario targets appear as `gap` |
+| `gold.alert_dispositions` | 6 | Triage priority (scenario weight x CRR tier: low, medium, high, critical), disposition (`escalated`, `closed_nfa`, `attached` to the customer's open case, `out_of_scope` for a non-customer, NULL while waiting for L1), aging against the SLA, QA re-review |
+| `gold.cases` | 7, 8 | Customer-keyed cases, at most one open per customer, with the alerts they pulled in and the payments of the lookback window; determination, `sar_filed` / `no_sar`, the 30-day filing deadline (60 when no suspect is identified), and the continuing-activity review 90 days after each SAR |
+
+**Dispositions are simulated, not made by people.** An alert is truly
+suspicious when it touches a planted (non-control) typology payment. The L1
+analyst decides correctly with probability `analyst_accuracy`, the L2
+investigator and the QA reviewer with `investigator_accuracy`. Every draw is
+a hash of the seed and the alert or case content, so a rerun reproduces the
+same decisions. Every operations number in the report is conditional on
+these values, and the report says so.
+
+```yaml
+architecture:
+  workload:
+    tm_operations:
+      seed: 20260924
+      analyst_accuracy: 0.90
+      investigator_accuracy: 0.95
+      qa_sample_rate: 0.05
+      alert_sla_days: 60          # policy SLA, alert to final decision
+      case_lookback_months: 12    # 6-12
+      late_filing_rate: 0.03
+```
+
+**Workflow invariants gate the run.** Checked on the tables as written, every
+cycle: monitored + excluded = source; every alert has a disposition row;
+escalated <= alerts; alert-driven cases <= escalated; SARs <= cases; at most
+one open case per customer; the funnel is monotone; every SAR past 90 days
+has its continuing-activity review. Any violation, or a gold stage that
+reports no invariants, fails the run in batch and in continuous.
+
+**Continuous.** Each gold-refresh tick re-runs detection over the full
+corpus, rebuilds the three projections from those alerts, and appends one
+reconciliation set with the tick as the cycle. Payments datagen has written
+that the stream has not yet carried into silver are excluded as
+`in_flight`. The continuous reset drops all four tables.
+
+**Investigator queries.** The AML benchmark set includes four timed
+investigator queries (class `investigator`): customer 360 for the top open
+case, the 12-month activity review of the newest case, the counterparty and
+two-hop view, and open cases older than 60 days.
+
 ## What the AML workload deliberately does not measure
 
 - **Real production alert queues.** The datagen has one baseline
