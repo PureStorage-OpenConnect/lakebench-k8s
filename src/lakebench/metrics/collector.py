@@ -96,6 +96,18 @@ class StreamingJobMetrics:
     # Silver only: rows of micro-batches that logged a commit. None when no
     # commit line was seen (unknown, so a run cannot count as drained).
     committed_rows: int | None = None
+    # AML gold only: time to detect, merged from every cycle's histogram
+    # ("Cycle N: time to detect ..."). None when no cycle logged one.
+    ttd_alerts: int | None = None
+    ttd_unmatched: int = 0
+    ttd_late: int = 0
+    ttd_unmeasured_cycles: int = 0
+    ttd_p50_seconds: float | None = None
+    ttd_p95_seconds: float | None = None
+    ttd_max_seconds: float | None = None
+    # Executors the submitted manifest requested, after the concurrent
+    # budget and any override. None when unknown (the profile is used).
+    requested_executors: int | None = None
     micro_batch_duration_ms: float = 0.0
     batch_size: int = 0
     total_batches: int = 0
@@ -420,6 +432,14 @@ class StageMetrics:
     freshness_active_seconds: float | None = None  # all but the trailing idle run (LB-145)
     trailing_idle_cycles: int = 0  # gold cycles after silver last moved
     committed_rows: int | None = None  # silver: rows in committed micro-batches
+    # AML gold: time to detect over newly raised alerts (None = not measured)
+    ttd_alerts: int | None = None
+    ttd_unmatched: int = 0
+    ttd_late: int = 0
+    ttd_unmeasured_cycles: int = 0
+    ttd_p50_seconds: float | None = None
+    ttd_p95_seconds: float | None = None
+    ttd_max_seconds: float | None = None
     total_batches: int = 0
     batch_size: int = 0
     unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
@@ -559,7 +579,15 @@ class PipelineBenchmark:
         "sustained_throughput_rps": "Rows entering bronze per second (higher is better)",
         "ingest_ratio": "Bronze rows ingested / datagen rows produced (1.0 = all data consumed)",
         "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
-        "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input",
+        "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input; intake_limit says whether bronze processing was the limit",
+        "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), below_bronze_capacity (bronze had idle time: the trigger rate, a late start or a stall; the throughput is not bronze's capacity), none (kept up)",
+        "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
+        "time_to_detect_seconds": "AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the end of the detection pass that first raised it (lower is better)",
+        "time_to_detect_p95_seconds": "AML continuous. 95th percentile of time_to_detect (histogram bin upper edge, 10 s bins)",
+        "time_to_detect_max_seconds": "AML continuous. Longest time to detect of any newly raised alert",
+        "time_to_detect_alerts": "AML continuous. Newly raised alerts the time to detect is measured over",
+        "time_to_detect_late_alerts": "AML continuous. Measured alerts whose related transactions were all in silver before the previous detection pass (re-raised after a rule error, or evidence outside related_txn_ids); included in the percentiles",
+        "time_to_detect_unmeasured_cycles": "AML continuous. Gold cycles that logged no time-to-detect line; their alerts are measured on the next cycle, late by one cycle",
         "corpus_drained": "True when the finite corpus was fully ingested before the window ended: freshness covers only cycles that saw new data, and sustained_throughput_rps is a lower bound",
         "total_rows_processed": "Cumulative rows processed across all streaming stages",
         "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
@@ -632,6 +660,31 @@ class PipelineBenchmark:
     # sustained_throughput_rps is corpus rows / window, a lower bound on what
     # the pipeline could sustain (LB-145). None when ingest_ratio is unknown.
     corpus_drained: bool | None = None
+    # What bounded intake when ingest_ratio < 0.95. "bronze_capacity": bronze
+    # micro-batches ran back to back for most of the window, so its processing
+    # rate is the limit and sustained_throughput_rps is its capacity.
+    # "below_bronze_capacity": bronze had idle time in the window, so the
+    # limit was elsewhere (the trigger rate, a late start or a stall; the
+    # driver log says which) and the throughput is not bronze's capacity.
+    # "none" when intake kept up; None when unknown. Diagnostic only:
+    # pipeline_saturated stays the ratio verdict.
+    intake_limit: str | None = None
+    # Share of the window bronze spent inside micro-batches (batches x mean
+    # batch time / window). None when bronze logged no batch times.
+    bronze_busy_fraction: float | None = None
+    # AML continuous time to detect: from the newest bronze ingest_ts of an
+    # alert's related transactions to the end of the detection pass that
+    # first raised it. Median (the score), p95 and max over newly raised
+    # alerts; None when not measured.
+    time_to_detect_seconds: float | None = None
+    time_to_detect_p95_seconds: float | None = None
+    time_to_detect_max_seconds: float | None = None
+    time_to_detect_alerts: int | None = None
+    # Of those, alerts whose evidence was in silver before the previous
+    # detection pass read it (re-raised after a rule error, or evidence
+    # outside related_txn_ids); and gold cycles that logged no measurement.
+    time_to_detect_late_alerts: int | None = None
+    time_to_detect_unmeasured_cycles: int | None = None
 
     # Trino detail (preserved for drill-down)
     query_benchmark: BenchmarkMetrics | None = None
@@ -808,6 +861,40 @@ class PipelineBenchmark:
             self.ingest_ratio = None
             self.pipeline_saturated = None
 
+        # What bounded intake. A short ratio alone does not say where: AML
+        # trickles a corpus that is complete before the run, so a window
+        # shorter than corpus / trickle rate reads short even if bronze idles
+        # between triggers. Bronze busy for most of the window means its own
+        # processing is the limit. Idle time does not prove a trigger cap (a
+        # slow start or a stall also leaves bronze idle), so it only says the
+        # limit was not bronze's processing.
+        bronze = bronze_stages[0] if bronze_stages else None
+        if bronze and bronze.latency_ms and bronze.total_batches and bronze.elapsed_seconds > 0:
+            self.bronze_busy_fraction = (
+                bronze.total_batches * bronze.latency_ms / 1000.0 / bronze.elapsed_seconds
+            )
+        if self.ingest_ratio is not None:
+            if self.ingest_ratio >= 0.95:
+                self.intake_limit = "none"
+            elif self.bronze_busy_fraction is not None:
+                self.intake_limit = (
+                    "bronze_capacity"
+                    if self.bronze_busy_fraction >= _BRONZE_BUSY_BOUND
+                    else "below_bronze_capacity"
+                )
+
+        # Time to detect (AML continuous): the gold stage's merged histogram.
+        gold = next((s for s in streaming if s.stage_name == "gold"), None)
+        is_aml = self.config_snapshot.get("workload_schema") == "financial"
+        if gold is not None and (gold.ttd_alerts is not None or is_aml):
+            self.time_to_detect_unmeasured_cycles = gold.ttd_unmeasured_cycles
+        if gold is not None and gold.ttd_alerts is not None:
+            self.time_to_detect_alerts = gold.ttd_alerts
+            self.time_to_detect_seconds = gold.ttd_p50_seconds
+            self.time_to_detect_p95_seconds = gold.ttd_p95_seconds
+            self.time_to_detect_max_seconds = gold.ttd_max_seconds
+            self.time_to_detect_late_alerts = gold.ttd_late
+
         # Drained: every datagen row reached bronze and silver COMMITTED all
         # of it, so the trailing idle gold cycles measured an empty feed, not a
         # slow pipeline (LB-145). A stall (rows missing, silver behind or its
@@ -927,12 +1014,34 @@ class PipelineBenchmark:
                 "composite_qph": composite_qph,
                 "pipeline_saturated": self.pipeline_saturated,
                 "corpus_drained": self.corpus_drained,
+                "intake_limit": self.intake_limit,
+                "bronze_busy_fraction": (
+                    round(self.bronze_busy_fraction, 3)
+                    if self.bronze_busy_fraction is not None
+                    else None
+                ),
                 "total_rows_processed": self.total_rows_processed,
                 "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
                 "total_s3_objects": self.total_s3_objects,
             }
             if self.query_time_freshness_seconds > 0:
                 scores["query_time_freshness_seconds"] = round(self.query_time_freshness_seconds, 2)
+            # AML runs always carry the keys, None when unmeasured, so a
+            # missing measurement is visible rather than an absent field.
+            if (
+                self.time_to_detect_alerts is not None
+                or self.config_snapshot.get("workload_schema") == "financial"
+            ):
+                scores["time_to_detect_seconds"] = self.time_to_detect_seconds
+                scores["time_to_detect_p95_seconds"] = self.time_to_detect_p95_seconds
+                scores["time_to_detect_max_seconds"] = (
+                    round(self.time_to_detect_max_seconds, 1)
+                    if self.time_to_detect_max_seconds is not None
+                    else None
+                )
+                scores["time_to_detect_alerts"] = self.time_to_detect_alerts
+                scores["time_to_detect_late_alerts"] = self.time_to_detect_late_alerts
+                scores["time_to_detect_unmeasured_cycles"] = self.time_to_detect_unmeasured_cycles
             if in_stream_qph > 0:
                 scores["in_stream_composite_qph"] = in_stream_qph
                 scores["benchmark_rounds_count"] = len(self.benchmark_rounds)
@@ -1302,6 +1411,10 @@ def build_pipeline_benchmark(
                 _override_val = _overrides.get(_override_key)
                 if _override_val is not None:
                     _s_execs = _override_val
+                # The count actually requested wins: the concurrent budget
+                # can cap a stage below both the profile and the override.
+                if sj.requested_executors:
+                    _s_execs = sj.requested_executors
                 _mem_str = _s_profile.get("executor_memory", "0g")
                 # Simple parse: strip trailing 'g'
                 _s_mem = (
@@ -1331,6 +1444,13 @@ def build_pipeline_benchmark(
             freshness_active_seconds=sj.freshness_active_seconds,
             trailing_idle_cycles=sj.trailing_idle_cycles,
             committed_rows=sj.committed_rows,
+            ttd_alerts=sj.ttd_alerts,
+            ttd_unmatched=sj.ttd_unmatched,
+            ttd_late=sj.ttd_late,
+            ttd_unmeasured_cycles=sj.ttd_unmeasured_cycles,
+            ttd_p50_seconds=sj.ttd_p50_seconds,
+            ttd_p95_seconds=sj.ttd_p95_seconds,
+            ttd_max_seconds=sj.ttd_max_seconds,
             total_batches=sj.total_batches,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
@@ -1548,6 +1668,75 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
     }
 
     return snapshot
+
+
+# Bronze busy share at or above which bronze's own processing bounds intake.
+# A bronze that cannot keep up starts each micro-batch as the last ends and
+# sits near 1.0; startup and idle triggers only pull the share down.
+_BRONZE_BUSY_BOUND = 0.8
+
+# gold_refresh_financial's per-cycle time-to-detect line (common.ttd_line).
+_TTD_LINE = re.compile(
+    r"Cycle (?P<cycle>\d+): time to detect alerts=(?P<alerts>\d+) late=(?P<late>\d+) "
+    r"unmatched=(?P<unmatched>\d+) max=(?P<max>[\d.]+|-)s bin=(?P<bin>\d+)s "
+    r"bins=(?P<bins>[\d:,]*)"
+)
+
+
+def ttd_percentile(bins: dict[int, int], bin_s: int, q: float, max_s: float) -> float:
+    """The q-quantile of a {bin index: count} histogram, at the upper edge of
+    the bin that reaches it (so never under the true value), capped at the
+    measured maximum."""
+    total = sum(bins.values())
+    need = q * total
+    seen = 0
+    for b in sorted(bins):
+        seen += bins[b]
+        if seen >= need:
+            return min(float((b + 1) * bin_s), max_s)
+    return max_s
+
+
+def _apply_ttd(metrics: StreamingJobMetrics, lines: list[re.Match[str]], cycles: set[int]) -> None:
+    """Merge the cycles' time-to-detect histograms into run-wide numbers.
+
+    Only lines with the first line's bin width are merged; the script uses
+    one constant, so a mismatch means mixed script versions in one log.
+    ``cycles`` are the gold cycles the log shows: those without a line are
+    counted as unmeasured, since their alerts are measured late or not at
+    all.
+    """
+    if not lines:
+        # Cycles ran but none logged a measurement: say so, the percentiles
+        # stay None.
+        metrics.ttd_unmeasured_cycles = len(cycles)
+        return
+    bin_s = int(lines[0]["bin"])
+    bins: dict[int, int] = {}
+    unmatched = 0
+    late = 0
+    peaks: list[float] = []
+    measured: set[int] = set()
+    for m in lines:
+        if int(m["bin"]) != bin_s:
+            continue
+        measured.add(int(m["cycle"]))
+        unmatched += int(m["unmatched"])
+        late += int(m["late"])
+        if m["max"] != "-":
+            peaks.append(float(m["max"]))
+        for pair in filter(None, m["bins"].split(",")):
+            b, n = pair.split(":")
+            bins[int(b)] = bins.get(int(b), 0) + int(n)
+    metrics.ttd_alerts = sum(bins.values())
+    metrics.ttd_unmatched = unmatched
+    metrics.ttd_late = late
+    metrics.ttd_unmeasured_cycles = len(cycles - measured)
+    if metrics.ttd_alerts > 0 and peaks:
+        mx = max(peaks)
+        metrics.ttd_max_seconds = mx
+        metrics.ttd_p50_seconds = ttd_percentile(bins, bin_s, 0.50, mx)
+        metrics.ttd_p95_seconds = ttd_percentile(bins, bin_s, 0.95, mx)
 
 
 class MetricsCollector:
@@ -1909,6 +2098,7 @@ class MetricsCollector:
         # Silver: rows per batch id, and the batch ids that logged a commit.
         batch_rows: dict[int, int] = {}
         committed_batches: set[int] = set()
+        ttd_lines: list[re.Match[str]] = []
 
         for line in logs.split("\n"):
             # Bronze: "Batch N: writing X rows to ..."
@@ -1976,6 +2166,15 @@ class MetricsCollector:
                 freshness_cycles.append((float(m.group(1)), bool(m.group(2))))
                 continue
 
+            # AML gold: "Cycle N: time to detect alerts=A unmatched=U
+            # max=Xs bin=Bs bins=i:n,..." (common.ttd_line).
+            m = _TTD_LINE.search(line)
+            if m:
+                ttd_lines.append(m)
+                continue
+
+        if job_type == "gold-refresh":
+            _apply_ttd(metrics, ttd_lines, batch_ids)
         metrics.total_batches = len(batch_ids)
         metrics.total_rows_processed = total_rows
 

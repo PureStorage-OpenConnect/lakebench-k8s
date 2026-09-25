@@ -223,6 +223,30 @@ class TestDocumentedMinimumsMatchCode:
             )
 
 
+class TestContinuousDocsTable:
+    """The continuous-mode minimums in getting-started.md come from
+    compute_peak_requirements(scale, "sustained", schema)."""
+
+    DOC = Path(__file__).resolve().parents[1] / "docs" / "getting-started.md"
+    ROW = re.compile(
+        r"^\| (Customer360|AML) \| ([\d-]+) \| ([\d,]+) cores \| ([\d,]+) GB \| ([\d,]+) Gi \|",
+        re.MULTILINE,
+    )
+
+    @pytest.mark.skipif(not DOC.exists(), reason="docs not present in this checkout")
+    def test_continuous_table_matches_profiles(self):
+        rows = self.ROW.findall(self.DOC.read_text())
+        assert len(rows) == 6, "continuous minimums table not found in docs/getting-started.md"
+        schema = {"Customer360": "customer360", "AML": "financial"}
+        for workload, scales, cores, memory, scratch in rows:
+            documented = tuple(int(v.replace(",", "")) for v in (cores, memory, scratch))
+            for scale in {int(x) for x in scales.split("-")}:
+                peak = compute_peak_requirements(scale, "sustained", schema[workload])
+                assert (peak.cpu_cores, peak.memory_gb, peak.scratch_gb) == documented, (
+                    f"docs/getting-started.md continuous {workload} scale {scale} is stale."
+                )
+
+
 class TestPrerequisiteWiring:
     """The check must actually be registered in run_prerequisites()."""
 

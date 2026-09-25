@@ -487,6 +487,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Removed
 - **`platform.storage.scratch.create_storage_class`.** See above.
 
+
+### AML continuous: time to detect and bronze sizing
+- **Higher cluster minimum for AML continuous.** bronze-ingest runs 5
+  executors x 4 cores (was 2 x 2) under `schema: financial`, sized from
+  run-20260925-104452-21bf3a, where it drained 58% of the scale-10 corpus in
+  a 30-minute window. The preflight minimum is now 54 cores / 340 GB at
+  scale 1-10 (was 38 / 272) and 106 cores / 788 GB at scale 100 (was 84 /
+  690). The concurrent budget keeps silver-stream and gold-refresh at their
+  earlier share and warns, naming the job, when it caps a stream.
+- **`time_to_detect_seconds`** (median), `_p95_seconds`, `_max_seconds`,
+  `_alerts`, `_late_alerts` and `_unmeasured_cycles` on AML continuous
+  scorecards: from the newest bronze ingest of an alert's transactions to the
+  end of the detection pass that first raised it.
+- **`intake_limit`** and **`bronze_busy_fraction`** say whether bronze's own
+  processing bounded intake when `ingest_ratio` is short.
+- Streaming stages report the executor count actually requested (after the
+  concurrent budget), so core-hours and GB per core-hour are right on capped
+  clusters.
+
 ## [1.5.0] - 2026-09-16
 
 Hardening release built on mandatory adversarial review: 22 bugs fixed
