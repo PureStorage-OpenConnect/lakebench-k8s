@@ -260,16 +260,22 @@ def test_gate_has_no_numeric_threshold_literals(path):
     assert _numeric_literals(path) <= {0, 1, 2}, _numeric_literals(path) - {0, 1, 2}
 
 
-def test_prereg_features_match_aml_features():
+def _tuple_const(name):
     tree = ast.parse(FEATURES_SRC.read_text())
-    cols = None
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "FEATURE_COLUMNS" for t in node.targets
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
         ):
-            cols = [e.value for e in node.value.elts]
+            return [e.value for e in node.value.elts]
+    raise AssertionError(name)
+
+
+def test_prereg_features_match_aml_features():
+    cols = _tuple_const("FEATURE_COLUMNS")
+    hist = _tuple_const("HISTORY_FEATURE_COLUMNS")
     p = json.loads(PREREG.read_text())
-    assert cols == p["features"]
+    assert p["features"] == cols + hist
+    assert p["unit_of_scoring"]["history_features"] == hist
     # AML-GOALS section 9 #32.
     assert "customer_type" in cols and "crr_tier" in cols and "is_customer" not in cols
     for t, f in p["classification"]["defining_feature"].items():
@@ -292,7 +298,11 @@ def test_high_risk_countries_match_generator_corridor_pool():
 
 def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
-    assert p["version"] == "3.3.1"
+    assert p["version"] == "3.4"
+    u = p["unit_of_scoring"]
+    assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
+    assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 13, 395)
+    assert p["leakage"]["relative_cap_formula"] == "lift_over_prevalence"
     assert p["band"] == {**p["band"], "ap_min": 0.3, "ap_max": 0.8}
     assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
     assert p["shortcut_model"]["max_depth"] == 2
@@ -406,7 +416,9 @@ def test_relative_cap_as_lift_over_prevalence():
     """Under the lift formula a weak full model does not fail every feature
     that edges above prevalence; a real shortcut still fails."""
     df = _frame(n=4000, prev=0.08, separable=False)
-    ratio = fg.evaluate_gate(df, _prereg())["typologies"]["beh"]
+    p = _prereg()
+    p["leakage"] = {**p["leakage"], "relative_cap_formula": "ratio"}
+    ratio = fg.evaluate_gate(df, p)["typologies"]["beh"]
     p = _prereg()
     p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence"}
     lift = fg.evaluate_gate(df, p)["typologies"]["beh"]

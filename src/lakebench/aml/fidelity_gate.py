@@ -538,6 +538,9 @@ def evaluate_gate(
     AP), verdict "counts_only", no level2 or passes."""
     import numpy as np
 
+    if unit_window(prereg) == "lifetime":
+        # The lifetime unit has no history window, so no history features.
+        prereg = lifetime_prereg(prereg)
     features = list(prereg["features"])
     typologies = in_scope_typologies(prereg)
     report: dict[str, Any] = {
