@@ -11,6 +11,7 @@ Usage:
     python scripts/release_gate.py --tag v1.6.0    # also check the tag
     python scripts/release_gate.py --only ruff-check,mypy
     python scripts/release_gate.py --list
+    python scripts/release_gate.py --only perf-baselines --perf-run c360-batch-s10=<run id>
 """
 
 from __future__ import annotations
@@ -272,7 +273,46 @@ def check_gitleaks() -> Result:
     )
 
 
-def build_checks(tag: str | None = None) -> list[Check]:
+# Performance-regression gate (docs/perf-regression-gate.md). Candidate runs
+# are searched in the local runs directory (or $LAKEBENCH_PERF_RUNS_DIR) and
+# in uat/perf/, where a release checks in the metrics.json of its perf runs
+# so CI can gate them. --perf-run NAME=RUN names a run explicitly.
+PERF_STORE = ROOT / "benchmarks" / "perf" / "baselines.yaml"
+PERF_RUNS_ENV = "LAKEBENCH_PERF_RUNS_DIR"
+PERF_UAT_RUNS = "uat/perf"
+
+
+def make_perf_check(
+    perf_runs: dict[str, str] | None = None,
+    store_path: Path | None = None,
+    runs_dirs: list[Path] | None = None,
+) -> Callable[[], Result]:
+    """FAIL when a required pinned config has no baseline, no run, or regressed."""
+
+    def run() -> Result:
+        saved_path = list(sys.path)
+        sys.path.insert(0, str(ROOT / "src"))
+        try:
+            from lakebench.metrics import perf_gate as pg
+        finally:
+            sys.path[:] = saved_path
+        local = Path(os.environ.get(PERF_RUNS_ENV) or ROOT / "lakebench-output" / "runs")
+        rdirs = runs_dirs if runs_dirs is not None else [local, ROOT / PERF_UAT_RUNS]
+        try:
+            store = pg.load_store(store_path or PERF_STORE)
+        except pg.PerfGateError as exc:
+            return Result("perf-baselines", FAIL, str(exc))
+        passed, lines = pg.release_check(store, rdirs, perf_runs)
+        failed = [ln for ln in lines if ln.startswith("FAIL")]
+        if passed:
+            return Result("perf-baselines", PASS, "\n".join(lines))
+        summary = f"{len(failed)} required pinned config(s) failed"
+        return Result("perf-baselines", FAIL, "\n".join([summary, *lines]))
+
+    return run
+
+
+def build_checks(tag: str | None = None, perf_runs: dict[str, str] | None = None) -> list[Check]:
     py = sys.executable
     return [
         Check(
@@ -323,6 +363,11 @@ def build_checks(tag: str | None = None) -> list[Check]:
         Check("changelog", check_changelog, "CHANGELOG.md has a section for the version"),
         Check("em-dashes", check_em_dashes, "no U+2014 in *.md, .github/, examples/, CLI"),
         Check("uat-results", check_uat_results, "uat/results-<version>.md exists"),
+        Check(
+            "perf-baselines",
+            make_perf_check(perf_runs),
+            "required pinned perf configs have a baseline and no regression",
+        ),
     ]
 
 
@@ -374,12 +419,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--only", help="comma-separated check names to run")
     parser.add_argument("--require-all", action="store_true", help="treat SKIP as failure")
     parser.add_argument("--list", action="store_true", help="list checks and exit")
+    parser.add_argument(
+        "--perf-run",
+        action="append",
+        metavar="NAME=RUN",
+        help="run (id or metrics.json) to gate pinned perf config NAME with; repeatable",
+    )
     args = parser.parse_args(argv)
 
-    checks = build_checks(args.tag)
+    perf_runs = {}
+    for item in args.perf_run or []:
+        if "=" not in item:
+            parser.error(f"--perf-run expects NAME=RUN, got {item!r}")
+        name, run_ref = item.split("=", 1)
+        perf_runs[name] = run_ref
+    checks = build_checks(args.tag, perf_runs)
     if args.list:
         for c in checks:
-            print(f"{c.name:14} {c.description}")
+            print(f"{c.name:15} {c.description}")
         return 0
     if args.only:
         wanted = {n.strip() for n in args.only.split(",") if n.strip()}
