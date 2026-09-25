@@ -2387,6 +2387,14 @@ class SparkJobManager:
                             "value": str(_spark_interval_to_seconds(trigger_interval)),
                         }
                     )
+                    # The TM layer reads the bronze stream's source log to
+                    # know which raw files bronze should hold (P10 stage 1).
+                    env.append(
+                        {
+                            "name": "LB_FINANCIAL_BRONZE_CHECKPOINT",
+                            "value": bronze_ingest_checkpoint_uri(cfg),
+                        }
+                    )
 
         # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
         # the report scored and which lakebench revision produced it.

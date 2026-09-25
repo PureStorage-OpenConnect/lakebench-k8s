@@ -131,6 +131,9 @@ def tm_verdict(
         c: s for c, s in sts.items() if c not in inv and s.get("status") in ("not_run", "disabled")
     }
     waiting = [s for _, s in sorted(sts.items()) if s.get("status") == "waiting"]
+    # A pass that started writing and never reported an outcome was killed
+    # (OOM, pod kill, window end): its tables are partly rewritten.
+    interrupted = sorted(c for c, s in sts.items() if c not in inv and s.get("status") == "started")
     out["cycles_not_run"] = sorted(not_run)
     if problems:
         out.update(status="fail", reason=problems[0], problems=problems)
@@ -141,7 +144,14 @@ def tm_verdict(
         for n, r in sorted(inv[c].items())
         if r.get("status") == "unchecked"
     ]
-    if inv and not not_run and not unchecked:
+    if inv and not not_run and not unchecked and not interrupted:
+        return out
+    if interrupted and not not_run:
+        out.update(
+            status="unknown",
+            reason=f"pass(es) {interrupted} were interrupted after writing the TM tables",
+        )
+        out["cycles_not_run"] = interrupted
         return out
     if unchecked and not not_run:
         # The layer ran but could not verify an invariant (an infrastructure

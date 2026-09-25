@@ -645,6 +645,54 @@ def query_set_id(names) -> str:
     return f"qs{len(uniq)}-{h.hexdigest()[:12]}"
 
 
+# Query sets that ran before query-set ids were recorded, by their query
+# names, pinned to the id each set had when ids were introduced. A legacy
+# record with one of these name sets gets that id, so it stays comparable with
+# runs over the same set and, once any of those queries' SQL changes (the
+# current id moves), stops being comparable with them. Any other legacy name
+# set is "unknown": it cannot be matched to SQL.
+LEGACY_QUERY_SET_IDS: dict[frozenset[str], str] = {
+    # Customer 360 (Q1-Q7, Q9).
+    frozenset(
+        {
+            "Q1_full_aggregation_scan",
+            "Q2_filtered_aggregation",
+            "Q3_customer_segmentation",
+            "Q4_churn_risk_analysis",
+            "Q5_revenue_trend_ma7",
+            "Q6_customer_rfm",
+            "Q7_channel_conversion_funnel",
+            "Q9_executive_dashboard",
+        }
+    ): "qs8-fbcf945fe40f",
+    # AML before the investigator class (FQ1-FQ8).
+    frozenset(
+        {
+            "FQ1_txn_full_scan",
+            "FQ2_top_corridors_window",
+            "FQ3_entity_edge_risk",
+            "FQ4_running_balance_window",
+            "FQ5_alert_triage",
+            "FQ6_structuring_scan",
+            "FQ7_cross_border_concentration",
+            "FQ8_alert_to_entity_join",
+        }
+    ): "qs8-1c2902f0b26a",
+}
+
+
+def legacy_query_set_id(queries) -> str:
+    """The id of a benchmark recorded before query-set ids: its query names
+    looked up in LEGACY_QUERY_SET_IDS, else "unknown". Never hashes today's
+    SQL, which the legacy run may not have run."""
+    names = frozenset(
+        str(q.get("name") or q.get("query_name")) if isinstance(q, dict) else str(q)
+        for q in (queries or [])
+        if (q.get("name") or q.get("query_name") if isinstance(q, dict) else q)
+    )
+    return LEGACY_QUERY_SET_IDS.get(names, "unknown")
+
+
 def qph_comparable(a: str | None, b: str | None) -> tuple[bool, str]:
     """Whether QpH over query sets ``a`` and ``b`` may be compared, and why not."""
     if not a or not b or a == "unknown" or b == "unknown":

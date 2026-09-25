@@ -96,9 +96,21 @@ _ENTITIES = [
 INGEST_TS = __import__("datetime").datetime(2025, 1, 2, 3, 0)
 
 
-def _files(*rows_by_mtime):
-    """A count_source_rows result: {"rows", "files": [(mtime_ms, rows)]}."""
-    return {"rows": sum(r for _, r in rows_by_mtime), "files": list(rows_by_mtime)}
+def _src(ckpt, ingested, pending=None):
+    """Raw files as count_source_rows reports them, plus the bronze stream's
+    checkpoint source log naming the files batch 0 took. ``ingested`` and
+    ``pending``: {file name: rows}."""
+    import json as _json
+
+    d = os.path.join(ckpt, "sources", "0")
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, "0"), "w") as f:
+        f.write("v1\n")
+        for name in sorted(ingested):
+            path = f"file:///raw/{name}.parquet"
+            f.write(_json.dumps({"path": path, "timestamp": 1, "batchId": 0}) + "\n")
+    by_path = {f"/raw/{k}.parquet": v for k, v in {**ingested, **(pending or {})}.items()}
+    return lambda s: {"rows": sum(by_path.values()), "by_path": by_path}
 
 
 def _setup(spark):
@@ -170,7 +182,28 @@ def _setup(spark):
         "ingest_ts TIMESTAMP",
     )
     txns.writeTo("lakehouse.silver.transactions").create()
-    txns.select("uetr", "ingest_ts").writeTo("lakehouse.default.pacs008_raw").create()
+    # Bronze as the stream writes it: its snapshot carries the batch id.
+    # Bronze as the continuous stream writes it (a real structured-streaming
+    # batch, so its snapshot carries spark.sql.streaming.epochId).
+    stage = os.path.join(os.environ["LB_TEST_WAREHOUSE"], "bronze-stage")
+    txns.select("uetr", "ingest_ts").coalesce(1).write.mode("overwrite").parquet(stage)
+    txns.select("uetr", "ingest_ts").limit(0).writeTo("lakehouse.default.pacs008_raw").create()
+    q = (
+        spark.readStream.format("parquet")
+        .schema("uetr STRING, ingest_ts TIMESTAMP")
+        .load(stage)
+        .writeStream.format("iceberg")
+        .outputMode("append")
+        .option("checkpointLocation", stage + "-ckpt")
+        .trigger(availableNow=True)
+        .toTable("lakehouse.default.pacs008_raw")
+    )
+    q.awaitTermination()
+    epochs = spark.sql(
+        "SELECT summary['spark.sql.streaming.epochId'] AS e "
+        "FROM lakehouse.default.pacs008_raw.snapshots"
+    ).collect()
+    assert [r["e"] for r in epochs if r["e"] is not None] == ["0"], epochs
 
     spark.createDataFrame(
         [
@@ -467,7 +500,8 @@ def _check(spark):
     # Continuous: one ledger set per operations pass, appended. Payments
     # datagen wrote that bronze does not hold yet (the newest raw file) are
     # in flight.
-    t_old, t_new = 1_000_000, 10**12
+    ckpt = os.path.join(os.environ["LB_TEST_WAREHOUSE"], "bronze-ckpt")
+    tm.BRONZE_CHECKPOINT = ckpt
     _alerts(spark, "run-cont")
     inv = tm.run_tm_operations(
         spark,
@@ -476,7 +510,7 @@ def _check(spark):
         cycle=7,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: _files((t_old, n_rows), (t_new, 4)),
+        source_rows_fn=_src(ckpt, {"f1": n_rows}, {"f2": 4}),
     )
     assert all(s == "pass" for _, s, _ in inv), inv
     rec = {
@@ -499,7 +533,7 @@ def _check(spark):
             *[c for c in extra.columns if c not in ("txn_id", "uetr")],
         )
         extra.writeTo("lakehouse.silver.transactions").append()
-        return _files((t_old, n_rows))
+        return _src(ckpt, {"f1": n_rows})(s)
 
     inv = tm.run_tm_operations(
         spark,
@@ -519,8 +553,8 @@ def _check(spark):
     assert cyc == {1: "run-cont-t1", 2: "run-cont-t2"}
     spark.sql("DELETE FROM lakehouse.silver.transactions WHERE txn_id LIKE '%-late'")
 
-    # Permanent loss fails instead of passing as in flight. (a) An old raw
-    # file bronze never took, while newer files were ingested.
+    # Permanent loss fails instead of passing as in flight. (a) A raw file
+    # the stream's log says it took, but bronze does not hold.
     inv = tm.run_tm_operations(
         spark,
         txns,
@@ -528,7 +562,7 @@ def _check(spark):
         cycle=9,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: _files((1, 3), (t_old, n_rows)),
+        source_rows_fn=_src(ckpt, {"f0": 3, "f1": n_rows}),
     )
     assert _st(inv)["reconciliation"] == "fail", inv
     # (b) A bronze row older than silver's watermark that silver never took.
@@ -543,7 +577,7 @@ def _check(spark):
         cycle=10,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: _files((t_old, n_rows + 1)),
+        source_rows_fn=_src(ckpt, {"f1": n_rows + 1}),
     )
     assert _st(inv)["reconciliation"] == "fail", inv
     # ... while a bronze row newer than the watermark is in flight to silver.
@@ -559,7 +593,7 @@ def _check(spark):
         cycle=11,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: _files((t_old, n_rows + 1)),
+        source_rows_fn=_src(ckpt, {"f1": n_rows + 1}),
     )
     assert _st(inv)["reconciliation"] == "pass", inv
     spark.sql("DELETE FROM lakehouse.default.pacs008_raw WHERE uetr = 'new-1'")
@@ -571,7 +605,7 @@ def _check(spark):
         cycle=12,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: _files((t_old, n_rows - 2)),
+        source_rows_fn=_src(ckpt, {"f1": n_rows - 2}),
     )
     assert _st(inv)["reconciliation"] == "fail"
 
@@ -589,7 +623,7 @@ def _check(spark):
             cycle=13,
             continuous=True,
             params=PARAMS,
-            source_rows_fn=lambda s: _files((t_old, n_rows)),
+            source_rows_fn=_src(ckpt, {"f1": n_rows}),
         )
     finally:
         tm.case_activity = real
@@ -606,7 +640,7 @@ def _check(spark):
         cycle=1,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: _files((t_old, n_rows)),
+        source_rows_fn=_src(ckpt, {"f1": n_rows}),
     )
     st = _st(inv)
     assert st["history_stable"] == "pass" and st["one_row_per_alert_identity"] == "pass", inv
@@ -635,7 +669,7 @@ def _check(spark):
         cycle=2,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: _files((t_old, n_rows)),
+        source_rows_fn=_src(ckpt, {"f1": n_rows}),
     )
     assert [(n, s) for n, s, _ in inv] == [("workflow", "not_run")], inv
     assert tm.current_snapshot_id(spark, "lakehouse.gold.alert_dispositions") == snap
@@ -686,12 +720,29 @@ def _check(spark):
         )
     )
     assert st["one_row_per_alert_identity"] == "pass" and st["history_stable"] == "pass", st
+    # The Spark-side memory bound (4 x cap) never drops a grown alert whose
+    # prior is carried (reviewer probe p5: it was written twice).
+    one = dict(PARAMS, max_alerts_per_customer=1)
+    _alerts(spark, "run-h-c1", [("H1", "W2_structuring", 1, (2024, 1, 11), ["u1"])])
+    tm.run_tm_operations(spark, txns, "run-h-c1", params=one, source_rows_fn=lambda s: n_rows)
+    hub = [("H1g", "W2_structuring", 1, (2024, 1, 12), ["u1", "u2"])]
+    hub += [(f"HB{i}", "W3_round_tripping", 1, (2024, 1, 2 + i), [f"u{5 + i}"]) for i in range(5)]
+    _alerts(spark, "run-h-c2", hub)
+    st = _st(
+        tm.run_tm_operations(spark, txns, "run-h-c2", params=one, source_rows_fn=lambda s: n_rows)
+    )
+    assert st["one_row_per_alert_identity"] == "pass" and st["history_stable"] == "pass", st
+    rows = spark.table("lakehouse.gold.alert_dispositions").collect()
+    assert len(rows) == 6 and len({r["alert_key"] for r in rows}) == 6
+    h1 = [r for r in rows if r["alert_id"] == "H1g"][0]
+    assert h1["disposition"] != "over_capacity" and h1["first_seen_cycle"] == 1
+
     # ... and the identity check fails when a row is duplicated.
     spark.sql(
         "INSERT INTO lakehouse.gold.alert_dispositions SELECT * FROM "
-        "lakehouse.gold.alert_dispositions WHERE alert_id = 'A2'"
+        "lakehouse.gold.alert_dispositions WHERE alert_id = 'HB0'"
     )
-    counts = tm.read_back(spark, "run-z-c2", date(2025, 1, 1))
+    counts = tm.read_back(spark, "run-h-c2", date(2025, 1, 1))
     counts.update(source=31, customers=3, silver=31, monitored=25, excluded=6)
     assert _st(tm.evaluate_invariants(counts))["one_row_per_alert_identity"] == "fail"
 
@@ -741,6 +792,7 @@ if __name__ == "__main__":
     # A path-based (hadoop) catalog places tables itself, like Polaris; the
     # Hive-only explicit bronze location does not apply.
     os.environ["LB_CATALOG_TYPE"] = "polaris"
+    os.environ["LB_TEST_WAREHOUSE"] = sys.argv[1]
     # Keep the continuous reset's raw-path handling on local disk.
     os.environ["LB_BRONZE_URI"] = f"file://{sys.argv[1]}/raw/"
     _spark = _session(sys.argv[1])

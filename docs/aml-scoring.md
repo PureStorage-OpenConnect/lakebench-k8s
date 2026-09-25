@@ -308,9 +308,14 @@ each cycle, so an alert's window can grow as payments arrive. The layer
 matches each alert to the last completed cycle's (read at the table
 snapshots that cycle recorded in the ledger): same content first, else the
 same rule on the same customer, its last payment moved forward by at most
-31 days, sharing at least one payment (a 32-hash sketch of the related
-payments), largest overlap first. A new alert with none of a prior alert's
-payments never takes its identity. A matched alert keeps its key, generated date, truth and
+31 days, and holding at least a quarter of the payments the prior was first
+raised on (a frozen 32-hash sketch of them, checked against all of the new
+alert's payments), largest overlap first. A new alert sharing a payment or
+two with a prior never takes its identity. Rules cap the related-payment
+list by payment id, so an alert that grows past about three times that cap
+between cycles can lose its identity: it is then carried as withdrawn and
+raised again as new, which inflates alert counts but never moves a decision.
+A matched alert keeps its key, generated date, truth and
 priority as first seen; an alert detection stops emitting is kept
 (`in_current_detection` false); a new alert whose payments predate the
 previous cycle is dated on this cycle, the first day it could have been
@@ -369,23 +374,29 @@ ledger before it writes; a pass that fails after writing is reported as a
 failure and never carried from.
 
 Silver, then bronze, are pinned before the raw files are counted.
-In-flight payments are bounded, not inferred: rows bronze has not taken must
-be the newest raw files (the stream ingests whole files oldest first, with
-15 minutes of reordering allowed), and rows silver has not taken must be
-newer than silver's ingest watermark. Anything else is `unaccounted` and
-fails reconciliation. The continuous reset drops all four tables.
+In-flight payments are bounded, not inferred: bronze must hold exactly the
+rows of the raw files its stream's checkpoint log says it took up to the
+pinned snapshot's batch (`spark.sql.streaming.epochId`), so the rest are
+files not yet taken; and rows silver has not taken must be newer than
+silver's ingest watermark. Anything else is `unaccounted` and fails
+reconciliation. Freshness samples taken after a pass follow the tick's own
+rule (only while data is moving), so a drained corpus's idle time never
+becomes the score. The continuous reset drops all four tables.
 
 **Investigator queries.** The AML benchmark set includes four timed
 investigator queries (class `investigator`): customer 360 for the top open
 case, the 12-month activity review of the newest case, the counterparty and
 two-hop view, and open cases older than 60 days. They read only this run's
-rows, and are left out unless this run's TM verdict is pass or fail (so a
+rows, and are left out unless this run's TM verdict is pass or fail (the
+standalone `benchmark` command uses the newest run of the deployment whose
+verdict was pass or fail) (so a
 disabled or not-run layer never times empty or stale tables), and from the
 in-window rounds of a continuous run. QpH is recorded with its query-set id; `compare` and
 `reproduce` refuse to compare QpH across different query sets, so an 8-query
 AML run is never set against a 12-query one. A run recorded before the id
-existed gets the id of the set its recorded query names describe, so an
-older c360 run stays comparable.
+existed gets a pinned historical id when its query names are the c360 set or
+the 8-query AML set (so it stays comparable with runs over that set until one
+of those queries' SQL changes); any other legacy set is `unknown`.
 
 ## What the AML workload deliberately does not measure
 
