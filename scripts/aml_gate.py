@@ -275,11 +275,16 @@ def main(argv=None) -> int:
     outputs = report.pop("_model_outputs", None)
     if outputs is not None:
         base = str(args.out.with_suffix(""))
-        paths = write_model_outputs(outputs, base)
-        report["model_outputs"] = {
-            name: {"path": p, "bytes": os.path.getsize(p)} for name, p in paths.items()
-        }
-        report["model_outputs"]["oof_scores"]["rows"] = int(len(outputs["scores"]))
+        # Written before the report, so a failure here (a full disk) must be
+        # recorded rather than lose the gate numbers.
+        try:
+            paths = write_model_outputs(outputs, base)
+            report["model_outputs"] = {
+                name: {"path": p, "bytes": os.path.getsize(p)} for name, p in paths.items()
+            }
+            report["model_outputs"]["oof_scores"]["rows"] = int(len(outputs["scores"]))
+        except Exception as e:  # noqa: BLE001
+            report["model_outputs"] = {"error": str(e)}
     report["unit_detail"] = inputs["unit"]
     if "secondary_lifetime_error" in inputs:
         report["secondary_lifetime"] = {

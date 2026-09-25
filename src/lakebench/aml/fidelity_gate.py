@@ -172,12 +172,12 @@ def _ap(y, score, w):
     return float(average_precision_score(y, score, sample_weight=w))
 
 
-def _parallel(fn, items):
+def _parallel(fn, items, jobs=None):
     """Map ``fn`` over ``items`` in threads (tree fits and AP release the
     GIL), keeping order. LB_AML_GATE_JOBS caps the threads; default all."""
     from joblib import Parallel, delayed
 
-    return Parallel(n_jobs=_jobs(), prefer="threads")(delayed(fn)(i) for i in items)
+    return Parallel(n_jobs=jobs or _jobs(), prefer="threads")(delayed(fn)(i) for i in items)
 
 
 def _jobs() -> int:
@@ -235,7 +235,7 @@ def _permutation_importance(models, X, y, w, folds, features, prereg) -> list[di
         drops = []
         for (m, test), b in zip(fitted, base, strict=True):
             for _ in range(spec["n_repeats"]):
-                Xp = X[test].copy()
+                Xp = X[test]  # fancy indexing already copies
                 Xp[:, j] = Xp[rng.permutation(len(test)), j]
                 drops.append(b - _ap(y[test], m.predict_proba(Xp)[:, 1], w[test]))
         return {
@@ -245,7 +245,10 @@ def _permutation_importance(models, X, y, w, folds, features, prereg) -> list[di
             "n": len(drops),
         }
 
-    return _parallel(one, range(len(features)))
+    # Each call holds a copy of the test fold (about 330 MB per thread at
+    # scale 2) and predict_proba is itself multithreaded, so cap the pool;
+    # the result does not depend on the thread count.
+    return _parallel(one, range(len(features)), jobs=min(_jobs(), spec["max_threads"]))
 
 
 def _json_params(model) -> dict:
@@ -381,7 +384,10 @@ def _evaluate_typology(
         for f, (_, test) in enumerate(folds):
             fold_of[test] = f
         sink["scores"] = {"label": y.astype(np.int8), "score": oof, "fold": fold_of}
-        sink["importance"] = _permutation_importance(models, X, y, w, folds, features, prereg)
+        try:
+            sink["importance"] = _permutation_importance(models, X, y, w, folds, features, prereg)
+        except Exception as e:  # noqa: BLE001 -- an output, never the gate numbers
+            sink["importance"], sink["importance_error"] = [], str(e)
         fitted = next((m for m in models if m is not None), None)
         sink["hyperparameters"] = _json_params(fitted) if fitted is not None else None
     ap = _ap(y, oof, w)
@@ -628,6 +634,15 @@ def evaluate_gate(
         raise ValueError(f"gate frame is missing columns {missing}")
     if "is_customer" in frame.columns:
         frame = frame[frame["is_customer"].astype(bool)]
+    # toPandas() hands rows back in whatever order the last shuffle left them,
+    # which depends on the partition count (so on the host's cores). The
+    # reference model bins on a positional subsample above 200k rows and the
+    # bootstrap numbers groups by first appearance, so AP and its CI would
+    # depend on that order. Sort by the unit key (unique per unit).
+    order = [c for c in UNIT_KEY_COLUMNS if c in frame.columns]
+    if order:
+        frame = frame.sort_values(order, kind="mergesort")
+    frame = frame.reset_index(drop=True)
     report["n_scored_units"] = int(len(frame))
     report["n_scored_customers"] = int(
         frame[GROUP_COLUMN].nunique() if GROUP_COLUMN in frame.columns else len(frame)
@@ -727,6 +742,9 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
         "aml_features_sha256": (report.get("provenance") or {}).get("aml_features_sha256"),
         "reference_model": prereg["reference_model"],
         "fitted_hyperparameters": {t: s.get("hyperparameters") for t, s in sinks.items()},
+        "importance_errors": {
+            t: s["importance_error"] for t, s in sinks.items() if "importance_error" in s
+        },
         "cv": prereg["cv"],
         "importance": prereg["model_outputs"]["importance"],
         "libraries": report.get("libraries"),
