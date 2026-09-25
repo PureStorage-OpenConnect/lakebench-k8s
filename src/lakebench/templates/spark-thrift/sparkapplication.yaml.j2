@@ -156,7 +156,7 @@ spec:
                 --conf spark.hadoop.fs.s3a.connection.ssl.enabled={{ s3_use_ssl | lower }} \
                 --conf spark.hadoop.fs.s3a.impl=org.apache.hadoop.fs.s3a.S3AFileSystem \
                 --conf spark.hive.server2.thrift.port=10000 \
-                --conf spark.driver.memory={{ spark_thrift_memory }} \
+                --conf spark.driver.memory={{ spark_thrift_heap }} \
                 --conf spark.driver.cores={{ spark_thrift_cores }} \
                 --conf spark.local.dir=/tmp/spark-local \
                 --conf spark.sql.warehouse.dir=/tmp/spark-warehouse \
