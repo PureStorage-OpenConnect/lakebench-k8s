@@ -46,8 +46,10 @@ Two hashes, both recorded with the baseline:
 
 Defaults are not part of `config_hash`, which is why each pinned file sets
 every knob itself; `tests/test_perf_gate.py` fails if one is left to a
-default. The run also has to match on what it realised: each stage's
-executor count and the number of datagen pods must equal the pinned values.
+default. A batch run also has to match on what it realised: each batch
+stage's executor count (the peak the run observed) and the number of datagen
+pods must equal the pinned values. Continuous stages have no realised count;
+see "Known gaps".
 
 Baselines are specific to the reference cluster. The storage classes are
 pinned, but a different cluster behind the same names produces different
@@ -75,7 +77,12 @@ A run is refused, never compared, when:
   run's. A drained run's freshness covers only the cycles that saw data;
 - its datagen fleet reported `data_quality` other than `complete`;
 - its snapshot records a `config_sha256` that is not the pinned file's. Runs
-  do not record this field yet; see "Known gaps".
+  do not record this field yet; see "Known gaps";
+- it is a batch run whose time to value was taken differently from the
+  baseline's (from stage timestamps in one, from the scorecard in the other),
+  or whose stages carry no timestamps while its datagen stage is stale or
+  present on one side only. Without timestamps, time to value is the run's
+  wall clock and may or may not include a generate.
 
 Within a comparable run, some numbers are left out rather than trusted:
 
@@ -84,15 +91,23 @@ Within a comparable run, some numbers are left out rather than trusted:
   the window, a lower bound, not a throughput (LB-145). A drained run is never
   recorded as the rows/s baseline either.
 - continuous stage seconds, which are the window length, not a measurement.
-- the datagen numbers, and time to value, GB/s and GB/core-hr, when the
-  datagen metrics were written more than 24 hours before the run started
-  (they came from an earlier `generate`) or when only one of the baseline and
-  the run has a datagen stage. Generate once and run several times is a
-  normal workflow; the pipeline stages are still compared. `start_time` is
-  naive local time and is read in the gate host's zone, so a gate on another
-  host is off by the zone difference.
-- `maintenance_value_pct` when it is null. It is reported as "not measured",
-  never as zero.
+- the datagen numbers (`datagen_*`) when the datagen metrics were written
+  more than 24 hours before the run started (they came from an earlier
+  `generate`) or when only one of the baseline and the run has a datagen
+  stage. Generate once and run several times is a normal workflow. Nothing
+  else is dropped with them: for batch runs time to value and GB/s are
+  recomputed from the pipeline stages' own timestamps with the datagen stage
+  left out, and GB/core-hr counts batch or continuous stages only. The run's
+  `start_time` is naive local time with no zone recorded, so the age is taken
+  at its smallest over every UTC offset (-12h to +14h): a sidecar is called
+  stale only when it is more than 24 hours old wherever the run happened, and
+  the answer does not depend on the gate host's zone. In practice a sidecar
+  has to be at least 38 hours older than the naive start to be dropped.
+
+`maintenance_value_pct` is reported by `lakebench run` but not gated. It is
+(post - pre) / pre, and both halves are gated on their own
+(`pre_compaction_qph`, `composite_qph`); it has no good direction, since a
+better write layout raises pre-maintenance QpH and so lowers it.
 
 `gate` and the release check also fail a required config whose run is not
 newer than the baseline run (run ids are timestamp-prefixed): a baseline
@@ -111,7 +126,6 @@ compared.
 | `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour`, `composite_qph`, `sustained_throughput_rps`, `datagen_aggregate_mbps`, `datagen_mbps_per_pod` | higher is better | 10% |
 | `query_qph_<query>` (3600 / query seconds) | higher is better | 20% |
 | `pre_compaction_qph` | higher is better | 10% |
-| `maintenance_value_pct` | higher is better | 10 percentage points (absolute tolerances only) |
 
 Only drift in the bad direction fails. An improvement past the tolerance is
 reported as `improved` and passes; record a new baseline if it should become
@@ -124,7 +138,7 @@ Per-config overrides go in the store entry:
   c360-batch-s10:
     tolerances:
       query_qph_Q1_full_aggregation_scan: {pct: 30}
-      maintenance_value_pct: {abs: 5}
+      data_freshness_seconds: {abs: 30}
 ```
 
 ## Record a baseline
@@ -167,7 +181,9 @@ no baseline. `gate` and the release check pick, for each pinned config, the
 newest successful run whose fingerprint matches, searching
 `lakebench-output/runs` (or `$LAKEBENCH_PERF_RUNS_DIR`) and `uat/perf/`. Name
 a run explicitly with `--perf-run NAME=RUN` on `release_gate.py` or
-`--run NAME=RUN` on `perf_gate.py gate`.
+`--run NAME=RUN` on `perf_gate.py gate`; a run id is looked up in both
+directories (`compare` and `record` do the same), and a run id present in
+both with different contents is refused.
 
 The release check fails when a required config has no accepted baseline, no
 run can be found for it, or its run is refused or regressed. An optional
@@ -186,6 +202,18 @@ of the config file they used (`config_sha256` in the snapshot), which the gate
 already checks when present. The datagen sidecar does not record the image
 that wrote it, so a run that reuses a recent sidecar from a different image is
 not caught either.
+
+Continuous runs are not checked for realised executor counts.
+`build_pipeline_benchmark` fills a continuous stage's `executor_count` from the
+snapshot's `executor_overrides` (or the profile default), not from the pods
+that ran, so a check would compare the config with itself. The fingerprint
+still pins the requested counts; a cluster that could not schedule them is not
+caught until the continuous run path records observed executor counts.
+
+The datagen staleness bound is wide: a sidecar written 14 to 38 hours before
+the run can still be attributed to it, because the run's zone is unknown.
+Recording `start_time` with its UTC offset in the run path would let the gate
+use the real 24-hour bound.
 
 ## Seeding
 

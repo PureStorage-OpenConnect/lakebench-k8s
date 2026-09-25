@@ -72,23 +72,27 @@ MAX_INGEST_RATIO = 1.05
 # The datagen fleet numbers come from a sidecar written by the last
 # `lakebench generate` in the namespace. One written more than this before
 # the run started belongs to an earlier generate: its datagen numbers are
-# left out rather than attributed to the run. start_time is naive local
-# time, read in the gate host's zone, so a gate on another host is off by
-# the zone difference.
+# left out rather than attributed to the run.
 MAX_DATAGEN_AGE_HOURS = 24.0
+# start_time is naive local time on the host that ran lakebench, and the
+# zone is not recorded. UTC offsets run from -12h to +14h, so the age is
+# taken at its smallest over every zone: a sidecar is only called stale when
+# it is stale wherever the run happened, whichever host runs the gate.
+_MAX_UTC_OFFSET_HOURS = 14.0
 
-# Metrics that only describe the datagen stage, and the whole-pipeline
-# numbers whose value depends on whether the datagen stage is included.
+# Metrics that only describe the datagen stage. Nothing else is left out
+# with them: time to value and GB/s are recomputed from the pipeline stages
+# (see _pipeline_ttv), and GB/core-hr counts batch or continuous stages only
+# (collector._compute_batch_scores / _compute_sustained_scores).
 _DATAGEN_METRICS = frozenset(
     {"datagen_seconds", "datagen_aggregate_mbps", "datagen_cpu_hr_per_tb", "datagen_mbps_per_pod"}
 )
-_DATAGEN_DEPENDENT = frozenset(
-    {
-        "time_to_value_seconds",
-        "pipeline_throughput_gb_per_second",
-        "compute_efficiency_gb_per_core_hour",
-    }
-)
+# How time_to_value_seconds was taken: from the pipeline stages' own
+# timestamps (datagen excluded by construction), or the scorecard value,
+# which falls back to the run's wall clock when stages carry no timestamps
+# and so may or may not include a generate.
+TTV_FROM_STAGES = "stages"
+TTV_FROM_SCORECARD = "scorecard"
 # Stages whose presence does not decide comparability: datagen is handled
 # by the exclusion above, and a missing query stage is a regression that the
 # QpH metrics report as missing.
@@ -100,11 +104,6 @@ DEFAULT_TOLERANCE: dict[str, float] = {"pct": 10.0}
 # One query takes seconds at scale 10, so scheduling noise moves it more
 # than it moves a whole-pipeline number.
 DEFAULT_QUERY_TOLERANCE: dict[str, float] = {"pct": 20.0}
-# maintenance_value_pct is already a percentage and can sit near zero, so a
-# relative drift on it is meaningless; compare in percentage points.
-DEFAULT_METRIC_TOLERANCES: dict[str, dict[str, float]] = {
-    "maintenance_value_pct": {"abs": 10.0},
-}
 
 STATUS_ACCEPTED = "accepted"
 STATUS_PENDING = "pending first run"
@@ -125,24 +124,13 @@ _PLACEHOLDER_ENV = {
     "LAKEBENCH_POLARIS_CLIENT_SECRET": "placeholder",
 }
 
-# Stage name in PipelineBenchmark -> executor override key in the snapshot,
-# per mode. Continuous runs name their stages bronze/silver/gold too
-# (collector._STREAMING_MAP), so the lookup has to know the mode.
-_STAGE_OVERRIDE_KEY = {
-    "batch": {"bronze": "bronze", "silver": "silver", "gold": "gold"},
-    "sustained": {
-        "bronze": "bronze_ingest",
-        "silver": "silver_stream",
-        "gold": "gold_refresh",
-        "bronze-ingest": "bronze_ingest",
-        "silver-stream": "silver_stream",
-        "gold-refresh": "gold_refresh",
-    },
-}
-
-# Signed percentages: a relative tolerance divides by a value that can be
-# negative or near zero, so only absolute tolerances are allowed.
-_ABS_ONLY_METRICS = frozenset({"maintenance_value_pct"})
+# Batch stage name in PipelineBenchmark -> executor override key in the
+# snapshot. Batch stages carry the executor count the run observed (the
+# progress callback's peak, _run.py); continuous stages do not have one:
+# collector.build_pipeline_benchmark fills theirs from the same snapshot
+# overrides this would compare against, so a continuous check could never
+# fail and there is none (docs/perf-regression-gate.md, "Known gaps").
+_BATCH_STAGE_OVERRIDE_KEY = {"bronze": "bronze", "silver": "silver", "gold": "gold"}
 
 
 class PerfGateError(Exception):
@@ -326,8 +314,12 @@ class RunRecord:
         return self.pb_raw.get("scorecard") or self.pb_raw.get("scores") or {}
 
 
-def load_run(ref: str | Path, runs_dir: Path | None = None) -> RunRecord:
-    """Load a run by metrics.json path, run directory, or run id."""
+def load_run(ref: str | Path, runs_dir: Path | list[Path] | None = None) -> RunRecord:
+    """Load a run by metrics.json path, run directory, or run id.
+
+    A run id is looked up in each of *runs_dir* in order (one directory or a
+    list); the first match wins.
+    """
     from lakebench.metrics.storage import MetricsStorage
 
     candidate = Path(ref)
@@ -335,11 +327,24 @@ def load_run(ref: str | Path, runs_dir: Path | None = None) -> RunRecord:
         candidate = candidate / "metrics.json"
     if not candidate.is_file():
         if runs_dir is None:
+            dirs: list[Path] = []
+        elif isinstance(runs_dir, (str, Path)):
+            dirs = [Path(runs_dir)]
+        else:
+            dirs = [Path(d) for d in runs_dir]
+        if not dirs:
             raise PerfGateError(f"run {ref!r} not found (no runs directory given)")
         run_id = str(ref).removeprefix("run-")
-        candidate = Path(runs_dir) / f"run-{run_id}" / "metrics.json"
-        if not candidate.is_file():
-            raise PerfGateError(f"run {ref!r} not found under {runs_dir}")
+        found = [d / f"run-{run_id}" / "metrics.json" for d in dirs]
+        found = [f for f in found if f.is_file()]
+        where = ", ".join(str(d) for d in dirs)
+        if not found:
+            raise PerfGateError(f"run {ref!r} not found under {where}")
+        if len({f.read_bytes() for f in found}) > 1:
+            raise PerfGateError(
+                f"run {ref!r} exists with different contents in more than one of {where}"
+            )
+        candidate = found[0]
     try:
         raw = json.loads(candidate.read_text())
     except (OSError, json.JSONDecodeError) as e:
@@ -370,13 +375,81 @@ def iter_runs(runs_dir: Path) -> Iterator[RunRecord]:
                 continue
 
 
+def _is_datagen_stage(stage: Mapping[str, Any]) -> bool:
+    return stage.get("stage_name") == "datagen" or stage.get("stage_type") == "datagen"
+
+
+def _pipeline_ttv(run: RunRecord) -> tuple[float, float | None] | None:
+    """(time to value, GB/s) over the batch pipeline stages, datagen excluded.
+
+    The same rule as ``_compute_batch_scores`` (first start to last end, a
+    stage without an end counts at its start), applied only to stages that
+    are not datagen, so whether a generate ran inside the run does not move
+    it. None when no pipeline stage records a start time.
+    """
+    starts: list[datetime] = []
+    ends: list[datetime] = []
+    gb = 0.0
+    for s in run.pb_raw.get("stages") or []:
+        if _is_datagen_stage(s):
+            continue
+        try:
+            start = datetime.fromisoformat(s["start_time"]) if s.get("start_time") else None
+            end = datetime.fromisoformat(s["end_time"]) if s.get("end_time") else None
+        except (TypeError, ValueError):
+            return None
+        if start is None:
+            continue
+        starts.append(start)
+        ends.append(end or start)
+        size = s.get("input_size_gb")
+        if isinstance(size, (int, float)) and size > 0:
+            gb += float(size)
+    if not starts:
+        return None
+    try:
+        ttv = (max(ends) - min(starts)).total_seconds()
+    except TypeError:  # aware and naive timestamps mixed
+        return None
+    if ttv <= 0:
+        return None
+    if gb <= 0:
+        # Stages without sizes: the scorecard's GB (datagen reads nothing,
+        # so it is the pipeline's) over the recomputed time.
+        s_ttv, s_gbps = (
+            run.scores.get("time_to_value_seconds"),
+            run.scores.get("pipeline_throughput_gb_per_second"),
+        )
+        if isinstance(s_ttv, (int, float)) and isinstance(s_gbps, (int, float)) and s_ttv > 0:
+            gb = float(s_gbps) * float(s_ttv)
+    return ttv, (gb / ttv if gb > 0 else None)
+
+
+def _datagen_stale(run: RunRecord) -> str | None:
+    """Why the run's datagen numbers belong to an earlier generate, or None."""
+    age = _datagen_age_hours(run)
+    if age is not None and age > MAX_DATAGEN_AGE_HOURS:
+        return (
+            f"datagen metrics written at least {age:.0f}h before the run; from an earlier generate"
+        )
+    return None
+
+
+def ttv_basis(run: RunRecord) -> str:
+    if run.mode == "batch" and _pipeline_ttv(run) is not None:
+        return TTV_FROM_STAGES
+    return TTV_FROM_SCORECARD
+
+
 def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     """Numbers the gate compares, plus the metrics it deliberately left out.
 
     Starts from ``_extract_expected_numbers`` (the reproduce surface, which
     already leaves out rows/s for a drained corpus) and adds per-query QpH,
-    datagen MB/s per pod and maintenance value. Correctness-band numbers are
-    dropped: they are guards, not performance.
+    pre-maintenance QpH and datagen MB/s per pod. Correctness-band numbers
+    are dropped: they are guards, not performance. For batch runs whose
+    stages carry timestamps, time to value and GB/s are recomputed without
+    the datagen stage.
 
     Returns (numbers, excluded) where *excluded* maps a metric name to the
     reason it was not measured.
@@ -400,19 +473,25 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
             "corpus drained before the window ended; rows/s is a lower bound (LB-145)"
         )
 
+    if run.mode == "batch":
+        recomputed = _pipeline_ttv(run)
+        if recomputed is not None:
+            ttv, gbps = recomputed
+            numbers["time_to_value_seconds"] = ttv
+            if gbps is not None:
+                numbers["pipeline_throughput_gb_per_second"] = gbps
+            else:
+                numbers.pop("pipeline_throughput_gb_per_second", None)
+
     scores = run.scores
     # Pre-maintenance QpH is gated on its own: a write-layout regression
-    # lowers it and raises maintenance_value_pct, while post-maintenance
-    # composite_qph stays flat.
+    # lowers it while post-maintenance composite_qph stays flat.
+    # maintenance_value_pct is not gated: it is (post - pre) / pre, both of
+    # which are gated, and it has no good direction (a better write layout
+    # raises pre and lowers it).
     pre_qph = scores.get("pre_compaction_qph")
     if isinstance(pre_qph, (int, float)) and pre_qph > 0:
         numbers["pre_compaction_qph"] = float(pre_qph)
-    if "maintenance_value_pct" in scores or "pre_compaction_qph" in scores:
-        value = scores.get("maintenance_value_pct")
-        if value is None:
-            excluded["maintenance_value_pct"] = "not measured"
-        else:
-            numbers["maintenance_value_pct"] = float(value)
 
     qb = run.pb_raw.get("query_benchmark") or run.raw.get("benchmark") or {}
     per_query: dict[str, list[float]] = {}
@@ -433,13 +512,12 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     if pod_mbps:
         numbers["datagen_mbps_per_pod"] = statistics.fmean(pod_mbps)
 
-    age = _datagen_age_hours(run)
-    if age is not None and age > MAX_DATAGEN_AGE_HOURS:
-        reason = f"datagen metrics written {age:.0f}h before the run; from an earlier generate"
-        for key in _DATAGEN_METRICS | _DATAGEN_DEPENDENT:
+    stale = _datagen_stale(run)
+    if stale:
+        for key in _DATAGEN_METRICS:
             if key in numbers:
                 del numbers[key]
-                excluded[key] = reason
+                excluded[key] = stale
 
     return {k: float(v) for k, v in numbers.items() if math.isfinite(float(v))}, excluded
 
@@ -504,8 +582,10 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
                 )
 
     # Realised sizing: what actually ran, not what the snapshot asked for.
+    # Batch only; continuous stages have no realised count (see
+    # _BATCH_STAGE_OVERRIDE_KEY).
     overrides = ((pinned.fingerprint.get("spark") or {}).get("executor_overrides")) or {}
-    stage_keys = _STAGE_OVERRIDE_KEY.get(run.mode, {})
+    stage_keys = _BATCH_STAGE_OVERRIDE_KEY if run.mode == "batch" else {}
     for stage in run.pb_raw.get("stages") or []:
         key = stage_keys.get(stage.get("stage_name", ""))
         want = overrides.get(key) if key else None
@@ -523,7 +603,14 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
 
 
 def _datagen_age_hours(run: RunRecord) -> float | None:
-    """Hours between the datagen sidecar's written_at and the run start."""
+    """Smallest possible hours between the datagen sidecar and the run start.
+
+    written_at is UTC-aware. start_time is naive local time on the run host
+    (datetime.now() in the run path) with no zone recorded, so it is read as
+    UTC and the largest positive offset is subtracted: the result is a lower
+    bound on the true age in every zone and does not depend on the gate
+    host's zone. An aware start_time is used as is.
+    """
     fleet = run.raw.get("datagen_fleet") or {}
     written, started = fleet.get("written_at"), run.raw.get("start_time")
     if not written or not started:
@@ -533,13 +620,13 @@ def _datagen_age_hours(run: RunRecord) -> float | None:
         s = datetime.fromisoformat(str(started))
     except ValueError:
         return None
-    # start_time is naive local time (datetime.now() in the run path); read
-    # it in this host's zone. written_at is UTC-aware.
-    if s.tzinfo is None:
-        s = s.astimezone()
     if w.tzinfo is None:
         w = w.replace(tzinfo=timezone.utc)
-    return (s - w).total_seconds() / 3600
+    slack = 0.0
+    if s.tzinfo is None:
+        s = s.replace(tzinfo=timezone.utc)
+        slack = _MAX_UTC_OFFSET_HOURS
+    return (s - w).total_seconds() / 3600 - slack
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +652,8 @@ class Baseline:
     # A drained run's freshness covers only the cycles that saw data, so a
     # drained and an undrained run are not comparable (LB-145).
     corpus_drained: bool | None = None
+    # Batch runs only: TTV_FROM_STAGES or TTV_FROM_SCORECARD.
+    ttv_basis: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -583,6 +672,7 @@ class Baseline:
             "fingerprint_hash",
             "recorded_at",
             "corpus_drained",
+            "ttv_basis",
         ):
             value = getattr(self, key)
             if value is not None:
@@ -632,8 +722,6 @@ def _check_tolerances(name: str, tolerances: Any) -> dict[str, dict[str, float]]
         for k, v in spec.items():
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not v >= 0:
                 raise PerfGateError(f"{name}: tolerance {metric}.{k} must be a number >= 0")
-        if metric in _ABS_ONLY_METRICS and "abs" not in spec:
-            raise PerfGateError(f"{name}: {metric} is a signed percentage; use {{abs: N}}")
         out[str(metric)] = {k: float(v) for k, v in spec.items()}
     return out
 
@@ -680,6 +768,7 @@ def load_store(path: Path) -> BaselineStore:
             tolerances=_check_tolerances(str(name), entry.get("tolerances")),
             notes=entry.get("notes"),
             corpus_drained=entry.get("corpus_drained"),
+            ttv_basis=entry.get("ttv_basis"),
         )
     return BaselineStore(path=path, baselines=baselines)
 
@@ -692,8 +781,6 @@ def load_store(path: Path) -> BaselineStore:
 def tolerance_for(metric: str, overrides: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
     if metric in overrides:
         return dict(overrides[metric])
-    if metric in DEFAULT_METRIC_TOLERANCES:
-        return dict(DEFAULT_METRIC_TOLERANCES[metric])
     if metric.startswith(QUERY_QPH_PREFIX):
         return dict(DEFAULT_QUERY_TOLERANCE)
     return dict(DEFAULT_TOLERANCE)
@@ -768,11 +855,26 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
                 "for drained and undrained runs (LB-145)"
             )
     actual, excluded = extract_metrics(run)
-    if ("datagen_seconds" in baseline.metrics) != ("datagen_seconds" in actual):
+    datagen_differs = ("datagen_seconds" in baseline.metrics) != ("datagen_seconds" in actual)
+    if datagen_differs:
         reason = "datagen stage present in only one of the baseline and the run"
-        for key in _DATAGEN_METRICS | _DATAGEN_DEPENDENT:
+        for key in _DATAGEN_METRICS:
             actual.pop(key, None)
             excluded.setdefault(key, reason)
+    if run.mode == "batch" and "time_to_value_seconds" in baseline.metrics:
+        basis = ttv_basis(run)
+        if basis != baseline.ttv_basis:
+            result.reasons.append(
+                f"time to value taken from the {basis} in the run but the "
+                f"{baseline.ttv_basis or 'unrecorded source'} in the baseline; record a new baseline"
+            )
+        elif basis == TTV_FROM_SCORECARD and (datagen_differs or _datagen_stale(run)):
+            # No stage timestamps, so TTV cannot be separated from a generate
+            # that may or may not have run inside it.
+            result.reasons.append(
+                "time to value cannot be separated from the datagen stage (stages carry "
+                "no timestamps) and the datagen stage differs from the baseline's or is stale"
+            )
     want_stages = {
         k for k in baseline.metrics if _is_stage_seconds(k) and k not in _OPTIONAL_STAGE_KEYS
     }
@@ -859,6 +961,12 @@ def record_baseline(
         )
     pinned = store.pinned(name)
     reasons = run_refusals(run, pinned)
+    basis = ttv_basis(run) if run.mode == "batch" else None
+    if basis == TTV_FROM_SCORECARD and _datagen_stale(run):
+        reasons.append(
+            "time to value cannot be separated from a stale datagen stage (stages carry "
+            "no timestamps)"
+        )
     if reasons:
         raise PerfGateError(
             f"run {run.run_id} cannot be a baseline for {name}: " + "; ".join(reasons)
@@ -880,6 +988,7 @@ def record_baseline(
         tolerances=current.tolerances,
         notes=current.notes,
         corpus_drained=(run.scores.get("corpus_drained") if run.mode == "sustained" else None),
+        ttv_basis=basis,
     )
     store.baselines[name] = new
     return new
@@ -970,7 +1079,7 @@ def release_check(
                 pinned = store.pinned(name)
                 run: RunRecord | None = None
                 if name in explicit_runs:
-                    run = load_run(explicit_runs[name], dirs[0] if dirs else None)
+                    run = load_run(explicit_runs[name], dirs)
                 else:
                     found = [r for d in dirs if (r := latest_candidate(pinned, d)) is not None]
                     run = max(found, key=lambda r: r.run_id) if found else None

@@ -8,8 +8,8 @@ Usage:
     python scripts/perf_gate.py seed    [--write]
     python scripts/perf_gate.py gate    [--run NAME=RUN ...]  (also searches uat/perf/)
 
-Runs are looked up by id under --runs-dir (default lakebench-output/runs) or
-given as a path to metrics.json. Nothing here touches Kubernetes or S3.
+Runs are looked up by id under --runs-dir (default lakebench-output/runs) and
+then uat/perf/, or given as a path to metrics.json. Nothing here touches Kubernetes or S3.
 
 Exit codes: 0 pass; 1 regression; 2 refused, no baseline, or bad input.
 See docs/perf-regression-gate.md.
@@ -57,14 +57,14 @@ def cmd_status(store: pg.BaselineStore, args: argparse.Namespace) -> int:
 
 
 def cmd_compare(store: pg.BaselineStore, args: argparse.Namespace) -> int:
-    run = pg.load_run(args.run, args.runs_dir)
+    run = pg.load_run(args.run, [args.runs_dir, ROOT / "uat" / "perf"])
     c = pg.compare_run(store, args.name, run)
     print(pg.format_comparison(c))
     return {pg.PASS: 0, pg.REGRESSION: 1}.get(c.verdict, 2)
 
 
 def cmd_record(store: pg.BaselineStore, args: argparse.Namespace) -> int:
-    run = pg.load_run(args.run, args.runs_dir)
+    run = pg.load_run(args.run, [args.runs_dir, ROOT / "uat" / "perf"])
     sha = args.git_sha
     if not sha:
         print(
