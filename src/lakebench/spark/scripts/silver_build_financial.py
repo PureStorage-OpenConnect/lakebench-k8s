@@ -24,7 +24,7 @@ import time
 
 from common import (
     ensure_column,
-    ensure_namespaces,
+    ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
     iceberg_table_stats,
@@ -1039,17 +1039,10 @@ def main() -> None:
     log(f"Session TZ: {spark.conf.get('spark.sql.session.timeZone')}")
     log("=" * 60)
 
-    ensure_namespaces(
+    ensure_namespaces_for_ddl(
         spark,
         CATALOG,
-        (
-            SILVER_TRANSACTIONS,
-            SILVER_ENTITIES,
-            SILVER_ACCOUNTS,
-            SILVER_STATEMENTS,
-            SILVER_EDGES,
-            SILVER_PROFILES,
-        ),
+        (DDL_TXNS, DDL_ENTITIES, DDL_ACCOUNTS, DDL_STATEMENTS, DDL_EDGES, DDL_PROFILES),
     )
     for name, ddl in (
         ("transactions", DDL_TXNS),

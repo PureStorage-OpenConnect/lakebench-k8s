@@ -9,6 +9,7 @@ Environment variables set by lakebench job.py:
 """
 
 import os
+import re
 from datetime import datetime
 
 
@@ -692,6 +693,23 @@ def ensure_namespaces(spark, catalog, tables):
     """
     for ns in sorted({t.split(".", 1)[0] for t in tables if "." in t}):
         spark.sql(f"CREATE NAMESPACE IF NOT EXISTS {catalog}.{ns}")
+
+
+_DDL_TABLE = re.compile(r"CREATE TABLE IF NOT EXISTS\s+[\w`]+\.([\w`]+)\.([\w`]+)", re.IGNORECASE)
+
+
+def ensure_namespaces_for_ddl(spark, catalog, ddls):
+    """ensure_namespaces for every table the given CREATE TABLE DDLs create.
+
+    Reads the names out of the DDL itself, so a table overridden into another
+    namespace is covered without keeping a second list in step.
+    """
+    tables = []
+    for ddl in ddls:
+        m = _DDL_TABLE.search(ddl)
+        if m:
+            tables.append(f"{m.group(1)}.{m.group(2)}".replace("`", ""))
+    ensure_namespaces(spark, catalog, tables)
 
 
 def _s3_table_path(bucket_uri, fq_table):

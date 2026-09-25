@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import time
 
-from common import env, log, log_job_metrics, one_line, path_size_gb
+from common import ensure_namespaces, env, log, log_job_metrics, one_line, path_size_gb
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, current_timestamp
 
@@ -90,8 +90,8 @@ def _bronze_location():
     """
     if os.getenv("LB_CATALOG_TYPE", "hive") == "polaris":
         return None
-    ns, _, table = BRONZE_TABLE.partition(".")
-    return f"{BRONZE_URI.rstrip('/')}/warehouse/{ns}.db/{table}"
+    ns, _, table = BRONZE_TABLE.rpartition(".")
+    return f"{BRONZE_URI.rstrip('/')}/warehouse/{ns or 'default'}.db/{table}"
 
 
 def _location_clause():
@@ -258,6 +258,8 @@ def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):
 
 def main() -> None:
     spark = SparkSession.builder.appName("lb-bronze-verify-financial").getOrCreate()
+    # Hive does not pre-create namespaces the way the Polaris bootstrap does.
+    ensure_namespaces(spark, CATALOG, (BRONZE_TABLE,))
     start_time = time.time()
 
     log("=" * 60)
