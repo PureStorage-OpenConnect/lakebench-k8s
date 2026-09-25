@@ -17,7 +17,8 @@ Measured 2026-09-24 on lane/c-hardening:
     unit   reports/scorecard.py     90.52%  (105/116)
     spark  spark/scripts/detection_rules.py  44.30%  (105/237)
 
-Measured 2026-09-25 on lane/q-release-hygiene (floors raised to match):
+Measured 2026-09-25 on lane/q-release-hygiene (floors raised; detection_rules
+floored a point lower because CI skips the Iceberg-jar Spark tests):
     unit   metrics/collector.py     93.56%
     unit   reports/scorecard.py     93.68%
     spark  spark/scripts/detection_rules.py  91.33%
@@ -40,7 +41,7 @@ FLOORS: dict[str, dict[str, float]] = {
         "lakebench/reports/scorecard.py": 93.0,
     },
     "spark": {
-        "lakebench/spark/scripts/detection_rules.py": 91.0,
+        "lakebench/spark/scripts/detection_rules.py": 90.0,
     },
 }
 

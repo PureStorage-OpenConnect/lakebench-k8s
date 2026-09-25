@@ -117,8 +117,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   container memory limit, so heap plus native memory exceeded the cgroup
   limit (exit 137). The coordinator and worker heaps are now 80% of the pod
   memory limit; pod limits are unchanged.
-- **LB-148: hive-delta-spark-thrift failed 5 of 8 c360 queries.** Q2 and
-  Q7 (delta-spark `ClassCastException`, LB-034) are worked around with
+- **LB-148: hive-delta-spark-thrift failed 5 of 8 c360 queries.** The
+  delta-spark `ClassCastException` on MIN/MAX of the date column (LB-034,
+  Q2 and Q6) is worked around with
   `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta +
   Hive, in the Thrift server and the Spark jobs; Q2 on Delta + Thrift is no
   longer tolerated as a known failure. The Thrift pod limit is now heap +
