@@ -82,9 +82,10 @@ def test_peak_requirements_count_the_override():
     aml = compute_peak_requirements(10, "sustained", "financial")
     c360 = compute_peak_requirements(10, "sustained", "customer360")
     ingest = next(r for r in aml.per_job if r.job_type == "bronze-ingest")
+    c360_ingest = next(r for r in c360.per_job if r.job_type == "bronze-ingest")
     assert ingest.executors == 5
     assert ingest.cpu_cores == 5 * 4 + 2
-    assert aml.cpu_cores - c360.cpu_cores == ingest.cpu_cores - (2 * 2 + 2)
+    assert c360_ingest.cpu_cores == 2 * 2 + 2
 
 
 def test_concurrent_budget_does_not_cap_the_override_back_to_base():
@@ -114,13 +115,15 @@ _GRID = [(scale, cores) for scale in (1, 10, 100, 500) for cores in (60, 80, 100
 
 @pytest.mark.parametrize(("scale", "cores"), _GRID)
 def test_the_override_never_takes_cores_from_silver_or_gold(scale, cores):
-    """The pre-override split is the c360 split (same base profiles). Silver
-    and gold keep it; bronze only gets headroom above it, and never fewer
-    cores than its base allocation had."""
+    """The pre-override split is the c360 split (same base profiles). AML
+    overrides all three streaming stages (bronze here, silver and gold in
+    test_aml_continuous_sizing), so each keeps at least the whole executors
+    its base cores hold and only the headroom above that is shared. Silver
+    and gold keep 4-core executors, so they never drop below the old count."""
     aml = _streaming_concurrent_budget(_config("financial", scale), cores * 1000)
     base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
-    assert aml[JobType.SILVER_STREAM] == base[JobType.SILVER_STREAM]
-    assert aml[JobType.GOLD_REFRESH] == base[JobType.GOLD_REFRESH]
+    assert aml[JobType.SILVER_STREAM] >= base[JobType.SILVER_STREAM]
+    assert aml[JobType.GOLD_REFRESH] >= base[JobType.GOLD_REFRESH]
     # Bronze keeps at least the whole 4-core executors its base cores hold.
     assert aml[JobType.BRONZE_INGEST] >= max(1, base[JobType.BRONZE_INGEST] * 2 // 4)
 
@@ -199,9 +202,9 @@ def test_a_capped_stage_is_warned_about_by_name(caplog):
     mgr = SparkJobManager(_config("financial", 10), _capacity_k8s(60))
     with caplog.at_level(logging.WARNING):
         manifest = mgr._build_manifest(JobType.BRONZE_INGEST)
-    assert manifest["spec"]["executor"]["instances"] == 3
+    assert manifest["spec"]["executor"]["instances"] == 1
     assert mgr.budget_warnings == [
-        "Concurrent budget: bronze-ingest capped from 5 to 3 executors "
+        "Concurrent budget: bronze-ingest capped from 5 to 1 executors "
         "(cluster too small for the profile)"
     ]
     assert any(

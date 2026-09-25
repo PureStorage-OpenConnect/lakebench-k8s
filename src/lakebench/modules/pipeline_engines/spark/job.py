@@ -244,6 +244,39 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executors_per_100_scale": 4,
             "max_executors": 20,
         },
+        # AML continuous silver-stream. Measured on run-20260925-135005-4b7a97
+        # (scale 10, 1800 s, bronze-ingest at the override above) with the base
+        # 4 executors x 4 cores: 4 micro-batches of 66.7M rows at 299 s each
+        # against a 60 s trigger, 13.9K rows/s per core with the per-batch
+        # overhead folded in. The silver source has no per-trigger file or row
+        # limit, so a slow batch makes the next one bigger: silver fell behind
+        # bronze (317K rows/s while the corpus drains, 50 files per 30 s
+        # trigger) and ~900 s of the 1,280 s time to detect was bronze and
+        # silver lag. Caught up, a 60 s trigger holds 19M rows. 10 x 4 = 40
+        # cores process that in ~34 s at the measured rate, leaving 26 s of the
+        # trigger for fixed per-batch cost, and hold 557K rows/s, 1.76x bronze
+        # intake, so a backlog cannot build. 8 executors (43 s of work) would
+        # leave only 17 s. Per-executor sizing stays at the base 4 cores / 32g
+        # / 8g; scaling keeps the base 8 per 100 scale, to the 28 cap.
+        "silver-stream": {
+            "base_executors": 10,
+            "executors_per_100_scale": 8,
+            "max_executors": _MAX_EXECUTORS_SAFE,
+        },
+        # AML continuous gold-refresh. Same run: 4 ticks at 349.5 s mean on
+        # the base 2 x 4 = 8 cores, over the 300 s refresh interval, so ticks
+        # ran back to back. Every tick recomputes all of silver (windowing
+        # loses recall, LB-127) and path searches are ~80% of a tick. Taking
+        # the other 20% as not scaling with cores, 6 x 4 = 24 cores run a tick
+        # in ~163 s, inside the refresh interval, so ticks start on the timer
+        # and an alert waits about half an interval plus one tick. 8 executors
+        # would save ~23 s more for 80 GB. Silver grows with scale and so does
+        # the tick; 8 per 100 scale to the 28 cap.
+        "gold-refresh": {
+            "base_executors": 6,
+            "executors_per_100_scale": 8,
+            "max_executors": _MAX_EXECUTORS_SAFE,
+        },
     },
 }
 
@@ -634,28 +667,61 @@ def _streaming_concurrent_budget(
     if not overridden:
         return base_caps
 
-    # A schema override (AML bronze-ingest) must not take cores from the
-    # stages it does not touch: they keep the split they had on the base
-    # profiles, and the overridden jobs share only what is left, never less
-    # than the whole executors that fit in the cores their base allocation
-    # had (at least one).
+    # A schema override must not take cores from the stages it does not
+    # touch: they keep the split they had on the base profiles. Each
+    # overridden job first gets a floor, the whole executors that fit in the
+    # cores its base allocation had (at least one); rounding down, because
+    # rounding up to whole larger executors would request more than the base
+    # split did. Only then is the headroom above the kept stages and the
+    # floors shared, in proportion to what each job still wants. Sharing the
+    # whole headroom by demand instead would let a job whose share fell below
+    # its floor keep the floor while the others kept their full share, past
+    # the budget (AML overrides all three stages, and silver's share of the
+    # demand is smaller than its share of the base split).
     caps = {jt: base_caps[jt] for jt in _STREAMING_JOB_TYPES if jt not in overridden}
     kept_m = sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in caps)
-    headroom_m = max(0, streaming_budget_m - kept_m)
-    demands = {
-        jt: _scale_executor_count(resolved[jt], scale) * resolved[jt]["executor_cores"] * 1000
-        for jt in overridden
-    }
-    total = sum(demands.values()) or 1
+    want = {jt: _scale_executor_count(resolved[jt], scale) for jt in overridden}
     for jt in overridden:
-        prof = resolved[jt]
-        exec_cpu_m = prof["executor_cores"] * 1000
         floor_cores = base_caps[jt] * _JOB_PROFILES[jt.value]["executor_cores"]
-        # Round down: rounding up to whole larger executors would request
-        # more than the base split did, past the budget's own headroom.
-        floor = max(1, floor_cores // prof["executor_cores"])
-        share = int(headroom_m * demands[jt] / total // exec_cpu_m)
-        caps[jt] = min(_scale_executor_count(prof, scale), max(floor, share))
+        floor = max(1, floor_cores // resolved[jt]["executor_cores"])
+        caps[jt] = min(want[jt], floor)
+    used_m = kept_m + sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in overridden)
+    headroom_m = max(0, streaming_budget_m - used_m)
+    # Water-fill: a job that reaches its uncapped count hands the rest of its
+    # share back to the others. Each pass either finishes or retires a job.
+    open_jobs = [jt for jt in overridden if caps[jt] < want[jt]]
+    while open_jobs and headroom_m > 0:
+        extra = {
+            jt: (want[jt] - caps[jt]) * resolved[jt]["executor_cores"] * 1000 for jt in open_jobs
+        }
+        total = sum(extra.values())
+        granted_m = 0
+        for jt in open_jobs:
+            exec_cpu_m = resolved[jt]["executor_cores"] * 1000
+            add = min(want[jt] - caps[jt], int(headroom_m * extra[jt] / total // exec_cpu_m))
+            caps[jt] += add
+            granted_m += add * exec_cpu_m
+        headroom_m -= granted_m
+        still_open = [jt for jt in open_jobs if caps[jt] < want[jt]]
+        if len(still_open) == len(open_jobs):
+            break
+        open_jobs = still_open
+    # Per-job rounding leaves up to one executor per job unspent: hand whole
+    # executors out one at a time, most-wanting job first, while they fit.
+    while True:
+        fits = [
+            jt
+            for jt in overridden
+            if caps[jt] < want[jt] and resolved[jt]["executor_cores"] * 1000 <= headroom_m
+        ]
+        if not fits:
+            break
+        jt = max(
+            fits,
+            key=lambda j: ((want[j] - caps[j]) * resolved[j]["executor_cores"], j.value),
+        )
+        caps[jt] += 1
+        headroom_m -= resolved[jt]["executor_cores"] * 1000
     return caps
 
 
