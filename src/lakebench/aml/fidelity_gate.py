@@ -466,7 +466,7 @@ def _evaluate_typology(
     # Ungated: a reference model that loses to a one- or two-feature tree is
     # not measuring the typology (the D0 v3.4.1 failure mode).
     best_shortcut = max((v["best"]["ap"] for v in shortcuts.values()), default=None)
-    out["model_beats_shortcuts"] = best_shortcut is None or ap > best_shortcut
+    out["model_beats_shortcuts"] = None if best_shortcut is None else bool(ap > best_shortcut)
     out["leakage_pass"] = all(s["pass"] for s in shortcuts.values()) and len(shortcuts) == len(
         lk["shortcut_models"]
     )
