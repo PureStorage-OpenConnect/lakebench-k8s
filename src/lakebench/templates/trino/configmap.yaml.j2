@@ -47,7 +47,10 @@ data:
 
   jvm.config.coordinator: |
     -server
-    -Xmx{{ trino_coordinator_memory | default('8Gi') | replace('Gi', 'G') | replace('Mi', 'M') }}
+    {# LB-146: heap is computed in engine.py as a fraction of the pod limit.
+       Trino's default query.max-memory-per-node and memory.heap-headroom-per-node
+       are each 30% of this heap, so they follow it; do not pin them absolutely. #}
+    -Xmx{{ trino_coordinator_heap }}
     -XX:+UseG1GC
     -XX:G1HeapRegionSize=32M
     -XX:+ExplicitGCInvokesConcurrent
@@ -64,7 +67,7 @@ data:
 
   jvm.config.worker: |
     -server
-    -Xmx{{ trino_worker_memory | default('16Gi') | replace('Gi', 'G') | replace('Mi', 'M') }}
+    -Xmx{{ trino_worker_heap }}
     -XX:+UseG1GC
     -XX:G1HeapRegionSize=32M
     -XX:+ExplicitGCInvokesConcurrent
