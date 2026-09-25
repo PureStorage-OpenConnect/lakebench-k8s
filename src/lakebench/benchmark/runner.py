@@ -154,6 +154,16 @@ class BenchmarkRunner:
             "gold_cases": t.gold_cases,
         }
 
+    def _queries(self) -> list[BenchmarkQuery]:
+        """The schema's query set. The investigator queries read the TM
+        operations tables, which stay empty when that layer is disabled, so
+        they are left out then (the query-set id records the difference)."""
+        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
+        workload = self.config.architecture.workload
+        if not workload.tm_operations.enabled:
+            queries = [q for q in queries if q.query_class != "investigator"]
+        return queries
+
     def run(
         self,
         mode: str | None = None,
@@ -231,7 +241,7 @@ class BenchmarkRunner:
         Returns:
             BenchmarkResult with mode="power"
         """
-        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
+        queries = self._queries()
         if query_class:
             queries = [q for q in queries if q.query_class == query_class]
 
@@ -296,7 +306,7 @@ class BenchmarkRunner:
         Returns:
             BenchmarkResult with mode="throughput" and stream_results
         """
-        queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
+        queries = self._queries()
         if query_class:
             queries = [q for q in queries if q.query_class == query_class]
 

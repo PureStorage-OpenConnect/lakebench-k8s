@@ -305,6 +305,16 @@ def _build_comparison(
     # Collect all score keys from both
     all_keys = sorted(set(list(scores_a.keys()) + list(scores_b.keys())))
 
+    # QpH is per query set: refuse to compare it across different sets.
+    from lakebench.benchmark.queries import qph_comparable
+
+    qs_a, qs_b = _query_set(metrics_a), _query_set(metrics_b)
+    qph_ok, qph_reason = qph_comparable(qs_a, qs_b)
+    refused = []
+    if not qph_ok:
+        refused = [k for k in all_keys if "qph" in k.lower()]
+        all_keys = [k for k in all_keys if k not in refused]
+
     rows = []
     for key in all_keys:
         val_a = scores_a.get(key)
@@ -324,8 +334,20 @@ def _build_comparison(
             "run_id": metrics_b.get("run_id"),
         },
         "noise_floor_pct": _NOISE_FLOOR_PCT,
+        "query_sets": {"config_a": qs_a, "config_b": qs_b},
+        "qph_comparable": qph_ok,
+        "qph_refused": {"metrics": refused, "reason": qph_reason} if refused else None,
         "metrics": rows,
     }
+
+
+def _query_set(metrics: dict) -> str | None:
+    """The query-set id a run's QpH was measured over, or None."""
+    if not isinstance(metrics, dict) or "error" in metrics:
+        return None
+    bench = metrics.get("benchmark") or {}
+    qb = (metrics.get("pipeline_benchmark") or {}).get("query_benchmark") or {}
+    return bench.get("query_set_id") or qb.get("query_set_id")
 
 
 def _print_comparison_table(comparison: dict) -> None:
@@ -373,6 +395,12 @@ def _print_comparison_table(comparison: dict) -> None:
         )
 
     console.print(table)
+    refused = comparison.get("qph_refused")
+    if refused:
+        console.print(
+            f"[yellow]QpH not compared ({', '.join(refused['metrics'])}): "
+            f"{refused['reason']}. QpH is queries per hour over one query set.[/yellow]"
+        )
     console.print(
         f"[dim]Delta is B relative to A. Differences under {_NOISE_FLOOR_PCT:g}% are within "
         "measured run-to-run spread and are not coloured.[/dim]"

@@ -617,6 +617,37 @@ def get_benchmark_queries(schema: WorkloadSchema) -> list[BenchmarkQuery]:
     return BENCHMARK_QUERIES_BY_DOMAIN.get(schema, _CUSTOMER360_QUERIES)
 
 
+def query_set_id(names) -> str:
+    """Identity of a benchmark query set: the query count and a hash of each
+    query's name and SQL text (names not in the registry hash by name only).
+
+    QpH is queries per hour over a set; two runs over different sets (the
+    Financial set grew from 8 to 12 queries with the investigator class, or a
+    query's SQL changed) do not have comparable QpH, and compare/reproduce
+    refuse to put them side by side.
+    """
+    import hashlib
+
+    sql = {q.name: q.sql for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for q in qs}
+    uniq = sorted({str(n) for n in names if n})
+    h = hashlib.sha256()
+    for n in uniq:
+        h.update(f"{n}\n{sql.get(n, '')}\n".encode())
+    return f"qs{len(uniq)}-{h.hexdigest()[:12]}"
+
+
+def qph_comparable(a: str | None, b: str | None) -> tuple[bool, str]:
+    """Whether QpH over query sets ``a`` and ``b`` may be compared, and why not."""
+    if not a or not b or a == "unknown" or b == "unknown":
+        return False, (
+            f"query set not recorded ({a or 'none'} vs {b or 'none'}); "
+            "the run predates query-set ids"
+        )
+    if a != b:
+        return False, f"different query sets ({a} vs {b})"
+    return True, ""
+
+
 # Backward-compatible alias. New code should call
 # ``get_benchmark_queries(schema)`` or read ``BENCHMARK_QUERIES_BY_DOMAIN``
 # directly so the benchmark set travels with the workload schema.
