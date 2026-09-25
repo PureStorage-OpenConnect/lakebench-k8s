@@ -579,6 +579,7 @@ class MetricsStorage:
                 maintenance_settle_seconds=scores.get("maintenance_settle_seconds"),
                 maintenance_settled=scores.get("maintenance_settled"),
                 maintenance_settle_capped=scores.get("maintenance_settle_capped", False),
+                maintenance_settle_verified=scores.get("maintenance_settle_verified"),
                 maintenance_settle=pb_data.get("maintenance_settle"),
             )
             if pb_data.get("end_time"):

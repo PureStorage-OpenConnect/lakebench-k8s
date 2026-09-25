@@ -147,6 +147,7 @@ The scorecard then reports:
 | `maintenance_settle_seconds` | Seconds from maintenance end until the storage settle probe was stable (see below). Not counted in `time_to_value_seconds` or any stage time |
 | `maintenance_settled` | False when the post round ran on storage that had not settled |
 | `maintenance_settle_capped` | True when the wait reached `max_seconds` |
+| `maintenance_settle_verified` | False when there was no pre-maintenance probe time to check the probes against |
 
 Both rounds are preceded by one unmeasured warm-up pass, which pays the first
 touch of a snapshot (metadata and manifest reads, split planning caches).
@@ -164,7 +165,13 @@ first scan-class query, a full scan of the table compaction rewrote) every
 query's pre-maintenance median by more than `tolerance_pct`. The second
 condition matters: in the run above the +2 and +15 minute rounds agreed
 within 4% while both were a third slow. Without a pre round (scale 50 and
-above) only the first condition applies, and a slow plateau can be accepted.
+above) there is no time to compare against: three consecutive probes must
+agree, and the result is recorded with `maintenance_settle_verified: false`
+because a slow plateau also agrees with itself. The reference is a bound,
+not a target: when compaction speeds the probe up more than settling slows
+it down, an unsettled probe can still pass it. When the probes are stable
+but stay slower than the pre-maintenance time, the wait runs to the cap and
+the reason says settling and a maintenance regression are not separable.
 
 If the wait reaches `max_seconds` the post round still runs, and
 `maintenance_value_pct` is null with the reason `storage did not settle

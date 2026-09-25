@@ -30,6 +30,10 @@ from typing import Any
 # A probe that fails this many times in a row ends the wait: the query is
 # broken or the engine is down, and waiting out the cap would not change it.
 MAX_CONSECUTIVE_PROBE_FAILURES = 3
+# Agreeing probes needed when there is no pre-maintenance time. More than
+# two, because a slow plateau also agrees with itself; still no proof, so the
+# result is recorded as unverified.
+UNVERIFIED_STABLE_PROBES = 3
 
 
 @dataclass
@@ -65,13 +69,19 @@ class SettleResult:
     reference_seconds: float | None
     probes: list[SettleProbe] = field(default_factory=list)
     reason: str = ""  # why it did not settle; "" when settled
+    # False when there was no pre-maintenance time to check against: the
+    # probes agreed with each other, which a slow plateau also does.
+    verified: bool = True
 
     def value_reason(self) -> str:
         """Why the maintenance value cannot be reported, or "" when it can."""
         if self.settled:
             return ""
         if self.capped:
-            return f"storage did not settle within {self.max_seconds:.0f} s"
+            msg = f"storage did not settle within {self.max_seconds:.0f} s"
+            if self.reason and "slower than" in self.reason:
+                msg += f" ({self.reason})"
+            return msg
         return f"settle wait ended without settling: {self.reason}"
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +97,7 @@ class SettleResult:
             ),
             "probes": [p.to_dict() for p in self.probes],
             "reason": self.reason,
+            "verified": self.verified,
         }
 
 
@@ -96,7 +107,7 @@ def _within(a: float, b: float, tolerance_pct: float) -> bool:
 
 
 def wait_for_settle(
-    probe: Callable[[], float],
+    probe: Callable[[float], float],
     *,
     probe_query: str,
     started_at: float,
@@ -111,8 +122,9 @@ def wait_for_settle(
     """Probe until two consecutive probes agree, or the cap is reached.
 
     Args:
-        probe: Runs the probe query once and returns its seconds. Raises on
-            failure (timeout, engine error).
+        probe: Runs the probe query once and returns its seconds; called
+            with the seconds left before the cap, which it should use to
+            bound its own timeout. Raises on failure (timeout, engine error).
         probe_query: Name recorded with the result.
         started_at: ``clock()`` value at maintenance end. Offsets and
             ``settle_seconds`` are measured from here.
@@ -126,6 +138,8 @@ def wait_for_settle(
     """
     probes: list[SettleProbe] = []
     failures = 0
+    has_reference = reference_seconds is not None and reference_seconds > 0
+    need = 2 if has_reference else UNVERIFIED_STABLE_PROBES
 
     def _result(settled: bool, capped: bool, reason: str) -> SettleResult:
         return SettleResult(
@@ -138,7 +152,10 @@ def wait_for_settle(
             reference_seconds=reference_seconds,
             probes=probes,
             reason=reason,
+            verified=has_reference,
         )
+
+    last_reason = ""
 
     def _near_reference(t: float) -> bool:
         if reference_seconds is None or reference_seconds <= 0:
@@ -149,9 +166,9 @@ def wait_for_settle(
         began = clock()
         offset = began - started_at
         if offset > max_seconds:
-            return _result(False, True, f"cap of {max_seconds:.0f} s reached")
+            return _result(False, True, last_reason or f"cap of {max_seconds:.0f} s reached")
         try:
-            t = float(probe())
+            t = float(probe(max(0.0, max_seconds - offset)))
             p = SettleProbe(offset_seconds=offset, seconds=t)
             failures = 0
         except Exception as e:  # noqa: BLE001
@@ -167,21 +184,26 @@ def wait_for_settle(
                 False,
                 f"probe {probe_query} failed {failures} times in a row ({p.error})",
             )
-        if len(probes) >= 2:
-            a, b = probes[-2].seconds, probes[-1].seconds
-            if (
-                a is not None
-                and b is not None
-                and _within(a, b, tolerance_pct)
-                and _near_reference(a)
-                and _near_reference(b)
-            ):
+        window = [q.seconds for q in probes[-need:]]
+        if len(window) == need and all(t is not None for t in window):
+            stable = all(_within(window[0], t, tolerance_pct) for t in window[1:]) and all(
+                _within(a, b, tolerance_pct) for a, b in zip(window, window[1:], strict=False)
+            )
+            if stable and all(_near_reference(t) for t in window):
                 return _result(True, False, "")
+            last_reason = ""
+            if stable:
+                last_reason = (
+                    f"probe stable at {window[-1]:.1f} s but slower than the "
+                    f"pre-maintenance {reference_seconds:.1f} s by more than "
+                    f"{tolerance_pct:g}%; settling and a maintenance regression "
+                    "are not separable"
+                )
 
         # Next probe one interval after this one started, never before now.
         wait = began + interval_seconds - clock()
         if clock() + max(wait, 0.0) - started_at > max_seconds:
             # The next probe would start past the cap.
-            return _result(False, True, f"cap of {max_seconds:.0f} s reached")
+            return _result(False, True, last_reason or f"cap of {max_seconds:.0f} s reached")
         if wait > 0:
             sleep(wait)

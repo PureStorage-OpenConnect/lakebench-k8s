@@ -42,7 +42,8 @@ def _prober(clock: _Clock, times):
     """Probe returning *times* in order; None raises. Each probe takes its time."""
     it = iter(times)
 
-    def _probe() -> float:
+    def _probe(remaining: float) -> float:
+        assert remaining >= 0
         t = next(it)
         if t is None:
             clock.t += 5.0
@@ -69,7 +70,7 @@ def _wait(clock, times, **kw):
 
 def test_decay_to_plateau_settles_on_first_stable_pair():
     clock = _Clock()
-    r = _wait(clock, [30.0, 20.0, 14.0, 12.0, 11.5, 11.4, 99.0])
+    r = _wait(clock, [30.0, 20.0, 14.0, 12.0, 11.5, 11.4, 99.0], reference_seconds=11.0)
     assert r.settled and not r.capped and r.reason == ""
     # 12.0 then 11.5 is the first pair within 10%.
     assert [p.seconds for p in r.probes] == [30.0, 20.0, 14.0, 12.0, 11.5]
@@ -91,10 +92,43 @@ def test_slow_plateau_is_not_accepted_when_pre_time_is_known():
     assert r.settle_seconds > 20 * 60
 
 
-def test_without_reference_consecutive_agreement_settles():
+def test_without_reference_three_agreeing_probes_settle_unverified():
     clock = _Clock()
-    r = _wait(clock, [15.2, 15.0], reference_seconds=None)
-    assert r.settled and len(r.probes) == 2
+    r = _wait(clock, [15.2, 15.0, 14.9], reference_seconds=None)
+    assert r.settled and len(r.probes) == 3
+    assert r.verified is False and r.to_dict()["verified"] is False
+    clock = _Clock()
+    assert _wait(clock, [10.0, 10.1], reference_seconds=10.0).verified is True
+
+
+def test_stable_but_slower_than_pre_is_named_not_blamed_on_storage():
+    clock = _Clock()
+    r = _wait(clock, [14.0] * 100, reference_seconds=10.0, max_seconds=600)
+    assert r.capped and not r.settled
+    assert "slower than the pre-maintenance 10.0 s" in r.reason
+    assert "not separable" in r.value_reason()
+
+
+def test_probe_is_told_the_time_left_before_the_cap():
+    clock = _Clock()
+    seen = []
+
+    def _probe(remaining):
+        seen.append(remaining)
+        clock.t += 10.0
+        return 10.0 + len(seen) * 5  # never stable
+
+    wait_for_settle(
+        _probe,
+        probe_query="Q1",
+        started_at=clock(),
+        max_seconds=300,
+        interval_seconds=60,
+        tolerance_pct=10.0,
+        clock=clock,
+        sleep=clock.sleep,
+    )
+    assert seen[0] == 300 and seen[1] == 240 and seen == sorted(seen, reverse=True)
 
 
 def test_never_settling_hits_the_cap():
@@ -126,7 +160,7 @@ def test_failing_probe_ends_the_wait_early():
 
 def test_one_failed_probe_breaks_the_pair_but_not_the_wait():
     clock = _Clock()
-    r = _wait(clock, [12.0, None, 12.1, 12.0])
+    r = _wait(clock, [12.0, None, 12.1, 12.0], reference_seconds=12.0)
     assert r.settled
     assert [p.seconds for p in r.probes] == [12.0, None, 12.1, 12.0]
     assert r.probes[1].error.startswith("Query exceeded")
@@ -135,7 +169,7 @@ def test_one_failed_probe_breaks_the_pair_but_not_the_wait():
 def test_slow_probe_does_not_sleep_negative():
     # A probe longer than the interval starts the next one immediately.
     clock = _Clock()
-    r = _wait(clock, [90.0, 80.0, 79.0], interval_seconds=60)
+    r = _wait(clock, [90.0, 80.0, 79.0], interval_seconds=60, reference_seconds=80.0)
     assert r.settled
     assert r.probes[1].offset_seconds == pytest.approx(90.0)
 
@@ -264,7 +298,8 @@ def test_helper_disabled_or_unknown_query_returns_none():
     clock = _Clock()
     runner = _FakeRunner(clock, [], _QUERIES)
     assert _settle_after_maintenance(_cfg(enabled=False), runner, None, 300, clock()) is None
-    assert _settle_after_maintenance(_cfg(probe_query="nope"), runner, None, 300, clock()) is None
+    with pytest.raises(ValueError):
+        _settle_after_maintenance(_cfg(probe_query="nope"), runner, None, 300, clock())
     assert runner.calls == []
 
 
@@ -274,6 +309,8 @@ def test_config_defaults():
     assert sc.tolerance_pct == 10.0 and sc.probe_query is None and sc.probe_samples == 1
     with pytest.raises(ValueError):
         MaintenanceSettleConfig(tolerance_pct=0)
+    with pytest.raises(ValueError):
+        MaintenanceSettleConfig(max_seconds=0)
     with pytest.raises(ValueError):
         MaintenanceSettleConfig(bogus=1)
 
@@ -319,8 +356,11 @@ def _pb_with_settle(settle: SettleResult | None):
         pb.maintenance_settled = settle.settled
         pb.maintenance_settle_capped = settle.capped
         pb.maintenance_settle = settle.to_dict()
-        if not settle.settled:
-            pb.maintenance_value_reason = settle.value_reason()
+        pre = [_qr("Q1", True, 10.0)]
+        post = [_qr("Q1", True, 5.0)]
+        value, n, reason = _maintenance_value(pre, post, 66, 61, 120.0, settle)
+        pb.maintenance_value_pct = value
+        pb.maintenance_value_reason = reason
     pm.pipeline_benchmark = pb
     return pm, pb
 
@@ -370,7 +410,7 @@ def test_report_shows_settle_rows():
     from lakebench.reports.generator import ReportGenerator
 
     clock = _Clock()
-    pm, _ = _pb_with_settle(_wait(clock, [12.0, None, 12.1, 12.0]))
+    pm, _ = _pb_with_settle(_wait(clock, [12.0, None, 12.1, 12.0], reference_seconds=12.0))
     html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(pm)
     assert "Storage settle wait" in html and "settled after" in html
     assert "12.0s, fail, 12.1s, 12.0s" in html
