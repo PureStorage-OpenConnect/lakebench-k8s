@@ -82,7 +82,14 @@ A run is refused, never compared, when:
   baseline's (from stage timestamps in one, from the scorecard in the other),
   or whose stages carry no timestamps while its datagen stage is stale or
   present on one side only. Without timestamps, time to value is the run's
-  wall clock and may or may not include a generate.
+  wall clock and may or may not include a generate;
+- it is a multi-cycle batch run (`cycles` above 1). Cycles 2 onwards generate
+  data between gold and the next bronze, inside the time-to-value span, and
+  `cycles` is not in the snapshot for the fingerprint to catch;
+- its batch stage timestamps span less time than the stages' own seconds add
+  up to. Timestamps are naive local time, so this is a clock change (a DST
+  fall-back) during the run. A spring-forward lengthens the span instead and
+  reads as a time-to-value regression.
 
 Within a comparable run, some numbers are left out rather than trusted:
 
@@ -101,8 +108,18 @@ Within a comparable run, some numbers are left out rather than trusted:
   `start_time` is naive local time with no zone recorded, so the age is taken
   at its smallest over every UTC offset (-12h to +14h): a sidecar is called
   stale only when it is more than 24 hours old wherever the run happened, and
-  the answer does not depend on the gate host's zone. In practice a sidecar
-  has to be at least 38 hours older than the naive start to be dropped.
+  the answer does not depend on the gate host's zone. The cost is a wide
+  bound: the naive start has to be more than 38 hours after `written_at` for
+  the sidecar to be dropped, which in real time is between 24 and 50 hours
+  depending on the run host's zone (44 hours on a UTC-6 host).
+
+The recomputed GB/s is the scorecard's: GB is summed over every non-datagen
+stage, the untimed query stage included, as the scorecard sums it.
+
+A batch baseline has to carry datagen numbers: `record` refuses a batch run
+whose datagen sidecar is stale or which has no datagen stage, because such a
+baseline would leave every later run's datagen ungated ("present on one side
+only").
 
 `maintenance_value_pct` is reported by `lakebench run` but not gated. It is
 (post - pre) / pre, and both halves are gated on their own
@@ -182,8 +199,9 @@ newest successful run whose fingerprint matches, searching
 `lakebench-output/runs` (or `$LAKEBENCH_PERF_RUNS_DIR`) and `uat/perf/`. Name
 a run explicitly with `--perf-run NAME=RUN` on `release_gate.py` or
 `--run NAME=RUN` on `perf_gate.py gate`; a run id is looked up in both
-directories (`compare` and `record` do the same), and a run id present in
-both with different contents is refused.
+directories (`compare` and `record` do the same). A run id present in both
+with different contents is refused, for a named run and for one the gate
+found itself.
 
 The release check fails when a required config has no accepted baseline, no
 run can be found for it, or its run is refused or regressed. An optional
@@ -210,8 +228,10 @@ that ran, so a check would compare the config with itself. The fingerprint
 still pins the requested counts; a cluster that could not schedule them is not
 caught until the continuous run path records observed executor counts.
 
-The datagen staleness bound is wide: a sidecar written 14 to 38 hours before
-the run can still be attributed to it, because the run's zone is unknown.
+The datagen staleness bound is wide: a sidecar written up to 50 hours
+before the run (real time, depending on the run host's zone) can still be
+attributed to it, because the run's zone is unknown. A run that reuses the
+baseline's own sidecar inside that window compares datagen with itself.
 Recording `start_time` with its UTC offset in the run path would let the gate
 use the real 24-hour bound.
 

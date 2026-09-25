@@ -314,6 +314,13 @@ class RunRecord:
         return self.pb_raw.get("scorecard") or self.pb_raw.get("scores") or {}
 
 
+def _canonical_json(path: Path) -> str:
+    try:
+        return json.dumps(json.loads(path.read_text()), sort_keys=True)
+    except (OSError, json.JSONDecodeError):
+        return f"unreadable:{path}"
+
+
 def load_run(ref: str | Path, runs_dir: Path | list[Path] | None = None) -> RunRecord:
     """Load a run by metrics.json path, run directory, or run id.
 
@@ -340,7 +347,7 @@ def load_run(ref: str | Path, runs_dir: Path | list[Path] | None = None) -> RunR
         where = ", ".join(str(d) for d in dirs)
         if not found:
             raise PerfGateError(f"run {ref!r} not found under {where}")
-        if len({f.read_bytes() for f in found}) > 1:
+        if len({_canonical_json(f) for f in found}) > 1:
             raise PerfGateError(
                 f"run {ref!r} exists with different contents in more than one of {where}"
             )
@@ -379,20 +386,28 @@ def _is_datagen_stage(stage: Mapping[str, Any]) -> bool:
     return stage.get("stage_name") == "datagen" or stage.get("stage_type") == "datagen"
 
 
-def _pipeline_ttv(run: RunRecord) -> tuple[float, float | None] | None:
-    """(time to value, GB/s) over the batch pipeline stages, datagen excluded.
+def _pipeline_ttv(run: RunRecord) -> tuple[float, float | None, float] | None:
+    """(time to value, GB/s, summed stage seconds) over the pipeline stages.
 
     The same rule as ``_compute_batch_scores`` (first start to last end, a
     stage without an end counts at its start), applied only to stages that
-    are not datagen, so whether a generate ran inside the run does not move
-    it. None when no pipeline stage records a start time.
+    are not datagen, so whether a generate ran inside a single-cycle run does
+    not move it (multi-cycle runs, which generate between cycles, are refused
+    in run_refusals). GB is summed over every non-datagen stage, timed or not,
+    as the scorecard sums it (the query stage has no timestamps but has an
+    input size), so GB/s equals the scorecard's whenever the time does. None
+    when no pipeline stage records a start time.
     """
     starts: list[datetime] = []
     ends: list[datetime] = []
     gb = 0.0
+    timed_seconds = 0.0
     for s in run.pb_raw.get("stages") or []:
         if _is_datagen_stage(s):
             continue
+        size = s.get("input_size_gb")
+        if isinstance(size, (int, float)) and size > 0:
+            gb += float(size)
         try:
             start = datetime.fromisoformat(s["start_time"]) if s.get("start_time") else None
             end = datetime.fromisoformat(s["end_time"]) if s.get("end_time") else None
@@ -402,9 +417,9 @@ def _pipeline_ttv(run: RunRecord) -> tuple[float, float | None] | None:
             continue
         starts.append(start)
         ends.append(end or start)
-        size = s.get("input_size_gb")
-        if isinstance(size, (int, float)) and size > 0:
-            gb += float(size)
+        elapsed = s.get("elapsed_seconds")
+        if isinstance(elapsed, (int, float)) and elapsed > 0:
+            timed_seconds += float(elapsed)
     if not starts:
         return None
     try:
@@ -422,7 +437,7 @@ def _pipeline_ttv(run: RunRecord) -> tuple[float, float | None] | None:
         )
         if isinstance(s_ttv, (int, float)) and isinstance(s_gbps, (int, float)) and s_ttv > 0:
             gb = float(s_gbps) * float(s_ttv)
-    return ttv, (gb / ttv if gb > 0 else None)
+    return ttv, (gb / ttv if gb > 0 else None), timed_seconds
 
 
 def _datagen_stale(run: RunRecord) -> str | None:
@@ -476,7 +491,7 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     if run.mode == "batch":
         recomputed = _pipeline_ttv(run)
         if recomputed is not None:
-            ttv, gbps = recomputed
+            ttv, gbps, _timed = recomputed
             numbers["time_to_value_seconds"] = ttv
             if gbps is not None:
                 numbers["pipeline_throughput_gb_per_second"] = gbps
@@ -546,6 +561,32 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
 
     scores = run.scores
     if run.mode == "batch":
+        # Cycles 2..N regenerate data between gold and the next bronze, so
+        # first start to last end spans datagen, and stage seconds keep only
+        # the last cycle's value. `cycles` is not in the snapshot, so it is
+        # checked here.
+        cycles = run.raw.get("cycles") or run.pb_raw.get("cycles") or []
+        names = [
+            s.get("stage_name")
+            for s in run.pb_raw.get("stages") or []
+            if s.get("stage_type") == "batch"
+        ]
+        if len(cycles) > 1 or len(names) != len(set(names)):
+            reasons.append(
+                f"multi-cycle batch run ({max(len(cycles), 2)} cycles); the gate compares "
+                "single-cycle runs only"
+            )
+        recomputed = _pipeline_ttv(run)
+        if recomputed is not None:
+            ttv, _gbps, timed = recomputed
+            # Batch stages run one after another, so their timestamps cannot
+            # span less than their own durations. A run that does crossed a
+            # clock change (naive local timestamps across a DST fall-back).
+            if ttv + max(5.0, 0.01 * timed) < timed:
+                reasons.append(
+                    f"stage timestamps span {ttv:.0f}s, less than the stages' own "
+                    f"{timed:.0f}s (a clock change during the run?)"
+                )
         ratio = scores.get("scale_ratio", run.pb_raw.get("scale_ratio"))
         ratio = float(ratio) if isinstance(ratio, (int, float)) else 0.0
         if ratio < MIN_SCALE_RATIO:
@@ -971,9 +1012,19 @@ def record_baseline(
         raise PerfGateError(
             f"run {run.run_id} cannot be a baseline for {name}: " + "; ".join(reasons)
         )
-    numbers, _excluded = extract_metrics(run)
+    numbers, excluded = extract_metrics(run)
     if not numbers:
         raise PerfGateError(f"run {run.run_id} has no performance numbers")
+    # A batch baseline without datagen numbers turns datagen gating off for
+    # every later run (they are excluded as "present on one side only"), so
+    # it has to come from a run with a fresh generate.
+    # Continuous stage seconds, datagen's included, are not gated.
+    if run.mode == "batch" and "datagen_seconds" not in numbers:
+        why = excluded.get("datagen_seconds") or "the run has no datagen stage"
+        raise PerfGateError(
+            f"run {run.run_id} cannot be a baseline for {name}: no datagen numbers ({why}); "
+            "record a run that generated its own data"
+        )
     new = Baseline(
         name=name,
         config=current.config,
@@ -1083,6 +1134,9 @@ def release_check(
                 else:
                     found = [r for d in dirs if (r := latest_candidate(pinned, d)) is not None]
                     run = max(found, key=lambda r: r.run_id) if found else None
+                    if run is not None:
+                        # The same run id in two directories must be one run.
+                        run = load_run(run.run_id, dirs)
                 if run is None:
                     ok, msg = False, f"no successful run of {baseline.config} in {where}"
                 else:
