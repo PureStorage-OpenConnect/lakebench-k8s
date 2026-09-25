@@ -131,6 +131,200 @@ def path_size_gb(spark, uri):
         return 0.0
 
 
+def _describe_table(spark, fq_table):
+    """(location, provider) of a catalog table from DESCRIBE TABLE EXTENDED.
+
+    Only rows after the "# Detailed Table Information" header count: a column
+    named Location or Provider comes earlier and would be read as the value.
+    """
+    location = provider = None
+    detail = False
+    for row in spark.sql(f"DESCRIBE TABLE EXTENDED {fq_table}").collect():
+        name = (row["col_name"] or "").strip()
+        if name.startswith("# Detailed Table Information"):
+            detail = True
+            continue
+        if not detail:
+            continue
+        value = (row["data_type"] or "").strip() or None
+        if name == "Location" and location is None:
+            location = value
+        elif name == "Provider" and provider is None:
+            provider = value
+    return location, provider
+
+
+def _norm_uri(uri):
+    """One spelling per location: s3a:// and s3:// compare equal, and so do
+    file:/x and file:///x (Hadoop reports either)."""
+    import re
+
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*):/*(.*)$", uri.strip())
+    if not m:
+        return uri.rstrip("/") + "/"
+    scheme, rest = m.group(1).lower(), m.group(2).rstrip("/")
+    if scheme in ("s3", "s3a", "s3n"):
+        return f"s3://{rest}/"
+    return f"{scheme}:/{rest}/"
+
+
+def owned_table_dir(location, owned_uris, keep_uris, table_name=None):
+    """True when ``location`` may be deleted as a table's own directory.
+
+    It must sit strictly below one of ``owned_uris`` (the deployment's
+    bucket roots; a bucket root itself is never a table directory), must
+    neither contain nor lie inside any of ``keep_uris`` (the raw datagen
+    landing zone, which the next stream reads), and, when ``table_name`` is
+    given, its last path segment must be the table name (or ``name-<suffix>``,
+    Iceberg's unique-location form), so a table that resolves to a namespace
+    or warehouse root never takes its sibling tables with it.
+    """
+    loc = _norm_uri(location)
+    if not any(loc.startswith(_norm_uri(o)) and loc != _norm_uri(o) for o in owned_uris):
+        return False
+    for k in keep_uris:
+        k = _norm_uri(k)
+        if loc.startswith(k) or k.startswith(loc):
+            return False
+    if table_name:
+        last = loc.rstrip("/").rsplit("/", 1)[-1]
+        if last != table_name and not last.startswith(table_name + "-"):
+            return False
+    return True
+
+
+def _hadoop_fs(spark, uri):
+    jvm = spark._jvm
+    hconf = spark._jsc.hadoopConfiguration()
+    target = uri.replace("s3://", "s3a://", 1)
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(target), hconf)
+    return fs, jvm.org.apache.hadoop.fs.Path(target)
+
+
+def _delete_children(spark, location, keep=()):
+    """Delete every child of ``location`` except the names in ``keep``."""
+    fs, path = _hadoop_fs(spark, location)
+    if not fs.exists(path):
+        return 0
+    n = 0
+    for st in fs.listStatus(path):
+        if st.getPath().getName() in keep:
+            continue
+        fs.delete(st.getPath(), True)
+        n += 1
+    return n
+
+
+def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
+    """Drop the tables a continuous run writes, with their data. Returns the
+    tables that existed and were dropped.
+
+    Order per table, so an interrupted reset can be re-run to completion:
+      1. Delete the table's data (every child of its directory except the
+         table log: ``metadata`` for Iceberg, ``_delta_log`` for Delta). The
+         catalog still loads the table during DROP, so the log must survive
+         until then; if the job dies here the table still exists and the
+         next reset finds it again.
+      2. DROP TABLE, with PURGE for Iceberg, or a plain DROP when the
+         catalog refuses purge (Polaris defaults drop-with-purge to off).
+      3. Delete what is left of the directory.
+    Directories are touched only when ``owned_table_dir`` allows it. A table
+    whose location cannot be read is still dropped and its directory kept.
+    """
+    dropped = []
+    for fq in tables:
+        if not table_exists(spark, fq):
+            log(f"Continuous reset: {fq} does not exist")
+            continue
+        try:
+            location, provider = _describe_table(spark, fq)
+        except Exception as e:  # noqa: BLE001
+            log(f"Continuous reset: no location for {fq} ({one_line(e)})")
+            location, provider = None, None
+        iceberg = (provider or "").lower() == "iceberg"
+        name = fq.rsplit(".", 1)[-1]
+        owned = bool(location) and owned_table_dir(location, owned_uris, keep_uris, name)
+        if location and not owned:
+            log(f"Continuous reset: kept {location} (outside this deployment or not its own dir)")
+        if owned:
+            n = _delete_children(spark, location, keep=("metadata", "_delta_log"))
+            log(f"Continuous reset: deleted {n} data entries under {location}")
+        how = "DROP"
+        if iceberg:
+            try:
+                spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
+                how = "DROP PURGE"
+            except Exception as e:  # noqa: BLE001
+                log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
+        if how == "DROP":
+            spark.sql(f"DROP TABLE IF EXISTS {fq}")
+        dropped.append(fq)
+        log(f"Continuous reset: {how} {fq} ({provider or 'unknown provider'})")
+        if owned:
+            fs, path = _hadoop_fs(spark, location)
+            if fs.exists(path):
+                fs.delete(path, True)
+                log(f"Continuous reset: deleted {location}")
+    return dropped
+
+
+def estimate_distinct_from_sample(sample_rows, distinct, singletons, doubletons, population_rows):
+    """Distinct values in the population from a uniform row sample (Chao1).
+
+    Dividing the sample's distinct count by the sampling fraction assumes
+    every sampled value is unseen elsewhere, which overstates a key that
+    repeats: a 0.1% sample of 24.8M rows over 1M customers holds about 24K
+    customers, and 24K / 0.001 reported 14.7M (LB-144). Chao1 adds the
+    unseen values implied by how many sampled values appear once versus
+    twice. It is a lower-bound estimator, capped here at the population
+    row count, and exact when the sample is the population.
+    """
+    if distinct <= 0 or population_rows <= 0:
+        return 0
+    if sample_rows >= population_rows:
+        return int(distinct)
+    if doubletons > 0:
+        unseen = singletons * singletons / (2.0 * doubletons)
+    else:
+        unseen = singletons * (singletons - 1) / 2.0
+    return int(min(distinct + unseen, population_rows))
+
+
+def sample_key_profile(sample_df, key, population_rows):
+    """(estimated distinct ``key`` values, skew factor) from a row sample.
+
+    One aggregation over the sample's per-key counts gives both the
+    frequency profile Chao1 needs and the max/avg ratio used as the skew
+    factor.
+    """
+    from pyspark.sql.functions import avg, col, count, lit, when
+    from pyspark.sql.functions import max as max_
+    from pyspark.sql.functions import sum as sum_
+
+    r = (
+        sample_df.groupBy(key)
+        .count()
+        .agg(
+            count(lit(1)).alias("distinct"),
+            sum_("count").alias("rows"),
+            sum_(when(col("count") == 1, 1).otherwise(0)).alias("f1"),
+            sum_(when(col("count") == 2, 1).otherwise(0)).alias("f2"),
+            max_("count").alias("max_count"),
+            avg("count").alias("avg_count"),
+        )
+        .collect()[0]
+    )
+    estimate = estimate_distinct_from_sample(
+        int(r["rows"] or 0),
+        int(r["distinct"] or 0),
+        int(r["f1"] or 0),
+        int(r["f2"] or 0),
+        population_rows,
+    )
+    skew = (r["max_count"] or 1) / max(r["avg_count"] or 1, 1)
+    return estimate, skew
+
+
 def iceberg_table_stats(spark, fq_table):
     """(row_count, size_gb) of an Iceberg table from its ``data_files`` metadata.
 
