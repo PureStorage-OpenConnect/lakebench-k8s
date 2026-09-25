@@ -16,6 +16,14 @@ from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_err
 
 logger = logging.getLogger(__name__)
 
+# The in-pod Python process ends itself this many seconds before the client
+# gives up. Killing the local ``kubectl exec`` on a client timeout leaves the
+# process (and its DuckDB query, memory and S3 reads) running in the pod.
+# SIGALRM with its default action terminates the process even inside a
+# long C call, where a Python-level handler would never run.
+SERVER_TIMEOUT_MARGIN_SECONDS = 5
+_SIGALRM_EXIT_CODES = (-14, 142)  # killed by signal 14, as seen locally / via kubectl
+
 # Python statement that turns ``rel`` (a DuckDB relation, or None for a
 # statement with no result) into ``rows``. Spark writes TIMESTAMP columns as
 # Iceberg timestamptz, and DuckDB can only hand a TIMESTAMP WITH TIME ZONE
@@ -90,11 +98,21 @@ class DuckDBExecutor:
         self._pod = pod
         return pod
 
-    def _build_python_script(self, sql: str) -> str:
-        """Build a Python one-liner that executes SQL via duckdb."""
+    def _build_python_script(self, sql: str, timeout: int | None = None) -> str:
+        """Build a Python one-liner that executes SQL via duckdb.
+
+        With *timeout*, the process terminates itself (SIGALRM) a few seconds
+        before the client timeout so no orphan outlives it in the pod.
+        """
         sql = " ".join(sql.split())
         escaped_sql = sql.replace("'", "\\'")
+        alarm = (
+            f"import signal; signal.alarm({max(1, int(timeout) - SERVER_TIMEOUT_MARGIN_SECONDS)}); "
+            if timeout
+            else ""
+        )
         return (
+            f"{alarm}"
             "import duckdb, json, os; "
             "conn = duckdb.connect(); "
             f"conn.load_extension('{'delta' if self.table_format == 'delta' else 'iceberg'}'); "
@@ -113,7 +131,7 @@ class DuckDBExecutor:
 
     def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
         pod = self._discover_pod()
-        script = self._build_python_script(sql)
+        script = self._build_python_script(sql, timeout=timeout)
         cmd = [
             "kubectl",
             "exec",
@@ -147,7 +165,12 @@ class DuckDBExecutor:
             )
 
         if result.returncode != 0:
-            error = summarise_engine_error(result.stderr or "")
+            # kubectl exec reports the remote exit on stderr ("command
+            # terminated with exit code 142"), so the code alone decides.
+            if result.returncode in _SIGALRM_EXIT_CODES:
+                error = f"Query timed out ({timeout}s, ended in the pod)"
+            else:
+                error = summarise_engine_error(result.stderr or "")
             return QueryExecutorResult(
                 sql=sql,
                 engine="duckdb",

@@ -120,18 +120,39 @@ The `PRINCIPAL_ROLE:ALL` scope grants Trino the permissions it needs to read and
 
 ## Sizing Guidance
 
-Worker sizing depends on query complexity, data volume, and concurrency:
+When `trino.worker.replicas`, `cpu` and `memory` are left at their defaults, the autosizer sets them from the scale factor (`full_compute_guidance()` in `config/scale.py`). Explicit values are kept.
 
-| Scale factor | Approximate data | Recommended workers | Worker memory | Notes |
+| Scale factor | Workers | Worker memory | Coordinator memory |
+|---|---|---|---|
+| 1-5 | 1 | 8Gi | 4Gi |
+| 6-50 | 2 | 16Gi | 8Gi |
+| 51-500 | max(4, scale / 25) | 48Gi | 16Gi |
+| 501+ | max(10, scale / 50) | 64Gi | 16Gi |
+
+### Query memory limits
+
+lakebench sets Trino's memory properties from the deployed heaps and worker count (`trino_memory_properties()` in `deploy/engine.py`). Trino's own defaults do not follow the cluster: `query.max-memory` is a flat 20GB, so before this change four 48Gi workers at AML scale 100 still failed FQ3 with `Query exceeded distributed user memory limit of 20GB` while about 107 GB of memory pool sat unused.
+
+| Property | Value | Scale 1 | Scale 10 | Scale 100 |
 |---|---|---|---|---|
-| 10 (~100 GB) | ~100 GB bronze | 1-2 | 8-16Gi | Minimal setup, suitable for development |
-| 100 (~1 TB) | ~1 TB bronze | 2 | 16Gi | Default config handles the 8-query benchmark |
-| 500+ (~5 TB+) | 5+ TB bronze | 4-8 | 32Gi | Increase replicas before increasing per-worker memory |
+| Worker `-Xmx` | 80% of the pod limit | 6553m | 13107m | 39321m |
+| `query.max-memory-per-node` | 35% of that node's heap | 2293MB | 4587MB | 13762MB |
+| `memory.heap-headroom-per-node` | 30% of that node's heap (Trino's default) | 1965MB | 3932MB | 11796MB |
+| `query.max-memory` | workers x worker per-node | 2293MB | 9174MB | 55048MB |
+| `query.max-total-memory` | Trino's default, 2 x `query.max-memory` | 4586MB | 18348MB | 110096MB |
+
+The per-node values shown are the worker's; the coordinator gets the same fractions of its own heap. Per-node plus headroom is 65% of the heap, inside Trino's startup check (the two may not exceed the heap). The node's memory pool is heap minus headroom, 70% of the heap, so two queries at the per-node cap fit a node at once. That matters for throughput and composite runs (several streams), though with nothing spare: a third concurrent stream at the cap, or untracked allocations past the headroom, still block. When a pool fills, Trino blocks queries and only after `query.low-memory-killer.delay` (5 minutes, longer than the 300 s client timeout) kills the largest, so a blocked stream reads as a timeout. A power run (one query at a time) still gets 17% more per node than Trino's 30% default. `query.max-total-memory` is left at Trino's default, which here is about the physical pool across the workers; pinning it to exactly that pool would let a coordinator reservation plus full revocable use on the workers trip it.
+
+At every autosized scale the new cluster cap is higher than the old effective cap, which was the smaller of 20GB and workers x 30% of the heap (scale 1: 1.9 GB to 2.2 GB; scale 10: 7.7 GB to 9.0 GB; scale 100: 20 GB to 53.8 GB). The values are fixed at deploy time; changing the worker count by hand afterwards does not update them.
+
+### Query timeouts
+
+The benchmark gives each query a client timeout (300 s, or 900 s for the financial workload). Killing the local `kubectl exec` on timeout does not stop the `trino` CLI or its query in the pod; before this was handled, a timed-out query kept holding worker memory and slowed every later query. The executor now passes `--session query_max_run_time=<timeout - 5>s`, so Trino fails the query just before the client gives up, and on a client timeout it also cancels anything still running under the query's unique `--source` tag with `system.runtime.kill_query`. There is deliberately no cluster-wide `query.max-execution-time`: Iceberg and Delta maintenance also runs through the Trino CLI and can legitimately take longer than any benchmark query. The same session limit applies to `lakebench query`: its default `--timeout` is 120 s, so a long ad-hoc statement (a manual `OPTIMIZE`, say) is now ended by Trino at 115 s instead of running on in the pod after the client gave up; pass a larger `--timeout` for such statements.
 
 General principles:
 
-- **Scale out before scaling up.** Adding worker replicas distributes query fragments across more nodes and is more effective than increasing memory on fewer workers.
-- **Spill storage is your safety net.** With `spill_enabled: true` (the default), queries that exceed worker memory spill intermediate data to disk rather than failing with OOM. Keep `spill_max_per_node` at or below the PVC `storage` size.
+- **Scale out before scaling up.** Adding worker replicas distributes query fragments across more nodes and raises `query.max-memory` with them.
+- **Spill does not cover every query.** With `spill_enabled: true` (the default), joins, `ORDER BY`, window functions and plain aggregations can spill to disk. Spilled state is revocable memory, which does not count toward `query.max-memory`. An aggregate that is still `DISTINCT` (or has an `ORDER BY` inside it) in the final plan, and the `MarkDistinct` operator, cannot spill in Trino 483, so their hash tables stay in user memory and hit the limits above. Whether a query keeps that shape depends on the plan: the optimizer can rewrite a `DISTINCT` aggregate into a spillable `GROUP BY` (the `pre_aggregate` distinct-aggregation strategy, chosen from statistics under the default `automatic`). AML FQ3 (`COUNT(DISTINCT target_entity_id)` alongside `SUM`s, grouped by entity) is a candidate for the non-spillable shape; check with `EXPLAIN`. Keep `spill_max_per_node` at or below the PVC `storage` size.
 - **Coordinator sizing is modest.** The coordinator does not process data. The defaults of 2 CPU / 8Gi are sufficient for most workloads.
 
 **Recipes using Trino:** Standard, Polaris.

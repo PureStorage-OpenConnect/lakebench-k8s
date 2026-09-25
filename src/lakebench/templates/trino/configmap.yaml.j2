@@ -17,6 +17,15 @@ data:
     node-scheduler.include-coordinator=false
     http-server.http.port=8080
     discovery.uri=http://lakebench-trino:8080
+    {% if trino_memory | default({}) %}
+    {# Sized in engine.py (trino_memory_properties) from the heaps and the
+       worker count. Unset, query.max-memory is a flat 20GB for any cluster
+       size, which failed AML FQ3 at scale 100 on 4 x 48Gi workers. The
+       cluster-wide caps are enforced here, on the coordinator. #}
+    query.max-memory={{ trino_memory.max_memory }}
+    query.max-memory-per-node={{ trino_memory.coordinator_max_memory_per_node }}
+    memory.heap-headroom-per-node={{ trino_memory.coordinator_heap_headroom }}
+    {% endif %}
     {% if trino_worker_spill_enabled | default(true) %}
     {# The coordinator PLANS with spill-enabled; the workers execute with
        theirs. With spill on the workers only, the coordinator never set a
@@ -33,6 +42,11 @@ data:
     coordinator=false
     http-server.http.port=8080
     discovery.uri=http://lakebench-trino:8080
+    {% if trino_memory | default({}) %}
+    query.max-memory={{ trino_memory.max_memory }}
+    query.max-memory-per-node={{ trino_memory.worker_max_memory_per_node }}
+    memory.heap-headroom-per-node={{ trino_memory.worker_heap_headroom }}
+    {% endif %}
     {% if trino_worker_spill_enabled | default(true) %}
     spill-enabled=true
     spiller-spill-path=/data/trino/spill
@@ -48,8 +62,8 @@ data:
   jvm.config.coordinator: |
     -server
     {# LB-146: heap is computed in engine.py as a fraction of the pod limit.
-       Trino's default query.max-memory-per-node and memory.heap-headroom-per-node
-       are each 30% of this heap, so they follow it; do not pin them absolutely. #}
+       query.max-memory-per-node and memory.heap-headroom-per-node are derived
+       from this same heap in engine.py; do not pin them absolutely. #}
     -Xmx{{ trino_coordinator_heap }}
     -XX:+UseG1GC
     -XX:G1HeapRegionSize=32M
