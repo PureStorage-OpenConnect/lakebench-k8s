@@ -1,0 +1,23 @@
+# Accepted performance baselines per pinned config. Written by
+# scripts/perf_gate.py record; see docs/perf-regression-gate.md.
+schema_version: 1
+baselines:
+  c360-batch-s10:
+    config: c360-batch-s10.yaml
+    required: true
+    status: pending first run
+    notes: No existing run matches this pinned config (see docs/perf-regression-gate.md,
+      "Seeding"). Record the first run of it.
+  c360-continuous-s10:
+    config: c360-continuous-s10.yaml
+    required: true
+    status: pending first run
+    notes: No existing run matches this pinned config (see docs/perf-regression-gate.md,
+      "Seeding"). Record the first run of it.
+  aml-batch-s1:
+    config: aml-batch-s1.yaml
+    required: false
+    status: pending first run
+    notes: Not required until the AML datagen is frozen. Every AML batch run so far
+      records scale_ratio 0.0 (bronze input volume not measured), which the gate
+      refuses; that has to be fixed before any AML run can become a baseline.
