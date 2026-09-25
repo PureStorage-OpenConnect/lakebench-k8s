@@ -481,11 +481,19 @@ class S3Client:
                 mp_paginator = self._client.get_paginator("list_multipart_uploads")
                 for page in mp_paginator.paginate(Bucket=bucket_name):
                     for upload in page.get("Uploads", []):
-                        self._client.abort_multipart_upload(
-                            Bucket=bucket_name,
-                            Key=upload["Key"],
-                            UploadId=upload["UploadId"],
-                        )
+                        # FlashBlade can still list an upload that its async
+                        # GC or a writer has already finished (LB-149). Gone
+                        # is the state we want; step 3 still verifies it.
+                        try:
+                            self._client.abort_multipart_upload(
+                                Bucket=bucket_name,
+                                Key=upload["Key"],
+                                UploadId=upload["UploadId"],
+                            )
+                        except ClientError as e:
+                            if e.response.get("Error", {}).get("Code") != "NoSuchUpload":
+                                raise
+                            continue
                         batch_deleted += 1
 
                 deleted_count += batch_deleted
