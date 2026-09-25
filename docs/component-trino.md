@@ -136,19 +136,19 @@ lakebench sets Trino's memory properties from the deployed heaps and worker coun
 | Property | Value | Scale 1 | Scale 10 | Scale 100 |
 |---|---|---|---|---|
 | Worker `-Xmx` | 80% of the pod limit | 6553m | 13107m | 39321m |
-| `query.max-memory-per-node` | 50% of that node's heap | 3276MB | 6553MB | 19660MB |
+| `query.max-memory-per-node` | 40% of that node's heap | 2621MB | 5242MB | 15728MB |
 | `memory.heap-headroom-per-node` | 30% of that node's heap (Trino's default) | 1965MB | 3932MB | 11796MB |
-| `query.max-memory` | workers x worker per-node | 3276MB | 13106MB | 78640MB |
-| `query.max-total-memory` | workers x (worker heap - headroom) | 4588MB | 18350MB | 110100MB |
+| `query.max-memory` | workers x worker per-node | 2621MB | 10484MB | 62912MB |
+| `query.max-total-memory` | Trino's default, 2 x `query.max-memory` | 5242MB | 20968MB | 125824MB |
 
-The per-node values shown are the worker's; the coordinator gets the same fractions of its own heap. Per-node plus headroom is 80% of the heap, inside Trino's startup check (the two may not exceed the heap). Half the heap is about 71% of the node's memory pool: one query in a power run can use most of it, and throughput runs (4 streams) still have room for a second query. When the pool fills, Trino blocks and its low-memory killer ends the largest query rather than the JVM running out of heap. `query.max-total-memory` is the physical pool across the workers; Trino's default (twice `query.max-memory`) is above that and would never bind first either.
+The per-node values shown are the worker's; the coordinator gets the same fractions of its own heap. Per-node plus headroom is 70% of the heap, inside Trino's startup check (the two may not exceed the heap). The node's memory pool is heap minus headroom, 70% of the heap, so one query may take about 57% of it. That gives a power run (one query at a time) a third more room than Trino's 30% default. Throughput runs (4 streams) can still oversubscribe a pool, as they could at the default: when the pool fills, Trino blocks and, after `query.low-memory-killer.delay` (5 minutes by default), its low-memory killer fails the largest query. `query.max-total-memory` is deliberately left at Trino's default. Pinning it to the physical worker pool would let a coordinator reservation plus full revocable use on the workers trip it, while the default can never bind before the pools fill.
 
-At every autosized scale the new cluster cap is higher than the old effective cap, which was the smaller of 20GB and workers x 30% of the heap (scale 1: 1.9 GB to 3.2 GB; scale 10: 7.7 GB to 12.8 GB; scale 100: 20 GB to 76.8 GB). The values are fixed at deploy time; changing the worker count by hand afterwards does not update them.
+At every autosized scale the new cluster cap is higher than the old effective cap, which was the smaller of 20GB and workers x 30% of the heap (scale 1: 1.9 GB to 2.6 GB; scale 10: 7.7 GB to 10.2 GB; scale 100: 20 GB to 61.4 GB). The values are fixed at deploy time; changing the worker count by hand afterwards does not update them.
 
 General principles:
 
 - **Scale out before scaling up.** Adding worker replicas distributes query fragments across more nodes and raises `query.max-memory` with them.
-- **Spill does not cover every query.** With `spill_enabled: true` (the default), joins, `ORDER BY`, window functions and plain aggregations can spill to disk. Spilled state is revocable memory, which does not count toward `query.max-memory`. Aggregations with `DISTINCT` (or an `ORDER BY` inside the aggregate) and the `MarkDistinct` operator cannot spill in Trino 483, so their hash tables stay in user memory and hit the limits above. AML FQ3 (`COUNT(DISTINCT target_entity_id)` grouped by entity) is this shape. Keep `spill_max_per_node` at or below the PVC `storage` size.
+- **Spill does not cover every query.** With `spill_enabled: true` (the default), joins, `ORDER BY`, window functions and plain aggregations can spill to disk. Spilled state is revocable memory, which does not count toward `query.max-memory`. An aggregate that is still `DISTINCT` (or has an `ORDER BY` inside it) in the final plan, and the `MarkDistinct` operator, cannot spill in Trino 483, so their hash tables stay in user memory and hit the limits above. Whether a query keeps that shape depends on the plan: the optimizer can rewrite a `DISTINCT` aggregate into a spillable `GROUP BY` (the `pre_aggregate` distinct-aggregation strategy, chosen from statistics under the default `automatic`). AML FQ3 (`COUNT(DISTINCT target_entity_id)` alongside `SUM`s, grouped by entity) is a candidate for the non-spillable shape; check with `EXPLAIN`. Keep `spill_max_per_node` at or below the PVC `storage` size.
 - **Coordinator sizing is modest.** The coordinator does not process data. The defaults of 2 CPU / 8Gi are sufficient for most workloads.
 
 **Recipes using Trino:** Standard, Polaris.

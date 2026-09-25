@@ -154,13 +154,15 @@ def thrift_pod_memory_limit(heap: str) -> str:
 #
 # Per node, Trino splits the heap into headroom (untracked allocations) and a
 # memory pool (heap minus headroom) that all queries share. The headroom stays
-# at Trino's own 30% default. One query may take half the heap, about 71% of
-# the pool: more than Trino's 30% default because the power run executes one
-# query at a time, while leaving room for a second query in throughput runs
-# (4 streams). Past the pool, Trino blocks and its low-memory killer ends the
-# largest query instead of the JVM running out of heap. Trino refuses to
-# start unless per-node + headroom <= heap; here they sum to 80%.
-TRINO_QUERY_MEMORY_PER_NODE_FRACTION = 0.5
+# at Trino's own 30% default, so the pool is 70% of the heap. One query may
+# take 40% of the heap, about 57% of the pool, against Trino's 30% default:
+# the power run executes one query at a time and gets a third more room,
+# while in throughput runs (4 streams) two queries at the cap do not fit a
+# node's pool (0.8 > 0.7) any more than three did at the default (0.9). Past
+# the pool, Trino blocks and after query.low-memory-killer.delay its killer
+# ends the largest query. Trino refuses to start unless per-node + headroom
+# <= heap; here they sum to 70%.
+TRINO_QUERY_MEMORY_PER_NODE_FRACTION = 0.4
 TRINO_HEAP_HEADROOM_FRACTION = 0.3
 
 
@@ -177,15 +179,17 @@ def trino_memory_properties(
 ) -> dict[str, str]:
     """Trino memory properties (Trino DataSize strings; Trino's MB is MiB).
 
-    Per-node values follow each role's own heap. The cluster-wide caps follow
+    Per-node values follow each role's own heap. The cluster-wide cap follows
     the workers, because with ``node-scheduler.include-coordinator=false`` only
     workers hold query memory:
 
     - ``query.max-memory`` (user memory, cluster) = workers x worker per-node.
-    - ``query.max-total-memory`` (user + revocable, cluster) = workers x worker
-      pool (heap - headroom), the physical total. Trino's own default is twice
-      ``query.max-memory``, which is above the physical pool and so never
-      binds first either; the explicit value states the bound.
+
+    ``query.max-total-memory`` (user + revocable) is left at Trino's default,
+    twice ``query.max-memory``. Pinning it to the physical worker pool would
+    add a failure mode: Trino sums every node, the coordinator included, so a
+    coordinator reservation plus full revocable use on the workers could trip
+    it while the default can never bind before the pools do.
     """
     workers = max(1, workers)
     out: dict[str, str] = {}
@@ -193,11 +197,8 @@ def trino_memory_properties(
         mib = _heap_mib(heap)
         out[f"{role}_max_memory_per_node"] = f"{int(mib * TRINO_QUERY_MEMORY_PER_NODE_FRACTION)}MB"
         out[f"{role}_heap_headroom"] = f"{int(mib * TRINO_HEAP_HEADROOM_FRACTION)}MB"
-    worker_mib = _heap_mib(worker_heap)
-    per_node = int(worker_mib * TRINO_QUERY_MEMORY_PER_NODE_FRACTION)
-    pool = worker_mib - int(worker_mib * TRINO_HEAP_HEADROOM_FRACTION)
+    per_node = int(_heap_mib(worker_heap) * TRINO_QUERY_MEMORY_PER_NODE_FRACTION)
     out["max_memory"] = f"{workers * per_node}MB"
-    out["max_total_memory"] = f"{workers * pool}MB"
     return out
 
 
