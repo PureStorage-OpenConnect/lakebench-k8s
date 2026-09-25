@@ -587,6 +587,9 @@ class PipelineBenchmark:
         "benchmark_samples_per_query": "Timed samples per query in the scored benchmark round (QpH uses the per-query median; 1 means no measured spread)",
         "qph_spread": "QpH of the slowest and fastest round the per-query samples allow, and their relative range",
         "maintenance_paired_queries": "Queries that succeeded before and after maintenance (the base of maintenance_value_pct)",
+        "maintenance_settle_seconds": "Seconds from maintenance end until a storage-bound probe query was stable, before the post-maintenance round; not counted in time_to_value",
+        "maintenance_settled": "True when the probe settled within the cap; false means the post round ran on unsettled storage and maintenance_value_pct is null",
+        "maintenance_settle_capped": "True when the settle wait reached benchmark.maintenance_settle.max_seconds",
     }
 
     run_id: str
@@ -668,6 +671,15 @@ class PipelineBenchmark:
     # The pre-maintenance round as BenchmarkResult.to_dict(), every sample
     # included, so the noise judgement can be rechecked from metrics.json.
     pre_compaction_benchmark: dict[str, Any] | None = None
+    # Storage settle wait between maintenance and the post round (LB-150).
+    # None when the wait did not run. Not a stage: it adds to the run's wall
+    # clock only, never to time_to_value or maintenance_elapsed_seconds.
+    maintenance_settle_seconds: float | None = None
+    maintenance_settled: bool | None = None
+    maintenance_settle_capped: bool = False
+    # SettleResult.to_dict(): the probe query, every probe's offset and time,
+    # the reference time and why the wait ended.
+    maintenance_settle: dict[str, Any] | None = None
 
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     success: bool = False
@@ -992,6 +1004,10 @@ class PipelineBenchmark:
             batch_scores["maintenance_paired_queries"] = self.maintenance_paired_queries
             if self.maintenance_value_pct is None and self.maintenance_value_reason:
                 batch_scores["maintenance_value_reason"] = self.maintenance_value_reason
+        if self.maintenance_settle_seconds is not None:
+            batch_scores["maintenance_settle_seconds"] = round(self.maintenance_settle_seconds, 1)
+            batch_scores["maintenance_settled"] = self.maintenance_settled
+            batch_scores["maintenance_settle_capped"] = self.maintenance_settle_capped
         if self.snapshots_expired > 0:
             batch_scores["snapshots_expired"] = self.snapshots_expired
         if self.orphan_files_removed > 0:
@@ -1056,6 +1072,8 @@ class PipelineBenchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
         if self.pre_compaction_benchmark:
             d["pre_compaction_benchmark"] = self.pre_compaction_benchmark
+        if self.maintenance_settle:
+            d["maintenance_settle"] = self.maintenance_settle
         if self.benchmark_rounds:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
         if self.cycles:

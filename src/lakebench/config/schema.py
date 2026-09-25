@@ -1438,6 +1438,65 @@ class TableNamesConfig(ConfigModel):
         return out
 
 
+class MaintenanceSettleConfig(ConfigModel):
+    """Wait for storage to settle between batch maintenance and the post round.
+
+    On FlashBlade at c360 scale 10 the compacted tables read QpH 546 two
+    minutes after maintenance, 569 at +15 min and 841 at +35 min, against 828
+    before it (LB-150). A post round taken straight away measured the object
+    store working off the delete and rewrite burst. The wait probes one
+    storage-bound query until it is stable; see ``lakebench.benchmark.settle``.
+    Batch mode only: continuous-mode maintenance runs during the stream and
+    is not waited on.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Probe until storage settles before the post-maintenance round",
+    )
+    # Recovery took about 35 minutes in the one measured case; 45 minutes
+    # leaves 10 minutes of margin before the post round runs unsettled.
+    max_seconds: int = Field(
+        default=2700,
+        ge=0,
+        le=14400,
+        description=(
+            "Longest wait after maintenance. When reached, the post round still runs "
+            "but maintenance_value_pct is null"
+        ),
+    )
+    interval_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+        description="Seconds between the start of consecutive probes",
+    )
+    # The unsettled rounds were 27-34% slow and the in-round spread of one
+    # query at scale 10 is a few percent, so 10% separates the two.
+    tolerance_pct: float = Field(
+        default=10.0,
+        gt=0,
+        le=100,
+        description=(
+            "Settled when two consecutive probes differ by at most this percent and, "
+            "when a pre-maintenance time is known, neither is slower than it by more"
+        ),
+    )
+    probe_query: str | None = Field(
+        default=None,
+        description=(
+            "Benchmark query name to probe with. Default: the workload's first "
+            "scan-class query (a full scan of the table compaction rewrote)"
+        ),
+    )
+    probe_samples: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Timed runs per probe; the probe time is their median",
+    )
+
+
 class BenchmarkConfig(ConfigModel):
     """Benchmark configuration.
 
@@ -1471,6 +1530,7 @@ class BenchmarkConfig(ConfigModel):
             "measured spread"
         ),
     )
+    maintenance_settle: MaintenanceSettleConfig = Field(default_factory=MaintenanceSettleConfig)
 
 
 class ArchitectureConfig(ConfigModel):
