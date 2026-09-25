@@ -228,9 +228,11 @@ def load_config(path: str | Path, *, allow_long_names: bool = False) -> Lakebenc
 
     Args:
         path: Path to configuration YAML file
-        allow_long_names: Skip the derived-name length check (LB-153). Only
-            ``destroy`` sets this, so a deployment whose namespace is too
-            long to finish deploying can still be torn down.
+        allow_long_names: Skip the derived-name length check (LB-153). Set by
+            the teardown and diagnostic commands (destroy, clean, status,
+            stop, logs, admin) and the perf gate, so a deployment whose
+            namespace is too long to finish deploying can still be
+            inspected and torn down. deploy, generate and run never set it.
 
     Returns:
         Validated LakebenchConfig object
