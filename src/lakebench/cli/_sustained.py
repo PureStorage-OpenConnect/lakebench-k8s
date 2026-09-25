@@ -189,7 +189,7 @@ def _require_reset_ownership(cfg) -> None:
     if problem:
         print_error(f"Refusing to reset continuous state: {problem}")
         print_info(
-            "Continuous AML runs delete the previous run's checkpoints and raw "
+            "Continuous runs delete the previous run's checkpoints, tables and raw "
             "data, so they require proof of ownership: buckets tagged by "
             "`lakebench deploy`, or on backends without bucket tagging, bucket "
             "names prefixed with the deployment name."
@@ -198,7 +198,7 @@ def _require_reset_ownership(cfg) -> None:
 
 
 def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
-    """Start a continuous AML run clean: delete the stream checkpoints and,
+    """Start a continuous run clean: delete the stream checkpoints and,
     when this run generates its own data, the previous raw datagen files.
 
     Must run BEFORE datagen starts. Stale checkpoints made a rerun ingest
@@ -229,7 +229,9 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
     ]
     if clear_raw:
         raw = cfg.architecture.pipeline.medallion.bronze.path_template
-        if raw == "customer/interactions":
+        if raw == "customer/interactions" and cfg.architecture.workload.schema_type.value == (
+            "financial"
+        ):
             raw = "pacs008"
         targets.append((b.bronze, raw.strip("/")))
     for bucket, prefix in targets:
@@ -240,6 +242,33 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
             raise typer.Exit(1) from e
         if n:
             print_info(f"Cleared {n} objects from {bucket}/{prefix}")
+
+
+C360_RESET_TIMEOUT_S = 900
+
+
+def _run_c360_continuous_reset(job_manager, monitor, console) -> bool:
+    """Drop the c360 continuous tables through a bronze-verify preflight.
+
+    False when the job fails; the caller then starts no stream over tables
+    the reset could not clear.
+    """
+    from lakebench.spark.job import JobState, JobType
+
+    console.print()
+    console.print("[bold]Preflight: resetting continuous tables via bronze-verify...[/bold]")
+    status = job_manager.submit_job(JobType.BRONZE_VERIFY, cycle_env={"LB_CONTINUOUS_RESET": "1"})
+    if status.state == JobState.FAILED:
+        print_error(f"continuous reset submit failed: {status.message}")
+        return False
+    result = monitor.wait_for_completion(
+        "lakebench-bronze-verify", timeout_seconds=C360_RESET_TIMEOUT_S, poll_interval=15
+    )
+    if not result.success:
+        print_error(f"continuous reset failed: {result.message}")
+        return False
+    print_success(f"Continuous tables reset in {result.elapsed_seconds:.0f}s")
+    return True
 
 
 def _find_prometheus_svc(namespace: str) -> str | None:
@@ -1182,14 +1211,14 @@ def _run_sustained(
         # Skipping is only sensible when bronze is already being populated by
         # another process; otherwise the continuous stages have no input.
         engine = DeploymentEngine(cfg)
-        if cfg.architecture.workload.schema_type.value == "financial":
-            # Every continuous AML run starts clean; see _reset_continuous_state
-            # and bronze_verify_financial CONTINUOUS_RESET.
-            # Ownership first: stopping streams in a namespace this run does
-            # not own would already be the damage the gate exists to prevent.
-            _require_reset_ownership(cfg)
-            _stop_leftover_streams(job_manager, cfg.get_namespace())
-            _reset_continuous_state(cfg, clear_raw=not skip_generate)
+        # Every continuous run starts clean; see _reset_continuous_state, and
+        # the table reset in bronze_verify_financial CONTINUOUS_RESET (AML) or
+        # bronze_verify LB_CONTINUOUS_RESET (c360, LB-142).
+        # Ownership first: stopping streams in a namespace this run does
+        # not own would already be the damage the gate exists to prevent.
+        _require_reset_ownership(cfg)
+        _stop_leftover_streams(job_manager, cfg.get_namespace())
+        _reset_continuous_state(cfg, clear_raw=not skip_generate)
         if skip_generate:
             console.print()
             print_info("Skipping datagen deploy (--skip-generate)")
@@ -1277,6 +1306,16 @@ def _run_sustained(
             print_success(
                 f"bronze-verify preflight complete in {preflight_result.elapsed_seconds:.0f}s"
             )
+        else:
+            # c360 (LB-142): a batch run, or an earlier continuous run, leaves
+            # bronze_raw, silver and gold full. The checkpoints were deleted
+            # above, and silver-stream refuses a fresh checkpoint over a full
+            # table, so drop the tables before any stream starts. Unlike the
+            # AML preflight this needs no schema, so it does not wait for
+            # datagen; datagen keeps writing while it runs.
+            if not _run_c360_continuous_reset(job_manager, monitor, console):
+                pipeline_success = False
+                raise typer.Exit(1)
 
         # Launch all streaming jobs concurrently
         console.print()
