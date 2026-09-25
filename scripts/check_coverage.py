@@ -17,6 +17,11 @@ Measured 2026-09-24 on lane/c-hardening:
     unit   reports/scorecard.py     90.52%  (105/116)
     spark  spark/scripts/detection_rules.py  44.30%  (105/237)
 
+Measured 2026-09-25 on lane/q-release-hygiene (floors raised to match):
+    unit   metrics/collector.py     93.56%
+    unit   reports/scorecard.py     93.68%
+    spark  spark/scripts/detection_rules.py  91.33%
+
 Usage:
     python scripts/check_coverage.py --suite unit coverage-unit.json
 """
@@ -31,11 +36,11 @@ from pathlib import Path
 FLOORS: dict[str, dict[str, float]] = {
     "unit": {
         "lakebench/aml/reference_score.py": 96.0,
-        "lakebench/metrics/collector.py": 91.0,
-        "lakebench/reports/scorecard.py": 90.0,
+        "lakebench/metrics/collector.py": 93.0,
+        "lakebench/reports/scorecard.py": 93.0,
     },
     "spark": {
-        "lakebench/spark/scripts/detection_rules.py": 44.0,
+        "lakebench/spark/scripts/detection_rules.py": 91.0,
     },
 }
 

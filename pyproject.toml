@@ -71,6 +71,9 @@ dev = [
     "numpy>=1.26",
     "pandas>=2.0",
     "scikit-learn>=1.4",
+    # lakebench.aml.fidelity_gate writes the reference model outputs as
+    # parquet through pandas, which needs an engine.
+    "pyarrow>=14",
     "pre-commit>=3.0.0",
 ]
 build = [
