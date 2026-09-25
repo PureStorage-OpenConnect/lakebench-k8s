@@ -310,8 +310,8 @@ snapshots that cycle recorded in the ledger): same content first, else the
 same rule on the same customer, its last payment moved forward by at most
 31 days, and holding at least a quarter of the payments the prior was first
 raised on (a frozen 32-hash sketch of them, checked against all of the new
-alert's payments), largest overlap first. A new alert sharing a payment or
-two with a prior never takes its identity. Rules cap the related-payment
+alert's payments) and never fewer than two, largest overlap first. A new
+alert sharing a single payment with a prior never takes its identity. Rules cap the related-payment
 list by payment id, so an alert that grows past about three times that cap
 between cycles can lose its identity: it is then carried as withdrawn and
 raised again as new, which inflates alert counts but never moves a decision.
@@ -368,8 +368,10 @@ last pass so detection ticks always run between passes, plus one final pass
 timed to finish before the window closes. One pass over the full corpus
 takes minutes at scale 10, and gold is not refreshed meanwhile, so a
 freshness sample is logged after each pass and the pass time counts in the
-freshness score. The continuous jobs carry the CLI run id, so a restarted
-driver appends to the same ledger. Each pass takes its cycle number in the
+freshness score (sampled after a pass while data is moving). The final pass
+is timed from the first gold-refresh driver's start, persisted in its
+checkpoint, plus the window length. The continuous jobs carry the CLI run
+id, so a restarted driver appends to the same ledger. Each pass takes its cycle number in the
 ledger before it writes; a pass that fails after writing is reported as a
 failure and never carried from.
 
@@ -388,15 +390,17 @@ investigator queries (class `investigator`): customer 360 for the top open
 case, the 12-month activity review of the newest case, the counterparty and
 two-hop view, and open cases older than 60 days. They read only this run's
 rows, and are left out unless this run's TM verdict is pass or fail (the
-standalone `benchmark` command uses the newest run of the deployment whose
-verdict was pass or fail) (so a
+standalone `benchmark` command includes them only when the deployment's
+newest run had a pass or fail verdict, since each run overwrites the tables) (so a
 disabled or not-run layer never times empty or stale tables), and from the
 in-window rounds of a continuous run. QpH is recorded with its query-set id; `compare` and
 `reproduce` refuse to compare QpH across different query sets, so an 8-query
 AML run is never set against a 12-query one. A run recorded before the id
 existed gets a pinned historical id when its query names are the c360 set or
-the 8-query AML set (so it stays comparable with runs over that set until one
-of those queries' SQL changes); any other legacy set is `unknown`.
+the 8-query AML set and was recorded after that set's last SQL change (so
+it stays comparable with runs over the same SQL); older records and any other
+legacy set are `unknown`. A run of an older branch recorded after that date
+is the one case this cannot tell apart.
 
 ## What the AML workload deliberately does not measure
 

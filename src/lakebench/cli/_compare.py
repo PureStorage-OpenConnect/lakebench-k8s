@@ -357,7 +357,7 @@ def _query_set(metrics: dict) -> str | None:
     # run).
     for b in (bench, qb):
         if b.get("queries"):
-            return legacy_query_set_id(b["queries"])
+            return legacy_query_set_id(b["queries"], metrics.get("start_time"))
     return None
 
 

@@ -737,12 +737,35 @@ def _check(spark):
     h1 = [r for r in rows if r["alert_id"] == "H1g"][0]
     assert h1["disposition"] != "over_capacity" and h1["first_seen_cycle"] == 1
 
+    # Neighbours sharing one payment with a carried alert (other rules, and
+    # the same rule below the growth threshold) do not rank as known, so they
+    # cannot push the carried alert past the bound (reviewer probe R4/p2).
+    a1 = ("N1", "W2_structuring", 1, (2024, 3, 11), ["u9", "u10"])
+    _alerts(spark, "run-n-c1", [a1])
+    tm.run_tm_operations(spark, txns, "run-n-c1", params=one, source_rows_fn=lambda s: n_rows)
+    nb = [a1]
+    nb += [(f"NW3{i}", "W3_round_tripping", 1, (2024, 1, 2 + i), ["u9", f"u{i}"]) for i in range(3)]
+    nb += [(f"NW2{i}", "W2_structuring", 1, (2024, 1, 2 + i), ["u9", f"u1{i}"]) for i in range(3)]
+    _alerts(spark, "run-n-c2", nb)
+    st = _st(
+        tm.run_tm_operations(spark, txns, "run-n-c2", params=one, source_rows_fn=lambda s: n_rows)
+    )
+    assert st["one_row_per_alert_identity"] == "pass" and st["history_stable"] == "pass", st
+    rows = spark.table("lakehouse.gold.alert_dispositions").collect()
+    n1 = [r for r in rows if r["alert_id"] == "N1"]
+    assert len(n1) == 1 and n1[0]["disposition"] != "over_capacity"
+
+    # The continuous window start survives a driver restart.
+    wdir = os.path.join(os.environ["LB_TEST_WAREHOUSE"], "gold-ckpt")
+    assert tm.window_start_marker(spark, "file://" + wdir, 100.0) == 100.0
+    assert tm.window_start_marker(spark, "file://" + wdir, 500.0) == 100.0
+
     # ... and the identity check fails when a row is duplicated.
     spark.sql(
         "INSERT INTO lakehouse.gold.alert_dispositions SELECT * FROM "
-        "lakehouse.gold.alert_dispositions WHERE alert_id = 'HB0'"
+        "lakehouse.gold.alert_dispositions WHERE alert_id = 'NW30'"
     )
-    counts = tm.read_back(spark, "run-h-c2", date(2025, 1, 1))
+    counts = tm.read_back(spark, "run-n-c2", date(2025, 1, 1))
     counts.update(source=31, customers=3, silver=31, monitored=25, excluded=6)
     assert _st(tm.evaluate_invariants(counts))["one_row_per_alert_identity"] == "fail"
 

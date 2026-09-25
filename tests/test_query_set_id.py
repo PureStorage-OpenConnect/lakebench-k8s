@@ -76,9 +76,10 @@ def test_compare_keeps_legacy_c360_runs_comparable():
     old.pop("query_set_id")
     new = _bench(c360).to_dict()
 
-    def m(b, qph):
+    def m(b, qph, start="2026-09-24T20:00:00-06:00"):
         return {
             "run_id": "x",
+            "start_time": start,
             "benchmark": b,
             "pipeline_benchmark": {"scores": {"composite_qph": qph}},
         }
@@ -86,6 +87,9 @@ def test_compare_keeps_legacy_c360_runs_comparable():
     c = _build_comparison("a", m(old, 500), "b", m(new, 480))
     assert c["qph_comparable"] is True
     assert [r["metric"] for r in c["metrics"]] == ["composite_qph"]
+    # Recorded before the last c360 SQL change (Q6 recency): not the same SQL.
+    c = _build_comparison("a", m(old, 500, "2026-09-20T10:00:00-06:00"), "b", m(new, 480))
+    assert c["qph_comparable"] is False
 
 
 def test_compare_refuses_qph_across_query_sets():
