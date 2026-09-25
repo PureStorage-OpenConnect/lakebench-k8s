@@ -116,6 +116,34 @@ RULE_TARGET_TYPOLOGY = {
     "W17_layering_chain": "stack",
 }
 
+# Alert subject scope (GOALS P10 stage 0). The reporting FI monitors its own
+# customers: a customer-scoped rule raises an alert only when its subject
+# (entity_id) is a customer in silver.entities, and non-customers appear only
+# as related parties. The graph scenarios run as an advanced-analytics overlay
+# across the whole payment network, so their subject can be an account at
+# another bank; they are declared as counterparty scenarios instead.
+# COUNTERPARTY_SCENARIOS must match tm_operations.DEFAULT_COUNTERPARTY_SCENARIOS
+# and the TmOperationsConfig default (a test asserts both), or the TM layer's
+# noncustomer_alerts_declared invariant fails on every run. The typology
+# generator makes every planted subject a customer (typology::subject_index),
+# and each customer-scoped rule's entity_id is that subject, so the scope does
+# not change designated recall.
+CUSTOMER_SCOPED_RULES = frozenset(
+    {
+        "W2_structuring",
+        "W5_sanctions_match",
+        "W6_pep_counterparty",
+        "W7_cross_border_high_risk",
+        "W8_dormant_reactivation",
+    }
+)
+COUNTERPARTY_SCENARIOS = (
+    "W1_connected_components",
+    "W3_round_tripping",
+    "W4_risk_propagation",
+    "W17_layering_chain",
+)
+
 
 # W1 declines to report when giant components (above max_cluster_size)
 # hold more than this share of all vertices; see w1_connected_components.
@@ -152,6 +180,58 @@ class RuleSkipped(Exception):
         super().__init__(f"{self.reason}: {detail}" if detail else self.reason)
 
 
+def _entities_frame(spark, silver_entities: DataFrame | None, rule: str) -> DataFrame:
+    """silver.entities as passed, or loaded from the session catalog
+    (``LB_ICEBERG_CATALOG`` . ``LB_FINANCIAL_SILVER_ENTITIES``) when None.
+
+    An unreadable table raises RuleSkipped("no-customer-master"): a
+    customer-scoped rule cannot tell its population, and "ran, 0 alerts"
+    would read as 0% recall.
+    """
+    import os
+
+    from pyspark.sql.utils import AnalysisException
+
+    if silver_entities is not None:
+        return silver_entities
+    catalog = os.environ.get("LB_ICEBERG_CATALOG", "lakehouse")
+    table = os.environ.get("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+    try:
+        return spark.table(f"{catalog}.{table}")
+    except AnalysisException as e:
+        raise RuleSkipped(
+            "no-customer-master", f"{rule}: {catalog}.{table} not readable ({e})"
+        ) from None
+
+
+def _customer_ids(spark, silver_entities: DataFrame | None, rule: str) -> DataFrame:
+    """entity_id of every customer of the reporting FI (is_customer true).
+
+    The same test the TM layer applies (tm_operations.build_alert_inputs), so
+    an entity missing from silver.entities, or with a NULL flag, is not a
+    customer. Skips, rather than returning an empty set, when silver.entities
+    has no is_customer column or no customer at all (a corpus from before
+    KYC, or a KYC join that matched nothing): every customer-scoped rule
+    would otherwise run and report 0 alerts.
+    """
+    ents = _entities_frame(spark, silver_entities, rule)
+    if "is_customer" not in ents.columns:
+        raise RuleSkipped("no-kyc", f"{rule}: silver.entities has no is_customer column")
+    # No distinct(): the left semi join in _customers_only is duplicate-safe,
+    # and a distinct would add an aggregate shuffle of every customer per rule.
+    # take(1) stops at the first partition holding a customer.
+    cust = ents.filter(col("is_customer") == lit(True)).select("entity_id")
+    if not cust.take(1):
+        raise RuleSkipped("no-customers", f"{rule}: no entity in silver.entities is a customer")
+    return cust
+
+
+def _customers_only(alerts: DataFrame, customers: DataFrame) -> DataFrame:
+    """Alerts whose subject is a customer. A semi join keeps the alert
+    columns and their order (gold_finalize inserts positionally)."""
+    return alerts.join(customers, "entity_id", "left_semi").select(*alerts.columns)
+
+
 def _suspicious_amount_expr():
     """Boolean Column: txn amount is in [0.9 x threshold, threshold] for its
     currency (see _STRUCTURING_THRESHOLDS for the provenance of both)."""
@@ -169,6 +249,7 @@ def w2_structuring(
     window_hours: int = 24,
     per_beneficiary: bool = True,
     max_txns_per_alert: int = 1000,
+    silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
 ) -> DataFrame:
     """Structuring: N>=threshold_count structuring-band transactions within
@@ -200,6 +281,11 @@ def w2_structuring(
     Both kinds share the band and count, and both are W2_structuring
     alerts; ``evidence['aggregation']`` names the kind.
 
+    Customer-scoped (CUSTOMER_SCOPED_RULES): an alert is kept only when its
+    subject (the originator, or the collecting beneficiary) is a customer.
+    Counting is unchanged, so a customer receiving from non-customer senders
+    still alerts, and the senders stay in related_entity_ids.
+
     Thresholds (R2 provenance): threshold_count 3 and the 24 h window are
     self-chosen. FinCEN and FFIEC describe structuring by its intent
     (transactions broken up to stay under the reporting threshold) and give
@@ -213,6 +299,8 @@ def w2_structuring(
             window to trigger an alert.
         window_hours: window length.
         per_beneficiary: also emit the beneficiary aggregation.
+        silver_entities: silver.entities (is_customer); loaded from the
+            session catalog when None.
         run_id: opaque id for the detection run, written into every
             alert row.
 
@@ -222,6 +310,7 @@ def w2_structuring(
     from pyspark.sql.functions import lag
     from pyspark.sql.functions import window as window_
 
+    customers = _customer_ids(silver_txns.sparkSession, silver_entities, "W2")
     suspicious = silver_txns.filter(_suspicious_amount_expr()).select(
         col("uetr"),
         col("originator_id"),
@@ -387,7 +476,7 @@ def w2_structuring(
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
-    return alerts
+    return _customers_only(alerts, customers)
 
 
 # ---------------------------------------------------------------------------
@@ -1999,9 +2088,13 @@ def _normalize_name_expr(col_name: str) -> str:
 
 def w5_sanctions_match(
     silver_txns: DataFrame,
+    silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
 ) -> DataFrame:
     """Flag transactions whose beneficiary name matches an SDN entry.
+
+    Customer-scoped: the subject is the originator, and only a customer
+    originator alerts (the beneficiary is the listed party).
 
     Exact match on the normalized (uppercased/trimmed/collapsed) name.
     Fuzzy match (Jaccard 3-gram or Levenshtein) is a Phase 2 extension
@@ -2011,6 +2104,7 @@ def w5_sanctions_match(
     from pyspark.sql.functions import broadcast
 
     spark = silver_txns.sparkSession
+    customers = _customer_ids(spark, silver_entities, "W5")
     raw = _load_reference(
         spark,
         "sanctions_list.json",
@@ -2064,14 +2158,18 @@ def w5_sanctions_match(
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
-    return alerts
+    return _customers_only(alerts, customers)
 
 
 def w6_pep_counterparty(
     silver_txns: DataFrame,
+    silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
 ) -> DataFrame:
     """Flag transactions with a PEP beneficiary.
+
+    Customer-scoped: the subject is the originator, and only a customer
+    originator alerts.
 
     Unlike sanctions matches, PEP counterparties are not intrinsically
     fraudulent -- they trigger enhanced due diligence, not blocking. So
@@ -2082,6 +2180,7 @@ def w6_pep_counterparty(
     from pyspark.sql.functions import broadcast
 
     spark = silver_txns.sparkSession
+    customers = _customer_ids(spark, silver_entities, "W6")
     raw = _load_reference(
         spark,
         "pep_list.json",
@@ -2145,7 +2244,7 @@ def w6_pep_counterparty(
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
-    return alerts
+    return _customers_only(alerts, customers)
 
 
 def w7_cross_border_high_risk(
@@ -2160,22 +2259,24 @@ def w7_cross_border_high_risk(
     ``silver_entities`` as None -- the rule will auto-load
     ``LB_ICEBERG_CATALOG.LB_FINANCIAL_SILVER_ENTITIES`` (default
     ``lakehouse.silver.entities``) from the Spark session. If that table
-    is not present (e.g. running against a partial silver from a legacy
-    schema), the rule returns zero alerts rather than raising.
+    is not present, or carries no customer (a pre-KYC corpus), the rule
+    raises RuleSkipped so the scorecard reads "not run" rather than 0%.
+
+    Customer-scoped: the subject is the originator, and only a customer
+    originator alerts. The beneficiary's country comes from every entity,
+    customer or not (the high-risk counterparty is usually not one).
 
     Historically this rule crashed inside the driver when the caller did
     NOT pass silver_entities AND the reference JSON was not mounted --
     the ImportError from ``import lakebench.spark.data`` surfaced as a
-    hard failure of the whole replay job. Both paths now degrade to an
-    empty alerts DF with a stderr note so downstream metrics see a real
-    zero, not a stack trace.
+    hard failure of the whole replay job. A missing reference JSON now
+    degrades to an empty alerts DF with a stderr note.
     """
-    import os
-
     from pyspark.sql.functions import broadcast
-    from pyspark.sql.utils import AnalysisException
 
     spark = silver_txns.sparkSession
+    silver_entities = _entities_frame(spark, silver_entities, "W7")
+    customers = _customer_ids(spark, silver_entities, "W7")
     raw = _load_reference(
         spark,
         "high_risk_jurisdictions.json",
@@ -2185,14 +2286,6 @@ def w7_cross_border_high_risk(
         print("[W7] high_risk_jurisdictions.json not available; skipping.")
         return _empty_alerts_df(spark, run_id)
 
-    if silver_entities is None:
-        catalog = os.environ.get("LB_ICEBERG_CATALOG", "lakehouse")
-        entities_table = os.environ.get("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
-        try:
-            silver_entities = spark.table(f"{catalog}.{entities_table}")
-        except AnalysisException as e:
-            print(f"[W7] silver.entities not found ({e}); skipping cross-border alerts.")
-            return _empty_alerts_df(spark, run_id)
     hrj = raw.select(
         col("country_code"),
         col("risk_tier"),
@@ -2272,13 +2365,14 @@ def w7_cross_border_high_risk(
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
-    return alerts
+    return _customers_only(alerts, customers)
 
 
 def w8_dormant_reactivation(
     silver_txns: DataFrame,
     dormant_days: int = 90,
     amount_threshold_usd: float = 5000.0,
+    silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
 ) -> DataFrame:
     """Flag reactivation of dormant originator accounts.
@@ -2290,8 +2384,13 @@ def w8_dormant_reactivation(
     First-ever activity for an originator is NOT flagged (no prior
     baseline). This is the correct semantics -- we cannot say an
     account was dormant if we never observed it before.
+
+    Customer-scoped: only a customer originator alerts. The gap is measured
+    over the originator's own sends, so the scope changes no gap.
     """
     from pyspark.sql.functions import lag, unix_timestamp
+
+    customers = _customer_ids(silver_txns.sparkSession, silver_entities, "W8")
 
     # Secondary sort on uetr so same-microsecond ties are broken
     # deterministically. Without this the LAG output is
@@ -2357,7 +2456,7 @@ def w8_dormant_reactivation(
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
-    return alerts
+    return _customers_only(alerts, customers)
 
 
 def _empty_alerts_df(spark, run_id: str) -> DataFrame:

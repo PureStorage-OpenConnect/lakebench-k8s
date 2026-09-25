@@ -179,3 +179,107 @@ def test_partial_when_one_of_two_designated_rules_errors(spark):
     row = _by_type(per)["fan_out"]
     assert row["detection_status"] == "partial"
     assert row["recall"] == pytest.approx(0.5)
+
+
+def _subject_frames(spark, customer_of):
+    """Manifest (typology, participants, seed), id map dg_id -> key = dg_id +
+    1000, and silver.entities with is_customer from ``customer_of(key)``."""
+    manifest = spark.createDataFrame(
+        [
+            ("micro_structuring", [1, 2, 3, 4], 11),  # subject: last (4)
+            ("dormant_reactivation", [5, 6], 12),  # subject: first (5)
+            ("stack", [7, 8, 9], 13),  # subject: 8 (W17, a counterparty scenario)
+            ("random", [10, 11], 14),
+            # subject: 12 or 13 by the instance seed's flip (typology.rs)
+            ("corridor_high_risk", [12, 13], 15),
+        ],
+        "typology_type string, participant_entity_ids array<long>, seed long",
+    )
+    id_map = spark.createDataFrame([(i, i + 1000) for i in range(1, 14)], "dg_id long, key long")
+    ents = spark.createDataFrame(
+        [(k, customer_of(k)) for k in range(1001, 1014)], "entity_id long, is_customer boolean"
+    )
+    return manifest, id_map, ents
+
+
+SCOPED = {"micro_structuring", "dormant_reactivation", "corridor_high_risk"}
+
+
+def _corridor_subject():
+    from aml_features import subject_index
+
+    return 1012 + subject_index("corridor_high_risk", 2, 15)
+
+
+def test_subject_check_passes_when_every_subject_is_a_customer(spark):
+    from score_financial import subject_customer_check
+
+    subjects = {1004, 1005, 1008, 1010, _corridor_subject()}
+    m, idm, e = _subject_frames(spark, lambda k: k in subjects)
+    out = subject_customer_check(spark, m, e, idm, SCOPED)
+    assert out["status"] == "ok", out
+    assert out["subjects"] == 5 and out["not_customer"] == 0 and out["unmapped"] == 0
+
+
+def test_subject_check_follows_the_corridor_flip(spark):
+    """The other corridor participant being the customer is a failure: W7
+    alerts on the originator, which the seed's flip makes the subject."""
+    from score_financial import subject_customer_check
+
+    other = 2025 - _corridor_subject()
+    m, idm, e = _subject_frames(spark, lambda k: k in {1004, 1005, 1010, other})
+    out = subject_customer_check(spark, m, e, idm, SCOPED)
+    assert out["failing_typologies"] == ["corridor_high_risk"], out
+
+
+def test_subject_check_duplicate_entity_rows(spark):
+    """An entity listed twice counts as a customer if any row says so, the
+    same answer the rules' semi join gives."""
+    from score_financial import subject_customer_check
+
+    subjects = {1004, 1005, 1010, _corridor_subject()}
+    m, idm, e = _subject_frames(spark, lambda k: k in subjects)
+    dup = e.unionByName(spark.createDataFrame([(1004, False)], e.schema))
+    assert subject_customer_check(spark, m, dup, idm, SCOPED)["status"] == "ok"
+
+
+def test_subject_check_only_counts_scoped_typologies(spark):
+    """A typology whose customer-scoped rule did not run (W7, W8 in
+    continuous mode) cannot fail the check."""
+    from score_financial import subject_customer_check
+
+    m, idm, e = _subject_frames(spark, lambda k: k in {1004})
+    out = subject_customer_check(spark, m, e, idm, {"micro_structuring"})
+    assert out["status"] == "ok", out
+
+
+def test_subject_check_fails_on_a_non_customer_subject(spark):
+    """An IBAN-join miss that leaves a micro_structuring subject a
+    non-customer: W2 cannot alert on it, and the check says so."""
+    from score_financial import subject_customer_check
+
+    m, idm, e = _subject_frames(spark, lambda k: k in {1005, 1010, _corridor_subject()})
+    out = subject_customer_check(spark, m, e, idm, SCOPED)
+    assert out["status"] == "fail"
+    assert out["failing_typologies"] == ["micro_structuring"]
+    assert out["by_typology"]["micro_structuring"]["not_customer"] == 1
+    # stack's subject is not a customer either, but W17 is a counterparty
+    # scenario: counted, not failed.
+    assert out["by_typology"]["stack"]["not_customer"] == 1
+
+
+def test_subject_check_fails_on_an_unmapped_subject(spark):
+    from score_financial import subject_customer_check
+
+    m, idm, e = _subject_frames(spark, lambda k: True)
+    out = subject_customer_check(spark, m, e, idm.where("dg_id <> 5"), SCOPED)
+    assert out["status"] == "incomplete", out
+    assert out["failing_typologies"] == ["dormant_reactivation"]
+    assert out["by_typology"]["dormant_reactivation"]["unmapped"] == 1
+
+
+def test_subject_check_unchecked_without_participants(spark):
+    from score_financial import subject_customer_check
+
+    out = subject_customer_check(spark, _manifest(spark), None, None, SCOPED)
+    assert out["status"] == "unchecked" and "participant_entity_ids" in out["reason"]
