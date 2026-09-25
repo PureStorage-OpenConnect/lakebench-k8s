@@ -404,13 +404,32 @@ fn pacs008_main() {
         // legs forward the previous leg less a skim (amounts::instance_amounts).
         // Amounts are assigned before the suppression drop below, so a dropped
         // leg still carries the chain forward.
-        let amounts = instance_amounts(
-            inst.typ,
-            &rows,
-            |o| w.ccy[o as usize],
-            |o| w.amount_logshift[o as usize],
-            &mut trng,
-        );
+        // corridor_high_risk, dormant_reactivation and micro_structuring draw
+        // from an instance-keyed stream; the shared stream replays the draws
+        // their old layout took, so every other typology's amounts are
+        // byte-identical (amounts::own_amount_stream).
+        let amounts = match datagen_rs::amounts::own_amount_stream(inst.typ) {
+            Some(per_row) => {
+                for _ in 0..per_row * rows.len() {
+                    trng.next_u64();
+                }
+                let mut arng = Rng::new(splitmix64((inst.seed as u64) ^ 0xA307_0000_0000_0001));
+                instance_amounts(
+                    inst.typ,
+                    &rows,
+                    |o| w.ccy[o as usize],
+                    |o| w.amount_logshift[o as usize],
+                    &mut arng,
+                )
+            }
+            None => instance_amounts(
+                inst.typ,
+                &rows,
+                |o| w.ccy[o as usize],
+                |o| w.amount_logshift[o as usize],
+                &mut trng,
+            ),
+        };
         for (row_idx, (r, amount)) in rows.into_iter().zip(amounts).enumerate() {
             // A NON-dormant typology row whose originator is a dormant
             // participant inside its suppression window would fill the dormancy
