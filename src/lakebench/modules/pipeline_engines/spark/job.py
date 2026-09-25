@@ -217,6 +217,30 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executor_memory": "8g",
             "executor_memory_overhead": "12g",
         },
+        # AML continuous bronze-ingest. Measured on run-20260925-104452-21bf3a
+        # (scale 10, 1800 s window) with the base 2 executors x 2 cores: every
+        # micro-batch took the full 50 files (maxFilesPerTrigger) and ran
+        # 109.7 s against a 30 s trigger, so bronze was busy 97.5% of the
+        # window and moved 0.456 files/s (0.114 files/s per core). The scale-10
+        # corpus is 1,371 files: 3,000 s to drain, ingest_ratio 0.58. The
+        # trickle ceiling is 50 files / 30 s = 1.67 files/s, 823 s to drain.
+        # 4 executors x 4 cores = 16 cores give ~1.8 files/s at the measured
+        # per-core rate, just above that ceiling, so the trigger rate rather
+        # than bronze bounds intake and the corpus drains in ~55% of the window.
+        # Memory follows the cores: 8g heap (a streaming read-and-append, no
+        # aggregation) plus 8g overhead for the S3A upload and Parquet writer
+        # buffers of 4 concurrent tasks (the bronze-verify note above: that is
+        # where the off-heap pressure lives). Scaling adds 4 executors per 100
+        # scale to a 20 cap: at the default trigger more cores only help once
+        # max_files_per_trigger is raised, which larger corpora need anyway.
+        "bronze-ingest": {
+            "executor_cores": 4,
+            "executor_memory": "8g",
+            "executor_memory_overhead": "8g",
+            "base_executors": 4,
+            "executors_per_100_scale": 4,
+            "max_executors": 20,
+        },
     },
 }
 
@@ -568,6 +592,10 @@ def _streaming_concurrent_budget(
         return {}
 
     scale = config.architecture.workload.datagen.scale
+    # Schema overrides change streaming profiles too (AML bronze-ingest); the
+    # budget must see the profile the manifest deploys, or it caps the job
+    # back to the base count.
+    schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
 
     # Co-resident pods (Trino + Hive + Postgres). Use the shared parser so
     # Kubernetes-idiomatic CPU strings ("500m", "1.5") don't crash mid-run.
@@ -591,7 +619,7 @@ def _streaming_concurrent_budget(
     # Compute each streaming job's uncapped CPU demand
     demands: dict[JobType, int] = {}
     for jt in _STREAMING_JOB_TYPES:
-        profile = _JOB_PROFILES[jt.value]
+        profile = _resolve_job_profile(jt.value, schema)
         count = _scale_executor_count(profile, scale)
         demands[jt] = count * profile["executor_cores"] * 1000
 
@@ -602,7 +630,7 @@ def _streaming_concurrent_budget(
     # Proportional allocation
     caps: dict[JobType, int] = {}
     for jt in _STREAMING_JOB_TYPES:
-        profile = _JOB_PROFILES[jt.value]
+        profile = _resolve_job_profile(jt.value, schema)
         fraction = demands[jt] / total_demand_m
         job_budget_m = streaming_budget_m * fraction
         exec_cpu_m = profile["executor_cores"] * 1000
