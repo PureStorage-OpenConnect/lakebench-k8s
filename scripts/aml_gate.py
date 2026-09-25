@@ -126,6 +126,12 @@ def main(argv=None) -> int:
         "passes.library_versions_match)",
     )
     ap.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="build units and labels and report counts only: no model, no AP (smoke tests "
+        "on a unit that must not be looked at before its first registered gate run)",
+    )
+    ap.add_argument(
         "--require-pass",
         action="store_true",
         help="exit 2 unless every gate passes (passes.all); default exit 0 when the gate ran",
@@ -142,6 +148,7 @@ def main(argv=None) -> int:
         evaluate_gate,
         in_scope_typologies,
         library_versions,
+        lifetime_prereg,
         load_preregistration,
         summary_lines,
     )
@@ -177,10 +184,19 @@ def main(argv=None) -> int:
             account_path=str(corpus / "bronze/account.parquet"),
         )
         txns = txns.cache()
-        features = af.entity_features(txns, ents).cache()
         registered_role = prereg["unit_of_scoring"]["label_role"]
         role = args.label_role or registered_role
-        labels = af.labels_for_role(spark, manifest, id_map, role).cache()
+        inputs = af.build_gate_inputs(
+            spark,
+            prereg,
+            txns=txns,
+            ents=ents,
+            id_map=id_map,
+            manifest=manifest,
+            role=role,
+            typologies=typologies,
+        )
+        features = inputs["lifetime_features"]
         by_participant = af.labels_from_participants(manifest, id_map)
         tm = prereg["timing_mixture"]
         timing = af.timing_mixture_counts(
@@ -197,7 +213,6 @@ def main(argv=None) -> int:
             by_participant.join(cust_keys, "key", "left_semi"),
             af.labels_from_uetrs(manifest, txns).join(cust_keys, "key", "left_semi"),
         )
-        pdf = af.gate_frame(features, labels, typologies)
         prov = {
             "adapter": "bronze",
             "manifest": manifest_src,
@@ -213,6 +228,7 @@ def main(argv=None) -> int:
             "git_sha": _git_sha(),
             **af.manifest_provenance(manifest),
             "n_entities": int(features.count()),
+            "n_payments": int(txns.count()),
             "label_route_agreement_customers": agreement,
         }
         t_spark = time.time() - t0
@@ -220,13 +236,24 @@ def main(argv=None) -> int:
         spark.stop()
 
     report = evaluate_gate(
-        pdf,
+        inputs["primary"],
         prereg,
         prereg_sha256=sha,
         timing_counts=timing,
         density_counts=density,
         provenance={**prov, "spark_seconds": round(t_spark, 1)},
+        score=not args.counts_only,
     )
+    report["unit_detail"] = inputs["unit"]
+    if "secondary_lifetime" in inputs:
+        # Ungated: the lifetime unit kept for comparison, never in passes.
+        sec = evaluate_gate(
+            inputs["secondary_lifetime"], lifetime_prereg(prereg), score=not args.counts_only
+        )
+        report["secondary_lifetime"] = {
+            "gated": False,
+            **{k: sec.get(k) for k in ("unit", "verdict", "n_scored_customers", "typologies")},
+        }
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
     seed_ok = seed_check["matched_share"] == 1
     if args.seed is not None and not seed_ok:
@@ -246,6 +273,8 @@ def main(argv=None) -> int:
         print(f"wrote {args.out}")
     else:
         print(text)
+    if args.counts_only:
+        return 0 if report.get("verdict") == "counts_only" else 1
     if report.get("verdict") != "ok":
         return 1
     if args.require_pass and not report["passes"]["all"]:

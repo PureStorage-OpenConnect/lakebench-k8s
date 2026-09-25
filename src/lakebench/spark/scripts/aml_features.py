@@ -63,16 +63,22 @@ from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     coalesce,
     col,
+    concat,
     countDistinct,
     create_map,
     dayofweek,
     explode,
+    expr,
     hour,
     lag,
     lit,
+    month,
+    sequence,
     stddev_pop,
+    struct,
     to_date,
     when,
+    year,
 )
 from pyspark.sql.functions import count as count_
 from pyspark.sql.functions import log2 as log2_
@@ -146,6 +152,133 @@ FEATURE_COLUMNS = (
 )
 
 
+#: History-relative features of the monthly unit (unit_of_scoring.history_features).
+HISTORY_FEATURE_COLUMNS = (
+    "days_since_prior_send",
+    "txn_count_vs_history",
+    "amount_mean_vs_history_median",
+    "frac_counterparties_new",
+)
+
+#: Mean month length, to express the history window's count per month.
+_DAYS_PER_MONTH = 365.25 / 12
+
+
+class MonthWindows:
+    """The (customer, UTC calendar month) unit: month indexes, the scoring
+    window A and the history window H, from unit_of_scoring.
+
+    Month m (0 = the corpus's first month) has A(m) = [start(m) - lead,
+    start(m + 1)) and H(m) = [start(m) - lead - history, start(m) - lead).
+    Months before burn_in_months are history only.
+    """
+
+    def __init__(self, y0: int, m0: int, n_months: int, cfg: dict):
+        self.y0, self.m0, self.n_months = int(y0), int(m0), int(n_months)
+        self.lead = int(cfg["lead_in_days"])
+        self.burn_in = int(cfg["burn_in_months"])
+        self.history = int(cfg["history_days"])
+        if self.history < 31:
+            raise ValueError("history_days must cover at least one month")
+
+    @classmethod
+    def from_txns(cls, txns: DataFrame, cfg: dict) -> MonthWindows:
+        """Corpus months from the first and last payment timestamps (UTC)."""
+        r = txns.agg(min_("ts").alias("lo"), max_("ts").alias("hi")).collect()[0]
+        y0, m0 = r["lo"].year, r["lo"].month
+        n = (r["hi"].year - y0) * 12 + (r["hi"].month - m0) + 1
+        return cls(y0, m0, n, cfg)
+
+    def describe(self) -> dict:
+        return {
+            "corpus_start_month": f"{self.y0:04d}-{self.m0:02d}",
+            "n_months": self.n_months,
+            "first_scored_month": self.burn_in,
+            "lead_in_days": self.lead,
+            "history_days": self.history,
+        }
+
+    def index(self, ts):
+        """Month index of a timestamp column."""
+        return (year(ts) - lit(self.y0)) * lit(12) + (month(ts) - lit(self.m0))
+
+    def _plus_days(self, ts, days: int):
+        return ts + expr(f"INTERVAL {int(days)} DAYS")
+
+    def a_months(self, ts):
+        """explode(): every month m whose A contains ts."""
+        return explode(sequence(self.index(ts), self.index(self._plus_days(ts, self.lead)), lit(1)))
+
+    def h_months(self, ts):
+        """explode(): every month m whose history window H contains ts."""
+        lo = self.index(self._plus_days(ts, self.lead)) + lit(1)
+        hi = self.index(self._plus_days(ts, self.lead + self.history))
+        return explode(sequence(lo, hi, lit(1)))
+
+    def scorable(self, name: str):
+        return (col(name) >= lit(self.burn_in)) & (col(name) < lit(self.n_months))
+
+    def history_features(self, cs: DataFrame, in_a: DataFrame) -> DataFrame:
+        """HISTORY_FEATURE_COLUMNS per (key, month) from the customer's own
+        payment sides ``cs`` and the A-exploded sides ``in_a``."""
+        unit = ["key", "month"]
+        in_h = cs.withColumn("month", self.h_months(col("ts"))).filter(self.scorable("month"))
+        hist = in_h.groupBy(*unit).agg(
+            count_(lit(1)).cast("double").alias("_n_hist"),
+            expr("percentile(amount_usd, 0.5)").alias("_med_hist"),
+        )
+        a_agg = in_a.groupBy(*unit).agg(
+            count_(lit(1)).cast("double").alias("_n_a"),
+            mean_("amount_usd").alias("_mean_a"),
+            countDistinct("cp").cast("double").alias("_ncp_a"),
+        )
+        # Counterparties of A that the history never saw.
+        cp_a = in_a.select(*unit, "cp").filter(col("cp").isNotNull()).distinct()
+        cp_h = in_h.select(*unit, "cp").filter(col("cp").isNotNull()).distinct()
+        new_cp = (
+            cp_a.join(cp_h, [*unit, "cp"], "left_anti")
+            .groupBy(*unit)
+            .agg(count_(lit(1)).cast("double").alias("_ncp_new"))
+        )
+        # Gap from the last send before A to A's first send, when that prior
+        # send lies inside H.
+        w = Window.partitionBy("key").orderBy(col("ts"), col("uetr"))
+        sends = cs.filter(col("is_send")).withColumn("_prev", lag(col("ts")).over(w))
+        first = (
+            sends.withColumn("month", self.a_months(col("ts")))
+            .filter(self.scorable("month"))
+            .groupBy(*unit)
+            .agg(min_(struct(col("ts"), col("uetr"), col("_prev"))).alias("_f"))
+            .select(*unit, col("_f.ts").alias("_first"), col("_f._prev").alias("_prev"))
+        )
+        prev_in_h = col("_prev").isNotNull() & (
+            col("month") <= self.index(self._plus_days(col("_prev"), self.lead + self.history))
+        )
+        first = first.select(
+            *unit,
+            when(
+                prev_in_h,
+                (col("_first").cast("double") - col("_prev").cast("double"))
+                / lit(float(_SECONDS_PER_DAY)),
+            ).alias("days_since_prior_send"),
+        )
+        per_month = lit(self.history / _DAYS_PER_MONTH)
+        return (
+            a_agg.join(hist, unit, "left")
+            .join(new_cp, unit, "left")
+            .join(first, unit, "left")
+            .select(
+                *unit,
+                "days_since_prior_send",
+                _ratio(col("_n_a"), col("_n_hist") / per_month).alias("txn_count_vs_history"),
+                _ratio(col("_mean_a"), col("_med_hist")).alias("amount_mean_vs_history_median"),
+                _ratio(coalesce(col("_ncp_new"), lit(0.0)), col("_ncp_a")).alias(
+                    "frac_counterparties_new"
+                ),
+            )
+        )
+
+
 def _code_map(mapping):
     pairs = []
     for k, v in mapping.items():
@@ -176,12 +309,8 @@ def _check_columns(df: DataFrame, needed, what: str) -> None:
         raise ValueError(f"{what} frame is missing columns {missing}")
 
 
-def entity_features(txns: DataFrame, entities: DataFrame) -> DataFrame:
-    """One row per entity key with FEATURE_COLUMNS, is_customer and n_sends."""
-    _check_columns(txns, TXN_COLUMNS, "transaction")
-    _check_columns(entities, ENTITY_COLUMNS, "entity")
-    hr = [lit(c) for c in HIGH_RISK_COUNTRIES]
-
+def _sides(txns: DataFrame) -> DataFrame:
+    """One row per (entity, payment) side: sends and receipts."""
     base = txns.select(*TXN_COLUMNS).withColumn(
         "_band", _in_structuring_band(col("amount"), col("currency"))
     )
@@ -208,12 +337,18 @@ def entity_features(txns: DataFrame, entities: DataFrame) -> DataFrame:
         lit(False).alias("is_send"),
         *common,
     )
-    sides = out_side.unionByName(in_side).withColumn("_hour", hour(col("ts")))
+    return out_side.unionByName(in_side).withColumn("_hour", hour(col("ts")))
+
+
+def _aggregate(sides: DataFrame, unit: list[str]) -> DataFrame:
+    """The registered behavioural features per ``unit`` (["key"] for the
+    lifetime unit, ["key", "month"] for the monthly one), plus n_sends."""
+    hr = [lit(c) for c in HIGH_RISK_COUNTRIES]
 
     def frac(cond):
         return mean_(when(cond, lit(1.0)).otherwise(lit(0.0)))
 
-    agg = sides.groupBy("key").agg(
+    agg = sides.groupBy(*unit).agg(
         count_(lit(1)).cast("double").alias("txn_count"),
         countDistinct(to_date(col("ts"))).cast("double").alias("active_days"),
         mean_("amount_usd").alias("amount_mean_usd"),
@@ -229,46 +364,55 @@ def entity_features(txns: DataFrame, entities: DataFrame) -> DataFrame:
     )
 
     # Hour-of-day entropy in bits.
-    per_hour = sides.groupBy("key", "_hour").agg(count_(lit(1)).alias("_n"))
-    tot = per_hour.groupBy("key").agg(sum_("_n").alias("_tot"))
+    per_hour = sides.groupBy(*unit, "_hour").agg(count_(lit(1)).alias("_n"))
+    tot = per_hour.groupBy(*unit).agg(sum_("_n").alias("_tot"))
     entropy = (
-        per_hour.join(tot, "key")
+        per_hour.join(tot, unit)
         .withColumn("_p", col("_n") / col("_tot"))
-        .groupBy("key")
+        .groupBy(*unit)
         .agg((-sum_(col("_p") * log2_(col("_p")))).alias("hour_of_day_entropy"))
     )
 
     # Most payments in any [t, t + 24 h] window, anchored at each payment.
     secs = col("ts").cast("long")
     w_burst = (
-        Window.partitionBy("key")
+        Window.partitionBy(*unit)
         .orderBy(secs)
         .rangeBetween(Window.currentRow, _BURST_WINDOW_SECONDS)
     )
     burst = (
-        sides.select("key", "ts")
+        sides.select(*unit, "ts")
         .withColumn("_b", count_(lit(1)).over(w_burst))
-        .groupBy("key")
+        .groupBy(*unit)
         .agg(max_("_b").cast("double").alias("max_burst_24h"))
     )
 
-    # Gaps between consecutive sends, in days.
-    w_gap = Window.partitionBy("key").orderBy(col("ts"), col("uetr"))
-    sends = sides.filter(col("is_send")).select("key", "ts", "uetr")
+    # Gaps between consecutive sends in the unit, in days.
+    w_gap = Window.partitionBy(*unit).orderBy(col("ts"), col("uetr"))
+    sends = sides.filter(col("is_send")).select(*unit, "ts", "uetr")
     gaps = sends.withColumn(
         "_gap",
         (col("ts").cast("double") - lag(col("ts").cast("double")).over(w_gap))
         / lit(float(_SECONDS_PER_DAY)),
     )
-    gap_agg = gaps.groupBy("key").agg(
+    gap_agg = gaps.groupBy(*unit).agg(
         count_(lit(1)).cast("double").alias("n_sends"),
         mean_("_gap").alias("gap_mean_days"),
         max_("_gap").alias("gap_max_days"),
         _ratio(stddev_pop("_gap"), mean_("_gap")).alias("gap_cv"),
         _ratio(max_("_gap"), mean_("_gap")).alias("max_gap_over_mean_gap"),
     )
+    return (
+        agg.join(entropy, unit, "left")
+        .join(burst, unit, "left")
+        .join(gap_agg, unit, "left")
+        .withColumn("n_sends", coalesce(col("n_sends"), lit(0.0)))
+    )
 
-    ent = entities.select(
+
+def _entity_attributes(entities: DataFrame) -> DataFrame:
+    hr = [lit(c) for c in HIGH_RISK_COUNTRIES]
+    return entities.select(
         col("key"),
         col("is_customer").cast("boolean").alias("is_customer"),
         when(col("home_country").isNull(), lit(None).cast("double"))
@@ -278,15 +422,38 @@ def entity_features(txns: DataFrame, entities: DataFrame) -> DataFrame:
         _code_map(_CRR_TIER_CODE)[col("crr_tier")].alias("crr_tier"),
     )
 
-    out = (
-        agg.join(entropy, "key", "left")
-        .join(burst, "key", "left")
-        .join(gap_agg, "key", "left")
-        .join(ent, "key", "left")
-        .withColumn("n_sends", coalesce(col("n_sends"), lit(0.0)))
-        .withColumn("is_customer", coalesce(col("is_customer"), lit(False)))
-    )
-    return out.select("key", *FEATURE_COLUMNS, "is_customer", "n_sends")
+
+def entity_features(txns: DataFrame, entities: DataFrame, windows=None) -> DataFrame:
+    """Lifetime unit (``windows`` None): one row per entity key with
+    FEATURE_COLUMNS, is_customer and n_sends.
+
+    Monthly unit (``windows`` a MonthWindows): one row per (customer, month)
+    whose window A = [start(month) - lead_in_days, end(month)) holds at least
+    one payment, for every scorable month (after the burn-in), with
+    FEATURE_COLUMNS computed over A plus HISTORY_FEATURE_COLUMNS over the
+    history_days before A. Same feature code for both units and both adapters.
+    """
+    _check_columns(txns, TXN_COLUMNS, "transaction")
+    _check_columns(entities, ENTITY_COLUMNS, "entity")
+    ent = _entity_attributes(entities)
+    sides = _sides(txns)
+    if windows is None:
+        out = (
+            _aggregate(sides, ["key"])
+            .join(ent, "key", "left")
+            .withColumn("is_customer", coalesce(col("is_customer"), lit(False)))
+        )
+        return out.select("key", *FEATURE_COLUMNS, "is_customer", "n_sends")
+
+    # Monthly units exist for customers only (the monitored population).
+    customers = ent.filter(col("is_customer")).select("key")
+    cs = sides.join(customers, "key", "left_semi")
+    unit = ["key", "month"]
+    in_a = cs.withColumn("month", windows.a_months(col("ts"))).filter(windows.scorable("month"))
+    feats = _aggregate(in_a, unit)
+    feats = feats.join(windows.history_features(cs, in_a), unit, "left")
+    out = feats.join(ent, "key", "left")
+    return out.select(*unit, *FEATURE_COLUMNS, *HISTORY_FEATURE_COLUMNS, "is_customer", "n_sends")
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +530,161 @@ def labels_for_role(spark, manifest: DataFrame, id_map: DataFrame, role: str) ->
     if role == "subject":
         return labels_from_subjects(spark, manifest, id_map)
     raise ValueError(f"unknown label_role {role!r}")
+
+
+def monthly_labels(spark, manifest, id_map, txns, windows, typologies):
+    """Labels for the (customer, month) unit, subject role only.
+
+    Returns (labels, counts). ``labels`` holds (key, month, typology_type,
+    kind) with kind "positive", "excluded_incomplete" or
+    "excluded_nonsubject", one row per unit and typology (positive wins):
+
+    - positive: the unit is the subject's month in which the instance's
+      latest planted row falls (dormant_reactivation: latest row at or after
+      the burst start, so the pre-dormancy anchor is ignored);
+    - excluded_incomplete: another month whose window A holds one of that
+      instance's planted rows with the subject as a party;
+    - excluded_nonsubject: a month whose A holds a planted row with a
+      non-subject participant as a party, or the completion month, for that
+      participant.
+
+    Only scorable months (after the burn-in) are returned; ``counts`` records
+    what was dropped on the way.
+    """
+    rows = []
+    for r in (
+        manifest.filter(col("typology_type").isin(*list(typologies)))
+        .select("typology_id", "typology_type", "participant_entity_ids", "seed")
+        .collect()
+    ):
+        ids = r["participant_entity_ids"] or []
+        if not ids:
+            continue
+        if r["seed"] is None:
+            raise ValueError("manifest row has no instance seed; cannot resolve the subject role")
+        subj = subject_index(r["typology_type"], len(ids), int(r["seed"]))
+        for i, dg in enumerate(ids):
+            rows.append((r["typology_id"], r["typology_type"], int(dg), i == subj))
+    parts = spark.createDataFrame(
+        rows, "typology_id string, typology_type string, dg_id long, is_subject boolean"
+    )
+    parts = parts.join(id_map, "dg_id", "inner").select(
+        "typology_id", "typology_type", "key", "is_subject"
+    )
+
+    starts = manifest.select("typology_id", "typology_type", "injection_ts_start")
+    planted = (
+        manifest.select("typology_id", explode(col("participant_uetrs")).alias("uetr"))
+        .join(txns.select("uetr", "ts", "orig_key", "bene_key"), "uetr", "inner")
+        .join(starts, "typology_id", "inner")
+        .filter(col("typology_type").isin(*list(typologies)))
+        .filter(
+            (col("typology_type") != lit("dormant_reactivation"))
+            | (col("ts") >= col("injection_ts_start").cast("timestamp"))
+        )
+    )
+    done = planted.groupBy("typology_id").agg(windows.index(max_("ts")).alias("done_month"))
+    row_months = (
+        planted.select("typology_id", "ts", col("orig_key").alias("key"))
+        .unionByName(planted.select("typology_id", "ts", col("bene_key").alias("key")))
+        .withColumn("month", windows.a_months(col("ts")))
+        .select("typology_id", "key", "month")
+        .distinct()
+    )
+    p = parts.join(done, "typology_id", "inner")
+    positive = p.filter(col("is_subject")).select(
+        "key", col("done_month").alias("month"), "typology_type", lit("positive").alias("kind")
+    )
+    touched = row_months.join(p, ["typology_id", "key"], "inner")
+    incomplete = touched.filter(col("is_subject") & (col("month") != col("done_month"))).select(
+        "key", "month", "typology_type", lit("excluded_incomplete").alias("kind")
+    )
+    nonsubj = (
+        touched.filter(~col("is_subject"))
+        .select("key", "month", "typology_type")
+        .unionByName(
+            p.filter(~col("is_subject")).select(
+                "key", col("done_month").alias("month"), "typology_type"
+            )
+        )
+        .withColumn("kind", lit("excluded_nonsubject"))
+    )
+    raw = positive.unionByName(incomplete).unionByName(nonsubj)
+    # One kind per unit and typology: positive, then incomplete, then non-subject.
+    rank = (
+        when(col("kind") == "positive", lit(0))
+        .when(col("kind") == "excluded_incomplete", lit(1))
+        .otherwise(lit(2))
+    )
+    labels = (
+        raw.withColumn("_r", rank)
+        .groupBy("key", "month", "typology_type")
+        .agg(min_("_r").alias("_r"))
+        .withColumn(
+            "kind",
+            when(col("_r") == 0, lit("positive"))
+            .when(col("_r") == 1, lit("excluded_incomplete"))
+            .otherwise(lit("excluded_nonsubject")),
+        )
+        .drop("_r")
+    )
+    scorable = labels.filter(windows.scorable("month"))
+
+    counts = {"per_typology": {}}
+    inst = parts.filter(col("is_subject")).join(done, "typology_id", "left")
+    for t in typologies:
+        counts["per_typology"][t] = {
+            "instances": 0,
+            "instances_without_planted_rows": 0,
+            "instances_completing_in_burn_in": 0,
+        }
+    for r in (
+        inst.groupBy("typology_type")
+        .agg(
+            count_(lit(1)).alias("n"),
+            sum_(when(col("done_month").isNull(), lit(1)).otherwise(lit(0))).alias("no_rows"),
+            sum_(when(col("done_month") < lit(windows.burn_in), lit(1)).otherwise(lit(0))).alias(
+                "burn_in"
+            ),
+        )
+        .collect()
+    ):
+        counts["per_typology"][r["typology_type"]] = {
+            "instances": int(r["n"]),
+            "instances_without_planted_rows": int(r["no_rows"] or 0),
+            "instances_completing_in_burn_in": int(r["burn_in"] or 0),
+        }
+    for r in scorable.groupBy("typology_type", "kind").count().collect():
+        counts["per_typology"][r["typology_type"]][f"units_{r['kind']}"] = int(r["count"])
+    return scorable, counts
+
+
+def gate_frame_monthly(features: DataFrame, labels: DataFrame, typologies):
+    """(customer, month) units with ``label:<T>`` and ``exclude:<T>`` columns
+    and the customer key as ``group``, pulled to pandas."""
+    ts = list(typologies)
+    unit = ["key", "month"]
+    lab = labels.filter(col("typology_type").isin(*ts))
+    pos = (
+        lab.filter(col("kind") == "positive")
+        .groupBy(*unit)
+        .pivot("typology_type", ts)
+        .agg(count_(lit(1)))
+    )
+    exc = (
+        lab.filter(col("kind") != "positive")
+        .select(*unit, concat(lit("x_"), col("typology_type")).alias("_t"))
+        .groupBy(*unit)
+        .pivot("_t", [f"x_{t}" for t in ts])
+        .agg(count_(lit(1)))
+    )
+    out = features.filter(col("is_customer")).join(pos, unit, "left").join(exc, unit, "left")
+    for t in ts:
+        out = out.withColumn(
+            f"label:{t}", (coalesce(col(f"`{t}`"), lit(0)) > lit(0)).cast("int")
+        ).withColumn(f"exclude:{t}", (coalesce(col(f"`x_{t}`"), lit(0)) > lit(0)).cast("int"))
+        out = out.drop(t, f"x_{t}")
+    return out.withColumnRenamed("key", "group").toPandas()
 
 
 def labels_from_uetrs(manifest: DataFrame, txns: DataFrame) -> DataFrame:
@@ -698,3 +1020,55 @@ def gate_frame(features: DataFrame, labels: DataFrame, typologies):
         ).drop(t)
     # The customer is the correlated unit the gate's CV and bootstrap group on.
     return out.withColumnRenamed("key", "group").toPandas()
+
+
+def default_pull(features: DataFrame, labels: DataFrame, typologies, monthly: bool):
+    """Pull the whole gate frame to the driver (no sampling)."""
+    if monthly:
+        return gate_frame_monthly(features, labels, typologies)
+    return gate_frame(features, labels, typologies)
+
+
+def build_gate_inputs(
+    spark, prereg: dict, *, txns, ents, id_map, manifest, role: str, typologies, pull=None
+) -> dict:
+    """Everything both entry points hand the evaluator, from one adapter's
+    frames: the primary gate frame for the pre-registered unit, the lifetime
+    features (D2 reads them), and for the monthly unit the ungated lifetime
+    frame plus the unit's label and window counts.
+    """
+    pull = pull or default_pull
+    uos = prereg.get("unit_of_scoring") or {}
+    life = entity_features(txns, ents).cache()
+    life_labels = labels_for_role(spark, manifest, id_map, role)
+    out = {"lifetime_features": life, "unit": {"window": uos.get("window", "lifetime")}}
+    if uos.get("window", "lifetime") == "lifetime":
+        out["primary"] = pull(life, life_labels, typologies, False)
+        return out
+    if uos["window"] != "utc_calendar_month":
+        raise ValueError(f"unknown unit_of_scoring.window {uos['window']!r}")
+    if role != "subject":
+        raise ValueError("the monthly unit is defined for subject-role labels only")
+    windows = MonthWindows.from_txns(txns, uos)
+    feats = entity_features(txns, ents, windows).cache()
+    labels, counts = monthly_labels(spark, manifest, id_map, txns, windows, typologies)
+    labels = labels.cache()
+    units = feats.filter(col("is_customer")).select("key", "month")
+    unmatched = (
+        labels.filter(col("kind") == "positive")
+        .join(units, ["key", "month"], "left_anti")
+        .groupBy("typology_type")
+        .count()
+        .collect()
+    )
+    for r in unmatched:
+        counts["per_typology"][r["typology_type"]]["positives_without_unit"] = int(r["count"])
+    out["unit"].update(
+        windows.describe(),
+        n_units=int(units.count()),
+        n_customers=int(units.select("key").distinct().count()),
+        labels=counts,
+    )
+    out["primary"] = pull(feats, labels, typologies, True)
+    out["secondary_lifetime"] = pull(life, life_labels, typologies, False)
+    return out
