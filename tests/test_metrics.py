@@ -3450,11 +3450,23 @@ class TestSustainedPipelineScoring:
     def test_ingest_ratio(self):
         """ingest_ratio computed when datagen_output_rows provided."""
         run = self._make_streaming_run()
+        # Bronze busy for 100 x 17 s of the 1800 s window: its own processing
+        # bounds intake, so a short ratio is saturation.
+        run.streaming[0].micro_batch_duration_ms = 17_000.0
         pb = build_pipeline_benchmark(run, datagen_output_rows=600_000)
 
         # bronze processed 500_000 out of 600_000 datagen rows
         assert pb.ingest_ratio == pytest.approx(500_000 / 600_000, rel=1e-3)
         assert pb.pipeline_saturated is True  # 0.833 < 0.95
+        assert pb.intake_limit == "bronze_capacity"
+
+    def test_short_ratio_with_idle_bronze_is_trigger_capped(self):
+        """Bronze busy 1% of the window: the trigger rate, not the pipeline,
+        left rows unread."""
+        run = self._make_streaming_run()
+        pb = build_pipeline_benchmark(run, datagen_output_rows=600_000)
+        assert pb.intake_limit == "trigger_rate"
+        assert pb.pipeline_saturated is False
 
     def test_ingest_ratio_not_saturated(self):
         """pipeline_saturated=False when completeness >= 0.95."""
@@ -3991,7 +4003,8 @@ class TestSustainedScoringEdgeCases:
                 assert stage.freshness_seconds is None
 
     def test_sustained_saturation_detection(self):
-        """Pipeline is saturated when ingest_ratio < 0.95."""
+        """Pipeline is saturated when ingest_ratio < 0.95 and bronze was busy
+        (80 x 20 s of the window), so the trigger rate was not the cap."""
         run = self._make_streaming_run(
             streaming=[
                 StreamingJobMetrics(
@@ -4002,7 +4015,7 @@ class TestSustainedScoringEdgeCases:
                     elapsed_seconds=1800.0,
                     success=True,
                     throughput_rps=222.2,
-                    micro_batch_duration_ms=200.0,
+                    micro_batch_duration_ms=20_000.0,
                     freshness_seconds=10.0,
                     batch_size=5000,
                 ),

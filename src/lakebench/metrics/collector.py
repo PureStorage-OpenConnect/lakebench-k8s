@@ -96,6 +96,13 @@ class StreamingJobMetrics:
     # Silver only: rows of micro-batches that logged a commit. None when no
     # commit line was seen (unknown, so a run cannot count as drained).
     committed_rows: int | None = None
+    # AML gold only: time to detect, merged from every cycle's histogram
+    # ("Cycle N: time to detect ..."). None when no cycle logged one.
+    ttd_alerts: int | None = None
+    ttd_unmatched: int = 0
+    ttd_p50_seconds: float | None = None
+    ttd_p95_seconds: float | None = None
+    ttd_max_seconds: float | None = None
     micro_batch_duration_ms: float = 0.0
     batch_size: int = 0
     total_batches: int = 0
@@ -420,6 +427,12 @@ class StageMetrics:
     freshness_active_seconds: float | None = None  # all but the trailing idle run (LB-145)
     trailing_idle_cycles: int = 0  # gold cycles after silver last moved
     committed_rows: int | None = None  # silver: rows in committed micro-batches
+    # AML gold: time to detect over newly raised alerts (None = not measured)
+    ttd_alerts: int | None = None
+    ttd_unmatched: int = 0
+    ttd_p50_seconds: float | None = None
+    ttd_p95_seconds: float | None = None
+    ttd_max_seconds: float | None = None
     total_batches: int = 0
     batch_size: int = 0
     unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
@@ -559,7 +572,13 @@ class PipelineBenchmark:
         "sustained_throughput_rps": "Rows entering bronze per second (higher is better)",
         "ingest_ratio": "Bronze rows ingested / datagen rows produced (1.0 = all data consumed)",
         "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
-        "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input",
+        "pipeline_saturated": "True when ingest_ratio < 0.95 and intake was not capped by trigger_rate -- pipeline cannot keep pace with input",
+        "intake_limit": "What bounded intake: bronze_capacity (bronze ran back to back; sustained_throughput_rps is its capacity), trigger_rate (bronze idled while input waited; maxFilesPerTrigger / trigger interval set the rate), none (kept up)",
+        "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
+        "time_to_detect_seconds": "AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the end of the detection pass that first raised it (lower is better)",
+        "time_to_detect_p95_seconds": "AML continuous. 95th percentile of time_to_detect (histogram bin upper edge, 10 s bins)",
+        "time_to_detect_max_seconds": "AML continuous. Longest time to detect of any newly raised alert",
+        "time_to_detect_alerts": "AML continuous. Newly raised alerts the time to detect is measured over",
         "corpus_drained": "True when the finite corpus was fully ingested before the window ended: freshness covers only cycles that saw new data, and sustained_throughput_rps is a lower bound",
         "total_rows_processed": "Cumulative rows processed across all streaming stages",
         "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
@@ -632,6 +651,24 @@ class PipelineBenchmark:
     # sustained_throughput_rps is corpus rows / window, a lower bound on what
     # the pipeline could sustain (LB-145). None when ingest_ratio is unknown.
     corpus_drained: bool | None = None
+    # What bounded intake when ingest_ratio < 0.95: "bronze_capacity" (bronze
+    # micro-batches ran back to back, so its processing rate is the limit and
+    # sustained_throughput_rps is its capacity) or "trigger_rate" (bronze
+    # idled between triggers while input waited: maxFilesPerTrigger / trigger
+    # interval set the rate, not the pipeline). "none" when intake kept up.
+    # None when unknown.
+    intake_limit: str | None = None
+    # Share of the window bronze spent inside micro-batches (batches x mean
+    # batch time / window). None when bronze logged no batch times.
+    bronze_busy_fraction: float | None = None
+    # AML continuous time to detect: from the newest bronze ingest_ts of an
+    # alert's related transactions to the end of the detection pass that
+    # first raised it. Median (the score), p95 and max over newly raised
+    # alerts; None when not measured.
+    time_to_detect_seconds: float | None = None
+    time_to_detect_p95_seconds: float | None = None
+    time_to_detect_max_seconds: float | None = None
+    time_to_detect_alerts: int | None = None
 
     # Trino detail (preserved for drill-down)
     query_benchmark: BenchmarkMetrics | None = None
@@ -808,6 +845,35 @@ class PipelineBenchmark:
             self.ingest_ratio = None
             self.pipeline_saturated = None
 
+        # What bounded intake. A short ratio alone does not say the pipeline
+        # fell behind: AML trickles a corpus that is complete before the run,
+        # so a window shorter than corpus / trickle rate reads "saturated"
+        # even with bronze idle between triggers. Bronze busy for most of the
+        # window means its own processing is the limit.
+        bronze = bronze_stages[0] if bronze_stages else None
+        if bronze and bronze.latency_ms and bronze.total_batches and bronze.elapsed_seconds > 0:
+            self.bronze_busy_fraction = (
+                bronze.total_batches * bronze.latency_ms / 1000.0 / bronze.elapsed_seconds
+            )
+        if self.ingest_ratio is not None:
+            if self.ingest_ratio >= 0.95:
+                self.intake_limit = "none"
+            elif self.bronze_busy_fraction is not None:
+                if self.bronze_busy_fraction >= _BRONZE_BUSY_BOUND:
+                    self.intake_limit = "bronze_capacity"
+                else:
+                    self.intake_limit = "trigger_rate"
+                    # The pipeline kept pace with what it was fed.
+                    self.pipeline_saturated = False
+
+        # Time to detect (AML continuous): the gold stage's merged histogram.
+        gold = next((s for s in streaming if s.stage_name == "gold"), None)
+        if gold is not None and gold.ttd_alerts is not None:
+            self.time_to_detect_alerts = gold.ttd_alerts
+            self.time_to_detect_seconds = gold.ttd_p50_seconds
+            self.time_to_detect_p95_seconds = gold.ttd_p95_seconds
+            self.time_to_detect_max_seconds = gold.ttd_max_seconds
+
         # Drained: every datagen row reached bronze and silver COMMITTED all
         # of it, so the trailing idle gold cycles measured an empty feed, not a
         # slow pipeline (LB-145). A stall (rows missing, silver behind or its
@@ -930,12 +996,32 @@ class PipelineBenchmark:
                 "composite_qph": composite_qph,
                 "pipeline_saturated": self.pipeline_saturated,
                 "corpus_drained": self.corpus_drained,
+                "intake_limit": self.intake_limit,
+                "bronze_busy_fraction": (
+                    round(self.bronze_busy_fraction, 3)
+                    if self.bronze_busy_fraction is not None
+                    else None
+                ),
                 "total_rows_processed": self.total_rows_processed,
                 "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
                 "total_s3_objects": self.total_s3_objects,
             }
             if self.query_time_freshness_seconds > 0:
                 scores["query_time_freshness_seconds"] = round(self.query_time_freshness_seconds, 2)
+            # AML runs always carry the keys, None when unmeasured, so a
+            # missing measurement is visible rather than an absent field.
+            if (
+                self.time_to_detect_alerts is not None
+                or self.config_snapshot.get("workload_schema") == "financial"
+            ):
+                scores["time_to_detect_seconds"] = self.time_to_detect_seconds
+                scores["time_to_detect_p95_seconds"] = self.time_to_detect_p95_seconds
+                scores["time_to_detect_max_seconds"] = (
+                    round(self.time_to_detect_max_seconds, 1)
+                    if self.time_to_detect_max_seconds is not None
+                    else None
+                )
+                scores["time_to_detect_alerts"] = self.time_to_detect_alerts
             if in_stream_qph > 0:
                 scores["in_stream_composite_qph"] = in_stream_qph
                 scores["benchmark_rounds_count"] = len(self.benchmark_rounds)
@@ -1334,6 +1420,11 @@ def build_pipeline_benchmark(
             freshness_active_seconds=sj.freshness_active_seconds,
             trailing_idle_cycles=sj.trailing_idle_cycles,
             committed_rows=sj.committed_rows,
+            ttd_alerts=sj.ttd_alerts,
+            ttd_unmatched=sj.ttd_unmatched,
+            ttd_p50_seconds=sj.ttd_p50_seconds,
+            ttd_p95_seconds=sj.ttd_p95_seconds,
+            ttd_max_seconds=sj.ttd_max_seconds,
             total_batches=sj.total_batches,
             batch_size=sj.batch_size,
             executor_count=_s_execs,
@@ -1551,6 +1642,62 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
     }
 
     return snapshot
+
+
+# Bronze busy share at or above which bronze's own processing bounds intake.
+# A trigger-capped bronze idles between triggers; one that cannot keep up
+# starts each micro-batch as the last ends and sits near 1.0.
+_BRONZE_BUSY_BOUND = 0.8
+
+# gold_refresh_financial's per-cycle time-to-detect line (common.ttd_line).
+_TTD_LINE = re.compile(
+    r"Cycle \d+: time to detect alerts=(\d+) unmatched=(\d+) "
+    r"max=([\d.]+|-)s bin=(\d+)s bins=([\d:,]*)"
+)
+
+
+def ttd_percentile(bins: dict[int, int], bin_s: int, q: float, max_s: float) -> float:
+    """The q-quantile of a {bin index: count} histogram, at the upper edge of
+    the bin that reaches it (so never under the true value), capped at the
+    measured maximum."""
+    total = sum(bins.values())
+    need = q * total
+    seen = 0
+    for b in sorted(bins):
+        seen += bins[b]
+        if seen >= need:
+            return min(float((b + 1) * bin_s), max_s)
+    return max_s
+
+
+def _apply_ttd(metrics: StreamingJobMetrics, lines: list[re.Match[str]]) -> None:
+    """Merge the cycles' time-to-detect histograms into run-wide numbers.
+
+    Only lines with the first line's bin width are merged; the script uses
+    one constant, so a mismatch means mixed script versions in one log.
+    """
+    if not lines:
+        return
+    bin_s = int(lines[0].group(4))
+    bins: dict[int, int] = {}
+    unmatched = 0
+    peaks: list[float] = []
+    for m in lines:
+        if int(m.group(4)) != bin_s:
+            continue
+        unmatched += int(m.group(2))
+        if m.group(3) != "-":
+            peaks.append(float(m.group(3)))
+        for pair in filter(None, m.group(5).split(",")):
+            b, n = pair.split(":")
+            bins[int(b)] = bins.get(int(b), 0) + int(n)
+    metrics.ttd_alerts = sum(bins.values())
+    metrics.ttd_unmatched = unmatched
+    if metrics.ttd_alerts > 0 and peaks:
+        mx = max(peaks)
+        metrics.ttd_max_seconds = mx
+        metrics.ttd_p50_seconds = ttd_percentile(bins, bin_s, 0.50, mx)
+        metrics.ttd_p95_seconds = ttd_percentile(bins, bin_s, 0.95, mx)
 
 
 class MetricsCollector:
@@ -1912,6 +2059,7 @@ class MetricsCollector:
         # Silver: rows per batch id, and the batch ids that logged a commit.
         batch_rows: dict[int, int] = {}
         committed_batches: set[int] = set()
+        ttd_lines: list[re.Match[str]] = []
 
         for line in logs.split("\n"):
             # Bronze: "Batch N: writing X rows to ..."
@@ -1979,6 +2127,14 @@ class MetricsCollector:
                 freshness_cycles.append((float(m.group(1)), bool(m.group(2))))
                 continue
 
+            # AML gold: "Cycle N: time to detect alerts=A unmatched=U
+            # max=Xs bin=Bs bins=i:n,..." (common.ttd_line).
+            m = _TTD_LINE.search(line)
+            if m:
+                ttd_lines.append(m)
+                continue
+
+        _apply_ttd(metrics, ttd_lines)
         metrics.total_batches = len(batch_ids)
         metrics.total_rows_processed = total_rows
 
