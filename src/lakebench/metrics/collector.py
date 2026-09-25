@@ -52,6 +52,12 @@ class JobMetrics:
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
     rules_skipped: dict[str, str] = field(default_factory=dict)
+    # TM operations layer (GOALS P10, AML gold only), from the driver's
+    # ``[tm-invariant]`` and ``[tm-ops]`` lines. ``tm_invariants`` is keyed
+    # by cycle (as a string, the JSON key) then invariant name, each value
+    # {"status", "detail"}. ``tm_ops`` is the last operations summary.
+    tm_invariants: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
+    tm_ops: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -1747,6 +1753,12 @@ class MetricsCollector:
         )
         for m in skip_re.finditer(logs):
             metrics.rules_skipped[m.group("rule")] = m.group("reason").strip()
+
+        # P10 TM operations lines (tm_operations.py).
+        from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops
+
+        metrics.tm_invariants = {str(c): inv for c, inv in parse_tm_invariants(logs).items()}
+        metrics.tm_ops = parse_tm_ops(logs)
 
         # Calculate throughput
         if metrics.elapsed_seconds > 0:

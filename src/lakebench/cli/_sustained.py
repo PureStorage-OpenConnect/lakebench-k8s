@@ -1737,6 +1737,18 @@ def _run_sustained(
                     f"AML continuous gate: detection produced {alert_count:,} "
                     "alerts over the window."
                 )
+            # P10.2 workflow invariants on every tick that ran the operations
+            # layer; none at all means it never ran.
+            if gold_logs is not None:
+                from lakebench.metrics.tm_ops import parse_tm_invariants, tm_gate_problems
+
+                _tm_problems = tm_gate_problems(
+                    parse_tm_invariants(gold_logs), label="AML continuous gate"
+                )
+                for _p in _tm_problems:
+                    print_error(_p)
+                if _tm_problems:
+                    pipeline_success = False
 
         # c360 honest continuous gate (LB-044 for c360; AML has its own above).
         # A continuous run whose bronze or silver stream processed zero rows

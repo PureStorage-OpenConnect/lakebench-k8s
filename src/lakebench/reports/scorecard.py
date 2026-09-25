@@ -115,7 +115,7 @@ class FinancialScorecardBlock:
         # Nothing AML-specific to show (e.g. a c360 run mislabelled, or a
         # financial run before detection wired) -- stay silent.
         if not alerts_by_rule and not rules_skipped and not scoring:
-            return ""
+            return _render_tm_operations(gold_jobs)
 
         try:
             from lakebench.benchmark.aml_queries import RULE_TARGETS
@@ -221,7 +221,10 @@ class FinancialScorecardBlock:
                 + "</div>"
             )
 
-        return f"""
+        tm_html = _render_tm_operations(gold_jobs)
+        return (
+            tm_html
+            + f"""
         <section>
             <h3>Detection Scorecard</h3>
             <table>
@@ -245,6 +248,145 @@ class FinancialScorecardBlock:
             {footer}
         </section>
         """
+        )
+
+
+def _fmt_pct(v) -> str:
+    return f"{float(v) * 100:.1f}%" if v is not None else "n/a"
+
+
+def _fmt_n(v) -> str:
+    return f"{int(v):,}" if isinstance(v, (int, float)) else "n/a"
+
+
+def _render_tm_operations(gold_jobs: list) -> str:
+    """TM operations pack (GOALS P10.3, core sections) from the last
+    gold-finalize job's ``tm_ops`` summary, plus every cycle's invariants.
+
+    Operations vocabulary (P10.4): "productive rate" (escalated or SAR), not
+    precision. Every number here is conditional on the simulated analyst,
+    which the section states with the accuracies used.
+    """
+    from html import escape
+
+    ops = None
+    for j in reversed(gold_jobs or []):
+        if getattr(j, "tm_ops", None):
+            ops = j.tm_ops
+            break
+    cycles: list[tuple[str, str, dict]] = []
+    for idx, j in enumerate(gold_jobs or [], start=1):
+        for c, inv in sorted((getattr(j, "tm_invariants", None) or {}).items()):
+            cycles.append((str(idx), c, inv))
+    if not ops and not cycles:
+        return ""
+    ops = ops or {}
+    parts = ["<section><h3>Transaction Monitoring Operations</h3>"]
+    sim = ops.get("simulation") or {}
+    if sim:
+        parts.append(
+            '<p style="color: var(--text-muted); font-size: 0.8125rem;">'
+            "Dispositions are simulated from the datagen ground truth: L1 analyst "
+            f"accuracy {sim.get('analyst_accuracy')}, investigator accuracy "
+            f"{sim.get('investigator_accuracy')}, QA sample {sim.get('qa_sample_rate')}, "
+            f"seed {sim.get('seed')}. As of {escape(str(ops.get('as_of_date')))}.</p>"
+        )
+
+    # Invariants: one row per (cycle, invariant) that did not pass, else a
+    # one-line all-pass statement per cycle.
+    inv_rows = []
+    for _job, c, inv in cycles:
+        bad = {n: r for n, r in inv.items() if r.get("status") != "pass"}
+        if bad:
+            for n, r in sorted(bad.items()):
+                inv_rows.append(
+                    f"<tr><td>{escape(c)}</td><td>{escape(n)}</td>"
+                    f'<td><span style="color: var(--danger, red);">{escape(r.get("status", ""))}'
+                    f"</span></td><td>{escape(r.get('detail', ''))}</td></tr>"
+                )
+        else:
+            inv_rows.append(
+                f"<tr><td>{escape(c)}</td><td>all {len(inv)}</td>"
+                '<td><span style="color: var(--success, green);">pass</span></td><td></td></tr>'
+            )
+    if inv_rows:
+        parts.append(
+            "<h4>Workflow invariants</h4><table><thead><tr><th>Cycle</th><th>Invariant</th>"
+            "<th>Status</th><th>Detail</th></tr></thead><tbody>"
+            + "".join(inv_rows)
+            + "</tbody></table>"
+        )
+
+    rec = ops.get("reconciliation") or {}
+    if rec:
+        rows = []
+        for key in sorted(rec):
+            section, _, item = key.partition(".")
+            if section in ("completeness", "exclusion", "dq"):
+                rows.append(
+                    f"<tr><td>{escape(section)}</td><td>{escape(item)}</td>"
+                    f"<td>{_fmt_n(rec[key])}</td></tr>"
+                )
+        parts.append(
+            "<h4>Coverage and completeness</h4><table><thead><tr><th>Section</th>"
+            "<th>Item</th><th>Payments</th></tr></thead><tbody>"
+            + "".join(rows)
+            + "</tbody></table>"
+        )
+
+    funnel = ops.get("funnel") or {}
+    if funnel:
+        order = ("payments", "monitored", "alerts", "escalated", "cases", "sars")
+        parts.append(
+            "<h4>Cycle funnel</h4><table><thead><tr>"
+            + "".join(f"<th>{k}</th>" for k in order)
+            + "</tr></thead><tbody><tr>"
+            + "".join(f"<td>{_fmt_n(funnel.get(k))}</td>" for k in order)
+            + "</tr></tbody></table>"
+            f"<p>L1 escalation rate {_fmt_pct(ops.get('l1_escalation_rate'))}; "
+            f"QA disagreement {_fmt_pct(ops.get('qa_disagreement_rate'))} on "
+            f"{_fmt_n(ops.get('qa_sample'))} re-reviewed; "
+            f"{_fmt_n(ops.get('alerts_out_of_scope'))} alerts on non-customers "
+            "(outside the monitored population).</p>"
+        )
+
+    aging = ops.get("alert_aging_open") or {}
+    if aging or "open_cases" in ops:
+        parts.append(
+            "<h4>Queue health</h4><table><thead><tr><th>Open alerts 0-30 d</th>"
+            "<th>31-60 d</th><th>61-90 d</th><th>90+ d</th><th>Open cases</th>"
+            "<th>Open cases &gt; 60 d</th><th>SLA breaches</th></tr></thead><tbody><tr>"
+            + "".join(f"<td>{_fmt_n(aging.get(b))}</td>" for b in ("0-30", "31-60", "61-90", "90+"))
+            + f"<td>{_fmt_n(ops.get('open_cases'))}</td>"
+            f"<td>{_fmt_n(ops.get('open_cases_over_60_days'))}</td>"
+            f"<td>{_fmt_n(ops.get('alert_sla_breaches'))}</td></tr></tbody></table>"
+        )
+
+    scen = ops.get("scenarios") or {}
+    if scen:
+        rows = [
+            f"<tr><td>{escape(rid)}</td><td>{_fmt_n(v.get('alerts'))}</td>"
+            f"<td>{_fmt_n(v.get('escalated'))}</td><td>{_fmt_pct(v.get('productive_rate'))}</td>"
+            f"<td>{_fmt_pct(v.get('sar_conversion'))}</td></tr>"
+            for rid, v in sorted(scen.items())
+        ]
+        parts.append(
+            "<h4>Scenario performance</h4><table><thead><tr><th>Scenario</th>"
+            "<th>Customer alerts</th><th>Escalated</th>"
+            '<th title="Share of decided alerts escalated or on a SAR case">Productive rate</th>'
+            "<th>SAR conversion</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+        )
+
+    if "sars_filed" in ops:
+        parts.append(
+            f"<p>SARs filed: <strong>{_fmt_n(ops.get('sars_filed'))}</strong>; "
+            f"determination-to-filing median {_fmt_n(ops.get('filing_days_median'))} d, "
+            f"p95 {_fmt_n(ops.get('filing_days_p95'))} d, "
+            f"{_fmt_pct(ops.get('filed_over_30_days_pct'))} over 30 days; "
+            f"continuing-activity reviews due: {_fmt_n(ops.get('continuing_reviews_due'))}.</p>"
+        )
+    parts.append("</section>")
+    return "\n".join(parts)
 
 
 _REGISTRY: dict[str, ScorecardBlock] = {
