@@ -538,14 +538,36 @@ def _check(spark):
     counts = tm.read_back(spark, "run-y-c1", date(2025, 1, 1))
     assert counts["reviews_folded_into_determined"] == 1
 
-    # (d) No manifest: the layer reports not run, with the reason, and
+    # (d) The per-customer cap never drops an alert already in the workflow:
+    # a new backdated alert on customer 1 under cap 2 must not push A2 out
+    # while its prior row is carried (it would be written twice).
+    capped = dict(PARAMS, max_alerts_per_customer=2)
+    _alerts(spark, "run-z-c1")
+    tm.run_tm_operations(spark, txns, "run-z-c1", params=capped, source_rows_fn=lambda s: n_rows)
+    _alerts(spark, "run-z-c2", _BASE_SPECS + [("A0", "W2_structuring", 1, (2024, 1, 2), ["u0"])])
+    st = _st(
+        tm.run_tm_operations(
+            spark, txns, "run-z-c2", params=capped, source_rows_fn=lambda s: n_rows
+        )
+    )
+    assert st["one_row_per_alert_identity"] == "pass" and st["history_stable"] == "pass", st
+    # ... and the identity check fails when a row is duplicated.
+    spark.sql(
+        "INSERT INTO lakehouse.gold.alert_dispositions SELECT * FROM "
+        "lakehouse.gold.alert_dispositions WHERE alert_id = 'A2'"
+    )
+    counts = tm.read_back(spark, "run-z-c2", date(2025, 1, 1))
+    counts.update(source=31, customers=3, silver=31, monitored=25, excluded=6)
+    assert _st(tm.evaluate_invariants(counts))["one_row_per_alert_identity"] == "fail"
+
+    # (e) No manifest: the layer reports not run, with the reason, and
     # leaves detection's alerts alone.
     spark.sql("DROP TABLE lakehouse.bronze.manifest")
     inv = tm.run_tm_operations(spark, txns, "run-y-c1", params=PARAMS, source_rows_fn=lambda s: 1)
     assert [(n, s) for n, s, _ in inv] == [("workflow", "not_run")]
     assert "manifest" in inv[0][2]
     assert spark.table("lakehouse.gold.alerts").where(col("run_id") == "run-y-c1").count() == 5
-    # (e) Disabled: says so and does nothing else.
+    # (f) Disabled: says so and does nothing else.
     inv = tm.run_tm_operations(spark, txns, "run-y-c1", params=dict(PARAMS, enabled=False))
     assert [(n, s) for n, s, _ in inv] == [("workflow", "disabled")]
 

@@ -297,14 +297,17 @@ cases). FinCEN continuing activity: review 90 days after each SAR and file
 the continuing SAR within 120 days of the prior one. A review that falls due
 while the customer's case is still under investigation is folded into it; a
 review that falls due while that case is already determined and only waiting
-to file is deferred until it files, never credited to it. Late filings are
+to file is never credited to its investigation; the SAR that case then files
+covers the activity and is recorded as the continuing-activity filing
+(`superseded_by_sar`). Late filings are
 drawn at `late_filing_rate` and flagged `filed_late`.
 
 **Alert identity across cycles.** Detection re-runs over the whole corpus
 each cycle, so an alert's window can grow as payments arrive. The layer
 matches each alert to the previous cycle's: same content first, else the
 same rule on the same customer with its last payment moved forward by at
-most 31 days. A matched alert keeps its key, generated date, truth and
+most 31 days (the earliest such alert, so grown windows pair in order). A
+matched alert keeps its key, generated date, truth and
 priority as first seen; an alert detection stops emitting is kept
 (`in_current_detection` false); a new alert whose payments predate the
 previous cycle is dated on this cycle, the first day it could have been
@@ -337,7 +340,7 @@ monitored population is not empty; monitored + excluded = source; every alert
 has a disposition row and none is NULL; alerts on non-customers come only
 from scenarios declared customer-and-counterparty; escalated <= alerts;
 alert-driven cases <= escalated; SARs <= cases; at most one open case per
-customer; the funnel is monotone; every SAR past 90 days has its review (or
+customer; one disposition row per alert identity; the funnel is monotone; every SAR past 90 days has its review (or
 is waiting on a case pending filing); no review is credited to an
 already-determined case; decided history is unchanged from the previous
 cycle.
@@ -345,7 +348,9 @@ cycle.
 **The P10 verdict is separate from detection.** `fail` (the layer ran and an
 invariant is violated) fails the run. `not_run` (no manifest, a layer error,
 a continuous window that ended before the manifest was ready) says why and
-leaves detection scoring alone. `unknown` means no driver log was captured.
+leaves detection scoring alone. `unknown` means no driver log was captured
+for some cycle, or an invariant could not be checked (the raw source files
+failed to list).
 `disabled` skips the gate. The verdict is kept in `metrics.json` as
 `tm_operations` and heads the report section.
 

@@ -92,7 +92,8 @@ def test_reproduce_refuses_qph_across_query_sets():
     st = {r["metric"]: r["status"] for r in rows}
     assert st == {"composite_qph": "incomparable", "scale_ratio": "pass"} and code == 1
     rows, code = _compare(exp, dict(exp), {}, (None, query_set_id(FIN)))
-    assert code == 1  # a package that predates query-set ids
+    # A package that predates query-set ids: QpH not compared, not failed.
+    assert code == 0 and rows[0]["status"] == "incomparable"
     rows, code = _compare(exp, dict(exp), {}, (query_set_id(FIN), query_set_id(FIN)))
     assert code == 0
     pb = SimpleNamespace(

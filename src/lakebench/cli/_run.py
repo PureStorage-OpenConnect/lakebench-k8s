@@ -568,20 +568,32 @@ def _aml_tm_verdict(gold_jobs: list, enabled: bool = True) -> dict:
     sts: dict = {}
     ops = None
     parsed = False
-    for job in gold_jobs:
+    unparsed = []
+    for idx, job in enumerate(gold_jobs, start=1):
         j_inv = getattr(job, "tm_invariants", None) or {}
         j_sts = getattr(job, "tm_status", None) or {}
         inv.update({int(c): v for c, v in j_inv.items()})
         sts.update({int(c): v for c, v in j_sts.items()})
         ops = getattr(job, "tm_ops", None) or ops
-        parsed = parsed or bool(
+        job_parsed = bool(
             j_inv
             or j_sts
             or getattr(job, "alerts_by_rule", None)
             or getattr(job, "rules_skipped", None)
             or getattr(job, "rule_errors", None)
         )
+        parsed = parsed or job_parsed
+        if not job_parsed:
+            unparsed.append(idx)
     verdict = tm_verdict(inv, sts, enabled=enabled, logs_captured=parsed, label="gold-finalize")
+    if unparsed and verdict["status"] == "pass":
+        # A cycle whose log was not read was not checked; the others passing
+        # does not make the run pass.
+        verdict.update(
+            status="unknown",
+            reason=f"no driver log parsed for gold-finalize job(s) {unparsed}; "
+            "those cycles are unchecked",
+        )
     verdict["invariants"] = {str(c): v for c, v in sorted(inv.items())}
     verdict["ops"] = ops
     verdict["mode"] = "batch"
