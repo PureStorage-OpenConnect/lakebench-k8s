@@ -490,8 +490,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.query_engine.trino.worker.storage` | string | `50Gi` | Worker storage size for spill and temp data. |
 | `architecture.query_engine.trino.worker.storage_class` | string | `""` | Worker StorageClass. Empty = emptyDir (ephemeral, no PVC needed). Set a class name to use PVC-backed persistent volumes instead. |
 | `architecture.query_engine.trino.catalog_name` | string | `lakehouse` | Trino catalog name for the Iceberg connector. |
-| `architecture.query_engine.spark_thrift.cores` | int | `2` | Spark Thrift Server CPU cores. |
-| `architecture.query_engine.spark_thrift.memory` | string | `4g` | Spark Thrift Server memory. |
+| `architecture.query_engine.spark_thrift.cores` | int | `2` | Spark Thrift Server CPU cores. Auto-sized to `8` on Delta + Hive when unset. |
+| `architecture.query_engine.spark_thrift.memory` | string | `4g` | Spark Thrift Server heap. The pod limit adds max(10% of heap, 1 GiB). Auto-sized to `16g` on Delta + Hive and `24g` on the financial schema when unset. |
 | `architecture.query_engine.spark_thrift.catalog_name` | string | `lakehouse` | Iceberg catalog name for Spark Thrift Server. |
 | `architecture.query_engine.duckdb.cores` | int | `2` | DuckDB CPU cores. |
 | `architecture.query_engine.duckdb.memory` | string | `4g` | DuckDB memory. |

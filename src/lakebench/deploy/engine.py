@@ -91,6 +91,50 @@ def jvm_heap_for_limit(limit: str, fraction: float = JVM_HEAP_FRACTION) -> str:
     return f"{heap_mib}m"
 
 
+# LB-148: the Spark Thrift pod limit is the heap plus a non-heap allowance.
+# Spark's own rule for a JVM container is max(10% of heap, 384 MiB). The
+# 384 MiB floor is sized for executors; the Thrift JVM is a driver that also
+# loads Hive, Delta or Iceberg and the S3A client (metaspace plus code cache
+# alone run to several hundred MiB) and runs HiveServer2's handler threads,
+# so the floor here is 1 GiB. At the 4g default that gives a 5Gi pod; with
+# heap == limit (the pre-LB-148 shape) the pod sat at 4014Mi of 4Gi mid-query.
+THRIFT_OVERHEAD_FACTOR = 0.10
+THRIFT_MIN_OVERHEAD_BYTES = 2**30
+
+_SPARK_MEM_UNITS_BYTES = {"k": 2**10, "m": 2**20, "g": 2**30, "t": 2**40}
+
+
+def spark_memory_bytes(value: str) -> int:
+    """Parse a Spark memory string (``4g``, ``4096m``, ``24G``, ``8gb``) to bytes.
+
+    Spark units are binary. A bare number is MiB, matching how Spark reads
+    ``spark.driver.memory``. Anything else raises.
+    """
+    s = str(value).strip().lower()
+    if len(s) > 1 and s.endswith("b") and s[-2] in _SPARK_MEM_UNITS_BYTES:
+        s = s[:-1]
+    unit = s[-1:] if s[-1:] in _SPARK_MEM_UNITS_BYTES else ""
+    number = s[:-1] if unit else s
+    try:
+        amount = float(number)
+    except ValueError:
+        raise ValueError(f"unparseable Spark memory {value!r}") from None
+    if amount <= 0:
+        raise ValueError(f"Spark memory must be positive, got {value!r}")
+    return int(amount * _SPARK_MEM_UNITS_BYTES.get(unit, 2**20))
+
+
+def thrift_pod_memory_limit(heap: str) -> str:
+    """Pod memory limit (whole MiB, e.g. ``5120Mi``) for a Spark Thrift heap.
+
+    Always strictly above the heap: heap + max(10% of heap, 1 GiB).
+    """
+    heap_bytes = spark_memory_bytes(heap)
+    overhead = max(int(heap_bytes * THRIFT_OVERHEAD_FACTOR), THRIFT_MIN_OVERHEAD_BYTES)
+    limit_mib = -(-(heap_bytes + overhead) // 2**20)
+    return f"{limit_mib}Mi"
+
+
 def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
     """Delete a freshly-created bucket when ownership was refused.
 
@@ -322,6 +366,21 @@ class DeploymentEngine:
             return ""
 
     @staticmethod
+    def _thrift_pod_memory(cfg: Any) -> str:
+        """Spark Thrift pod memory limit for the configured heap (LB-148).
+
+        Strict only when Spark Thrift is the active query engine, for the
+        same reason as ``_trino_heap``: destroy builds this context too.
+        """
+        heap = cfg.architecture.query_engine.spark_thrift.memory
+        if cfg.architecture.query_engine.type == QueryEngineType.SPARK_THRIFT:
+            return thrift_pod_memory_limit(heap)
+        try:
+            return thrift_pod_memory_limit(heap)
+        except ValueError:
+            return ""
+
+    @staticmethod
     def _spark_mem_to_k8s(spark_mem: str) -> str:
         """Convert Spark memory format (e.g. ``4g``) to K8s format (e.g. ``4Gi``)."""
         s = spark_mem.strip().lower()
@@ -506,9 +565,8 @@ class DeploymentEngine:
             # Spark Thrift Server
             "spark_thrift_cores": cfg.architecture.query_engine.spark_thrift.cores,
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,
-            "spark_thrift_memory_k8s": self._spark_mem_to_k8s(
-                cfg.architecture.query_engine.spark_thrift.memory
-            ),
+            # LB-148: pod limit = heap + overhead, never heap == limit.
+            "spark_thrift_memory_k8s": self._thrift_pod_memory(cfg),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
             # Spark Thrift packages (computed from config versions)

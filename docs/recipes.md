@@ -107,7 +107,7 @@ architecture:
 
 **Does not deploy:** Trino, Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator. The Spark Thrift Server uses 2 cores and 4g memory by default (configurable via `architecture.query_engine.spark_thrift`).
+**Caveats:** Requires the Stackable Hive Operator. The Spark Thrift Server uses 2 cores and a 4g heap by default (configurable via `architecture.query_engine.spark_thrift`); on `hive-delta-spark-thrift` the auto-sized default is 8 cores and a 16g heap, because Delta is not compacted before the benchmark.
 
 ---
 
