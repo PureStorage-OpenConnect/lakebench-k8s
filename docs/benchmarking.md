@@ -126,7 +126,9 @@ cost and value of table maintenance by running the benchmark twice:
    uncompacted data (many small files from the pipeline).
 2. **Maintenance** -- runs Iceberg `expire_snapshots` + `remove_orphan_files`
    + `rewrite_data_files` (compaction), or Delta `VACUUM`.
-3. **Post-compaction benchmark** -- runs the same 8 queries on compacted data.
+3. **Storage settle wait** -- probes one query until storage has settled
+   after the maintenance burst (see below).
+4. **Post-compaction benchmark** -- runs the same 8 queries on compacted data.
 
 The scorecard then reports:
 
@@ -142,13 +144,55 @@ The scorecard then reports:
 | `pre_compaction_file_count` | Data files before compaction |
 | `post_compaction_file_count` | Data files after compaction |
 | `compaction_ratio` | `pre / post` file count (higher = more compaction benefit) |
+| `maintenance_settle_seconds` | Seconds from maintenance end until the storage settle probe was stable (see below). Not counted in `time_to_value_seconds` or any stage time |
+| `maintenance_settled` | False when the post round ran on storage that had not settled |
+| `maintenance_settle_capped` | True when the wait reached `max_seconds` |
 
-Both rounds are preceded by one unmeasured warm-up pass. A warm-up rather
-than a quiet period: the first touch of a snapshot (metadata and manifest
-reads, split planning caches) is what differs between a round right after
-maintenance and one later, and waiting does not pay that cost while a pass
-over the same queries does. Maintenance is synchronous, so there is no
-background work for a quiet period to wait out.
+Both rounds are preceded by one unmeasured warm-up pass, which pays the first
+touch of a snapshot (metadata and manifest reads, split planning caches).
+
+The warm-up is not enough on its own. Maintenance returns when its SQL
+returns, but the object store keeps working off the burst of deletes and
+rewrites afterwards. On FlashBlade at c360 scale 10 the same compacted files
+read QpH 546 about 2 minutes after maintenance, 569 at +15 minutes and 841 at
++35 minutes, against 828 before maintenance; AML scale 10 read 27% slow
+straight after (LB-150). So between maintenance and the post round,
+lakebench times one storage-bound probe query (by default the workload's
+first scan-class query, a full scan of the table compaction rewrote) every
+`interval_seconds` until two consecutive probes agree within
+`tolerance_pct` and, when the pre round ran, neither is slower than that
+query's pre-maintenance median by more than `tolerance_pct`. The second
+condition matters: in the run above the +2 and +15 minute rounds agreed
+within 4% while both were a third slow. Without a pre round (scale 50 and
+above) only the first condition applies, and a slow plateau can be accepted.
+
+If the wait reaches `max_seconds` the post round still runs, and
+`maintenance_value_pct` is null with the reason `storage did not settle
+within N s`. Three failed probes in a row end the wait early with the same
+effect. Every probe's offset and time is kept in `metrics.json` under
+`maintenance_settle`. The wait adds to the run's wall clock, not to time to
+value, stage times or `maintenance_elapsed_seconds`.
+
+```yaml
+architecture:
+  benchmark:
+    maintenance_settle:
+      enabled: true          # false: run the post round straight after maintenance
+      max_seconds: 2700      # 45 min: recovery took ~35 min in the measured case
+      interval_seconds: 60
+      tolerance_pct: 10.0    # unsettled rounds were 27-34% slow
+      probe_query: null      # a query name; default is the first scan-class query
+      probe_samples: 1       # timed runs per probe, median taken
+```
+
+Continuous mode does not wait. Its maintenance and compaction run on a
+timer during the stream (`sustained.retention_interval`,
+`sustained.compaction_interval`), and an in-stream benchmark round that
+starts soon after one of them can read slow for the same reason. The
+continuous scorecard does not separate those rounds: `in_stream_composite_qph`
+is the median over all rounds and `qph_degradation_pct` compares the first
+and second halves, so settling rounds are included in both. The median
+limits the effect when only a few rounds land in a settling window.
 
 The value is reported only when the pre and post rounds are distinguishable
 at the samples taken. Over the paired queries, each round's total seconds

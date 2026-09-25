@@ -511,6 +511,30 @@ class BenchmarkRunner:
 
         return results
 
+    def probe_query(self, name: str | None = None) -> BenchmarkQuery:
+        """The query named *name*, or the first scan-class query.
+
+        Raises ValueError when no such query is in this run's query set.
+        """
+        queries = self._queries()
+        if name:
+            for q in queries:
+                if q.name == name:
+                    return q
+            raise ValueError(f"probe query {name!r} is not in the benchmark query set")
+        for q in queries:
+            if q.query_class == "scan":
+                return q
+        if queries:
+            return queries[0]
+        raise ValueError("benchmark query set is empty")
+
+    def time_query(
+        self, query: BenchmarkQuery, iterations: int = 1, query_timeout: int = 300
+    ) -> QueryResult:
+        """Run one query hot, ``iterations`` times, scored by the median."""
+        return self._repeat_query(query, "hot", iterations, query_timeout)
+
     def _repeat_query(
         self,
         query: BenchmarkQuery,

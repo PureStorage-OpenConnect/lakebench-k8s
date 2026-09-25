@@ -436,7 +436,7 @@ def _data_file_total(health: dict[str, int]) -> int:
 
 
 def _maintenance_value(
-    pre, post, pre_files: int, post_files: int, maint_elapsed: float
+    pre, post, pre_files: int, post_files: int, maint_elapsed: float, settle=None
 ) -> tuple[float | None, int, str]:
     """(value %, paired queries, reason) for the pre/post maintenance rounds.
 
@@ -445,6 +445,11 @@ def _maintenance_value(
     differ only in what compaction did not change, and the difference is
     run-to-run noise: on 2026-09-24 four runs with the same file count before
     and after read -12.4%, -8.9%, +31.2% and +46.8% (LB-141).
+
+    *settle* is the ``SettleResult`` of the wait before the post round, or
+    None when the wait was disabled. A wait that did not settle leaves the
+    value None: the post round measured storage still working off the
+    maintenance burst (LB-150).
     """
     if maint_elapsed <= 0:
         return None, 0, "maintenance did not run"
@@ -456,6 +461,8 @@ def _maintenance_value(
     if paired is None:
         return None, 0, "no query succeeded in both rounds"
     pre_q, post_q, n = paired
+    if settle is not None and not settle.settled:
+        return None, n, settle.value_reason()
     value = (post_q - pre_q) / pre_q * 100
     noise = _paired_noise(pre, post)
     if noise is None:
@@ -549,6 +556,75 @@ def _warm_benchmark(runner, query_timeout: int) -> None:
         runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1)
     except Exception as e:  # noqa: BLE001
         logger.warning("benchmark warm-up pass failed: %s", e)
+
+
+def _settle_after_maintenance(
+    cfg, runner, pre_queries, query_timeout: int, started_at: float, *, clock=None, sleep=None
+):
+    """Probe until storage settles after batch maintenance (LB-150).
+
+    Returns the ``SettleResult``, or None when the wait is disabled or no
+    probe query could be chosen. *started_at* is ``time.monotonic()`` at
+    maintenance end. The wait is not a pipeline stage, so it adds to the
+    run's wall clock but not to time to value or any stage time.
+    """
+    from lakebench.benchmark.settle import wait_for_settle
+
+    sc = cfg.architecture.benchmark.maintenance_settle
+    if not sc.enabled:
+        print_info("Storage settle wait: disabled (benchmark.maintenance_settle.enabled)")
+        return None
+    try:
+        query = runner.probe_query(sc.probe_query)
+    except ValueError as e:
+        print_warning(f"Storage settle wait skipped: {e}")
+        return None
+
+    # The same query's pre-maintenance median, when the pre round ran and the
+    # query succeeded there.
+    reference = None
+    for q in pre_queries or []:
+        if q.query.name == query.name and q.success and q.elapsed_seconds > 0:
+            reference = q.elapsed_seconds
+    ref_note = f", pre-maintenance {reference:.1f}s" if reference else ", no pre-maintenance time"
+    print_info(
+        f"Waiting for storage to settle: probe {query.name} every {sc.interval_seconds}s, "
+        f"within {sc.tolerance_pct:g}%{ref_note}, cap {sc.max_seconds}s"
+    )
+
+    def _probe() -> float:
+        r = runner.time_query(query, iterations=sc.probe_samples, query_timeout=query_timeout)
+        if not r.success:
+            raise RuntimeError(r.error_message or "probe failed")
+        return r.elapsed_seconds
+
+    def _show(p) -> None:
+        if p.seconds is None:
+            console.print(f"  +{p.offset_seconds:.0f}s probe [red]FAIL[/red] ({p.error[:60]})")
+        else:
+            console.print(f"  +{p.offset_seconds:.0f}s probe {p.seconds:.1f}s")
+
+    kwargs = {}
+    if clock is not None:
+        kwargs["clock"] = clock
+    if sleep is not None:
+        kwargs["sleep"] = sleep
+    result = wait_for_settle(
+        _probe,
+        probe_query=query.name,
+        started_at=started_at,
+        max_seconds=sc.max_seconds,
+        interval_seconds=sc.interval_seconds,
+        tolerance_pct=sc.tolerance_pct,
+        reference_seconds=reference,
+        on_probe=_show,
+        **kwargs,
+    )
+    if result.settled:
+        print_info(f"Storage settled {result.settle_seconds:.0f}s after maintenance")
+    else:
+        print_warning(f"Storage did not settle: {result.reason}; post round runs anyway")
+    return result
 
 
 def _benchmark_gate_problems(cfg, queries) -> list[str]:
@@ -1842,7 +1918,10 @@ def run(
         # due to 200K+ uncompacted files overwhelming Trino memory).
         pre_compaction_qph = 0.0
         _pre_record = None
+        _pre_result = None
         _maint_value = None
+        _maint_end = None
+        _settle = None
         pre_file_count = 0
         post_file_count = 0
         maint_elapsed = 0.0
@@ -1934,6 +2013,7 @@ def run(
                 _run_iceberg_compaction(cfg, k8s, console, j)
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
                 maint_elapsed = (datetime.now() - _maint_start).total_seconds()
+                _maint_end = time.monotonic()
 
                 # 4. Post-maintenance file count
                 try:
@@ -1944,6 +2024,23 @@ def run(
 
             except Exception as e:
                 print_warning(f"Maintenance failed (non-fatal): {e}")
+
+            # 5. Wait for storage to settle before the post round (LB-150).
+            # Runs after maint_elapsed is taken and outside every stage, so it
+            # cannot move time to value or maintenance_pct_of_pipeline.
+            if maint_elapsed > 0 and _maint_end is not None:
+                console.print()
+                console.print("[bold]Storage settle wait[/bold]")
+                try:
+                    _settle = _settle_after_maintenance(
+                        cfg,
+                        _BR(cfg),
+                        _pre_result.queries if _pre_result is not None else None,
+                        900 if cfg.architecture.workload.schema_type.value == "financial" else 300,
+                        _maint_end,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    print_warning(f"Storage settle wait failed (non-fatal): {e}")
 
         # -- Phase 6/7: Benchmark --------------------------------------------------
         console.print()
@@ -2024,6 +2121,7 @@ def run(
                         pre_file_count,
                         post_file_count,
                         maint_elapsed,
+                        _settle,
                     )
                     if _maint_value[0] is not None:
                         console.print(
@@ -2033,6 +2131,13 @@ def run(
                         )
                     else:
                         console.print(f"  Maintenance value: not measured ({_maint_value[2]})")
+                if _settle is not None:
+                    _state = "settled" if _settle.settled else "did not settle"
+                    console.print(
+                        f"  Storage {_state} {_settle.settle_seconds:.0f}s after maintenance "
+                        f"({len(_settle.probes)} probes of {_settle.probe_query}; "
+                        "not counted in time to value)"
+                    )
                 if maint_elapsed > 0 and pre_file_count > 0 and post_file_count > 0:
                     ratio = pre_file_count / max(post_file_count, 1)
                     console.print(
@@ -2165,6 +2270,11 @@ def run(
                             pb.maintenance_value_reason = _maint_value[2]
                             pb.maintenance_paired_queries = _maint_value[1]
                         pb.pre_compaction_benchmark = _pre_record
+                    if _settle is not None:
+                        pb.maintenance_settle_seconds = _settle.settle_seconds
+                        pb.maintenance_settled = _settle.settled
+                        pb.maintenance_settle_capped = _settle.capped
+                        pb.maintenance_settle = _settle.to_dict()
                 except Exception:
                     pass  # Maintenance metrics are best-effort
 
