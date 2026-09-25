@@ -428,6 +428,15 @@ def _ts(a):
     return a["alert_ts"] if a["alert_ts"] is not None else -1
 
 
+def extension_threshold(sketch_size):
+    """Payments a current alert must share with a prior's first-seen sketch
+    to be that alert grown: at least two (an alert sharing one payment with
+    it is new activity; a one-payment prior needs its one), and at least a
+    quarter of a large sketch. A quarter, not all: rules cap related_txn_ids
+    by uetr order, so a grown alert keeps only part of its first payments."""
+    return max(min(sketch_size, 2), (sketch_size + 3) // 4, 1)
+
+
 def match_alerts(current, prior, prev_as_of, as_of, cycle):
     """This cycle's alerts on one customer, with their identity carried.
 
@@ -501,12 +510,7 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
                 ov = int((ext or {}).get(p["alert_key"], 0))
             else:
                 ov = len(cs & set(psk))
-            # At least a quarter of the payments the prior was first raised
-            # on (its sketch): an alert sharing one payment with it is new
-            # activity, not the same alert grown. A quarter, not all: rules
-            # cap related_txn_ids by uetr order, so a grown alert keeps only
-            # part of its first payments in the list.
-            if ov and ov >= max(1, (len(psk) + 3) // 4):
+            if ov and ov >= extension_threshold(len(psk)):
                 pairs.append(
                     (-ov, c["alert_ts"] - p["alert_ts"], p["alert_key"], c["content_hash"], ci, p)
                 )
@@ -1089,11 +1093,14 @@ def bronze_stream_epoch(spark, fq_table, snapshot_id):
         return None
     at = {r["snapshot_id"]: r["committed_at"] for r in rows}
     limit = at.get(snapshot_id)
+    if limit is None:
+        # The pinned snapshot is gone (expired mid-pass): unknown, not "all".
+        return None
     epochs = [
         int(r["summary"]["spark.sql.streaming.epochId"])
         for r in rows
         if (r["summary"] or {}).get("spark.sql.streaming.epochId") is not None
-        and (limit is None or r["committed_at"] <= limit)
+        and r["committed_at"] <= limit
     ]
     return max(epochs) if epochs else None
 
@@ -1257,14 +1264,19 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         date_add,
         explode,
         expr,
+        floor,
+        greatest,
+        least,
         lit,
         map_from_entries,
         row_number,
         sha2,
+        size,
         struct,
         to_date,
         when,
     )
+    from pyspark.sql.functions import max as max_
     from pyspark.sql.window import Window
 
     weight_map = create_map(*[x for k, v in SCENARIO_WEIGHT.items() for x in (lit(k), lit(v))])
@@ -1350,8 +1362,8 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         )
     )
     band = None
-    for floor, name in PRIORITY_BANDS:
-        cond = col("priority_score") >= lit(floor)
+    for band_floor, name in PRIORITY_BANDS:
+        cond = col("priority_score") >= lit(band_floor)
         band = when(cond, lit(name)) if band is None else band.when(cond, lit(name))
     out = out.withColumn("triage_priority", band.otherwise(lit("low")))
     # Payments each alert shares with each carried alert on its entity: the
@@ -1359,12 +1371,18 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
     # related payments (not this alert's own sketch, which drifts as the
     # alert grows). {prior alert_key: shared payments}, NULL when none.
     if known is not None and "txn_sketch" in known.columns:
+        # Same rule only: only a same-rule prior can be matched.
         ph = known.select(
-            "entity_id", col("alert_key").alias("_pk"), explode(col("txn_sketch")).alias("_h")
+            "entity_id",
+            col("rule_id").alias("rule_id"),
+            col("alert_key").alias("_pk"),
+            size(col("txn_sketch")).alias("_psz"),
+            explode(col("txn_sketch")).alias("_h"),
         )
         ch = raw.select(
             "alert_id",
             "entity_id",
+            "rule_id",
             explode(
                 expr(
                     "array_distinct(transform(coalesce(related_txn_ids, "
@@ -1372,16 +1390,23 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
                 )
             ).alias("_h"),
         )
+        thr = greatest(least(col("_psz"), lit(2)), floor((col("_psz") + lit(3)) / lit(4)), lit(1))
         ov = (
-            ch.join(ph, ["entity_id", "_h"])
-            .groupBy("alert_id", "_pk")
+            ch.join(ph, ["entity_id", "rule_id", "_h"])
+            .groupBy("alert_id", "_pk", "_psz")
             .agg(count(lit(1)).alias("_n"))
             .groupBy("alert_id")
-            .agg(map_from_entries(collect_list(struct("_pk", "_n"))).alias("ext_overlap"))
+            .agg(
+                map_from_entries(collect_list(struct("_pk", "_n"))).alias("ext_overlap"),
+                # Could be a carried alert grown (passes extension_threshold).
+                max_((col("_n") >= thr).cast("int")).alias("_ext_known"),
+            )
         )
         out = out.join(ov, "alert_id", "left")
     else:
-        out = out.withColumn("ext_overlap", lit(None).cast("map<string,bigint>"))
+        out = out.withColumn("ext_overlap", lit(None).cast("map<string,bigint>")).withColumn(
+            "_ext_known", lit(None).cast("int")
+        )
     # Memory bound only (the exact cap is applied after identity matching,
     # in the replay): past HARD_CAP_MULTIPLE x the cap, a customer's alerts
     # are over_capacity here. Alerts with the content of a carried alert rank
@@ -1390,18 +1415,19 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
     if known is not None:
         k = known.select("entity_id", "content_hash").distinct().withColumn("_known", lit(True))
         out = out.join(k, ["entity_id", "content_hash"], "left")
-        # A grown alert (new content) that shares payments with a carried
-        # one is also known: capping it would write it twice.
-        out = out.withColumn(
-            "_known", when(col("ext_overlap").isNotNull(), lit(True)).otherwise(col("_known"))
-        )
     else:
         out = out.withColumn("_known", lit(None).cast("boolean"))
-    rank = Window.partitionBy("entity_id").orderBy(
-        col("_known").isNull(), "generated_date", "alert_key"
+    # Rank: same content as a carried alert, then a same-rule alert that
+    # passes the growth threshold against one (capping either could write a
+    # carried alert twice), then everything else.
+    tier = (
+        when(col("_known").isNotNull(), lit(0))
+        .when(col("_ext_known") == lit(1), lit(1))
+        .otherwise(lit(2))
     )
+    rank = Window.partitionBy("entity_id").orderBy(tier, "generated_date", "alert_key")
     over = col("is_customer") & (row_number().over(rank) > lit(hard))
-    return out.withColumn("over_capacity", over).drop("_known")
+    return out.withColumn("over_capacity", over).drop("_known", "_ext_known")
 
 
 _DISP_SIM_SCHEMA = (
@@ -2128,6 +2154,37 @@ def _prior_state(spark, base_run_id, cycle, ledger):
     return None, None, None, f"cycle {last}'s tables are unreadable ({reason}); identity restarted"
 
 
+def window_start_marker(spark, checkpoint, now):
+    """The continuous window's start, persisted once per run in the
+    gold-refresh checkpoint (deleted by the continuous reset), so a restarted
+    driver keeps the first driver's start. Returns ``now`` when there is no
+    checkpoint or it cannot be written."""
+    if not checkpoint:
+        return now
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        conf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        path = jvm.org.apache.hadoop.fs.Path(
+            checkpoint.replace("s3://", "s3a://", 1).rstrip("/") + "/_tm_window_start"
+        )
+        fs = path.getFileSystem(conf)
+        if fs.exists(path):
+            stream = fs.open(path)
+            try:
+                return float(jvm.org.apache.commons.io.IOUtils.toString(stream, "UTF-8"))
+            finally:
+                stream.close()
+        out = fs.create(path, False)
+        try:
+            out.write(bytearray(f"{now:.3f}".encode()))
+        finally:
+            out.close()
+        return now
+    except Exception as e:  # noqa: BLE001
+        log(f"[tm] window start marker unavailable: {one_line(e)}")
+        return now
+
+
 def tm_pass_due(now, clock, params, window_end_s=0):
     """Whether gold-refresh should run an operations pass now.
 
@@ -2137,8 +2194,9 @@ def tm_pass_due(now, clock, params, window_end_s=0):
     (so a pass longer than the interval cannot run back to back and starve
     detection); and once more when the window is about to close, early
     enough for a pass as long as the last one to finish. ``window_end_s`` is
-    the window's end as an epoch time from the CLI, so a restarted driver
-    times its final pass against the real window.
+    the window's end as an epoch time on the driver's clock: the first
+    driver's start (window_start_marker) plus the CLI's window length, so a
+    restarted driver times its final pass against the real window.
     """
     if clock.get("end") is None:
         return True

@@ -533,13 +533,17 @@ def _display_throughput_results(result: Any) -> None:
 
 
 def _latest_tm_run_id(cfg) -> str | None:
-    """The newest recorded run of this deployment whose TM operations layer
-    ran (verdict pass or fail), whose tables the investigator queries read."""
+    """The deployment's newest recorded run, when its TM operations layer ran
+    (verdict pass or fail). Each run overwrites the TM tables, so an older
+    run's verdict says nothing about what the tables hold now: when the
+    newest run's layer did not run, the investigator queries are skipped."""
     from lakebench.metrics import MetricsStorage
 
     try:
         storage = MetricsStorage()
         for info in storage.list_runs():
+            if info.get("deployment_name") not in (None, cfg.name):
+                continue
             run = storage.load_run(info["run_id"])
             if run is None or run.deployment_name != cfg.name:
                 continue

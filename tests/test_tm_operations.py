@@ -751,8 +751,8 @@ def test_schema_bounds():
 def test_continuous_jobs_get_the_cli_run_id_and_window():
     from lakebench.cli._sustained import _streaming_job_env
 
-    env = _streaming_job_env("20260925-101010-abcdef", 900, now=1000.0)
-    assert env == {"LB_RUN_ID": "20260925-101010-abcdef", "LB_CONTINUOUS_WINDOW_END_S": "1900"}
+    env = _streaming_job_env("20260925-101010-abcdef", 900)
+    assert env == {"LB_RUN_ID": "20260925-101010-abcdef", "LB_CONTINUOUS_WINDOW_S": "900"}
     import inspect
 
     from lakebench.cli import _sustained
@@ -769,13 +769,14 @@ def test_gold_refresh_samples_freshness_after_a_tm_pass():
         / "src/lakebench/spark/scripts/gold_refresh_financial.py"
     ).read_text()
     i = src.index("run_tm_operations(\n")
-    after = src[i : i + 900]
+    after = src[i : i + 1800]
     assert 'tm_clock["end"] = time.time()' in after
     assert "data freshness" in after
     # Only on the same terms as the tick's own sample: a drained corpus's
     # idle time must not become the freshness score.
-    assert "if fresh_sampled:" in after
-    assert "tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_END_S)" in src
+    assert "(fresh_sampled or arrived)" in after
+    assert "tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s)" in src
+    assert "window_start_marker(spark, GOLD_CHECKPOINT" in src
 
 
 def test_alert_sharing_one_payment_cannot_take_a_grown_alerts_identity():
@@ -831,12 +832,34 @@ def test_legacy_query_set_ids_are_pinned_not_hashed_from_todays_sql():
     c360 = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
     fin = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
     fin8 = [n for n in fin if not n.startswith("IQ")]
-    assert legacy_query_set_id([{"name": n} for n in c360]) == "qs8-fbcf945fe40f"
-    assert legacy_query_set_id([{"name": n} for n in fin8]) == "qs8-1c2902f0b26a"
+    late = "2026-09-24T20:00:00-06:00"
+    assert legacy_query_set_id([{"name": n} for n in c360], late) == "qs8-fbcf945fe40f"
+    assert legacy_query_set_id([{"name": n} for n in fin8], late) == "qs8-1c2902f0b26a"
+    # Recorded before the set's last SQL change, or with no time: unknown.
+    early = "2026-09-24T09:00:00-06:00"
+    assert legacy_query_set_id([{"name": n} for n in c360], early) == "unknown"
+    assert legacy_query_set_id([{"name": n} for n in c360]) == "unknown"
     # A 12-query record from before ids (unscoped investigator SQL) is not
     # matched to today's SQL.
-    assert legacy_query_set_id([{"name": n} for n in fin]) == "unknown"
+    assert legacy_query_set_id([{"name": n} for n in fin], late) == "unknown"
     # Today the pinned sets still have these ids; when a query's SQL changes,
     # this line fails and the new id makes legacy runs incomparable, as it
     # should. Update this assertion, never the pinned constants.
-    assert {query_set_id(c360), query_set_id(fin8)} == set(LEGACY_QUERY_SET_IDS.values())
+    assert {query_set_id(c360), query_set_id(fin8)} == {v[0] for v in LEGACY_QUERY_SET_IDS.values()}
+
+
+def test_extension_threshold_needs_two_shared_payments_on_small_priors():
+    got = [tm.extension_threshold(n) for n in (1, 2, 3, 4, 5, 8, 9, 32)]
+    assert got == [1, 2, 2, 2, 2, 2, 3, 8]
+
+
+def test_small_prior_is_not_taken_by_an_alert_sharing_one_payment():
+    """Reviewer probe p3 (R4): B took A's identity when A had 1-4 payments."""
+    prev = D0 + timedelta(days=60)
+    for n in (2, 3, 4):
+        a = _prior(_cur("A", "a", 0, truth=True, txns=[f"a{i}" for i in range(n)]))
+        b = _cur("B", "b", 3, txns=["a0", "b1"])
+        b["ext_overlap"] = {"a-0": 1}
+        out = {r["alert_id"]: r for r in tm.match_alerts([b], [a], prev, prev, 2)}
+        assert out["B"]["alert_key"] != "a-0", n
+        assert out["A"]["in_current_detection"] is False

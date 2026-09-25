@@ -85,7 +85,13 @@ from gold_finalize_financial import (
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
-from tm_operations import bootstrap_tm_tables, params_from_env, run_tm_operations, tm_pass_due
+from tm_operations import (
+    bootstrap_tm_tables,
+    params_from_env,
+    run_tm_operations,
+    tm_pass_due,
+    window_start_marker,
+)
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
@@ -94,9 +100,12 @@ GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 REFRESH_S = int(env("LB_FINANCIAL_GOLD_REFRESH_S", "60"))
 TM_PARAMS = params_from_env()
-# When the CLI's continuous window ends, as an epoch time (0: unknown), so the
-# TM layer times a final pass before it closes, also after a driver restart.
-WINDOW_END_S = float(env("LB_CONTINUOUS_WINDOW_END_S", "0") or 0)
+# The CLI's continuous window length (0: unknown), so the TM layer times a
+# final pass before the window closes. The window's start is the first
+# driver's start, persisted in this job's checkpoint (tm_operations
+# .window_start_marker), so a restarted driver keeps it.
+WINDOW_S = int(env("LB_CONTINUOUS_WINDOW_S", "0") or 0)
+GOLD_CHECKPOINT = env("CHECKPOINT_LOCATION", "")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
 
@@ -198,6 +207,11 @@ def main() -> None:
     cycle = 0
     last_ingest_s = 0.0
     tm_clock = {"run_start": time.time(), "start": None, "end": None, "elapsed": 0.0}
+    window_end_s = (
+        window_start_marker(spark, GOLD_CHECKPOINT, tm_clock["run_start"]) + WINDOW_S
+        if WINDOW_S > 0
+        else 0.0
+    )
 
     while not _SHUTDOWN:
         tick = time.time()
@@ -274,7 +288,7 @@ def main() -> None:
             # (dispositions are simulated from it); a window that ends first
             # reports the layer as not run. Never raises.
             now = time.time()
-            if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_END_S):
+            if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s):
                 if silver_rows > 0 and manifest_ready:
                     tm_clock["start"] = now
                     run_tm_operations(
@@ -283,10 +297,17 @@ def main() -> None:
                     tm_clock["end"] = time.time()
                     tm_clock["elapsed"] = tm_clock["end"] - now
                     # Gold was not refreshed while the pass ran: its staleness
-                    # now includes the pass, so it is sampled again, on the
-                    # same terms as the tick's sample (only while data is
-                    # moving, so a drained corpus's idle time never counts).
-                    if fresh_sampled:
+                    # now includes the pass, so it is sampled again while
+                    # data is moving -- the tick sampled, or bronze took rows
+                    # during the pass that gold has not seen. A drained
+                    # corpus's idle time never counts.
+                    after_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
+                    arrived = (
+                        after_bronze_s is not None
+                        and newest_ingest_s is not None
+                        and after_bronze_s > newest_ingest_s
+                    )
+                    if newest_ingest_s is not None and (fresh_sampled or arrived):
                         log(
                             f"Cycle {cycle}: data freshness "
                             f"{max(0.0, time.time() - newest_ingest_s):.0f}s"

@@ -646,13 +646,15 @@ def query_set_id(names) -> str:
 
 
 # Query sets that ran before query-set ids were recorded, by their query
-# names, pinned to the id each set had when ids were introduced. A legacy
-# record with one of these name sets gets that id, so it stays comparable with
-# runs over the same set and, once any of those queries' SQL changes (the
-# current id moves), stops being comparable with them. Any other legacy name
-# set is "unknown": it cannot be matched to SQL.
-LEGACY_QUERY_SET_IDS: dict[frozenset[str], str] = {
-    # Customer 360 (Q1-Q7, Q9).
+# names: the id each set had when ids were introduced, and the time of the
+# last change to any of its queries' SQL before then. A legacy record with one
+# of these name sets, recorded after that change, gets that id, so it stays
+# comparable with runs over the same SQL; once the SQL changes again (the
+# current id moves) it stops being comparable. Older records and any other
+# legacy name set are "unknown": they cannot be matched to SQL. A run of an
+# older branch recorded after the date is the one case this cannot see.
+LEGACY_QUERY_SET_IDS: dict[frozenset[str], tuple[str, str]] = {
+    # Customer 360 (Q1-Q7, Q9); last SQL change 9c603b8 (Q6 recency).
     frozenset(
         {
             "Q1_full_aggregation_scan",
@@ -664,8 +666,8 @@ LEGACY_QUERY_SET_IDS: dict[frozenset[str], str] = {
             "Q7_channel_conversion_funnel",
             "Q9_executive_dashboard",
         }
-    ): "qs8-fbcf945fe40f",
-    # AML before the investigator class (FQ1-FQ8).
+    ): ("qs8-fbcf945fe40f", "2026-09-24T11:45:13-06:00"),
+    # AML before the investigator class (FQ1-FQ8); last SQL change 5331601.
     frozenset(
         {
             "FQ1_txn_full_scan",
@@ -677,20 +679,40 @@ LEGACY_QUERY_SET_IDS: dict[frozenset[str], str] = {
             "FQ7_cross_border_concentration",
             "FQ8_alert_to_entity_join",
         }
-    ): "qs8-1c2902f0b26a",
+    ): ("qs8-1c2902f0b26a", "2026-09-24T03:32:22-06:00"),
 }
 
 
-def legacy_query_set_id(queries) -> str:
+def legacy_query_set_id(queries, recorded_at=None) -> str:
     """The id of a benchmark recorded before query-set ids: its query names
-    looked up in LEGACY_QUERY_SET_IDS, else "unknown". Never hashes today's
-    SQL, which the legacy run may not have run."""
+    looked up in LEGACY_QUERY_SET_IDS when it was recorded after that set's
+    last SQL change, else "unknown". Never hashes today's SQL, which the
+    legacy run may not have run."""
+    from datetime import datetime, timezone
+
     names = frozenset(
         str(q.get("name") or q.get("query_name")) if isinstance(q, dict) else str(q)
         for q in (queries or [])
         if (q.get("name") or q.get("query_name") if isinstance(q, dict) else q)
     )
-    return LEGACY_QUERY_SET_IDS.get(names, "unknown")
+    pinned = LEGACY_QUERY_SET_IDS.get(names)
+    if pinned is None or not recorded_at:
+        return "unknown"
+    try:
+        when = (
+            recorded_at
+            if isinstance(recorded_at, datetime)
+            else datetime.fromisoformat(str(recorded_at))
+        )
+        if when.tzinfo is None:
+            # metrics.json start times are local wall-clock; compare as local.
+            when = when.astimezone()
+        since = datetime.fromisoformat(pinned[1])
+    except ValueError:
+        return "unknown"
+    return (
+        pinned[0] if when.astimezone(timezone.utc) >= since.astimezone(timezone.utc) else "unknown"
+    )
 
 
 def qph_comparable(a: str | None, b: str | None) -> tuple[bool, str]:

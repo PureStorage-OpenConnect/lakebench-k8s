@@ -1129,20 +1129,17 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     return False
 
 
-def _streaming_job_env(run_id: str, run_duration: int, now: float | None = None) -> dict[str, str]:
+def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
     """Env for the continuous SparkApplications.
 
     LB_RUN_ID is the CLI run id. It lives in the manifest, so a driver the
     operator restarts keeps it: gold.alerts and the TM ledger stay this run's
     instead of a fresh uuid per driver, which erased the ledger and restarted
-    alert identity. LB_CONTINUOUS_WINDOW_END_S (epoch seconds) lets
-    gold-refresh time its final TM pass before the window closes, from the
-    window's real start rather than its own driver's.
+    alert identity. LB_CONTINUOUS_WINDOW_S is the window length; gold-refresh
+    anchors it on its first driver's start (persisted in its checkpoint), not
+    on the CLI's clock at submit, which precedes the driver-ready wait.
     """
-    import time as _time
-
-    end = (now if now is not None else _time.time()) + int(run_duration)
-    return {"LB_RUN_ID": run_id, "LB_CONTINUOUS_WINDOW_END_S": f"{end:.0f}"}
+    return {"LB_RUN_ID": run_id, "LB_CONTINUOUS_WINDOW_S": str(int(run_duration))}
 
 
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
