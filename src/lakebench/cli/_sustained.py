@@ -1129,6 +1129,19 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     return False
 
 
+def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
+    """Env for the continuous SparkApplications.
+
+    LB_RUN_ID is the CLI run id. It lives in the manifest, so a driver the
+    operator restarts keeps it: gold.alerts and the TM ledger stay this run's
+    instead of a fresh uuid per driver, which erased the ledger and restarted
+    alert identity. LB_CONTINUOUS_WINDOW_S is the window length; gold-refresh
+    anchors it on its first driver's start (persisted in its checkpoint), not
+    on the CLI's clock at submit, which precedes the driver-ready wait.
+    """
+    return {"LB_RUN_ID": run_id, "LB_CONTINUOUS_WINDOW_S": str(int(run_duration))}
+
+
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
     """Return the peak gold.alerts row count reported by the continuous gold
     stage, or None if the logs show no detection activity.
@@ -1402,8 +1415,9 @@ def _run_sustained(
         )
 
         submitted = []
+        stream_env = _streaming_job_env(run_id, run_duration)
         for job_type, job_name in streaming_jobs:
-            job_status = job_manager.submit_job(job_type)
+            job_status = job_manager.submit_job(job_type, cycle_env=stream_env)
             if job_status.state == JobState.FAILED:
                 print_error(f"Failed to submit {job_name}: {job_status.message}")
                 pipeline_success = False
@@ -1737,6 +1751,34 @@ def _run_sustained(
                     f"AML continuous gate: detection produced {alert_count:,} "
                     "alerts over the window."
                 )
+            # P10 TM operations: its own verdict on every operations pass.
+            # Only violated invariants fail the run; a layer that could not
+            # run (no manifest within the window, an error) is reported as
+            # not run, and a missing log as unknown, as in batch.
+            from lakebench.cli._run import _report_tm_verdict
+            from lakebench.metrics.tm_ops import (
+                parse_tm_invariants,
+                parse_tm_ops,
+                parse_tm_status,
+                tm_verdict,
+            )
+
+            _inv = parse_tm_invariants(gold_logs)
+            _tm = tm_verdict(
+                _inv,
+                parse_tm_status(gold_logs),
+                enabled=cfg.architecture.workload.tm_operations.enabled,
+                logs_captured=gold_logs is not None,
+                continuous=True,
+                label="AML continuous gate",
+            )
+            _tm["invariants"] = {str(c): v for c, v in sorted(_inv.items())}
+            _tm["ops"] = parse_tm_ops(gold_logs)
+            _tm["mode"] = "continuous"
+            if collector.current_run is not None:
+                collector.current_run.tm_operations = _tm
+            if _report_tm_verdict(_tm, "AML continuous gate"):
+                pipeline_success = False
 
         # c360 honest continuous gate (LB-044 for c360; AML has its own above).
         # A continuous run whose bronze or silver stream processed zero rows

@@ -85,6 +85,13 @@ from gold_finalize_financial import (
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
+from tm_operations import (
+    bootstrap_tm_tables,
+    params_from_env,
+    run_tm_operations,
+    tm_pass_due,
+    window_start_marker,
+)
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
@@ -92,6 +99,13 @@ BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 REFRESH_S = int(env("LB_FINANCIAL_GOLD_REFRESH_S", "60"))
+TM_PARAMS = params_from_env()
+# The CLI's continuous window length (0: unknown), so the TM layer times a
+# final pass before the window closes. The window's start is the first
+# driver's start, persisted in this job's checkpoint (tm_operations
+# .window_start_marker), so a restarted driver keeps it.
+WINDOW_S = int(env("LB_CONTINUOUS_WINDOW_S", "0") or 0)
+GOLD_CHECKPOINT = env("CHECKPOINT_LOCATION", "")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
 
@@ -145,6 +159,7 @@ def _bootstrap_gold_tables(spark) -> None:
     )
     for ddl in (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS):
         spark.sql(ddl)
+    bootstrap_tm_tables(spark)
     ensure_partition_transform(
         spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
     )
@@ -191,6 +206,12 @@ def main() -> None:
     manifest_ready = table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}")
     cycle = 0
     last_ingest_s = 0.0
+    tm_clock = {"run_start": time.time(), "start": None, "end": None, "elapsed": 0.0}
+    window_end_s = (
+        window_start_marker(spark, GOLD_CHECKPOINT, tm_clock["run_start"]) + WINDOW_S
+        if WINDOW_S > 0
+        else 0.0
+    )
 
     while not _SHUTDOWN:
         tick = time.time()
@@ -230,7 +251,6 @@ def main() -> None:
                 rules=CONTINUOUS_RULES,
                 skipped_rules=CONTINUOUS_SKIPPED_RULES,
             )
-
             # This run's alerts only. Rules skipped in continuous mode keep
             # alerts from earlier runs, and counting those let the continuous
             # gate pass with no continuous detection at all.
@@ -255,9 +275,52 @@ def main() -> None:
                 and newest_ingest_s is not None
                 and newest_bronze_s > newest_ingest_s
             )
+            fresh_sampled = False
             if newest_ingest_s is not None and (newest_ingest_s > last_ingest_s or backlog):
                 log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
                 last_ingest_s = newest_ingest_s
+                fresh_sampled = True
+            # P10 operations layer. It runs every continuous_interval_seconds,
+            # measured from the end of the last pass, so detection ticks always
+            # run between passes however long a pass takes; plus one final pass
+            # timed to finish before the window closes. One pass over the full
+            # corpus costs minutes at scale 10. Waits for data and the manifest
+            # (dispositions are simulated from it); a window that ends first
+            # reports the layer as not run. Never raises.
+            now = time.time()
+            if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, window_end_s):
+                if silver_rows > 0 and manifest_ready:
+                    tm_clock["start"] = now
+                    run_tm_operations(
+                        spark, txns, RUN_ID, cycle=cycle, continuous=True, params=TM_PARAMS
+                    )
+                    tm_clock["end"] = time.time()
+                    tm_clock["elapsed"] = tm_clock["end"] - now
+                    # Gold was not refreshed while the pass ran: its staleness
+                    # now includes the pass, so it is sampled again while
+                    # data is moving -- the tick sampled, or bronze took rows
+                    # during the pass that gold has not seen. A drained
+                    # corpus's idle time never counts.
+                    after_bronze_s = _newest_ingest_epoch_s(spark, f"{CATALOG}.{BRONZE_TABLE}")
+                    arrived = (
+                        after_bronze_s is not None
+                        and newest_ingest_s is not None
+                        and after_bronze_s > newest_ingest_s
+                    )
+                    if newest_ingest_s is not None and (fresh_sampled or arrived):
+                        log(
+                            f"Cycle {cycle}: data freshness "
+                            f"{max(0.0, time.time() - newest_ingest_s):.0f}s"
+                        )
+                else:
+                    log(
+                        # cycle=0: no operations pass has a number yet (they
+                        # are numbered from the ledger, not by tick).
+                        f"[tm-status] status=waiting cycle=0 reason=tick {cycle}, "
+                        + ("silver is empty" if silver_rows == 0 else "no manifest yet")
+                    )
+            elif not TM_PARAMS["enabled"] and cycle == 1:
+                run_tm_operations(spark, txns, RUN_ID, cycle=cycle, params=TM_PARAMS)
             consecutive_failures = 0
         except Exception as e:  # noqa: BLE001
             consecutive_failures += 1

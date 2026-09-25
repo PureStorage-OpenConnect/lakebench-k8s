@@ -18,6 +18,7 @@ from lakebench.cli._helpers import (
     journal_open,
     print_error,
     print_info,
+    print_warning,
     resolve_config_path,
 )
 from lakebench.config import (
@@ -531,6 +532,28 @@ def _display_throughput_results(result: Any) -> None:
     console.print(f"  [bold]Throughput QpH: {result.qph:.1f}[/bold]")
 
 
+def _latest_tm_run_id(cfg) -> str | None:
+    """The deployment's newest recorded run, when its TM operations layer ran
+    (verdict pass or fail). Each run overwrites the TM tables, so an older
+    run's verdict says nothing about what the tables hold now: when the
+    newest run's layer did not run, the investigator queries are skipped."""
+    from lakebench.metrics import MetricsStorage
+
+    try:
+        storage = MetricsStorage()
+        for info in storage.list_runs():
+            if info.get("deployment_name") not in (None, cfg.name):
+                continue
+            run = storage.load_run(info["run_id"])
+            if run is None or run.deployment_name != cfg.name:
+                continue
+            status = (getattr(run, "tm_operations", None) or {}).get("status")
+            return run.run_id if status in ("pass", "fail") else None
+    except Exception:  # noqa: BLE001 -- no history: no investigator queries
+        return None
+    return None
+
+
 def benchmark(
     config_file: Annotated[
         Path | None,
@@ -667,7 +690,12 @@ def benchmark(
     )
 
     try:
-        runner = BenchmarkRunner(cfg)
+        runner = BenchmarkRunner(cfg, tm_run_id=_latest_tm_run_id(cfg))
+        if query_class == "investigator" and runner.tm_run_id is None:
+            print_warning(
+                "No run of this deployment has TM operations tables that ran "
+                "(verdict pass or fail); the investigator queries are skipped."
+            )
         run_result = runner.run(
             mode=mode,
             cache=cache_mode,

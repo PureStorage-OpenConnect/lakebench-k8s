@@ -52,6 +52,15 @@ class JobMetrics:
     alerts_by_rule: dict[str, int] = field(default_factory=dict)
     rule_errors: dict[str, str] = field(default_factory=dict)
     rules_skipped: dict[str, str] = field(default_factory=dict)
+    # TM operations layer (GOALS P10, AML gold only), from the driver's
+    # ``[tm-invariant]`` and ``[tm-ops]`` lines. ``tm_invariants`` is keyed
+    # by cycle (as a string, the JSON key) then invariant name, each value
+    # {"status", "detail"}. ``tm_ops`` is the last operations summary.
+    tm_invariants: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
+    tm_ops: dict[str, Any] | None = None
+    # ``[tm-status]`` lines by cycle: {"status", "reason"}; says whether the
+    # layer ran and why not.
+    tm_status: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -252,6 +261,12 @@ class PipelineMetrics:
     # per-rule recall/precision; None means recall was not computed.
     financial_scoring: dict[str, Any] | None = None
 
+    # P10 TM operations verdict for the run (metrics/tm_ops.tm_verdict), with
+    # the invariants by cycle and the last operations summary. Batch also
+    # keeps them per gold-finalize job; continuous has no job record, so this
+    # is where its TM section comes from.
+    tm_operations: dict[str, Any] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = {
@@ -283,6 +298,8 @@ class PipelineMetrics:
             d["datagen_fleet"] = self.datagen_fleet
         if self.financial_scoring is not None:
             d["financial_scoring"] = self.financial_scoring
+        if self.tm_operations is not None:
+            d["tm_operations"] = self.tm_operations
         return d
 
 
@@ -306,11 +323,29 @@ class BenchmarkMetrics:
     streams: int = 1
     stream_results: list[dict[str, Any]] = field(default_factory=list)
     round_meta: BenchmarkRoundMeta | None = None
+    # Identity of the query set QpH was measured over (queries.query_set_id).
+    # None: derive it from ``queries`` with today's SQL (a benchmark being
+    # recorded now). Records loaded from older metrics.json get their id from
+    # queries.legacy_query_set_id instead. "unknown": not comparable.
+    query_set_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.query_set_id is None:
+            from lakebench.benchmark.queries import query_set_id
+
+            names = [
+                (q.get("name") or q.get("query_name"))
+                if isinstance(q, dict)
+                else getattr(getattr(q, "query", q), "name", None)
+                for q in self.queries or []
+            ]
+            self.query_set_id = query_set_id(names) if any(names) else "unknown"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d: dict[str, Any] = {
             "benchmark_type": "trino_query",
+            "query_set_id": self.query_set_id,
             "mode": self.mode,
             "cache": self.cache,
             "scale": self.scale,
@@ -1747,6 +1782,13 @@ class MetricsCollector:
         )
         for m in skip_re.finditer(logs):
             metrics.rules_skipped[m.group("rule")] = m.group("reason").strip()
+
+        # P10 TM operations lines (tm_operations.py).
+        from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_ops, parse_tm_status
+
+        metrics.tm_invariants = {str(c): inv for c, inv in parse_tm_invariants(logs).items()}
+        metrics.tm_status = {str(c): st for c, st in parse_tm_status(logs).items()}
+        metrics.tm_ops = parse_tm_ops(logs)
 
         # Calculate throughput
         if metrics.elapsed_seconds > 0:

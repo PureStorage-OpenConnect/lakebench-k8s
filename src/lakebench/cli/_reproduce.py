@@ -239,6 +239,16 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
     return numbers
 
 
+def _run_query_set(metrics: Any) -> str | None:
+    """The query-set id of the run's QpH (the benchmark the QpH came from)."""
+    pb = getattr(metrics, "pipeline_benchmark", None)
+    for bench in (getattr(pb, "query_benchmark", None), getattr(metrics, "benchmark", None)):
+        qs = getattr(bench, "query_set_id", None)
+        if qs:
+            return qs
+    return None
+
+
 def _build_package(
     metrics: Any,
     *,
@@ -283,6 +293,8 @@ def _build_package(
             "pipeline_mode": pipeline_mode,
             "config_reference": config_reference,
             "expected_numbers": numbers,
+            # QpH is only reproducible over the same query set.
+            "query_set_id": _run_query_set(metrics),
             "tolerance_pct": dict(DEFAULT_TOLERANCES),
             "config_snapshot": snapshot,
             "datagen_fleet_summary": {
@@ -482,11 +494,15 @@ def _compare(
     expected: dict[str, float],
     actual: dict[str, float],
     tolerances: dict[str, float],
+    query_sets: tuple[str | None, str | None] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Compare expected vs actual and return (rows, exit_code).
 
     Rows are dicts with keys metric, expected, actual, drift_pct, band,
     tolerance_pct, status. Exit code is 0/1/2 per the CLI contract.
+    ``query_sets`` is (package, actual) query-set ids; QpH over different or
+    unrecorded sets is refused (status ``incomparable``, a performance
+    failure) rather than compared.
     """
     perf_tol = float(tolerances.get("performance", DEFAULT_TOLERANCES["performance"]))
     # R1: correctness tolerance is hard-zero at the compare layer regardless
@@ -499,10 +515,35 @@ def _compare(
     correctness_failed = False
     performance_failed = False
 
+    qph_ok, qph_reason = True, ""
+    if query_sets is not None:
+        from lakebench.benchmark.queries import qph_comparable
+
+        qph_ok, qph_reason = qph_comparable(*query_sets)
+
     for metric, expected_value in expected.items():
         band = _classify(metric)
         tol = corr_tol if band == "correctness" else perf_tol
         actual_value = actual.get(metric)
+        if "qph" in metric and not qph_ok:
+            # Different recorded sets: a performance failure. A package that
+            # predates query-set ids: not compared, not failed (re-record it).
+            legacy = query_sets is not None and not query_sets[0]
+            rows.append(
+                {
+                    "metric": metric,
+                    "expected": expected_value,
+                    "actual": actual_value,
+                    "drift_pct": None,
+                    "band": band,
+                    "tolerance_pct": tol,
+                    "status": "incomparable",
+                    "reason": qph_reason,
+                }
+            )
+            if not legacy:
+                performance_failed = True
+            continue
         if actual_value is None:
             rows.append(
                 {
@@ -562,7 +603,7 @@ def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
 
     for row in rows:
         exp_s = f"{row['expected']:.2f}"
-        if row["actual"] is None:
+        if row["actual"] is None or row.get("drift_pct") is None:
             act_s = "-"
             drift_s = "-"
         else:
@@ -573,12 +614,20 @@ def _print_comparison(rows: list[dict[str, Any]], exit_code: int) -> None:
             status_s = "[green]pass[/green]"
         elif status == "missing":
             status_s = "[yellow]missing[/yellow]"
+        elif status == "incomparable":
+            status_s = "[yellow]incomparable[/yellow]"
         else:
             status_s = "[red]fail[/red]"
         table.add_row(row["metric"], exp_s, act_s, drift_s, row["band"], status_s)
 
     console.print()
     console.print(table)
+    for row in rows:
+        if row["status"] == "incomparable":
+            console.print(
+                f"[yellow]{row['metric']} not compared: {row.get('reason')}. "
+                "Re-record the package on the current query set.[/yellow]"
+            )
 
     if exit_code == 0:
         verdict = "[green]PASS -- every metric within tolerance[/green]"
@@ -780,7 +829,9 @@ def _verify(
         raise typer.Exit(2) from None
 
     actual = _measure_actual_numbers(metrics)
-    rows, exit_code = _compare(expected, actual, tolerances)
+    rows, exit_code = _compare(
+        expected, actual, tolerances, (meta.get("query_set_id"), _run_query_set(metrics))
+    )
     _print_comparison(rows, exit_code)
 
     if exit_code != 0:

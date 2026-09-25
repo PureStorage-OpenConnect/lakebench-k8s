@@ -15,6 +15,9 @@ Categories:
   - aggregation (Q3, Q7): Hash aggregation and conditional SUM(CASE).
   - analytics (Q5, Q6): Window functions and CTE with multi-branch CASE.
   - operational (Q9): Gold layer executive dashboard read.
+
+The Financial set adds an ``investigator`` class (IQ1-IQ4, GOALS P10 stage
+9) over the TM operations tables.
 """
 
 from __future__ import annotations
@@ -439,6 +442,161 @@ ORDER BY a.alert_ts DESC""",
 )
 
 
+# Investigator queries (GOALS P10 stage 9) over the TM operations tables.
+# Each picks its subject from gold.cases the way an investigator would open
+# their queue, so it runs against whatever cases the run produced. SQL is
+# Trino dialect with at most one DATE_DIFF per query (the Spark Thrift and
+# DuckDB adapters rewrite the first occurrence) and INTERVAL arithmetic in
+# place of date_add, which all three engines parse. Every read of a TM table
+# is scoped to the run ({tm_run_id}), and the runner leaves the class out
+# unless this run's TM layer ran: otherwise they would time a stale or empty
+# table under the same query-set id.
+
+_IQ1 = BenchmarkQuery(
+    name="IQ1_customer_360",
+    display_name="Investigator: customer 360 for the top open case",
+    query_class="investigator",
+    sql="""\
+WITH subject AS (
+  SELECT customer_id
+  FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
+  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END,
+           CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+           opened_date, case_id
+  LIMIT 1
+),
+alerts AS (
+  SELECT d.entity_id,
+         COUNT(*) AS alert_count,
+         COUNT(DISTINCT d.rule_id) AS scenarios,
+         SUM(CASE WHEN d.queue_status = 'open' THEN 1 ELSE 0 END) AS open_alerts,
+         MAX(d.generated_date) AS last_alert_date
+  FROM {catalog}.{gold_alert_dispositions} d
+  JOIN subject s ON d.entity_id = s.customer_id
+  WHERE d.base_run_id = '{tm_run_id}'
+  GROUP BY d.entity_id
+),
+history AS (
+  SELECT c.customer_id,
+         COUNT(*) AS cases,
+         SUM(CASE WHEN c.sar_decision = 'sar_filed' THEN 1 ELSE 0 END) AS sars
+  FROM {catalog}.{gold_cases} c
+  JOIN subject s ON c.customer_id = s.customer_id
+  WHERE c.base_run_id = '{tm_run_id}'
+  GROUP BY c.customer_id
+),
+accts AS (
+  SELECT a.holder_entity_id, COUNT(*) AS accounts, SUM(a.current_balance) AS balance
+  FROM {catalog}.{silver_accounts} a
+  JOIN subject s ON a.holder_entity_id = s.customer_id
+  GROUP BY a.holder_entity_id
+)
+SELECT e.entity_id, e.name, e.customer_type, e.country, e.customer_since,
+       e.crr_tier, e.crr_score, e.crr_factors, e.pep_status, e.expected_monthly_volume_usd,
+       ac.accounts, ac.balance,
+       al.alert_count, al.scenarios, al.open_alerts, al.last_alert_date,
+       h.cases, h.sars
+FROM subject s
+JOIN {catalog}.{silver_entities} e ON e.entity_id = s.customer_id
+LEFT JOIN accts ac ON ac.holder_entity_id = s.customer_id
+LEFT JOIN alerts al ON al.entity_id = s.customer_id
+LEFT JOIN history h ON h.customer_id = s.customer_id""",
+)
+
+_IQ2 = BenchmarkQuery(
+    name="IQ2_case_activity_12m",
+    display_name="Investigator: 12-month activity review for the newest case",
+    query_class="investigator",
+    sql="""\
+WITH subject AS (
+  SELECT customer_id, opened_date
+  FROM {catalog}.{gold_cases}
+  WHERE case_type = 'alert_escalation' AND base_run_id = '{tm_run_id}'
+  ORDER BY opened_date DESC, case_id
+  LIMIT 1
+)
+SELECT date_trunc('month', t.txn_timestamp) AS activity_month,
+       COUNT(*) AS txns,
+       SUM(CASE WHEN t.originator_id = s.customer_id THEN t.txn_amount_usd ELSE 0 END) AS sent_usd,
+       SUM(CASE WHEN t.beneficiary_id = s.customer_id THEN t.txn_amount_usd ELSE 0 END) AS received_usd,
+       COUNT(DISTINCT CASE WHEN t.originator_id = s.customer_id
+                           THEN t.beneficiary_id ELSE t.originator_id END) AS counterparties,
+       SUM(CASE WHEN t.cross_border THEN 1 ELSE 0 END) AS cross_border_txns
+FROM {catalog}.{silver_table} t
+JOIN subject s ON t.originator_id = s.customer_id OR t.beneficiary_id = s.customer_id
+WHERE t.txn_timestamp >= CAST(s.opened_date AS TIMESTAMP) - INTERVAL '365' DAY
+  AND t.txn_timestamp < CAST(s.opened_date AS TIMESTAMP)
+GROUP BY date_trunc('month', t.txn_timestamp)
+ORDER BY activity_month""",
+)
+
+_IQ3 = BenchmarkQuery(
+    name="IQ3_counterparty_two_hop",
+    display_name="Investigator: counterparties and two-hop network of the oldest open case",
+    query_class="investigator",
+    sql="""\
+WITH subject AS (
+  SELECT customer_id
+  FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
+  ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END, opened_date, case_id
+  LIMIT 1
+),
+hop1 AS (
+  SELECT cp, SUM(amount_usd) AS amount_usd, SUM(txns) AS txns
+  FROM (
+    SELECT e.target_entity_id AS cp, e.cumulative_amount_usd AS amount_usd, e.txn_count AS txns
+    FROM {catalog}.{silver_counterparty_edges} e
+    JOIN subject s ON e.source_entity_id = s.customer_id
+    UNION ALL
+    SELECT e.source_entity_id AS cp, e.cumulative_amount_usd AS amount_usd, e.txn_count AS txns
+    FROM {catalog}.{silver_counterparty_edges} e
+    JOIN subject s ON e.target_entity_id = s.customer_id
+  ) sides
+  GROUP BY cp
+  ORDER BY amount_usd DESC, cp
+  LIMIT 50
+),
+hop2 AS (
+  SELECT h.cp AS via_entity_id, e.target_entity_id AS hop2_entity_id,
+         e.cumulative_amount_usd AS amount_usd
+  FROM {catalog}.{silver_counterparty_edges} e
+  JOIN hop1 h ON e.source_entity_id = h.cp
+),
+alerted AS (
+  SELECT DISTINCT entity_id FROM {catalog}.{gold_alert_dispositions}
+  WHERE base_run_id = '{tm_run_id}'
+)
+SELECT h2.via_entity_id, h2.hop2_entity_id, en.name, en.is_customer, en.country, en.crr_tier,
+       h2.amount_usd,
+       CASE WHEN al.entity_id IS NULL THEN 0 ELSE 1 END AS hop2_alerted
+FROM hop2 h2
+LEFT JOIN {catalog}.{silver_entities} en ON en.entity_id = h2.hop2_entity_id
+LEFT JOIN alerted al ON al.entity_id = h2.hop2_entity_id
+ORDER BY h2.amount_usd DESC, h2.hop2_entity_id
+LIMIT 500""",
+)
+
+_IQ4 = BenchmarkQuery(
+    name="IQ4_open_cases_over_60_days",
+    display_name="Investigator: open cases older than 60 days",
+    query_class="investigator",
+    sql="""\
+SELECT c.case_id, c.customer_id, e.name, c.case_type, c.priority, c.crr_tier,
+       c.opened_date, DATE_DIFF('day', c.opened_date, c.as_of_date) AS age_days,
+       c.alert_count, c.case_status
+FROM {catalog}.{gold_cases} c
+LEFT JOIN {catalog}.{silver_entities} e ON e.entity_id = c.customer_id
+WHERE c.base_run_id = '{tm_run_id}'
+  AND c.case_status <> 'closed'
+  AND c.opened_date <= c.as_of_date - INTERVAL '60' DAY
+ORDER BY age_days DESC, c.case_id""",
+)
+
+INVESTIGATOR_QUERIES: list[BenchmarkQuery] = [_IQ1, _IQ2, _IQ3, _IQ4]
+
+
 _FINANCIAL_QUERIES: list[BenchmarkQuery] = [
     _FQ1,  # scan
     _FQ2,  # filter_prune
@@ -448,6 +606,7 @@ _FINANCIAL_QUERIES: list[BenchmarkQuery] = [
     _FQ4,  # analytics
     _FQ5,  # operational
     _FQ8,  # operational
+    *INVESTIGATOR_QUERIES,  # investigator (P10 stage 9)
 ]
 
 
@@ -465,6 +624,107 @@ def get_benchmark_queries(schema: WorkloadSchema) -> list[BenchmarkQuery]:
     behavior for CUSTOM and any other value pending its own query set.
     """
     return BENCHMARK_QUERIES_BY_DOMAIN.get(schema, _CUSTOMER360_QUERIES)
+
+
+def query_set_id(names) -> str:
+    """Identity of a benchmark query set: the query count and a hash of each
+    query's name and SQL text (names not in the registry hash by name only).
+
+    QpH is queries per hour over a set; two runs over different sets (the
+    Financial set grew from 8 to 12 queries with the investigator class, or a
+    query's SQL changed) do not have comparable QpH, and compare/reproduce
+    refuse to put them side by side.
+    """
+    import hashlib
+
+    sql = {q.name: q.sql for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for q in qs}
+    uniq = sorted({str(n) for n in names if n})
+    h = hashlib.sha256()
+    for n in uniq:
+        h.update(f"{n}\n{sql.get(n, '')}\n".encode())
+    return f"qs{len(uniq)}-{h.hexdigest()[:12]}"
+
+
+# Query sets that ran before query-set ids were recorded, by their query
+# names: the id each set had when ids were introduced, and the time of the
+# last change to any of its queries' SQL before then. A legacy record with one
+# of these name sets, recorded after that change, gets that id, so it stays
+# comparable with runs over the same SQL; once the SQL changes again (the
+# current id moves) it stops being comparable. Older records and any other
+# legacy name set are "unknown": they cannot be matched to SQL. A run of an
+# older branch recorded after the date is the one case this cannot see.
+LEGACY_QUERY_SET_IDS: dict[frozenset[str], tuple[str, str]] = {
+    # Customer 360 (Q1-Q7, Q9); last SQL change 9c603b8 (Q6 recency).
+    frozenset(
+        {
+            "Q1_full_aggregation_scan",
+            "Q2_filtered_aggregation",
+            "Q3_customer_segmentation",
+            "Q4_churn_risk_analysis",
+            "Q5_revenue_trend_ma7",
+            "Q6_customer_rfm",
+            "Q7_channel_conversion_funnel",
+            "Q9_executive_dashboard",
+        }
+    ): ("qs8-fbcf945fe40f", "2026-09-24T11:45:13-06:00"),
+    # AML before the investigator class (FQ1-FQ8); last SQL change 5331601.
+    frozenset(
+        {
+            "FQ1_txn_full_scan",
+            "FQ2_top_corridors_window",
+            "FQ3_entity_edge_risk",
+            "FQ4_running_balance_window",
+            "FQ5_alert_triage",
+            "FQ6_structuring_scan",
+            "FQ7_cross_border_concentration",
+            "FQ8_alert_to_entity_join",
+        }
+    ): ("qs8-1c2902f0b26a", "2026-09-24T03:32:22-06:00"),
+}
+
+
+def legacy_query_set_id(queries, recorded_at=None) -> str:
+    """The id of a benchmark recorded before query-set ids: its query names
+    looked up in LEGACY_QUERY_SET_IDS when it was recorded after that set's
+    last SQL change, else "unknown". Never hashes today's SQL, which the
+    legacy run may not have run."""
+    from datetime import datetime, timezone
+
+    names = frozenset(
+        str(q.get("name") or q.get("query_name")) if isinstance(q, dict) else str(q)
+        for q in (queries or [])
+        if (q.get("name") or q.get("query_name") if isinstance(q, dict) else q)
+    )
+    pinned = LEGACY_QUERY_SET_IDS.get(names)
+    if pinned is None or not recorded_at:
+        return "unknown"
+    try:
+        when = (
+            recorded_at
+            if isinstance(recorded_at, datetime)
+            else datetime.fromisoformat(str(recorded_at))
+        )
+        if when.tzinfo is None:
+            # metrics.json start times are local wall-clock; compare as local.
+            when = when.astimezone()
+        since = datetime.fromisoformat(pinned[1])
+    except ValueError:
+        return "unknown"
+    return (
+        pinned[0] if when.astimezone(timezone.utc) >= since.astimezone(timezone.utc) else "unknown"
+    )
+
+
+def qph_comparable(a: str | None, b: str | None) -> tuple[bool, str]:
+    """Whether QpH over query sets ``a`` and ``b`` may be compared, and why not."""
+    if not a or not b or a == "unknown" or b == "unknown":
+        return False, (
+            f"query set not recorded ({a or 'none'} vs {b or 'none'}); "
+            "the run predates query-set ids"
+        )
+    if a != b:
+        return False, f"different query sets ({a} vs {b})"
+    return True, ""
 
 
 # Backward-compatible alias. New code should call

@@ -391,6 +391,10 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.alerts_by_rule = parsed.alerts_by_rule
     job_metrics.rule_errors = parsed.rule_errors
     job_metrics.rules_skipped = parsed.rules_skipped
+    # P10 TM operations invariants and summary; the batch gate reads them.
+    job_metrics.tm_invariants = parsed.tm_invariants
+    job_metrics.tm_ops = parsed.tm_ops
+    job_metrics.tm_status = parsed.tm_status
 
 
 # Upstream failures a benchmark may carry without failing the run, as
@@ -549,6 +553,71 @@ def _aml_batch_gate_problems(
                     f"typology {target} has no detector in this run."
                 )
     return problems, warnings
+
+
+def _aml_tm_verdict(gold_jobs: list, enabled: bool = True) -> dict:
+    """The P10 TM operations verdict over every gold-finalize cycle.
+
+    Separate from detection: only ``fail`` (the layer ran and an invariant is
+    violated) fails the run. ``not_run`` says why the layer did not run and
+    leaves detection scoring alone; ``unknown`` means no driver log was
+    parsed, the same treatment continuous gives a missing log.
+    """
+    from lakebench.metrics.tm_ops import tm_verdict
+
+    inv: dict = {}
+    sts: dict = {}
+    ops = None
+    parsed = False
+    unparsed = []
+    for idx, job in enumerate(gold_jobs, start=1):
+        j_inv = getattr(job, "tm_invariants", None) or {}
+        j_sts = getattr(job, "tm_status", None) or {}
+        inv.update({int(c): v for c, v in j_inv.items()})
+        sts.update({int(c): v for c, v in j_sts.items()})
+        ops = getattr(job, "tm_ops", None) or ops
+        job_parsed = bool(
+            j_inv
+            or j_sts
+            or getattr(job, "alerts_by_rule", None)
+            or getattr(job, "rules_skipped", None)
+            or getattr(job, "rule_errors", None)
+        )
+        parsed = parsed or job_parsed
+        if not job_parsed:
+            unparsed.append(idx)
+    verdict = tm_verdict(inv, sts, enabled=enabled, logs_captured=parsed, label="gold-finalize")
+    if unparsed and verdict["status"] == "pass":
+        # A cycle whose log was not read was not checked; the others passing
+        # does not make the run pass.
+        verdict.update(
+            status="unknown",
+            reason=f"no driver log parsed for gold-finalize job(s) {unparsed}; "
+            "those cycles are unchecked",
+        )
+    verdict["invariants"] = {str(c): v for c, v in sorted(inv.items())}
+    verdict["ops"] = ops
+    verdict["mode"] = "batch"
+    return verdict
+
+
+def _report_tm_verdict(verdict: dict, label: str) -> bool:
+    """Print the P10 verdict; True when it must fail the run."""
+    status = verdict.get("status")
+    if status == "fail":
+        for p in verdict.get("problems") or []:
+            print_error(p)
+        return True
+    if status == "pass":
+        print_success(f"{label}: TM operations ran; every workflow invariant passed.")
+    elif status == "disabled":
+        print_info(f"{label}: TM operations disabled (workload.tm_operations.enabled).")
+    else:
+        print_warning(
+            f"{label}: TM operations {status.replace('_', ' ')}: {verdict.get('reason')}. "
+            "The P10 gate is not met; detection results are unaffected."
+        )
+    return False
 
 
 def _behavioural_subset() -> set[str]:
@@ -1169,6 +1238,9 @@ def run(
     results: list[tuple[str, bool, float]] = []
     benchmark_qph: float | None = None
     _financial_scoring: dict | None = None
+    # Set when this run's TM layer ran (verdict pass or fail); the benchmark
+    # includes the investigator queries only then.
+    _tm_run_id: str | None = None
 
     try:
         # Check Spark operator
@@ -1672,6 +1744,17 @@ def run(
             for _problem in _problems:
                 print_error(_problem)
                 pipeline_success = False
+            # P10 TM operations: its own verdict, recorded for the scorecard.
+            _tm = _aml_tm_verdict(
+                _gold_jobs, enabled=cfg.architecture.workload.tm_operations.enabled
+            )
+            collector.current_run.tm_operations = _tm
+            if _tm.get("status") in ("pass", "fail"):
+                # The layer ran for this run: the investigator queries read
+                # its tables. Otherwise they are left out of the benchmark.
+                _tm_run_id = run_id
+            if _report_tm_verdict(_tm, "AML batch gate"):
+                pipeline_success = False
 
         # -- Phase 5/7: Maintenance ------------------------------------------------
         console.print()
@@ -1820,7 +1903,7 @@ def run(
                             short_err = (error[:60] + "...") if len(error) > 60 else error
                             console.print(f"[red]FAIL[/red] ({short_err})")
 
-                bench_runner = BenchmarkRunner(cfg)
+                bench_runner = BenchmarkRunner(cfg, tm_run_id=_tm_run_id)
                 # LB-117: AML analytical queries (aggregate_typology_coverage
                 # etc) can exceed the 300s default at scale >= 5; a timeout
                 # here masquerades as a failed query and drops QpH to 0.
