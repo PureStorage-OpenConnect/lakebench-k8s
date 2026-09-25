@@ -346,7 +346,7 @@ def main() -> None:
     spark.stop()
 
 
-def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None) -> None:
+def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None) -> dict:
     """Invoke each configured detection rule and append alerts to gold.alerts.
 
     Per-rule isolation: a rule that raises is logged and skipped, and
@@ -381,6 +381,13 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     still emit ``alerts=0 error=...`` (instead of a bare FAILED line)
     so the parser sees a row for every rule that was attempted, not
     just the ones that succeeded.
+
+    Returns the pass's timings, which the continuous tick logs and measures
+    time to detect against: {"setup_s", "cleanup_s", "finish_s", "rules": {rule_id:
+    {"elapsed_s", "committed_s"}}}. ``committed_s`` is the epoch time at
+    which the rule's alerts were committed to gold.alerts, None for a rule
+    that did not run (skip or error). ``cleanup_s`` is the per-rule cache
+    and path-spill cleanup, summed. Batch ignores it.
     """
     import inspect
 
@@ -402,6 +409,8 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     # score_financial render their typologies "not run" instead of a false 0%.
     rules = tuple(rules) if rules is not None else DEFAULT_DETECTION_RULES
     skipped_rules = tuple(skipped_rules or ())
+    pass_start = time.time()
+    timings: dict = {"setup_s": 0.0, "cleanup_s": 0.0, "finish_s": 0.0, "rules": {}}
 
     # Load silver.entities once. The customer-scoped rules (W2, W5-W8) and
     # W7's country lookup need it; loading up-front is cheap
@@ -448,12 +457,14 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     # gone, and scoring then reported 0% recall as a valid result.
     spark.sql(f"DELETE FROM {CATALOG}.{GOLD_ALERTS} WHERE run_id <> '{run_id}'")
     log(f"[detection] cleared {GOLD_ALERTS} rows from runs other than {run_id}")
+    timings["setup_s"] = time.time() - pass_start
     for rule_id in rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         fn = get_rule(rule_id)
         if fn is None:
             log(f"[detection] {rule_id}: alerts=0 error=unknown-rule elapsed=0.0s")
             status_rows.append((rule_id, "error", "unknown-rule", target_typology, None))
+            timings["rules"][rule_id] = {"elapsed_s": 0.0, "committed_s": None}
             continue
         rule_start = time.time()
         try:
@@ -500,7 +511,9 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             except Exception:  # noqa: BLE001 -- diagnostic only
                 prior_count = -1
             _write_rule_alerts(spark, alerts, rule_id, alert_count)
-            elapsed = time.time() - rule_start
+            committed_s = time.time()
+            elapsed = committed_s - rule_start
+            timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": committed_s}
             log(
                 f"[detection] {rule_id}: alerts={alert_count} "
                 f"prior={prior_count} elapsed={elapsed:.1f}s"
@@ -517,6 +530,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # not run.
             _drop_rule_alerts(spark, rule_id)
             elapsed = time.time() - rule_start
+            timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": None}
             log(
                 f"[detection] {rule_id}: skipped={skip.reason} "
                 f"detail={one_line(skip.detail)} elapsed={elapsed:.1f}s"
@@ -535,8 +549,10 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             err = one_line(f"{type(e).__name__}: {e}")
             log(f"[detection] {rule_id}: alerts=0 error={err} elapsed={elapsed:.1f}s")
             _drop_rule_alerts(spark, rule_id)
+            timings["rules"][rule_id] = {"elapsed_s": elapsed, "committed_s": None}
             status_rows.append((rule_id, "error", err, target_typology, None))
         finally:
+            cleanup_start = time.time()
             # The alerts frame and W1/W3/W17's intermediate frames (edges,
             # step, path levels) are persisted. Nothing outlives the rule's
             # write, and left cached they hold executor memory and scratch
@@ -545,8 +561,10 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
             # W3/W17 write their path levels and results under the gold
             # bucket; the alerts are written (or dropped) by now.
             cleanup_path_search_spill(spark)
+            timings["cleanup_s"] += time.time() - cleanup_start
     log(f"[detection] total alerts written: {total_alerts}")
 
+    finish_start = time.time()
     for rule_id in skipped_rules:
         target_typology = RULE_TARGET_TYPOLOGY.get(rule_id)
         log(f"[detection] {rule_id}: skipped=mode-excluded elapsed=0.0s")
@@ -561,6 +579,8 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     # source (e.g. W1 skipped at high scale) writes an empty derived table,
     # which is the correct "nothing to project" state, not a bug.
     _project_derived_gold(spark, run_id)
+    timings["finish_s"] = time.time() - finish_start
+    return timings
 
 
 def _drop_rule_alerts(spark, rule_id: str) -> None:

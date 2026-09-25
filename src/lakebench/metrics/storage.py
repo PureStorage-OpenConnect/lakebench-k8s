@@ -418,6 +418,10 @@ class MetricsStorage:
                     success=s_data.get("success", False),
                     error_message=s_data.get("error_message"),
                     requested_executors=s_data.get("requested_executors"),
+                    tick_timings=list(s_data.get("tick_timings") or []),
+                    ttd_pass_end_p50_seconds=s_data.get("ttd_pass_end_p50_seconds"),
+                    ttd_pass_end_p95_seconds=s_data.get("ttd_pass_end_p95_seconds"),
+                    ttd_by_rule=dict(s_data.get("ttd_by_rule") or {}),
                 )
             )
 

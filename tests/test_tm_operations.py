@@ -768,7 +768,7 @@ def test_gold_refresh_samples_freshness_after_a_tm_pass():
         Path(__file__).resolve().parents[1]
         / "src/lakebench/spark/scripts/gold_refresh_financial.py"
     ).read_text()
-    i = src.index("run_tm_operations(\n")
+    i = src.index("run_tm_operations(spark, txns, RUN_ID, cycle=cycle, continuous=True")
     after = src[i : i + 1800]
     assert 'tm_clock["end"] = time.time()' in after
     assert "data freshness" in after
