@@ -506,6 +506,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   concurrent budget), so core-hours and GB per core-hour are right on capped
   clusters.
 
+### AML continuous: silver-stream and gold-refresh sizing
+- **Higher cluster minimum for AML continuous.** Under `schema: financial`,
+  silver-stream runs 10 executors x 4 cores (was 4) with 80 shuffle
+  partitions, adding 8 per 100 scale, and gold-refresh 12 x 4 (was 2) with 96,
+  growing 12 per 10 scale to the 28 cap; per-executor sizing unchanged. Sized
+  from run-20260925-135005-4b7a97 (scale 10): silver micro-batches took 299 s
+  against a 60 s trigger and fell behind bronze, and gold ticks took 349.5 s
+  against a 300 s refresh interval while reading a lagging silver, together
+  most of the 1,280 s median time to detect. The full request is now 118
+  cores / 980 GB / 2,300 Gi scratch at scale 1-10 (was 54 / 340 / 700) and
+  222 cores / 1,948 GB / 4,660 Gi at scale 100 (was 106 / 788 / 1,760).
+- **Smaller clusters run degraded rather than failing preflight.** In
+  continuous mode the capacity check passes with a WARNING naming the capped
+  stages when the request after the concurrent budget, plus Trino,
+  Hive/Postgres and datagen, fits (AML scale 1-10: 57 cores), and fails
+  only when that does not fit or a single pod fits no node. With schema
+  overrides the budget now nets out the three drivers before sharing, so a
+  capped run does not ask for more cores than the cluster has. The budget gives each
+  overridden stage its base-split floor first, then spare cores upstream
+  first: bronze, silver up to its keep-up count (7 for AML), gold, then the
+  rest of silver.
+
 ## [1.5.0] - 2026-09-16
 
 Hardening release built on mandatory adversarial review: 22 bugs fixed

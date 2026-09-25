@@ -244,6 +244,57 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executors_per_100_scale": 4,
             "max_executors": 20,
         },
+        # AML continuous silver-stream. Measured on run-20260925-135005-4b7a97
+        # (scale 10, 1800 s, bronze-ingest at the override above) with the base
+        # 4 executors x 4 cores: 4 micro-batches of 66.7M rows at 299 s each
+        # against a 60 s trigger, 13.9K rows/s per core with the per-batch
+        # overhead folded in. The silver source has no per-trigger file or row
+        # limit, so a slow batch makes the next one bigger: silver fell behind
+        # bronze (317K rows/s while the corpus drains, 50 files per 30 s
+        # trigger) and ~900 s of the 1,280 s time to detect was bronze and
+        # silver lag. Caught up, a 60 s trigger holds 19M rows. 10 x 4 = 40
+        # cores process that in ~34 s at the measured rate, leaving 26 s of the
+        # trigger for fixed per-batch cost, and hold 557K rows/s, 1.76x bronze
+        # intake, so a backlog cannot build. 8 executors (43 s of work) would
+        # leave only 17 s. Per-executor sizing stays at the base 4 cores / 32g
+        # / 8g; scaling keeps the base 8 per 100 scale, to the 28 cap. The
+        # base 32 shuffle partitions would leave 8 of the 40 cores idle in
+        # every shuffle stage (43 s, the 8-executor case), so base_partitions
+        # is 2x the cores, as _scale_partitions uses above scale 10.
+        # keep_up_executors (7 x 4 cores hold 390K rows/s, 1.2x bronze intake)
+        # is what the concurrent budget gives silver before gold on a cluster
+        # too small for all three: beyond it silver's cores mostly wait.
+        "silver-stream": {
+            "base_executors": 10,
+            "keep_up_executors": 7,
+            "executors_per_100_scale": 8,
+            "max_executors": _MAX_EXECUTORS_SAFE,
+            "base_partitions": 80,
+        },
+        # AML continuous gold-refresh. Same run: 4 ticks at 349.5 s mean on
+        # the base 2 x 4 = 8 cores, over the 300 s refresh interval, so ticks
+        # ran back to back. Every tick recomputes all of silver (windowing
+        # loses recall, LB-127), so tick cost follows silver's size, and those
+        # ticks read a lagging silver: 58.4M rows on average. Once silver keeps
+        # up it holds the whole scale-10 corpus, 266.7M rows, by the time
+        # bronze drains. Lane U's local ticks (84 s at 3.4M rows, 122 s at
+        # 6.7M) put the fixed per-tick cost near 45 s, which leaves 5.2 s of
+        # row work per million rows at 8 cores, taken as scaling with cores
+        # (path searches, ~80% of a tick, are shuffle joins). A full-silver
+        # tick is then 1,389 s of row work at 8 cores: 12 x 4 = 48 cores run
+        # it in ~276 s, inside the refresh interval, so ticks start on the
+        # timer. 10 executors (~323 s) would not. Per-executor sizing stays at
+        # the base. The tick's row work grows with scale, so the count grows
+        # in proportion (12 per 10 scale) until the 28 cap at scale ~23;
+        # beyond that a full-silver tick outgrows the interval (scale 100:
+        # ~1,000 s at the cap). base_partitions follows 2x the cores, as
+        # _scale_partitions uses above scale 10.
+        "gold-refresh": {
+            "base_executors": 12,
+            "executors_per_100_scale": 120,
+            "max_executors": _MAX_EXECUTORS_SAFE,
+            "base_partitions": 96,
+        },
     },
 }
 
@@ -634,29 +685,132 @@ def _streaming_concurrent_budget(
     if not overridden:
         return base_caps
 
-    # A schema override (AML bronze-ingest) must not take cores from the
-    # stages it does not touch: they keep the split they had on the base
-    # profiles, and the overridden jobs share only what is left, never less
-    # than the whole executors that fit in the cores their base allocation
-    # had (at least one).
+    # A schema override must not take cores from the stages it does not
+    # touch: they keep the split they had on the base profiles. Each
+    # overridden job first gets a floor, the whole executors that fit in the
+    # cores its base allocation had (at least one); rounding down, because
+    # rounding up to whole larger executors would request more than the base
+    # split did. The headroom above the kept stages and the floors then goes
+    # upstream first, bronze before silver before gold: a stage runs no
+    # faster than its input arrives, so cores given to silver while bronze
+    # sits at its floor idle (AML at scale 10 on 60-80 cores: bronze at one
+    # executor is the intake the bronze override was sized to fix, and
+    # silver's extra cores would wait on it). Silver is filled first only to
+    # its keep-up count, then gold, then silver's surplus, so gold is not left
+    # at its floor behind a silver that outruns bronze. Granting floors before
+    # sharing also keeps the total inside the budget when a schema overrides
+    # several stages.
     caps = {jt: base_caps[jt] for jt in _STREAMING_JOB_TYPES if jt not in overridden}
     kept_m = sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in caps)
-    headroom_m = max(0, streaming_budget_m - kept_m)
-    demands = {
-        jt: _scale_executor_count(resolved[jt], scale) * resolved[jt]["executor_cores"] * 1000
-        for jt in overridden
-    }
-    total = sum(demands.values()) or 1
+    want = {jt: _scale_executor_count(resolved[jt], scale) for jt in overridden}
     for jt in overridden:
-        prof = resolved[jt]
-        exec_cpu_m = prof["executor_cores"] * 1000
         floor_cores = base_caps[jt] * _JOB_PROFILES[jt.value]["executor_cores"]
-        # Round down: rounding up to whole larger executors would request
-        # more than the base split did, past the budget's own headroom.
-        floor = max(1, floor_cores // prof["executor_cores"])
-        share = int(headroom_m * demands[jt] / total // exec_cpu_m)
-        caps[jt] = min(_scale_executor_count(prof, scale), max(floor, share))
+        floor = max(1, floor_cores // resolved[jt]["executor_cores"])
+        caps[jt] = min(want[jt], floor)
+    used_m = kept_m + sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in overridden)
+    # The base split leaves the drivers to the 10% slack, which the larger
+    # overridden stages outgrow: take the drivers out before sharing, or a
+    # capped AML run asks for a few cores more than the cluster has (100
+    # cores at scale 10: 101 with Trino and datagen).
+    forced_driver = config.platform.compute.spark.driver_cores
+    driver_m = sum(
+        (forced_driver if forced_driver is not None else resolved[jt]["driver_cores"]) * 1000
+        for jt in _STREAMING_JOB_TYPES
+    )
+    override_budget_m = min(streaming_budget_m, int(max(0, remaining_m - driver_m) * 0.90))
+    headroom_m = max(0, override_budget_m - used_m)
+    # A stage with ``keep_up_executors`` is filled only to that count on the
+    # first pass (enough to keep pace with its input), so the stages after it
+    # are not left at their floor; its surplus comes last.
+    first = [
+        (jt, min(want[jt], resolved[jt].get("keep_up_executors", want[jt])))
+        for jt in _STREAMING_PIPELINE_ORDER
+        if jt in overridden
+    ]
+    second = [(jt, want[jt]) for jt in _STREAMING_PIPELINE_ORDER if jt in overridden]
+    for jt, target in first + second:
+        exec_cpu_m = resolved[jt]["executor_cores"] * 1000
+        add = max(0, min(target - caps[jt], headroom_m // exec_cpu_m))
+        caps[jt] += add
+        headroom_m -= add * exec_cpu_m
     return caps
+
+
+@dataclass(frozen=True)
+class BudgetedStreamingRequest:
+    """What a continuous run requests once the concurrent budget caps the
+    streams, co-resident pods (Trino, Hive/Postgres, datagen) included."""
+
+    cpu_cores: int
+    memory_gb: int
+    # "silver-stream 10 -> 6" for each stage the budget cut below its profile.
+    capped: tuple[str, ...]
+
+
+def streaming_request_under_budget(
+    config: LakebenchConfig, cluster_cpu_millicores: int
+) -> BudgetedStreamingRequest:
+    """Continuous-mode request after ``_streaming_concurrent_budget`` caps it.
+
+    The capacity preflight uses this when the uncapped peak does not fit: the
+    run caps the streams to what fits and warns, so the preflight fails only
+    when even the capped request does not fit. The totals include what the
+    budget sets aside and the cluster must also hold (Trino, Hive/Postgres,
+    datagen), and an explicit per-job executor count, which the manifest
+    applies after the budget.
+    """
+    from lakebench.config.autosizer import _parse_cpu_millicores, _parse_memory_gi
+    from lakebench.config.schema import parse_spark_memory
+
+    scale = config.architecture.workload.datagen.scale
+    schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
+    budget = _streaming_concurrent_budget(config, cluster_cpu_millicores)
+    spark_cfg = config.platform.compute.spark
+    explicit = {
+        JobType.BRONZE_INGEST: spark_cfg.bronze_ingest_executors,
+        JobType.SILVER_STREAM: spark_cfg.silver_stream_executors,
+        JobType.GOLD_REFRESH: spark_cfg.gold_refresh_executors,
+    }
+    gib = 1024**3
+    cores_m = mem = 0
+    capped: list[str] = []
+    for jt in _STREAMING_PIPELINE_ORDER:
+        prof = _resolve_job_profile(jt.value, schema) or _JOB_PROFILES[jt.value]
+        full = _scale_executor_count(prof, scale)
+        forced = explicit[jt]
+        if forced is not None:
+            n = int(forced)
+        else:
+            n = min(full, budget.get(jt, full))
+            if n < full:
+                capped.append(f"{jt.value} {full} -> {n}")
+        exec_bytes = parse_spark_memory(prof["executor_memory"]) + parse_spark_memory(
+            prof["executor_memory_overhead"]
+        )
+        # The manifest applies the global driver overrides to every job.
+        drv_cores = spark_cfg.driver_cores or prof["driver_cores"]
+        drv_mem = spark_cfg.driver_memory or prof["driver_memory"]
+        cores_m += (n * prof["executor_cores"] + drv_cores) * 1000
+        mem += n * exec_bytes + parse_spark_memory(drv_mem)
+
+    trino = config.architecture.query_engine.trino
+    datagen = config.architecture.workload.datagen
+    cores_m += (
+        _parse_cpu_millicores(trino.coordinator.cpu)
+        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
+        + 1000  # Hive + Postgres, as the budget counts them
+        + datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
+    )
+    co_gi = (
+        _parse_memory_gi(trino.coordinator.memory)
+        + trino.worker.replicas * _parse_memory_gi(trino.worker.memory)
+        + datagen.parallelism * _parse_memory_gi(datagen.memory)
+    )
+    return BudgetedStreamingRequest(
+        cpu_cores=-(-cores_m // 1000),
+        memory_gb=int(-(-(mem + co_gi * gib) // gib)),
+        capped=tuple(capped),
+    )
 
 
 def _proportional_caps(
@@ -1157,6 +1311,9 @@ _STREAMING_JOB_TYPES = frozenset(
         JobType.GOLD_REFRESH,
     }
 )
+# The same jobs in data-flow order, upstream first (the concurrent budget
+# grants spare cores in this order).
+_STREAMING_PIPELINE_ORDER = (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
 
 
 class JobState(Enum):
