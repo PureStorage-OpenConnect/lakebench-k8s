@@ -128,6 +128,7 @@ spec:
 {% elif table_format_type == "delta" %}
                 --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension \
                 --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog \
+                --conf spark.databricks.delta.optimizeMetadataQuery.enabled=false \
                 --conf spark.sql.catalogImplementation=hive \
                 --conf spark.hadoop.hive.metastore.uris=thrift://lakebench-hive-metastore.{{ namespace }}.svc.cluster.local:9083 \
 {% else %}

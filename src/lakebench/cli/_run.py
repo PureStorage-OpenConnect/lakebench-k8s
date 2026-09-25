@@ -393,11 +393,12 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.rules_skipped = parsed.rules_skipped
 
 
-# Upstream failures a benchmark may carry without failing the run. Each is a
-# documented bug outside lakebench (CLAUDE.md gotcha 22 / LB-034).
-_KNOWN_QUERY_FAILURES = {
-    ("delta", "spark-thrift", "Q2_filtered_aggregation"),
-}
+# Upstream failures a benchmark may carry without failing the run, as
+# (table format, query engine, query name). Each must be a documented bug
+# outside lakebench. Delta + Thrift Q2 (CLAUDE.md gotcha 22 / LB-034) left
+# this list with LB-148: the metadata-query rewrite that crashes it is now
+# disabled, so a Q2 failure there is a regression, not an upstream bug.
+_KNOWN_QUERY_FAILURES: set[tuple[str, str, str]] = set()
 
 
 def _paired_qph(pre, post) -> tuple[float, float, int] | None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -89,6 +90,61 @@ def jvm_heap_for_limit(limit: str, fraction: float = JVM_HEAP_FRACTION) -> str:
     if heap_mib < 1:
         raise ValueError(f"memory limit {limit!r} is too small for a JVM heap")
     return f"{heap_mib}m"
+
+
+# LB-148: the Spark Thrift pod limit is the heap plus a non-heap allowance.
+# Spark's own rule for a JVM container is max(10% of heap, 384 MiB). The
+# 384 MiB floor is sized for executors; the Thrift JVM is a driver that also
+# loads Hive, Delta or Iceberg and the S3A client (metaspace plus code cache
+# alone run to several hundred MiB) and runs HiveServer2's handler threads,
+# so the floor here is 1 GiB. At the 4g default that gives a 5Gi pod; with
+# heap == limit (the pre-LB-148 shape) the pod sat at 4014Mi of 4Gi mid-query.
+THRIFT_OVERHEAD_FACTOR = 0.10
+THRIFT_MIN_OVERHEAD_BYTES = 2**30
+
+_SPARK_MEM_UNITS_BYTES = {
+    "b": 1,
+    "k": 2**10,
+    "kb": 2**10,
+    "m": 2**20,
+    "mb": 2**20,
+    "g": 2**30,
+    "gb": 2**30,
+    "t": 2**40,
+    "tb": 2**40,
+    "p": 2**50,
+    "pb": 2**50,
+}
+_SPARK_MEM_RE = re.compile(r"([0-9]+)([a-z]+)?")
+
+
+def spark_memory_bytes(value: str) -> int:
+    """Parse a Spark memory string (``4g``, ``4096m``, ``24G``, ``8gb``) to bytes.
+
+    Follows Spark's ``JavaUtils.byteStringAs``: a whole number with an
+    optional binary suffix, case-insensitive, no fractions. A bare number is
+    MiB, which is how Spark reads ``spark.driver.memory``. Anything Spark
+    would reject raises ``ValueError`` here, before a pod is rendered.
+    """
+    s = str(value).strip().lower()
+    m = _SPARK_MEM_RE.fullmatch(s)
+    if not m or (m.group(2) and m.group(2) not in _SPARK_MEM_UNITS_BYTES):
+        raise ValueError(f"unparseable Spark memory {value!r}")
+    amount = int(m.group(1))
+    if amount <= 0:
+        raise ValueError(f"Spark memory must be positive, got {value!r}")
+    return amount * _SPARK_MEM_UNITS_BYTES[m.group(2) or "m"]
+
+
+def thrift_pod_memory_limit(heap: str) -> str:
+    """Pod memory limit (whole MiB, e.g. ``5120Mi``) for a Spark Thrift heap.
+
+    Always strictly above the heap: heap + max(10% of heap, 1 GiB).
+    """
+    heap_bytes = spark_memory_bytes(heap)
+    overhead = max(int(heap_bytes * THRIFT_OVERHEAD_FACTOR), THRIFT_MIN_OVERHEAD_BYTES)
+    limit_mib = -(-(heap_bytes + overhead) // 2**20)
+    return f"{limit_mib}Mi"
 
 
 def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
@@ -322,6 +378,21 @@ class DeploymentEngine:
             return ""
 
     @staticmethod
+    def _thrift_pod_memory(cfg: Any) -> str:
+        """Spark Thrift pod memory limit for the configured heap (LB-148).
+
+        Strict only when Spark Thrift is the active query engine, for the
+        same reason as ``_trino_heap``: destroy builds this context too.
+        """
+        heap = cfg.architecture.query_engine.spark_thrift.memory
+        if cfg.architecture.query_engine.type == QueryEngineType.SPARK_THRIFT:
+            return thrift_pod_memory_limit(heap)
+        try:
+            return thrift_pod_memory_limit(heap)
+        except ValueError:
+            return ""
+
+    @staticmethod
     def _spark_mem_to_k8s(spark_mem: str) -> str:
         """Convert Spark memory format (e.g. ``4g``) to K8s format (e.g. ``4Gi``)."""
         s = spark_mem.strip().lower()
@@ -506,9 +577,8 @@ class DeploymentEngine:
             # Spark Thrift Server
             "spark_thrift_cores": cfg.architecture.query_engine.spark_thrift.cores,
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,
-            "spark_thrift_memory_k8s": self._spark_mem_to_k8s(
-                cfg.architecture.query_engine.spark_thrift.memory
-            ),
+            # LB-148: pod limit = heap + overhead, never heap == limit.
+            "spark_thrift_memory_k8s": self._thrift_pod_memory(cfg),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
             # Spark Thrift packages (computed from config versions)
