@@ -108,3 +108,25 @@ def test_failed_probe_makes_the_file_count_unknown():
     assert _data_file_total({"silver_data_file_count": 1200, "gold_data_file_count": -1}) == 0
     assert _data_file_total({"silver_snapshot_count": 3}) == 0
     assert _data_file_total({}) == 0
+
+
+def test_difference_under_the_round_drift_floor_is_within_noise():
+    """Tight within-round ranges do not make a between-round drift real."""
+    pre = [_qr3("Q1", True, 60.0, jitter=0.01), _qr3("Q5", True, 20.0, jitter=0.01)]
+    post = [_qr3("Q1", True, 57.0, jitter=0.01), _qr3("Q5", True, 19.0, jitter=0.01)]
+    value, n, reason = _maintenance_value(pre, post, 900, 300, 120.0)
+    assert value is None and n == 2
+    assert "drift between rounds" in reason and "+5.3%" in reason
+
+
+def test_run_scores_both_rounds_with_the_configured_iterations():
+    """The pre and post rounds of `lakebench run` take benchmark.iterations samples.
+
+    Before LB-150 neither call passed it, so a config asking for 3 took one.
+    """
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod)
+    assert src.count("iterations=cfg.architecture.benchmark.iterations") == 2

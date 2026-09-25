@@ -155,8 +155,11 @@ at the samples taken. Over the paired queries, each round's total seconds
 can fall anywhere between the sum of per-query fastest samples and the sum
 of per-query slowest samples. When the two ranges overlap, the value is null
 and `maintenance_value_reason` reads `within noise: ...` with the raw
-difference and both spreads. With `iterations: 1` there is no range and the
-value is null with the reason `one sample per query`. The pre round is kept
+difference and both spreads. Samples inside a round run back to back, so
+their range misses drift between rounds; a difference of 11% or less is also
+reported as within noise, the drift measured between two rounds of the same
+run with nothing changed between them (3-11%). With `iterations: 1` there is
+no range and the value is null with the reason `one sample per query`. The pre round is kept
 in `metrics.json` as `pre_compaction_benchmark`, samples included, so the
 judgement can be rechecked.
 
