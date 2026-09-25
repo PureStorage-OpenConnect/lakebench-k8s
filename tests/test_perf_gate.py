@@ -187,6 +187,14 @@ def env(tmp_path):
     store_dir.mkdir()
     for f in PERF.glob("*.yaml"):
         shutil.copy(f, store_dir / f.name)
+    # Start every test from pending baselines, whatever the checked-in store
+    # has accepted since, so recording is exercised from scratch.
+    store = yaml.safe_load((store_dir / "baselines.yaml").read_text())
+    for entry in store["baselines"].values():
+        for key in [k for k in entry if k not in ("config", "required", "notes")]:
+            del entry[key]
+        entry["status"] = "pending first run"
+    (store_dir / "baselines.yaml").write_text(yaml.safe_dump(store, sort_keys=False))
     runs = tmp_path / "runs"
     runs.mkdir()
     snaps = {
