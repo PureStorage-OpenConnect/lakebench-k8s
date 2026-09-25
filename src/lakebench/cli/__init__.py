@@ -1101,7 +1101,7 @@ def status(
         config_file = resolve_config_path(config_file, file_option)
     if config_file:
         try:
-            cfg = load_config(config_file)
+            cfg = load_config(config_file, allow_long_names=True)  # LB-153
             ns = ns or cfg.get_namespace()
         except ConfigError as e:
             print_error(f"Config error: {e}")
@@ -1248,7 +1248,7 @@ def stop(
 
     config_file = resolve_config_path(config_file, file_option)
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, allow_long_names=True)  # LB-153
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
@@ -1850,7 +1850,7 @@ def logs(
     config_file = resolve_config_path(config_file, file_option)
 
     try:
-        cfg = load_config(config_file)
+        cfg = load_config(config_file, allow_long_names=True)  # LB-153
     except ConfigError as e:
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
