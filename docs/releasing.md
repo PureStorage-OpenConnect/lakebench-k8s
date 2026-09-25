@@ -61,6 +61,14 @@ resolves to `lakebench-output/runs/run-<id>/metrics.json`. The gate checks
 the heading and that a row exists; the maintainer who tags is responsible
 for the content.
 
+### Performance baselines
+
+The `perf-baselines` check fails the release when a required pinned perf
+config (`benchmarks/perf/`) has no accepted baseline, has no run, or its run
+regressed or was refused. Check in the `metrics.json` of each required perf
+run as `uat/perf/run-<id>/metrics.json` so the check can see it in CI. See
+[perf-regression-gate.md](perf-regression-gate.md).
+
 ## After tagging
 
 ```bash

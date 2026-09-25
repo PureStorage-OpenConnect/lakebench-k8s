@@ -87,7 +87,17 @@ _METRIC_TABLE: dict[str, tuple[str, str]] = {
     "composite_qph": ("performance", "higher"),
     "sustained_throughput_rps": ("performance", "higher"),
     "datagen_aggregate_mbps": ("performance", "higher"),
+    # Used by the performance-regression gate (lakebench.metrics.perf_gate).
+    # _extract_expected_numbers does not emit them, so reproduction packages
+    # are unchanged.
+    "datagen_mbps_per_pod": ("performance", "higher"),
+    "maintenance_value_pct": ("performance", "higher"),
 }
+
+# Per-query QpH (3600 / query seconds) lives in an open namespace keyed by
+# query name, for example ``query_qph_Q1_full_aggregation_scan``. Higher is
+# better.
+QUERY_QPH_PREFIX = "query_qph_"
 
 
 # Per-stage seconds live in an open namespace: the stage name comes from the
@@ -114,6 +124,8 @@ def _classify_direction(metric: str) -> tuple[str, str]:
     """
     if metric in _METRIC_TABLE:
         return _METRIC_TABLE[metric]
+    if metric.startswith(QUERY_QPH_PREFIX):
+        return ("performance", "higher")
     if _is_stage_seconds(metric):
         return ("performance", "lower")
     return ("performance", "exact")

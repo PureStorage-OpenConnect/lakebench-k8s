@@ -1,0 +1,120 @@
+# Pinned performance config: AML (financial schema), batch, scale 1.
+#
+# This file is a performance baseline contract, not an example. Every sizing
+# knob is set explicitly so a run of this file on the reference cluster is
+# comparable with its accepted baseline in baselines.yaml. The gate hashes the
+# parsed contents of this file; editing any value (not a comment) invalidates
+# the baseline and the gate refuses to compare until a new one is recorded.
+# See docs/perf-regression-gate.md.
+#
+# Scale 1 is the interim AML point. It is not required by the release gate
+# until the AML datagen is frozen (GOALS 0a line 2); AML batch scale 10 joins
+# as a required config at that point.
+#
+# Run it as-is. Identity and credentials come from the environment:
+#   LAKEBENCH_PERF_NAME, LAKEBENCH_S3_ENDPOINT, LAKEBENCH_S3_ACCESS_KEY,
+#   LAKEBENCH_S3_SECRET_KEY, LAKEBENCH_POLARIS_CLIENT_SECRET
+
+name: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s1}
+recipe: polaris-iceberg-spark-thrift
+
+images:
+  datagen: docker.io/sillidata/lb-datagen:14c4eee
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  polaris: apache/polaris:1.6.0
+  polaris_admin_tool: apache/polaris-admin-tool:1.6.0
+  trino: trinodb/trino:483
+  pull_policy: Always
+
+platform:
+  kubernetes:
+    namespace: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s1}
+    create_namespace: true
+
+  storage:
+    s3:
+      endpoint: ${LAKEBENCH_S3_ENDPOINT}
+      region: us-east-1
+      path_style: true
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+      buckets:
+        bronze: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s1}-bronze
+        silver: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s1}-silver
+        gold: ${LAKEBENCH_PERF_NAME:-perf-aml-batch-s1}-gold
+    scratch:
+      enabled: true
+      storage_class: px-csi-scratch
+      size: 200Gi
+
+  compute:
+    postgres:
+      storage: 10Gi
+      storage_class: px-csi-db
+    spark:
+      driver:
+        cores: 2
+        memory: 2g
+      executor:
+        instances: 2
+        cores: 2
+        memory: 4g
+        memory_overhead: 1g
+      # Per-job executor counts, equal to the scale-1 auto values today
+      # (get_executor_count with schema financial).
+      bronze_executors: 4
+      silver_executors: 8
+      gold_executors: 4
+
+architecture:
+  catalog:
+    type: polaris
+    polaris:
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
+
+  pipeline:
+    mode: batch
+    medallion:
+      bronze:
+        format: parquet
+        path_template: pacs008
+
+  workload:
+    schema: financial
+    retention_workload: true
+    retention_months: 60
+    datagen:
+      scale: 1
+      mode: batch
+      parallelism: 2
+      cpu: "8"
+      generators: 0
+      uploaders: 0
+      file_size: 64mb
+      timestamp_start: "2024-01-01"
+      timestamp_end: "2025-01-01"
+
+  tables:
+    bronze: default.pacs008_raw
+    silver: silver.transactions
+    silver_entities: silver.entities
+    silver_accounts: silver.accounts
+    silver_counterparty_edges: silver.counterparty_edges
+    gold: gold.daily_dashboards
+    gold_alerts: gold.alerts
+    gold_risk_scores: gold.risk_scores
+    gold_entity_clusters: gold.entity_clusters
+    gold_daily_dashboards: gold.daily_dashboards
+
+  query_engine:
+    type: spark-thrift
+    spark_thrift:
+      cores: 2
+      memory: 24g
+
+  benchmark:
+    mode: power
+    cache: hot
+    iterations: 1
+    streams: 4
