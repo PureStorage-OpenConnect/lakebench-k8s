@@ -239,3 +239,59 @@ class TestGetBucketSize:
 # Note: Integration tests requiring a real S3/MinIO endpoint
 # would go in a separate test file (test_s3_integration.py)
 # and be marked with @pytest.mark.integration
+
+
+class TestEmptyBucketMultipart:
+    """LB-149: an upload that vanished between list and abort is not an error."""
+
+    def _run(self, abort_error_code, ghost_passes=1, max_wait=5):
+        from unittest.mock import MagicMock, patch
+
+        from botocore.exceptions import ClientError
+
+        client = S3Client(endpoint="http://localhost:9000", access_key="key", secret_key="secret")
+        listed = {"n": 0}
+
+        def paginator(name):
+            p = MagicMock()
+            if name == "list_multipart_uploads":
+                listed["n"] += 1
+                uploads = [{"Key": "k", "UploadId": "u"}] if listed["n"] <= ghost_passes else []
+                p.paginate.return_value = [{"Uploads": uploads}]
+            else:
+                p.paginate.return_value = [{"Contents": []}]
+            return p
+
+        err = ClientError(
+            {"Error": {"Code": abort_error_code, "Message": "x"}}, "AbortMultipartUpload"
+        )
+        abort = MagicMock(side_effect=err)
+        with (
+            patch.object(client, "bucket_exists", return_value=True),
+            patch.object(client._client, "get_paginator", side_effect=paginator),
+            patch.object(client._client, "abort_multipart_upload", abort),
+            patch("time.sleep"),
+        ):
+            return client.empty_bucket("b", max_wait=max_wait), abort
+
+    def test_no_such_upload_is_tolerated(self):
+        deleted, abort = self._run("NoSuchUpload")
+        assert deleted == 0
+        abort.assert_called_once_with(Bucket="b", Key="k", UploadId="u")
+
+    def test_ghost_that_stays_listed_still_fails_verify(self):
+        import pytest
+
+        from lakebench.s3.client import S3BucketError
+
+        with pytest.raises(S3BucketError):
+            self._run("NoSuchUpload", ghost_passes=10**9, max_wait=0)
+
+    def test_other_abort_errors_still_fail(self):
+        import pytest
+
+        from lakebench.s3.client import S3BucketError
+
+        with pytest.raises(S3BucketError) as exc:
+            self._run("AccessDenied")
+        assert "AccessDenied" in str(exc.value)
