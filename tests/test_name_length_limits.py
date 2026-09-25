@@ -113,15 +113,76 @@ class TestLoader:
         )
         assert cfg.get_namespace() == "ov-perf-c360-continuous-s10"
 
-    def test_destroy_cli_loads_with_allow_long_names(self):
-        import inspect
+    @pytest.mark.parametrize(
+        ("module", "argv"),
+        [
+            ("lakebench.cli._destroy", ["destroy"]),
+            ("lakebench.cli._clean", ["clean", "data"]),
+            ("lakebench.cli", ["status"]),
+            ("lakebench.cli", ["stop"]),
+            ("lakebench.cli", ["logs", "hive"]),
+            ("lakebench.cli._admin", ["admin", "doctor"]),
+            ("lakebench.cli._admin", ["admin", "reclaim-bucket"]),
+            ("lakebench.cli._admin", ["admin", "repair-operator"]),
+        ],
+    )
+    def test_teardown_and_recovery_commands_skip_the_check(
+        self, module, argv, tmp_path, monkeypatch
+    ):
+        # A deployment that failed LB-153 still has buckets and secrets, so
+        # the commands that clean up or inspect it must load its config.
+        import importlib
 
-        from lakebench.cli import _destroy
+        from typer.testing import CliRunner
 
-        assert "allow_long_names=True" in inspect.getsource(_destroy)
+        from lakebench.cli import app
+        from lakebench.config.loader import ConfigFileNotFoundError
+
+        monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+        seen: list[dict] = []
+
+        def spy(path, **kwargs):
+            seen.append(kwargs)
+            raise ConfigFileNotFoundError(str(path))
+
+        monkeypatch.setattr(importlib.import_module(module), "load_config", spy)
+        cfg_path = self._write(tmp_path, "ov-perf-c360-continuous-s10")
+        CliRunner().invoke(app, [*argv, str(cfg_path)])
+        assert seen, f"{argv} never loaded the config"
+        assert seen[0].get("allow_long_names") is True
+
+    def test_deploy_path_keeps_the_check(self, tmp_path, monkeypatch):
+        import importlib
+
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+        from lakebench.config.loader import ConfigFileNotFoundError
+
+        monkeypatch.setenv("KUBECONFIG", "/nonexistent")
+        seen: list[dict] = []
+
+        def spy(path, **kwargs):
+            seen.append(kwargs)
+            raise ConfigFileNotFoundError(str(path))
+
+        monkeypatch.setattr(importlib.import_module("lakebench.cli._deploy"), "load_config", spy)
+        CliRunner().invoke(app, ["deploy", str(self._write(tmp_path, "x"))])
+        assert seen and not seen[0].get("allow_long_names")
 
 
 class TestPinnedPerfConfigs:
+    @pytest.mark.parametrize(
+        "path", sorted(Path(__file__).parent.parent.glob("benchmarks/perf/*-s*.yaml"))
+    )
+    def test_gate_loads_with_a_long_perf_name_in_the_env(self, path, monkeypatch):
+        # The fingerprint does not depend on the name, so the gate must not
+        # refuse because a too-long LAKEBENCH_PERF_NAME is still exported.
+        from lakebench.metrics.perf_gate import load_pinned
+
+        monkeypatch.setenv("LAKEBENCH_PERF_NAME", "ov-perf-c360-continuous-s10")
+        load_pinned(path)
+
     @pytest.mark.parametrize(
         "path", sorted(Path(__file__).parent.parent.glob("benchmarks/perf/*-s*.yaml"))
     )
