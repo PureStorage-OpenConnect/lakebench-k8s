@@ -58,18 +58,37 @@ numbers; do not compare across clusters.
 A run is refused, never compared, when:
 
 - it did not succeed;
-- it is a batch run with `scale_ratio` below 0.95 (0 means the bronze input
-  volume was not measured, which is refused too);
-- its datagen fleet reported `data_quality` other than `complete`.
+- it is a batch run with `scale_ratio` outside 0.95 to 1.10 (0 means the
+  bronze input volume was not measured, which is refused too; above 1.10
+  means extra data, which flatters GB/s);
+- it is a batch run whose set of stages differs from the baseline run's (for
+  example no datagen stage), since time to value then covers different work;
+- it is a continuous run in which no data flowed (`ingest_ratio` or rows/s
+  zero or missing), or whose freshness was not measured;
+- it is a continuous run whose window (stage seconds) differs from the pinned
+  `run_duration` by more than 10%. A `--duration` override is not recorded in
+  the snapshot, so this is how it is caught;
+- it is a continuous run whose `corpus_drained` differs from the baseline
+  run's. A drained run's freshness covers only the cycles that saw data;
+- its datagen fleet reported `data_quality` other than `complete`, or the
+  datagen metrics were written more than 38 hours before the run started
+  (24 hours plus slack for the unrecorded zone of `start_time`), which means
+  they came from an earlier `generate`;
+- its snapshot records a `config_sha256` that is not the pinned file's. Runs
+  do not record this field yet; see "Known gaps".
 
-Within a comparable run, two numbers are left out rather than trusted:
+Within a comparable run, some numbers are left out rather than trusted:
 
 - `sustained_throughput_rps` of a continuous run whose corpus drained before
   the window ended (`corpus_drained: true`). That figure is corpus rows over
   the window, a lower bound, not a throughput (LB-145). A drained run is never
   recorded as the rows/s baseline either.
+- continuous stage seconds, which are the window length, not a measurement.
 - `maintenance_value_pct` when it is null. It is reported as "not measured",
   never as zero.
+
+`gate` and the release check also fail a required config whose newest run is
+the baseline run itself: a baseline compared with itself proves nothing.
 
 ## Metrics and tolerances
 
@@ -83,7 +102,8 @@ compared.
 | `time_to_value_seconds`, `<stage>_seconds`, `data_freshness_seconds`, `datagen_cpu_hr_per_tb` | lower is better | 10% |
 | `pipeline_throughput_gb_per_second`, `compute_efficiency_gb_per_core_hour`, `composite_qph`, `sustained_throughput_rps`, `datagen_aggregate_mbps`, `datagen_mbps_per_pod` | higher is better | 10% |
 | `query_qph_<query>` (3600 / query seconds) | higher is better | 20% |
-| `maintenance_value_pct` | higher is better | 10 percentage points |
+| `pre_compaction_qph` | higher is better | 10% |
+| `maintenance_value_pct` | higher is better | 10 percentage points (absolute tolerances only) |
 
 Only drift in the bad direction fails. An improvement past the tolerance is
 reported as `improved` and passes; record a new baseline if it should become
@@ -146,6 +166,18 @@ run can be found for it, or its run is refused or regressed. An optional
 config is reported but never fails the release. CI has no local runs
 directory, so a release checks in the `metrics.json` of each required perf
 run as `uat/perf/run-<id>/metrics.json` alongside `uat/results-<version>.md`.
+
+## Known gaps
+
+The fingerprint can only compare what `build_config_snapshot` records. Some
+knobs that move numbers are not in it: datagen CPU, the datagen timestamp
+range, Trino spill settings, table format versions, and the Spark Thrift
+size. Pinning them in the file covers runs of the file itself, but a run of an
+edited copy with the same snapshot is not caught until runs record the sha256
+of the config file they used (`config_sha256` in the snapshot), which the gate
+already checks when present. The datagen sidecar does not record the image
+that wrote it, so a run that reuses a recent sidecar from a different image is
+not caught either.
 
 ## Seeding
 

@@ -92,6 +92,7 @@ _METRIC_TABLE: dict[str, tuple[str, str]] = {
     # are unchanged.
     "datagen_mbps_per_pod": ("performance", "higher"),
     "maintenance_value_pct": ("performance", "higher"),
+    "pre_compaction_qph": ("performance", "higher"),
 }
 
 # Per-query QpH (3600 / query seconds) lives in an open namespace keyed by

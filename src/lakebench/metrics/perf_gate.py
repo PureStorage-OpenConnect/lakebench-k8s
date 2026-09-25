@@ -45,6 +45,7 @@ from lakebench.cli._reproduce import (
     _classify_direction,
     _drift_pct,
     _extract_expected_numbers,
+    _is_stage_seconds,
 )
 
 STORE_SCHEMA_VERSION = 1
@@ -52,6 +53,22 @@ STORE_SCHEMA_VERSION = 1
 # Refuse batch runs that processed less than this share of the expected
 # bronze volume (a scale_ratio of 0 means the volume was not measured).
 MIN_SCALE_RATIO = 0.95
+# ...and refuse more than this: extra data (a bronze bucket not emptied
+# before a regenerate) flatters GB/s and GB/core-hr just as missing data
+# flatters time to value.
+MAX_SCALE_RATIO = 1.10
+
+# A continuous stage runs for the whole window, so its elapsed seconds is
+# the window length. Refuse a run whose window differs from the pinned
+# run_duration by more than this (a --duration override is not recorded in
+# the snapshot).
+WINDOW_TOLERANCE_PCT = 10.0
+
+# The datagen fleet numbers come from a sidecar written by the last
+# `lakebench generate` in the namespace. Refuse one written this long before
+# the run started. The run's start_time is naive local time with no recorded
+# zone, so 14 hours of zone slack are added to the 24-hour limit.
+MAX_DATAGEN_AGE_HOURS = 24 + 14
 
 # Default tolerances. "pct" is percent drift in the bad direction; "abs" is
 # an absolute difference in the metric's own unit.
@@ -84,15 +101,24 @@ _PLACEHOLDER_ENV = {
     "LAKEBENCH_POLARIS_CLIENT_SECRET": "placeholder",
 }
 
-# Stage name in PipelineBenchmark -> executor override key in the snapshot.
+# Stage name in PipelineBenchmark -> executor override key in the snapshot,
+# per mode. Continuous runs name their stages bronze/silver/gold too
+# (collector._STREAMING_MAP), so the lookup has to know the mode.
 _STAGE_OVERRIDE_KEY = {
-    "bronze": "bronze",
-    "silver": "silver",
-    "gold": "gold",
-    "bronze-ingest": "bronze_ingest",
-    "silver-stream": "silver_stream",
-    "gold-refresh": "gold_refresh",
+    "batch": {"bronze": "bronze", "silver": "silver", "gold": "gold"},
+    "sustained": {
+        "bronze": "bronze_ingest",
+        "silver": "silver_stream",
+        "gold": "gold_refresh",
+        "bronze-ingest": "bronze_ingest",
+        "silver-stream": "silver_stream",
+        "gold-refresh": "gold_refresh",
+    },
 }
+
+# Signed percentages: a relative tolerance divides by a value that can be
+# negative or near zero, so only absolute tolerances are allowed.
+_ABS_ONLY_METRICS = frozenset({"maintenance_value_pct"})
 
 
 class PerfGateError(Exception):
@@ -199,6 +225,7 @@ class PinnedConfig:
     config_hash: str
     mode: str
     fingerprint: dict[str, Any]
+    file_sha256: str = ""
 
     @property
     def fingerprint_hash(self) -> str:
@@ -238,6 +265,7 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
         config_hash=config_hash,
         mode=mode,
         fingerprint=fp,
+        file_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
     )
 
 
@@ -336,6 +364,12 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     }
     excluded: dict[str, str] = {}
 
+    if run.mode == "sustained":
+        # Every continuous stage runs for the whole window, so its seconds
+        # is the window length, not a measurement.
+        for key in [k for k in numbers if _is_stage_seconds(k)]:
+            del numbers[key]
+
     if run.mode == "sustained" and run.scores.get("corpus_drained") is True:
         numbers.pop("sustained_throughput_rps", None)
         excluded["sustained_throughput_rps"] = (
@@ -343,6 +377,12 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
         )
 
     scores = run.scores
+    # Pre-maintenance QpH is gated on its own: a write-layout regression
+    # lowers it and raises maintenance_value_pct, while post-maintenance
+    # composite_qph stays flat.
+    pre_qph = scores.get("pre_compaction_qph")
+    if isinstance(pre_qph, (int, float)) and pre_qph > 0:
+        numbers["pre_compaction_qph"] = float(pre_qph)
     if "maintenance_value_pct" in scores or "pre_compaction_qph" in scores:
         value = scores.get("maintenance_value_pct")
         if value is None:
@@ -384,17 +424,53 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
         diff = fingerprint_diff(pinned.fingerprint, run_fp)
         reasons.append("config fingerprint differs from the pinned config: " + "; ".join(diff))
 
+    # A run that records the sha256 of the config file it used must have used
+    # the pinned file byte for byte. Runs that predate the field cannot be
+    # checked this way; the fingerprint is the only guard for them.
+    recorded = run.snapshot.get("config_sha256")
+    if recorded and recorded != pinned.file_sha256:
+        reasons.append(
+            f"run used a different config file (sha256 {str(recorded)[:12]}, "
+            f"pinned {pinned.file_sha256[:12]})"
+        )
+
+    scores = run.scores
     if run.mode == "batch":
-        ratio = run.scores.get("scale_ratio", run.pb_raw.get("scale_ratio"))
+        ratio = scores.get("scale_ratio", run.pb_raw.get("scale_ratio"))
         ratio = float(ratio) if isinstance(ratio, (int, float)) else 0.0
         if ratio < MIN_SCALE_RATIO:
             note = " (0 means bronze input volume was not measured)" if ratio == 0 else ""
             reasons.append(f"scale_ratio {ratio:.3f} < {MIN_SCALE_RATIO}{note}")
+        elif ratio > MAX_SCALE_RATIO:
+            reasons.append(f"scale_ratio {ratio:.3f} > {MAX_SCALE_RATIO}: more data than the scale")
+    else:
+        ingest = scores.get("ingest_ratio")
+        rps = scores.get("sustained_throughput_rps")
+        if not isinstance(ingest, (int, float)) or ingest <= 0:
+            reasons.append(f"no data flowed (ingest_ratio {ingest!r})")
+        elif not isinstance(rps, (int, float)) or rps <= 0:
+            reasons.append(f"no data flowed (sustained_throughput_rps {rps!r})")
+        if scores.get("data_freshness_seconds") is None:
+            reasons.append("data_freshness_seconds was not measured")
+        want_window = (pinned.fingerprint.get("sustained") or {}).get("run_duration")
+        windows = [
+            float(s.get("elapsed_seconds") or 0)
+            for s in run.pb_raw.get("stages") or []
+            if s.get("stage_type") == "streaming"
+        ]
+        if want_window and windows:
+            window = max(windows)
+            if abs(window - want_window) > want_window * WINDOW_TOLERANCE_PCT / 100:
+                reasons.append(
+                    f"run window {window:.0f}s differs from pinned run_duration {want_window}s "
+                    "(a --duration override?)"
+                )
 
     # Realised sizing: what actually ran, not what the snapshot asked for.
     overrides = ((pinned.fingerprint.get("spark") or {}).get("executor_overrides")) or {}
+    stage_keys = _STAGE_OVERRIDE_KEY.get(run.mode, {})
     for stage in run.pb_raw.get("stages") or []:
-        key = _STAGE_OVERRIDE_KEY.get(stage.get("stage_name", ""))
+        key = stage_keys.get(stage.get("stage_name", ""))
         want = overrides.get(key) if key else None
         got = stage.get("executor_count") or 0
         if want and got and got != want:
@@ -406,7 +482,30 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
         reasons.append(f"datagen ran {got_pods} pods, pinned {want_pods}")
     if fleet and fleet.get("data_quality") not in (None, "complete"):
         reasons.append(f"datagen fleet data_quality={fleet.get('data_quality')!r}")
+    age = _datagen_age_hours(run)
+    if age is not None and age > MAX_DATAGEN_AGE_HOURS:
+        reasons.append(
+            f"datagen metrics were written {age:.0f}h before the run started; they belong "
+            "to an earlier generate, not this run"
+        )
     return reasons
+
+
+def _datagen_age_hours(run: RunRecord) -> float | None:
+    """Hours between the datagen sidecar's written_at and the run start."""
+    fleet = run.raw.get("datagen_fleet") or {}
+    written, started = fleet.get("written_at"), run.raw.get("start_time")
+    if not written or not started:
+        return None
+    try:
+        w = datetime.fromisoformat(str(written))
+        s = datetime.fromisoformat(str(started))
+    except ValueError:
+        return None
+    # start_time is naive; compare wall-clock values and let the slack in
+    # MAX_DATAGEN_AGE_HOURS absorb the unknown zone offset.
+    w, s = w.replace(tzinfo=None), s.replace(tzinfo=None)
+    return (s - w).total_seconds() / 3600
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +527,10 @@ class Baseline:
     metrics: dict[str, float] = field(default_factory=dict)
     tolerances: dict[str, dict[str, float]] = field(default_factory=dict)
     notes: str | None = None
+    # Continuous runs only: whether the baseline run drained its corpus.
+    # A drained run's freshness covers only the cycles that saw data, so a
+    # drained and an undrained run are not comparable (LB-145).
+    corpus_drained: bool | None = None
 
     @property
     def accepted(self) -> bool:
@@ -439,7 +542,14 @@ class Baseline:
             "required": self.required,
             "status": self.status,
         }
-        for key in ("run_id", "git_sha", "config_hash", "fingerprint_hash", "recorded_at"):
+        for key in (
+            "run_id",
+            "git_sha",
+            "config_hash",
+            "fingerprint_hash",
+            "recorded_at",
+            "corpus_drained",
+        ):
             value = getattr(self, key)
             if value is not None:
                 d[key] = value
@@ -488,6 +598,8 @@ def _check_tolerances(name: str, tolerances: Any) -> dict[str, dict[str, float]]
         for k, v in spec.items():
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not v >= 0:
                 raise PerfGateError(f"{name}: tolerance {metric}.{k} must be a number >= 0")
+        if metric in _ABS_ONLY_METRICS and "abs" not in spec:
+            raise PerfGateError(f"{name}: {metric} is a signed percentage; use {{abs: N}}")
         out[str(metric)] = {k: float(v) for k, v in spec.items()}
     return out
 
@@ -533,6 +645,7 @@ def load_store(path: Path) -> BaselineStore:
             metrics={k: float(v) for k, v in metrics.items()},
             tolerances=_check_tolerances(str(name), entry.get("tolerances")),
             notes=entry.get("notes"),
+            corpus_drained=entry.get("corpus_drained"),
         )
     return BaselineStore(path=path, baselines=baselines)
 
@@ -612,11 +725,26 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
             "recorded (a schema default or autosizer change); record a new baseline"
         )
     result.reasons.extend(run_refusals(run, pinned))
+    if run.mode == "sustained":
+        drained = run.scores.get("corpus_drained")
+        if drained != baseline.corpus_drained:
+            result.reasons.append(
+                f"corpus_drained is {drained!r} but the baseline's is "
+                f"{baseline.corpus_drained!r}; freshness and rows/s mean different things "
+                "for drained and undrained runs (LB-145)"
+            )
+    actual, excluded = extract_metrics(run)
+    want_stages = {k for k in baseline.metrics if _is_stage_seconds(k)}
+    got_stages = {k for k in actual if _is_stage_seconds(k)}
+    if run.mode == "batch" and want_stages != got_stages:
+        result.reasons.append(
+            "stages differ from the baseline run (time to value is not like for like): "
+            f"baseline {sorted(want_stages)}, run {sorted(got_stages)}"
+        )
     if result.reasons:
         result.verdict = REFUSED
         return result
 
-    actual, excluded = extract_metrics(run)
     regressed = False
     for metric, expected in sorted(baseline.metrics.items()):
         _band, direction = _classify_direction(metric)
@@ -710,6 +838,7 @@ def record_baseline(
         metrics=numbers,
         tolerances=current.tolerances,
         notes=current.notes,
+        corpus_drained=(run.scores.get("corpus_drained") if run.mode == "sustained" else None),
     )
     store.baselines[name] = new
     return new
@@ -816,7 +945,11 @@ def release_check(
                     if bad:
                         msg += ": " + ", ".join(bad)
                     if run.run_id == baseline.run_id:
-                        msg += " (this run is the baseline itself)"
+                        ok = False
+                        msg = (
+                            f"no run newer than the baseline (run {run.run_id}); "
+                            "a baseline compared with itself proves nothing"
+                        )
         except PerfGateError as e:
             ok, msg = False, str(e)
         if not ok and baseline.required:

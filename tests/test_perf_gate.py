@@ -113,18 +113,29 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
     }
 
 
-def _cont_run(snapshot: dict, run_id: str, *, rps: float, drained: bool) -> dict:
+def _cont_run(
+    snapshot: dict,
+    run_id: str,
+    *,
+    rps: float,
+    drained: bool,
+    window: float = 1800.0,
+    ingest: float | None = None,
+    executors: tuple[int, int, int] = (2, 4, 2),
+) -> dict:
     scores = {
         "data_freshness_seconds": 120.0,
         "sustained_throughput_rps": rps,
-        "ingest_ratio": 1.0 if drained else 0.97,
+        "ingest_ratio": ingest if ingest is not None else (1.0 if drained else 0.97),
         "corpus_drained": drained,
         "compute_efficiency_gb_per_core_hour": 3.0,
         "composite_qph": None,
     }
+    # Continuous runs name their stages bronze/silver/gold (collector
+    # _STREAMING_MAP), each lasting the whole window.
     stages = [
-        {"stage_name": n, "stage_type": "streaming", "elapsed_seconds": 1800.0, "executor_count": c}
-        for n, c in (("bronze-ingest", 2), ("silver-stream", 4), ("gold-refresh", 2))
+        {"stage_name": n, "stage_type": "streaming", "elapsed_seconds": window, "executor_count": c}
+        for n, c in zip(("bronze", "silver", "gold"), executors, strict=True)
     ]
     return {
         "run_id": run_id,
@@ -282,23 +293,39 @@ def test_record_refuses_mismatched_run(env):
 
 def test_drained_run_rows_per_second_excluded(env):
     snap = env.snaps["c360-continuous-s10"]
-    store = _record(
+    _record(
+        env,
+        "c360-continuous-s10",
+        _cont_run(snap, "20260924-100000-aaaaaa", rps=9000.0, drained=True),
+    )
+    # A drained run reports corpus rows / window, far below the real rate.
+    # Its rows/s is never compared, however low it is.
+    c = _compare(
+        env,
+        "c360-continuous-s10",
+        _cont_run(snap, "20260924-110000-bbbbbb", rps=10.0, drained=True),
+    )
+    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    assert all(r.metric != "sustained_throughput_rps" for r in c.rows)
+    numbers, excluded = pg.extract_metrics(pg.load_run(env.runs / "run-20260924-110000-bbbbbb"))
+    assert "sustained_throughput_rps" not in numbers
+    assert "LB-145" in excluded["sustained_throughput_rps"]
+
+
+def test_drained_run_refused_against_undrained_baseline(env):
+    snap = env.snaps["c360-continuous-s10"]
+    _record(
         env,
         "c360-continuous-s10",
         _cont_run(snap, "20260924-100000-aaaaaa", rps=50000.0, drained=False),
     )
-    assert "sustained_throughput_rps" in store.baselines["c360-continuous-s10"].metrics
-    # A drained run reports corpus/window, far below the real rate. It must
-    # not read as a regression, and must not be compared at all.
     c = _compare(
         env,
         "c360-continuous-s10",
         _cont_run(snap, "20260924-110000-bbbbbb", rps=9000.0, drained=True),
     )
-    assert c.verdict == pg.PASS, pg.format_comparison(c)
-    row = _row(c, "sustained_throughput_rps")
-    assert row.actual is None and row.status.startswith("excluded")
-    assert "LB-145" in row.status
+    assert c.verdict == pg.REFUSED
+    assert any("corpus_drained" in r for r in c.reasons)
 
 
 def test_drained_run_never_becomes_the_rows_per_second_baseline(env):
@@ -439,17 +466,16 @@ def test_release_check_fails_on_missing_required_baseline(env):
     assert any(ln.startswith("warn aml-batch-s1 [optional]") for ln in lines)
 
 
-def _accept_both_c360(env):
+def _accept_both_c360(env, extra_runs: bool = True):
+    """Record both c360 baselines and, by default, one later run of each."""
+    b, c = env.snaps["c360-batch-s10"], env.snaps["c360-continuous-s10"]
+    _record(env, "c360-batch-s10", _batch_run(b, "20260924-100000-aaaaaa"))
     _record(
-        env, "c360-batch-s10", _batch_run(env.snaps["c360-batch-s10"], "20260924-100000-aaaaaa")
+        env, "c360-continuous-s10", _cont_run(c, "20260924-100001-aaaaaa", rps=5e4, drained=False)
     )
-    _record(
-        env,
-        "c360-continuous-s10",
-        _cont_run(
-            env.snaps["c360-continuous-s10"], "20260924-100001-aaaaaa", rps=5e4, drained=False
-        ),
-    )
+    if extra_runs:
+        env.write_run(_batch_run(b, "20260924-200000-eeeeee", ttv=610.0))
+        env.write_run(_cont_run(c, "20260924-200001-eeeeee", rps=5.1e4, drained=False))
 
 
 def test_release_check_passes_and_then_fails_on_regression(env):
@@ -664,4 +690,131 @@ def test_store_rejects_accepted_entry_without_provenance(tmp_path):
         )
     )
     with pytest.raises(pg.PerfGateError, match="run_id"):
+        pg.load_store(p)
+
+
+# -- review fixes (adversarial pass on d9860b9) ------------------------------
+
+
+def test_release_check_fails_when_only_the_baseline_run_exists(env):
+    _accept_both_c360(env, extra_runs=False)
+    passed, lines = pg.release_check(env.store(), env.runs)
+    assert not passed
+    assert any("no run newer than the baseline" in ln for ln in lines)
+
+
+def test_continuous_window_override_refused(env):
+    snap = env.snaps["c360-continuous-s10"]
+    _record(
+        env,
+        "c360-continuous-s10",
+        _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False),
+    )
+    run = _cont_run(snap, "20260924-110000-bbbbbb", rps=5e4, drained=False, window=300.0)
+    c = _compare(env, "c360-continuous-s10", run)
+    assert c.verdict == pg.REFUSED
+    assert any("run window 300s" in r for r in c.reasons)
+
+
+def test_continuous_stage_seconds_are_not_compared(env):
+    snap = env.snaps["c360-continuous-s10"]
+    store = _record(
+        env,
+        "c360-continuous-s10",
+        _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False),
+    )
+    metrics = store.baselines["c360-continuous-s10"].metrics
+    assert "data_freshness_seconds" in metrics
+    assert not [k for k in metrics if k.endswith("_seconds") and k != "data_freshness_seconds"]
+
+
+def test_continuous_run_with_no_data_cannot_be_recorded(env):
+    snap = env.snaps["c360-continuous-s10"]
+    store = env.store()
+    data = _cont_run(snap, "20260924-100000-aaaaaa", rps=0.0, drained=False, ingest=0.0)
+    run = pg.load_run(env.write_run(data))
+    with pytest.raises(pg.PerfGateError, match="no data flowed"):
+        pg.record_baseline(store, "c360-continuous-s10", run, "abc")
+
+
+def test_continuous_executor_mismatch_refused(env):
+    snap = env.snaps["c360-continuous-s10"]
+    _record(
+        env,
+        "c360-continuous-s10",
+        _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False),
+    )
+    run = _cont_run(snap, "20260924-110000-bbbbbb", rps=5e4, drained=False, executors=(2, 8, 2))
+    c = _compare(env, "c360-continuous-s10", run)
+    assert c.verdict == pg.REFUSED
+    assert any("silver ran 8 executors, pinned 4" in r for r in c.reasons)
+
+
+def test_scale_ratio_above_band_refused(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    c = _compare(
+        env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", scale_ratio=2.05)
+    )
+    assert c.verdict == pg.REFUSED
+    assert any("more data than the scale" in r for r in c.reasons)
+
+
+def test_missing_stage_refused_not_compared(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    no_datagen = _batch_run(
+        snap, "20260924-110000-bbbbbb", stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0}
+    )
+    c = _compare(env, "c360-batch-s10", no_datagen)
+    assert c.verdict == pg.REFUSED
+    assert any("stages differ" in r for r in c.reasons)
+
+
+def test_stale_datagen_metrics_refused(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    stale = _batch_run(snap, "20260924-110000-bbbbbb")
+    stale["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
+    c = _compare(env, "c360-batch-s10", stale)
+    assert c.verdict == pg.REFUSED
+    assert any("earlier generate" in r for r in c.reasons)
+    # Written during the same run: start_time is naive local, written_at UTC.
+    fresh = _batch_run(snap, "20260924-120000-cccccc")
+    fresh["datagen_fleet"]["written_at"] = "2026-09-24T16:00:00+00:00"
+    assert _compare(env, "c360-batch-s10", fresh).verdict == pg.PASS
+
+
+def test_recorded_config_file_sha_must_match(env):
+    import hashlib
+
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    edited = copy.deepcopy(snap)
+    edited["config_sha256"] = "0" * 64
+    c = _compare(env, "c360-batch-s10", _batch_run(edited, "20260924-110000-bbbbbb"))
+    assert c.verdict == pg.REFUSED
+    assert any("different config file" in r for r in c.reasons)
+    same = copy.deepcopy(snap)
+    pinned_bytes = (env.store_dir / "c360-batch-s10.yaml").read_bytes()
+    same["config_sha256"] = hashlib.sha256(pinned_bytes).hexdigest()
+    assert _compare(env, "c360-batch-s10", _batch_run(same, "20260924-120000-cccccc")).ok
+
+
+def test_pre_compaction_qph_regression_detected(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa", maintenance_value_pct=10.0)
+    _record(env, "c360-batch-s10", base)
+    worse = _batch_run(snap, "20260924-110000-bbbbbb", maintenance_value_pct=10.0)
+    worse["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 200.0
+    c = _compare(env, "c360-batch-s10", worse)
+    assert c.verdict == pg.REGRESSION
+    assert _row(c, "pre_compaction_qph").status == "regression"
+
+
+def test_relative_tolerance_on_signed_metric_rejected(tmp_path):
+    p = tmp_path / "baselines.yaml"
+    entry = {"config": "x.yaml", "tolerances": {"maintenance_value_pct": {"pct": 10}}}
+    p.write_text(yaml.safe_dump({"schema_version": 1, "baselines": {"x": entry}}))
+    with pytest.raises(pg.PerfGateError, match="signed percentage"):
         pg.load_store(p)
