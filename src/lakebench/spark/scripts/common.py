@@ -369,6 +369,23 @@ def stream_batch_lines(batch_id, rows, seconds, table):
     ]
 
 
+def ttd_line(cycle, stats):
+    """The per-cycle time-to-detect line ``parse_streaming_logs`` reads.
+
+    ``stats`` is gold_refresh_financial.ttd_stats: ``alerts`` measured,
+    ``unmatched`` (no related transaction found in silver), ``max_s``, and a
+    histogram ``bins`` of {bin index: count} at ``bin_s`` seconds per bin.
+    The collector merges the bins of every cycle into run-wide percentiles.
+    """
+    bins = ",".join(f"{b}:{n}" for b, n in sorted(stats["bins"].items()))
+    mx = stats["max_s"]
+    return (
+        f"Cycle {cycle}: time to detect alerts={stats['alerts']} "
+        f"unmatched={stats['unmatched']} max={'-' if mx is None else f'{mx:.1f}'}s "
+        f"bin={stats['bin_s']}s bins={bins}"
+    )
+
+
 def parse_size_gb(s):
     """Parse size string to GB."""
     return float(s)

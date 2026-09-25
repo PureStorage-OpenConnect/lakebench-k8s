@@ -46,8 +46,22 @@ never as the previous tick's alerts under a status that says otherwise.
 
 detected_ts semantics in continuous (LB-127): because each tick rewrites a
 rule's alerts, detected_ts carries the LAST re-detection time, not the first.
-That is sufficient for Phase 3 (alerts exist, recall is scorable); the
-first-detection-preserving time-to-detect / freshness measurement is Phase 4.
+
+Time to detect (Phase 4a): alert_id is a fresh uuid() on every tick, so first
+detection is found by content instead. An alert is newly raised on a tick
+when its (rule_id, entity_id, sorted related_txn_ids) was not in gold.alerts
+at the snapshot before the tick. Its time to detect is the end of that tick's
+detection pass (all of its rules' alerts are committed by then) minus the
+newest bronze ingest_ts among its related transactions, i.e. from the moment
+the last piece of its evidence entered bronze to the moment the alert was
+visible in gold. The rule's detected_ts is not used: it is stamped when the
+rule starts computing, so it would leave the detection time itself out. Each
+tick logs a histogram (common.ttd_line); the collector merges the ticks.
+An episode that grows gets a new content key, so each re-raise is measured
+against the transaction that changed it. An alert re-raised after a rule
+error, or raised late because its evidence lies outside related_txn_ids (W2
+waits for the customer's entity row), is measured against its related
+transactions and so reads as a long time to detect, never a short one.
 
 Refresh discipline:
 - Baseline overwrites ONLY rule_id='baseline' rows (DELETE + append); the
@@ -75,6 +89,7 @@ from common import (
     log,
     one_line,
     table_exists,
+    ttd_line,
 )
 from gold_finalize_financial import (
     DDL_ALERTS,
@@ -86,10 +101,26 @@ from gold_finalize_financial import (
     run_detection_rules,
 )
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col
+from pyspark.sql.functions import (
+    array_join,
+    array_sort,
+    coalesce,
+    col,
+    concat_ws,
+    count,
+    explode_outer,
+    floor,
+    greatest,
+    lit,
+    sha2,
+    unix_micros,
+    when,
+)
+from pyspark.sql.functions import max as max_
 from tm_operations import (
     bootstrap_tm_tables,
     params_from_env,
+    read_at_snapshot,
     run_tm_operations,
     tm_pass_due,
     window_start_marker,
@@ -110,6 +141,9 @@ WINDOW_S = int(env("LB_CONTINUOUS_WINDOW_S", "0") or 0)
 GOLD_CHECKPOINT = env("CHECKPOINT_LOCATION", "")
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
+# Time-to-detect histogram resolution. Percentiles are reported at the bin's
+# upper edge, so they overstate by less than one bin.
+TTD_BIN_S = 10
 
 # Rules run every tick over the full corpus. W2 is customer-scoped and also
 # reads silver.entities; silver_stream commits a batch's entities after its
@@ -191,6 +225,114 @@ def _newest_ingest_epoch_s(spark, fq_table):
         return None
 
 
+def _alert_content_keys(alerts):
+    """One row per distinct alert content: (_key, related_txn_ids).
+
+    alert_id is a uuid() redrawn every tick, so it cannot say whether an
+    alert is new. The content key is stable while the alert's evidence is
+    unchanged and changes when a transaction joins or leaves it.
+    """
+    key = sha2(
+        concat_ws(
+            "|",
+            col("rule_id"),
+            coalesce(col("entity_id").cast("string"), lit("")),
+            coalesce(array_join(array_sort(col("related_txn_ids")), ","), lit("")),
+        ),
+        256,
+    )
+    return alerts.select(key.alias("_key"), col("related_txn_ids")).dropDuplicates(["_key"])
+
+
+def new_alert_arrivals(current, prior, txns):
+    """Alerts in ``current`` whose content was not in ``prior``, with the
+    newest ingest_ts among their related transactions (``arrival_ts``; NULL
+    when none of them is in ``txns``).
+
+    ``prior`` is gold.alerts as of the snapshot before the tick, or None when
+    the table had no snapshot (every current alert is new).
+    """
+    cur = _alert_content_keys(current)
+    if prior is not None:
+        cur = cur.join(_alert_content_keys(prior).select("_key"), "_key", "left_anti")
+    exploded = cur.select("_key", explode_outer("related_txn_ids").alias("uetr"))
+    ingest = txns.select("uetr", "ingest_ts")
+    return (
+        exploded.join(ingest, "uetr", "left")
+        .groupBy("_key")
+        .agg(max_("ingest_ts").alias("arrival_ts"))
+    )
+
+
+def ttd_stats(arrivals, detected_s, bin_s=TTD_BIN_S):
+    """Histogram of ``detected_s - arrival_ts`` over ``arrivals``.
+
+    Returns {"alerts", "unmatched", "max_s", "bin_s", "bins"}: bins maps
+    floor(ttd / bin_s) to a count. Clock skew between the bronze and gold
+    drivers can make a ttd slightly negative; it is clamped to 0.
+    """
+    ttd = greatest(lit(0.0), lit(float(detected_s)) - unix_micros(col("arrival_ts")) / 1e6)
+    matched = col("arrival_ts").isNotNull()
+    rows = (
+        arrivals.select(
+            when(matched, floor(ttd / bin_s)).otherwise(lit(-1)).cast("long").alias("b"),
+            when(matched, ttd).alias("t"),
+        )
+        .groupBy("b")
+        .agg(count(lit(1)).alias("n"), max_("t").alias("mx"))
+        .collect()
+    )
+    bins = {int(r["b"]): int(r["n"]) for r in rows if r["b"] >= 0}
+    peaks = [float(r["mx"]) for r in rows if r["b"] >= 0 and r["mx"] is not None]
+    return {
+        "alerts": sum(bins.values()),
+        "unmatched": sum(int(r["n"]) for r in rows if r["b"] < 0),
+        "max_s": max(peaks) if peaks else None,
+        "bin_s": int(bin_s),
+        "bins": bins,
+    }
+
+
+# _prior_alerts_snapshot's answer when the snapshot could not be read: the
+# tick's new alerts are then unknown, and treating every alert as new would
+# report the whole run's backlog as one tick's time to detect.
+_SNAPSHOT_UNKNOWN = object()
+
+
+def _prior_alerts_snapshot(spark):
+    """gold.alerts' newest snapshot id; None when it has none yet (every
+    alert is new); _SNAPSHOT_UNKNOWN when the lookup failed."""
+    try:
+        rows = spark.sql(
+            f"SELECT snapshot_id FROM {CATALOG}.{GOLD_ALERTS}.snapshots "
+            "ORDER BY committed_at DESC LIMIT 1"
+        ).collect()
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] snapshot of {GOLD_ALERTS} unavailable: {one_line(e)}")
+        return _SNAPSHOT_UNKNOWN
+    return int(rows[0][0]) if rows else None
+
+
+def _log_time_to_detect(spark, cycle, prior_sid, detected_s) -> None:
+    """Log this tick's time-to-detect line. Best effort: a failure costs the
+    tick's sample, never the tick."""
+    if prior_sid is _SNAPSHOT_UNKNOWN:
+        log(f"[metrics] time to detect unavailable on cycle {cycle}: no prior snapshot")
+        return
+    try:
+        fq_alerts = f"{CATALOG}.{GOLD_ALERTS}"
+        current = spark.table(fq_alerts).where(col("run_id") == RUN_ID)
+        prior = (
+            read_at_snapshot(spark, fq_alerts, prior_sid).where(col("run_id") == RUN_ID)
+            if prior_sid is not None
+            else None
+        )
+        arrivals = new_alert_arrivals(current, prior, spark.table(f"{CATALOG}.{SILVER_TXNS}"))
+        log(ttd_line(cycle, ttd_stats(arrivals, detected_s)))
+    except Exception as e:  # noqa: BLE001
+        log(f"[metrics] time to detect unavailable on cycle {cycle}: {one_line(e)}")
+
+
 def main() -> None:
     _install_signal_handlers()
     spark = SparkSession.builder.appName("lb-gold-refresh-financial").getOrCreate()
@@ -249,6 +391,9 @@ def main() -> None:
             # DELETE + INSERT makes this tick's alerts the single correct set
             # for each rule; per-rule errors are isolated inside the driver, so
             # only a failure to read silver at all raises up to here.
+            # The snapshot before the rewrite is what this tick's alerts are
+            # compared against to find the newly raised ones.
+            prior_alerts_sid = _prior_alerts_snapshot(spark)
             run_detection_rules(
                 spark,
                 txns,
@@ -256,6 +401,7 @@ def main() -> None:
                 rules=CONTINUOUS_RULES,
                 skipped_rules=CONTINUOUS_SKIPPED_RULES,
             )
+            detection_end_s = time.time()
             # This run's alerts only. Rules skipped in continuous mode keep
             # alerts from earlier runs, and counting those let the continuous
             # gate pass with no continuous detection at all.
@@ -285,6 +431,7 @@ def main() -> None:
                 log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
                 last_ingest_s = newest_ingest_s
                 fresh_sampled = True
+            _log_time_to_detect(spark, cycle, prior_alerts_sid, detection_end_s)
             # P10 operations layer. It runs every continuous_interval_seconds,
             # measured from the end of the last pass, so detection ticks always
             # run between passes however long a pass takes; plus one final pass
