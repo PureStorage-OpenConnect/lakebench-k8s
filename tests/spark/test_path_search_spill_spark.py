@@ -201,9 +201,9 @@ def test_budget_refuses_a_level_before_writing_it(spark, tmp_path, monkeypatch):
     written = []
     cut = dr._PathBudget.cut
 
-    def spy(self, frame, label):
+    def spy(self, frame, label, **kw):
         written.append(label)
-        return cut(self, frame, label)
+        return cut(self, frame, label, **kw)
 
     monkeypatch.setattr(dr._PathBudget, "cut", spy)
     checks = {}
@@ -236,3 +236,72 @@ def test_partition_count_scales_with_edges_within_bounds(spark):
     assert dr.path_search_partitions(spark, 1_000) == 4  # the job's own count
     assert dr.path_search_partitions(spark, 266_700_000) == 534  # scale 10
     assert dr.path_search_partitions(spark, 2_667_000_000) == dr.PATH_SEARCH_MAX_PARTITIONS
+
+
+def test_last_hop_joins_the_step_frame_in_place(spark, monkeypatch):
+    """Review: on the last hop the closing test ``e_dst == start`` became a
+    third join key, the step frame's (e_src, _b) partitioning no longer
+    counted, and Spark reshuffled the whole step frame at the job's shuffle
+    partitions. Under the search's setting it is joined in place."""
+    import re
+
+    import detection_rules as dr
+    from pyspark.sql.functions import array, col
+
+    monkeypatch.delenv("LB_GOLD_URI", raising=False)
+    monkeypatch.setattr(dr, "PATH_SEARCH_ROWS_PER_PARTITION", 100)
+    old = spark.conf.get("spark.sql.autoBroadcastJoinThreshold")
+    spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "-1")
+    try:
+        df = _df(spark, _rows(5, 500, 50))
+        hop_us = 168 * HOUR_US
+        _, edges, n_edges, step, _, parts = dr._search_frames(
+            df, "W3", hop_us, 200, 10**9, 10**9, with_amount=False
+        )
+        paths = edges.select(
+            col("src").alias("start"),
+            col("dst").alias("end"),
+            col("t").alias("t_last"),
+            array(col("uetr")).alias("uetrs"),
+        )
+
+        def last_hop_plan():
+            closing = dr._extend_paths(paths, step, hop_us, parts).filter(
+                col("e_dst") == col("start")
+            )
+            return closing._jdf.queryExecution().executedPlan().toString()
+
+        assert "hashpartitioning(e_dst" in last_hop_plan()  # the defect
+        assert parts > 4
+        with dr._copartition_on_key_subset(spark):
+            plan = last_hop_plan()
+        assert "hashpartitioning(e_dst" not in plan
+        assert re.search(rf"hashpartitioning\(end#\d+L, _pb#\d+L, {parts}\)", plan)
+        assert spark.conf.get("spark.sql.requireAllClusterKeysForCoPartition") == "true"
+    finally:
+        spark.conf.set("spark.sql.autoBroadcastJoinThreshold", old)
+        spark.catalog.clearCache()
+
+
+def test_sweep_removes_only_stale_foreign_spill(spark, tmp_path, monkeypatch):
+    """A driver killed mid-search leaves its levels; the next run removes
+    directories whose newest file is old, and nothing recent or its own."""
+    import time
+
+    import detection_rules as dr
+
+    monkeypatch.setenv("LB_GOLD_URI", f"file://{tmp_path}/gold/")
+    own = dr._path_spill_root(spark).removeprefix("file://")
+    base = Path(own).parent
+    old_file = base / "spark-dead" / "W3-x" / "level-3" / "part-0.parquet"
+    new_file = base / "spark-live" / "W17-y" / "level-2" / "part-0.parquet"
+    own_file = Path(own) / "W3-z" / "cycles-2" / "part-0.parquet"
+    for f in (old_file, new_file, own_file):
+        f.parent.mkdir(parents=True)
+        f.write_bytes(b"x")
+    stale = time.time() - 48 * 3600
+    os.utime(old_file, (stale, stale))
+    os.utime(own_file, (stale, stale))
+    assert dr.sweep_stale_path_spill(spark) == 1
+    assert not (base / "spark-dead").exists()
+    assert new_file.exists() and own_file.exists()

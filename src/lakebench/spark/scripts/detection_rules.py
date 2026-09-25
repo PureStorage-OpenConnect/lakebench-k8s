@@ -34,6 +34,8 @@ The rule dispatcher (`get_rule`) is called by replay_financial.py.
 
 from __future__ import annotations
 
+import contextlib
+
 from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     array,
@@ -433,6 +435,13 @@ PATH_SEARCH_NO_PVC_BYTES = 20 * 2**30
 PATH_SEARCH_ROWS_PER_PARTITION = 2_000_000
 PATH_SEARCH_LEVEL_EDGE_RATIO = 4
 PATH_SEARCH_MAX_PARTITIONS = 2048
+# Files per written result frame (cycles, complete chains): results are small
+# next to the levels they come from.
+PATH_SEARCH_RESULT_FILES = 16
+# Spill directories of drivers that died before their cleanup are swept at
+# the next detection run once their newest file is this old. Well above any
+# gold job's run time, so a live replay driver's files are never touched.
+PATH_SEARCH_STALE_HOURS = 24
 _SCRATCH_SIZE_CONF = (
     "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-local-dir-1.options.sizeLimit"
 )
@@ -514,6 +523,49 @@ def _delete_uri(spark, path: str, who: str) -> None:
         print(f"[{who}] cleanup of {path} failed: {e}")
 
 
+def sweep_stale_path_spill(spark, max_age_hours: float = PATH_SEARCH_STALE_HOURS) -> int:
+    """Delete other drivers' spill directories whose newest file is older than
+    ``max_age_hours``: a driver killed mid-search (OOM, eviction, retry) never
+    ran its cleanup, and every retry has a new application id. Returns the
+    number of directories removed. Best effort."""
+    import time
+
+    root = _path_spill_root(spark)
+    if not root:
+        return 0
+    parent = root.rsplit("/", 1)[0]
+    cutoff_ms = (time.time() - max_age_hours * 3600) * 1000
+    removed = 0
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(parent), hconf)
+        ppath = jvm.org.apache.hadoop.fs.Path(parent)
+        if not fs.exists(ppath):
+            return 0
+        for st in fs.listStatus(ppath):
+            p = st.getPath()
+            # By name: Hadoop prints file:/// URIs as file:/, so a whole-path
+            # comparison would miss this driver's own directory.
+            if not st.isDirectory() or p.getName() == root.rstrip("/").rsplit("/", 1)[1]:
+                continue
+            # Directory times are not reliable on S3; the files' are.
+            fresh = False
+            it = fs.listFiles(p, True)
+            while it.hasNext():
+                if it.next().getModificationTime() >= cutoff_ms:
+                    fresh = True
+                    break
+            if not fresh:
+                fs.delete(p, True)
+                removed += 1
+    except Exception as e:  # noqa: BLE001
+        print(f"[path-search] stale spill sweep under {parent} failed: {e}")
+    if removed:
+        print(f"[path-search] removed {removed} stale spill directories under {parent}")
+    return removed
+
+
 def cleanup_path_search_spill(spark) -> None:
     """Delete this driver's path-search levels and results. Call once the
     rule's alerts are written (the alerts frame reads the result files)."""
@@ -535,9 +587,14 @@ class _PathBudget:
     checkpoint, used before, kept each block only on the executor that built
     it: at scale 10 gold executors were OOM-killed and the next level failed
     with CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND, since a lost block cannot be
-    recomputed. The written levels also leave executor memory and scratch;
-    a local checkpoint held them at MEMORY_AND_DISK. Without ``LB_GOLD_URI``
-    (unit tests) the local checkpoint remains.
+    recomputed. Why the executors exceeded their 40Gi limit is not settled
+    from the driver log alone: exit 137 is the container limit, and cached
+    blocks at MEMORY_AND_DISK are evicted rather than killed. Writing the
+    levels removes the fatal dependency either way and takes them out of
+    executor memory and scratch; the writes add S3A upload buffers
+    (fast.upload.buffer=bytebuffer, about 4 tasks x 4 blocks x 64 MB per
+    executor) to the 8g overhead. Without ``LB_GOLD_URI`` (unit tests) the
+    local checkpoint remains.
 
     The budget still counts a written level as held. That overstates the
     scratch it takes (only its shuffle, when it is the next level's input,
@@ -577,10 +634,14 @@ class _PathBudget:
         if self.live > self.max_rows:
             self._skip(f"holds {label} of", n)
 
-    def cut(self, df: DataFrame, label: str) -> DataFrame:
-        """Materialise ``df`` without its lineage (see the class docstring)."""
+    def cut(self, df: DataFrame, label: str, files: int | None = None) -> DataFrame:
+        """Materialise ``df`` without its lineage (see the class docstring).
+        ``files`` repartitions a small result first, so it is not written as
+        one file per join partition."""
         if not self.spill:
             return df.localCheckpoint(eager=True)
+        if files:
+            df = df.repartition(files)
         path = f"{self.spill}/{label.replace(' ', '-')}"
         schema = df.schema
         hconf = self.spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
@@ -770,6 +831,33 @@ def _search_frames(
     return budget, edges, n_edges, step, n_step, parts
 
 
+@contextlib.contextmanager
+def _copartition_on_key_subset(spark):
+    """Let the extension join reuse the step frame's partitioning when the
+    join has more keys than it is partitioned on.
+
+    On the last hop both rules keep only extensions that return to the start,
+    and the optimizer adds ``e_dst == start`` to the join keys. With
+    spark.sql.requireAllClusterKeysForCoPartition at its default (true), the
+    step frame's partitioning on (e_src, _b) then no longer counts, and Spark
+    reshuffled the whole step frame and the paths at the job's shuffle
+    partitions (32 at scale 10) for the last and often largest level. A
+    partitioning on a subset of the keys still places every matching pair in
+    one partition. Set only while the levels are built; every join runs
+    eagerly inside.
+    """
+    key = "spark.sql.requireAllClusterKeysForCoPartition"
+    prior = spark.conf.get(key, None)
+    spark.conf.set(key, "false")
+    try:
+        yield
+    finally:
+        if prior is None:
+            spark.conf.unset(key)
+        else:
+            spark.conf.set(key, prior)
+
+
 def _extend_paths(paths: DataFrame, step: DataFrame, bucket_us: int, parts: int) -> DataFrame:
     """Join each path to the transfers that can follow its last hop.
 
@@ -807,7 +895,7 @@ def _cut_small(df: DataFrame, budget: _PathBudget, label: str) -> DataFrame:
     lineage, so the levels it came from can be released. Its rows stay held
     until the rule ends and count against the budget. Written result files
     stay until cleanup_path_search_spill, after the alerts are written."""
-    cut = budget.cut(df, label)
+    cut = budget.cut(df, label, files=PATH_SEARCH_RESULT_FILES)
     budget.add(cut.count(), label)
     return cut
 
@@ -935,7 +1023,8 @@ def w3_round_tripping(
         )
 
     try:
-        found = _w3_levels(budget, edges, n_edges, step, paths, _ext, max_hops)
+        with _copartition_on_key_subset(spark):
+            found = _w3_levels(budget, edges, n_edges, step, paths, _ext, max_hops)
     except BaseException:
         budget.discard()
         raise
@@ -1152,9 +1241,10 @@ def w17_layering_chain(
         array(col("src"), col("dst")).alias("nodes"),
     )
     try:
-        chains = _w17_levels(
-            budget, edges, n_edges, step, paths, _ext, _advance, min_hops, max_hops
-        )
+        with _copartition_on_key_subset(spark):
+            chains = _w17_levels(
+                budget, edges, n_edges, step, paths, _ext, _advance, min_hops, max_hops
+            )
     except BaseException:
         budget.discard()
         raise
