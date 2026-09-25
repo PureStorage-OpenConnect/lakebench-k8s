@@ -432,6 +432,15 @@ def _evaluate_typology(
         # applies to what each model gains over a random ranking, so a full
         # model that barely beats prevalence does not fail every feature.
         rel_cap = prev + lk["shortcut_ap_rel_max"] * (ap - prev)
+    elif formula == "lift_over_prevalence_band_floor":
+        # The same lift rule, measured against max(ap, band floor): the
+        # question is whether one or two features carry a large share of the
+        # signal a typology must have to count, so a weak model (AP near
+        # prevalence) cannot shrink the cap to the prevalence itself. In band
+        # it equals lift_over_prevalence; below band the cap is at most
+        # prev + rel_max * (ap_min - prev), under the absolute cap.
+        ref = max(ap, prereg["band"]["ap_min"])
+        rel_cap = prev + lk["shortcut_ap_rel_max"] * (ref - prev)
     else:
         raise ValueError(f"unknown leakage.relative_cap_formula {formula!r}")
     shortcuts = {}
@@ -454,6 +463,10 @@ def _evaluate_typology(
             "pass": abs_ok and rel_ok,
         }
     out["shortcuts"] = shortcuts
+    # Ungated: a reference model that loses to a one- or two-feature tree is
+    # not measuring the typology (the D0 v3.4.1 failure mode).
+    best_shortcut = max((v["best"]["ap"] for v in shortcuts.values()), default=None)
+    out["model_beats_shortcuts"] = None if best_shortcut is None else bool(ap > best_shortcut)
     out["leakage_pass"] = all(s["pass"] for s in shortcuts.values()) and len(shortcuts) == len(
         lk["shortcut_models"]
     )
