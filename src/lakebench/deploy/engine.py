@@ -12,7 +12,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from lakebench.config import LakebenchConfig
-from lakebench.config.schema import CatalogType, require_polaris_client_secret
+from lakebench.config.schema import CatalogType, QueryEngineType, require_polaris_client_secret
 from lakebench.k8s import K8sClient
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,62 @@ def image_tag(image: str) -> str:
         return image.split("@", 1)[1][:12]
     tag = image.rsplit(":", 1)[1] if ":" in image else "latest"
     return tag
+
+
+# LB-146: the JVM heap must sit well below the container memory limit. The
+# process also needs metaspace, thread stacks, direct buffers, code cache and
+# GC structures outside the heap; with -Xmx equal to the limit the kernel
+# OOM-kills the container (exit 137) before the JVM ever reports a heap OOM.
+# Trino's deployment guidance is 70-85% of the memory available to the JVM.
+JVM_HEAP_FRACTION = 0.8
+
+_MEM_UNITS_BYTES = {
+    "Ki": 2**10,
+    "Mi": 2**20,
+    "Gi": 2**30,
+    "Ti": 2**40,
+    "K": 10**3,
+    "k": 10**3,
+    "M": 10**6,
+    "G": 10**9,
+    "T": 10**12,
+}
+
+
+def k8s_memory_bytes(quantity: str) -> int:
+    """Parse a Kubernetes memory quantity (``8Gi``, ``4096Mi``, ``8G``) to bytes.
+
+    Binary suffixes (Ki/Mi/Gi/Ti) and decimal suffixes (K/M/G/T) follow
+    Kubernetes semantics, because the value is also the pod limit and the
+    kubelet reads it that way. A bare number is bytes. Anything else
+    (including Spark-style ``8g``, which Kubernetes rejects) raises.
+    """
+    s = str(quantity).strip()
+    for unit in sorted(_MEM_UNITS_BYTES, key=len, reverse=True):
+        if s.endswith(unit):
+            number = s[: -len(unit)]
+            break
+    else:
+        unit, number = "", s
+    try:
+        value = float(number)
+    except ValueError:
+        raise ValueError(f"unparseable memory quantity {quantity!r}") from None
+    if value <= 0:
+        raise ValueError(f"memory quantity must be positive, got {quantity!r}")
+    return int(value * _MEM_UNITS_BYTES.get(unit, 1))
+
+
+def jvm_heap_for_limit(limit: str, fraction: float = JVM_HEAP_FRACTION) -> str:
+    """Return a JVM heap size in whole MiB (e.g. ``6553m``) for a container limit.
+
+    The value is valid both as ``-Xmx<value>`` and as ``spark.driver.memory``;
+    both read a lowercase ``m`` suffix as MiB.
+    """
+    heap_mib = int(k8s_memory_bytes(limit) * fraction) // 2**20
+    if heap_mib < 1:
+        raise ValueError(f"memory limit {limit!r} is too small for a JVM heap")
+    return f"{heap_mib}m"
 
 
 def _try_cleanup_orphan_bucket(boto_client, bucket: str) -> None:
@@ -251,6 +307,21 @@ class DeploymentEngine:
         return ".".join(tag.split(".")[:2])
 
     @staticmethod
+    def _trino_heap(cfg: Any, limit: str) -> str:
+        """Trino -Xmx for a pod memory limit (LB-146).
+
+        Strict only when Trino is the active query engine: an unparseable
+        Trino memory on a spark-thrift or duckdb deployment must not stop
+        that deployment's destroy, which also builds this context.
+        """
+        if cfg.architecture.query_engine.type == QueryEngineType.TRINO:
+            return jvm_heap_for_limit(limit)
+        try:
+            return jvm_heap_for_limit(limit)
+        except ValueError:
+            return ""
+
+    @staticmethod
     def _spark_mem_to_k8s(spark_mem: str) -> str:
         """Convert Spark memory format (e.g. ``4g``) to K8s format (e.g. ``4Gi``)."""
         s = spark_mem.strip().lower()
@@ -407,6 +478,13 @@ class DeploymentEngine:
             "trino_worker_replicas": cfg.architecture.query_engine.trino.worker.replicas,
             "trino_worker_cpu": cfg.architecture.query_engine.trino.worker.cpu,
             "trino_worker_memory": cfg.architecture.query_engine.trino.worker.memory,
+            # LB-146: heap is a fraction of the pod limit, never equal to it.
+            "trino_coordinator_heap": self._trino_heap(
+                cfg, cfg.architecture.query_engine.trino.coordinator.memory
+            ),
+            "trino_worker_heap": self._trino_heap(
+                cfg, cfg.architecture.query_engine.trino.worker.memory
+            ),
             "trino_catalog_name": cfg.architecture.query_engine.trino.catalog_name,
             # Trino worker storage (StatefulSet PVCs + spill)
             "trino_worker_spill_enabled": cfg.architecture.query_engine.trino.worker.spill_enabled,
