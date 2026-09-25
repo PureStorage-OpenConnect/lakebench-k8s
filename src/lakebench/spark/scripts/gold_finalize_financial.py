@@ -378,6 +378,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
         RuleSkipped,
         cleanup_path_search_spill,
         get_rule,
+        sweep_stale_path_spill,
     )
 
     # Which rules to run this invocation. Batch passes None (the full default
@@ -399,6 +400,9 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     except Exception as e:  # noqa: BLE001 -- broad catch on catalog errors
         log(f"[detection] silver.entities not readable ({e}); W7 will skip.")
         silver_entities = None
+
+    # W3/W17 path levels a killed earlier driver left under the gold bucket.
+    sweep_stale_path_spill(spark)
 
     log("=" * 60)
     log(f"Running detection rules: {list(rules)}")
