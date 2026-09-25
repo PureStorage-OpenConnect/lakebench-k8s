@@ -20,12 +20,11 @@ from common import (
     env,
     log,
     resolve_data_clock,
+    sample_key_profile,
     set_utc_session,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    approx_count_distinct,
-    avg,
     col,
     to_date,
 )
@@ -89,7 +88,7 @@ def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
     Key changes:
     - Use filesystem API for size (no Spark scan)
     - Estimate row count from size (no count())
-    - Use approx_count_distinct on sample (no distinct().count() shuffle)
+    - Estimate distinct customers from the sample's frequency profile (Chao1)
     - Single aggregation pass on sample for all stats
     """
     log("Profiling Bronze data (lightweight)...")
@@ -108,20 +107,22 @@ def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
     estimated_row_count = int(txn_size_gb * 1024 * 1024 * 1024 / 4096)
     log(f"  Estimated rows: {estimated_row_count:,}")
 
-    # 4. Use approx_count_distinct on SAMPLE (no shuffle, no full scan)
-    # Sample fraction: 0.1% or enough for 10M rows, whichever is smaller
+    # 4. Sample: 0.1% or enough for 10M rows, whichever is smaller
     sample_fraction = min(0.001, 10_000_000 / max(estimated_row_count, 1))
     sample_df = transactions.sample(sample_fraction)
 
-    # Single aggregation pass for all stats
     sample_stats = sample_df.agg(
-        approx_count_distinct("customer_id").alias("approx_customers"),
         min_(to_date(col("event_timestamp"))).alias("min_date"),
         max_(to_date(col("event_timestamp"))).alias("max_date"),
     ).collect()[0]
 
-    # Scale up approximate customer count
-    approx_customer_count = int(sample_stats.approx_customers / sample_fraction)
+    # Customers and skew from the sample's per-customer counts. The distinct
+    # count is not scaled by 1 / sample_fraction: that treated every sampled
+    # customer as unique to the sample and reported 14.7M customers at
+    # scale 10, where there are 1M (LB-144).
+    approx_customer_count, skew_factor = sample_key_profile(
+        sample_df, "customer_id", estimated_row_count
+    )
     min_date = sample_stats.min_date
     max_date = sample_stats.max_date
     date_range_days = (max_date - min_date).days if min_date and max_date else 1
@@ -129,16 +130,6 @@ def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
     log(f"  Approx customers: {approx_customer_count:,}")
     log(f"  Date range: {min_date} to {max_date} ({date_range_days} days)")
 
-    # 5. Skew detection from sample (small local shuffle, not full data)
-    key_stats = (
-        sample_df.groupBy("customer_id")
-        .count()
-        .agg(max_("count").alias("max_count"), avg("count").alias("avg_count"))
-        .collect()[0]
-    )
-    max_count = key_stats.max_count or 1
-    avg_count = key_stats.avg_count or 1
-    skew_factor = max_count / max(avg_count, 1)
     log(f"  Skew factor: {skew_factor:.1f}")
 
     profile = DataProfile(
