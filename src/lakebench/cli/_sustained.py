@@ -1737,18 +1737,34 @@ def _run_sustained(
                     f"AML continuous gate: detection produced {alert_count:,} "
                     "alerts over the window."
                 )
-            # P10.2 workflow invariants on every tick that ran the operations
-            # layer; none at all means it never ran.
-            if gold_logs is not None:
-                from lakebench.metrics.tm_ops import parse_tm_invariants, tm_gate_problems
+            # P10 TM operations: its own verdict on every operations pass.
+            # Only violated invariants fail the run; a layer that could not
+            # run (no manifest within the window, an error) is reported as
+            # not run, and a missing log as unknown, as in batch.
+            from lakebench.cli._run import _report_tm_verdict
+            from lakebench.metrics.tm_ops import (
+                parse_tm_invariants,
+                parse_tm_ops,
+                parse_tm_status,
+                tm_verdict,
+            )
 
-                _tm_problems = tm_gate_problems(
-                    parse_tm_invariants(gold_logs), label="AML continuous gate"
-                )
-                for _p in _tm_problems:
-                    print_error(_p)
-                if _tm_problems:
-                    pipeline_success = False
+            _inv = parse_tm_invariants(gold_logs)
+            _tm = tm_verdict(
+                _inv,
+                parse_tm_status(gold_logs),
+                enabled=cfg.architecture.workload.tm_operations.enabled,
+                logs_captured=gold_logs is not None,
+                continuous=True,
+                label="AML continuous gate",
+            )
+            _tm["invariants"] = {str(c): v for c, v in sorted(_inv.items())}
+            _tm["ops"] = parse_tm_ops(gold_logs)
+            _tm["mode"] = "continuous"
+            if collector.current_run is not None:
+                collector.current_run.tm_operations = _tm
+            if _report_tm_verdict(_tm, "AML continuous gate"):
+                pipeline_success = False
 
         # c360 honest continuous gate (LB-044 for c360; AML has its own above).
         # A continuous run whose bronze or silver stream processed zero rows

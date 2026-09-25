@@ -108,3 +108,68 @@ def test_duckdb_adapter_rewrites_financial_extra_tables():
     out = ex.adapt_query("SELECT * FROM lakehouse.gold.cases JOIN lakehouse.silver.entities")
     assert "s3://gb/warehouse/gold.db/cases" in out
     assert "s3://sb/warehouse/silver.db/entities" in out
+
+
+def test_duckdb_hive_path_matches_where_the_gold_job_creates_namespaces():
+    """On Hive, tm_operations creates the gold namespace with no LOCATION, so
+    Iceberg's HiveCatalog puts it at <catalog warehouse>/<ns>.db and each table
+    under it. The gold jobs' catalog warehouse is the gold bucket and the
+    silver jobs' the silver bucket, which is the path the DuckDB adapter
+    rewrites to."""
+    from unittest.mock import MagicMock
+
+    from lakebench.modules.query_engines.duckdb.executor import DuckDBExecutor
+    from lakebench.spark.job import JobType, SparkJobManager
+    from tests.conftest import make_config
+
+    cfg = make_config(architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}})
+    k8s = MagicMock()
+    k8s.get_cluster_capacity.return_value = None
+    mgr = SparkJobManager(cfg, k8s)
+    b = cfg.platform.storage.s3.buckets
+
+    def warehouse(job):
+        conf = mgr._build_manifest(job)["spec"]["sparkConf"]
+        return next(v for k, v in conf.items() if k.endswith(".warehouse") and "catalog" in k)
+
+    assert warehouse(JobType.GOLD_FINALIZE) == f"s3a://{b.gold}/warehouse/"
+    assert warehouse(JobType.GOLD_REFRESH) == f"s3a://{b.gold}/warehouse/"
+    assert warehouse(JobType.SILVER_BUILD) == f"s3a://{b.silver}/warehouse/"
+    ex = DuckDBExecutor(
+        namespace="x",
+        catalog_name="lakehouse",
+        s3_buckets={"silver": b.silver, "gold": b.gold},
+        table_names={
+            "gold_cases": "gold.cases",
+            "gold_alert_dispositions": "gold.alert_dispositions",
+        },
+        catalog_type="hive",
+    )
+    out = ex.adapt_query("SELECT * FROM lakehouse.gold.cases, lakehouse.gold.alert_dispositions")
+    wh = warehouse(JobType.GOLD_FINALIZE).replace("s3a://", "s3://")
+    assert f"{wh}gold.db/cases" in out and f"{wh}gold.db/alert_dispositions" in out
+
+
+def test_tm_tables_are_in_iceberg_maintenance():
+    """Continuous appends a snapshot per operations pass to each TM table;
+    the continuous maintenance round expires snapshots on all four."""
+    from unittest.mock import MagicMock, patch
+
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+    from tests.conftest import make_config
+
+    cfg = make_config(architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}})
+    sent = []
+    with (
+        patch(
+            "lakebench.deploy.iceberg.find_maintenance_engine",
+            return_value=("trino", "pod", "lakehouse"),
+        ),
+        patch(
+            "lakebench.deploy.iceberg.exec_sql",
+            side_effect=lambda e, k, p, n, sql: sent.append(sql),
+        ),
+    ):
+        _run_iceberg_maintenance(cfg, MagicMock(), MagicMock(), MagicMock(), "30m")
+    for t in ("tm_reconciliation", "scenario_coverage", "alert_dispositions", "cases"):
+        assert any(f"lakehouse.gold.{t} " in q and "expire_snapshots" in q for q in sent), t

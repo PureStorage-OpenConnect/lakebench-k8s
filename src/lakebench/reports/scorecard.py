@@ -115,7 +115,7 @@ class FinancialScorecardBlock:
         # Nothing AML-specific to show (e.g. a c360 run mislabelled, or a
         # financial run before detection wired) -- stay silent.
         if not alerts_by_rule and not rules_skipped and not scoring:
-            return _render_tm_operations(gold_jobs)
+            return _safe_tm_section(metrics, gold_jobs)
 
         try:
             from lakebench.benchmark.aml_queries import RULE_TARGETS
@@ -221,7 +221,7 @@ class FinancialScorecardBlock:
                 + "</div>"
             )
 
-        tm_html = _render_tm_operations(gold_jobs)
+        tm_html = _safe_tm_section(metrics, gold_jobs)
         return (
             tm_html
             + f"""
@@ -259,7 +259,19 @@ def _fmt_n(v) -> str:
     return f"{int(v):,}" if isinstance(v, (int, float)) else "n/a"
 
 
-def _render_tm_operations(gold_jobs: list) -> str:
+def _safe_tm_section(metrics, gold_jobs: list) -> str:
+    """The TM section in its own guard: a malformed ``tm_operations`` or
+    ``tm_ops`` blanks this section only, never the detection table."""
+    try:
+        return _render_tm_operations(gold_jobs, getattr(metrics, "tm_operations", None))
+    except Exception:  # noqa: BLE001 -- render must never crash the report
+        return (
+            "<section><h3>Transaction Monitoring Operations</h3>"
+            "<p>The operations summary in this run's metrics could not be rendered.</p></section>"
+        )
+
+
+def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
     """TM operations pack (GOALS P10.3, core sections) from the last
     gold-finalize job's ``tm_ops`` summary, plus every cycle's invariants.
 
@@ -269,19 +281,38 @@ def _render_tm_operations(gold_jobs: list) -> str:
     """
     from html import escape
 
-    ops = None
-    for j in reversed(gold_jobs or []):
-        if getattr(j, "tm_ops", None):
-            ops = j.tm_ops
-            break
+    verdict = verdict if isinstance(verdict, dict) else {}
+    ops = verdict.get("ops") if isinstance(verdict.get("ops"), dict) else None
     cycles: list[tuple[str, str, dict]] = []
-    for idx, j in enumerate(gold_jobs or [], start=1):
-        for c, inv in sorted((getattr(j, "tm_invariants", None) or {}).items()):
-            cycles.append((str(idx), c, inv))
-    if not ops and not cycles:
+    if not ops:
+        for j in reversed(gold_jobs or []):
+            if getattr(j, "tm_ops", None):
+                ops = j.tm_ops
+                break
+    if verdict.get("invariants"):
+        # Run-level record: batch (merged over cycles) or continuous (one
+        # entry per operations pass).
+        for c, inv in sorted(verdict["invariants"].items(), key=lambda kv: int(kv[0])):
+            cycles.append(("", str(c), inv))
+    else:
+        for idx, j in enumerate(gold_jobs or [], start=1):
+            for c, inv in sorted((getattr(j, "tm_invariants", None) or {}).items()):
+                cycles.append((str(idx), c, inv))
+    if not ops and not cycles and not verdict:
         return ""
     ops = ops or {}
     parts = ["<section><h3>Transaction Monitoring Operations</h3>"]
+    if verdict.get("status"):
+        mode = verdict.get("mode") or ""
+        unit = "operations pass" if mode == "continuous" else "cycle"
+        colour = {"pass": "success", "fail": "danger"}.get(verdict["status"], "warning")
+        parts.append(
+            f"<p>P10 gate ({escape(mode)}, per {unit}): "
+            f'<strong style="color: var(--{colour});">'
+            f"{escape(str(verdict['status']).replace('_', ' '))}</strong>"
+            + (f" -- {escape(str(verdict.get('reason')))}" if verdict.get("reason") else "")
+            + "</p>"
+        )
     sim = ops.get("simulation") or {}
     if sim:
         parts.append(
@@ -383,8 +414,24 @@ def _render_tm_operations(gold_jobs: list) -> str:
             f"determination-to-filing median {_fmt_n(ops.get('filing_days_median'))} d, "
             f"p95 {_fmt_n(ops.get('filing_days_p95'))} d, "
             f"{_fmt_pct(ops.get('filed_over_30_days_pct'))} over 30 days; "
-            f"continuing-activity reviews due: {_fmt_n(ops.get('continuing_reviews_due'))}.</p>"
+            f"continuing-activity reviews due: {_fmt_n(ops.get('continuing_reviews_due'))} "
+            f"(opened {_fmt_n(ops.get('continuing_reviews_opened'))}, folded into an open "
+            f"investigation {_fmt_n(ops.get('continuing_reviews_folded'))}, waiting on a case "
+            f"pending filing {_fmt_n(ops.get('continuing_reviews_deferred'))}).</p>"
         )
+        limits = ops.get("sars_by_limit") or {}
+        if limits:
+            rows = "".join(
+                f"<tr><td>{escape(str(k))}</td><td>{_fmt_n(v.get('filed'))}</td>"
+                f"<td>{_fmt_n(v.get('late'))}</td></tr>"
+                for k, v in sorted(limits.items())
+            )
+            parts.append(
+                "<table><thead><tr><th>Filing limit</th><th>SARs filed</th><th>Filed late</th>"
+                "</tr></thead><tbody>" + rows + "</tbody></table>"
+                f"<p>Continuing-activity SARs filed more than 120 days after the prior SAR: "
+                f"{_fmt_n(ops.get('continuing_sars_over_120_days'))}.</p>"
+            )
     parts.append("</section>")
     return "\n".join(parts)
 

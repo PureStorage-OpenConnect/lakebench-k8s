@@ -60,29 +60,80 @@ def test_skipped_behavioural_rule_warns():
     assert any("gather_scatter" in w and "not run" in w for w in warnings)
 
 
-# P10.2: the TM workflow invariants are a gate, every cycle.
+# P10: the TM operations verdict is separate from detection. Only violated
+# invariants fail the run; a layer that could not run is "not run".
 
 
-def test_failed_workflow_invariant_fails_the_run():
+def _tm(jobs, enabled=True):
+    from lakebench.cli._run import _aml_tm_verdict
+
+    return _aml_tm_verdict(jobs, enabled=enabled)
+
+
+def _tjob(alerts=None, tm=_PASS, status=None, ops=None):
+    return SimpleNamespace(
+        alerts_by_rule=alerts or {},
+        rule_errors={},
+        rules_skipped={},
+        tm_invariants=tm,
+        tm_status=status or {},
+        tm_ops=ops,
+    )
+
+
+def test_tm_is_not_part_of_the_detection_gate():
     tm = {"1": {"sars_le_cases": {"status": "fail", "detail": "SARs 5 <= cases 4"}}}
     probs, _ = _aml_batch_gate_problems([_job({"W2": 3}, tm=tm)])
-    assert probs == [
+    assert probs == []
+
+
+def test_failed_workflow_invariant_fails_the_verdict():
+    tm = {"1": {"sars_le_cases": {"status": "fail", "detail": "SARs 5 <= cases 4"}}}
+    v = _tm([_tjob({"W2": 3}, tm=tm)])
+    assert v["status"] == "fail"
+    assert v["problems"] == [
         "gold-finalize: cycle 1: workflow invariant sars_le_cases fail: SARs 5 <= cases 4"
     ]
 
 
-def test_workflow_error_fails_the_run():
-    tm = {"1": {"workflow": {"status": "error", "detail": "RuntimeError: no manifest"}}}
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 3}, tm=tm)])
-    assert len(probs) == 1 and "workflow" in probs[0] and "error" in probs[0]
+def test_missing_manifest_is_not_run_not_a_failure():
+    st = {"1": {"status": "not_run", "reason": "no ground-truth manifest (bronze.manifest)"}}
+    v = _tm([_tjob({"W2": 3}, tm={}, status=st)])
+    assert v["status"] == "not_run" and not v["problems"]
+    assert "manifest" in v["reason"]
 
 
-def test_parsed_log_without_invariants_fails_the_run():
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 3}, tm={})])
-    assert any("reported no workflow invariants" in p for p in probs)
+def test_parsed_log_without_tm_lines_is_not_run():
+    v = _tm([_tjob({"W2": 3}, tm={})])
+    assert v["status"] == "not_run" and "no TM lines" in v["reason"]
+
+
+def test_no_log_at_all_is_unknown():
+    v = _tm([_tjob({}, tm={})])
+    assert v["status"] == "unknown" and not v["problems"]
+
+
+def test_disabled_skips_the_gate_even_with_failures():
+    tm = {"1": {"sars_le_cases": {"status": "fail", "detail": "x"}}}
+    v = _tm([_tjob({"W2": 3}, tm=tm)], enabled=False)
+    assert v["status"] == "disabled" and not v["problems"]
 
 
 def test_every_cycle_is_gated_not_only_the_last():
     bad = {"1": {"funnel_monotone": {"status": "fail", "detail": "cases=3 < sars=4"}}}
-    probs, _ = _aml_batch_gate_problems([_job({"W2": 3}, tm=bad), _job({"W2": 3})])
-    assert probs and probs[0].startswith("gold-finalize 1: cycle 1:")
+    good = {"2": {"funnel_monotone": {"status": "pass", "detail": ""}}}
+    v = _tm([_tjob({"W2": 3}, tm=bad), _tjob({"W2": 3}, tm=good)])
+    assert v["status"] == "fail" and v["problems"][0].startswith("gold-finalize: cycle 1:")
+
+
+def test_one_cycle_not_run_is_reported_even_when_others_pass():
+    st = {"2": {"status": "not_run", "reason": "error: boom"}}
+    v = _tm([_tjob({"W2": 3}), _tjob({"W2": 3}, tm={}, status=st)])
+    assert (
+        v["status"] == "not_run" and "cycle 2" in v["reason"] and "ran on cycles [1]" in v["reason"]
+    )
+
+
+def test_all_pass():
+    v = _tm([_tjob({"W2": 3}, ops={"funnel": {}})])
+    assert v["status"] == "pass" and v["ops"] == {"funnel": {}} and v["mode"] == "batch"

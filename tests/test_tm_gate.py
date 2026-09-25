@@ -61,7 +61,7 @@ def test_gate_names_the_failed_invariant_and_cycle():
     assert tm_gate_problems(parse_tm_invariants(LOGS), label="x") == [
         "x: cycle 1: workflow invariant sars_le_cases fail: SARs 5 <= cases 4"
     ]
-    assert tm_gate_problems({}) and "did not run" in tm_gate_problems({})[0]
+    assert tm_gate_problems({}) == []  # not run is the verdict's call, not a problem
 
 
 def test_continuous_ticks_are_all_gated():
@@ -126,6 +126,9 @@ def test_spark_jobs_get_tm_env_and_the_module():
     env = {e["name"]: e.get("value") for e in manifest["spec"]["driver"]["env"]}
     assert env["LB_TM_ANALYST_ACCURACY"] == "0.8"
     assert env["LB_TM_SEED"] == "5"
+    assert env["LB_TM_ENABLED"] == "true"
+    assert env["LB_TM_CONTINUOUS_INTERVAL_S"] == "1800"
+    assert env["LB_TM_COUNTERPARTY_SCENARIOS"].split(",")[0] == "W1_connected_components"
     assert env["LB_FINANCIAL_GOLD_CASES"] == "gold.cases"
     exec_env = {e["name"] for e in manifest["spec"]["executor"]["env"]}
     assert "LB_TM_SEED" in exec_env
@@ -135,3 +138,70 @@ def test_spark_jobs_get_tm_env_and_the_module():
     from lakebench.modules.pipeline_engines.spark.job import SparkJobManager as M
 
     assert '"tm_operations.py"' in inspect.getsource(M.deploy_scripts_configmap)
+
+
+def test_status_lines_parse_and_last_wins():
+    from lakebench.metrics.tm_ops import parse_tm_status
+
+    logs = (
+        "[tm-status] status=waiting cycle=1 reason=no manifest yet\n"
+        "[tm-status] status=not_run cycle=2 reason=error: boom\n"
+        "[tm-status] status=ran cycle=2 reason=ok\n"
+    )
+    assert parse_tm_status(logs) == {
+        1: {"status": "waiting", "reason": "no manifest yet"},
+        2: {"status": "ran", "reason": "ok"},
+    }
+
+
+def test_continuous_window_without_the_manifest_is_not_run():
+    from lakebench.metrics.tm_ops import parse_tm_status, tm_verdict
+
+    logs = "".join(
+        f"[tm-status] status=waiting cycle={c} reason=no manifest yet\n" for c in range(1, 9)
+    )
+    v = tm_verdict({}, parse_tm_status(logs), continuous=True)
+    assert v["status"] == "not_run" and "window ended" in v["reason"] and not v["problems"]
+
+
+def test_continuous_waiting_then_running_passes():
+    from lakebench.metrics.tm_ops import parse_tm_invariants, parse_tm_status, tm_verdict
+
+    logs = (
+        "[tm-status] status=waiting cycle=1 reason=no manifest yet\n"
+        "[tm-status] status=ran cycle=1 reason=ok\n"
+        "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
+    )
+    v = tm_verdict(parse_tm_invariants(logs), parse_tm_status(logs), continuous=True)
+    assert v["status"] == "pass"
+
+
+def test_continuous_section_renders_from_the_run_record():
+    from lakebench.reports.scorecard import FinancialScorecardBlock
+
+    verdict = {
+        "status": "not_run",
+        "reason": "the window ended before the layer could run (no manifest yet)",
+        "mode": "continuous",
+        "invariants": {"1": {"reconciliation": {"status": "pass", "detail": ""}}},
+        "ops": OPS,
+    }
+    html = FinancialScorecardBlock().render_detail_html(
+        SimpleNamespace(jobs=[], financial_scoring=None, config_snapshot={}, tm_operations=verdict)
+    )
+    assert "Transaction Monitoring Operations" in html
+    assert "per operations pass" in html and "not run" in html and "window ended" in html
+    assert "Cycle funnel" in html
+
+
+def test_bad_tm_summary_does_not_blank_the_detection_table():
+    from lakebench.reports.scorecard import FinancialScorecardBlock
+
+    job = JobMetrics(job_name="g", job_type="gold-finalize", success=True)
+    job.alerts_by_rule = {"W2_structuring": 3}
+    job.tm_ops = {"scenarios": {"W2": 5}, "funnel": "garbage"}
+    html = FinancialScorecardBlock().render_detail_html(
+        SimpleNamespace(jobs=[job], financial_scoring=None, config_snapshot={}, tm_operations=None)
+    )
+    assert "W2_structuring" in html
+    assert "could not be rendered" in html
