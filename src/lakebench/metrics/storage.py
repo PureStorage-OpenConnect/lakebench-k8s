@@ -576,6 +576,11 @@ class MetricsStorage:
                 maintenance_paired_queries=scores.get("maintenance_paired_queries", 0),
                 maintenance_value_reason=scores.get("maintenance_value_reason", ""),
                 pre_compaction_benchmark=pb_data.get("pre_compaction_benchmark"),
+                maintenance_settle_seconds=scores.get("maintenance_settle_seconds"),
+                maintenance_settled=scores.get("maintenance_settled"),
+                maintenance_settle_capped=scores.get("maintenance_settle_capped", False),
+                maintenance_settle_verified=scores.get("maintenance_settle_verified"),
+                maintenance_settle=pb_data.get("maintenance_settle"),
             )
             if pb_data.get("end_time"):
                 metrics.pipeline_benchmark.end_time = datetime.fromisoformat(pb_data["end_time"])

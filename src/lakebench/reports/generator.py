@@ -461,6 +461,35 @@ class ReportGenerator:
                 "<tr><td>QpH improvement</td>"
                 f"<td>not reported ({escape(pb.maintenance_value_reason)})</td></tr>"
             )
+        settle_s = pb.maintenance_settle_seconds
+        if settle_s is not None:
+            from html import escape as _esc
+
+            detail = pb.maintenance_settle or {}
+            probes = detail.get("probes") or []
+            times = ", ".join(
+                "fail" if p.get("seconds") is None else f"{p['seconds']:.1f}s" for p in probes
+            )
+            if pb.maintenance_settled and pb.maintenance_settle_verified is False:
+                state = (
+                    f"probes stable after {settle_s:.0f}s (unverified: no "
+                    "pre-maintenance time to compare against)"
+                )
+            elif pb.maintenance_settled:
+                state = f"settled after {settle_s:.0f}s"
+            elif pb.maintenance_settle_capped:
+                state = f"did not settle within {float(detail.get('max_seconds', settle_s)):.0f}s"
+            else:
+                state = f"did not settle ({detail.get('reason') or 'unknown'})"
+            rows.append(
+                "<tr><td>Storage settle wait</td>"
+                f"<td>{_esc(state)}; not counted in time to value</td></tr>"
+            )
+            if probes:
+                rows.append(
+                    f"<tr><td>Settle probes ({_esc(str(detail.get('probe_query', '')))})</td>"
+                    f"<td>{_esc(times)}</td></tr>"
+                )
 
         if not rows:
             return ""
