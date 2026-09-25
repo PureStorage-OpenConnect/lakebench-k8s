@@ -131,10 +131,20 @@ def path_size_gb(spark, uri):
 
 
 def _describe_table(spark, fq_table):
-    """(location, provider) of a catalog table from DESCRIBE TABLE EXTENDED."""
+    """(location, provider) of a catalog table from DESCRIBE TABLE EXTENDED.
+
+    Only rows after the "# Detailed Table Information" header count: a column
+    named Location or Provider comes earlier and would be read as the value.
+    """
     location = provider = None
+    detail = False
     for row in spark.sql(f"DESCRIBE TABLE EXTENDED {fq_table}").collect():
         name = (row["col_name"] or "").strip()
+        if name.startswith("# Detailed Table Information"):
+            detail = True
+            continue
+        if not detail:
+            continue
         value = (row["data_type"] or "").strip() or None
         if name == "Location" and location is None:
             location = value
@@ -157,13 +167,16 @@ def _norm_uri(uri):
     return f"{scheme}:/{rest}/"
 
 
-def owned_table_dir(location, owned_uris, keep_uris):
+def owned_table_dir(location, owned_uris, keep_uris, table_name=None):
     """True when ``location`` may be deleted as a table's own directory.
 
     It must sit strictly below one of ``owned_uris`` (the deployment's
-    bucket roots; a bucket root itself is never a table directory) and must
+    bucket roots; a bucket root itself is never a table directory), must
     neither contain nor lie inside any of ``keep_uris`` (the raw datagen
-    landing zone, which the next stream reads).
+    landing zone, which the next stream reads), and, when ``table_name`` is
+    given, its last path segment must be the table name (or ``name-<suffix>``,
+    Iceberg's unique-location form), so a table that resolves to a namespace
+    or warehouse root never takes its sibling tables with it.
     """
     loc = _norm_uri(location)
     if not any(loc.startswith(_norm_uri(o)) and loc != _norm_uri(o) for o in owned_uris):
@@ -172,19 +185,50 @@ def owned_table_dir(location, owned_uris, keep_uris):
         k = _norm_uri(k)
         if loc.startswith(k) or k.startswith(loc):
             return False
+    if table_name:
+        last = loc.rstrip("/").rsplit("/", 1)[-1]
+        if last != table_name and not last.startswith(table_name + "-"):
+            return False
     return True
+
+
+def _hadoop_fs(spark, uri):
+    jvm = spark._jvm
+    hconf = spark._jsc.hadoopConfiguration()
+    target = uri.replace("s3://", "s3a://", 1)
+    fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(target), hconf)
+    return fs, jvm.org.apache.hadoop.fs.Path(target)
+
+
+def _delete_children(spark, location, keep=()):
+    """Delete every child of ``location`` except the names in ``keep``."""
+    fs, path = _hadoop_fs(spark, location)
+    if not fs.exists(path):
+        return 0
+    n = 0
+    for st in fs.listStatus(path):
+        if st.getPath().getName() in keep:
+            continue
+        fs.delete(st.getPath(), True)
+        n += 1
+    return n
 
 
 def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
     """Drop the tables a continuous run writes, with their data. Returns the
     tables that existed and were dropped.
 
-    Iceberg tables are dropped with PURGE, or a plain DROP when the catalog
-    refuses purge. Every table's directory is then
-    deleted as well, which removes what a plain DROP leaves (a Delta table's
-    files, orphans an Iceberg PURGE does not know about), but only when
-    ``owned_table_dir`` allows it. A table whose location cannot be read is
-    still dropped and its directory kept.
+    Order per table, so an interrupted reset can be re-run to completion:
+      1. Delete the table's data (every child of its directory except the
+         table log: ``metadata`` for Iceberg, ``_delta_log`` for Delta). The
+         catalog still loads the table during DROP, so the log must survive
+         until then; if the job dies here the table still exists and the
+         next reset finds it again.
+      2. DROP TABLE, with PURGE for Iceberg, or a plain DROP when the
+         catalog refuses purge (Polaris defaults drop-with-purge to off).
+      3. Delete what is left of the directory.
+    Directories are touched only when ``owned_table_dir`` allows it. A table
+    whose location cannot be read is still dropped and its directory kept.
     """
     dropped = []
     for fq in tables:
@@ -196,32 +240,30 @@ def reset_stream_tables(spark, tables, *, owned_uris, keep_uris):
         except Exception as e:  # noqa: BLE001
             log(f"Continuous reset: no location for {fq} ({one_line(e)})")
             location, provider = None, None
+        iceberg = (provider or "").lower() == "iceberg"
+        name = fq.rsplit(".", 1)[-1]
+        owned = bool(location) and owned_table_dir(location, owned_uris, keep_uris, name)
+        if location and not owned:
+            log(f"Continuous reset: kept {location} (outside this deployment or not its own dir)")
+        if owned:
+            n = _delete_children(spark, location, keep=("metadata", "_delta_log"))
+            log(f"Continuous reset: deleted {n} data entries under {location}")
         how = "DROP"
-        if (provider or "").lower() == "iceberg":
+        if iceberg:
             try:
                 spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
                 how = "DROP PURGE"
             except Exception as e:  # noqa: BLE001
-                # A catalog may refuse purge (Polaris without drop-with-purge
-                # enabled); the directory delete below removes the files.
                 log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
         if how == "DROP":
             spark.sql(f"DROP TABLE IF EXISTS {fq}")
         dropped.append(fq)
         log(f"Continuous reset: {how} {fq} ({provider or 'unknown provider'})")
-        if not location:
-            continue
-        if not owned_table_dir(location, owned_uris, keep_uris):
-            log(f"Continuous reset: kept {location} (outside this deployment or overlaps raw data)")
-            continue
-        jvm = spark._jvm
-        hconf = spark._jsc.hadoopConfiguration()
-        target = location.replace("s3://", "s3a://", 1)
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(target), hconf)
-        path = jvm.org.apache.hadoop.fs.Path(target)
-        if fs.exists(path):
-            fs.delete(path, True)
-            log(f"Continuous reset: deleted {location}")
+        if owned:
+            fs, path = _hadoop_fs(spark, location)
+            if fs.exists(path):
+                fs.delete(path, True)
+                log(f"Continuous reset: deleted {location}")
     return dropped
 
 

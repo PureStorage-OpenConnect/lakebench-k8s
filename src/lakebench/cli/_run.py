@@ -887,6 +887,16 @@ def run(
             help="Skip pre-benchmark maintenance (compaction, snapshot expiry)",
         ),
     ] = False,
+    force_reset: Annotated[
+        bool,
+        typer.Option(
+            "--force-reset",
+            help=(
+                "Continuous c360 only: allow the run to drop existing bronze_raw, silver "
+                "and gold tables, stream checkpoints and raw data before starting"
+            ),
+        ),
+    ] = False,
     deploy_only: Annotated[
         bool,
         typer.Option(
@@ -1121,6 +1131,7 @@ def run(
             duration,
             skip_generate=skip_generate,
             skip_maintenance=skip_maintenance,
+            force_reset=force_reset,
         )
         return
 

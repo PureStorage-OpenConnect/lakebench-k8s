@@ -96,3 +96,9 @@ def test_missing_tables_are_skipped_and_reset_is_idempotent(result):
         "spark_catalog.other.foreign_t",
     ]
     assert result["second_dropped"] == []
+
+
+def test_namespace_root_location_is_not_deleted(result):
+    """A table resolving to a directory not named after it keeps that directory."""
+    assert result["dropped_rooted"] == ["spark_catalog.other.rooted_t"]
+    assert result["sibling_survives"] is True

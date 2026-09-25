@@ -244,14 +244,72 @@ def _reset_continuous_state(cfg, *, clear_raw: bool) -> None:
             print_info(f"Cleared {n} objects from {bucket}/{prefix}")
 
 
-C360_RESET_TIMEOUT_S = 900
+def _c360_existing_state(cfg, *, clear_raw: bool) -> list[str]:
+    """Bucket prefixes holding state a c360 continuous reset would delete.
+
+    Read-only listing, one key per prefix. A prefix that cannot be listed is
+    reported too, so the caller fails closed.
+    """
+    from lakebench.s3 import S3Client
+
+    s3_cfg = cfg.platform.storage.s3
+    raw_client = S3Client(
+        endpoint=s3_cfg.endpoint,
+        access_key=s3_cfg.access_key,
+        secret_key=s3_cfg.secret_key,
+        region=s3_cfg.region,
+        path_style=s3_cfg.path_style,
+        ca_cert=s3_cfg.ca_cert,
+        verify_ssl=s3_cfg.verify_ssl,
+    ).raw_client
+    b = s3_cfg.buckets
+    base = cfg.architecture.pipeline.sustained.checkpoint_base.strip("/")
+    # Silver and gold buckets hold only the tables and stream checkpoints.
+    prefixes = [
+        (b.silver, ""),
+        (b.gold, ""),
+        (b.bronze, f"{base}/bronze-ingest/"),
+        (b.bronze, "default/bronze_raw/"),
+        (b.bronze, "warehouse/default.db/bronze_raw/"),
+    ]
+    if clear_raw:
+        raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+        prefixes.append((b.bronze, f"{raw}/"))
+    found = []
+    for bucket, prefix in prefixes:
+        try:
+            resp = raw_client.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+        except Exception as e:  # noqa: BLE001
+            if "NoSuchBucket" in str(e):
+                continue
+            found.append(f"{bucket}/{prefix} (could not list: {e})")
+            continue
+        if resp.get("KeyCount", len(resp.get("Contents", []))):
+            found.append(f"{bucket}/{prefix}")
+    return found
 
 
-def _run_c360_continuous_reset(job_manager, monitor, console) -> bool:
+def _refuse_c360_reset(cfg, existing: list[str]) -> None:
+    tables = cfg.architecture.tables
+    print_error(
+        "Refusing to reset continuous state: this deployment already holds data "
+        "a continuous run would delete."
+    )
+    print_info(f"Tables that would be dropped: {tables.bronze}, {tables.silver}, {tables.gold}")
+    for p in existing:
+        print_info(f"  non-empty: {p}")
+    print_info(
+        "Re-run with --force-reset to drop them, or --skip-generate to keep the raw "
+        "data and only reset checkpoints and tables (still needs --force-reset)."
+    )
+
+
+def _run_c360_continuous_reset(job_manager, monitor, console, *, timeout_seconds: int) -> bool:
     """Drop the c360 continuous tables through a bronze-verify preflight.
 
     False when the job fails; the caller then starts no stream over tables
-    the reset could not clear.
+    the reset could not clear. ``timeout_seconds`` scales with the data: at
+    scale 100 the silver directory alone is hundreds of thousands of files.
     """
     from lakebench.spark.job import JobState, JobType
 
@@ -262,7 +320,7 @@ def _run_c360_continuous_reset(job_manager, monitor, console) -> bool:
         print_error(f"continuous reset submit failed: {status.message}")
         return False
     result = monitor.wait_for_completion(
-        "lakebench-bronze-verify", timeout_seconds=C360_RESET_TIMEOUT_S, poll_interval=15
+        "lakebench-bronze-verify", timeout_seconds=timeout_seconds, poll_interval=15
     )
     if not result.success:
         print_error(f"continuous reset failed: {result.message}")
@@ -1102,6 +1160,7 @@ def _run_sustained(
     duration: int | None,
     skip_generate: bool = False,
     skip_maintenance: bool = False,
+    force_reset: bool = False,
 ) -> None:
     """Run the sustained streaming pipeline.
 
@@ -1217,6 +1276,15 @@ def _run_sustained(
         # Ownership first: stopping streams in a namespace this run does
         # not own would already be the damage the gate exists to prevent.
         _require_reset_ownership(cfg)
+        if cfg.architecture.workload.schema_type.value != "financial" and not force_reset:
+            # c360 keeps existing state unless the operator asks to drop it:
+            # a scale-100 corpus from `lakebench generate` or a batch run's
+            # tables took hours to build.
+            _existing = _c360_existing_state(cfg, clear_raw=not skip_generate)
+            if _existing:
+                _refuse_c360_reset(cfg, _existing)
+                pipeline_success = False
+                raise typer.Exit(1)
         _stop_leftover_streams(job_manager, cfg.get_namespace())
         _reset_continuous_state(cfg, clear_raw=not skip_generate)
         if skip_generate:
@@ -1313,7 +1381,12 @@ def _run_sustained(
             # table, so drop the tables before any stream starts. Unlike the
             # AML preflight this needs no schema, so it does not wait for
             # datagen; datagen keeps writing while it runs.
-            if not _run_c360_continuous_reset(job_manager, monitor, console):
+            _reset_timeout = aml_bronze_verify_timeout_budget(
+                cfg.architecture.workload.datagen.get_effective_scale()
+            )
+            if not _run_c360_continuous_reset(
+                job_manager, monitor, console, timeout_seconds=_reset_timeout
+            ):
                 pipeline_success = False
                 raise typer.Exit(1)
 
