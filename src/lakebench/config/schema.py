@@ -1458,7 +1458,7 @@ class MaintenanceSettleConfig(ConfigModel):
     # leaves 10 minutes of margin before the post round runs unsettled.
     max_seconds: int = Field(
         default=2700,
-        ge=0,
+        ge=60,
         le=14400,
         description=(
             "Longest wait after maintenance. When reached, the post round still runs "

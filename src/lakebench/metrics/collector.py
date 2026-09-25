@@ -590,6 +590,7 @@ class PipelineBenchmark:
         "maintenance_settle_seconds": "Seconds from maintenance end until a storage-bound probe query was stable, before the post-maintenance round; not counted in time_to_value",
         "maintenance_settled": "True when the probe settled within the cap; false means the post round ran on unsettled storage and maintenance_value_pct is null",
         "maintenance_settle_capped": "True when the settle wait reached benchmark.maintenance_settle.max_seconds",
+        "maintenance_settle_verified": "False when there was no pre-maintenance probe time (scale >= 50): the probes agreed with each other, which a slow plateau also does",
     }
 
     run_id: str
@@ -677,6 +678,9 @@ class PipelineBenchmark:
     maintenance_settle_seconds: float | None = None
     maintenance_settled: bool | None = None
     maintenance_settle_capped: bool = False
+    # False when no pre-maintenance time was available (scale >= 50): the
+    # probes agreed with each other, which a slow plateau also does.
+    maintenance_settle_verified: bool | None = None
     # SettleResult.to_dict(): the probe query, every probe's offset and time,
     # the reference time and why the wait ended.
     maintenance_settle: dict[str, Any] | None = None
@@ -1008,6 +1012,7 @@ class PipelineBenchmark:
             batch_scores["maintenance_settle_seconds"] = round(self.maintenance_settle_seconds, 1)
             batch_scores["maintenance_settled"] = self.maintenance_settled
             batch_scores["maintenance_settle_capped"] = self.maintenance_settle_capped
+            batch_scores["maintenance_settle_verified"] = self.maintenance_settle_verified
         if self.snapshots_expired > 0:
             batch_scores["snapshots_expired"] = self.snapshots_expired
         if self.orphan_files_removed > 0:

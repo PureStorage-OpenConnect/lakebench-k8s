@@ -470,7 +470,12 @@ class ReportGenerator:
             times = ", ".join(
                 "fail" if p.get("seconds") is None else f"{p['seconds']:.1f}s" for p in probes
             )
-            if pb.maintenance_settled:
+            if pb.maintenance_settled and pb.maintenance_settle_verified is False:
+                state = (
+                    f"probes stable after {settle_s:.0f}s (unverified: no "
+                    "pre-maintenance time to compare against)"
+                )
+            elif pb.maintenance_settled:
                 state = f"settled after {settle_s:.0f}s"
             elif pb.maintenance_settle_capped:
                 state = f"did not settle within {float(detail.get('max_seconds', settle_s)):.0f}s"

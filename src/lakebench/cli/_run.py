@@ -563,8 +563,8 @@ def _settle_after_maintenance(
 ):
     """Probe until storage settles after batch maintenance (LB-150).
 
-    Returns the ``SettleResult``, or None when the wait is disabled or no
-    probe query could be chosen. *started_at* is ``time.monotonic()`` at
+    Returns the ``SettleResult``, or None when the wait is disabled. Raises
+    ValueError when the configured probe query is not in the query set. *started_at* is ``time.monotonic()`` at
     maintenance end. The wait is not a pipeline stage, so it adds to the
     run's wall clock but not to time to value or any stage time.
     """
@@ -574,11 +574,7 @@ def _settle_after_maintenance(
     if not sc.enabled:
         print_info("Storage settle wait: disabled (benchmark.maintenance_settle.enabled)")
         return None
-    try:
-        query = runner.probe_query(sc.probe_query)
-    except ValueError as e:
-        print_warning(f"Storage settle wait skipped: {e}")
-        return None
+    query = runner.probe_query(sc.probe_query)  # ValueError: recorded by the caller
 
     # The same query's pre-maintenance median, when the pre round ran and the
     # query succeeded there.
@@ -592,8 +588,11 @@ def _settle_after_maintenance(
         f"within {sc.tolerance_pct:g}%{ref_note}, cap {sc.max_seconds}s"
     )
 
-    def _probe() -> float:
-        r = runner.time_query(query, iterations=sc.probe_samples, query_timeout=query_timeout)
+    def _probe(remaining: float) -> float:
+        # Bound each sample by the time left before the cap, so a hung probe
+        # cannot run up to probe_samples * query_timeout past it.
+        per_sample = max(30, min(query_timeout, int(remaining / sc.probe_samples) + 1))
+        r = runner.time_query(query, iterations=sc.probe_samples, query_timeout=per_sample)
         if not r.success:
             raise RuntimeError(r.error_message or "probe failed")
         return r.elapsed_seconds
@@ -620,7 +619,12 @@ def _settle_after_maintenance(
         on_probe=_show,
         **kwargs,
     )
-    if result.settled:
+    if result.settled and not result.verified:
+        print_warning(
+            f"Storage probes stable {result.settle_seconds:.0f}s after maintenance, "
+            "unverified: no pre-maintenance time to compare against"
+        )
+    elif result.settled:
         print_info(f"Storage settled {result.settle_seconds:.0f}s after maintenance")
     else:
         print_warning(f"Storage did not settle: {result.reason}; post round runs anyway")
@@ -2041,6 +2045,22 @@ def run(
                     )
                 except Exception as e:  # noqa: BLE001
                     print_warning(f"Storage settle wait failed (non-fatal): {e}")
+                    # Recorded as not settled, so the maintenance value is
+                    # not reported as if the wait had run.
+                    from lakebench.benchmark.settle import SettleResult
+
+                    _sc = cfg.architecture.benchmark.maintenance_settle
+                    _settle = SettleResult(
+                        probe_query=_sc.probe_query or "",
+                        settled=False,
+                        settle_seconds=max(0.0, time.monotonic() - _maint_end),
+                        capped=False,
+                        max_seconds=float(_sc.max_seconds),
+                        tolerance_pct=float(_sc.tolerance_pct),
+                        reference_seconds=None,
+                        reason=f"settle wait failed: {e}",
+                        verified=False,
+                    )
 
         # -- Phase 6/7: Benchmark --------------------------------------------------
         console.print()
@@ -2274,6 +2294,7 @@ def run(
                         pb.maintenance_settle_seconds = _settle.settle_seconds
                         pb.maintenance_settled = _settle.settled
                         pb.maintenance_settle_capped = _settle.capped
+                        pb.maintenance_settle_verified = _settle.verified
                         pb.maintenance_settle = _settle.to_dict()
                 except Exception:
                     pass  # Maintenance metrics are best-effort
