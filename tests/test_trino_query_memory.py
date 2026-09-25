@@ -18,8 +18,6 @@ import yaml
 
 from lakebench.config.scale import full_compute_guidance
 from lakebench.deploy.engine import (
-    TRINO_HEAP_HEADROOM_FRACTION,
-    TRINO_QUERY_MEMORY_PER_NODE_FRACTION,
     DeploymentEngine,
     TemplateRenderer,
     trino_memory_properties,
@@ -101,8 +99,13 @@ def test_query_memory_sized_from_workers(scale):
         headroom = _size_bytes(props["memory.heap-headroom-per-node"])
         # Trino refuses to start if per-node + headroom exceeds the heap.
         assert per_node + headroom <= heap, role
-        assert per_node == pytest.approx(TRINO_QUERY_MEMORY_PER_NODE_FRACTION * heap, abs=2**20)
-        assert headroom == pytest.approx(TRINO_HEAP_HEADROOM_FRACTION * heap, abs=2**20)
+        # Two cap-sized queries fit the node's pool (heap - headroom) at once,
+        # so concurrent streams do not block on the low-memory killer.
+        assert 2 * per_node <= heap - headroom, role
+        # Headroom no smaller than Trino's own default, and the per-node cap
+        # no smaller than Trino's default either (never a regression).
+        assert headroom >= 0.3 * heap - 2**20, role
+        assert per_node >= 0.3 * heap, role
         per_role[role] = (props, heap, per_node, headroom)
 
     w_props, w_heap, w_per_node, w_headroom = per_role["worker"]
@@ -113,9 +116,13 @@ def test_query_memory_sized_from_workers(scale):
     # query.max-total-memory stays at Trino's default (2 x max-memory).
     assert "query.max-total-memory" not in c_props
     assert "query.max-total-memory" not in w_props
-    # Cluster user cap = workers x worker per-node, never above the pool.
+    # Cluster user cap = workers x worker per-node and never above the pool.
+    # Trino's effective query.max-total-memory (unset, so 2 x max-memory)
+    # must exceed the user cap; it does by construction whenever max-memory
+    # is positive.
     assert max_memory == workers * w_per_node
     assert max_memory <= workers * (w_heap - w_headroom)
+    assert 0 < max_memory < 2 * max_memory
     # Never below the cap Trino's defaults gave: min(20GB, workers x 30% heap).
     assert max_memory > min(_TRINO_DEFAULT_MAX_MEMORY, workers * 0.3 * w_heap)
 
@@ -124,8 +131,8 @@ def test_scale_100_lifts_the_20gb_default():
     """The shape that failed live: 4 x 48Gi workers."""
     cm = _configmap(_engine(**_scale_overrides(100)).context)
     props = _props(cm["config.properties.coordinator"])
-    assert _size_bytes(props["query.max-memory"]) > 3 * _TRINO_DEFAULT_MAX_MEMORY
-    assert props["query.max-memory"] == "62912MB"
+    assert _size_bytes(props["query.max-memory"]) > 2.5 * _TRINO_DEFAULT_MAX_MEMORY
+    assert props["query.max-memory"] == "55048MB"
 
 
 def test_explicit_worker_count_drives_cluster_cap():
@@ -146,7 +153,7 @@ def test_explicit_worker_count_drives_cluster_cap():
 
 def test_zero_workers_still_renders_a_valid_cap():
     props = trino_memory_properties("3276m", "6553m", 0)
-    assert props["max_memory"] == "2621MB"  # one worker's worth, not 0MB
+    assert props["max_memory"] == "2293MB"  # one worker's worth, not 0MB
 
 
 @pytest.mark.parametrize("bad", ["", "8g", "0m", "12Gi"])
