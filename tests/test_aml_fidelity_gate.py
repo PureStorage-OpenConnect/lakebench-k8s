@@ -519,3 +519,39 @@ def test_behavioural_six_and_empty_definitional_subset():
     rep = fg.evaluate_gate(_frame(), q)
     assert rep["passes"]["definitional_check"] is None
     assert "definitional_check" not in rep["typologies"]["defn"]
+
+
+def test_model_outputs_scores_importance_and_card(tmp_path):
+    df = _frame(n=1200)
+    df["group"] = np.arange(len(df))
+    df["month"] = 3
+    df["exclude:defn"] = 0
+    df.loc[:9, "exclude:defn"] = 1
+    rep = fg.evaluate_gate(df, _prereg(), collect_outputs=True)
+    out = rep.pop("_model_outputs")
+    sc = out["scores"]
+    assert list(sc.columns) == ["group", "month", "typology", "label", "score", "fold"]
+    assert (sc["typology"] == "beh").sum() == 1200 and (sc["typology"] == "defn").sum() == 1190
+    beh = sc[sc["typology"] == "beh"].set_index("group")
+    assert (beh["label"].to_numpy() == df["label:beh"].to_numpy()).all()
+    assert set(beh["fold"]) == set(range(_prereg()["cv"]["folds"]))
+    assert beh["score"].between(0, 1).all() and str(beh["score"].dtype) == "float32"
+    imp = out["importance"]
+    top = imp[imp["typology"] == "beh"].sort_values("ap_drop_mean").iloc[-1]
+    assert top["feature"] == "planted" and top["ap_drop_mean"] > 0.5
+    card = out["card"]
+    assert card["features"] == _prereg()["features"] and len(card["features_sha256"]) == 64
+    assert (
+        card["fitted_hyperparameters"]["beh"]["max_iter"]
+        == _prereg()["reference_model"]["max_iter"]
+    )
+    assert card["importance"]["method"] == "permutation_on_held_out_folds"
+    paths = fg.write_model_outputs(out, str(tmp_path / "gate"))
+    back = pd.read_parquet(paths["oof_scores"])
+    assert len(back) == len(sc)
+    assert json.loads(Path(paths["model_card"]).read_text())["unit_key_columns"] == [
+        "group",
+        "month",
+    ]
+    # Not collected unless asked, and never in counts-only mode.
+    assert "_model_outputs" not in fg.evaluate_gate(df, _prereg())

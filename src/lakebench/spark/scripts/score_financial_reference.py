@@ -208,6 +208,44 @@ def _write_text(spark, uri: str, text: str) -> None:
         out.close()
 
 
+def _write_model_outputs(spark, prefix: str, outputs: dict) -> dict:
+    """oof_scores.parquet, feature_importance.parquet and model_card.json
+    under ``prefix``. The driver has pandas but no pyarrow, so the scores go
+    to Spark as row chunks; the pull is already capped at --driver-sample-cap
+    units, which bounds the table at that many units per typology."""
+    import json as _json
+
+    out = {}
+    scores = outputs["scores"]
+    if len(scores):
+        cols = list(scores.columns)
+        types = {"group": "long", "month": "int", "typology": "string"}
+        types |= {"label": "tinyint", "score": "float", "fold": "tinyint"}
+        schema = ", ".join(f"`{c}` {types.get(c, 'string')}" for c in cols)
+        chunk = 200_000
+        df = None
+        for lo in range(0, len(scores), chunk):
+            part = scores.iloc[lo : lo + chunk]
+            rows = [
+                tuple(v.item() if hasattr(v, "item") else v for v in r)
+                for r in part.astype({"typology": str}).itertuples(index=False, name=None)
+            ]
+            piece = spark.createDataFrame(rows, schema)
+            df = piece if df is None else df.unionByName(piece)
+        path = f"{prefix}/oof_scores.parquet"
+        df.write.mode("overwrite").option("compression", "snappy").parquet(path)
+        out["oof_scores"] = {"path": path, "rows": int(len(scores))}
+    imp = outputs["importance"]
+    if len(imp):
+        path = f"{prefix}/feature_importance.parquet"
+        spark.createDataFrame(imp.to_dict("records")).write.mode("overwrite").parquet(path)
+        out["feature_importance"] = {"path": path}
+    path = f"{prefix}/model_card.json"
+    _write_text(spark, path, _json.dumps(outputs["card"], indent=2, default=str))
+    out["model_card"] = {"path": path}
+    return out
+
+
 def _metric_rows(report: dict) -> list[dict]:
     feats = json.dumps(report.get("features", []))
     header = {
@@ -357,6 +395,7 @@ def run_fidelity_gate(
             "label_route_agreement_customers": agreement,
         },
         score=score,
+        collect_outputs=score,
     )
     report["unit_detail"] = inputs["unit"]
     if "secondary_lifetime_error" in inputs:
@@ -493,6 +532,13 @@ def main() -> None:
             log(line)
     except Exception:  # noqa: BLE001 -- logging only
         pass
+    outputs = report.pop("_model_outputs", None)
+    if outputs is not None:
+        try:
+            report["model_outputs"] = _write_model_outputs(spark, prefix, outputs)
+        except Exception as e:  # noqa: BLE001 -- the gate numbers still ship
+            log(f"WARN: model outputs not written: {e}")
+            report["model_outputs"] = {"error": str(e)}
     text = json.dumps(report, indent=2, default=str)
     report_out = f"{prefix}/aml_gate_report.json"
     _write_text(spark, report_out, text)

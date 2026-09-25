@@ -195,7 +195,9 @@ def _jobs() -> int:
     return cpu_count()
 
 
-def _oof_scores(make_model, X, y, w, folds):
+def _oof_scores(make_model, X, y, w, folds, models=None):
+    """Out-of-fold scores; ``models``, when a list, receives each fold's
+    fitted model (None for a fold scored at the training prevalence)."""
     import numpy as np
 
     oof = np.zeros(len(y), dtype=float)
@@ -204,11 +206,54 @@ def _oof_scores(make_model, X, y, w, folds):
             # A group holding every positive can leave a training fold with
             # one class; score its test fold as the training prevalence.
             oof[test] = float(np.average(y[train], weights=w[train]))
+            if models is not None:
+                models.append(None)
             continue
         m = make_model()
         m.fit(X[train], y[train], sample_weight=w[train])
         oof[test] = m.predict_proba(X[test])[:, 1]
+        if models is not None:
+            models.append(m)
     return oof
+
+
+def _permutation_importance(models, X, y, w, folds, features, prereg) -> list[dict]:
+    """Per feature: the drop in held-out AP when that feature is permuted in
+    each fold's test rows and scored by that fold's model, averaged over folds
+    and repeats (model_outputs.importance). Folds without a fitted model are
+    skipped."""
+    import numpy as np
+
+    spec = prereg["model_outputs"]["importance"]
+    if spec["method"] != "permutation_on_held_out_folds":
+        raise ValueError(f"unsupported importance method {spec['method']!r}")
+    fitted = [(m, test) for m, (_, test) in zip(models, folds, strict=True) if m is not None]
+    base = [_ap(y[test], m.predict_proba(X[test])[:, 1], w[test]) for m, test in fitted]
+
+    def one(j):
+        rng = np.random.default_rng(prereg["cv"]["seed"] + j)
+        drops = []
+        for (m, test), b in zip(fitted, base, strict=True):
+            for _ in range(spec["n_repeats"]):
+                Xp = X[test].copy()
+                Xp[:, j] = Xp[rng.permutation(len(test)), j]
+                drops.append(b - _ap(y[test], m.predict_proba(Xp)[:, 1], w[test]))
+        return {
+            "feature": features[j],
+            "ap_drop_mean": float(np.mean(drops)) if drops else None,
+            "ap_drop_std": float(np.std(drops)) if drops else None,
+            "n": len(drops),
+        }
+
+    return _parallel(one, range(len(features)))
+
+
+def _json_params(model) -> dict:
+    """get_params() with values JSON can carry."""
+    out = {}
+    for k, v in model.get_params().items():
+        out[k] = v if isinstance(v, (str, int, float, bool, type(None))) else repr(v)
+    return out
 
 
 def _oof_rank_scores(x, y, w, folds):
@@ -306,7 +351,9 @@ def _bootstrap_ci(y, score, w, groups, prereg: dict) -> tuple[float | None, floa
 # ---------------------------------------------------------------------------
 
 
-def _evaluate_typology(name, X, y, w, groups, features, prereg, kind, score=True) -> dict[str, Any]:
+def _evaluate_typology(
+    name, X, y, w, groups, features, prereg, kind, score=True, sink=None
+) -> dict[str, Any]:
     import numpy as np
 
     n_pos = int(y.sum())
@@ -327,7 +374,16 @@ def _evaluate_typology(name, X, y, w, groups, features, prereg, kind, score=True
         return out
 
     folds = _folds(y, groups, prereg)
-    oof = _oof_scores(lambda: _reference_model(prereg), X, y, w, folds)
+    models = [] if sink is not None else None
+    oof = _oof_scores(lambda: _reference_model(prereg), X, y, w, folds, models)
+    if sink is not None:
+        fold_of = np.empty(len(y), dtype=np.int8)
+        for f, (_, test) in enumerate(folds):
+            fold_of[test] = f
+        sink["scores"] = {"label": y.astype(np.int8), "score": oof, "fold": fold_of}
+        sink["importance"] = _permutation_importance(models, X, y, w, folds, features, prereg)
+        fitted = next((m for m in models if m is not None), None)
+        sink["hyperparameters"] = _json_params(fitted) if fitted is not None else None
     ap = _ap(y, oof, w)
     lo, hi = _bootstrap_ci(y, oof, w, groups, prereg)
     out.update(
@@ -534,12 +590,18 @@ def evaluate_gate(
     density_counts: dict | None = None,
     provenance: dict | None = None,
     score: bool = True,
+    collect_outputs: bool = False,
 ) -> dict[str, Any]:
     """Run every gate on ``frame`` and return one JSON-serialisable report.
 
     ``score=False`` stops before any model: per typology only n_scored,
     n_positives, prevalence and n_excluded (a smoke test that must not look at
-    AP), verdict "counts_only", no level2 or passes."""
+    AP), verdict "counts_only", no level2 or passes.
+
+    ``collect_outputs=True`` also returns the reference model's outputs under
+    report["_model_outputs"] (callers pop it and write files): per-unit
+    out-of-fold scores, permutation importances on the held-out folds, the
+    fitted hyperparameters and a model card."""
     import numpy as np
 
     if unit_window(prereg) == "lifetime":
@@ -592,15 +654,28 @@ def evaluate_gate(
         groups = np.arange(len(frame))
     report["n_groups"] = int(len(np.unique(groups)))
     per = {}
+    sinks: dict[str, dict] = {}
     for t in typologies:
         y = frame[LABEL_PREFIX + t].to_numpy(dtype=int)
         keep = np.ones(len(y), dtype=bool)
         if EXCLUDE_PREFIX + t in frame.columns:
             keep = frame[EXCLUDE_PREFIX + t].to_numpy(dtype=int) == 0
         kind = "behavioural" if t in prereg["behavioural_subset"] else "definitional"
+        sink = {"rows": np.flatnonzero(keep)} if collect_outputs and score else None
         per[t] = _evaluate_typology(
-            t, X[keep], y[keep], w[keep], groups[keep], features, prereg, kind, score=score
+            t,
+            X[keep],
+            y[keep],
+            w[keep],
+            groups[keep],
+            features,
+            prereg,
+            kind,
+            score=score,
+            sink=sink,
         )
+        if sink is not None and "scores" in sink:
+            sinks[t] = sink
         per[t]["n_excluded"] = int((~keep).sum())
     report["typologies"] = per
     if not score:
@@ -609,7 +684,72 @@ def evaluate_gate(
     report["level2"] = _level2(per, prereg)
     report["verdict"] = "ok"
     report["passes"] = _passes(report, prereg)
+    if collect_outputs:
+        report["_model_outputs"] = _model_outputs(frame, sinks, features, prereg, report)
     return report
+
+
+#: Unit key columns copied into the scores table when present.
+UNIT_KEY_COLUMNS = (GROUP_COLUMN, "month")
+
+
+def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dict) -> dict:
+    """{"scores": long DataFrame, "importance": DataFrame, "card": dict}.
+
+    scores has one row per scored unit and typology (excluded units have no
+    out-of-fold score and are absent): the unit key columns, typology,
+    label, score (out-of-fold probability, stored as float32) and fold.
+    """
+    import numpy as np
+    import pandas as pd
+
+    parts, imp = [], []
+    keys = [c for c in UNIT_KEY_COLUMNS if c in frame.columns]
+    for t, sink in sinks.items():
+        rows = sink["rows"]
+        df = frame.iloc[rows][keys].reset_index(drop=True)
+        df["typology"] = t
+        df["label"] = sink["scores"]["label"]
+        df["score"] = sink["scores"]["score"].astype(np.float32)
+        df["fold"] = sink["scores"]["fold"]
+        parts.append(df)
+        imp += [{"typology": t, **r} for r in sink["importance"]]
+    scores = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    if len(scores):
+        scores["typology"] = scores["typology"].astype("category")
+    card = {
+        "prereg_version": report.get("prereg_version"),
+        "prereg_sha256": report.get("prereg_sha256"),
+        "unit": report.get("unit"),
+        "unit_key_columns": keys,
+        "features": features,
+        "features_sha256": hashlib.sha256("\n".join(features).encode()).hexdigest(),
+        "aml_features_sha256": (report.get("provenance") or {}).get("aml_features_sha256"),
+        "reference_model": prereg["reference_model"],
+        "fitted_hyperparameters": {t: s.get("hyperparameters") for t, s in sinks.items()},
+        "cv": prereg["cv"],
+        "importance": prereg["model_outputs"]["importance"],
+        "libraries": report.get("libraries"),
+        "score_note": "out-of-fold probability from the fold model that did not train on the "
+        "unit; excluded units are not scored",
+    }
+    return {"scores": scores, "importance": pd.DataFrame(imp), "card": card}
+
+
+def write_model_outputs(outputs: dict, base: str) -> dict:
+    """Write ``base``_oof_scores.parquet, ``base``_feature_importance.parquet
+    and ``base``_model_card.json locally (snappy parquet). Returns
+    {name: path}."""
+    paths = {
+        "oof_scores": f"{base}_oof_scores.parquet",
+        "feature_importance": f"{base}_feature_importance.parquet",
+        "model_card": f"{base}_model_card.json",
+    }
+    outputs["scores"].to_parquet(paths["oof_scores"], compression="snappy", index=False)
+    outputs["importance"].to_parquet(paths["feature_importance"], compression="snappy", index=False)
+    with open(paths["model_card"], "w") as fh:
+        json.dump(outputs["card"], fh, indent=2, default=str)
+    return paths
 
 
 def summary_lines(report: dict) -> list[str]:

@@ -157,6 +157,7 @@ def main(argv=None) -> int:
         lifetime_prereg,
         load_preregistration,
         summary_lines,
+        write_model_outputs,
     )
 
     mismatch = version_mismatches(library_versions())
@@ -264,7 +265,16 @@ def main(argv=None) -> int:
         density_counts=density,
         provenance={**prov, "spark_seconds": round(t_spark, 1)},
         score=not args.counts_only,
+        collect_outputs=args.out is not None and not args.counts_only,
     )
+    outputs = report.pop("_model_outputs", None)
+    if outputs is not None:
+        base = str(args.out.with_suffix(""))
+        paths = write_model_outputs(outputs, base)
+        report["model_outputs"] = {
+            name: {"path": p, "bytes": os.path.getsize(p)} for name, p in paths.items()
+        }
+        report["model_outputs"]["oof_scores"]["rows"] = int(len(outputs["scores"]))
     report["unit_detail"] = inputs["unit"]
     if "secondary_lifetime_error" in inputs:
         report["secondary_lifetime"] = {
