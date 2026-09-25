@@ -188,6 +188,12 @@ Per-config overrides go in the store entry:
 1. Run the pinned config as-is on the reference cluster. Identity and
    credentials come from the environment, so the file does not change:
 
+   `LAKEBENCH_PERF_NAME` becomes the namespace. The pinned configs are Hive
+   recipes, so it must be at most 23 characters; a longer one is refused at
+   config load (LB-153). The defaults in the files fit (17 to 19 characters).
+   Setting the variable does not change `config_hash`, which is taken before
+   substitution.
+
    ```bash
    export LAKEBENCH_PERF_NAME=perf-c360-batch-s10
    export LAKEBENCH_S3_ENDPOINT=... LAKEBENCH_S3_ACCESS_KEY=... LAKEBENCH_S3_SECRET_KEY=...

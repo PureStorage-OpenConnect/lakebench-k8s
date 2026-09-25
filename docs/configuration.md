@@ -107,6 +107,10 @@ everything else has sensible defaults.
 ```yaml
 # REQUIRED: Unique name for this deployment. Also used as the default
 # Kubernetes namespace if platform.kubernetes.namespace is empty.
+# The namespace is limited to 23 characters on a Hive recipe and 38 on any
+# other: Stackable derives a metastore pod volume name,
+# lakebench-s3-credentials-<namespace>-s3-credentials, that Kubernetes caps
+# at 63. Config load refuses a longer one and names the derived object.
 name: my-lakehouse
 
 # Optional human-readable description.

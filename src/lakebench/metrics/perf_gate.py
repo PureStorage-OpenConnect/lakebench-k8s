@@ -262,7 +262,9 @@ def load_pinned(path: Path, name: str | None = None) -> PinnedConfig:
     added = {k: v for k, v in _PLACEHOLDER_ENV.items() if not os.environ.get(k)}
     os.environ.update(added)
     try:
-        cfg = load_config(path)
+        # The fingerprint does not depend on the name, so a too-long
+        # LAKEBENCH_PERF_NAME left in the environment must not fail the gate.
+        cfg = load_config(path, allow_long_names=True)
         resolve_auto_sizing(cfg, None)
     except Exception as e:  # noqa: BLE001 -- any load failure is a gate failure
         raise PerfGateError(f"pinned config {path} does not load: {e}") from None
