@@ -249,6 +249,38 @@ def _run_query_set(metrics: Any) -> str | None:
     return None
 
 
+def _benchmark_samples(metrics: Any) -> int | None:
+    """Timed samples per query behind the run's QpH; 1 for pre-LB-150 records."""
+    from lakebench.benchmark.spread import samples_per_query
+
+    pb = getattr(metrics, "pipeline_benchmark", None)
+    qb = getattr(pb, "query_benchmark", None) if pb is not None else None
+    if qb is None:
+        qb = getattr(metrics, "benchmark", None)
+    return samples_per_query(getattr(qb, "queries", None) or [])
+
+
+def _sample_mismatch(meta: dict[str, Any], got: int | None) -> str | None:
+    """Why a batch QpH measured with *got* samples cannot verify the package.
+
+    A package recorded before per-query repeats has no
+    ``benchmark_samples_per_query`` and took one sample. Refused rather than
+    warned: a single sample and a median of three are different estimators,
+    so the QpH drift between them is a bias and the exit code would be wrong
+    either way.
+    """
+    expected = meta.get("expected_numbers") or {}
+    if meta.get("pipeline_mode", "batch") != "batch" or "composite_qph" not in expected:
+        return None
+    want = meta.get("benchmark_samples_per_query", 1)
+    if got is None or got == want:
+        return None
+    return (
+        f"The package's QpH is the median of {want} sample(s) per query but this run took "
+        f"{got}; set architecture.benchmark.iterations: {want} in the config to reproduce it."
+    )
+
+
 def _build_package(
     metrics: Any,
     *,
@@ -295,6 +327,7 @@ def _build_package(
             "expected_numbers": numbers,
             # QpH is only reproducible over the same query set.
             "query_set_id": _run_query_set(metrics),
+            "benchmark_samples_per_query": _benchmark_samples(metrics) or 1,
             "tolerance_pct": dict(DEFAULT_TOLERANCES),
             "config_snapshot": snapshot,
             "datagen_fleet_summary": {
@@ -816,6 +849,18 @@ def _verify(
         raise typer.Exit(2) from None
     print_info(f"  config: {config_file}")
 
+    # Refuse before a multi-hour run that would be refused afterwards.
+    try:
+        from lakebench.config import load_config
+
+        _iterations = load_config(config_file).architecture.benchmark.iterations
+    except Exception:  # noqa: BLE001 -- the run itself reports config errors
+        _iterations = None
+    _mismatch = _sample_mismatch(meta, _iterations)
+    if _mismatch:
+        print_error(_mismatch)
+        raise typer.Exit(2)
+
     if dry_run:
         print_warning("--dry-run set: package validation only, no pipeline run")
         console.print()
@@ -827,6 +872,11 @@ def _verify(
     except ReproduceError as e:
         print_error(str(e))
         raise typer.Exit(2) from None
+
+    _mismatch = _sample_mismatch(meta, _benchmark_samples(metrics))
+    if _mismatch:
+        print_error(_mismatch)
+        raise typer.Exit(2)
 
     actual = _measure_actual_numbers(metrics)
     rows, exit_code = _compare(

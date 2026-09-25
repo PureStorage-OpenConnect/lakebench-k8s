@@ -191,3 +191,23 @@ class TestBuildComparison:
         comparison = _build_comparison("a", {"error": "boom"}, "b", {})
         assert comparison["config_a"]["error"] == "boom"
         assert comparison["metrics"] == []
+
+
+class TestSampleCountWarning:
+    """QpH from different samples per query are different estimators (LB-150)."""
+
+    @staticmethod
+    def _run(samples):
+        q = {"name": "Q1", "elapsed_seconds": 2.0, "success": True}
+        if samples:
+            q["samples"] = [2.0] * samples
+        return {"pipeline_benchmark": {"scores": {}, "query_benchmark": {"queries": [q]}}}
+
+    def test_mismatch_warns(self):
+        comparison = _build_comparison("a", self._run(None), "b", self._run(3))
+        assert comparison["warnings"] and "median of 1" in comparison["warnings"][0]
+
+    def test_same_count_is_silent(self):
+        assert _build_comparison("a", self._run(3), "b", self._run(3))["warnings"] == []
+        # Both pre-LB-150 records: n=1 on both sides.
+        assert _build_comparison("a", self._run(None), "b", self._run(None))["warnings"] == []

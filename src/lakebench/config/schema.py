@@ -1457,11 +1457,19 @@ class BenchmarkConfig(ConfigModel):
         pattern=r"^(hot|cold)$",
         description="Cache mode: 'hot' or 'cold'",
     )
+    # One sample per query cannot tell a change from noise: same-run rounds
+    # on the live cluster differed 3-11% in QpH and a post-maintenance round
+    # read 10-80% slower per query with nothing to compare that against
+    # (LB-150). Three samples give a median and a measured spread.
     iterations: int = Field(
-        default=1,
+        default=3,
         ge=1,
         le=100,
-        description="Iterations per query (>1 uses median, extended mode)",
+        description=(
+            "Timed runs of each query per benchmark round. QpH is scored from the "
+            "per-query median and the spread is recorded; 1 is a quick run with no "
+            "measured spread"
+        ),
     )
 
 
