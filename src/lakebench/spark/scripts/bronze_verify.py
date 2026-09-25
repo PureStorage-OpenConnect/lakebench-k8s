@@ -6,13 +6,21 @@ a key column that is entirely null, or no row that survives the silver
 quality filter. These used to be warnings or not checked at all, so an empty
 or schema-broken bronze passed and the run reported success on no data
 (LB-044 class).
+
+LB_CONTINUOUS_RESET=1 turns the job into the continuous preflight instead
+(LB-142): it drops the tables the continuous jobs write (bronze_raw, silver,
+gold) with their data, and verifies nothing. A batch run leaves silver and
+gold full, and silver-stream rightly refuses to start a fresh checkpoint over
+a full table. The CLI deletes the stream checkpoints before submitting this
+job, so tables and checkpoints are cleared together. The raw landing zone is
+never touched here; the CLI clears it only when the run generates new data.
 """
 
 from __future__ import annotations
 
 import time
 
-from common import env, log, path_size_gb, set_utc_session
+from common import env, log, path_size_gb, reset_stream_tables, set_utc_session
 
 _INT = ("tinyint", "smallint", "int", "bigint")
 _NUM = _INT + ("float", "double", "decimal")
@@ -145,6 +153,29 @@ def verify_bronze(df):
     return stats, problems, warnings
 
 
+def continuous_reset_targets():
+    """(tables, owned bucket URIs, raw landing zone) for the continuous reset.
+
+    Tables are named in the catalog each writer uses: bronze-ingest writes
+    through CATALOG_NAME, silver-stream and gold-refresh through
+    LB_ICEBERG_CATALOG.
+    """
+    bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
+    writer_catalog = env("CATALOG_NAME", "lakehouse")
+    catalog = env("LB_ICEBERG_CATALOG", "lakehouse")
+    tables = [
+        f"{writer_catalog}.{env('LB_BRONZE_TABLE', 'default.bronze_raw')}",
+        f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}",
+        f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard')}",
+    ]
+    owned = [
+        bronze_uri,
+        env("LB_SILVER_URI", "s3a://lb-silver/"),
+        env("LB_GOLD_URI", "s3a://lb-gold/"),
+    ]
+    return tables, owned, bronze_uri + "customer/interactions/"
+
+
 def main() -> None:
     from pyspark.sql import SparkSession
 
@@ -154,6 +185,17 @@ def main() -> None:
     spark = SparkSession.builder.appName("lb-bronze-verify").getOrCreate()
     set_utc_session(spark)
     start_time = time.time()
+
+    if env("LB_CONTINUOUS_RESET", "0") == "1":
+        tables, owned, raw = continuous_reset_targets()
+        log("=" * 60)
+        log("Continuous reset (no verification)")
+        log("=" * 60)
+        dropped = reset_stream_tables(spark, tables, owned_uris=owned, keep_uris=[raw])
+        log(f"Continuous reset complete: {len(dropped)} of {len(tables)} tables dropped")
+        # No JOB METRICS block: this is not a bronze-verify stage.
+        spark.stop()
+        return
 
     log("=" * 60)
     log("Bronze Data Verification")
