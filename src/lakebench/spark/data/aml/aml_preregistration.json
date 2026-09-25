@@ -1,6 +1,6 @@
 {
-  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate script loads this file; AML-GOALS.md describes it. Changing any value after a gate run requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a. Every numeric gate in AML-GOALS.md must have a key here (enforced by test).",
-  "version": "3.4",
+  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.4.1 is v3.4 final as approved 2026-09-24 (AML-GOALS section 9 #36): the (customer, UTC calendar month) unit with subject-only labels, six behavioural typologies with K = 4 of 6, the lift-over-prevalence relative cap, gate scale 2, and persisted reference-model outputs. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
+  "version": "3.4.1",
   "registered": "2026-09-24",
   "metric": "average_precision",
   "unit_of_scoring": {

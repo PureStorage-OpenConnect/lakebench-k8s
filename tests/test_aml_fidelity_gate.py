@@ -298,7 +298,8 @@ def test_high_risk_countries_match_generator_corridor_pool():
 
 def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
-    assert p["version"] == "3.4"
+    assert p["version"] == "3.4.1"
+    assert "#36" in p["_doc"]
     u = p["unit_of_scoring"]
     assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
     assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 14, 395)

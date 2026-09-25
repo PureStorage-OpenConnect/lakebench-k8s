@@ -175,6 +175,11 @@ def main(argv=None) -> int:
         .config("spark.driver.memory", args.driver_memory)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.session.timeZone", "UTC")
+        # Arrow for toPandas: the monthly unit pulls millions of units, which
+        # the row-by-row path converts far more slowly. Measured at scale 0.1
+        # (seed 7777): identical primary and lifetime frames, values and
+        # dtypes, with build_gate_inputs at 27 s against 107 s.
+        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("ERROR")
