@@ -23,7 +23,6 @@ data:
        size, which failed AML FQ3 at scale 100 on 4 x 48Gi workers. The
        cluster-wide caps are enforced here, on the coordinator. #}
     query.max-memory={{ trino_memory.max_memory }}
-    query.max-total-memory={{ trino_memory.max_total_memory }}
     query.max-memory-per-node={{ trino_memory.coordinator_max_memory_per_node }}
     memory.heap-headroom-per-node={{ trino_memory.coordinator_heap_headroom }}
     {% endif %}
@@ -45,7 +44,6 @@ data:
     discovery.uri=http://lakebench-trino:8080
     {% if trino_memory | default({}) %}
     query.max-memory={{ trino_memory.max_memory }}
-    query.max-total-memory={{ trino_memory.max_total_memory }}
     query.max-memory-per-node={{ trino_memory.worker_max_memory_per_node }}
     memory.heap-headroom-per-node={{ trino_memory.worker_heap_headroom }}
     {% endif %}
