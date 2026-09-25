@@ -218,8 +218,21 @@ def _continuous_reset(spark, df):
     # too: the continuous stream only appends dimension rows it has not seen,
     # so rows from an earlier run (another seed, scale or a pre-KYC corpus)
     # would otherwise survive the reset.
+    # Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which
+    # the bootstrap does not do; fall back to a plain DROP and delete the
+    # table's own directory, as common.reset_stream_tables does for c360.
     for t in (SILVER_TXNS, SILVER_EDGES, SILVER_ENTITIES, SILVER_ACCOUNTS):
-        spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{t} PURGE")
+        fq = f"{CATALOG}.{t}"
+        try:
+            spark.sql(f"DROP TABLE IF EXISTS {fq} PURGE")
+        except Exception as e:  # noqa: BLE001
+            log(f"Continuous reset: PURGE of {fq} refused ({one_line(e)}); plain DROP")
+            silver_loc = _table_location(spark, fq)
+            spark.sql(f"DROP TABLE IF EXISTS {fq}")
+            # Only a directory named after the table: never a namespace or
+            # warehouse root that other tables share.
+            if silver_loc and silver_loc.rstrip("/").rsplit("/", 1)[-1] == t.rsplit(".", 1)[-1]:
+                _delete_dir_if_disjoint(spark, silver_loc, BRONZE_URI + PACS_PREFIX)
     _with_location(
         df.limit(0)
         .withColumn("ingest_ts", current_timestamp())
