@@ -40,6 +40,8 @@ _GOLD_FIXED_S = 45
 _SILVER_FULL_ROWS_M_S10 = 266.7
 _GOLD_REFRESH_S = 300
 
+_KEEP_UP = get_job_profile("silver-stream", "financial")["keep_up_executors"]
+
 _STAGES = (JobType.BRONZE_INGEST, JobType.SILVER_STREAM, JobType.GOLD_REFRESH)
 
 
@@ -135,7 +137,7 @@ def test_c360_is_unchanged():
 
 @pytest.mark.parametrize(
     ("scale", "silver", "gold"),
-    [(1, 10, 12), (10, 10, 12), (50, 13, 15), (100, 17, 19), (1000, 28, 28)],
+    [(1, 10, 12), (10, 10, 12), (20, 10, 24), (50, 13, 28), (100, 17, 28), (1000, 28, 28)],
 )
 def test_counts_scale_and_respect_the_cap(scale, silver, gold):
     assert get_executor_count("silver-stream", scale, "financial") == silver
@@ -145,7 +147,7 @@ def test_counts_scale_and_respect_the_cap(scale, silver, gold):
 
 @pytest.mark.parametrize(
     ("scale", "cores", "memory"),
-    [(1, 118, 980), (10, 118, 980), (100, 186, 1588)],
+    [(1, 118, 980), (10, 118, 980), (100, 222, 1948)],
 )
 def test_peak_requirements(scale, cores, memory):
     """Gotcha 34: the preflight and the docs read compute_peak_requirements."""
@@ -157,19 +159,19 @@ def test_peak_requirements(scale, cores, memory):
 _BUDGET = [
     (1, 60, (3, 4, 2)),
     (1, 80, (5, 6, 2)),
-    (1, 100, (5, 10, 3)),
+    (1, 100, (5, 7, 6)),
     (1, 150, (5, 10, 12)),
     (1, 434, (5, 10, 12)),
     (10, 60, (3, 4, 2)),
     (10, 80, (5, 6, 2)),
-    (10, 100, (5, 10, 3)),
+    (10, 100, (5, 7, 6)),
     (10, 150, (5, 10, 12)),
     (10, 434, (5, 10, 12)),
     (100, 60, (2, 5, 2)),
     (100, 80, (2, 8, 3)),
     (100, 100, (4, 10, 4)),
-    (100, 150, (8, 16, 5)),
-    (100, 434, (8, 17, 19)),
+    (100, 150, (8, 11, 10)),
+    (100, 434, (8, 17, 28)),
 ]
 
 
@@ -222,15 +224,27 @@ def test_budget_never_overspends_and_uses_what_fits(scale, cores):
 @pytest.mark.parametrize("scale", [1, 10, 50, 100, 500])
 @pytest.mark.parametrize("cores", range(20, 700, 3))
 def test_spare_cores_go_upstream_first(scale, cores):
-    """A stage runs no faster than its input: silver or gold only get cores
-    above their floor once every stage upstream has all it wants."""
+    """A stage runs no faster than its input: gold gets cores above its
+    floor only once bronze is full and silver is at its keep-up count, and
+    silver goes past keep-up only once bronze and gold are full."""
     got = _streaming_concurrent_budget(_config("financial", scale), cores * 1000)
     base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
-    for i, j in enumerate(_STAGES):
-        floor = max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4)
-        if got[j] > floor:
-            for up in _STAGES[:i]:
-                assert got[up] == get_executor_count(up.value, scale, "financial")
+    want = {j: get_executor_count(j.value, scale, "financial") for j in _STAGES}
+    floor = {j: max(1, base[j] * _JOB_PROFILES[j.value]["executor_cores"] // 4) for j in _STAGES}
+    keep_up = min(want[JobType.SILVER_STREAM], _KEEP_UP)
+    if got[JobType.SILVER_STREAM] > floor[JobType.SILVER_STREAM]:
+        assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST]
+    if got[JobType.GOLD_REFRESH] > floor[JobType.GOLD_REFRESH]:
+        assert got[JobType.BRONZE_INGEST] == want[JobType.BRONZE_INGEST]
+        assert got[JobType.SILVER_STREAM] >= keep_up
+    if got[JobType.SILVER_STREAM] > max(floor[JobType.SILVER_STREAM], keep_up):
+        assert got[JobType.GOLD_REFRESH] == want[JobType.GOLD_REFRESH]
+
+
+def test_silver_keep_up_count_holds_bronze_intake():
+    per_core_rps = _SILVER_ROWS / _SILVER_S / _SILVER_CORES
+    assert _KEEP_UP * 4 * per_core_rps >= 1.2 * _BRONZE_RPS
+    assert (_KEEP_UP - 1) * 4 * per_core_rps < 1.2 * _BRONZE_RPS
 
 
 def _capacity_k8s(cores):
@@ -254,3 +268,55 @@ def test_manifest_deploys_the_override(job, instances):
     assert ex["instances"] == instances
     assert ex["cores"] == 4
     assert mgr.budget_warnings == []
+
+
+class TestPreflightBetweenOldAndNewMinimum:
+    """A cluster between the old AML continuous minimum (54 cores) and the
+    new one (118) runs degraded with a warning naming the capped stages,
+    rather than failing preflight."""
+
+    GIB = 1024**3
+
+    def _check(self, cores, memory_gb=4000, node_cores=64, node_gb=256):
+        from unittest import mock
+
+        from lakebench.cli._prerequisites import _check_cluster_capacity
+
+        cap = ClusterCapacity(
+            cores * 1000, memory_gb * self.GIB, 8, node_cores * 1000, node_gb * self.GIB
+        )
+        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+            get_client.return_value.get_cluster_capacity.return_value = cap
+            return _check_cluster_capacity(_config("financial", 10))
+
+    @pytest.mark.parametrize("cores", [60, 80, 100, 117])
+    def test_runs_degraded_with_a_warning(self, cores):
+        r = self._check(cores)
+        assert r.passed
+        assert r.message.startswith("WARNING")
+        assert "silver-stream" in r.message or "gold-refresh" in r.message
+
+    def test_full_cluster_is_not_warned(self):
+        r = self._check(434)
+        assert r.passed and not r.message.startswith("WARNING")
+
+    def test_too_small_even_capped_still_fails(self):
+        assert not self._check(20).passed
+
+    def test_memory_short_even_capped_still_fails(self):
+        assert not self._check(80, memory_gb=200).passed
+
+    def test_a_pod_that_fits_no_node_still_fails(self):
+        assert not self._check(100, node_gb=30).passed
+
+    def test_batch_mode_is_unchanged(self):
+        from unittest import mock
+
+        from lakebench.cli._prerequisites import _check_cluster_capacity
+
+        cfg = _config("financial", 10)
+        cfg.architecture.pipeline.mode = "batch"
+        cap = ClusterCapacity(20_000, 4000 * self.GIB, 8, 64_000, 256 * self.GIB)
+        with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
+            get_client.return_value.get_cluster_capacity.return_value = cap
+            assert not _check_cluster_capacity(cfg).passed
