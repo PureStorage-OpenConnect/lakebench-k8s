@@ -156,12 +156,14 @@ def thrift_pod_memory_limit(heap: str) -> str:
 # memory pool (heap minus headroom) that all queries share. The headroom stays
 # at Trino's own 30% default, so the pool is 70% of the heap. One query may
 # take 35% of the heap, half the pool, so two cap-sized queries fit a node at
-# once. That gives the power run (one query at a time) 17% more than Trino's
-# 30% default, and throughput and composite runs (several streams) no worse
-# a fit than the default: past the pool, Trino blocks queries and only after
-# query.low-memory-killer.delay (5 minutes, longer than the 300 s client
-# timeout) kills one, so blocking must be the exception. Trino refuses to
-# start unless per-node + headroom <= heap; here they sum to 65%.
+# once with nothing spare; a third stream, or untracked system allocations
+# past the headroom, block. Trino's 30% default fits two with 10% of the
+# heap spare, and three not at all. This gives the power run (one query at
+# a time) 17% more than the default. Past the pool, Trino blocks queries
+# and only after query.low-memory-killer.delay (5 minutes, longer than the
+# 300 s client timeout) kills one, so a blocked stream reads as a timeout.
+# Trino refuses to start unless per-node + headroom <= heap; here they sum
+# to 65%.
 TRINO_QUERY_MEMORY_PER_NODE_FRACTION = 0.35
 TRINO_HEAP_HEADROOM_FRACTION = 0.3
 

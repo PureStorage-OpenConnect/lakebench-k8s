@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 # later query; with query_max_run_time just below the client timeout the
 # server fails the query first and the client reads a clean error.
 SERVER_TIMEOUT_MARGIN_SECONDS = 5
+# Bound on each cleanup call after a client timeout (lookup, then one kill
+# per id), so a saturated coordinator cannot stretch a timed-out probe loop.
+_CLEANUP_TIMEOUT_SECONDS = 10
 
 _QUERY_ID_RE = re.compile(r"^[0-9]{8}_[0-9]{6}_[0-9]{5}_[0-9a-z]{5}$")
 
@@ -86,12 +89,16 @@ class TrinoExecutor:
         """Cancel, server side, every live query submitted with *source*.
 
         Backstop for the session run-time limit: the client timed out, so
-        whatever still runs under this source is an orphan.
+        whatever still runs under this source is an orphan. If the CLI had
+        not registered the query yet, the lookup finds nothing and the
+        session limit still ends it.
         """
         try:
             listed = subprocess.run(
                 self._exec_cmd(
                     pod,
+                    "--session",
+                    f"query_max_run_time={server_run_time_limit(_CLEANUP_TIMEOUT_SECONDS)}s",
                     "--output-format",
                     "TSV",
                     "--execute",
@@ -100,7 +107,7 @@ class TrinoExecutor:
                 ),
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=_CLEANUP_TIMEOUT_SECONDS,
             )
             ids = [q for q in listed.stdout.split() if _QUERY_ID_RE.match(q)]
             for query_id in ids:
@@ -113,7 +120,7 @@ class TrinoExecutor:
                     ),
                     capture_output=True,
                     text=True,
-                    timeout=30,
+                    timeout=_CLEANUP_TIMEOUT_SECONDS,
                 )
             if ids:
                 logger.warning("Cancelled %d orphaned Trino query(s): %s", len(ids), ids)
