@@ -1,0 +1,102 @@
+# Pinned performance config: Customer 360, batch, scale 10.
+#
+# This file is a performance baseline contract, not an example. Every sizing
+# knob is set explicitly so a run of this file on the reference cluster is
+# comparable with its accepted baseline in baselines.yaml. The gate hashes the
+# parsed contents of this file; editing any value (not a comment) invalidates
+# the baseline and the gate refuses to compare until a new one is recorded.
+# See docs/perf-regression-gate.md.
+#
+# Run it as-is. Identity and credentials come from the environment so the
+# file itself never changes between runs:
+#   LAKEBENCH_PERF_NAME      deployment name / namespace (default below)
+#   LAKEBENCH_S3_ENDPOINT, LAKEBENCH_S3_ACCESS_KEY, LAKEBENCH_S3_SECRET_KEY
+
+name: ${LAKEBENCH_PERF_NAME:-perf-c360-batch-s10}
+recipe: hive-iceberg-spark-trino
+
+images:
+  datagen: docker.io/sillidata/lb-datagen:14c4eee
+  spark: apache/spark:4.0.2-python3
+  postgres: postgres:17
+  trino: trinodb/trino:483
+  pull_policy: Always
+
+platform:
+  kubernetes:
+    namespace: ${LAKEBENCH_PERF_NAME:-perf-c360-batch-s10}
+    create_namespace: true
+
+  storage:
+    s3:
+      endpoint: ${LAKEBENCH_S3_ENDPOINT}
+      region: us-east-1
+      path_style: true
+      access_key: ${LAKEBENCH_S3_ACCESS_KEY}
+      secret_key: ${LAKEBENCH_S3_SECRET_KEY}
+      buckets:
+        bronze: ${LAKEBENCH_PERF_NAME:-perf-c360-batch-s10}-bronze
+        silver: ${LAKEBENCH_PERF_NAME:-perf-c360-batch-s10}-silver
+        gold: ${LAKEBENCH_PERF_NAME:-perf-c360-batch-s10}-gold
+    scratch:
+      enabled: true
+      storage_class: px-csi-scratch
+      size: 100Gi
+
+  compute:
+    postgres:
+      storage: 10Gi
+      storage_class: px-csi-db
+    spark:
+      driver:
+        cores: 4
+        memory: 8g
+      executor:
+        instances: 4
+        cores: 4
+        memory: 16g
+        memory_overhead: 4g
+      # Per-job executor counts, equal to the scale-10 auto values today
+      # (get_executor_count). Pinned so a profile change shows up as a
+      # config change, not as a performance change.
+      bronze_executors: 4
+      silver_executors: 8
+      gold_executors: 4
+
+architecture:
+  pipeline:
+    mode: batch
+
+  workload:
+    schema: customer360
+    datagen:
+      scale: 10
+      mode: batch
+      parallelism: 4
+      cpu: "8"
+      generators: 0
+      uploaders: 0
+      file_size: 64mb
+      timestamp_start: "2024-01-01"
+      timestamp_end: "2025-01-01"
+
+  query_engine:
+    type: trino
+    trino:
+      coordinator:
+        cpu: "2"
+        memory: 8Gi
+      worker:
+        replicas: 2
+        cpu: "4"
+        memory: 16Gi
+        spill_enabled: true
+        spill_max_per_node: 40Gi
+        storage: 50Gi
+        storage_class: ""
+
+  benchmark:
+    mode: power
+    cache: hot
+    iterations: 1
+    streams: 4

@@ -77,10 +77,12 @@ def test_find_em_dashes(tmp_path, monkeypatch):
 
 
 def test_main_exit_code_follows_failures(monkeypatch, capsys):
-    monkeypatch.setattr(rg, "build_checks", lambda tag=None: [_check("a", rg.FAIL, "why")])
+    monkeypatch.setattr(
+        rg, "build_checks", lambda tag=None, perf_runs=None: [_check("a", rg.FAIL, "why")]
+    )
     assert rg.main([]) == 1
     assert "-- a (failed)" in capsys.readouterr().out
-    monkeypatch.setattr(rg, "build_checks", lambda tag=None: [_check("a", rg.SKIP)])
+    monkeypatch.setattr(rg, "build_checks", lambda tag=None, perf_runs=None: [_check("a", rg.SKIP)])
     assert rg.main([]) == 0
     assert rg.main(["--require-all"]) == 1
 
@@ -106,6 +108,7 @@ def test_gate_covers_the_required_checks():
         "changelog",
         "em-dashes",
         "uat-results",
+        "perf-baselines",
     } <= names
 
 
