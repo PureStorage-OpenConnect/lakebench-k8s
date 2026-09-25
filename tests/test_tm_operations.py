@@ -255,7 +255,6 @@ def test_invariants_pass_on_a_consistent_cycle():
     "over,failing",
     [
         ({"excluded": 39}, "reconciliation"),
-        ({"source": None}, "reconciliation"),
         ({"negative_items": ["exclusion.in_flight=-3"]}, "reconciliation"),
         ({"escalated": 11}, "escalated_le_alerts"),
         ({"alert_cases": 5}, "cases_le_escalated"),
@@ -270,6 +269,7 @@ def test_invariants_pass_on_a_consistent_cycle():
         ({"noncustomer_undeclared": 2, "noncustomer_alerts": 5}, "noncustomer_alerts_declared"),
         ({"reviews_folded_into_determined": 1}, "review_not_folded_into_determined"),
         ({"history_checked": True, "history_changed": 1}, "history_stable"),
+        ({"disposition_rows": 7, "distinct_alert_keys": 6}, "one_row_per_alert_identity"),
     ],
 )
 def test_each_invariant_fails_when_violated(over, failing):
@@ -381,9 +381,11 @@ def test_review_is_never_folded_into_an_already_determined_case():
     assert folded > 0
 
 
-def test_deferred_review_opens_when_the_blocking_case_files():
-    # Find a seed where the review of SAR 1 falls due while case 2 is
-    # determined and waiting to file.
+def test_deferred_review_is_covered_by_the_sar_the_blocking_case_files():
+    # A review that falls due while the customer's case is determined and
+    # waiting to file is not credited to that case's investigation; the SAR
+    # that case files is the continuing-activity filing.
+    seen = 0
     for seed in range(400):
         alerts = [_alert("a", 0, True, "critical")] + [
             _alert(f"b{j}", 60 + 3 * j, True, "critical") for j in range(20)
@@ -392,23 +394,25 @@ def test_deferred_review_opens_when_the_blocking_case_files():
             1, "high", alerts, dict(PARAMS, seed=seed), D0 + timedelta(days=900)
         )
         by = {c["case_id"]: c for c in cases}
-        hits = [
-            c
-            for c in cases
-            if c["continuing_review_status"] == "opened"
-            and by[c["continuing_review_case_id"]]["opened_date"] > c["continuing_review_due_date"]
-        ]
-        if hits:
-            c = hits[0]
-            review = by[c["continuing_review_case_id"]]
-            blocker = [
-                x
-                for x in cases
-                if x["case_id"] != c["case_id"] and x["filing_date"] == review["opened_date"]
-            ]
-            assert blocker, "a delayed review opens the day the blocking case files"
-            return
-    pytest.fail("no seed produced a deferred review")
+        for c in cases:
+            if c["continuing_review_status"] == "superseded_by_sar":
+                seen += 1
+                blocker = by[c["continuing_review_case_id"]]
+                assert blocker["sar_decision"] == "sar_filed"
+                assert blocker["determination_date"] <= c["continuing_review_due_date"]
+                assert blocker["filing_date"] >= c["continuing_review_due_date"]
+    assert seen > 0
+
+
+def test_no_continuing_sar_is_late_by_construction():
+    # With no late-filing draw, no continuing-activity SAR misses its limit
+    # (the reviewer's probe: deferred-origin reviews were measured from the
+    # wrong SAR and came out late).
+    for cust in range(300):
+        _, cases = _continuing(cust)
+        for c in cases:
+            if c["sar_decision"] == "sar_filed":
+                assert c["filed_late"] is False, (cust, c["case_type"], c["days_since_prior_sar"])
 
 
 # --- Alert identity across cycles -----------------------------------------
@@ -565,3 +569,40 @@ def test_every_config_field_reaches_the_script(monkeypatch):
     assert p["max_alerts_per_customer"] == 777 and p["continuous_interval_seconds"] == 90
     assert p["counterparty_scenarios"] == ("W4_risk_propagation",)
     assert len(cfg.env()) == len(TmOperationsConfig.model_fields)
+
+
+def test_new_alert_never_takes_a_withdrawn_alerts_key():
+    # Prior alert first seen as content A (key A-0) whose content is now B;
+    # detection emits content A again. Two alerts, two keys, two rows.
+    p = _prior(_cur("X", "B", 10))
+    p["alert_key"] = "A-0"
+    out = tm.match_alerts(
+        [_cur("X2", "A", 0)], [p], D0 + timedelta(days=60), D0 + timedelta(days=90), 3
+    )
+    keys = [a["alert_key"] for a in out]
+    assert len(set(keys)) == 2 and "A-0" in keys
+    disp, _ = tm.simulate_customer(1, "low", out, PARAMS, D0 + timedelta(days=90))
+    assert len(disp) == 2
+
+
+def test_grown_windows_pair_in_time_order():
+    p1 = _prior(_cur("P1", "h1", 0, truth=True))
+    p2 = _prior(_cur("P2", "h2", 20))
+    c1 = _cur("C1", "h1b", 21)
+    c2 = _cur("C2", "h2b", 40)
+    prev = D0 + timedelta(days=60)
+    out = {a["alert_id"]: a for a in tm.match_alerts([c1, c2], [p1, p2], prev, prev, 2)}
+    assert out["C1"]["alert_key"] == "h1-0" and out["C1"]["truth"] is True
+    assert out["C2"]["alert_key"] == "h2-0" and out["C2"]["in_current_detection"]
+    assert all(a["in_current_detection"] for a in out.values())
+
+
+def test_unavailable_source_is_unchecked_not_failed():
+    from lakebench.metrics.tm_ops import tm_verdict
+
+    inv = {
+        n: {"status": s, "detail": d} for n, s, d in tm.evaluate_invariants(_counts(source=None))
+    }
+    assert inv["reconciliation"]["status"] == "unchecked"
+    v = tm_verdict({1: inv}, {})
+    assert v["status"] == "unknown" and not v["problems"] and "reconciliation" in v["reason"]

@@ -417,7 +417,8 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
             f"continuing-activity reviews due: {_fmt_n(ops.get('continuing_reviews_due'))} "
             f"(opened {_fmt_n(ops.get('continuing_reviews_opened'))}, folded into an open "
             f"investigation {_fmt_n(ops.get('continuing_reviews_folded'))}, waiting on a case "
-            f"pending filing {_fmt_n(ops.get('continuing_reviews_deferred'))}).</p>"
+            f"pending filing {_fmt_n(ops.get('continuing_reviews_deferred'))}, covered by "
+            f"the SAR that case filed {_fmt_n(ops.get('continuing_reviews_superseded'))}).</p>"
         )
         limits = ops.get("sars_by_limit") or {}
         if limits:

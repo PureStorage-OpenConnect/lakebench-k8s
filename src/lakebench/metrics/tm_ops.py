@@ -17,8 +17,9 @@ The P10 verdict (:func:`tm_verdict`) is separate from detection scoring:
   with no TM lines). The P10 gate is not met and the report says why, but
   detection results stand and the run is not failed for it.
 - ``disabled``: ``workload.tm_operations.enabled`` is false; nothing is gated.
-- ``unknown``: no driver log was captured; a warning, in batch and continuous
-  alike.
+- ``unknown``: no driver log was captured (for a batch run, for any cycle),
+  or an invariant could not be checked (``unchecked``); a warning, in batch
+  and continuous alike.
 - ``pass``: every cycle that reported ran, and every invariant passed.
 """
 
@@ -83,7 +84,7 @@ def tm_gate_problems(
     problems = []
     for cycle in sorted(invariants_by_cycle):
         for name, r in sorted(invariants_by_cycle[cycle].items()):
-            if r.get("status") != "pass":
+            if r.get("status") not in ("pass", "unchecked"):
                 problems.append(
                     f"{prefix}cycle {cycle}: workflow invariant {name} "
                     f"{r.get('status')}: {r.get('detail')}"
@@ -134,7 +135,18 @@ def tm_verdict(
     if problems:
         out.update(status="fail", reason=problems[0], problems=problems)
         return out
-    if inv and not not_run:
+    unchecked = [
+        f"cycle {c}: {n} unchecked: {r.get('detail')}"
+        for c in sorted(inv)
+        for n, r in sorted(inv[c].items())
+        if r.get("status") == "unchecked"
+    ]
+    if inv and not not_run and not unchecked:
+        return out
+    if unchecked and not not_run:
+        # The layer ran but could not verify an invariant (an infrastructure
+        # gap, such as the raw files failing to list), not a violation.
+        out.update(status="unknown", reason=unchecked[0])
         return out
     if not_run:
         c, s = sorted(not_run.items())[-1]

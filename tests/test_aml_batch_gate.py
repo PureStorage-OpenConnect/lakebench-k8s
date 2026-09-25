@@ -134,6 +134,13 @@ def test_one_cycle_not_run_is_reported_even_when_others_pass():
     )
 
 
+def test_a_cycle_with_no_log_is_unknown_not_pass():
+    ok = {"1": {"reconciliation": {"status": "pass", "detail": ""}}}
+    ok3 = {"3": {"reconciliation": {"status": "pass", "detail": ""}}}
+    v = _tm([_tjob({"W2": 3}, tm=ok), _tjob({}, tm={}), _tjob({"W2": 3}, tm=ok3)])
+    assert v["status"] == "unknown" and "[2]" in v["reason"]
+
+
 def test_all_pass():
     v = _tm([_tjob({"W2": 3}, ops={"funnel": {}})])
     assert v["status"] == "pass" and v["ops"] == {"funnel": {}} and v["mode"] == "batch"

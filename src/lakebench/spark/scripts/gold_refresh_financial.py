@@ -278,7 +278,9 @@ def main() -> None:
                     )
                 else:
                     log(
-                        f"[tm-status] status=waiting cycle={cycle} reason="
+                        # cycle=0: no operations pass has a number yet (they
+                        # are numbered from the ledger, not by tick).
+                        f"[tm-status] status=waiting cycle=0 reason=tick {cycle}, "
                         + ("silver is empty" if silver_rows == 0 else "no manifest yet")
                     )
             elif not TM_PARAMS["enabled"] and cycle == 1:

@@ -428,7 +428,9 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
     the first cycle that could have raised them.
     """
     out = []
-    used = set()
+    # Every prior key is taken, matched or not: a new alert must never be
+    # handed the key of a prior alert carried as withdrawn.
+    used = {p["alert_key"] for p in prior}
     by_content = {}
     for p in sorted(prior, key=lambda x: (_ts(x), x["alert_key"])):
         by_content.setdefault(p["content_hash"], []).append(p)
@@ -464,8 +466,11 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
         for p in cands:
             if p["alert_ts"] is None or c["alert_ts"] is None:
                 continue
+            # The earliest prior this alert could have grown from: with
+            # current alerts taken in time order this pairs grown windows in
+            # order instead of letting an early alert take a later one's key.
             if p["alert_ts"] <= c["alert_ts"] <= p["alert_ts"] + window:
-                if best is None or p["alert_ts"] > best["alert_ts"]:
+                if best is None or p["alert_ts"] < best["alert_ts"]:
                     best = p
         if best is not None:
             cands.remove(best)
@@ -683,8 +688,12 @@ def simulate_customer(customer_id, crr_tier, alerts, params, as_of):
             open_case[0] = None
             push(case["review_due"], _EV_REVIEW, case["case_id"])
             if deferred_reviews:
-                # Reviews that fell due while this case was waiting to file.
-                open_review(day, list(deferred_reviews))
+                # Reviews that fell due while this case was waiting to file:
+                # the SAR it just filed covers the customer's activity to
+                # date, so it is the continuing-activity filing for them.
+                for p in deferred_reviews:
+                    p["review_case_id"] = case["case_id"]
+                    p["review_status"] = "superseded_by_sar"
                 deferred_reviews.clear()
         elif kind == _EV_REVIEW:
             parent = by_id[ref]
@@ -698,8 +707,8 @@ def simulate_customer(customer_id, crr_tier, alerts, params, as_of):
                 parent["review_status"] = "folded"
             else:
                 # The open case is already determined and only waiting to
-                # file; it reviews nothing new. The review opens when it
-                # closes.
+                # file; it reviews nothing new. Its SAR, once filed, is the
+                # continuing-activity filing (see _EV_CLOSE).
                 parent["review_status"] = "deferred"
                 deferred_reviews.append(parent)
 
@@ -1035,7 +1044,7 @@ def reconcile(spark, txns, entities, source_rows, bronze_rows, continuous):
     return rows, {"monitored": n("monitored"), "excluded": excluded, "silver": silver_rows}
 
 
-def build_alert_inputs(spark, alerts, entities, manifest, params):
+def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
     """One row per alert: content key, customer flags, truth and priority,
     and the per-customer rank the capacity cap reads."""
     from pyspark.sql.functions import (
@@ -1130,9 +1139,21 @@ def build_alert_inputs(spark, alerts, entities, manifest, params):
         band = when(cond, lit(name)) if band is None else band.when(cond, lit(name))
     out = out.withColumn("triage_priority", band.otherwise(lit("low")))
     cap = int(params.get("max_alerts_per_customer") or 0)
-    rank = Window.partitionBy("entity_id").orderBy("generated_date", "alert_key")
-    over = col("is_customer") & (row_number().over(rank) > lit(cap)) if cap > 0 else lit(False)
-    return out.withColumn("over_capacity", over)
+    if cap <= 0:
+        return out.withColumn("over_capacity", lit(False))
+    # Alerts already in the workflow (same content as a carried prior alert)
+    # are never capped: capping one would drop it from the replay while its
+    # prior row is carried, writing the alert twice. Only new alerts are
+    # ranked against the cap.
+    if known is not None:
+        k = known.select("entity_id", "content_hash").distinct().withColumn("_known", lit(True))
+        out = out.join(k, ["entity_id", "content_hash"], "left")
+    else:
+        out = out.withColumn("_known", lit(None).cast("boolean"))
+    new = col("_known").isNull()
+    rank = Window.partitionBy("entity_id", new).orderBy("generated_date", "alert_key")
+    over = col("is_customer") & new & (row_number().over(rank) > lit(cap))
+    return out.withColumn("over_capacity", over).drop("_known")
 
 
 _DISP_SIM_SCHEMA = (
@@ -1294,7 +1315,12 @@ def evaluate_invariants(counts: dict) -> list[tuple[str, str, str]]:
     mon, exc = counts["monitored"], counts["excluded"]
     if src is None:
         out.append(
-            ("reconciliation", "fail", "source payment count unavailable; completeness unproven")
+            (
+                "reconciliation",
+                "unchecked",
+                "source payment count unavailable (listing the raw files failed); "
+                "completeness unproven",
+            )
         )
     else:
         # A negative item (silver holding more than the source, so in_flight
@@ -1312,6 +1338,13 @@ def evaluate_invariants(counts: dict) -> list[tuple[str, str, str]]:
         alerts == disp,
         f"alerts {alerts}, disposition rows for them {disp}",
     )
+    rows, keys = counts.get("disposition_rows"), counts.get("distinct_alert_keys")
+    if rows is not None and keys is not None:
+        check(
+            "one_row_per_alert_identity",
+            rows == keys,
+            f"{rows} disposition rows, {keys} distinct alert identities",
+        )
     nulls = counts.get("null_dispositions", 0)
     check("no_null_disposition", nulls == 0, f"{nulls} disposition rows with no disposition")
     und = counts.get("noncustomer_undeclared", 0)
@@ -1379,7 +1412,9 @@ def _flag(c):
     return when(c, lit(1)).otherwise(lit(0))
 
 
-def read_back(spark, run_id, as_of, prior_disp=None, prior_cases=None, prev_as_of=None):
+def read_back(
+    spark, run_id, as_of, prior_disp=None, prior_cases=None, prev_as_of=None, rerun=False
+):
     """Everything the invariants, the funnel rows and the operations summary
     need, from the written tables in a handful of actions: one grouped
     collect per table, the open-case maximum, the folded-review check, and
@@ -1456,6 +1491,7 @@ def read_back(spark, run_id, as_of, prior_disp=None, prior_cases=None, prev_as_o
         .count()
     )
     alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == lit(run_id)).count()
+    distinct_keys = d.select("alert_key").distinct().count()
 
     def s(rows, pred):
         return sum(int(r["n"]) for r in rows if pred(r))
@@ -1467,6 +1503,7 @@ def read_back(spark, run_id, as_of, prior_disp=None, prior_cases=None, prev_as_o
         "alerts": int(alerts),
         "dispositions": s(dg, lambda r: r["in_current_detection"]),
         "disposition_rows": s(dg, lambda r: True),
+        "distinct_alert_keys": int(distinct_keys),
         "null_dispositions": s(dg, lambda r: r["disposition"] is None),
         "noncustomer_alerts": s(dg, lambda r: not r["is_customer"]),
         "noncustomer_undeclared": s(
@@ -1493,6 +1530,9 @@ def read_back(spark, run_id, as_of, prior_disp=None, prior_cases=None, prev_as_o
             ),
         ),
         "reviews_deferred": s(sar, lambda r: r["continuing_review_status"] == "deferred"),
+        "reviews_superseded": s(
+            sar, lambda r: r["continuing_review_status"] == "superseded_by_sar"
+        ),
         "reviews_opened": s(sar, lambda r: r["continuing_review_status"] == "opened"),
         "reviews_folded": s(sar, lambda r: r["continuing_review_status"] == "folded"),
         "reviews_folded_into_determined": int(folded_bad),
@@ -1500,21 +1540,28 @@ def read_back(spark, run_id, as_of, prior_disp=None, prior_cases=None, prev_as_o
         "_cg": cg,
     }
     counts.update(
-        _history_check(spark, run_id, prior_disp, prior_cases, prev_as_of)
+        _history_check(spark, run_id, prior_disp, prior_cases, prev_as_of, rerun)
         if prior_disp is not None and prev_as_of is not None
         else {"history_checked": False}
     )
     return counts
 
 
-def _history_check(spark, run_id, prior_disp, prior_cases, prev_as_of):
+def _history_check(spark, run_id, prior_disp, prior_cases, prev_as_of, rerun=False):
     """Decisions made by the previous as-of date, compared with this cycle's
     tables: a changed disposition, case, decision date, determination or
     filing is history rewritten."""
     from pyspark.sql.functions import coalesce, col, lit
 
     same = lambda a, b: coalesce(col(a) == col(b), col(a).isNull() & col(b).isNull())  # noqa: E731
-    pd_ = prior_disp.where(col("disposition").isin(*WORKED_DISPOSITIONS)).select(
+    prev = lit(prev_as_of)
+    worked = col("disposition").isin(*WORKED_DISPOSITIONS)
+    if rerun:
+        # A rerun's prior tables also hold decisions made after the previous
+        # as-of date, which may legitimately differ: compare only decisions
+        # dated by then (an undated attachment is not compared).
+        worked = worked & ((col("decision_date") <= prev) | (col("l1_decision_date") <= prev))
+    pd_ = prior_disp.where(worked).select(
         "alert_key",
         col("disposition").alias("p_disp"),
         col("case_id").alias("p_case"),
@@ -1533,13 +1580,13 @@ def _history_check(spark, run_id, prior_disp, prior_cases, prev_as_of):
         col("_present").isNotNull()
         & same("p_disp", "n_disp")
         & same("p_case", "n_case")
-        & (col("p_dec").isNull() | same("p_dec", "n_dec"))
+        & (col("p_dec").isNull() | (col("p_dec") > prev) | same("p_dec", "n_dec"))
     )
     dc = j.select(_flag(changed_d).alias("c")).groupBy().sum("c").collect()[0][0] or 0
     dn = pd_.count()
     cn = cc = 0
     if prior_cases is not None:
-        pc = prior_cases.select(
+        pc = prior_cases.where(col("opened_date") <= prev).select(
             "case_id",
             col("determination").alias("p_det"),
             col("determination_date").alias("p_dd"),
@@ -1558,8 +1605,16 @@ def _history_check(spark, run_id, prior_disp, prior_cases, prev_as_of):
         jc = pc.join(nc, "case_id", "left")
         changed_c = ~(
             col("_present").isNotNull()
-            & (col("p_dd").isNull() | (same("p_det", "n_det") & same("p_dd", "n_dd")))
-            & (col("p_fd").isNull() | (same("p_sar", "n_sar") & same("p_fd", "n_fd")))
+            & (
+                col("p_dd").isNull()
+                | (col("p_dd") > prev)
+                | (same("p_det", "n_det") & same("p_dd", "n_dd"))
+            )
+            & (
+                col("p_fd").isNull()
+                | (col("p_fd") > prev)
+                | (same("p_sar", "n_sar") & same("p_fd", "n_fd"))
+            )
         )
         cc = jc.select(_flag(changed_c).alias("c")).groupBy().sum("c").collect()[0][0] or 0
         cn = pc.count()
@@ -1686,6 +1741,7 @@ def ops_summary(as_of, params, recon_rows, counts):
         "continuing_reviews_opened": counts["reviews_opened"],
         "continuing_reviews_folded": counts["reviews_folded"],
         "continuing_reviews_deferred": counts["reviews_deferred"],
+        "continuing_reviews_superseded": counts["reviews_superseded"],
         "scenarios": per_rule,
     }
 
@@ -1760,8 +1816,9 @@ def _ledger_cycles(spark, base_run_id):
 
 def _prior_state(spark, base_run_id, cycle, ledger):
     """The previous cycle's dispositions and cases (pinned snapshots) to
-    carry forward, and its as-of date. (None, None, None) on a first cycle
-    or another run's tables."""
+    carry forward, its as-of date, and whether this is a rerun of the same
+    cycle. (None, None, None, False) on a first cycle or another run's
+    tables."""
     from pyspark.sql.functions import col, lit
     from pyspark.sql.functions import max as max_
     from pyspark.sql.functions import min as min_
@@ -1769,7 +1826,7 @@ def _prior_state(spark, base_run_id, cycle, ledger):
     dt, ct = f"{CATALOG}.{GOLD_DISPOSITIONS}", f"{CATALOG}.{GOLD_CASES}"
     dsid, csid = current_snapshot_id(spark, dt), current_snapshot_id(spark, ct)
     if dsid is None:
-        return None, None, None
+        return None, None, None, False
     pdisp = read_at_snapshot(spark, dt, dsid)
     pcases = read_at_snapshot(spark, ct, csid) if csid is not None else None
     meta = pdisp.agg(
@@ -1779,7 +1836,7 @@ def _prior_state(spark, base_run_id, cycle, ledger):
         max_("as_of_date").alias("a"),
     ).collect()[0]
     if meta["lo"] is None or meta["lo"] != base_run_id or meta["hi"] != base_run_id:
-        return None, None, None
+        return None, None, None, False
     prior_cycle = int(meta["c"])
     if prior_cycle < cycle:
         prev_as_of = meta["a"]
@@ -1788,16 +1845,16 @@ def _prior_state(spark, base_run_id, cycle, ledger):
         # the ledger's previous cycle.
         earlier = [c for c in ledger if c < cycle]
         if not earlier:
-            return None, None, None
+            return None, None, None, False
         prev_as_of = ledger[max(earlier)]
         pdisp = pdisp.where(col("first_seen_cycle") < lit(cycle))
         if pcases is not None:
             pcases = pcases.where(col("opened_date") <= lit(prev_as_of))
     else:
-        return None, None, None
+        return None, None, None, False
     if prev_as_of is None:
-        return None, None, None
-    return pdisp, pcases, prev_as_of
+        return None, None, None, False
+    return pdisp, pcases, prev_as_of, prior_cycle == cycle
 
 
 def _status(status, cycle, reason):
@@ -1888,16 +1945,22 @@ def run_tm_operations(
         recon_rows, recon = reconcile(spark, txns, entities, source_rows, bronze_rows, continuous)
 
         # The previous cycle, pinned before this cycle overwrites it.
-        prior_disp, prior_cases, prev_as_of = _prior_state(spark, base_run_id, cycle_no, ledger)
+        prior_disp, prior_cases, prev_as_of, rerun = _prior_state(
+            spark, base_run_id, cycle_no, ledger
+        )
         carry = None
         if prior_disp is not None:
+            # Customers only, and only those still customers: an entity that
+            # left the monitored population has its alerts out of scope now.
+            still = entities.where(col("is_customer") == lit(True)).select("entity_id").distinct()
             carry = prior_disp.where(
                 col("is_customer") & (col("disposition") != lit(DISP_OVER_CAPACITY))
-            )
+            ).join(still, "entity_id", "left_semi")
+            prior_disp = prior_disp.join(still, "entity_id", "left_semi")
 
         # Stage 6-8: triage, cases, SAR decisions.
         alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == lit(run_id))
-        inputs = build_alert_inputs(spark, alerts, entities, manifest, params).persist()
+        inputs = build_alert_inputs(spark, alerts, entities, manifest, params, carry).persist()
         held.append(inputs)
         disp_sim, cases_sim, tagged = simulate(
             spark, inputs, carry, params, as_of, prev_as_of, cycle_no
@@ -1985,7 +2048,7 @@ def run_tm_operations(
 
         # Read the written tables back once; the funnel rows complete the
         # cycle ledger, and the invariants read the ledger as written.
-        counts = read_back(spark, run_id, as_of, prior_disp, prior_cases, prev_as_of)
+        counts = read_back(spark, run_id, as_of, prior_disp, prior_cases, prev_as_of, rerun)
         recon_rows = recon_rows + [
             ("funnel", "alerts", "alerts", counts["customer_alerts"], None),
             ("funnel", "alerts_out_of_scope", "alerts", counts["noncustomer_alerts"], None),

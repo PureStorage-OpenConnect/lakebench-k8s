@@ -514,6 +514,9 @@ def _compare(
         tol = corr_tol if band == "correctness" else perf_tol
         actual_value = actual.get(metric)
         if "qph" in metric and not qph_ok:
+            # Different recorded sets: a performance failure. A package that
+            # predates query-set ids: not compared, not failed (re-record it).
+            legacy = query_sets is not None and not query_sets[0]
             rows.append(
                 {
                     "metric": metric,
@@ -526,7 +529,8 @@ def _compare(
                     "reason": qph_reason,
                 }
             )
-            performance_failed = True
+            if not legacy:
+                performance_failed = True
             continue
         if actual_value is None:
             rows.append(
