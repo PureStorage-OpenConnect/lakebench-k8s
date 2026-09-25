@@ -1,6 +1,6 @@
 {
   "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.5.0 (2026-09-25, AML-GOALS section 9 #37/#38) replaces the reference model's hyperparameters, the relative leakage cap and the calibration and evaluation seeds after D0 at v3.4.1 was voided as a harness failure; see changelog. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
-  "version": "3.5.0",
+  "version": "3.5.1",
   "registered": "2026-09-25",
   "metric": "average_precision",
   "unit_of_scoring": {
@@ -61,6 +61,8 @@
     "note": "for a possible model-training workload (#36): per-unit out-of-fold scores (unit key, typology, label, score, fold), permutation importances on each fold's held-out rows, the fitted hyperparameters, library versions and the feature list with its sha256; written next to the JSON report (snappy parquet)"
   },
   "corpora": {
+    "spent_seeds": [42, 50000042],
+    "spent_seeds_note": "Seeds retired by seed_rule: 42 was looked at by the voided D0 at v3.4.1 (AML-GOALS section 9 #38), 50000042 was the evaluation seed before v3.5.0 moved it. The cluster datagen refuses a spent seed for the financial schema (lakebench/config/datagen_seed.py). Append a seed here when a look at it is voided or burned.",
     "calibration_seed": 43,
     "evaluation_seed": 50000043,
     "robustness_seed": 90000042,
@@ -206,6 +208,15 @@
   },
   "features_note": "v3.3: customer_type and crr_tier added (AML-GOALS section 9 #32); is_customer excluded because only customers are scored. v3.4: four history-relative features for the monthly unit (unit_of_scoring.history_features). Definitions: src/lakebench/spark/scripts/aml_features.py.",
   "changelog": [
+    {
+      "version": "3.5.1",
+      "date": "2026-09-25",
+      "approved": "AML-GOALS section 9 #38/#39 (seed 42 spent; cluster datagen hard-coded it)",
+      "changes": [
+        "corpora.spent_seeds: [42, 50000042], read by the cluster datagen to refuse a retired seed"
+      ],
+      "unchanged": "every gated value: band, K/N, unit, labels, gate scale, typologies, features, CV, reference and shortcut models, leakage caps, power, and the calibration, evaluation and robustness seeds"
+    },
     {
       "version": "3.5.0",
       "date": "2026-09-25",

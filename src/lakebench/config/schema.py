@@ -971,6 +971,10 @@ class DatagenConfig(ConfigModel):
     )
 
     mode: DatagenMode = DatagenMode.AUTO
+    # Top-level generator seed. Unset: the AML pre-registration's calibration
+    # seed for the financial schema, 42 otherwise (config/datagen_seed.py). A
+    # financial seed the pre-registration lists as spent is refused.
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
     parallelism: int = Field(default=4, ge=1)
     # Datagen output file size. Per-thread generator memory scales with it
     # (about 4.8x for financial, 3.0x for c360, measured), so the old 512mb
@@ -1173,6 +1177,16 @@ class WorkloadConfig(ConfigModel):
     tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _seed_not_spent(self) -> WorkloadConfig:
+        # Refused at load, before anything is deployed: a spent AML seed would
+        # regenerate a corpus that has already been looked at (AML-GOALS R3).
+        if self.datagen.seed is not None:
+            from lakebench.config.datagen_seed import check_seed
+
+            check_seed(self.datagen.seed, self.schema_type.value)
+        return self
 
 
 # Supported component combinations (catalog, table_format, query_engine).
