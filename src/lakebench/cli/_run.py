@@ -417,6 +417,57 @@ def _paired_qph(pre, post) -> tuple[float, float, int] | None:
     return len(common) / pre_s * 3600, len(common) / post_s * 3600, len(common)
 
 
+def _data_file_total(health: dict[str, int]) -> int:
+    """Data files across the probed tables; 0 (unknown) when any probe failed.
+
+    ``_probe_table_health`` reports a failed probe as -1. Summed in, it
+    shifted the total by one per failure, and a probe that failed on one
+    side only read as a file-count change.
+    """
+    counts = [v for k, v in health.items() if "file_count" in k and isinstance(v, int)]
+    if not counts or any(v < 0 for v in counts):
+        return 0
+    return sum(counts)
+
+
+def _maintenance_value(
+    pre, post, pre_files: int, post_files: int, maint_elapsed: float
+) -> tuple[float | None, int, str]:
+    """(value %, paired queries, reason) for the pre/post maintenance rounds.
+
+    The value is None, with the reason, unless maintenance ran and compaction
+    reduced the data file count. With the file count unchanged the two rounds
+    differ only in what compaction did not change, and the difference is
+    run-to-run noise: on 2026-09-24 four runs with the same file count before
+    and after read -12.4%, -8.9%, +31.2% and +46.8% (LB-141).
+    """
+    if maint_elapsed <= 0:
+        return None, 0, "maintenance did not run"
+    if pre_files <= 0 or post_files <= 0:
+        return None, 0, "data file counts unavailable"
+    if post_files >= pre_files:
+        return None, 0, f"compaction changed no files ({pre_files:,} -> {post_files:,})"
+    paired = _paired_qph(pre, post)
+    if paired is None:
+        return None, 0, "no query succeeded in both rounds"
+    pre_q, post_q, n = paired
+    return (post_q - pre_q) / pre_q * 100, n, ""
+
+
+def _warm_benchmark(runner, query_timeout: int) -> None:
+    """One unmeasured pass, so a measured round does not pay first-touch costs.
+
+    Before this, the pre-maintenance round was the first query ever against
+    the new tables (cold metadata and file caches) and the post round the
+    first against the post-maintenance snapshot; each paid a different set of
+    first-touch costs, and the difference was read as the maintenance value.
+    """
+    try:
+        runner.run_power(cache="hot", query_timeout=query_timeout)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("benchmark warm-up pass failed: %s", e)
+
+
 def _benchmark_gate_problems(cfg, queries) -> list[str]:
     """Reasons the benchmark result is not a valid score.
 
@@ -1617,7 +1668,7 @@ def run(
         # Pre-compaction benchmark only runs at scale < 50 (OOMs at higher scales
         # due to 200K+ uncompacted files overwhelming Trino memory).
         pre_compaction_qph = 0.0
-        _paired = None
+        _maint_value = None
         pre_file_count = 0
         post_file_count = 0
         maint_elapsed = 0.0
@@ -1658,11 +1709,7 @@ def run(
                 # 1. Pre-maintenance file count
                 try:
                     _pre_health = _probe_table_health(cfg, k8s)
-                    pre_file_count = sum(
-                        v
-                        for k, v in _pre_health.items()
-                        if "file_count" in k and isinstance(v, int)
-                    )
+                    pre_file_count = _data_file_total(_pre_health)
                 except Exception:
                     pass
 
@@ -1681,6 +1728,8 @@ def run(
                     _pre_timeout = (
                         900 if cfg.architecture.workload.schema_type.value == "financial" else 300
                     )
+                    print_info("Warm-up pass (not measured)...")
+                    _warm_benchmark(_pre_runner, _pre_timeout)
                     _pre_result = _pre_runner.run_power(
                         cache="hot",
                         progress_callback=_bench_progress,
@@ -1713,11 +1762,7 @@ def run(
                 # 4. Post-maintenance file count
                 try:
                     _post_health = _probe_table_health(cfg, k8s)
-                    post_file_count = sum(
-                        v
-                        for k, v in _post_health.items()
-                        if "file_count" in k and isinstance(v, int)
-                    )
+                    post_file_count = _data_file_total(_post_health)
                 except Exception:
                     pass
 
@@ -1770,6 +1815,12 @@ def run(
                 _bench_timeout = (
                     900 if cfg.architecture.workload.schema_type.value == "financial" else 300
                 )
+                if pre_compaction_qph > 0:
+                    # The pre round was measured after a warm-up pass; give
+                    # this one the same, or the comparison measures the
+                    # warm-up rather than maintenance (LB-141).
+                    print_info("Warm-up pass (not measured)...")
+                    _warm_benchmark(bench_runner, _bench_timeout)
                 bench_result = bench_runner.run_power(
                     cache="hot",
                     progress_callback=_post_bench_progress,
@@ -1781,18 +1832,22 @@ def run(
                 benchmark_qph = bench_result.qph
 
                 # Maintenance summary
-                _paired = (
-                    _paired_qph(_pre_result.queries, bench_result.queries)
-                    if pre_compaction_qph > 0
-                    else None
-                )
-                if _paired and maint_elapsed > 0:
-                    _pre_q, _post_q, _n_pair = _paired
-                    improvement = ((_post_q - _pre_q) / _pre_q) * 100
-                    console.print(
-                        f"  [bold]Maintenance value: {improvement:+.1f}% QpH improvement[/bold] "
-                        f"(over the {_n_pair} queries that succeeded in both runs)"
+                if pre_compaction_qph > 0:
+                    _maint_value = _maintenance_value(
+                        _pre_result.queries,
+                        bench_result.queries,
+                        pre_file_count,
+                        post_file_count,
+                        maint_elapsed,
                     )
+                    if _maint_value[0] is not None:
+                        console.print(
+                            f"  [bold]Maintenance value: {_maint_value[0]:+.1f}% QpH "
+                            f"improvement[/bold] (over the {_maint_value[1]} queries that "
+                            "succeeded in both runs)"
+                        )
+                    else:
+                        console.print(f"  Maintenance value: not measured ({_maint_value[2]})")
                 if maint_elapsed > 0 and pre_file_count > 0:
                     ratio = pre_file_count / max(post_file_count, 1)
                     console.print(
@@ -1915,13 +1970,12 @@ def run(
                     if pre_compaction_qph > 0 and benchmark_qph:
                         pb.pre_compaction_qph = pre_compaction_qph
                         pb.post_compaction_qph = benchmark_qph
-                        # Only a paired comparison after maintenance that ran
-                        # is a maintenance value; otherwise leave it null.
-                        if _paired and maint_elapsed > 0:
-                            pb.maintenance_value_pct = (
-                                (_paired[1] - _paired[0]) / _paired[0]
-                            ) * 100
-                            pb.maintenance_paired_queries = _paired[2]
+                        # Only a paired comparison after a compaction that
+                        # changed files is a maintenance value; otherwise
+                        # leave it null (LB-141).
+                        if _maint_value is not None and _maint_value[0] is not None:
+                            pb.maintenance_value_pct = _maint_value[0]
+                            pb.maintenance_paired_queries = _maint_value[1]
                 except Exception:
                     pass  # Maintenance metrics are best-effort
 
