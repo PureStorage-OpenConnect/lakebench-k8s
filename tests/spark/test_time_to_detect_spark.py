@@ -140,3 +140,52 @@ def test_small_lookup_broadcasts_instead_of_shuffling_silver(spark):
         spark.conf.unset("spark.sql.autoBroadcastJoinThreshold")
     assert "BroadcastHashJoin" in plan
     assert [r["arrival_ts"].timestamp() for r in df.collect()] == [1_000_300]
+
+
+def test_each_alert_is_measured_at_its_own_rule_commit(spark):
+    """A rule's alerts are visible when its INSERT commits, so a cheap rule
+    run first is measured at its own commit, not at the end of the pass."""
+    from gold_refresh_financial import new_alert_arrivals, new_alert_txns, ttd_stats
+
+    current = spark.createDataFrame(
+        [
+            ("a", "W4_risk_propagation", 1, ["t4"]),
+            ("b", "W3_round_tripping", 2, ["t2"]),
+            ("c", "W2_structuring", 3, ["t1"]),
+        ],
+        _ALERTS,
+    )
+    arrivals = new_alert_arrivals(new_alert_txns(current, None), _txns(spark))
+    stats = ttd_stats(
+        arrivals,
+        1_000_900.0,
+        detected_by_rule={
+            "W4_risk_propagation": 1_000_320.0,
+            "W3_round_tripping": 1_000_800.0,
+            # A rule that did not commit falls back to the pass end.
+            "W2_structuring": None,
+        },
+        bin_s=10,
+    )
+    # W4: 320 - 300 = 20 -> bin 2; W3: 800 - 160 = 640 -> bin 64;
+    # W2: 900 - 100 = 800 -> bin 80.
+    assert stats["bins"] == {2: 1, 64: 1, 80: 1}
+    assert stats["max_s"] == pytest.approx(800.0)
+    # The pass-end histogram measures all three at 900: 600, 740, 800.
+    assert stats["pass_end"]["bins"] == {60: 1, 74: 1, 80: 1}
+    assert stats["by_rule"]["W4_risk_propagation"] == {
+        "alerts": 1,
+        "max_s": pytest.approx(20.0),
+        "bins": {2: 1},
+    }
+    from gold_refresh_financial import ttd_detail_lines
+
+    lines = ttd_detail_lines(4, stats)
+    assert (
+        lines[0]
+        == "Cycle 4: time to detect at pass end alerts=3 max=800.0s bin=10s bins=60:1,74:1,80:1"
+    )
+    assert (
+        "Cycle 4: time to detect rule=W4_risk_propagation alerts=1 max=20.0s bin=10s bins=2:1"
+        in lines
+    )

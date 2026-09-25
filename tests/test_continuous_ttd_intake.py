@@ -207,7 +207,7 @@ def test_unknown_bronze_timing_keeps_the_ratio_verdict():
 
 def test_gold_refresh_logs_time_to_detect():
     src = (SCRIPTS / "gold_refresh_financial.py").read_text()
-    assert "if _log_time_to_detect(spark, cycle, ttd_base, detection_end_s):" in src
+    assert "if _log_time_to_detect(\n        spark, cycle, ttd_base, detection_end_s," in src
     assert "ttd_baseline.measured(_prior_alerts_snapshot(spark))" in src
     assert "log(ttd_line(cycle, stats))" in src
 
