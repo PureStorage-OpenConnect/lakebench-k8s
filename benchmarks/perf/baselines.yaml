@@ -5,13 +5,60 @@ baselines:
   c360-batch-s10:
     config: c360-batch-s10.yaml
     required: true
-    status: pending first run
+    status: accepted
+    run_id: 20260925-144532-16983c
+    git_sha: f6c7795cf105301baf3eff92fa6d3f545494cda0
+    config_hash: 26c2e83ced891e2d3209dfd5e150f95d1163a852b5b1b1781ead7ebf2c241e07
+    fingerprint_hash: 8a660e5d6f6599674427526fd522717f1ee3f5e1e304247ab29ac2dddfbb5bf9
+    recorded_at: '2026-09-25T21:06:03+00:00'
+    ttv_basis: stages
+    metrics:
+      bronze_seconds: 90.1402
+      composite_qph: 817.5
+      compute_efficiency_gb_per_core_hour: 119.7187
+      datagen_aggregate_mbps: 2479.344
+      datagen_cpu_hr_per_tb: 3.577
+      datagen_mbps_per_pod: 621.2995
+      datagen_seconds: 42.923
+      gold_seconds: 90.1106
+      pipeline_throughput_gb_per_second: 0.7541
+      pre_compaction_qph: 798.8
+      query_qph_Q1_full_aggregation_scan: 648.0648
+      query_qph_Q2_filtered_aggregation: 881.0573
+      query_qph_Q3_customer_segmentation: 619.728
+      query_qph_Q4_churn_risk_analysis: 873.9985
+      query_qph_Q5_revenue_trend_ma7: 870.1958
+      query_qph_Q6_customer_rfm: 614.4393
+      query_qph_Q7_channel_conversion_funnel: 993.6517
+      query_qph_Q9_executive_dashboard: 1762.9775
+      query_seconds: 35.229
+      silver_seconds: 210.2428
+      time_to_value_seconds: 392.0797
     notes: No existing run matches this pinned config (see docs/perf-regression-gate.md,
       "Seeding"). Record the first run of it.
   c360-continuous-s10:
     config: c360-continuous-s10.yaml
     required: true
-    status: pending first run
+    status: accepted
+    run_id: 20260925-153533-529c12
+    git_sha: f6c7795cf105301baf3eff92fa6d3f545494cda0
+    config_hash: 374366ccbe8717576ca37f0df450456abd34cbac657d02c6fe20b1412e31e669
+    fingerprint_hash: e9935307c7ece7fe57c636d93dd7681ced7ceafb2de5e32e97bc6029ed08ec14
+    recorded_at: '2026-09-25T22:07:40+00:00'
+    corpus_drained: true
+    metrics:
+      composite_qph: 830.6
+      compute_efficiency_gb_per_core_hour: 28.046
+      data_freshness_seconds: 89.0
+      pipeline_throughput_gb_per_second: 0.2181
+      query_qph_Q1_full_aggregation_scan: 683.6308
+      query_qph_Q2_filtered_aggregation: 565.9488
+      query_qph_Q3_customer_segmentation: 684.4106
+      query_qph_Q4_churn_risk_analysis: 908.4027
+      query_qph_Q5_revenue_trend_ma7: 1051.0949
+      query_qph_Q6_customer_rfm: 727.5667
+      query_qph_Q7_channel_conversion_funnel: 964.3718
+      query_qph_Q9_executive_dashboard: 1745.0315
     notes: No existing run matches this pinned config (see docs/perf-regression-gate.md,
       "Seeding"). Record the first run of it.
   aml-batch-s1:
@@ -19,5 +66,5 @@ baselines:
     required: false
     status: pending first run
     notes: Not required until the AML datagen is frozen. Every AML batch run so far
-      records scale_ratio 0.0 (bronze input volume not measured), which the gate
-      refuses; that has to be fixed before any AML run can become a baseline.
+      records scale_ratio 0.0 (bronze input volume not measured), which the gate refuses;
+      that has to be fixed before any AML run can become a baseline.
