@@ -1129,6 +1129,18 @@ def _wait_for_bronze_data(cfg, timeout_seconds: int = 300) -> bool:
     return False
 
 
+def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
+    """Env for the continuous SparkApplications.
+
+    LB_RUN_ID is the CLI run id. It lives in the manifest, so a driver the
+    operator restarts keeps it: gold.alerts and the TM ledger stay this run's
+    instead of a fresh uuid per driver, which erased the ledger and restarted
+    alert identity. LB_CONTINUOUS_WINDOW_S lets gold-refresh time its final
+    TM pass before the window closes.
+    """
+    return {"LB_RUN_ID": run_id, "LB_CONTINUOUS_WINDOW_S": str(int(run_duration))}
+
+
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
     """Return the peak gold.alerts row count reported by the continuous gold
     stage, or None if the logs show no detection activity.
@@ -1402,8 +1414,9 @@ def _run_sustained(
         )
 
         submitted = []
+        stream_env = _streaming_job_env(run_id, run_duration)
         for job_type, job_name in streaming_jobs:
-            job_status = job_manager.submit_job(job_type)
+            job_status = job_manager.submit_job(job_type, cycle_env=stream_env)
             if job_status.state == JobState.FAILED:
                 print_error(f"Failed to submit {job_name}: {job_status.message}")
                 pipeline_success = False

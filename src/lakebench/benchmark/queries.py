@@ -447,7 +447,10 @@ ORDER BY a.alert_ts DESC""",
 # their queue, so it runs against whatever cases the run produced. SQL is
 # Trino dialect with at most one DATE_DIFF per query (the Spark Thrift and
 # DuckDB adapters rewrite the first occurrence) and INTERVAL arithmetic in
-# place of date_add, which all three engines parse.
+# place of date_add, which all three engines parse. Every read of a TM table
+# is scoped to the run ({tm_run_id}), and the runner leaves the class out
+# unless this run's TM layer ran: otherwise they would time a stale or empty
+# table under the same query-set id.
 
 _IQ1 = BenchmarkQuery(
     name="IQ1_customer_360",
@@ -457,6 +460,7 @@ _IQ1 = BenchmarkQuery(
 WITH subject AS (
   SELECT customer_id
   FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
   ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END,
            CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
            opened_date, case_id
@@ -470,6 +474,7 @@ alerts AS (
          MAX(d.generated_date) AS last_alert_date
   FROM {catalog}.{gold_alert_dispositions} d
   JOIN subject s ON d.entity_id = s.customer_id
+  WHERE d.base_run_id = '{tm_run_id}'
   GROUP BY d.entity_id
 ),
 history AS (
@@ -478,6 +483,7 @@ history AS (
          SUM(CASE WHEN c.sar_decision = 'sar_filed' THEN 1 ELSE 0 END) AS sars
   FROM {catalog}.{gold_cases} c
   JOIN subject s ON c.customer_id = s.customer_id
+  WHERE c.base_run_id = '{tm_run_id}'
   GROUP BY c.customer_id
 ),
 accts AS (
@@ -506,7 +512,7 @@ _IQ2 = BenchmarkQuery(
 WITH subject AS (
   SELECT customer_id, opened_date
   FROM {catalog}.{gold_cases}
-  WHERE case_type = 'alert_escalation'
+  WHERE case_type = 'alert_escalation' AND base_run_id = '{tm_run_id}'
   ORDER BY opened_date DESC, case_id
   LIMIT 1
 )
@@ -533,6 +539,7 @@ _IQ3 = BenchmarkQuery(
 WITH subject AS (
   SELECT customer_id
   FROM {catalog}.{gold_cases}
+  WHERE base_run_id = '{tm_run_id}'
   ORDER BY CASE WHEN case_status = 'closed' THEN 1 ELSE 0 END, opened_date, case_id
   LIMIT 1
 ),
@@ -559,6 +566,7 @@ hop2 AS (
 ),
 alerted AS (
   SELECT DISTINCT entity_id FROM {catalog}.{gold_alert_dispositions}
+  WHERE base_run_id = '{tm_run_id}'
 )
 SELECT h2.via_entity_id, h2.hop2_entity_id, en.name, en.is_customer, en.country, en.crr_tier,
        h2.amount_usd,
@@ -580,7 +588,8 @@ SELECT c.case_id, c.customer_id, e.name, c.case_type, c.priority, c.crr_tier,
        c.alert_count, c.case_status
 FROM {catalog}.{gold_cases} c
 LEFT JOIN {catalog}.{silver_entities} e ON e.entity_id = c.customer_id
-WHERE c.case_status <> 'closed'
+WHERE c.base_run_id = '{tm_run_id}'
+  AND c.case_status <> 'closed'
   AND c.opened_date <= c.as_of_date - INTERVAL '60' DAY
 ORDER BY age_days DESC, c.case_id""",
 )

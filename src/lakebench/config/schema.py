@@ -1096,7 +1096,7 @@ class TmOperationsConfig(ConfigModel):
     )
     continuous_interval_seconds: int = Field(
         default=1800,
-        ge=0,
+        ge=60,
         le=86_400,
         description=(
             "Continuous mode: seconds between operations passes. One pass costs minutes "

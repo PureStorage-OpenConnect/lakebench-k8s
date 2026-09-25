@@ -421,11 +421,18 @@ _DAY_US = 86_400 * 1_000_000
 _T0 = 1_704_067_200 * 1_000_000  # 2024-01-01T00:00Z in epoch microseconds
 
 
-def _cur(aid, content, day, rule="W2_structuring", truth=False, prio="high"):
+def _sk(*txns):
+    import zlib
+
+    return sorted(zlib.crc32(t.encode()) for t in txns)
+
+
+def _cur(aid, content, day, rule="W2_structuring", truth=False, prio="high", txns=None):
     return {
         "alert_id": aid,
         "alert_key": f"{content}-0",
         "content_hash": content,
+        "txn_sketch": _sk(*(txns if txns is not None else [content])),
         "rule_id": rule,
         "alert_ts": _T0 + day * _DAY_US,
         "generated_date": D0 + timedelta(days=day + 1),
@@ -451,7 +458,8 @@ def test_match_keeps_identity_for_same_content_and_for_a_grown_window():
     p2 = _prior(_cur("x2", "c2", 50))
     cur = [
         _cur("y1", "c1", 10),  # identical
-        _cur("y2", "c2-grown", 60, truth=True, prio="low"),  # window grew 10 days
+        # Window grew 10 days: c2's payment plus a new one.
+        _cur("y2", "c2-grown", 60, truth=True, prio="low", txns=["c2", "t-new"]),
     ]
     out = {a["alert_id"]: a for a in tm.match_alerts(cur, [p1, p2], prev, prev, 2)}
     assert out["y1"]["alert_key"] == "c1-0" and out["y1"]["first_seen_cycle"] == 1
@@ -520,7 +528,10 @@ def test_decided_history_is_reproduced_the_next_cycle():
                 c2.append(a)
             else:
                 g = dict(
-                    a, content_hash=a["content_hash"] + "g", alert_ts=a["alert_ts"] + 3 * _DAY_US
+                    a,
+                    content_hash=a["content_hash"] + "g",
+                    alert_ts=a["alert_ts"] + 3 * _DAY_US,
+                    txn_sketch=sorted(a["txn_sketch"] + _sk(a["content_hash"] + "-more")),
                 )
                 c2.append(g)
         c2 += [_cur(f"n{j}", f"new{cust}-{j}", 290 + 20 * j, truth=True) for j in range(3)]
@@ -588,8 +599,8 @@ def test_new_alert_never_takes_a_withdrawn_alerts_key():
 def test_grown_windows_pair_in_time_order():
     p1 = _prior(_cur("P1", "h1", 0, truth=True))
     p2 = _prior(_cur("P2", "h2", 20))
-    c1 = _cur("C1", "h1b", 21)
-    c2 = _cur("C2", "h2b", 40)
+    c1 = _cur("C1", "h1b", 21, txns=["h1", "x1"])
+    c2 = _cur("C2", "h2b", 40, txns=["h2", "x2"])
     prev = D0 + timedelta(days=60)
     out = {a["alert_id"]: a for a in tm.match_alerts([c1, c2], [p1, p2], prev, prev, 2)}
     assert out["C1"]["alert_key"] == "h1-0" and out["C1"]["truth"] is True
@@ -606,3 +617,156 @@ def test_unavailable_source_is_unchecked_not_failed():
     assert inv["reconciliation"]["status"] == "unchecked"
     v = tm_verdict({1: inv}, {})
     assert v["status"] == "unknown" and not v["problems"] and "reconciliation" in v["reason"]
+
+
+def test_new_activity_inside_a_window_cannot_take_the_identity():
+    """Reviewer probe: prior K1 (truth) at day 0; this cycle a new same-rule
+    alert at day 5 with other payments and K1 grown to day 20. The grown one
+    keeps K1; the new activity is a new alert."""
+    prev = D0 + timedelta(days=60)
+    k1 = _prior(_cur("K1", "k1", 0, truth=True, txns=["p1", "p2"]))
+    fresh = _cur("N", "n5", 5, truth=False, txns=["q1"])
+    grown = _cur("G", "k1g", 20, truth=False, txns=["p1", "p2", "p3"])
+    for order in ([fresh, grown], [grown, fresh]):
+        out = {a["alert_id"]: a for a in tm.match_alerts(order, [k1], prev, prev, 2)}
+        assert out["G"]["alert_key"] == "k1-0" and out["G"]["truth"] is True
+        assert out["N"]["alert_key"] != "k1-0" and out["N"]["first_seen_cycle"] == 2
+
+
+def test_extension_prefers_the_largest_overlap_then_is_deterministic():
+    prev = D0 + timedelta(days=60)
+    a = _prior(_cur("A", "a", 0, txns=["x", "y"]))
+    b = _prior(_cur("B", "b", 2, txns=["x"]))
+    c = _cur("C", "c", 10, txns=["x", "y", "z"])
+    out = {r["alert_id"]: r for r in tm.match_alerts([c], [b, a], prev, prev, 2)}
+    assert out["C"]["alert_key"] == "a-0"
+    assert out["B"]["in_current_detection"] is False
+
+
+# --- The per-customer cap (applied after identity matching) ----------------
+
+
+def _group(current, prior, cap, cycle=2, prev=D0 + timedelta(days=60)):
+    import json as _json
+
+    rows = [("n", tuple(a.get(f) for f in tm._CUR_FIELDS)) for a in current]
+    rows += [("p", tuple(a.get(f) for f in tm._PRIOR_FIELDS)) for a in prior]
+    p = dict(PARAMS, max_alerts_per_customer=cap)
+    out = tm._simulate_group((1, iter(rows)), p, prev + timedelta(days=30), prev, cycle)
+    return [_json.loads(x) for t, x in out if t == "d"]
+
+
+def test_cap_never_duplicates_a_grown_alert():
+    """Reviewer probe: a grown alert has new content, so a Spark-side cap saw
+    it as new and capped it while its prior row was carried."""
+    p1 = _prior(_cur("P1", "p1", 0, txns=["a"]))
+    p2 = _prior(_cur("P2", "p2", 1, txns=["b"]))
+    cur = [
+        _cur("G1", "p1g", 5, txns=["a", "a2"]),  # P1 grown
+        _cur("P2x", "p2", 1, txns=["b"]),  # P2 unchanged
+        _cur("N", "n", 2, txns=["c"]),  # new, but no room under cap 2
+    ]
+    d = _group(cur, [p1, p2], cap=2)
+    keys = [r["alert_key"] for r in d]
+    assert len(keys) == len(set(keys)) == 3
+    by = {r["alert_id"]: r for r in d}
+    assert by["G1"]["alert_key"] == "p1-0" and by["G1"]["disposition"] != "over_capacity"
+    assert by["N"]["disposition"] == "over_capacity"
+
+
+def test_cap_bounds_the_workflow_total_per_customer():
+    prior = [_prior(_cur(f"P{i}", f"p{i}", i, txns=[f"t{i}"])) for i in range(3)]
+    cur = [_cur(f"N{i}", f"n{i}", 10 + i, txns=[f"u{i}"]) for i in range(10)]
+    d = _group(cur, prior, cap=5)
+    worked = [r for r in d if r["disposition"] != "over_capacity"]
+    assert len(worked) == 5 and len(d) == 13
+    # New alerts admitted oldest first.
+    assert {r["alert_id"] for r in worked} == {"P0", "P1", "P2", "N0", "N1"}
+
+
+# --- Continuous scheduling (gold-refresh) ------------------------------------
+
+
+def test_tm_pass_due_interval_from_the_end_of_the_last_pass():
+    p = {"continuous_interval_seconds": 600}
+    clock = {"run_start": 0.0, "start": None, "end": None, "elapsed": 0.0}
+    assert tm.tm_pass_due(60, clock, p)  # first eligible tick
+    clock.update(start=60, end=1000, elapsed=940)  # a pass longer than the interval
+    assert not tm.tm_pass_due(1001, clock, p)  # detection ticks run before the next
+    assert tm.tm_pass_due(1600, clock, p)
+
+
+def test_tm_pass_due_runs_a_final_pass_before_the_window_closes():
+    p = {"continuous_interval_seconds": 1800}
+    clock = {"run_start": 0.0, "start": 60.0, "end": 240.0, "elapsed": 180.0}
+    window = 900  # shorter than the interval
+    final_at = window - max(120.0, 1.5 * 180 + 60)
+    assert not tm.tm_pass_due(final_at - 1, clock, p, window)
+    assert tm.tm_pass_due(final_at, clock, p, window)
+    clock.update(start=final_at, end=final_at + 180)
+    assert not tm.tm_pass_due(final_at + 200, clock, p, window)  # once
+
+
+# --- Continuous in-flight bound ---------------------------------------------
+
+
+def test_bronze_must_hold_a_time_ordered_prefix_of_the_raw_files():
+    files = [(1_000_000, 10), (2_000_000, 10), (3_000_000, 10), (9_000_000, 5)]
+    gap = tm.bronze_prefix_gap
+    assert gap(files, 30, tolerance_ms=0) == 0  # newest file in flight
+    assert gap(files, 35, tolerance_ms=0) == 0
+    assert gap(files, 0, tolerance_ms=0) == 0
+    assert gap(files, 25, tolerance_ms=0) == 5  # half a file: not how the stream reads
+    assert gap(files, 40, tolerance_ms=0) == 5  # more than the source
+    # An old file lost while newer ones were ingested.
+    assert gap([(1, 3), (10**9, 50)], 50, tolerance_ms=900_000) == 3
+    # Reordering inside the tolerance is allowed.
+    assert gap([(1_000_000, 10), (1_000_500, 7)], 7, tolerance_ms=1_000) == 0
+
+
+def test_reconciliation_fails_on_unaccounted_and_is_unchecked_when_unbounded():
+    inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(unaccounted=3))}
+    assert inv["reconciliation"] == "fail"
+    inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(unaccounted=None))}
+    assert inv["reconciliation"] == "unchecked"
+    inv = {n: s for n, s, _ in tm.evaluate_invariants(_counts(history_note="snapshots expired"))}
+    assert inv["history_stable"] == "unchecked"
+
+
+def test_schema_bounds():
+    import pydantic
+
+    from lakebench.config.schema import TmOperationsConfig
+
+    with pytest.raises(pydantic.ValidationError):
+        TmOperationsConfig(continuous_interval_seconds=0)
+    with pytest.raises(pydantic.ValidationError):
+        TmOperationsConfig(max_alerts_per_customer=0)
+    assert TmOperationsConfig(continuous_interval_seconds=60).continuous_interval_seconds == 60
+
+
+def test_continuous_jobs_get_the_cli_run_id_and_window():
+    from lakebench.cli._sustained import _streaming_job_env
+
+    env = _streaming_job_env("20260925-101010-abcdef", 900)
+    assert env == {"LB_RUN_ID": "20260925-101010-abcdef", "LB_CONTINUOUS_WINDOW_S": "900"}
+    import inspect
+
+    from lakebench.cli import _sustained
+
+    src = inspect.getsource(_sustained._run_sustained)
+    assert "submit_job(job_type, cycle_env=stream_env)" in src
+
+
+def test_gold_refresh_samples_freshness_after_a_tm_pass():
+    """Gold is not refreshed while a pass runs, so the staleness it causes
+    must reach the freshness score: a freshness line follows each pass."""
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src/lakebench/spark/scripts/gold_refresh_financial.py"
+    ).read_text()
+    i = src.index("run_tm_operations(\n")
+    after = src[i : i + 900]
+    assert 'tm_clock["end"] = time.time()' in after
+    assert "data freshness" in after
+    assert "tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_S)" in src

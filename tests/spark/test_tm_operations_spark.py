@@ -92,6 +92,15 @@ _ENTITIES = [
 ]
 
 
+# Stream ingest time of every bronze and silver row in the fixture.
+INGEST_TS = __import__("datetime").datetime(2025, 1, 2, 3, 0)
+
+
+def _files(*rows_by_mtime):
+    """A count_source_rows result: {"rows", "files": [(mtime_ms, rows)]}."""
+    return {"rows": sum(r for _, r in rows_by_mtime), "files": list(rows_by_mtime)}
+
+
 def _setup(spark):
     from datetime import datetime, timedelta
     from decimal import Decimal
@@ -151,15 +160,17 @@ def _setup(spark):
                 None if usd is None else Decimal(str(usd)),
                 ts,
                 False,
+                INGEST_TS,
             )
             for u, o, b, a, usd, ts in rows
         ],
         "txn_id STRING, uetr STRING, originator_id BIGINT, beneficiary_id BIGINT, "
         "originator_bank_bic STRING, beneficiary_bank_bic STRING, txn_amount DECIMAL(18,2), "
-        "txn_amount_usd DECIMAL(18,2), txn_timestamp TIMESTAMP, cross_border BOOLEAN",
+        "txn_amount_usd DECIMAL(18,2), txn_timestamp TIMESTAMP, cross_border BOOLEAN, "
+        "ingest_ts TIMESTAMP",
     )
     txns.writeTo("lakehouse.silver.transactions").create()
-    txns.select("uetr").writeTo("lakehouse.default.pacs008_raw").create()
+    txns.select("uetr", "ingest_ts").writeTo("lakehouse.default.pacs008_raw").create()
 
     spark.createDataFrame(
         [
@@ -373,6 +384,7 @@ def _check(spark):
             silver_counterparty_edges="silver.counterparty_edges",
             gold_alert_dispositions="gold.alert_dispositions",
             gold_cases="gold.cases",
+            tm_run_id="run-x",
         )
         got[q.name] = spark.sql(adapt(sql)).collect()
     assert len(got) == 4
@@ -425,9 +437,15 @@ def _check(spark):
 
     # history_stable can fail: a decided alert whose recorded outcome differs
     # from what the replay reproduces is history rewritten.
+    # The recorded cycle-2 state is edited and the ledger pointed at it.
     spark.sql(
         "UPDATE lakehouse.gold.alert_dispositions SET disposition = 'closed_nfa' "
         f"WHERE alert_key = '{keys_c1['A1']}'"
+    )
+    sid = tm.current_snapshot_id(spark, "lakehouse.gold.alert_dispositions")
+    spark.sql(
+        f"UPDATE lakehouse.gold.tm_reconciliation SET item_count = {sid} "
+        "WHERE cycle = 2 AND section = 'snapshot' AND item = 'alert_dispositions'"
     )
     _alerts(spark, "run-x-c3", specs2)
     inv = tm.run_tm_operations(
@@ -447,7 +465,9 @@ def _check(spark):
     assert detail[0] == "fail" and detail[1].startswith("1 alerts"), detail
 
     # Continuous: one ledger set per operations pass, appended. Payments
-    # datagen wrote that silver does not hold yet are excluded as in_flight.
+    # datagen wrote that bronze does not hold yet (the newest raw file) are
+    # in flight.
+    t_old, t_new = 1_000_000, 10**12
     _alerts(spark, "run-cont")
     inv = tm.run_tm_operations(
         spark,
@@ -456,14 +476,17 @@ def _check(spark):
         cycle=7,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: n_rows + 4,
+        source_rows_fn=lambda s: _files((t_old, n_rows), (t_new, 4)),
     )
     assert all(s == "pass" for _, s, _ in inv), inv
     rec = {
         (r["section"], r["item"]): r["item_count"]
         for r in spark.table("lakehouse.gold.tm_reconciliation").where("cycle = 1").collect()
     }
-    assert rec[("exclusion", "in_flight")] == 4
+    assert rec[("exclusion", "in_flight_to_bronze")] == 4
+    assert rec[("exclusion", "in_flight_to_silver")] == 0
+    assert rec[("completeness", "unaccounted")] == 0
+    assert rec[("status", "complete")] is None and rec[("snapshot", "cases")] > 0
 
     # Race: the stream commits more payments to silver while the source is
     # being counted. Silver was pinned before the count, so the ledger
@@ -476,7 +499,7 @@ def _check(spark):
             *[c for c in extra.columns if c not in ("txn_id", "uetr")],
         )
         extra.writeTo("lakehouse.silver.transactions").append()
-        return n_rows
+        return _files((t_old, n_rows))
 
     inv = tm.run_tm_operations(
         spark,
@@ -488,23 +511,135 @@ def _check(spark):
         source_rows_fn=count_then_stream,
     )
     assert _st(inv)["reconciliation"] == "pass", inv
+    assert _st(inv)["history_stable"] == "pass", inv
     cyc = {
         r["cycle"]: r["cycle_run_id"]
         for r in spark.table("lakehouse.gold.tm_reconciliation").collect()
     }
     assert cyc == {1: "run-cont-t1", 2: "run-cont-t2"}
-    # Silver holding more than the source is a duplication, not in flight.
+    spark.sql("DELETE FROM lakehouse.silver.transactions WHERE txn_id LIKE '%-late'")
+
+    # Permanent loss fails instead of passing as in flight. (a) An old raw
+    # file bronze never took, while newer files were ingested.
     inv = tm.run_tm_operations(
         spark,
-        spark.table("lakehouse.silver.transactions"),
+        txns,
         "run-cont",
         cycle=9,
         continuous=True,
         params=PARAMS,
-        source_rows_fn=lambda s: n_rows - 2,
+        source_rows_fn=lambda s: _files((1, 3), (t_old, n_rows)),
+    )
+    assert _st(inv)["reconciliation"] == "fail", inv
+    # (b) A bronze row older than silver's watermark that silver never took.
+    spark.sql(
+        "INSERT INTO lakehouse.default.pacs008_raw VALUES "
+        "('lost-1', TIMESTAMP '2025-01-01 00:00:00')"
+    )
+    inv = tm.run_tm_operations(
+        spark,
+        txns,
+        "run-cont",
+        cycle=10,
+        continuous=True,
+        params=PARAMS,
+        source_rows_fn=lambda s: _files((t_old, n_rows + 1)),
+    )
+    assert _st(inv)["reconciliation"] == "fail", inv
+    # ... while a bronze row newer than the watermark is in flight to silver.
+    spark.sql("DELETE FROM lakehouse.default.pacs008_raw WHERE uetr = 'lost-1'")
+    spark.sql(
+        "INSERT INTO lakehouse.default.pacs008_raw VALUES "
+        "('new-1', TIMESTAMP '2025-01-03 00:00:00')"
+    )
+    inv = tm.run_tm_operations(
+        spark,
+        txns,
+        "run-cont",
+        cycle=11,
+        continuous=True,
+        params=PARAMS,
+        source_rows_fn=lambda s: _files((t_old, n_rows + 1)),
+    )
+    assert _st(inv)["reconciliation"] == "pass", inv
+    spark.sql("DELETE FROM lakehouse.default.pacs008_raw WHERE uetr = 'new-1'")
+    # (c) Silver holding more than the source is a duplication.
+    inv = tm.run_tm_operations(
+        spark,
+        txns,
+        "run-cont",
+        cycle=12,
+        continuous=True,
+        params=PARAMS,
+        source_rows_fn=lambda s: _files((t_old, n_rows - 2)),
     )
     assert _st(inv)["reconciliation"] == "fail"
-    spark.sql("DELETE FROM lakehouse.silver.transactions WHERE txn_id LIKE '%-late'")
+
+    # A crash after the TM tables were written fails the pass (not "not
+    # run"); the next pass takes a new cycle number and carries from the
+    # last completed cycle, not from the half-written one.
+    ledger_before = tm._ledger_cycles(spark, "run-cont")
+    real = tm.case_activity
+    tm.case_activity = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("executor lost"))
+    try:
+        inv = tm.run_tm_operations(
+            spark,
+            txns,
+            "run-cont",
+            cycle=13,
+            continuous=True,
+            params=PARAMS,
+            source_rows_fn=lambda s: _files((t_old, n_rows)),
+        )
+    finally:
+        tm.case_activity = real
+    assert [(n, s) for n, s, _ in inv] == [("workflow", "fail")], inv
+    crashed = max(tm._ledger_cycles(spark, "run-cont"))
+    assert crashed == max(ledger_before) + 1
+    assert not tm._ledger_cycles(spark, "run-cont")[crashed]["complete"]
+    # A restarted driver (fresh file cache) with the same run id appends.
+    tm._SOURCE_SEEN.clear()
+    inv = tm.run_tm_operations(
+        spark,
+        txns,
+        "run-cont",
+        cycle=1,
+        continuous=True,
+        params=PARAMS,
+        source_rows_fn=lambda s: _files((t_old, n_rows)),
+    )
+    st = _st(inv)
+    assert st["history_stable"] == "pass" and st["one_row_per_alert_identity"] == "pass", inv
+    ledger = tm._ledger_cycles(spark, "run-cont")
+    assert max(ledger) == crashed + 1 and ledger[crashed + 1]["complete"]
+    assert set(ledger) >= set(ledger_before)
+
+    # An unreadable ledger stops the pass before it writes anything.
+    class NoLedger:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        def table(self, name):
+            if name.endswith("tm_reconciliation"):
+                raise RuntimeError("metastore timeout")
+            return self._inner.table(name)
+
+    snap = tm.current_snapshot_id(spark, "lakehouse.gold.alert_dispositions")
+    inv = tm.run_tm_operations(
+        NoLedger(spark),
+        txns,
+        "run-cont",
+        cycle=2,
+        continuous=True,
+        params=PARAMS,
+        source_rows_fn=lambda s: _files((t_old, n_rows)),
+    )
+    assert [(n, s) for n, s, _ in inv] == [("workflow", "not_run")], inv
+    assert tm.current_snapshot_id(spark, "lakehouse.gold.alert_dispositions") == snap
+    assert tm._ledger_cycles(spark, "run-cont") == ledger
 
     # A new run clears the old run's ledger. (a) Source says more payments
     # than silver holds.

@@ -23,6 +23,7 @@ TABLES = {
     "silver_counterparty_edges": "silver.counterparty_edges",
     "gold_alert_dispositions": "gold.alert_dispositions",
     "gold_cases": "gold.cases",
+    "tm_run_id": "run-a",
 }
 
 
@@ -56,15 +57,20 @@ def con():
         ") t(originator_id, beneficiary_id, txn_amount_usd, txn_timestamp, cross_border)"
     )
     c.execute(
-        "CREATE TABLE lakehouse.gold.alert_dispositions AS SELECT 1::BIGINT AS entity_id, "
-        "'W2_structuring' AS rule_id, 'open' AS queue_status, DATE '2024-02-06' AS generated_date"
+        "CREATE TABLE lakehouse.gold.alert_dispositions AS SELECT * FROM (VALUES "
+        "(1::BIGINT, 'W2_structuring', 'open', DATE '2024-02-06', 'run-a'),"
+        "(3::BIGINT, 'W2_structuring', 'open', DATE '2024-02-06', 'run-old')"
+        ") t(entity_id, rule_id, queue_status, generated_date, base_run_id)"
     )
     c.execute(
         "CREATE TABLE lakehouse.gold.cases AS SELECT * FROM (VALUES "
         "('k1', 1::BIGINT, 'alert_escalation', 'open', 'critical', 'high', DATE '2024-03-01', "
-        "DATE '2024-06-01', NULL::VARCHAR, 2)"
+        "DATE '2024-06-01', NULL::VARCHAR, 2, 'run-a'),"
+        # A stale case from an earlier run: the queries must not see it.
+        "('k0', 2::BIGINT, 'alert_escalation', 'open', 'critical', 'high', DATE '2023-03-01', "
+        "DATE '2024-06-01', NULL::VARCHAR, 2, 'run-old')"
         ") t(case_id, customer_id, case_type, case_status, priority, crr_tier, opened_date, "
-        "as_of_date, sar_decision, alert_count)"
+        "as_of_date, sar_decision, alert_count, base_run_id)"
     )
     yield c
     c.close()
@@ -90,7 +96,8 @@ def test_query_runs_in_duckdb_dialect(con, q):
     if q.name == "IQ2_case_activity_12m":
         assert sum(r[1] for r in rows) == 2
     if q.name == "IQ3_counterparty_two_hop":
-        assert [r[1] for r in rows] == [3]
+        # Entity 3 was alerted only in the old run: not flagged here.
+        assert [(r[1], r[7]) for r in rows] == [(3, 0)]
     if q.name == "IQ4_open_cases_over_60_days":
         assert [r[0] for r in rows] == ["k1"] and rows[0][7] == 92
 

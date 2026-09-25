@@ -324,8 +324,9 @@ class BenchmarkMetrics:
     stream_results: list[dict[str, Any]] = field(default_factory=list)
     round_meta: BenchmarkRoundMeta | None = None
     # Identity of the query set QpH was measured over (queries.query_set_id).
-    # None: derive it from ``queries``. "unknown": loaded from a run that
-    # predates the field; never comparable.
+    # None: derive it from the recorded query names, which is how a run that
+    # predates the field gets the id of the set it actually ran (a c360 run,
+    # or an 8-query AML run, stays comparable). "unknown": no names recorded.
     query_set_id: str | None = None
 
     def __post_init__(self) -> None:

@@ -47,7 +47,9 @@ def test_benchmark_metrics_carry_the_id_through_metrics_json(tmp_path):
     assert st.load_run("r1").benchmark.query_set_id == b.query_set_id
 
 
-def test_legacy_run_without_an_id_is_unknown_and_not_comparable(tmp_path):
+def test_legacy_run_gets_the_id_of_the_set_it_ran(tmp_path):
+    """A run recorded before query-set ids keeps comparing with runs over
+    the same set: its id is derived from its recorded query names."""
     import json
 
     st = MetricsStorage(tmp_path)
@@ -61,8 +63,29 @@ def test_legacy_run_without_an_id_is_unknown_and_not_comparable(tmp_path):
     raw["benchmark"].pop("query_set_id")
     path.write_text(json.dumps(raw))
     loaded = st.load_run("old").benchmark
-    assert loaded.query_set_id == "unknown"
-    assert qph_comparable(loaded.query_set_id, query_set_id(FIN8))[0] is False
+    assert loaded.query_set_id == query_set_id(FIN8)
+    assert qph_comparable(loaded.query_set_id, query_set_id(FIN8))[0] is True
+    assert qph_comparable(loaded.query_set_id, query_set_id(FIN))[0] is False
+
+
+def test_compare_keeps_legacy_c360_runs_comparable():
+    from lakebench.cli._compare import _build_comparison
+
+    c360 = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
+    old = _bench(c360).to_dict()
+    old.pop("query_set_id")
+    new = _bench(c360).to_dict()
+
+    def m(b, qph):
+        return {
+            "run_id": "x",
+            "benchmark": b,
+            "pipeline_benchmark": {"scores": {"composite_qph": qph}},
+        }
+
+    c = _build_comparison("a", m(old, 500), "b", m(new, 480))
+    assert c["qph_comparable"] is True
+    assert [r["metric"] for r in c["metrics"]] == ["composite_qph"]
 
 
 def test_compare_refuses_qph_across_query_sets():
@@ -111,13 +134,13 @@ def test_reproduce_refuses_qph_across_query_sets():
     assert pkg["reproduction_metadata"]["query_set_id"] == query_set_id(FIN)
 
 
-def test_disabled_tm_drops_the_investigator_queries():
+def test_investigator_queries_only_for_a_run_whose_tm_layer_ran():
     from unittest.mock import MagicMock
 
     from lakebench.benchmark.runner import BenchmarkRunner
     from tests.conftest import make_config
 
-    def names(enabled):
+    def runner(enabled, tm_run_id):
         cfg = make_config(
             architecture={
                 "workload": {
@@ -129,7 +152,42 @@ def test_disabled_tm_drops_the_investigator_queries():
         )
         r = BenchmarkRunner.__new__(BenchmarkRunner)
         r.config = cfg
+        r.tm_run_id = tm_run_id
         r.executor = MagicMock()
-        return [q.name for q in r._queries()]
+        return r
 
-    assert names(True) == FIN and names(False) == FIN8
+    assert [q.name for q in runner(True, "run-1")._queries()] == FIN
+    assert [q.name for q in runner(True, None)._queries()] == FIN8  # layer did not run
+    assert [q.name for q in runner(False, "run-1")._queries()] == FIN8
+
+
+def test_investigator_sql_is_scoped_to_the_run():
+    from unittest.mock import MagicMock
+
+    from lakebench.benchmark.runner import BenchmarkRunner
+    from tests.conftest import make_config
+
+    cfg = make_config(architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}})
+    r = BenchmarkRunner.__new__(BenchmarkRunner)
+    r.config, r.tm_run_id, r.catalog = cfg, "run-9", "lakehouse"
+    r.silver_table, r.gold_table = "silver.transactions", "gold.daily_dashboards"
+    r._extra_tables = {
+        "gold_cases": "gold.cases",
+        "gold_alert_dispositions": "gold.alert_dispositions",
+        "silver_entities": "silver.entities",
+        "silver_accounts": "silver.accounts",
+        "silver_counterparty_edges": "silver.counterparty_edges",
+    }
+    seen = []
+    r.executor = MagicMock()
+    r.executor.adapt_query.side_effect = lambda s: seen.append(s) or s
+    r.executor.execute_query.return_value = MagicMock(
+        duration_seconds=1.0, rows_returned=1, success=True, error=None
+    )
+    for q in INVESTIGATOR_QUERIES:
+        r._execute_single_query(q)
+    assert len(seen) == 4 and all("base_run_id = 'run-9'" in s for s in seen)
+    # Every FROM of a TM table carries the run filter.
+    for q in INVESTIGATOR_QUERIES:
+        reads = q.sql.count("{gold_cases}") + q.sql.count("{gold_alert_dispositions}")
+        assert q.sql.count("{tm_run_id}") == reads, q.name
