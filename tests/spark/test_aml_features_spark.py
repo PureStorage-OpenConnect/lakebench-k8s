@@ -162,7 +162,7 @@ def test_feature_columns_match_preregistration(feats):
             / "src/lakebench/spark/data/aml/aml_preregistration.json"
         ).read_text()
     )
-    assert list(af.FEATURE_COLUMNS) == prereg["features"]
+    assert list(af.FEATURE_COLUMNS) + list(af.HISTORY_FEATURE_COLUMNS) == prereg["features"]
     assert set(af.FEATURE_COLUMNS) <= set(feats["A"])
 
 
