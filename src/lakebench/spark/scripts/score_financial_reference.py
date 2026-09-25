@@ -35,7 +35,7 @@ import sys
 
 from common import env, log
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, explode, lit, when
+from pyspark.sql.functions import col, explode, lit, pmod, when, xxhash64
 from pyspark.sql.functions import count as count_
 
 # numpy/pandas/scikit-learn (imported inside functions) are installed per job into this directory by an
@@ -173,12 +173,18 @@ def _capped_pull(cap_rows: int, sampling: dict):
         pos = cust.join(pos_units, unit, "left_semi")
         rest = cust.join(pos_units, unit, "left_anti")
         n_pos = pos.count()
-        if n_pos >= cap_rows:
+        # At least half the cap must be left for sampled units, or the frame
+        # would be almost all positives at enormous negative weights.
+        if n_pos * 2 > cap_rows:
             raise ValueError(
-                f"{n_pos} positive units exceed the driver cap {cap_rows}; raise --driver-sample-cap"
+                f"{n_pos} positive units leave too little of the driver cap {cap_rows} for "
+                "negatives; raise --driver-sample-cap"
             )
         frac = (cap_rows - n_pos) / max(1, n - n_pos)
-        keys = rest.select("key").distinct().sample(withReplacement=False, fraction=frac, seed=0)
+        # Deterministic in the key (a hash threshold), unlike sample(), whose
+        # pick depends on row order after a shuffle.
+        u = pmod(xxhash64(col("key")), lit(1 << 31)) / lit(float(1 << 31))
+        keys = rest.select("key").distinct().filter(u < lit(frac))
         kept = pos.withColumn("weight", lit(1.0)).unionByName(
             rest.join(keys, "key", "left_semi").withColumn("weight", lit(1.0 / frac))
         )
@@ -351,6 +357,12 @@ def run_fidelity_gate(
         score=score,
     )
     report["unit_detail"] = inputs["unit"]
+    if "secondary_lifetime_error" in inputs:
+        report["secondary_lifetime"] = {
+            "gated": False,
+            "verdict": "error",
+            "note": inputs["secondary_lifetime_error"],
+        }
     if "secondary_lifetime" in inputs:
         # Ungated: the lifetime unit kept for comparison, never in passes. Its
         # failure must not void the gated result.
@@ -364,7 +376,8 @@ def run_fidelity_gate(
     if seed_check["claimed_seed"] is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
-        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
+        n_unres = af.unresolved_subjects(inputs["unit"])
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0 and n_unres == 0)
         if seed_check["claimed_seed"] is not None:
             add_pass(report, "corpus_seed_verified", seed_ok)
     return report

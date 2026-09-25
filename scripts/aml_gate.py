@@ -245,16 +245,33 @@ def main(argv=None) -> int:
         score=not args.counts_only,
     )
     report["unit_detail"] = inputs["unit"]
+    if "secondary_lifetime_error" in inputs:
+        report["secondary_lifetime"] = {
+            "gated": False,
+            "verdict": "error",
+            "note": inputs["secondary_lifetime_error"],
+        }
     if "secondary_lifetime" in inputs:
-        # Ungated: the lifetime unit kept for comparison, never in passes.
-        sec = evaluate_gate(
-            inputs["secondary_lifetime"], lifetime_prereg(prereg), score=not args.counts_only
-        )
+        # Ungated: the lifetime unit kept for comparison, never in passes; its
+        # failure must not lose the gated report.
+        try:
+            sec = evaluate_gate(
+                inputs["secondary_lifetime"], lifetime_prereg(prereg), score=not args.counts_only
+            )
+        except Exception as e:  # noqa: BLE001
+            sec = {"verdict": "error", "note": str(e)}
         report["secondary_lifetime"] = {
             "gated": False,
             **{
                 k: sec.get(k)
-                for k in ("unit", "verdict", "n_scored_customers", "n_scored_units", "typologies")
+                for k in (
+                    "unit",
+                    "verdict",
+                    "note",
+                    "n_scored_customers",
+                    "n_scored_units",
+                    "typologies",
+                )
             },
         }
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
@@ -262,7 +279,8 @@ def main(argv=None) -> int:
     if args.seed is not None and not seed_ok:
         report["corpus_role"] = "unverified"
     if report.get("verdict") == "ok":
-        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0)
+        n_unres = af.unresolved_subjects(inputs["unit"])
+        add_pass(report, "corpus_fully_keyed", unkeyed == 0 and dup_ibans == 0 and n_unres == 0)
         add_pass(report, "library_versions_match", not mismatch)
         if args.seed is not None:
             add_pass(report, "corpus_seed_verified", seed_ok)

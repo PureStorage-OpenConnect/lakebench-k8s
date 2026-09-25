@@ -1090,5 +1090,15 @@ def build_gate_inputs(
         labels=counts,
     )
     out["primary"] = pull(feats, labels, typologies, True)
-    out["secondary_lifetime"] = pull(life, life_labels, typologies, False)
+    try:
+        out["secondary_lifetime"] = pull(life, life_labels, typologies, False)
+    except Exception as e:  # noqa: BLE001 -- ungated; must not void the primary
+        out["secondary_lifetime_error"] = str(e)
     return out
+
+
+def unresolved_subjects(unit: dict) -> int:
+    """Instances whose subject has no entity key, over every in-scope typology
+    (0 for the lifetime unit, which does not resolve subjects per month)."""
+    per = ((unit.get("labels") or {}).get("per_typology")) or {}
+    return int(sum(v.get("instances_subject_unresolved", 0) for v in per.values()))
