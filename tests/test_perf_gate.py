@@ -123,6 +123,9 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
             "data_quality": "complete",
             "aggregate_mbps": over.get("dg_mbps", 2000.0),
             "cpu_hr_per_tb": 6.0,
+            # The collector takes the datagen stage's seconds from here when
+            # the run did not generate itself.
+            "wall_elapsed_max_s": stage_s.get("datagen", 0.0),
             "per_pod": [{"throughput_mbps": over.get("dg_mbps", 2000.0) / pods}] * pods,
         },
     }
@@ -963,6 +966,32 @@ def test_record_refuses_a_batch_run_without_fresh_datagen(env):
     del none["datagen_fleet"]
     with pytest.raises(pg.PerfGateError, match="no datagen stage"):
         pg.record_baseline(env.store(), "c360-batch-s10", pg.load_run(env.write_run(none)), "x")
+
+
+def test_in_run_datagen_seconds_kept_when_sidecar_is_stale(env):
+    """`run --generate` writes no sidecar but attaches an old one."""
+    snap = env.snaps["c360-batch-s10"]
+    data = _batch_run(snap, "20260924-100000-aaaaaa")
+    data["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
+    data["datagen_fleet"]["wall_elapsed_max_s"] = 900.0  # the old generate's time
+    store = env.store()
+    pg.record_baseline(store, "c360-batch-s10", pg.load_run(env.write_run(data)), "x")
+    metrics = store.baselines["c360-batch-s10"].metrics
+    assert metrics["datagen_seconds"] == 120.0  # the in-run stage, not 900
+    assert "datagen_mbps_per_pod" not in metrics
+    sidecar_only = _batch_run(snap, "20260924-110000-bbbbbb", stage_s={"datagen": 900.0})
+    sidecar_only["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
+    sidecar_only["datagen_fleet"]["wall_elapsed_max_s"] = 900.0
+    numbers, excluded = pg.extract_metrics(pg.load_run(env.write_run(sidecar_only)))
+    assert "datagen_seconds" not in numbers and "earlier generate" in excluded["datagen_seconds"]
+
+
+def test_local_run_refused(env):
+    snap = copy.deepcopy(env.snaps["c360-batch-s10"])
+    snap["local"] = True
+    run = pg.load_run(env.write_run(_batch_run(snap, "20260924-100000-aaaaaa")))
+    reasons = pg.run_refusals(run, env.store().pinned("c360-batch-s10"))
+    assert any("local run" in r for r in reasons)
 
 
 def test_multi_cycle_batch_run_refused(env):

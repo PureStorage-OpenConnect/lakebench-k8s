@@ -60,6 +60,8 @@ numbers; do not compare across clusters.
 A run is refused, never compared, when:
 
 - it did not succeed;
+- it is a local run (`lakebench run --local`), which the fingerprint does not
+  otherwise tell apart from a cluster run;
 - it is a batch run with `scale_ratio` outside 0.95 to 1.10 (0 means the
   bronze input volume was not measured, which is refused too; above 1.10
   means extra data, which flatters GB/s);
@@ -101,7 +103,8 @@ Within a comparable run, some numbers are left out rather than trusted:
 - the datagen numbers (`datagen_*`) when the datagen metrics were written
   more than 24 hours before the run started (they came from an earlier
   `generate`) or when only one of the baseline and the run has a datagen
-  stage. Generate once and run several times is a normal workflow. Nothing
+  stage. `datagen_seconds` stays when it is the run's own generate time
+  (`lakebench run --generate` writes no sidecar but attaches the last one). Generate once and run several times is a normal workflow. Nothing
   else is dropped with them: for batch runs time to value and GB/s are
   recomputed from the pipeline stages' own timestamps with the datagen stage
   left out, and GB/core-hr counts batch or continuous stages only. The run's
