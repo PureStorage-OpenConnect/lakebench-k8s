@@ -505,3 +505,17 @@ def test_counts_only_needs_no_sklearn(monkeypatch):
     monkeypatch.setattr(fg, "_sklearn_available", lambda: False)
     rep = fg.evaluate_gate(_frame(), _prereg(), score=False)
     assert rep["verdict"] == "counts_only" and rep["typologies"]["beh"]["n_positives"] > 0
+
+
+def test_behavioural_six_and_empty_definitional_subset():
+    p = json.loads(PREREG.read_text())
+    assert len(p["behavioural_subset"]) == 6 and p["definitional_subset"] == []
+    assert (p["level2"]["n"], p["level2"]["k_in_band"]) == (6, 4)
+    assert "#36" in p["classification"]["note"]
+    q = _prereg()
+    q["behavioural_subset"] = ["beh", "defn"]
+    q["definitional_subset"] = []
+    q["level2"] = {**q["level2"], "n": 2, "k_in_band": 1}
+    rep = fg.evaluate_gate(_frame(), q)
+    assert rep["passes"]["definitional_check"] is None
+    assert "definitional_check" not in rep["typologies"]["defn"]

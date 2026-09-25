@@ -56,15 +56,14 @@
     "gather_scatter",
     "rapid_layering",
     "stack",
-    "dormant_reactivation"
-  ],
-  "definitional_subset": [
+    "dormant_reactivation",
     "micro_structuring",
     "corridor_high_risk"
   ],
+  "definitional_subset": [],
   "level2": {
-    "k_in_band": 3,
-    "n": 4,
+    "k_in_band": 4,
+    "n": 6,
     "require_on_corpora": [
       "evaluation",
       "robustness"
@@ -130,7 +129,8 @@
       "corridor_high_risk": "home_country_high_risk"
     },
     "definitional_min_single_ap": 0.95,
-    "reclassification": "behavioural -> definitional is forbidden for this release after any gate run (D0 included); if it happens N stays 4 and the typology counts as a miss. definitional -> behavioural is always allowed."
+    "reclassification": "behavioural -> definitional is forbidden for this release after any gate run (D0 included); if it happens N stays 4 and the typology counts as a miss. definitional -> behavioural is always allowed.",
+    "note": "AML-GOALS section 9 #36 (2026-09-24): micro_structuring and corridor_high_risk moved to the behavioural subset; the definitional subset is empty. defining_feature and definitional_min_single_ap are kept for the record and are unused while the subset is empty."
   },
   "power": {
     "min_positives": 200,
