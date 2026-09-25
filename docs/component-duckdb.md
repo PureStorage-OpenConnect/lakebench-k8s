@@ -54,6 +54,14 @@ Benchmark queries are written in Trino SQL (the canonical dialect). DuckDB's
 `adapt_query()` rewrites Trino-specific functions:
 
 - `date_add('month', N, expr)` -> `(expr + INTERVAL N MONTH)`
+- `date_diff(...)` -> `datediff(...)`
+- `cardinality(array)` -> `len(array)` (outside string literals, quoted
+  identifiers and comments)
+
+Catalog-qualified table names become `iceberg_scan()` (or `delta_scan()`)
+calls on the table's S3 path. The auxiliary AML tables (`silver_entities`,
+`gold_alerts` and the others) resolve to the bucket of the layer that
+writes them.
 
 Other Trino functions (COUNT, SUM, AVG, LAG, window frames) work unchanged
 in DuckDB.

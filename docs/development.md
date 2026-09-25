@@ -18,7 +18,8 @@ cluster for integration and end-to-end tests.
 Clone the repository and install in editable mode with development dependencies:
 
 ```bash
-cd lakebench
+git clone https://github.com/PureStorage-OpenConnect/lakebench-k8s.git
+cd lakebench-k8s
 pip install -e ".[dev]"
 pre-commit install
 ```
@@ -30,8 +31,8 @@ This installs:
 - **Dev dependencies:** pytest, pytest-cov, ruff, mypy, moto (AWS mocking),
   pre-commit
 
-The `pre-commit install` step registers Git hooks that run linting, formatting,
-and unit tests automatically before each commit. You can also set up the full
+The `pre-commit install` step registers Git hooks that run the secret scan,
+linting and formatting automatically before each commit. You can also set up the full
 dev environment in one step with `make dev`.
 
 ## Running Tests
@@ -96,11 +97,11 @@ ruff check src/ tests/
 ruff format src/ tests/
 ```
 
-Type checking is available via mypy with strict settings
-(`disallow_untyped_defs = true`):
+Type checking uses mypy, configured in `pyproject.toml` (untyped
+functions are allowed; CI runs the same command and must pass):
 
 ```bash
-mypy src/
+mypy src/lakebench/
 ```
 
 ## Makefile Targets
@@ -119,7 +120,7 @@ to see the full list.
 
 | Target | Description |
 |--------|-------------|
-| `make test` | Run all tests (excludes e2e, extended, and stress) |
+| `make test` | Run the tests that need no cluster (excludes integration, e2e, extended and stress) |
 | `make test-unit` | Run unit tests only (fast, no cluster needed) |
 | `make test-integration` | Run integration tests (requires K8s and S3) |
 | `make test-e2e` | Run end-to-end tests (full workflow) |
@@ -143,19 +144,17 @@ to see the full list.
 
 ## Pre-commit Hooks
 
-When you run `pre-commit install`, the following hooks are registered and run
-automatically on every `git commit`:
+When you run `pre-commit install`, the hooks in `.pre-commit-config.yaml` are
+registered and run automatically on every `git commit`:
 
-1. **Ruff lint** -- Checks for code quality issues and applies auto-fixes
-   where possible.
-2. **Ruff format** -- Enforces consistent code formatting.
-3. **Trailing whitespace** -- Removes trailing whitespace from all files.
-4. **End-of-file fixer** -- Ensures files end with a single newline.
-5. **YAML check** -- Validates YAML syntax (with support for custom tags).
-6. **Large file check** -- Prevents committing files larger than 500KB.
-7. **Merge conflict check** -- Catches unresolved merge conflict markers.
-8. **Unit tests** -- Runs `pytest tests/ -x -q -m "not integration and not e2e"`
-   to catch regressions before they reach the remote.
+1. **gitleaks** -- Fails the commit on anything that looks like a credential.
+2. **Ruff lint** -- Checks `src/` and `tests/` and applies auto-fixes where
+   possible.
+3. **Ruff format** -- Enforces consistent formatting on `src/` and `tests/`.
+4. **cargo fmt** -- Checks formatting of the Rust datagen when a `.rs` file
+   changes.
+
+The hooks do not run the tests; run `pytest tests/ -x` yourself.
 
 To run all hooks manually against the entire codebase:
 
@@ -170,7 +169,7 @@ self-contained module with a specific responsibility:
 
 ```
 src/lakebench/
-  benchmark/    Query engine benchmark (8-query QpH suite)
+  benchmark/    Query engine benchmark (QpH; 8 c360 queries, 12 AML queries)
   cli/          CLI package (Typer commands, helpers, sustained pipeline)
   config/       Pydantic config schema, YAML loader, cluster autosizer
   deploy/       Deployment engine and re-export shims for deployers
@@ -193,7 +192,7 @@ Supporting directories:
 
 - `tests/` -- pytest test suite organized by module
   (`test_config.py`, `test_deploy.py`, `test_spark.py`, etc.)
-- `datagen/` -- Docker image for data generation (Parquet files to S3)
+- `datagen_rs/` -- Rust data generator and its container image (Parquet files to S3)
 - `docs/` -- Project documentation
 
 ### Key Conventions

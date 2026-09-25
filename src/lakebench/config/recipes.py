@@ -213,9 +213,9 @@ RECIPE_NOTES: dict[str, RecipeNote] = {
     "hive-delta-spark-thrift": RecipeNote(
         when="Delta queried through Spark rather than Trino.",
         caveats=(
-            "Q2 of the benchmark is a known failure: delta-spark 4.0 throws "
-            "ClassCastException on MIN/MAX over a date partition column. "
-            "(gotcha 22)",
+            "delta-spark's metadata-only MIN/MAX rewrite is disabled "
+            "(optimizeMetadataQuery.enabled=false) to avoid its ClassCastException "
+            "on date partition columns, so Q2 and Q7 scan instead. (gotcha 22, LB-148)",
             "Pre-benchmark OPTIMIZE is skipped; it exhausts Thrift memory. (gotcha 21)",
         ),
     ),

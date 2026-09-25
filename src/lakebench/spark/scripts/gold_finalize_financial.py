@@ -369,7 +369,7 @@ def run_detection_rules(spark, txns, run_id: str, rules=None, skipped_rules=None
     gold.alerts between commits see either the prior committed state
     or the new one -- never a mix.
 
-    Note that two concurrent ``lakebench run`` invocations against the
+    Two concurrent ``lakebench run`` invocations against the
     SAME catalog will race on ``DELETE WHERE rule_id = ...``; the
     intended usage model is one live pipeline per catalog / namespace
     at a time (per shared-cluster ownership discipline in
