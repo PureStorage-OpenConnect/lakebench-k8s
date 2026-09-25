@@ -19,8 +19,8 @@ import subprocess
 import time
 from pathlib import Path
 
-from lakebench.benchmark.result import QueryExecutorResult
-from lakebench.modules.query_engines.duckdb.executor import DuckDBExecutor
+from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
+from lakebench.modules.query_engines.duckdb.executor import FETCH_ROWS, DuckDBExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
 
         sql = self._rewrite_date_add(sql)
         sql = self._rewrite_date_diff(sql)
+        sql = self._rewrite_cardinality(sql)
         return sql
 
     def _build_local_script(self, sql: str) -> str:
@@ -141,7 +142,8 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 f"conn.execute(\"SET s3_access_key_id='{self.access_key}'\")",
                 f"conn.execute(\"SET s3_secret_access_key='{self.secret_key}'\")",
                 "conn.execute('SET unsafe_enable_version_guessing = true')",
-                "rows = conn.execute(sql).fetchall()",
+                "rel = conn.sql(sql)",
+                FETCH_ROWS,
                 # Report the engine version alongside every result. The pin is
                 # only a request; this is what proves the container honoured it.
                 "ver = conn.execute('SELECT version()').fetchone()[0]",
@@ -245,24 +247,5 @@ class LocalDuckDBExecutor(DuckDBExecutor):
 
 
 def _summarise_duckdb_error(text: str) -> str:
-    """Return the meaningful line from a DuckDB or Python traceback.
-
-    Scanning backwards finds the caret line a parser error ends with, which
-    carries no information at all. Prefer the named exception, then any line
-    with substance.
-    """
-    lines = [line.strip() for line in text.strip().splitlines() if line.strip()]
-
-    for line in lines:
-        if "Error:" in line or "Exception:" in line:
-            return line[:300]
-
-    for line in reversed(lines):
-        # A caret-only line points at a column in the line above it.
-        if set(line) <= {"^", " "}:
-            continue
-        if line.startswith(("File ", "Traceback")):
-            continue
-        return line[:300]
-
-    return text.strip()[-300:] if text.strip() else "Query failed with no output"
+    """Return the meaningful line from a DuckDB or Python traceback."""
+    return summarise_engine_error(text) if text.strip() else "Query failed with no output"

@@ -238,7 +238,7 @@ class TestDuckDBExecuteQuery:
             result = executor.execute_query("SELECT * FROM nonexistent")
             assert not result.success
             assert result.error is not None
-            assert len(result.error) <= 200  # stderr truncation
+            assert len(result.error) <= 300  # stderr truncation
 
     def test_json_parse_success(self):
         import json
@@ -322,7 +322,7 @@ class TestTrinoExecuteQuery:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=1, stderr="E" * 500, stdout="")
             result = executor.execute_query("BAD SQL")
-            assert len(result.error) <= 200
+            assert len(result.error) <= 300
 
     def test_empty_stderr(self):
         from lakebench.benchmark.executor import TrinoExecutor

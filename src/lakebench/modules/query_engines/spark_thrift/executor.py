@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 
-from lakebench.benchmark.result import QueryExecutorResult
+from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ class SparkThriftExecutor:
             )
 
         if result.returncode != 0:
-            error = result.stderr.strip()[:200] if result.stderr else "Unknown error"
+            error = summarise_engine_error(result.stderr or "")
             return QueryExecutorResult(
                 sql=sql,
                 engine="spark-thrift",
