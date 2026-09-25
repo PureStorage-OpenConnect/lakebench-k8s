@@ -221,9 +221,30 @@ def test_fidelity_gate_over_silver_monthly_unit(spark, tmp_path, monkeypatch):
     assert report["verdict"] == "ok" and report["unit"] == "utc_calendar_month"
     u = report["unit_detail"]
     assert u["window"] == "utc_calendar_month" and u["first_scored_month"] == 1
-    assert u["n_units"] == report["n_scored_customers"] and u["n_customers"] <= 120
+    assert u["n_units"] == report["n_scored_units"] and u["n_customers"] <= 120
+    assert report["n_scored_customers"] == u["n_customers"]
     assert report["n_groups"] == u["n_customers"]
     assert report["secondary_lifetime"]["gated"] is False
     assert report["secondary_lifetime"]["unit"] == "lifetime"
     for r in report["typologies"].values():
         assert r["n_positives"] <= 1  # one subject per instance
+
+    # Counts only: the same units and labels, and no AP anywhere in the outputs.
+    with threadpool_limits(limits=2):
+        counts = ref.run_fidelity_gate(
+            spark, manifest, cap_rows=100_000, provenance={}, score=False
+        )
+    assert counts["verdict"] == "counts_only"
+    assert counts["secondary_lifetime"]["verdict"] == "counts_only"
+    text = json.dumps(counts, default=str) + json.dumps(ref._metric_rows(counts), default=str)
+    assert '"ap_ci"' not in text and '"ap": 0' not in text and 'r_precision": 0' not in text
+    assert all(row["ap"] is None for row in ref._metric_rows(counts))
+    assert counts["unit_detail"]["n_units"] == u["n_units"]
+
+    # Capped: every positive unit survives, other customers are sampled whole.
+    with threadpool_limits(limits=2):
+        capped = ref.run_fidelity_gate(spark, manifest, cap_rows=300, provenance={}, score=False)
+    samp = capped["provenance"]["sampling"]["monthly"]
+    assert 0 < samp["negative_fraction"] < 1 and samp["n_pulled"] < u["n_units"]
+    for t, r in capped["typologies"].items():
+        assert r["n_positives"] == report["typologies"][t]["n_positives"], t

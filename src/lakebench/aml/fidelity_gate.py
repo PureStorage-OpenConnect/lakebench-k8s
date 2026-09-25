@@ -562,7 +562,10 @@ def evaluate_gate(
         raise ValueError(f"gate frame is missing columns {missing}")
     if "is_customer" in frame.columns:
         frame = frame[frame["is_customer"].astype(bool)]
-    report["n_scored_customers"] = int(len(frame))
+    report["n_scored_units"] = int(len(frame))
+    report["n_scored_customers"] = int(
+        frame[GROUP_COLUMN].nunique() if GROUP_COLUMN in frame.columns else len(frame)
+    )
 
     if not _sklearn_available():
         report.update(verdict="no_sklearn", typologies={}, level2=None)
@@ -609,7 +612,7 @@ def summary_lines(report: dict) -> list[str]:
     """Human-readable lines for a driver log or terminal."""
     lines = [
         f"AML gate (prereg v{report.get('prereg_version')}, verdict {report.get('verdict')}, "
-        f"{report.get('n_scored_customers')} customers)"
+        f"{report.get('n_scored_customers')} customers, {report.get('n_scored_units')} units)"
     ]
     for t, r in (report.get("typologies") or {}).items():
         if r.get("status") != "ok":

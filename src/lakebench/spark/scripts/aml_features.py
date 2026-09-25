@@ -183,11 +183,17 @@ class MonthWindows:
 
     @classmethod
     def from_txns(cls, txns: DataFrame, cfg: dict) -> MonthWindows:
-        """Corpus months from the first and last payment timestamps (UTC)."""
-        r = txns.agg(min_("ts").alias("lo"), max_("ts").alias("hi")).collect()[0]
-        y0, m0 = r["lo"].year, r["lo"].month
-        n = (r["hi"].year - y0) * 12 + (r["hi"].month - m0) + 1
-        return cls(y0, m0, n, cfg)
+        """Corpus months from the first and last payment timestamps. Year and
+        month are taken in SQL (session zone UTC): collect() would turn the
+        timestamps into Python datetimes in the driver's OS zone."""
+        r = txns.agg(
+            year(min_("ts")).alias("y0"),
+            month(min_("ts")).alias("m0"),
+            year(max_("ts")).alias("y1"),
+            month(max_("ts")).alias("m1"),
+        ).collect()[0]
+        n = (r["y1"] - r["y0"]) * 12 + (r["m1"] - r["m0"]) + 1
+        return cls(r["y0"], r["m0"], n, cfg)
 
     def describe(self) -> dict:
         return {
@@ -565,12 +571,20 @@ def monthly_labels(spark, manifest, id_map, txns, windows, typologies):
         subj = subject_index(r["typology_type"], len(ids), int(r["seed"]))
         for i, dg in enumerate(ids):
             rows.append((r["typology_id"], r["typology_type"], int(dg), i == subj))
-    parts = spark.createDataFrame(
+    all_parts = spark.createDataFrame(
         rows, "typology_id string, typology_type string, dg_id long, is_subject boolean"
     )
-    parts = parts.join(id_map, "dg_id", "inner").select(
+    parts = all_parts.join(id_map, "dg_id", "inner").select(
         "typology_id", "typology_type", "key", "is_subject"
     )
+    unresolved = {
+        r["typology_type"]: int(r["count"])
+        for r in all_parts.filter(col("is_subject"))
+        .join(id_map, "dg_id", "left_anti")
+        .groupBy("typology_type")
+        .count()
+        .collect()
+    }
 
     starts = manifest.select("typology_id", "typology_type", "injection_ts_start")
     planted = (
@@ -578,12 +592,17 @@ def monthly_labels(spark, manifest, id_map, txns, windows, typologies):
         .join(txns.select("uetr", "ts", "orig_key", "bene_key"), "uetr", "inner")
         .join(starts, "typology_id", "inner")
         .filter(col("typology_type").isin(*list(typologies)))
-        .filter(
+    )
+    # The completion month ignores dormant_reactivation's pre-dormancy anchor;
+    # the exclusions below still cover the anchor's months (it is a planted row).
+    done = (
+        planted.filter(
             (col("typology_type") != lit("dormant_reactivation"))
             | (col("ts") >= col("injection_ts_start").cast("timestamp"))
         )
+        .groupBy("typology_id")
+        .agg(windows.index(max_("ts")).alias("done_month"))
     )
-    done = planted.groupBy("typology_id").agg(windows.index(max_("ts")).alias("done_month"))
     row_months = (
         planted.select("typology_id", "ts", col("orig_key").alias("key"))
         .unionByName(planted.select("typology_id", "ts", col("bene_key").alias("key")))
@@ -637,6 +656,7 @@ def monthly_labels(spark, manifest, id_map, txns, windows, typologies):
             "instances": 0,
             "instances_without_planted_rows": 0,
             "instances_completing_in_burn_in": 0,
+            "instances_subject_unresolved": unresolved.get(t, 0),
         }
     for r in (
         inst.groupBy("typology_type")
@@ -649,11 +669,11 @@ def monthly_labels(spark, manifest, id_map, txns, windows, typologies):
         )
         .collect()
     ):
-        counts["per_typology"][r["typology_type"]] = {
-            "instances": int(r["n"]),
-            "instances_without_planted_rows": int(r["no_rows"] or 0),
-            "instances_completing_in_burn_in": int(r["burn_in"] or 0),
-        }
+        counts["per_typology"][r["typology_type"]].update(
+            instances=int(r["n"]),
+            instances_without_planted_rows=int(r["no_rows"] or 0),
+            instances_completing_in_burn_in=int(r["burn_in"] or 0),
+        )
     for r in scorable.groupBy("typology_type", "kind").count().collect():
         counts["per_typology"][r["typology_type"]][f"units_{r['kind']}"] = int(r["count"])
     return scorable, counts

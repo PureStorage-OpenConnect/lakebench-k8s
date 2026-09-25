@@ -138,9 +138,12 @@ def test_monthly_labels_and_frame(spark, frames):
         (5, 2, "stack", "excluded_nonsubject"),
         (5, 3, "stack", "excluded_nonsubject"),
         (6, 3, "stack", "excluded_nonsubject"),
-        # The anchor (Feb) is not a planted row for the completion rule.
+        # The anchor (Feb) does not set the completion month, but its month is
+        # still excluded: it holds a planted row.
         (7, 5, "dormant_reactivation", "positive"),
+        (7, 1, "dormant_reactivation", "excluded_incomplete"),
         (8, 5, "dormant_reactivation", "excluded_nonsubject"),
+        (8, 1, "dormant_reactivation", "excluded_nonsubject"),
     }
     assert counts["per_typology"]["stack"]["instances"] == 1
     assert counts["per_typology"]["stack"]["units_positive"] == 1
