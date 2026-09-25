@@ -31,6 +31,7 @@ def _runner(durations):
     runner.silver_table = "s"
     runner.gold_table = "g"
     runner._extra_tables = {}
+    runner.tm_run_id = None
     it = iter(durations)
 
     def _exec(sql, timeout=300):
