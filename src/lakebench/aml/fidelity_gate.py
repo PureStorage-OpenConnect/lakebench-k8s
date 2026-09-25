@@ -34,6 +34,9 @@ from typing import Any
 
 PREREG_FILENAME = "aml_preregistration.json"
 LABEL_PREFIX = "label:"
+#: Optional per-typology exclusion column (1 = the row is not scored for that
+#: typology: a partial or non-subject month under the monthly unit).
+EXCLUDE_PREFIX = "exclude:"
 #: Optional frame column naming the correlated unit (the customer). CV folds
 #: never split a group and the bootstrap resamples groups. Absent: each row is
 #: its own group.
@@ -88,6 +91,23 @@ def load_preregistration(path: str | os.PathLike | None = None) -> tuple[dict, s
         + ", ".join(str(p) for p in _prereg_candidates(path))
         + ")"
     )
+
+
+def unit_window(prereg: dict) -> str:
+    """ "lifetime" (one row per customer) or "utc_calendar_month"."""
+    return (prereg.get("unit_of_scoring") or {}).get("window", "lifetime")
+
+
+def lifetime_prereg(prereg: dict) -> dict:
+    """The pre-registration as the lifetime unit sees it: the monthly history
+    features dropped. Used for the ungated secondary lifetime block."""
+    import copy
+
+    p = copy.deepcopy(prereg)
+    hist = set((p.get("unit_of_scoring") or {}).get("history_features", []))
+    p["features"] = [f for f in p["features"] if f not in hist]
+    p.setdefault("unit_of_scoring", {})["window"] = "lifetime"
+    return p
 
 
 def in_scope_typologies(prereg: dict) -> list[str]:
@@ -286,7 +306,7 @@ def _bootstrap_ci(y, score, w, groups, prereg: dict) -> tuple[float | None, floa
 # ---------------------------------------------------------------------------
 
 
-def _evaluate_typology(name, X, y, w, groups, features, prereg, kind) -> dict[str, Any]:
+def _evaluate_typology(name, X, y, w, groups, features, prereg, kind, score=True) -> dict[str, Any]:
     import numpy as np
 
     n_pos = int(y.sum())
@@ -299,6 +319,9 @@ def _evaluate_typology(name, X, y, w, groups, features, prereg, kind) -> dict[st
         "prevalence": (float(np.average(y, weights=w)) if n else None),
         "underpowered": n_pos < prereg["power"]["min_positives"],
     }
+    if not score:
+        out.update(status="counts_only")
+        return out
     if n_pos < prereg["cv"]["folds"] or n_pos == n:
         out.update(status="insufficient_labels", ap=None, ap_ci=[None, None])
         return out
@@ -307,7 +330,13 @@ def _evaluate_typology(name, X, y, w, groups, features, prereg, kind) -> dict[st
     oof = _oof_scores(lambda: _reference_model(prereg), X, y, w, folds)
     ap = _ap(y, oof, w)
     lo, hi = _bootstrap_ci(y, oof, w, groups, prereg)
-    out.update(status="ok", ap=ap, ap_ci=[lo, hi], r_precision=_r_precision(y, oof, w))
+    out.update(
+        status="ok",
+        ap=ap,
+        ap_ci=[lo, hi],
+        ap_over_prevalence=ap / out["prevalence"],
+        r_precision=_r_precision(y, oof, w),
+    )
 
     # D5 shortcuts: every single feature and every feature pair, out of fold
     # on the reference model's folds.
@@ -500,8 +529,13 @@ def evaluate_gate(
     timing_counts: dict | None = None,
     density_counts: dict | None = None,
     provenance: dict | None = None,
+    score: bool = True,
 ) -> dict[str, Any]:
-    """Run every gate on ``frame`` and return one JSON-serialisable report."""
+    """Run every gate on ``frame`` and return one JSON-serialisable report.
+
+    ``score=False`` stops before any model: per typology only n_scored,
+    n_positives, prevalence and n_excluded (a smoke test that must not look at
+    AP), verdict "counts_only", no level2 or passes."""
     import numpy as np
 
     features = list(prereg["features"])
@@ -511,6 +545,7 @@ def evaluate_gate(
         "prereg_version": prereg.get("version"),
         "prereg_sha256": prereg_sha256,
         "metric": prereg["metric"],
+        "unit": unit_window(prereg),
         "provenance": dict(provenance or {}),
         "libraries": library_versions(),
         "corpus_role": corpus_role((provenance or {}).get("corpus_seed"), prereg),
@@ -549,9 +584,18 @@ def evaluate_gate(
     per = {}
     for t in typologies:
         y = frame[LABEL_PREFIX + t].to_numpy(dtype=int)
+        keep = np.ones(len(y), dtype=bool)
+        if EXCLUDE_PREFIX + t in frame.columns:
+            keep = frame[EXCLUDE_PREFIX + t].to_numpy(dtype=int) == 0
         kind = "behavioural" if t in prereg["behavioural_subset"] else "definitional"
-        per[t] = _evaluate_typology(t, X, y, w, groups, features, prereg, kind)
+        per[t] = _evaluate_typology(
+            t, X[keep], y[keep], w[keep], groups[keep], features, prereg, kind, score=score
+        )
+        per[t]["n_excluded"] = int((~keep).sum())
     report["typologies"] = per
+    if not score:
+        report.update(verdict="counts_only", level2=None)
+        return report
     report["level2"] = _level2(per, prereg)
     report["verdict"] = "ok"
     report["passes"] = _passes(report, prereg)
@@ -566,7 +610,10 @@ def summary_lines(report: dict) -> list[str]:
     ]
     for t, r in (report.get("typologies") or {}).items():
         if r.get("status") != "ok":
-            lines.append(f"  {t}: {r.get('status')} n_pos={r['n_positives']}")
+            lines.append(
+                f"  {t}: {r.get('status')} n_scored={r['n_scored']} n_pos={r['n_positives']} "
+                f"prevalence={r['prevalence']} n_excluded={r.get('n_excluded')}"
+            )
             continue
         sc = r["shortcuts"]
         s1 = sc.get("single_feature", {}).get("best", {})

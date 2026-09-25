@@ -168,10 +168,13 @@ def test_cap_keeps_positives_and_weights_negatives(spark, tmp_path, monkeypatch)
     )
     feats = af.entity_features(txns, ents)
     labels = af.labels_from_participants(manifest, id_map)
-    pdf, n, frac = ref._cap_customers(feats, labels, ["stack", "rapid_layering"], cap_rows=40)
+    ts = ["stack", "rapid_layering"]
+    sampling: dict = {}
+    pdf = ref._capped_pull(40, sampling)(feats, labels, ts, False)
+    n, frac = sampling["lifetime"]["n_units"], sampling["lifetime"]["negative_fraction"]
     assert n == 120 and 0 < frac < 1
-    full, _, one = ref._cap_customers(feats, labels, ["stack", "rapid_layering"], cap_rows=10_000)
-    assert one == 1.0 and len(full) == 120
+    full = ref._capped_pull(10_000, sampling)(feats, labels, ts, False)
+    assert sampling["lifetime"]["negative_fraction"] == 1.0 and len(full) == 120
 
     def positives(df):
         return df[(df["label:stack"] == 1) | (df["label:rapid_layering"] == 1)]

@@ -464,3 +464,26 @@ def test_null_group_is_refused():
     df["group"] = None
     with pytest.raises(ValueError, match="NULL group"):
         fg.evaluate_gate(df, _prereg())
+
+
+def test_exclusions_counts_only_and_lift_ratio():
+    df = _frame(n=1500, prev=0.06)
+    df["exclude:beh"] = 0
+    df.loc[:99, "exclude:beh"] = 1
+    rep = fg.evaluate_gate(df, _prereg(), score=False)
+    r = rep["typologies"]["beh"]
+    assert rep["verdict"] == "counts_only" and r["status"] == "counts_only"
+    assert r["n_excluded"] == 100 and r["n_scored"] == 1400 and "ap" not in r
+    assert rep["level2"] is None and "passes" not in rep
+    assert any("n_excluded=100" in line for line in fg.summary_lines(rep))
+    scored = fg.evaluate_gate(df, _prereg())["typologies"]["beh"]
+    assert scored["n_scored"] == 1400
+    assert scored["ap_over_prevalence"] == pytest.approx(scored["ap"] / scored["prevalence"])
+
+
+def test_lifetime_prereg_drops_history_features():
+    p = _prereg()
+    p["unit_of_scoring"] = {"window": "utc_calendar_month", "history_features": ["noise_b"]}
+    life = fg.lifetime_prereg(p)
+    assert life["features"] == ["planted", "noise_a"]
+    assert fg.unit_window(life) == "lifetime" and fg.unit_window(p) == "utc_calendar_month"

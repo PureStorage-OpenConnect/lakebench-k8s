@@ -142,32 +142,42 @@ def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest)
     return rows
 
 
-def _cap_customers(features, labels, typologies, cap_rows: int):
-    """Keep every labelled customer and a seeded sample of the rest when the
-    customer count exceeds ``cap_rows`` (driver memory). Each kept negative
-    carries weight 1 / fraction, which the gate uses in fitting and in AP, so
-    AP reflects the true prevalence."""
+def _capped_pull(cap_rows: int, sampling: dict):
+    """A gate-frame builder for aml_features.build_gate_inputs that keeps
+    every customer with a label row for an in-scope typology and a seeded
+    sample of the other customers when the frame would exceed ``cap_rows``
+    units (driver memory). Customers are sampled whole, so a customer's months
+    stay together for the grouped CV; each sampled unit carries weight
+    1 / fraction, which the gate uses in fitting and in AP. ``sampling`` is
+    filled with the counts per unit kind for provenance."""
     import aml_features as af
 
-    cust = features.filter(col("is_customer")).cache()
-    n = cust.count()
-    if n <= cap_rows:
-        pdf = af.gate_frame(cust, labels, typologies)
-        pdf["weight"] = 1.0
-        return pdf, n, 1.0
-    pos_keys = labels.filter(col("typology_type").isin(*typologies)).select("key").distinct()
-    pos = cust.join(pos_keys, "key", "left_semi")
-    neg = cust.join(pos_keys, "key", "left_anti")
-    n_pos = pos.count()
-    frac = min(1.0, max(0.0, (cap_rows - n_pos) / max(1, n - n_pos)))
-    kept = pos.withColumn("weight", lit(1.0)).unionByName(
-        neg.sample(withReplacement=False, fraction=frac, seed=0).withColumn(
-            "weight", lit(1.0 / frac) if frac > 0 else lit(0.0)
+    def pull(features, labels, typologies, monthly):
+        cust = features.filter(col("is_customer")).cache()
+        n = cust.count()
+        name = "monthly" if monthly else "lifetime"
+        if n <= cap_rows:
+            pdf = af.default_pull(cust, labels, typologies, monthly)
+            pdf["weight"] = 1.0
+            sampling[name] = {"n_units": n, "n_pulled": len(pdf), "negative_fraction": 1.0}
+            return pdf
+        pos_keys = labels.filter(col("typology_type").isin(*typologies)).select("key").distinct()
+        pos = cust.join(pos_keys, "key", "left_semi")
+        neg = cust.join(pos_keys, "key", "left_anti")
+        n_pos = pos.count()
+        frac = min(1.0, max(0.0, (cap_rows - n_pos) / max(1, n - n_pos)))
+        neg_keys = neg.select("key").distinct().sample(withReplacement=False, fraction=frac, seed=0)
+        kept = pos.withColumn("weight", lit(1.0)).unionByName(
+            neg.join(neg_keys, "key", "left_semi").withColumn(
+                "weight", lit(1.0 / frac) if frac > 0 else lit(0.0)
+            )
         )
-    )
-    pdf = af.gate_frame(kept, labels, typologies)
-    cust.unpersist()
-    return pdf, n, frac
+        pdf = af.default_pull(kept, labels, typologies, monthly)
+        cust.unpersist()
+        sampling[name] = {"n_units": n, "n_pulled": len(pdf), "negative_fraction": frac}
+        return pdf
+
+    return pull
 
 
 def _write_text(spark, uri: str, text: str) -> None:
@@ -248,7 +258,13 @@ def run_fidelity_gate(
 ) -> dict:
     """Build silver features and evaluate the gate. Returns the report dict."""
     import aml_features as af
-    from fidelity_gate import add_pass, evaluate_gate, in_scope_typologies, load_preregistration
+    from fidelity_gate import (
+        add_pass,
+        evaluate_gate,
+        in_scope_typologies,
+        lifetime_prereg,
+        load_preregistration,
+    )
 
     prereg, sha = load_preregistration()
     typologies = in_scope_typologies(prereg)
@@ -261,9 +277,20 @@ def run_fidelity_gate(
         account_path=ACCOUNT_PATH,
     )
     txns = txns.cache()
-    features = af.entity_features(txns, ents).cache()
     role = prereg["unit_of_scoring"]["label_role"]
-    labels = af.labels_for_role(spark, manifest, id_map, role).cache()
+    sampling: dict = {}
+    inputs = af.build_gate_inputs(
+        spark,
+        prereg,
+        txns=txns,
+        ents=ents,
+        id_map=id_map,
+        manifest=manifest,
+        role=role,
+        typologies=typologies,
+        pull=_capped_pull(cap_rows, sampling),
+    )
+    features = inputs["lifetime_features"]
     tm = prereg["timing_mixture"]
     timing = af.timing_mixture_counts(
         features,
@@ -286,10 +313,9 @@ def run_fidelity_gate(
             features.filter(col("is_customer")).select("key"), "key", "left_semi"
         ),
     )
-    pdf, n_customers, frac = _cap_customers(features, labels, typologies, cap_rows)
-    log(f"Customers: {n_customers:,}; pulled to driver: {len(pdf):,} (negative fraction {frac})")
+    log(f"Driver pull: {sampling}")
     report = evaluate_gate(
-        pdf,
+        inputs["primary"],
         prereg,
         prereg_sha256=sha,
         timing_counts=timing,
@@ -303,11 +329,18 @@ def run_fidelity_gate(
             "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
             "aml_features_sha256": af.source_sha256(),
-            "n_customers": n_customers,
-            "negative_sample_fraction": frac,
+            "sampling": sampling,
             "label_route_agreement_customers": agreement,
         },
     )
+    report["unit_detail"] = inputs["unit"]
+    if "secondary_lifetime" in inputs:
+        # Ungated: the lifetime unit kept for comparison, never in passes.
+        sec = evaluate_gate(inputs["secondary_lifetime"], lifetime_prereg(prereg))
+        report["secondary_lifetime"] = {
+            "gated": False,
+            **{k: sec.get(k) for k in ("unit", "verdict", "n_scored_customers", "typologies")},
+        }
     seed_ok = seed_check["matched_share"] == 1
     if seed_check["claimed_seed"] is not None and not seed_ok:
         report["corpus_role"] = "unverified"
