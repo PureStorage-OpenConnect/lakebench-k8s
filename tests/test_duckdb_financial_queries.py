@@ -17,6 +17,7 @@ with pytz blocked, against in-memory tables of the same shape.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -183,6 +184,8 @@ def _financial_table_names() -> dict[str, str]:
         "gold_risk_scores",
         "gold_entity_clusters",
         "gold_daily_dashboards",
+        "gold_alert_dispositions",
+        "gold_cases",
     ):
         names[field] = getattr(t, field)
     return names
@@ -203,7 +206,11 @@ def _render(query) -> str:
     names = _financial_table_names()
     extra = {k: v for k, v in names.items() if k not in ("silver", "gold")}
     return query.sql.format(
-        catalog="lakehouse", silver_table=names["silver"], gold_table=names["gold"], **extra
+        catalog="lakehouse",
+        silver_table=names["silver"],
+        gold_table=names["gold"],
+        tm_run_id="run-test",
+        **extra,
     )
 
 
@@ -243,6 +250,13 @@ class TestAdaptQuery:
             "len(b) -- don't\nFROM t"
         )
 
+    def test_tm_tables_resolve_to_the_gold_bucket(self):
+        sql = _executor().adapt_query(
+            "SELECT * FROM lakehouse.gold.cases c JOIN lakehouse.gold.alert_dispositions d ON 1=1"
+        )
+        assert "iceberg_scan('s3://gb/warehouse/gold.db/cases'" in sql
+        assert "iceberg_scan('s3://gb/warehouse/gold.db/alert_dispositions'" in sql
+
     def test_local_executor_rewrites_cardinality(self):
         local = LocalDuckDBExecutor(
             endpoint="http://127.0.0.1:1",
@@ -262,9 +276,34 @@ class TestAdaptQuery:
 
 duckdb = pytest.importorskip("duckdb")
 
+
+def _duckdb_ddl(table_key: str, name: str) -> str:
+    """The real Spark DDL for ``table_key``, translated to a DuckDB table.
+
+    TIMESTAMP becomes TIMESTAMPTZ because that is what Spark writes to Iceberg
+    for a TIMESTAMP column. NOT NULL is dropped so fixtures can insert only the
+    columns a query reads.
+    """
+    from lakebench.deploy.financial_ddl import FINANCIAL_TABLE_DDLS
+
+    ddl = FINANCIAL_TABLE_DDLS[table_key].split("USING iceberg")[0]
+    body = ddl[ddl.index("(") + 1 : ddl.rindex(")")]
+    body = re.sub(r"--[^\n]*", "", body)
+    body = re.sub(r"\bNOT NULL\b", "", body)
+    body = re.sub(r"\bSTRING\b", "VARCHAR", body)
+    body = re.sub(r"\bTIMESTAMP\b", "TIMESTAMPTZ", body)
+    body = re.sub(r"ARRAY<(\w+)>", r"\1[]", body)
+    body = re.sub(
+        r"STRUCT<([^>]*)>",
+        lambda m: "STRUCT(" + re.sub(r"(\w+)\s*:\s*", r"\1 ", m.group(1)) + ")",
+        body,
+    )
+    return f"CREATE TABLE s.{name}({body});"
+
+
 # Timestamp columns are TIMESTAMPTZ because that is what Spark writes to
-# Iceberg for a TIMESTAMP column.
-_SETUP = """
+# Iceberg for a TIMESTAMP column. The TM and entity tables use the real DDL.
+_SETUP_TEMPLATE = """
 CREATE SCHEMA s;
 CREATE TABLE s.transactions(txn_id VARCHAR, originator_id BIGINT, beneficiary_id BIGINT,
   originator_bank_bic VARCHAR, beneficiary_bank_bic VARCHAR, txn_amount DECIMAL(18,2),
@@ -273,11 +312,29 @@ INSERT INTO s.transactions VALUES
   ('a',1,2,'X','Y',9500,'USD',9500,TIMESTAMPTZ '2026-01-01 00:00:00+00',true),
   ('b',1,2,'X','Y',9600,'USD',9600,TIMESTAMPTZ '2026-01-02 00:00:00+00',true),
   ('c',1,2,'X','Y',9700,'USD',9700,TIMESTAMPTZ '2026-01-03 00:00:00+00',false);
-CREATE TABLE s.entities(entity_id BIGINT, entity_type VARCHAR, name VARCHAR);
-INSERT INTO s.entities VALUES (1,'Person','n1'),(2,'Company','n2');
+{entities}
+INSERT INTO s.entities BY NAME
+  SELECT * FROM (VALUES (1,'Person','n1',true,'person','GB','low'),
+                        (2,'Company','n2',false,NULL,'DE',NULL))
+  t(entity_id, entity_type, name, is_customer, customer_type, country, crr_tier);
+{accounts}
+INSERT INTO s.accounts BY NAME SELECT 10 AS account_id, 1 AS holder_entity_id, 250.00 AS current_balance;
+{alert_dispositions}
+INSERT INTO s.alert_dispositions BY NAME
+  SELECT * FROM (VALUES ('d1',1,'W2','open',DATE '2026-02-20','run-test'),
+                        ('d2',2,'W3','closed',DATE '2026-02-21','run-test'),
+                        ('d3',1,'W2','open',DATE '2025-02-20','run-old'))
+  t(alert_id, entity_id, rule_id, queue_status, generated_date, base_run_id);
+{cases}
+INSERT INTO s.cases BY NAME
+  SELECT * FROM (VALUES
+    ('c1',1,'alert_escalation','high','open',DATE '2026-03-01',DATE '2026-06-01',2,'run-test'),
+    ('c0',2,'alert_escalation','critical','open',DATE '2025-01-01',DATE '2026-06-01',1,'run-old'))
+  t(case_id, customer_id, case_type, priority, case_status, opened_date, as_of_date,
+    alert_count, base_run_id);
 CREATE TABLE s.counterparty_edges(source_entity_id BIGINT, target_entity_id BIGINT,
   txn_count BIGINT, cumulative_amount_usd DECIMAL(18,2));
-INSERT INTO s.counterparty_edges VALUES (1,2,3,100.5);
+INSERT INTO s.counterparty_edges VALUES (1,2,3,100.5),(2,3,1,50);
 CREATE TABLE s.account_statements(account_id BIGINT, book_ts TIMESTAMPTZ, cdt_dbt_ind VARCHAR,
   amt DECIMAL(18,2), bal_after DECIMAL(18,2));
 INSERT INTO s.account_statements VALUES
@@ -289,16 +346,27 @@ INSERT INTO s.alerts VALUES
   ('al1',1,'W2','high','open',0.9,TIMESTAMPTZ '2026-01-05 00:00:00+00',['a','b']),
   ('al2',2,'W3','low','open',0.2,TIMESTAMPTZ '2026-01-04 00:00:00+00',NULL);
 """
+_SETUP = _SETUP_TEMPLATE.format(
+    entities=_duckdb_ddl("silver_entities", "entities"),
+    accounts=_duckdb_ddl("silver_accounts", "accounts"),
+    alert_dispositions=_duckdb_ddl("gold_alert_dispositions", "alert_dispositions"),
+    cases=_duckdb_ddl("gold_cases", "cases"),
+)
 
 _EXPECTED_ROWS = {
     "FQ1_txn_full_scan": 1,
     "FQ2_top_corridors_window": 1,
     "FQ6_structuring_scan": 1,
-    "FQ3_entity_edge_risk": 1,
+    "FQ3_entity_edge_risk": 2,
     "FQ7_cross_border_concentration": 1,
     "FQ4_running_balance_window": 2,
     "FQ5_alert_triage": 2,
     "FQ8_alert_to_entity_join": 2,
+    # Subject is case c1 (customer 1, run-test); the run-old rows must not leak in.
+    "IQ1_customer_360": 1,
+    "IQ2_case_activity_12m": 1,  # January 2026, inside the year before 2026-03-01
+    "IQ3_counterparty_two_hop": 1,  # 1 -> 2 -> 3
+    "IQ4_open_cases_over_60_days": 1,  # c1 only; c0 belongs to run-old
 }
 
 
@@ -320,8 +388,15 @@ def _run_pod_script(executor: DuckDBExecutor, sql: str) -> subprocess.CompletedP
         "import sys; sys.modules['pytz'] = None; "
         f"import duckdb, json; conn = duckdb.connect(); conn.execute('{setup}'); "
     )
+    # The pod image runs in UTC. Pin it so date_trunc over a TIMESTAMPTZ
+    # buckets months the same way on a developer machine in another zone.
+    env = {**os.environ, "TZ": "UTC"}
     return subprocess.run(
-        [sys.executable, "-c", prelude + body], capture_output=True, text=True, timeout=60
+        [sys.executable, "-c", prelude + body],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=env,
     )
 
 
