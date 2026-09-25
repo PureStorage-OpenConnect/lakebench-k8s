@@ -85,7 +85,7 @@ from gold_finalize_financial import (
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
-from tm_operations import bootstrap_tm_tables, params_from_env, run_tm_operations
+from tm_operations import bootstrap_tm_tables, params_from_env, run_tm_operations, tm_pass_due
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
@@ -94,6 +94,9 @@ GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 REFRESH_S = int(env("LB_FINANCIAL_GOLD_REFRESH_S", "60"))
 TM_PARAMS = params_from_env()
+# The continuous window length the CLI runs for (0: unknown), so the TM layer
+# can time a final pass before the window closes.
+WINDOW_S = int(env("LB_CONTINUOUS_WINDOW_S", "0") or 0)
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
 
@@ -194,7 +197,7 @@ def main() -> None:
     manifest_ready = table_exists(spark, f"{CATALOG}.{MANIFEST_TABLE}")
     cycle = 0
     last_ingest_s = 0.0
-    last_tm_s = None
+    tm_clock = {"run_start": time.time(), "start": None, "end": None, "elapsed": 0.0}
 
     while not _SHUTDOWN:
         tick = time.time()
@@ -261,21 +264,29 @@ def main() -> None:
             if newest_ingest_s is not None and (newest_ingest_s > last_ingest_s or backlog):
                 log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
                 last_ingest_s = newest_ingest_s
-            # P10 operations layer, after the tick's freshness is logged so its
-            # cost does not count as detection staleness. It runs every
-            # continuous_interval_seconds, not every tick: one pass over the
-            # full corpus costs minutes at scale 10. Waits for data and for
-            # the manifest (dispositions are simulated from it); a window that
-            # ends first reports the layer as not run. Never raises.
+            # P10 operations layer. It runs every continuous_interval_seconds,
+            # measured from the end of the last pass, so detection ticks always
+            # run between passes however long a pass takes; plus one final pass
+            # timed to finish before the window closes. One pass over the full
+            # corpus costs minutes at scale 10. Waits for data and the manifest
+            # (dispositions are simulated from it); a window that ends first
+            # reports the layer as not run. Never raises.
             now = time.time()
-            if TM_PARAMS["enabled"] and (
-                last_tm_s is None or now - last_tm_s >= TM_PARAMS["continuous_interval_seconds"]
-            ):
+            if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_S):
                 if silver_rows > 0 and manifest_ready:
-                    last_tm_s = now
+                    tm_clock["start"] = now
                     run_tm_operations(
                         spark, txns, RUN_ID, cycle=cycle, continuous=True, params=TM_PARAMS
                     )
+                    tm_clock["end"] = time.time()
+                    tm_clock["elapsed"] = tm_clock["end"] - now
+                    # Gold was not refreshed while the pass ran: its staleness
+                    # now includes the pass, so it is sampled again here.
+                    if newest_ingest_s is not None:
+                        log(
+                            f"Cycle {cycle}: data freshness "
+                            f"{max(0.0, time.time() - newest_ingest_s):.0f}s"
+                        )
                 else:
                     log(
                         # cycle=0: no operations pass has a number yet (they

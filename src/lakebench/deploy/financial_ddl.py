@@ -517,6 +517,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     triage_priority                STRING NOT NULL,
     alert_ts                       TIMESTAMP,
     content_hash                   STRING,
+    txn_sketch                     ARRAY<BIGINT>,
     first_seen_cycle               INT,
     first_seen_as_of               DATE,
     in_current_detection           BOOLEAN NOT NULL,

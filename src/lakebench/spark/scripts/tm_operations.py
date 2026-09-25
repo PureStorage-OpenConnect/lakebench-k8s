@@ -183,6 +183,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_DISPOSITIONS} (
     triage_priority       STRING NOT NULL,
     alert_ts              TIMESTAMP,
     content_hash          STRING,
+    txn_sketch            ARRAY<BIGINT>,
     first_seen_cycle      INT,
     first_seen_as_of      DATE,
     in_current_detection  BOOLEAN NOT NULL,
@@ -351,6 +352,22 @@ CONTINUING_FILING_LIMIT_DAYS = 120
 # the same alert (its window grew with the corpus). Beyond this it is new
 # activity and a new alert.
 EXTENSION_MATCH_DAYS = 31
+# A bottom-k sketch of each alert's related payments (the k smallest 64-bit
+# hashes of their ids): two alerts whose sketches share an element share a
+# payment. Carried across cycles instead of the id list, which a W1 alert
+# holds 250K of.
+TXN_SKETCH_K = 32
+# Detection can emit more alerts on one customer than the replay should hold
+# in one executor task. Past this multiple of max_alerts_per_customer, alerts
+# are dispositioned over_capacity before the replay (memory bound); within it
+# the replay applies the exact cap after identity matching.
+HARD_CAP_MULTIPLE = 4
+# Source-to-bronze in-flight bound (continuous). The bronze stream ingests
+# raw files oldest first by modification time, so the files not yet in
+# bronze are the newest ones. S3 dates a multipart upload by its start, so a
+# large file can land with an older time than files already ingested: this
+# much reordering is allowed.
+IN_FLIGHT_MTIME_TOLERANCE_S = 900
 
 # Alert queue aging buckets (P10.3 queue health).
 AGING_BUCKETS = ((0, 30, "0-30"), (31, 60, "31-60"), (61, 90, "61-90"), (91, None, "90+"))
@@ -444,6 +461,7 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
             # stay as first seen.
             a["alert_ts"] = cur["alert_ts"]
             a["content_hash"] = cur["content_hash"]
+            a["txn_sketch"] = cur.get("txn_sketch")
         used.add(a["alert_key"])
         out.append(a)
 
@@ -459,22 +477,40 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
     for lst in by_content.values():
         for p in lst:
             remaining.setdefault(p["rule_id"], []).append(p)
+    # Extension matches: same rule, the current alert's time inside the
+    # prior's window, and at least one payment in common (sketch overlap).
+    # Pairs are assigned greedily by overlap, then by closeness in time, then
+    # by key, so the result does not depend on input order and a new alert
+    # with none of the prior's payments can never take its identity.
     window = EXTENSION_MATCH_DAYS * _MICROS_PER_DAY
-    for c in unmatched:
-        cands = remaining.get(c["rule_id"]) or []
-        best = None
-        for p in cands:
-            if p["alert_ts"] is None or c["alert_ts"] is None:
+    pairs = []
+    for ci, c in enumerate(unmatched):
+        cs = set(c.get("txn_sketch") or ())
+        if not cs or c["alert_ts"] is None:
+            continue
+        for p in remaining.get(c["rule_id"]) or ():
+            if p["alert_ts"] is None or not (
+                p["alert_ts"] <= c["alert_ts"] <= p["alert_ts"] + window
+            ):
                 continue
-            # The earliest prior this alert could have grown from: with
-            # current alerts taken in time order this pairs grown windows in
-            # order instead of letting an early alert take a later one's key.
-            if p["alert_ts"] <= c["alert_ts"] <= p["alert_ts"] + window:
-                if best is None or p["alert_ts"] < best["alert_ts"]:
-                    best = p
-        if best is not None:
-            cands.remove(best)
-            carry(best, c)
+            ov = len(cs & set(p.get("txn_sketch") or ()))
+            if ov:
+                pairs.append(
+                    (-ov, c["alert_ts"] - p["alert_ts"], p["alert_key"], c["content_hash"], ci, p)
+                )
+    pairs.sort(key=lambda x: x[:5])
+    taken_p, taken_c = set(), set()
+    for _, _, pkey, _, ci, p in pairs:
+        if pkey in taken_p or ci in taken_c:
+            continue
+        taken_p.add(pkey)
+        taken_c.add(ci)
+        carry(p, unmatched[ci])
+    remaining = {
+        r: [p for p in lst if p["alert_key"] not in taken_p] for r, lst in remaining.items()
+    }
+    for ci, c in enumerate(unmatched):
+        if ci in taken_c:
             continue
         a = dict(c)
         raw = c["generated_date"]
@@ -814,6 +850,7 @@ _PASS_THROUGH = (
     "triage_priority",
     "alert_ts",
     "content_hash",
+    "txn_sketch",
     "first_seen_cycle",
     "first_seen_as_of",
     "in_current_detection",
@@ -826,6 +863,7 @@ _CUR_FIELDS = (
     "alert_id",
     "alert_key",
     "content_hash",
+    "txn_sketch",
     "rule_id",
     "alert_ts",
     "generated_date",
@@ -838,11 +876,53 @@ _CUR_FIELDS = (
 _PRIOR_FIELDS = _CUR_FIELDS + ("first_seen_cycle", "first_seen_as_of")
 
 
+def apply_cap(alerts, cap, cycle):
+    """Split matched alerts into (replayed, over_capacity).
+
+    Alerts already in the workflow (carried from an earlier cycle, matched or
+    withdrawn) are never capped: dropping one would lose decided history.
+    Alerts first seen this cycle are admitted, oldest first, only while the
+    customer's total stays within ``cap``.
+    """
+    known = [a for a in alerts if a.get("first_seen_cycle") != cycle]
+    new = sorted(
+        (a for a in alerts if a.get("first_seen_cycle") == cycle),
+        key=lambda a: (a["generated_date"], a["alert_key"]),
+    )
+    room = max(0, int(cap) - len(known))
+    return known + new[:room], new[room:]
+
+
+def _over_capacity_row(a, customer_id):
+    row = {x: a.get(x) for x in _PASS_THROUGH if x in a}
+    row.update(
+        {
+            "alert_id": a["alert_id"],
+            "alert_key": a["alert_key"],
+            "entity_id": customer_id,
+            "l1_decision_date": None,
+            "disposition": DISP_OVER_CAPACITY,
+            "queue_status": "closed",
+            "case_id": None,
+            "decision_date": a["generated_date"],
+            "aging_days": 0,
+            "sla_breached": False,
+            "simulated_truth": bool(a["truth"]),
+            "analyst_correct": None,
+            "qa_sampled": False,
+            "qa_disposition": None,
+            "qa_disagrees": None,
+        }
+    )
+    return row
+
+
 def _simulate_group(item, params, as_of, prev_as_of, cycle):
     """RDD adapter: (customer_id, iterable of ("n"|"p", tuple)) -> tagged rows.
 
-    Iterates the group once; the cap on alerts per customer is applied in
-    Spark before this runs, so a hub customer's memory is bounded.
+    The group is bounded before this runs: current alerts past
+    HARD_CAP_MULTIPLE x the cap are dispositioned in Spark, and carried
+    alerts never exceed the cap, so a hub customer's memory is bounded.
     """
     customer_id, rows = item
     current, prior = [], []
@@ -857,8 +937,9 @@ def _simulate_group(item, params, as_of, prev_as_of, cycle):
             if crr_tier is None:
                 crr_tier = d["crr_tier"]
             prior.append(d)
-    alerts = match_alerts(current, prior, prev_as_of, as_of, cycle)
+    matched = match_alerts(current, prior, prev_as_of, as_of, cycle)
     del current, prior
+    alerts, over = apply_cap(matched, params["max_alerts_per_customer"], cycle)
     disp, cases = simulate_customer(customer_id, crr_tier, alerts, params, as_of)
     truth = {a["alert_key"]: bool(a["truth"]) for a in alerts}
     out = []
@@ -866,6 +947,8 @@ def _simulate_group(item, params, as_of, prev_as_of, cycle):
         d["entity_id"] = customer_id
         d["simulated_truth"] = truth[d["alert_key"]]
         out.append(("d", json.dumps(_jsonable(d))))
+    for a in over:
+        out.append(("d", json.dumps(_jsonable(_over_capacity_row(a, customer_id)))))
     for c in cases:
         out.append(("c", json.dumps(_jsonable(c))))
     return out
@@ -927,28 +1010,92 @@ def read_at_snapshot(spark, fq_table, snapshot_id):
 # Spark stages
 # ---------------------------------------------------------------------------
 
-# Raw source files already counted, by path (datagen files are immutable),
-# so a continuous run reads only the footers of files new since its last
-# operations pass. Driver-local; reset when a file disappears.
-_SOURCE_SEEN = {"files": set(), "rows": 0}
+# Raw source files already counted, by path (datagen files are immutable):
+# path -> (modification time in ms, rows). A continuous run reads only the
+# files new since its last operations pass. Driver-local; reset when a file
+# disappears.
+_SOURCE_SEEN = {}
+
+
+def _norm_path(p):
+    from urllib.parse import unquote, urlparse
+
+    u = urlparse(str(p))
+    return unquote(u.netloc + u.path)
 
 
 def count_source_rows(spark):
-    """Payments the datagen wrote (the raw pacs.008 Parquet), or None."""
+    """Payments the datagen wrote (the raw pacs.008 Parquet), with each
+    file's modification time and rows: ``{"rows", "files": [(mtime_ms,
+    rows)]}``, or None when the files cannot be listed."""
     from bronze_verify_financial import BRONZE_URI, PACS_PREFIX
+    from pyspark.sql.functions import input_file_name
 
     try:
-        files = set(spark.read.parquet(BRONZE_URI + PACS_PREFIX).inputFiles())
-        if not _SOURCE_SEEN["files"] <= files:
-            _SOURCE_SEEN["files"], _SOURCE_SEEN["rows"] = set(), 0
-        new = sorted(files - _SOURCE_SEEN["files"])
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        conf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        root = (BRONZE_URI + PACS_PREFIX).replace("s3://", "s3a://", 1)
+        path = jvm.org.apache.hadoop.fs.Path(root)
+        fs = path.getFileSystem(conf)
+        listed = {}
+        it = fs.listFiles(path, True)
+        while it.hasNext():
+            st = it.next()
+            name = st.getPath().toString()
+            if name.endswith(".parquet"):
+                listed[_norm_path(name)] = (name, int(st.getModificationTime()))
+        if not set(_SOURCE_SEEN) <= set(listed):
+            _SOURCE_SEEN.clear()
+        new = sorted(k for k in listed if k not in _SOURCE_SEEN)
         if new:
-            _SOURCE_SEEN["rows"] += int(spark.read.parquet(*new).count())
-            _SOURCE_SEEN["files"] |= set(new)
-        return _SOURCE_SEEN["rows"]
+            per = {
+                _norm_path(r[0]): int(r[1])
+                for r in spark.read.parquet(*[listed[k][0] for k in new])
+                .groupBy(input_file_name().alias("f"))
+                .count()
+                .collect()
+            }
+            for k in new:
+                _SOURCE_SEEN[k] = (listed[k][1], per.get(k, 0))
+        files = [_SOURCE_SEEN[k] for k in listed]
+        return {"rows": sum(r for _, r in files), "files": files}
     except Exception as e:  # noqa: BLE001
         log(f"[tm] source payment count unavailable: {one_line(e)}")
         return None
+
+
+def bronze_prefix_gap(files, bronze_rows, tolerance_ms=IN_FLIGHT_MTIME_TOLERANCE_S * 1000):
+    """Rows by which bronze differs from any set of raw files the stream
+    could have ingested by now, or None when that cannot be decided.
+
+    The stream takes whole raw files, oldest first by modification time, so
+    bronze holds a time-ordered prefix of the files: every file older than
+    the boundary, none newer, and any subset of those within the tolerance of
+    the boundary (S3 dates a multipart upload by its start). 0 means bronze
+    is consistent with such a prefix; anything else is a lost or duplicated
+    file. ``files``: (mtime_ms, rows) per raw file.
+    """
+    ordered = sorted(files)
+    total = sum(r for _, r in ordered)
+    if bronze_rows >= total:
+        return bronze_rows - total
+    if bronze_rows <= 0:
+        return 0
+    cum, mk = 0, ordered[-1][0]
+    for m, r in ordered:
+        cum += r
+        if cum >= bronze_rows:
+            mk = m
+            break
+    lo, hi = mk - tolerance_ms, mk + tolerance_ms
+    required = sum(r for m, r in ordered if m < lo)
+    sums = {0}
+    for m, r in ordered:
+        if lo <= m <= hi:
+            sums |= {x + r for x in sums}
+            if len(sums) > 200_000:
+                return None
+    return min(abs(bronze_rows - required - x) for x in sums)
 
 
 def classify_payments(txns, entities):
@@ -998,11 +1145,28 @@ DQ_RULES = (
 )
 
 
-def reconcile(spark, txns, entities, source_rows, bronze_rows, continuous):
-    """Completeness rows (section, item, unit, count, amount) for one cycle."""
+def reconcile(spark, txns, entities, source, bronze, continuous):
+    """Completeness rows (section, item, unit, count, amount) for one cycle.
+
+    ``source``: the raw payment count, or ``{"rows", "files"}`` from
+    :func:`count_source_rows`. ``bronze``: the bronze row count, or in
+    continuous ``{"rows", "pending"}`` where ``pending`` counts bronze rows
+    newer than silver's ingest watermark (None when it cannot be measured).
+
+    Continuous in-flight payments are bounded, not inferred: rows bronze has
+    not taken yet must be the newest raw files (``bronze_prefix_gap``), and
+    rows silver has not taken yet must be newer than its watermark. Anything
+    else is ``unaccounted`` and fails reconciliation.
+    """
     from pyspark.sql.functions import col, count, lit, when
     from pyspark.sql.functions import sum as sum_
 
+    source_rows, files = (
+        (source.get("rows"), source.get("files")) if isinstance(source, dict) else (source, None)
+    )
+    bronze_rows, pending = (
+        (bronze.get("rows"), bronze.get("pending")) if isinstance(bronze, dict) else (bronze, None)
+    )
     cls = classify_payments(txns, entities)
     aggs = [count(lit(1)).alias("n"), sum_(col("txn_amount_usd")).alias("usd")]
     aggs += [sum_(when(col(r), lit(1)).otherwise(lit(0))).alias(r) for r in DQ_RULES]
@@ -1029,13 +1193,19 @@ def reconcile(spark, txns, entities, source_rows, bronze_rows, continuous):
     for reason in ("no_customer_party", "dq_unconvertible_currency"):
         rows.append(("exclusion", reason, "payments", n(reason), usd(reason)))
         excluded += n(reason)
-    if continuous and source_rows is not None:
-        # Written by datagen, not yet carried into silver by the stream.
-        # Silver was pinned before the source was counted, so this cannot
-        # go negative unless silver holds rows the source never had.
-        in_flight = source_rows - silver_rows
-        rows.append(("exclusion", "in_flight", "payments", in_flight, None))
-        excluded += in_flight
+    if continuous and source_rows is not None and bronze_rows is not None:
+        # Silver, then bronze, were pinned before the source was counted.
+        to_bronze = source_rows - bronze_rows
+        to_silver = pending if pending is not None else bronze_rows - silver_rows
+        rows.append(("exclusion", "in_flight_to_bronze", "payments", to_bronze, None))
+        rows.append(("exclusion", "in_flight_to_silver", "payments", to_silver, None))
+        excluded += to_bronze + to_silver
+        # Bronze must hold a time-ordered prefix of the raw files; a gap is a
+        # lost (or duplicated) file, not data in flight.
+        unaccounted = None
+        if files is not None and pending is not None:
+            unaccounted = bronze_prefix_gap(files, bronze_rows)
+        rows.append(("completeness", "unaccounted", "payments", unaccounted, None))
     rows.append(("completeness", "excluded", "payments", excluded, None))
     for rule in DQ_RULES:
         rows.append(
@@ -1056,6 +1226,7 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         create_map,
         date_add,
         explode,
+        expr,
         lit,
         row_number,
         sha2,
@@ -1085,6 +1256,11 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         256,
     )
     raw = alerts.select("alert_id", "rule_id", "entity_id", "alert_ts", "related_txn_ids")
+    sketch = expr(
+        "slice(array_sort(array_distinct(transform("
+        "coalesce(related_txn_ids, cast(array() as array<string>)), x -> xxhash64(x)))), "
+        f"1, {TXN_SKETCH_K})"
+    )
     planted = (
         manifest.where(col("typology_type") != lit("random"))
         .select(explode(col("participant_uetrs")).alias("uetr"))
@@ -1099,7 +1275,14 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
     )
     # related_txn_ids is dropped here, before the window shuffle below: a W1
     # alert can carry 250K ids.
-    base = raw.select("alert_id", "rule_id", "entity_id", "alert_ts", content.alias("content_hash"))
+    base = raw.select(
+        "alert_id",
+        "rule_id",
+        "entity_id",
+        "alert_ts",
+        content.alias("content_hash"),
+        sketch.alias("txn_sketch"),
+    )
     # Identical alerts (same rule, entity, time and txns) share a content
     # hash; the occurrence number keeps their keys distinct.
     w = Window.partitionBy("content_hash").orderBy("alert_id")
@@ -1114,6 +1297,7 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
             "alert_id",
             "alert_key",
             "content_hash",
+            "txn_sketch",
             "rule_id",
             "entity_id",
             "alert_ts",
@@ -1138,28 +1322,28 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         cond = col("priority_score") >= lit(floor)
         band = when(cond, lit(name)) if band is None else band.when(cond, lit(name))
     out = out.withColumn("triage_priority", band.otherwise(lit("low")))
-    cap = int(params.get("max_alerts_per_customer") or 0)
-    if cap <= 0:
-        return out.withColumn("over_capacity", lit(False))
-    # Alerts already in the workflow (same content as a carried prior alert)
-    # are never capped: capping one would drop it from the replay while its
-    # prior row is carried, writing the alert twice. Only new alerts are
-    # ranked against the cap.
+    # Memory bound only (the exact cap is applied after identity matching,
+    # in the replay): past HARD_CAP_MULTIPLE x the cap, a customer's alerts
+    # are over_capacity here. Alerts with the content of a carried alert rank
+    # first, so the bound drops new alerts before known ones.
+    hard = HARD_CAP_MULTIPLE * int(params["max_alerts_per_customer"])
     if known is not None:
         k = known.select("entity_id", "content_hash").distinct().withColumn("_known", lit(True))
         out = out.join(k, ["entity_id", "content_hash"], "left")
     else:
         out = out.withColumn("_known", lit(None).cast("boolean"))
-    new = col("_known").isNull()
-    rank = Window.partitionBy("entity_id", new).orderBy("generated_date", "alert_key")
-    over = col("is_customer") & new & (row_number().over(rank) > lit(cap))
+    rank = Window.partitionBy("entity_id").orderBy(
+        col("_known").isNull(), "generated_date", "alert_key"
+    )
+    over = col("is_customer") & (row_number().over(rank) > lit(hard))
     return out.withColumn("over_capacity", over).drop("_known")
 
 
 _DISP_SIM_SCHEMA = (
     "alert_id STRING, alert_key STRING, entity_id BIGINT, rule_id STRING, crr_tier STRING, "
     "scenario_weight DOUBLE, priority_score DOUBLE, triage_priority STRING, "
-    "alert_ts BIGINT, content_hash STRING, first_seen_cycle INT, first_seen_as_of DATE, "
+    "alert_ts BIGINT, content_hash STRING, txn_sketch ARRAY<BIGINT>, first_seen_cycle INT, "
+    "first_seen_as_of DATE, "
     "in_current_detection BOOLEAN, generated_date DATE, l1_decision_date DATE, "
     "disposition STRING, queue_status STRING, case_id STRING, decision_date DATE, "
     "aging_days INT, sla_breached BOOLEAN, simulated_truth BOOLEAN, analyst_correct BOOLEAN, "
@@ -1326,12 +1510,22 @@ def evaluate_invariants(counts: dict) -> list[tuple[str, str, str]]:
         # A negative item (silver holding more than the source, so in_flight
         # below zero) is a duplication, not a balanced ledger.
         neg = counts.get("negative_items") or []
-        check(
-            "reconciliation",
-            mon + exc == src and not neg,
-            f"monitored {mon} + excluded {exc} = {mon + exc} vs source {src}"
-            + (f"; negative: {', '.join(neg)}" if neg else ""),
+        unacc = counts.get("unaccounted", 0)
+        detail = f"monitored {mon} + excluded {exc} = {mon + exc} vs source {src}" + (
+            f"; negative: {', '.join(neg)}" if neg else ""
         )
+        if mon + exc != src or neg or unacc:
+            out.append(
+                ("reconciliation", "fail", detail + (f"; unaccounted {unacc}" if unacc else ""))
+            )
+        elif unacc is None:
+            # Continuous, and the in-flight rows could not be bounded (no
+            # file listing, or no ingest watermark): not proven either way.
+            out.append(
+                ("reconciliation", "unchecked", detail + "; in-flight rows could not be bounded")
+            )
+        else:
+            out.append(("reconciliation", "pass", detail))
     alerts, disp = counts["alerts"], counts["dispositions"]
     check(
         "every_alert_dispositioned",
@@ -1395,7 +1589,9 @@ def evaluate_invariants(counts: dict) -> list[tuple[str, str, str]]:
         folded == 0,
         f"{folded} reviews credited to a case already determined before the review was due",
     )
-    if counts.get("history_checked"):
+    if counts.get("history_note"):
+        out.append(("history_stable", "unchecked", counts["history_note"]))
+    elif counts.get("history_checked"):
         changed = counts.get("history_changed", 0)
         check(
             "history_stable",
@@ -1796,65 +1992,97 @@ def _write_recon(spark, rows, base_run_id, cycle, cycle_run_id, as_of):
 
 
 def _ledger_cycles(spark, base_run_id):
-    """{cycle: as_of_date} already in the ledger for this run."""
-    from pyspark.sql.functions import col, lit
-    from pyspark.sql.functions import max as max_
+    """{cycle: {"as_of", "complete", "disp_sid", "case_sid"}} for this run.
 
-    try:
-        return {
-            int(r["cycle"]): r["a"]
-            for r in spark.table(f"{CATALOG}.{GOLD_RECON}")
-            .where(col("run_id") == lit(base_run_id))
-            .groupBy("cycle")
-            .agg(max_("as_of_date").alias("a"))
-            .collect()
-        }
-    except Exception as e:  # noqa: BLE001
-        log(f"[tm] ledger unreadable: {one_line(e)}")
-        return {}
+    Raises when the ledger cannot be read: an unreadable ledger must stop the
+    pass before it writes, not reset identity and numbering.
+    """
+    from pyspark.sql.functions import col, lit
+
+    out = {}
+    for r in (
+        spark.table(f"{CATALOG}.{GOLD_RECON}")
+        .where(col("run_id") == lit(base_run_id))
+        .select("cycle", "as_of_date", "section", "item", "item_count")
+        .collect()
+    ):
+        c = out.setdefault(
+            int(r["cycle"]), {"as_of": None, "complete": False, "disp_sid": None, "case_sid": None}
+        )
+        if r["as_of_date"] is not None:
+            c["as_of"] = r["as_of_date"]
+        if (r["section"], r["item"]) == ("status", "complete"):
+            c["complete"] = True
+        elif (r["section"], r["item"]) == ("snapshot", "alert_dispositions"):
+            c["disp_sid"] = r["item_count"]
+        elif (r["section"], r["item"]) == ("snapshot", "cases"):
+            c["case_sid"] = r["item_count"]
+    return out
 
 
 def _prior_state(spark, base_run_id, cycle, ledger):
-    """The previous cycle's dispositions and cases (pinned snapshots) to
-    carry forward, its as-of date, and whether this is a rerun of the same
-    cycle. (None, None, None, False) on a first cycle or another run's
-    tables."""
-    from pyspark.sql.functions import col, lit
+    """The last completed cycle before this one: its dispositions and cases
+    at the snapshots the ledger recorded, and its as-of date.
+
+    Returns ``(dispositions, cases, prev_as_of, note)``; all None on a first
+    cycle. ``note`` is set, with no prior, when a completed cycle exists but
+    its tables can no longer be read (snapshots expired and the current
+    tables hold another cycle): identity restarts and history is unchecked.
+    A pass that crashed after writing is not complete, so it is never used.
+    """
     from pyspark.sql.functions import max as max_
     from pyspark.sql.functions import min as min_
 
+    done = [c for c, info in ledger.items() if c < cycle and info["complete"]]
+    if not done:
+        return None, None, None, None
+    last = max(done)
+    info = ledger[last]
     dt, ct = f"{CATALOG}.{GOLD_DISPOSITIONS}", f"{CATALOG}.{GOLD_CASES}"
-    dsid, csid = current_snapshot_id(spark, dt), current_snapshot_id(spark, ct)
-    if dsid is None:
-        return None, None, None, False
-    pdisp = read_at_snapshot(spark, dt, dsid)
-    pcases = read_at_snapshot(spark, ct, csid) if csid is not None else None
+    try:
+        if info["disp_sid"] is None or info["case_sid"] is None:
+            raise LookupError("the ledger recorded no snapshots")
+        pdisp = read_at_snapshot(spark, dt, info["disp_sid"])
+        pcases = read_at_snapshot(spark, ct, info["case_sid"])
+        pdisp.limit(1).collect()
+        pcases.limit(1).collect()
+        return pdisp, pcases, info["as_of"], None
+    except Exception as e:  # noqa: BLE001
+        reason = one_line(e)
+    # The recorded snapshots are gone (expired). The current tables still
+    # serve if they hold exactly that cycle of this run.
+    pdisp, pcases = spark.table(dt), spark.table(ct)
     meta = pdisp.agg(
         min_("base_run_id").alias("lo"),
         max_("base_run_id").alias("hi"),
-        max_("cycle").alias("c"),
-        max_("as_of_date").alias("a"),
+        min_("cycle").alias("c0"),
+        max_("cycle").alias("c1"),
     ).collect()[0]
-    if meta["lo"] is None or meta["lo"] != base_run_id or meta["hi"] != base_run_id:
-        return None, None, None, False
-    prior_cycle = int(meta["c"])
-    if prior_cycle < cycle:
-        prev_as_of = meta["a"]
-    elif prior_cycle == cycle:
-        # A rerun of this cycle: carry only what earlier cycles saw, dated by
-        # the ledger's previous cycle.
-        earlier = [c for c in ledger if c < cycle]
-        if not earlier:
-            return None, None, None, False
-        prev_as_of = ledger[max(earlier)]
-        pdisp = pdisp.where(col("first_seen_cycle") < lit(cycle))
-        if pcases is not None:
-            pcases = pcases.where(col("opened_date") <= lit(prev_as_of))
-    else:
-        return None, None, None, False
-    if prev_as_of is None:
-        return None, None, None, False
-    return pdisp, pcases, prev_as_of, prior_cycle == cycle
+    if meta["lo"] == base_run_id == meta["hi"] and meta["c0"] == last == meta["c1"]:
+        return pdisp, pcases, info["as_of"], None
+    return None, None, None, f"cycle {last}'s tables are unreadable ({reason}); identity restarted"
+
+
+def tm_pass_due(now, clock, params, window_s=0):
+    """Whether gold-refresh should run an operations pass now.
+
+    ``clock``: {"run_start", "start", "end", "elapsed"} of the driver and its
+    last pass. Due on the first eligible tick; then when
+    ``continuous_interval_seconds`` have passed since the last pass ENDED
+    (so a pass longer than the interval cannot run back to back and starve
+    detection); and once more when the window is about to close, early
+    enough for a pass as long as the last one to finish.
+    """
+    if clock.get("end") is None:
+        return True
+    if now - clock["end"] >= int(params["continuous_interval_seconds"]):
+        return True
+    if window_s and window_s > 0:
+        margin = max(120.0, 1.5 * float(clock.get("elapsed") or 0.0) + 60.0)
+        final_at = clock["run_start"] + window_s - margin
+        if now >= final_at and clock["start"] < final_at:
+            return True
+    return False
 
 
 def _status(status, cycle, reason):
@@ -1899,6 +2127,7 @@ def run_tm_operations(
 
     started = time.time()
     held = []
+    wrote = False
     try:
         if rule_targets is None:
             from detection_rules import RULE_TARGET_TYPOLOGY
@@ -1939,13 +2168,26 @@ def run_tm_operations(
             _status("not_run", cycle_no, reason)
             return [("workflow", "not_run", reason)]
 
-        # Stage 1: completeness.
-        source_rows = (source_rows_fn or count_source_rows)(spark)
-        bronze_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{BRONZE_TABLE}")
-        recon_rows, recon = reconcile(spark, txns, entities, source_rows, bronze_rows, continuous)
+        # Stage 1: completeness. Bronze is pinned after silver and before
+        # the source count, so silver <= bronze <= source by construction and
+        # any gap is either bounded in-flight data or a loss.
+        btable = f"{CATALOG}.{BRONZE_TABLE}"
+        if continuous:
+            bronze_df = read_at_snapshot(spark, btable, current_snapshot_id(spark, btable))
+            pending = None
+            if "ingest_ts" in txns.columns and "ingest_ts" in bronze_df.columns:
+                wm = txns.agg(max_(col("ingest_ts")).alias("w")).collect()[0]["w"]
+                pending = (
+                    bronze_df.where(col("ingest_ts") > lit(wm)).count() if wm is not None else None
+                )
+            bronze = {"rows": bronze_df.count(), "pending": pending}
+        else:
+            bronze, _ = iceberg_table_stats(spark, btable)
+        source = (source_rows_fn or count_source_rows)(spark)
+        recon_rows, recon = reconcile(spark, txns, entities, source, bronze, continuous)
 
-        # The previous cycle, pinned before this cycle overwrites it.
-        prior_disp, prior_cases, prev_as_of, rerun = _prior_state(
+        # The last completed cycle, at the snapshots its ledger recorded.
+        prior_disp, prior_cases, prev_as_of, history_note = _prior_state(
             spark, base_run_id, cycle_no, ledger
         )
         carry = None
@@ -1957,6 +2199,9 @@ def run_tm_operations(
                 col("is_customer") & (col("disposition") != lit(DISP_OVER_CAPACITY))
             ).join(still, "entity_id", "left_semi")
             prior_disp = prior_disp.join(still, "entity_id", "left_semi")
+            if "txn_sketch" not in carry.columns:
+                # A table written before the sketch existed.
+                carry = carry.withColumn("txn_sketch", lit(None).cast("array<bigint>"))
 
         # Stage 6-8: triage, cases, SAR decisions.
         alerts = spark.table(f"{CATALOG}.{GOLD_ALERTS}").where(col("run_id") == lit(run_id))
@@ -1998,6 +2243,7 @@ def run_tm_operations(
             "triage_priority",
             "alert_ts",
             "content_hash",
+            "txn_sketch",
             lit(None).cast("int").alias("first_seen_cycle"),
             lit(None).cast("date").alias("first_seen_as_of"),
             lit(True).alias("in_current_detection"),
@@ -2016,6 +2262,19 @@ def run_tm_operations(
             lit(None).cast("boolean").alias("qa_disagrees"),
         )
         disp = sim_rows.select(*disp_cols).unionByName(other.select(*disp_cols))
+        # From here on tables are overwritten. The cycle number is taken in
+        # the ledger first, so a crash leaves an incomplete cycle the next
+        # pass skips (never reused, never carried from), and any error after
+        # this point fails the pass instead of reporting it as not run.
+        _write_recon(
+            spark,
+            [("status", "started", "pass", None, None)],
+            base_run_id,
+            cycle_no,
+            cycle_run_id,
+            as_of,
+        )
+        wrote = True
         disp.select(*disp_cols, *run_cols).writeTo(f"{CATALOG}.{GOLD_DISPOSITIONS}").overwrite(
             lit(True)
         )
@@ -2048,7 +2307,9 @@ def run_tm_operations(
 
         # Read the written tables back once; the funnel rows complete the
         # cycle ledger, and the invariants read the ledger as written.
-        counts = read_back(spark, run_id, as_of, prior_disp, prior_cases, prev_as_of, rerun)
+        counts = read_back(spark, run_id, as_of, prior_disp, prior_cases, prev_as_of)
+        if history_note:
+            counts["history_note"] = history_note
         recon_rows = recon_rows + [
             ("funnel", "alerts", "alerts", counts["customer_alerts"], None),
             ("funnel", "alerts_out_of_scope", "alerts", counts["noncustomer_alerts"], None),
@@ -2065,7 +2326,31 @@ def run_tm_operations(
             ("funnel", "sars", "sars", counts["alert_sars"], None),
             ("funnel", "continuing_sars", "sars", counts["review_sars"], None),
         ]
-        _write_recon(spark, recon_rows, base_run_id, cycle_no, cycle_run_id, as_of)
+        _write_recon(
+            spark,
+            recon_rows
+            + [
+                ("status", "complete", "pass", None, None),
+                (
+                    "snapshot",
+                    "alert_dispositions",
+                    "snapshot_id",
+                    current_snapshot_id(spark, f"{CATALOG}.{GOLD_DISPOSITIONS}"),
+                    None,
+                ),
+                (
+                    "snapshot",
+                    "cases",
+                    "snapshot_id",
+                    current_snapshot_id(spark, f"{CATALOG}.{GOLD_CASES}"),
+                    None,
+                ),
+            ],
+            base_run_id,
+            cycle_no,
+            cycle_run_id,
+            as_of,
+        )
         rec = {
             (r["section"], r["item"]): r["item_count"]
             for r in spark.table(f"{CATALOG}.{GOLD_RECON}")
@@ -2076,8 +2361,11 @@ def run_tm_operations(
         counts.update(
             {
                 "negative_items": sorted(
-                    f"{s}.{i}={v}" for (s, i), v in rec.items() if v is not None and v < 0
+                    f"{s}.{i}={v}"
+                    for (s, i), v in rec.items()
+                    if v is not None and v < 0 and s not in ("status", "snapshot")
                 ),
+                "unaccounted": rec.get(("completeness", "unaccounted"), 0),
                 "source": None if src is None else int(src),
                 "customers": int(rec.get(("completeness", "customers")) or 0),
                 "silver": int(rec.get(("completeness", "silver")) or 0),
@@ -2089,6 +2377,14 @@ def run_tm_operations(
         summary = ops_summary(as_of, params, recon_rows, counts)
     except Exception as e:  # noqa: BLE001 -- reported through the gate
         err = one_line(f"{type(e).__name__}: {e}", limit=400)
+        if wrote:
+            # The TM tables are partly rewritten: a failure, not "not run".
+            _status("failed", cycle_no, f"error after writing: {err}")
+            log(
+                f"[tm-invariant] workflow: status=fail cycle={cycle_no} "
+                f"detail=error after the TM tables were written: {err}"
+            )
+            return [("workflow", "fail", f"error after the TM tables were written: {err}")]
         _status("not_run", cycle_no, f"error: {err}")
         return [("workflow", "not_run", f"error: {err}")]
     finally:

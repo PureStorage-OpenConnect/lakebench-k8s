@@ -122,16 +122,26 @@ class BenchmarkResult:
 class BenchmarkRunner:
     """Runs the query benchmark suite against the configured engine."""
 
-    def __init__(self, config: LakebenchConfig, namespace: str | None = None):
+    def __init__(
+        self,
+        config: LakebenchConfig,
+        namespace: str | None = None,
+        tm_run_id: str | None = None,
+    ):
         """Initialize benchmark runner.
 
         Args:
             config: Lakebench configuration
             namespace: Override namespace (default: from config)
+            tm_run_id: The run whose TM operations tables the investigator
+                queries read. None leaves the investigator class out: the
+                caller passes it only when this run's TM layer ran (verdict
+                pass or fail).
         """
         from .executor import get_executor
 
         self.config = config
+        self.tm_run_id = tm_run_id
         self.namespace = namespace or config.get_namespace()
         self.executor = get_executor(config, self.namespace)
         self.catalog = self.executor.catalog_name
@@ -155,12 +165,13 @@ class BenchmarkRunner:
         }
 
     def _queries(self) -> list[BenchmarkQuery]:
-        """The schema's query set. The investigator queries read the TM
-        operations tables, which stay empty when that layer is disabled, so
-        they are left out then (the query-set id records the difference)."""
+        """The schema's query set. The investigator queries read this run's
+        TM operations tables; they are left out when the layer is disabled or
+        did not run for this run (no ``tm_run_id``), and the query-set id
+        records the difference."""
         queries = get_benchmark_queries(self.config.architecture.workload.schema_type)
         workload = self.config.architecture.workload
-        if not workload.tm_operations.enabled:
+        if not workload.tm_operations.enabled or not self.tm_run_id:
             queries = [q for q in queries if q.query_class != "investigator"]
         return queries
 
@@ -510,6 +521,7 @@ class BenchmarkRunner:
             catalog=self.catalog,
             silver_table=self.silver_table,
             gold_table=self.gold_table,
+            tm_run_id=(self.tm_run_id or "").replace("'", "''"),
             **self._extra_tables,
         )
 

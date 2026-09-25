@@ -1237,6 +1237,9 @@ def run(
     results: list[tuple[str, bool, float]] = []
     benchmark_qph: float | None = None
     _financial_scoring: dict | None = None
+    # Set when this run's TM layer ran (verdict pass or fail); the benchmark
+    # includes the investigator queries only then.
+    _tm_run_id: str | None = None
 
     try:
         # Check Spark operator
@@ -1745,6 +1748,10 @@ def run(
                 _gold_jobs, enabled=cfg.architecture.workload.tm_operations.enabled
             )
             collector.current_run.tm_operations = _tm
+            if _tm.get("status") in ("pass", "fail"):
+                # The layer ran for this run: the investigator queries read
+                # its tables. Otherwise they are left out of the benchmark.
+                _tm_run_id = run_id
             if _report_tm_verdict(_tm, "AML batch gate"):
                 pipeline_success = False
 
@@ -1895,7 +1902,7 @@ def run(
                             short_err = (error[:60] + "...") if len(error) > 60 else error
                             console.print(f"[red]FAIL[/red] ({short_err})")
 
-                bench_runner = BenchmarkRunner(cfg)
+                bench_runner = BenchmarkRunner(cfg, tm_run_id=_tm_run_id)
                 # LB-117: AML analytical queries (aggregate_typology_coverage
                 # etc) can exceed the 300s default at scale >= 5; a timeout
                 # here masquerades as a failed query and drops QpH to 0.

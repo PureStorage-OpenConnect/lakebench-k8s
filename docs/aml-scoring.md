@@ -280,7 +280,8 @@ Anything that would be decided later is the open backlog.
 |---|---|---|
 | `gold.tm_reconciliation` | 1 | One set of rows per cycle (batch) or operations pass (continuous), appended: customers; source, bronze and silver payments; monitored vs excluded by reason (`no_customer_party`, `dq_unconvertible_currency`, and `in_flight` in continuous); DQ rule failures; the funnel alerts -> escalated -> cases -> SARs |
 | `gold.scenario_coverage` | 1 | Scenario-to-typology matrix with this cycle's rule status, alert volume and planted instances; planted typologies no scenario targets appear as `gap` |
-| `gold.alert_dispositions` | 6 | Triage priority (scenario weight x CRR tier: low, medium, high, critical) and a disposition that is never NULL: `escalated`, `closed_nfa`, `attached` to the customer's open case, `pending_l1`, `out_of_scope` (non-customer), `over_capacity` (past the per-customer cap); aging against the SLA; QA re-review; the alert's first-seen cycle |
+| `gold.alert_dispositions` | 6 | Triage priority (scenario weight x CRR tier: low, medium, high, critical) and a disposition that is never NULL: `escalated`, `closed_nfa`, `attached` to the customer's open case, `pending_l1`, `out_of_scope` (non-customer), `over_capacity` (past the per-customer cap, applied after identity matching so an alert already in
+the workflow is never capped); aging against the SLA; QA re-review; the alert's first-seen cycle |
 | `gold.cases` | 7, 8 | Customer-keyed cases, at most one open per customer, with the alerts they pulled in and the payments of the lookback window; determination, `sar_filed` / `no_sar`, the filing limit that applied, the continuing-activity review and what happened to it |
 
 **Dispositions are simulated, not made by people.** An alert is truly
@@ -304,10 +305,12 @@ drawn at `late_filing_rate` and flagged `filed_late`.
 
 **Alert identity across cycles.** Detection re-runs over the whole corpus
 each cycle, so an alert's window can grow as payments arrive. The layer
-matches each alert to the previous cycle's: same content first, else the
-same rule on the same customer with its last payment moved forward by at
-most 31 days (the earliest such alert, so grown windows pair in order). A
-matched alert keeps its key, generated date, truth and
+matches each alert to the last completed cycle's (read at the table
+snapshots that cycle recorded in the ledger): same content first, else the
+same rule on the same customer, its last payment moved forward by at most
+31 days, sharing at least one payment (a 32-hash sketch of the related
+payments), largest overlap first. A new alert with none of a prior alert's
+payments never takes its identity. A matched alert keeps its key, generated date, truth and
 priority as first seen; an alert detection stops emitting is kept
 (`in_current_detection` false); a new alert whose payments predate the
 previous cycle is dated on this cycle, the first day it could have been
@@ -355,19 +358,34 @@ failed to list).
 `tm_operations` and heads the report section.
 
 **Continuous.** gold-refresh runs the layer every
-`continuous_interval_seconds`, after the tick's freshness is logged: one pass
-over the full corpus takes minutes at scale 10. Silver is read at one pinned
-snapshot taken before the source files are counted, so payments datagen
-wrote after the snapshot are `in_flight`, never a negative. The continuous
-reset drops all four tables.
+`continuous_interval_seconds` (at least 60), counted from the end of the
+last pass so detection ticks always run between passes, plus one final pass
+timed to finish before the window closes. One pass over the full corpus
+takes minutes at scale 10, and gold is not refreshed meanwhile, so a
+freshness sample is logged after each pass and the pass time counts in the
+freshness score. The continuous jobs carry the CLI run id, so a restarted
+driver appends to the same ledger. Each pass takes its cycle number in the
+ledger before it writes; a pass that fails after writing is reported as a
+failure and never carried from.
+
+Silver, then bronze, are pinned before the raw files are counted.
+In-flight payments are bounded, not inferred: rows bronze has not taken must
+be the newest raw files (the stream ingests whole files oldest first, with
+15 minutes of reordering allowed), and rows silver has not taken must be
+newer than silver's ingest watermark. Anything else is `unaccounted` and
+fails reconciliation. The continuous reset drops all four tables.
 
 **Investigator queries.** The AML benchmark set includes four timed
 investigator queries (class `investigator`): customer 360 for the top open
 case, the 12-month activity review of the newest case, the counterparty and
-two-hop view, and open cases older than 60 days. They are left out when the
-layer is disabled. QpH is recorded with its query-set id; `compare` and
+two-hop view, and open cases older than 60 days. They read only this run's
+rows, and are left out unless this run's TM verdict is pass or fail (so a
+disabled or not-run layer never times empty or stale tables), and from the
+in-window rounds of a continuous run. QpH is recorded with its query-set id; `compare` and
 `reproduce` refuse to compare QpH across different query sets, so an 8-query
-AML run is never set against a 12-query one.
+AML run is never set against a 12-query one. A run recorded before the id
+existed gets the id of the set its recorded query names describe, so an
+older c360 run stays comparable.
 
 ## What the AML workload deliberately does not measure
 
