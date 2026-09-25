@@ -364,6 +364,8 @@ class MetricsStorage:
                 alerts_by_rule=job_data.get("alerts_by_rule") or {},
                 rule_errors=job_data.get("rule_errors") or {},
                 rules_skipped=job_data.get("rules_skipped") or {},
+                tm_invariants=job_data.get("tm_invariants") or {},
+                tm_ops=job_data.get("tm_ops"),
             )
 
             if job_data.get("start_time"):

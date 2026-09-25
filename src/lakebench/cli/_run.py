@@ -391,6 +391,9 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.alerts_by_rule = parsed.alerts_by_rule
     job_metrics.rule_errors = parsed.rule_errors
     job_metrics.rules_skipped = parsed.rules_skipped
+    # P10 TM operations invariants and summary; the batch gate reads them.
+    job_metrics.tm_invariants = parsed.tm_invariants
+    job_metrics.tm_ops = parsed.tm_ops
 
 
 # Upstream failures a benchmark may carry without failing the run. Each is a
@@ -532,6 +535,22 @@ def _aml_batch_gate_problems(
             "Could not confirm that detection produced alerts: no per-rule "
             "counts in the gold-finalize driver log and no scoring result."
         )
+    # P10.2 workflow invariants, every cycle. A gold job whose driver log was
+    # parsed (it carries per-rule detection lines) but has no invariant lines
+    # means the operations layer did not run: a failure, not a pass.
+    from lakebench.metrics.tm_ops import tm_gate_problems
+
+    for idx, job in enumerate(gold_jobs, start=1):
+        inv = {int(c): v for c, v in (getattr(job, "tm_invariants", None) or {}).items()}
+        parsed = bool(getattr(job, "alerts_by_rule", None) or getattr(job, "rules_skipped", None))
+        if inv or parsed:
+            label = f"gold-finalize {idx}" if len(gold_jobs) > 1 else "gold-finalize"
+            problems.extend(tm_gate_problems(inv, label=label))
+        else:
+            warnings.append(
+                "Could not confirm the TM workflow invariants: no gold-finalize "
+                "driver log was parsed."
+            )
     # A skipped rule is honest ("not run"), but when its designated typology
     # is in the pre-registered behavioural subset the benchmark has no
     # detector for a typology it claims to measure. Say so every run.
