@@ -700,7 +700,7 @@ def test_release_check_fails_when_only_the_baseline_run_exists(env):
     _accept_both_c360(env, extra_runs=False)
     passed, lines = pg.release_check(env.store(), env.runs)
     assert not passed
-    assert any("no run newer than the baseline" in ln for ln in lines)
+    assert any("is not newer than the baseline run" in ln for ln in lines)
 
 
 def test_continuous_window_override_refused(env):
@@ -763,26 +763,81 @@ def test_scale_ratio_above_band_refused(env):
 def test_missing_stage_refused_not_compared(env):
     snap = env.snaps["c360-batch-s10"]
     _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    no_datagen = _batch_run(
-        snap, "20260924-110000-bbbbbb", stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0}
+    no_silver = _batch_run(
+        snap, "20260924-110000-bbbbbb", stage_s={"datagen": 120.0, "bronze": 100.0, "gold": 150.0}
     )
-    c = _compare(env, "c360-batch-s10", no_datagen)
+    c = _compare(env, "c360-batch-s10", no_silver)
     assert c.verdict == pg.REFUSED
     assert any("stages differ" in r for r in c.reasons)
 
 
-def test_stale_datagen_metrics_refused(env):
+def test_run_without_datagen_stage_compares_pipeline_only(env):
+    """Generate once, run several times: no datagen stage, no refusal."""
     snap = env.snaps["c360-batch-s10"]
     _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    stale = _batch_run(snap, "20260924-110000-bbbbbb")
-    stale["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
-    c = _compare(env, "c360-batch-s10", stale)
+    run = _batch_run(
+        snap, "20260924-110000-bbbbbb", stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0}
+    )
+    del run["datagen_fleet"]
+    c = _compare(env, "c360-batch-s10", run)
+    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    for metric in ("datagen_seconds", "datagen_mbps_per_pod", "time_to_value_seconds"):
+        assert _row(c, metric).status.startswith("excluded"), metric
+    assert _row(c, "silver_seconds").status == "ok"
+
+
+def test_failed_benchmark_is_a_regression_not_a_refusal(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["stages"].append(
+        {"stage_name": "query", "stage_type": "query", "elapsed_seconds": 13.0, "success": True}
+    )
+    _record(env, "c360-batch-s10", base)
+    crashed = _batch_run(snap, "20260924-110000-bbbbbb", failed=tuple(QUERIES), qph=0.0)
+    c = _compare(env, "c360-batch-s10", crashed)
+    assert c.verdict == pg.REGRESSION
+    assert _row(c, "query_seconds").status == "missing"
+    assert _row(c, "composite_qph").status == "missing"
+
+
+def test_continuous_ingest_ratio_above_band_refused(env):
+    snap = env.snaps["c360-continuous-s10"]
+    _record(
+        env,
+        "c360-continuous-s10",
+        _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False),
+    )
+    run = _cont_run(snap, "20260924-110000-bbbbbb", rps=1.2e5, drained=False, ingest=2.4)
+    c = _compare(env, "c360-continuous-s10", run)
     assert c.verdict == pg.REFUSED
-    assert any("earlier generate" in r for r in c.reasons)
-    # Written during the same run: start_time is naive local, written_at UTC.
-    fresh = _batch_run(snap, "20260924-120000-cccccc")
-    fresh["datagen_fleet"]["written_at"] = "2026-09-24T16:00:00+00:00"
-    assert _compare(env, "c360-batch-s10", fresh).verdict == pg.PASS
+    assert any("ingest_ratio 2.40" in r for r in c.reasons)
+
+
+def test_release_check_rejects_a_run_older_than_the_baseline(env):
+    older = env.write_run(_batch_run(env.snaps["c360-batch-s10"], "20260901-100000-000000"))
+    _accept_both_c360(env)
+    passed, lines = pg.release_check(env.store(), env.runs, {"c360-batch-s10": str(older)})
+    assert not passed
+    assert any("20260901-100000-000000 is not newer" in ln for ln in lines)
+
+
+def test_stale_datagen_metrics_excluded_not_attributed(env):
+    from datetime import datetime, timedelta, timezone
+
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    start_utc = datetime.fromisoformat("2026-09-24T10:00:00").astimezone().astimezone(timezone.utc)
+    stale = _batch_run(snap, "20260924-110000-bbbbbb", dg_mbps=500.0)
+    stale["datagen_fleet"]["written_at"] = (start_utc - timedelta(hours=30)).isoformat()
+    c = _compare(env, "c360-batch-s10", stale)
+    # A much slower datagen from an earlier generate is not this run's number.
+    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    assert "earlier generate" in _row(c, "datagen_mbps_per_pod").status
+    fresh = _batch_run(snap, "20260924-120000-cccccc", dg_mbps=500.0)
+    fresh["datagen_fleet"]["written_at"] = (start_utc - timedelta(minutes=5)).isoformat()
+    c = _compare(env, "c360-batch-s10", fresh)
+    assert c.verdict == pg.REGRESSION
+    assert _row(c, "datagen_mbps_per_pod").status == "regression"
 
 
 def test_recorded_config_file_sha_must_match(env):

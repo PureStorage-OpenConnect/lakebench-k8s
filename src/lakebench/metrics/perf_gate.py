@@ -64,11 +64,35 @@ MAX_SCALE_RATIO = 1.10
 # the snapshot).
 WINDOW_TOLERANCE_PCT = 10.0
 
+# Continuous runs: bronze rows over datagen rows above this means data was
+# ingested twice (stale or re-ingested corpus), which inflates rows/s. Below
+# 1.0 is saturation, a real performance signal, and stays comparable.
+MAX_INGEST_RATIO = 1.05
+
 # The datagen fleet numbers come from a sidecar written by the last
-# `lakebench generate` in the namespace. Refuse one written this long before
-# the run started. The run's start_time is naive local time with no recorded
-# zone, so 14 hours of zone slack are added to the 24-hour limit.
-MAX_DATAGEN_AGE_HOURS = 24 + 14
+# `lakebench generate` in the namespace. One written more than this before
+# the run started belongs to an earlier generate: its datagen numbers are
+# left out rather than attributed to the run. start_time is naive local
+# time, read in the gate host's zone, so a gate on another host is off by
+# the zone difference.
+MAX_DATAGEN_AGE_HOURS = 24.0
+
+# Metrics that only describe the datagen stage, and the whole-pipeline
+# numbers whose value depends on whether the datagen stage is included.
+_DATAGEN_METRICS = frozenset(
+    {"datagen_seconds", "datagen_aggregate_mbps", "datagen_cpu_hr_per_tb", "datagen_mbps_per_pod"}
+)
+_DATAGEN_DEPENDENT = frozenset(
+    {
+        "time_to_value_seconds",
+        "pipeline_throughput_gb_per_second",
+        "compute_efficiency_gb_per_core_hour",
+    }
+)
+# Stages whose presence does not decide comparability: datagen is handled
+# by the exclusion above, and a missing query stage is a regression that the
+# QpH metrics report as missing.
+_OPTIONAL_STAGE_KEYS = frozenset({"datagen_seconds", "query_seconds"})
 
 # Default tolerances. "pct" is percent drift in the bad direction; "abs" is
 # an absolute difference in the metric's own unit.
@@ -409,6 +433,14 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     if pod_mbps:
         numbers["datagen_mbps_per_pod"] = statistics.fmean(pod_mbps)
 
+    age = _datagen_age_hours(run)
+    if age is not None and age > MAX_DATAGEN_AGE_HOURS:
+        reason = f"datagen metrics written {age:.0f}h before the run; from an earlier generate"
+        for key in _DATAGEN_METRICS | _DATAGEN_DEPENDENT:
+            if key in numbers:
+                del numbers[key]
+                excluded[key] = reason
+
     return {k: float(v) for k, v in numbers.items() if math.isfinite(float(v))}, excluded
 
 
@@ -448,6 +480,11 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
         rps = scores.get("sustained_throughput_rps")
         if not isinstance(ingest, (int, float)) or ingest <= 0:
             reasons.append(f"no data flowed (ingest_ratio {ingest!r})")
+        elif ingest > MAX_INGEST_RATIO:
+            reasons.append(
+                f"ingest_ratio {ingest:.2f} > {MAX_INGEST_RATIO}: bronze ingested more rows than "
+                "datagen produced, which inflates rows/s"
+            )
         elif not isinstance(rps, (int, float)) or rps <= 0:
             reasons.append(f"no data flowed (sustained_throughput_rps {rps!r})")
         if scores.get("data_freshness_seconds") is None:
@@ -482,12 +519,6 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
         reasons.append(f"datagen ran {got_pods} pods, pinned {want_pods}")
     if fleet and fleet.get("data_quality") not in (None, "complete"):
         reasons.append(f"datagen fleet data_quality={fleet.get('data_quality')!r}")
-    age = _datagen_age_hours(run)
-    if age is not None and age > MAX_DATAGEN_AGE_HOURS:
-        reasons.append(
-            f"datagen metrics were written {age:.0f}h before the run started; they belong "
-            "to an earlier generate, not this run"
-        )
     return reasons
 
 
@@ -502,9 +533,12 @@ def _datagen_age_hours(run: RunRecord) -> float | None:
         s = datetime.fromisoformat(str(started))
     except ValueError:
         return None
-    # start_time is naive; compare wall-clock values and let the slack in
-    # MAX_DATAGEN_AGE_HOURS absorb the unknown zone offset.
-    w, s = w.replace(tzinfo=None), s.replace(tzinfo=None)
+    # start_time is naive local time (datetime.now() in the run path); read
+    # it in this host's zone. written_at is UTC-aware.
+    if s.tzinfo is None:
+        s = s.astimezone()
+    if w.tzinfo is None:
+        w = w.replace(tzinfo=timezone.utc)
     return (s - w).total_seconds() / 3600
 
 
@@ -734,8 +768,15 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
                 "for drained and undrained runs (LB-145)"
             )
     actual, excluded = extract_metrics(run)
-    want_stages = {k for k in baseline.metrics if _is_stage_seconds(k)}
-    got_stages = {k for k in actual if _is_stage_seconds(k)}
+    if ("datagen_seconds" in baseline.metrics) != ("datagen_seconds" in actual):
+        reason = "datagen stage present in only one of the baseline and the run"
+        for key in _DATAGEN_METRICS | _DATAGEN_DEPENDENT:
+            actual.pop(key, None)
+            excluded.setdefault(key, reason)
+    want_stages = {
+        k for k in baseline.metrics if _is_stage_seconds(k) and k not in _OPTIONAL_STAGE_KEYS
+    }
+    got_stages = {k for k in actual if _is_stage_seconds(k) and k not in _OPTIONAL_STAGE_KEYS}
     if run.mode == "batch" and want_stages != got_stages:
         result.reasons.append(
             "stages differ from the baseline run (time to value is not like for like): "
@@ -768,7 +809,7 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
             better = {"lower": value < expected, "higher": value > expected}.get(direction, False)
             status = "improved" if better and abs(drift) > tol.get("pct", 0) else "ok"
         result.rows.append(Row(metric, expected, value, drift, direction, tol_s, status))
-    for metric in sorted(set(actual) - set(baseline.metrics)):
+    for metric in sorted(set(actual) - set(baseline.metrics) - set(excluded)):
         _band, direction = _classify_direction(metric)
         result.rows.append(Row(metric, None, actual[metric], None, direction, "-", "new"))
     if regressed:
@@ -944,11 +985,12 @@ def release_check(
                     bad = [r.metric for r in c.rows if r.status in ("regression", "missing")]
                     if bad:
                         msg += ": " + ", ".join(bad)
-                    if run.run_id == baseline.run_id:
+                    # Run ids are timestamp-prefixed, so they order by time.
+                    if run.run_id <= (baseline.run_id or ""):
                         ok = False
                         msg = (
-                            f"no run newer than the baseline (run {run.run_id}); "
-                            "a baseline compared with itself proves nothing"
+                            f"run {run.run_id} is not newer than the baseline run "
+                            f"{baseline.run_id}; a gate needs a run made after the baseline"
                         )
         except PerfGateError as e:
             ok, msg = False, str(e)

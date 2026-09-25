@@ -61,19 +61,19 @@ A run is refused, never compared, when:
 - it is a batch run with `scale_ratio` outside 0.95 to 1.10 (0 means the
   bronze input volume was not measured, which is refused too; above 1.10
   means extra data, which flatters GB/s);
-- it is a batch run whose set of stages differs from the baseline run's (for
-  example no datagen stage), since time to value then covers different work;
+- it is a batch run whose bronze, silver or gold stages differ from the
+  baseline run's. A missing query stage is not a refusal: the QpH metrics
+  report it as missing, a regression;
 - it is a continuous run in which no data flowed (`ingest_ratio` or rows/s
-  zero or missing), or whose freshness was not measured;
+  zero or missing), whose `ingest_ratio` is above 1.05 (bronze ingested more
+  rows than datagen produced, which inflates rows/s; below 1 is saturation
+  and stays comparable), or whose freshness was not measured;
 - it is a continuous run whose window (stage seconds) differs from the pinned
   `run_duration` by more than 10%. A `--duration` override is not recorded in
   the snapshot, so this is how it is caught;
 - it is a continuous run whose `corpus_drained` differs from the baseline
   run's. A drained run's freshness covers only the cycles that saw data;
-- its datagen fleet reported `data_quality` other than `complete`, or the
-  datagen metrics were written more than 38 hours before the run started
-  (24 hours plus slack for the unrecorded zone of `start_time`), which means
-  they came from an earlier `generate`;
+- its datagen fleet reported `data_quality` other than `complete`;
 - its snapshot records a `config_sha256` that is not the pinned file's. Runs
   do not record this field yet; see "Known gaps".
 
@@ -84,11 +84,19 @@ Within a comparable run, some numbers are left out rather than trusted:
   the window, a lower bound, not a throughput (LB-145). A drained run is never
   recorded as the rows/s baseline either.
 - continuous stage seconds, which are the window length, not a measurement.
+- the datagen numbers, and time to value, GB/s and GB/core-hr, when the
+  datagen metrics were written more than 24 hours before the run started
+  (they came from an earlier `generate`) or when only one of the baseline and
+  the run has a datagen stage. Generate once and run several times is a
+  normal workflow; the pipeline stages are still compared. `start_time` is
+  naive local time and is read in the gate host's zone, so a gate on another
+  host is off by the zone difference.
 - `maintenance_value_pct` when it is null. It is reported as "not measured",
   never as zero.
 
-`gate` and the release check also fail a required config whose newest run is
-the baseline run itself: a baseline compared with itself proves nothing.
+`gate` and the release check also fail a required config whose run is not
+newer than the baseline run (run ids are timestamp-prefixed): a baseline
+compared with itself, or with an older run, proves nothing.
 
 ## Metrics and tolerances
 
