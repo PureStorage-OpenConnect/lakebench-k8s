@@ -227,7 +227,7 @@ def test_budget_refuses_a_level_before_writing_it(spark, tmp_path, monkeypatch):
     assert exc.value.reason == "path-cap"
     assert "estimates level 3" in exc.value.detail
     assert "level 3" not in written and "level 2" in written
-    assert not any((tmp_path / "gold/_checkpoints/paths").glob("*/*"))
+    assert not any((tmp_path / "gold/_checkpoints/paths").glob("*/W3-*"))
 
 
 def test_partition_count_scales_with_edges_within_bounds(spark):
@@ -302,6 +302,26 @@ def test_sweep_removes_only_stale_foreign_spill(spark, tmp_path, monkeypatch):
     stale = time.time() - 48 * 3600
     os.utime(old_file, (stale, stale))
     os.utime(own_file, (stale, stale))
+    # A write just starting: its part files are not visible yet.
+    (base / "spark-starting" / "W3-w" / "level-2" / "_temporary").mkdir(parents=True)
+    # A long-running driver whose level is old but whose next write began.
+    alive = base / "spark-busy" / "_alive"
+    old_level = base / "spark-busy" / "W3-v" / "level-2" / "part-0.parquet"
+    old_level.parent.mkdir(parents=True)
+    old_level.write_bytes(b"x")
+    os.utime(old_level, (stale, stale))
+    alive.write_bytes(b"")
     assert dr.sweep_stale_path_spill(spark) == 1
     assert not (base / "spark-dead").exists()
-    assert new_file.exists() and own_file.exists()
+    assert new_file.exists() and own_file.exists() and old_level.exists()
+    assert (base / "spark-starting").exists()
+
+
+def test_cut_touches_the_liveness_file(spark, tmp_path, monkeypatch):
+    import detection_rules as dr
+
+    monkeypatch.setenv("LB_GOLD_URI", f"file://{tmp_path}/gold/")
+    dr.w3_round_tripping(_df(spark, _rows(6, 300, 30)), run_id="r").count()
+    root = Path(dr._path_spill_root(spark).removeprefix("file://"))
+    assert (root / "_alive").exists()
+    dr.cleanup_path_search_spill(spark)
