@@ -548,6 +548,41 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     return {k: float(v) for k, v in numbers.items() if math.isfinite(float(v))}, excluded
 
 
+def run_samples_per_query(run: RunRecord) -> int | None:
+    """Timed samples per query in the run's scored benchmark round.
+
+    A record written before per-query repeats (LB-150) has no ``samples``
+    and reads as 1, whatever its config snapshot says: before then
+    ``lakebench run`` never passed ``benchmark.iterations`` to the runner,
+    so a snapshot reading 3 still took one sample. None when the run has no
+    successful benchmark query.
+    """
+    from lakebench.benchmark.spread import samples_per_query
+
+    qb = run.pb_raw.get("query_benchmark") or run.raw.get("benchmark") or {}
+    return samples_per_query(qb.get("queries") or [])
+
+
+def benchmark_sample_refusal(run: RunRecord, pinned: PinnedConfig) -> str | None:
+    """Why the run's QpH cannot stand against *pinned*'s, or None.
+
+    A median of three samples and a single sample are different estimators:
+    with right-skewed query noise the median reads faster, so a QpH drift
+    between them is a bias, not a change. The gate refuses rather than warns
+    because it exits nonzero on a regression and a biased pass or fail is
+    worse than no verdict.
+    """
+    want = (pinned.fingerprint.get("benchmark") or {}).get("iterations")
+    got = run_samples_per_query(run)
+    if not isinstance(want, int) or got is None or got == want:
+        return None
+    return (
+        f"benchmark took {got} sample(s) per query but the pinned config scores the "
+        f"median of {want}; QpH from different sample counts is not comparable"
+        + (" (the run predates per-query repeats, LB-150)" if got == 1 else "")
+    )
+
+
 def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
     """Reasons this run cannot stand for *pinned*. Empty means comparable."""
     reasons: list[str] = []
@@ -602,6 +637,9 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
                     f"stage timestamps span {ttv:.0f}s, less than the stages' own "
                     f"{timed:.0f}s (a clock change during the run?)"
                 )
+        sample_problem = benchmark_sample_refusal(run, pinned)
+        if sample_problem:
+            reasons.append(sample_problem)
         ratio = scores.get("scale_ratio", run.pb_raw.get("scale_ratio"))
         ratio = float(ratio) if isinstance(ratio, (int, float)) else 0.0
         if ratio < MIN_SCALE_RATIO:

@@ -310,7 +310,7 @@ architecture:
     mode: power                       # power | standard | extended
     streams: 4
     cache: hot                        # hot | cold
-    iterations: 1
+    iterations: 3                     # timed runs per query; QpH uses the median
 
   tables:
     bronze: "default.bronze_raw"
@@ -559,7 +559,7 @@ leave these at defaults and control volume via `datagen.scale`.
 | `architecture.benchmark.mode` | enum | `power` | Benchmark mode: `power`, `standard`, `extended`, `throughput`, or `composite`. |
 | `architecture.benchmark.streams` | int | `4` | Concurrent query streams for throughput mode. Range: 1--64. |
 | `architecture.benchmark.cache` | enum | `hot` | Cache mode: `hot` (warm cache) or `cold` (cleared before each query). |
-| `architecture.benchmark.iterations` | int | `1` | Iterations per query. >1 uses median timing. Range: 1--100. |
+| `architecture.benchmark.iterations` | int | `3` | Timed runs of each query per benchmark round. QpH is scored from the per-query median and every sample plus the spread is recorded in `metrics.json`. `1` is a quick run with no measured spread; the maintenance value is then not reported. Range: 1--100. |
 
 ### Architecture -- Table Names
 

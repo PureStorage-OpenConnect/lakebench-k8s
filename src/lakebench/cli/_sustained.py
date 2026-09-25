@@ -915,7 +915,10 @@ def _run_benchmark_round(
         pass
 
     # 3. Run the full 8-query power benchmark
-    bench_result = bench_runner.run_power(cache="hot")
+    # One sample per query: gold refreshes under the round, so repeats would
+    # time different snapshots. The rounds themselves are the repeats, and
+    # the scores take their median (qph_degradation_pct, composite_qph).
+    bench_result = bench_runner.run_power(cache="hot", iterations=1)
 
     # 4. Check Q9 for contention (gold-table query)
     q9_failed = False

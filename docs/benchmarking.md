@@ -134,13 +134,31 @@ The scorecard then reports:
 |-------|-------------|
 | `pre_compaction_qph` | QpH before maintenance |
 | `post_compaction_qph` | QpH after maintenance, over every query that succeeded in that run (this is the reported `composite_qph`) |
-| `maintenance_value_pct` | QpH change from maintenance, computed over only the queries that succeeded in both runs; null when maintenance did not run or no query succeeded twice. Each run is a single pass, so at scale below 5 a change under about 10% is within run-to-run noise |
+| `maintenance_value_pct` | QpH change from maintenance, computed over only the queries that succeeded in both runs. Null when maintenance did not run, compaction changed no files, no query succeeded twice, the rounds took one sample per query, or the difference is within noise (see below) |
+| `maintenance_value_reason` | Why `maintenance_value_pct` is null, when it is |
 | `maintenance_paired_queries` | Number of queries in that comparison |
 | `maintenance_elapsed_seconds` | Wall-clock time spent on maintenance |
 | `maintenance_pct_of_pipeline` | Maintenance time as a fraction of total pipeline time |
 | `pre_compaction_file_count` | Data files before compaction |
 | `post_compaction_file_count` | Data files after compaction |
 | `compaction_ratio` | `pre / post` file count (higher = more compaction benefit) |
+
+Both rounds are preceded by one unmeasured warm-up pass. A warm-up rather
+than a quiet period: the first touch of a snapshot (metadata and manifest
+reads, split planning caches) is what differs between a round right after
+maintenance and one later, and waiting does not pay that cost while a pass
+over the same queries does. Maintenance is synchronous, so there is no
+background work for a quiet period to wait out.
+
+The value is reported only when the pre and post rounds are distinguishable
+at the samples taken. Over the paired queries, each round's total seconds
+can fall anywhere between the sum of per-query fastest samples and the sum
+of per-query slowest samples. When the two ranges overlap, the value is null
+and `maintenance_value_reason` reads `within noise: ...` with the raw
+difference and both spreads. With `iterations: 1` there is no range and the
+value is null with the reason `one sample per query`. The pre round is kept
+in `metrics.json` as `pre_compaction_benchmark`, samples included, so the
+judgement can be rechecked.
 
 To skip maintenance and run only the post-pipeline benchmark:
 
@@ -200,8 +218,26 @@ QpH = (num_queries / total_seconds) * 3600
 For example, if 8 queries complete in 40 seconds total, QpH = (8 / 40) *
 3600 = 720.
 
-When `iterations > 1`, each query is run multiple times and the median time
-is used for scoring.
+Each query is timed `architecture.benchmark.iterations` times (default 3)
+and scored by the median of its samples; the QpH above sums the medians.
+`iterations: 1` is a quick run that measures no spread. The first failed
+sample fails the query and stops its repeats, so a timeout is paid once.
+
+`metrics.json` keeps every sample. Each query record carries `samples`,
+`min_seconds`, `max_seconds` and `relative_range` ((max - min) / median), and
+each round carries a `spread` block: `qph_low` and `qph_high` are the QpH of
+the slowest and fastest round the samples allow, and `samples_per_query` is
+the smallest sample count over the successful queries. The scorecard repeats
+these as `benchmark_samples_per_query` and `qph_spread`. Records written
+before per-query repeats have no `samples` and read as one sample.
+
+Time cost at the default: each measured round takes three times as long,
+plus the one warm-up pass. A c360 scale-100 round is about 8 queries x 60 s,
+so the post-maintenance round goes from about 8 to about 24 minutes (+16
+min). At scale below 50 the pre-maintenance round runs too, so the benchmark
+phase adds about 2 x 2 x one round. Continuous runs keep one sample per query
+in each in-stream round: gold changes under the round, and the rounds are
+already the repeats.
 
 #### Throughput Run
 

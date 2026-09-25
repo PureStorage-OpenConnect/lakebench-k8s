@@ -112,5 +112,6 @@ architecture:
   benchmark:
     mode: power
     cache: hot
+    # In-stream rounds take one sample per query; the rounds are the repeats.
     iterations: 1
     streams: 4

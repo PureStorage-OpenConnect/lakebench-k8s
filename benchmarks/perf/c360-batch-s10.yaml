@@ -98,5 +98,7 @@ architecture:
   benchmark:
     mode: power
     cache: hot
-    iterations: 1
+    # Median of 3 timed runs per query (LB-150); a run with a different
+    # sample count is refused by the gate.
+    iterations: 3
     streams: 4
