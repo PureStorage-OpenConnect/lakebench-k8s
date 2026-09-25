@@ -424,9 +424,13 @@ class TtdBaseline:
         """Start a tick: ``prior`` is its pre-detection snapshot id (None:
         no snapshot; TTD_SNAPSHOT_UNKNOWN: lookup failed). Returns the
         (snapshot, late_before_s) to measure against."""
+        carry = self._carry
+        if carry is not None and self._carries >= self.max_carry:
+            # The fallback is as old as the carried snapshot: it may be
+            # expired too.
+            self._last_good = None
         if prior == TTD_SNAPSHOT_UNKNOWN and self._last_good is not None:
             prior = self._last_good
-        carry = self._carry
         if (
             carry is not None
             and carry[0] != TTD_SNAPSHOT_UNKNOWN
