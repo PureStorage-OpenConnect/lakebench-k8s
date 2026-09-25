@@ -284,6 +284,18 @@ def _load_latest_metrics(config_path: Path) -> dict[str, Any]:
         return {"error": f"Failed to load metrics: {e}"}
 
 
+def _samples_per_query(metrics: dict) -> int | None:
+    """Samples per query behind a run's QpH; 1 for records without samples."""
+    from lakebench.benchmark.spread import samples_per_query
+
+    if "error" in metrics:
+        return None
+    qb = (metrics.get("pipeline_benchmark") or {}).get("query_benchmark") or metrics.get(
+        "benchmark"
+    )
+    return samples_per_query((qb or {}).get("queries") or [])
+
+
 def _build_comparison(
     name_a: str,
     metrics_a: dict,
@@ -311,8 +323,21 @@ def _build_comparison(
         val_b = scores_b.get(key)
         rows.append({"metric": key, "config_a": val_a, "config_b": val_b})
 
+    warnings = []
+    n_a, n_b = _samples_per_query(metrics_a), _samples_per_query(metrics_b)
+    if n_a is not None and n_b is not None and n_a != n_b:
+        # Warn, not refuse: compare runs two configs the user chose, and the
+        # sample count may be the thing being compared. The QpH rows are
+        # still different estimators, which the table has to say.
+        warnings.append(
+            f"QpH for A is the median of {n_a} sample(s) per query and for B of {n_b}; "
+            "the QpH rows compare different estimators (set the same "
+            "architecture.benchmark.iterations in both configs)"
+        )
+
     return {
         "timestamp": datetime.now().isoformat(),
+        "warnings": warnings,
         "config_a": {
             "name": name_a,
             "error": metrics_a.get("error"),
@@ -337,6 +362,9 @@ def _print_comparison_table(comparison: dict) -> None:
         console.print(f"[red]Config A ({name_a}) failed: {comparison['config_a']['error']}[/red]")
     if comparison["config_b"].get("error"):
         console.print(f"[red]Config B ({name_b}) failed: {comparison['config_b']['error']}[/red]")
+
+    for warning in comparison.get("warnings") or []:
+        console.print(f"[yellow]Warning: {warning}[/yellow]")
 
     table = Table(title="Comparison Results", show_header=True, header_style="bold")
     table.add_column("Metric", style="cyan")

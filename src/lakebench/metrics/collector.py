@@ -320,6 +320,10 @@ class BenchmarkMetrics:
             "streams": self.streams,
             "queries": self.queries,
         }
+        if self.queries:
+            from lakebench.benchmark.spread import spread
+
+            d["spread"] = spread(self.queries)
         if self.stream_results:
             d["stream_results"] = self.stream_results
         if self.round_meta is not None:
@@ -543,7 +547,10 @@ class PipelineBenchmark:
         "storage_reclaimed_mb": "MB of storage freed by maintenance operations",
         "pre_compaction_qph": "QpH measured before maintenance (on uncompacted data)",
         "post_compaction_qph": "QpH measured after maintenance (on compacted data) -- the primary QpH score",
-        "maintenance_value_pct": "QpH change from maintenance over the queries that succeeded in both runs: (post - pre) / pre * 100; null when not measurable",
+        "maintenance_value_pct": "QpH change from maintenance over the queries that succeeded in both runs: (post - pre) / pre * 100; null when not measurable or within the within-round spread",
+        "maintenance_value_reason": "Why maintenance_value_pct is null: not measurable, one sample per query, or within noise",
+        "benchmark_samples_per_query": "Timed samples per query in the scored benchmark round (QpH uses the per-query median; 1 means no measured spread)",
+        "qph_spread": "QpH of the slowest and fastest round the per-query samples allow, and their relative range",
         "maintenance_paired_queries": "Queries that succeeded before and after maintenance (the base of maintenance_value_pct)",
     }
 
@@ -620,6 +627,12 @@ class PipelineBenchmark:
     # 0.0 would read as "maintenance had no effect".
     maintenance_value_pct: float | None = None
     maintenance_paired_queries: int = 0
+    # Set when maintenance_value_pct is None after both rounds ran: the
+    # difference was unmeasurable or inside the within-round spread (LB-150).
+    maintenance_value_reason: str = ""
+    # The pre-maintenance round as BenchmarkResult.to_dict(), every sample
+    # included, so the noise judgement can be rechecked from metrics.json.
+    pre_compaction_benchmark: dict[str, Any] | None = None
 
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     success: bool = False
@@ -906,6 +919,17 @@ class PipelineBenchmark:
             "composite_qph": qph,
             "scale_ratio": round(self.scale_ratio, 3),
         }
+        if self.query_benchmark and self.query_benchmark.queries:
+            from lakebench.benchmark.spread import spread
+
+            _spread = spread(self.query_benchmark.queries)
+            if _spread["samples_per_query"] > 0:
+                batch_scores["benchmark_samples_per_query"] = _spread["samples_per_query"]
+                batch_scores["qph_spread"] = {
+                    "low": _spread["qph_low"],
+                    "high": _spread["qph_high"],
+                    "relative_range": _spread["relative_range"],
+                }
         if self.cycles:
             batch_scores["cycle_progression"] = [
                 {
@@ -931,6 +955,8 @@ class PipelineBenchmark:
                 None if self.maintenance_value_pct is None else round(self.maintenance_value_pct, 1)
             )
             batch_scores["maintenance_paired_queries"] = self.maintenance_paired_queries
+            if self.maintenance_value_pct is None and self.maintenance_value_reason:
+                batch_scores["maintenance_value_reason"] = self.maintenance_value_reason
         if self.snapshots_expired > 0:
             batch_scores["snapshots_expired"] = self.snapshots_expired
         if self.orphan_files_removed > 0:
@@ -993,6 +1019,8 @@ class PipelineBenchmark:
             d["corpus_drained"] = self.corpus_drained
         if self.query_benchmark:
             d["query_benchmark"] = self.query_benchmark.to_dict()
+        if self.pre_compaction_benchmark:
+            d["pre_compaction_benchmark"] = self.pre_compaction_benchmark
         if self.benchmark_rounds:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
         if self.cycles:

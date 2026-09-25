@@ -275,7 +275,7 @@ lakebench benchmark [CONFIG_FILE] [OPTIONS]
 | `--mode` | `-m` | `power` | Benchmark mode: `power`, `throughput`, or `composite` |
 | `--streams` | `-s` | `4` | Concurrent query streams (throughput/composite modes) |
 | `--cold` | | `false` | Flush Iceberg metadata cache before each query |
-| `--iterations` | `-n` | `1` | Iterations per query (>1 uses median) |
+| `--iterations` | `-n` | config (`3`) | Timed runs per query, scored by the median. Overrides `architecture.benchmark.iterations` |
 | `--class` | `-c` | all | Run only a specific query class (`scan`, `analytics`, `gold`) |
 
 Executes 8 analytical queries against the gold layer and reports Queries

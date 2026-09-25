@@ -1204,7 +1204,7 @@ class TestBenchmarkConfig:
         assert b.mode.value == "power"
         assert b.streams == 4
         assert b.cache == "hot"
-        assert b.iterations == 1
+        assert b.iterations == 3
 
     def test_yaml_parse(self, tmp_path):
         yaml_content = """
