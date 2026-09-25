@@ -435,8 +435,7 @@ PATH_SEARCH_NO_PVC_BYTES = 20 * 2**30
 PATH_SEARCH_ROWS_PER_PARTITION = 2_000_000
 PATH_SEARCH_LEVEL_EDGE_RATIO = 4
 PATH_SEARCH_MAX_PARTITIONS = 2048
-# Files per written result frame (cycles, complete chains): results are small
-# next to the levels they come from.
+# Files per written W3 cycles frame: cycles are a sliver of their level.
 PATH_SEARCH_RESULT_FILES = 16
 # Spill directories of drivers that died before their cleanup are swept at
 # the next detection run once their newest file is this old. Well above any
@@ -549,16 +548,24 @@ def sweep_stale_path_spill(spark, max_age_hours: float = PATH_SEARCH_STALE_HOURS
             # comparison would miss this driver's own directory.
             if not st.isDirectory() or p.getName() == root.rstrip("/").rsplit("/", 1)[1]:
                 continue
-            # Directory times are not reliable on S3; the files' are.
-            fresh = False
-            it = fs.listFiles(p, True)
-            while it.hasNext():
-                if it.next().getModificationTime() >= cutoff_ms:
-                    fresh = True
-                    break
-            if not fresh:
-                fs.delete(p, True)
-                removed += 1
+            # Directory times are not reliable on S3; the files' are. Every
+            # write first touches the driver's _alive file, so a driver with a
+            # write in flight (its part files are invisible on S3 until the
+            # upload closes) always shows a fresh file. A directory with no
+            # file at all is never deleted: it may be a write just starting.
+            try:
+                newest, seen = 0, False
+                it = fs.listFiles(p, True)
+                while it.hasNext():
+                    seen = True
+                    newest = max(newest, it.next().getModificationTime())
+                    if newest >= cutoff_ms:
+                        break
+                if seen and newest < cutoff_ms:
+                    fs.delete(p, True)
+                    removed += 1
+            except Exception as e:  # noqa: BLE001 -- e.g. removed by its owner meanwhile
+                print(f"[path-search] stale spill sweep skipped {p.toString()}: {e}")
     except Exception as e:  # noqa: BLE001
         print(f"[path-search] stale spill sweep under {parent} failed: {e}")
     if removed:
@@ -642,6 +649,7 @@ class _PathBudget:
             return df.localCheckpoint(eager=True)
         if files:
             df = df.repartition(files)
+        self._touch_alive()
         path = f"{self.spill}/{label.replace(' ', '-')}"
         schema = df.schema
         hconf = self.spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
@@ -662,6 +670,17 @@ class _PathBudget:
                 hconf.set(key, prior)
         self._written[label] = path
         return self.spark.read.schema(schema).parquet(path)
+
+    def _touch_alive(self) -> None:
+        """Rewrite this driver's liveness file (see sweep_stale_path_spill)."""
+        root = self.spill.rsplit("/", 1)[0]
+        try:
+            jvm = self.spark._jvm  # type: ignore[attr-defined]
+            hconf = self.spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+            p = jvm.org.apache.hadoop.fs.Path(f"{root}/_alive")
+            jvm.org.apache.hadoop.fs.FileSystem.get(p.toUri(), hconf).create(p, True).close()
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.rule}] could not write {root}/_alive: {e}")
 
     def admit(self, df: DataFrame, estimate: float, label: str):
         """Returns ``(materialised_df, rows)``."""
@@ -890,12 +909,14 @@ def _sampled_size(paths: DataFrame, n_paths: int, extend) -> float:
     return extend(paths.sample(False, frac, seed=17)).count() / frac
 
 
-def _cut_small(df: DataFrame, budget: _PathBudget, label: str) -> DataFrame:
+def _cut_small(
+    df: DataFrame, budget: _PathBudget, label: str, files: int | None = None
+) -> DataFrame:
     """Materialise a result frame (cycles, complete chains) and drop its
     lineage, so the levels it came from can be released. Its rows stay held
     until the rule ends and count against the budget. Written result files
     stay until cleanup_path_search_spill, after the alerts are written."""
-    cut = budget.cut(df, label, files=PATH_SEARCH_RESULT_FILES)
+    cut = budget.cut(df, label, files=files)
     budget.add(cut.count(), label)
     return cut
 
@@ -931,6 +952,10 @@ def _w3_levels(budget, edges, n_edges, step, paths, _ext, max_hops):
                 ),
                 budget,
                 f"cycles {_hop}",
+                # Cycles are a sliver of their level. W17's complete chains are
+                # not (at the last hop nearly the whole level), so they keep
+                # the join's partitions rather than pay a shuffle into 16.
+                files=PATH_SEARCH_RESULT_FILES,
             )
         )
         # The previous level (the edge frame, for level 2) is not read again.
