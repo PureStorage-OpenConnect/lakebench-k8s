@@ -626,7 +626,10 @@ def _streaming_concurrent_budget(
     )
     if not base_caps:
         return {}
-    resolved = {jt: _resolve_job_profile(jt.value, schema) for jt in _STREAMING_JOB_TYPES}
+    resolved: dict[JobType, dict[str, Any]] = {
+        jt: _resolve_job_profile(jt.value, schema) or _JOB_PROFILES[jt.value]
+        for jt in _STREAMING_JOB_TYPES
+    }
     overridden = [jt for jt in _STREAMING_JOB_TYPES if resolved[jt] != _JOB_PROFILES[jt.value]]
     if not overridden:
         return base_caps
