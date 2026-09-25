@@ -57,6 +57,24 @@ Three things surprise people about this table:
   needs 60 GB on one node. A cluster with 512 GB spread across sixteen 32 GB
   nodes has enough total memory on paper and still cannot schedule the job.
 
+Continuous mode runs its three streaming jobs at the same time, so the
+minimum is their sum, and it differs by workload. AML (`schema: financial`)
+gives bronze-ingest 5 executors x 4 cores so the scale-10 corpus drains
+inside a 30-minute window:
+
+| Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
+|:---------|------:|------------:|------------:|------------:|
+| Customer360 | 1-10 | 38 cores | 272 GB | 640 Gi |
+| AML | 1-10 | 54 cores | 340 GB | 700 Gi |
+| Customer360 | 50 | 56 cores | 438 GB | 1,060 Gi |
+| AML | 50 | 74 cores | 516 GB | 1,120 Gi |
+| Customer360 | 100 | 84 cores | 690 GB | 1,700 Gi |
+| AML | 100 | 106 cores | 788 GB | 1,760 Gi |
+
+On a smaller cluster the run caps the streaming jobs to what fits and warns
+naming each capped job; silver-stream and gold-refresh keep their share
+first, so AML bronze-ingest is the one that shrinks.
+
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
 compares the peak request against your cluster's allocatable capacity and
 fails immediately with the specific shortfall, rather than leaving pods

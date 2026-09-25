@@ -199,6 +199,13 @@ def _print_report_summary(metrics) -> None:
         # the warning under the same condition it was meant to fire.
         if pb.pipeline_saturated is True:
             scores.append("[yellow]Pipeline saturated (completeness < 95%)[/yellow]")
+            if pb.intake_limit == "bronze_capacity":
+                scores.append("[dim]Bronze ran back to back: its processing is the limit[/dim]")
+        if pb.time_to_detect_seconds is not None:
+            scores.append(
+                f"Time to detect:  {pb.time_to_detect_seconds:>8.1f}s p50, "
+                f"{pb.time_to_detect_p95_seconds or 0:.0f}s p95"
+            )
     else:
         if pb.time_to_value_seconds > 0:
             scores.append(f"Time to Value:   {pb.time_to_value_seconds:>8.1f}s")
@@ -1329,7 +1336,11 @@ def info(
     resolve_auto_sizing(cfg)
 
     from lakebench.config.scale import compute_guidance as _compute_guidance
-    from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
+    from lakebench.modules.pipeline_engines.spark.job import (
+        _JOB_PROFILES,
+        _resolve_job_profile,
+        _scale_executor_count,
+    )
 
     spark = cfg.platform.compute.spark
     s3 = cfg.platform.storage.s3
@@ -1345,6 +1356,12 @@ def info(
 
     is_sustained = arch.pipeline.mode == PipelineMode.SUSTAINED
 
+    # Schema-resolved profiles: what the manifests deploy (AML overrides
+    # bronze-verify and bronze-ingest), so info matches the capacity check.
+    _profiles = {
+        j: _resolve_job_profile(j, workload.schema_type.value) or _JOB_PROFILES[j]
+        for j in _JOB_PROFILES
+    }
     # Per-job executor counts with auto/override labels
     override_map = {
         "bronze-verify": spark.bronze_executors,
@@ -1353,7 +1370,7 @@ def info(
     }
     executor_parts = []
     for job_name, override_val in override_map.items():
-        auto_count = _scale_executor_count(_JOB_PROFILES[job_name], scale)
+        auto_count = _scale_executor_count(_profiles[job_name], scale)
         if override_val is not None:
             executor_parts.append(f"{job_name}={override_val} (override)")
         else:
@@ -1367,11 +1384,15 @@ def info(
     }
     streaming_executor_parts = []
     for job_name, override_val in streaming_override_map.items():
-        auto_count = _scale_executor_count(_JOB_PROFILES[job_name], scale)
+        auto_count = _scale_executor_count(_profiles[job_name], scale)
         if override_val is not None:
             streaming_executor_parts.append(f"{job_name}={override_val} (override)")
         else:
-            streaming_executor_parts.append(f"{job_name}={auto_count} (auto)")
+            # info does not read the cluster, so this is the profile count;
+            # the run caps it to the concurrent budget and warns when it does.
+            streaming_executor_parts.append(
+                f"{job_name}={auto_count} (auto, before cluster budget)"
+            )
 
     # Build info lines
     lines = [
@@ -1472,7 +1493,7 @@ def info(
         if is_sustained:
             # Sustained: datagen + streaming spark + trino all run concurrently
             streaming_cores = sum(
-                _scale_executor_count(_JOB_PROFILES[j], scale) * _JOB_PROFILES[j]["executor_cores"]
+                _scale_executor_count(_profiles[j], scale) * _profiles[j]["executor_cores"]
                 for j in ("bronze-ingest", "silver-stream", "gold-refresh")
             )
             peak_cores = datagen_cores + streaming_cores + trino_cores + 4
