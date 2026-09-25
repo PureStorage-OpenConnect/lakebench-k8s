@@ -34,6 +34,8 @@ The rule dispatcher (`get_rule`) is called by replay_financial.py.
 
 from __future__ import annotations
 
+import contextlib
+
 from pyspark.sql import DataFrame, Window
 from pyspark.sql.functions import (
     array,
@@ -421,6 +423,24 @@ PATH_SEARCH_SCRATCH_SHARE = 0.7
 PATH_SEARCH_MAX_PATHS = int(4 * 100 * 2**30 * PATH_SEARCH_SCRATCH_SHARE / PATH_SEARCH_BYTES_PER_ROW)
 PATH_SEARCH_MAX_ROWS_ENV = "LB_PATH_SEARCH_MAX_ROWS"
 PATH_SEARCH_NO_PVC_BYTES = 20 * 2**30
+# Partition count of the extension join (the step frame and each level). At
+# the job's shuffle partitions (32 at scale 10) a level of 260M rows put ~8M
+# rows (~2 GB) in every task and every cached block. The count is sized so a
+# level of up to PATH_SEARCH_LEVEL_EDGE_RATIO x edges rows (the ratio W3 held
+# at peak on the scale-0.25 corpus, rounded up) averages
+# PATH_SEARCH_ROWS_PER_PARTITION rows per partition, and is never below the
+# job's own count. Scale 10 (266.7M transfers) gets 534 partitions. The cap
+# keeps a stage near the ~2,000 tasks the driver's status listener handles
+# at scale 100 (LB-049); scale 100 reaches it.
+PATH_SEARCH_ROWS_PER_PARTITION = 2_000_000
+PATH_SEARCH_LEVEL_EDGE_RATIO = 4
+PATH_SEARCH_MAX_PARTITIONS = 2048
+# Files per written W3 cycles frame: cycles are a sliver of their level.
+PATH_SEARCH_RESULT_FILES = 16
+# Spill directories of drivers that died before their cleanup are swept at
+# the next detection run once their newest file is this old. Well above any
+# gold job's run time, so a live replay driver's files are never touched.
+PATH_SEARCH_STALE_HOURS = 24
 _SCRATCH_SIZE_CONF = (
     "spark.kubernetes.executor.volumes.persistentVolumeClaim.spark-local-dir-1.options.sizeLimit"
 )
@@ -467,20 +487,138 @@ def path_search_budget_rows(spark) -> int:
     return PATH_SEARCH_MAX_PATHS
 
 
+def path_search_partitions(spark, n_edges: int) -> int:
+    """Partitions for the step frame and the extension join (see the table)."""
+    base = int(spark.conf.get("spark.sql.shuffle.partitions", "200"))
+    want = -(-PATH_SEARCH_LEVEL_EDGE_RATIO * max(0, n_edges) // PATH_SEARCH_ROWS_PER_PARTITION)
+    return max(base, min(PATH_SEARCH_MAX_PARTITIONS, want))
+
+
+def _path_spill_root(spark) -> str | None:
+    """Where path levels are written, or None (local checkpoints, tests).
+
+    Under ``LB_GOLD_URI`` and the driver's application id, so a replay
+    driver of the same deployment never shares or deletes this one's files.
+    """
+    import os
+
+    base = os.getenv("LB_GOLD_URI")
+    if not base:
+        return None
+    app = spark.sparkContext.applicationId
+    return f"{base.rstrip('/')}/_checkpoints/paths/{app}"
+
+
+def _delete_uri(spark, path: str, who: str) -> None:
+    """Recursively delete ``path`` through the Hadoop FileSystem. Best effort."""
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(path), hconf)
+        p = jvm.org.apache.hadoop.fs.Path(path)
+        if fs.exists(p):
+            fs.delete(p, True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[{who}] cleanup of {path} failed: {e}")
+
+
+def sweep_stale_path_spill(spark, max_age_hours: float = PATH_SEARCH_STALE_HOURS) -> int:
+    """Delete other drivers' spill directories whose newest file is older than
+    ``max_age_hours``: a driver killed mid-search (OOM, eviction, retry) never
+    ran its cleanup, and every retry has a new application id. Returns the
+    number of directories removed. Best effort."""
+    import time
+
+    root = _path_spill_root(spark)
+    if not root:
+        return 0
+    parent = root.rsplit("/", 1)[0]
+    cutoff_ms = (time.time() - max_age_hours * 3600) * 1000
+    removed = 0
+    try:
+        jvm = spark._jvm  # type: ignore[attr-defined]
+        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(parent), hconf)
+        ppath = jvm.org.apache.hadoop.fs.Path(parent)
+        if not fs.exists(ppath):
+            return 0
+        for st in fs.listStatus(ppath):
+            p = st.getPath()
+            # By name: Hadoop prints file:/// URIs as file:/, so a whole-path
+            # comparison would miss this driver's own directory.
+            if not st.isDirectory() or p.getName() == root.rstrip("/").rsplit("/", 1)[1]:
+                continue
+            # Directory times are not reliable on S3; the files' are. Every
+            # write first touches the driver's _alive file, so a driver with a
+            # write in flight (its part files are invisible on S3 until the
+            # upload closes) always shows a fresh file. A directory with no
+            # file at all is never deleted: it may be a write just starting.
+            try:
+                newest, seen = 0, False
+                it = fs.listFiles(p, True)
+                while it.hasNext():
+                    seen = True
+                    newest = max(newest, it.next().getModificationTime())
+                    if newest >= cutoff_ms:
+                        break
+                if seen and newest < cutoff_ms:
+                    fs.delete(p, True)
+                    removed += 1
+            except Exception as e:  # noqa: BLE001 -- e.g. removed by its owner meanwhile
+                print(f"[path-search] stale spill sweep skipped {p.toString()}: {e}")
+    except Exception as e:  # noqa: BLE001
+        print(f"[path-search] stale spill sweep under {parent} failed: {e}")
+    if removed:
+        print(f"[path-search] removed {removed} stale spill directories under {parent}")
+    return removed
+
+
+def cleanup_path_search_spill(spark) -> None:
+    """Delete this driver's path-search levels and results. Call once the
+    rule's alerts are written (the alerts frame reads the result files)."""
+    root = _path_spill_root(spark)
+    if root:
+        _delete_uri(spark, root, "path-search")
+
+
 class _PathBudget:
     """Rows one path search holds, against its budget.
 
     ``admit`` checks the estimate first, so a level that would take the held
     rows over the budget is never built, then materialises the frame
-    (``cut``: local checkpoint, which also drops its lineage and so frees the
-    shuffles behind it once unreferenced) and checks the real count.
+    (``cut``) and checks the real count.
+
+    Materialising drops the frame's lineage, which frees the shuffles behind
+    it once unreferenced. With ``LB_GOLD_URI`` set (every cluster run) a frame
+    is written as Parquet under _path_spill_root and read back. A local
+    checkpoint, used before, kept each block only on the executor that built
+    it: at scale 10 gold executors were OOM-killed and the next level failed
+    with CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND, since a lost block cannot be
+    recomputed. Why the executors exceeded their 40Gi limit is not settled
+    from the driver log alone: exit 137 is the container limit, and cached
+    blocks at MEMORY_AND_DISK are evicted rather than killed. Writing the
+    levels removes the fatal dependency either way and takes them out of
+    executor memory and scratch; the writes add S3A upload buffers
+    (fast.upload.buffer=bytebuffer, about 4 tasks x 4 blocks x 64 MB per
+    executor) to the 8g overhead. Without ``LB_GOLD_URI`` (unit tests) the
+    local checkpoint remains.
+
+    The budget still counts a written level as held. That overstates the
+    scratch it takes (only its shuffle, when it is the next level's input,
+    lands on scratch), so the skip stays where it was; relaxing it needs a
+    scratch measurement on the cluster.
     """
 
     def __init__(self, spark, rule: str, max_rows: int) -> None:
+        import uuid
+
         self.spark = spark
         self.rule = rule
         self.max_rows = max_rows
         self.live = 0
+        root = _path_spill_root(spark)
+        self.spill = f"{root}/{rule}-{uuid.uuid4().hex[:12]}" if root else None
+        self._written: dict[str, str] = {}
 
     def _skip(self, what: str, rows: int) -> None:
         raise RuleSkipped(
@@ -503,26 +641,77 @@ class _PathBudget:
         if self.live > self.max_rows:
             self._skip(f"holds {label} of", n)
 
+    def cut(self, df: DataFrame, label: str, files: int | None = None) -> DataFrame:
+        """Materialise ``df`` without its lineage (see the class docstring).
+        ``files`` repartitions a small result first, so it is not written as
+        one file per join partition."""
+        if not self.spill:
+            return df.localCheckpoint(eager=True)
+        if files:
+            df = df.repartition(files)
+        self._touch_alive()
+        path = f"{self.spill}/{label.replace(' ', '-')}"
+        schema = df.schema
+        hconf = self.spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+        key = "mapreduce.fileoutputcommitter.algorithm.version"
+        prior = hconf.get(key)
+        # Algorithm 2 commits each task's files straight into the output
+        # directory: one S3 copy per file, made by the tasks in parallel,
+        # instead of a second job-level rename of the whole level from the
+        # driver. A failed write leaves partial files only here, and they are
+        # deleted with the directory.
+        hconf.set(key, "2")
+        try:
+            df.write.mode("overwrite").parquet(path)
+        finally:
+            if prior is None:
+                hconf.unset(key)
+            else:
+                hconf.set(key, prior)
+        self._written[label] = path
+        return self.spark.read.schema(schema).parquet(path)
+
+    def _touch_alive(self) -> None:
+        """Rewrite this driver's liveness file (see sweep_stale_path_spill)."""
+        root = self.spill.rsplit("/", 1)[0]
+        try:
+            jvm = self.spark._jvm  # type: ignore[attr-defined]
+            hconf = self.spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
+            p = jvm.org.apache.hadoop.fs.Path(f"{root}/_alive")
+            jvm.org.apache.hadoop.fs.FileSystem.get(p.toUri(), hconf).create(p, True).close()
+        except Exception as e:  # noqa: BLE001
+            print(f"[{self.rule}] could not write {root}/_alive: {e}")
+
     def admit(self, df: DataFrame, estimate: float, label: str):
-        """Returns ``(checkpointed_df, rows)``."""
+        """Returns ``(materialised_df, rows)``."""
         self.check(estimate, label)
-        cut = df.localCheckpoint(eager=True)
+        cut = self.cut(df, label)
         n = cut.count()
         self.add(n, label, estimate)
         return cut, n
 
-    def release(self, n: int) -> None:
-        """Forget ``n`` held rows whose frame the caller no longer references.
+    def release(self, n: int, label: str | None = None) -> None:
+        """Forget ``n`` held rows whose frame the caller no longer references,
+        and delete that frame's files when it was written (``label``).
 
         Local checkpoint blocks and shuffle files are removed by Spark's
         ContextCleaner once the driver-side objects are collected; the GC
         request makes that happen now rather than at the next periodic GC.
         """
         self.live -= n
+        path = self._written.pop(label, None) if label else None
+        if path:
+            _delete_uri(self.spark, path, self.rule)
         try:
             self.spark.sparkContext._jvm.System.gc()  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001
             pass
+
+    def discard(self) -> None:
+        """Delete every file this search wrote (it skipped or failed)."""
+        if self.spill:
+            _delete_uri(self.spark, self.spill, self.rule)
+        self._written.clear()
 
 
 def _epoch_micros(df: DataFrame):
@@ -584,7 +773,7 @@ def _search_frames(
 ):
     """Edges and the extension (step) frame, both held and budgeted.
 
-    Returns ``(budget, edges, n_edges, step, n_step)``. ``edges`` is
+    Returns ``(budget, edges, n_edges, step, n_step, parts)``. ``edges`` is
     persisted (the caller unpersists it once level 2 is built); ``step`` is
     persisted for the whole search.
 
@@ -614,7 +803,11 @@ def _search_frames(
     budget = _PathBudget(
         spark, rule, path_search_budget_rows(spark) if max_paths is None else max_paths
     )
-    edges = _flow_edges(silver_txns, with_amount).persist(StorageLevel.MEMORY_AND_DISK)
+    # DISK_ONLY: at scale 10 the step frame is ~530M rows. Cached at
+    # MEMORY_AND_DISK it filled the executors' storage memory, which the
+    # extension joins' sorts then had to evict. Both frames keep their
+    # lineage, so a block lost with an executor is recomputed from silver.
+    edges = _flow_edges(silver_txns, with_amount).persist(StorageLevel.DISK_ONLY)
     n_edges = edges.count()
     if n_edges > max_edges:
         raise RuleSkipped(
@@ -643,29 +836,62 @@ def _search_frames(
         renamed.append(col("amt").alias("e_amt"))
     base = non_hub.select(*renamed)
     e_bucket = (col("e_t") / lit(bucket_us)).cast("long")
-    parts = int(spark.conf.get("spark.sql.shuffle.partitions", "200"))
+    parts = path_search_partitions(spark, n_edges)
     step = (
         base.withColumn("_b", e_bucket)
         .unionByName(base.withColumn("_b", e_bucket - lit(1)))
         .repartition(parts, "e_src", "_b")
     )
     budget.check(2 * n_edges, "step")
-    step = step.persist(StorageLevel.MEMORY_AND_DISK)
+    step = step.persist(StorageLevel.DISK_ONLY)
     n_step = step.count()
     budget.add(n_step, "step", 2 * n_edges)
-    return budget, edges, n_edges, step, n_step
+    print(f"[{rule}] extension join partitions={parts}")
+    return budget, edges, n_edges, step, n_step, parts
 
 
-def _extend_paths(paths: DataFrame, step: DataFrame, bucket_us: int) -> DataFrame:
+@contextlib.contextmanager
+def _copartition_on_key_subset(spark):
+    """Let the extension join reuse the step frame's partitioning when the
+    join has more keys than it is partitioned on.
+
+    On the last hop both rules keep only extensions that return to the start,
+    and the optimizer adds ``e_dst == start`` to the join keys. With
+    spark.sql.requireAllClusterKeysForCoPartition at its default (true), the
+    step frame's partitioning on (e_src, _b) then no longer counts, and Spark
+    reshuffled the whole step frame and the paths at the job's shuffle
+    partitions (32 at scale 10) for the last and often largest level. A
+    partitioning on a subset of the keys still places every matching pair in
+    one partition. Set only while the levels are built; every join runs
+    eagerly inside.
+    """
+    key = "spark.sql.requireAllClusterKeysForCoPartition"
+    prior = spark.conf.get(key, None)
+    spark.conf.set(key, "false")
+    try:
+        yield
+    finally:
+        if prior is None:
+            spark.conf.unset(key)
+        else:
+            spark.conf.set(key, prior)
+
+
+def _extend_paths(paths: DataFrame, step: DataFrame, bucket_us: int, parts: int) -> DataFrame:
     """Join each path to the transfers that can follow its last hop.
 
     A hop must start strictly after the previous one. Two transfers with the
     same microsecond timestamp therefore never chain, in either order: the
     data cannot say which came first, and neither rule guesses.
+
+    The paths are hash-partitioned on the join key into the step frame's
+    ``parts`` partitions, so the persisted step frame is joined in place and
+    each task takes one of ``parts`` slices of the level.
     """
     p_bucket = (col("t_last") / lit(bucket_us)).cast("long")
     return (
         paths.withColumn("_pb", p_bucket)
+        .repartition(parts, "end", "_pb")
         .join(step, (col("end") == col("e_src")) & (col("_pb") == col("_b")), "inner")
         .filter(col("e_t") > col("t_last"))
         .filter(col("e_t") <= col("t_last") + lit(bucket_us))
@@ -683,13 +909,81 @@ def _sampled_size(paths: DataFrame, n_paths: int, extend) -> float:
     return extend(paths.sample(False, frac, seed=17)).count() / frac
 
 
-def _cut_small(df: DataFrame, budget: _PathBudget, label: str) -> DataFrame:
+def _cut_small(
+    df: DataFrame, budget: _PathBudget, label: str, files: int | None = None
+) -> DataFrame:
     """Materialise a result frame (cycles, complete chains) and drop its
     lineage, so the levels it came from can be released. Its rows stay held
-    until the rule ends and count against the budget."""
-    cut = df.localCheckpoint(eager=True)
+    until the rule ends and count against the budget. Written result files
+    stay until cleanup_path_search_spill, after the alerts are written."""
+    cut = budget.cut(df, label, files=files)
     budget.add(cut.count(), label)
     return cut
+
+
+def _w3_levels(budget, edges, n_edges, step, paths, _ext, max_hops):
+    """W3's level loop: the union of the cycles found at each level."""
+    from pyspark.sql.functions import array_contains, concat
+
+    n_paths = n_edges
+    held_prev, prev_label = n_edges, None  # level 1 is the edge frame
+    cycles = []
+    for _hop in range(2, max_hops + 1):
+        # The last level is only read for the transfers that close a cycle.
+        final = _hop == max_hops
+
+        def _build(p: DataFrame, final: bool = final) -> DataFrame:
+            e = _ext(p)
+            return e.filter(col("e_dst") == col("start")) if final else e
+
+        # Estimated from a sample of the paths at every level: a growth
+        # factor from earlier levels is wrong in both directions (a review
+        # measured a 45x under-estimate and a skip on a level that was empty).
+        est = _sampled_size(paths, n_paths, _build)
+        level, n = budget.admit(_build(paths), est, f"level {_hop}")
+        cycles.append(
+            _cut_small(
+                level.filter(col("e_dst") == col("start")).select(
+                    col("start"),
+                    concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+                    col("nodes"),
+                    col("t_first"),
+                    col("e_ts").alias("ts_last"),
+                ),
+                budget,
+                f"cycles {_hop}",
+                # Cycles are a sliver of their level. W17's complete chains are
+                # not (at the last hop nearly the whole level), so they keep
+                # the join's partitions rather than pay a shuffle into 16.
+                files=PATH_SEARCH_RESULT_FILES,
+            )
+        )
+        # The previous level (the edge frame, for level 2) is not read again.
+        if _hop == 2:
+            edges.unpersist()
+        paths = None
+        budget.release(held_prev, prev_label)
+        held_prev, prev_label = n, f"level {_hop}"
+        if final:
+            break
+        paths = level.filter(~array_contains(col("nodes"), col("e_dst"))).select(
+            col("start"),
+            col("e_dst").alias("end"),
+            col("t_first"),
+            col("e_t").alias("t_last"),
+            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
+            concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
+        )
+        n_paths = n
+        level = None
+    # The last level was only read for its cycles.
+    budget.release(held_prev, prev_label)
+    step.unpersist()
+
+    found = cycles[0]
+    for c in cycles[1:]:
+        found = found.unionByName(c)
+    return found
 
 
 def w3_round_tripping(
@@ -728,7 +1022,6 @@ def w3_round_tripping(
     Emits one alert per cycle: entity_id is the originator, related_txn_ids
     the transfers in hop order.
     """
-    from pyspark.sql.functions import array_contains, concat
 
     spark = silver_txns.sparkSession
     if max_hops < 2:
@@ -736,7 +1029,7 @@ def w3_round_tripping(
         return _empty_alerts_df(spark, run_id)
     hop_us = hop_window_hours * 3_600_000_000
     total_us = total_window_days * 86_400_000_000
-    budget, edges, n_edges, step, _ = _search_frames(
+    budget, edges, n_edges, step, _, parts = _search_frames(
         silver_txns, "W3", hop_us, max_out_degree, max_edges, max_paths, with_amount=False
     )
 
@@ -750,60 +1043,16 @@ def w3_round_tripping(
     )
 
     def _ext(p: DataFrame) -> DataFrame:
-        return _extend_paths(p, step, hop_us).filter(col("e_t") <= col("t_first") + lit(total_us))
-
-    n_paths = n_edges
-    held_prev = n_edges  # level 1 is the edge frame
-    cycles = []
-    for _hop in range(2, max_hops + 1):
-        # The last level is only read for the transfers that close a cycle.
-        final = _hop == max_hops
-
-        def _build(p: DataFrame, final: bool = final) -> DataFrame:
-            e = _ext(p)
-            return e.filter(col("e_dst") == col("start")) if final else e
-
-        # Estimated from a sample of the paths at every level: a growth
-        # factor from earlier levels is wrong in both directions (a review
-        # measured a 45x under-estimate and a skip on a level that was empty).
-        est = _sampled_size(paths, n_paths, _build)
-        level, n = budget.admit(_build(paths), est, f"level {_hop}")
-        cycles.append(
-            _cut_small(
-                level.filter(col("e_dst") == col("start")).select(
-                    col("start"),
-                    concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
-                    col("nodes"),
-                    col("t_first"),
-                    col("e_ts").alias("ts_last"),
-                ),
-                budget,
-                f"cycles {_hop}",
-            )
+        return _extend_paths(p, step, hop_us, parts).filter(
+            col("e_t") <= col("t_first") + lit(total_us)
         )
-        # The previous level (the edge frame, for level 2) is not read again.
-        if _hop == 2:
-            edges.unpersist()
-        paths = None
-        budget.release(held_prev)
-        held_prev = n
-        if final:
-            break
-        paths = level.filter(~array_contains(col("nodes"), col("e_dst"))).select(
-            col("start"),
-            col("e_dst").alias("end"),
-            col("t_first"),
-            col("e_t").alias("t_last"),
-            concat(col("uetrs"), array(col("e_uetr"))).alias("uetrs"),
-            concat(col("nodes"), array(col("e_dst"))).alias("nodes"),
-        )
-        n_paths = n
-        level = None
-    step.unpersist()
 
-    found = cycles[0]
-    for c in cycles[1:]:
-        found = found.unionByName(c)
+    try:
+        with _copartition_on_key_subset(spark):
+            found = _w3_levels(budget, edges, n_edges, step, paths, _ext, max_hops)
+    except BaseException:
+        budget.discard()
+        raise
     alerts = found.withColumn("hops", size(col("uetrs")))
     return alerts.select(
         expr("uuid()").alias("alert_id"),
@@ -851,6 +1100,59 @@ def w3_round_tripping(
         # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
+
+
+def _w17_levels(budget, edges, n_edges, step, paths, _ext, _advance, min_hops, max_hops):
+    """W17's level loop: the union of the complete chains of each level."""
+    from pyspark.sql.functions import array_contains
+
+    n_paths = n_edges
+    held_prev, prev_label = n_edges, None  # level 1 is the edge frame
+    complete = []  # complete chains of >= min_hops transfers, per level
+    for hop in range(1, max_hops + 1):
+        # ``paths`` holds chains of ``hop`` transfers; ``level`` their
+        # one-transfer extensions. At max_hops only the extensions that
+        # return to the start are needed (to drop returning chains).
+        final = hop == max_hops
+
+        def _build(p: DataFrame, final: bool = final) -> DataFrame:
+            e = _ext(p)
+            return e.filter(col("e_dst") == col("start")) if final else e
+
+        # Sampled at every level; see w3_round_tripping.
+        est = _sampled_size(paths, n_paths, _build)
+        level, n = budget.admit(_build(paths), est, f"level {hop + 1}")
+        if hop >= min_hops:
+            returns = level.filter(col("e_dst") == col("start")).select("uetrs")
+            done = paths.join(returns, "uetrs", "left_anti")
+            if not final:
+                onward = level.filter(~array_contains(col("nodes"), col("e_dst")))
+                done = done.join(onward.select("uetrs"), "uetrs", "left_anti")
+            complete.append(
+                _cut_small(
+                    done.select("uetrs", "nodes", "ts_last", "ts_q"), budget, f"complete {hop}"
+                )
+            )
+            # Drop every reference to the previous level before releasing it.
+            done = returns = onward = None
+        if hop == 1:
+            edges.unpersist()
+        paths = None
+        budget.release(held_prev, prev_label)
+        held_prev, prev_label = n, f"level {hop + 1}"
+        if final:
+            break
+        paths = _advance(level)
+        n_paths = n
+        level = None
+    # The last level was only read for the chains that return to the start.
+    budget.release(held_prev, prev_label)
+    step.unpersist()
+
+    chains = complete[0]
+    for c in complete[1:]:
+        chains = chains.unionByName(c)
+    return chains
 
 
 def w17_layering_chain(
@@ -926,12 +1228,12 @@ def w17_layering_chain(
         return _empty_alerts_df(spark, run_id)
 
     hop_us = hop_window_hours * 3_600_000_000
-    budget, edges, n_edges, step, _ = _search_frames(
+    budget, edges, n_edges, step, _, parts = _search_frames(
         silver_txns, "W17", hop_us, max_out_degree, max_edges, max_paths, with_amount=True
     )
 
     def _ext(p: DataFrame) -> DataFrame:
-        e = _extend_paths(p, step, hop_us)
+        e = _extend_paths(p, step, hop_us, parts)
         return e.filter(col("e_amt") >= col("amt_last") * lit(min_forward_ratio)).filter(
             col("e_amt") <= col("amt_last") * lit(max_forward_ratio)
         )
@@ -963,50 +1265,14 @@ def w17_layering_chain(
         array(col("uetr")).alias("uetrs"),
         array(col("src"), col("dst")).alias("nodes"),
     )
-    n_paths = n_edges
-    held_prev = n_edges
-    complete = []  # complete chains of >= min_hops transfers, per level
-    for hop in range(1, max_hops + 1):
-        # ``paths`` holds chains of ``hop`` transfers; ``level`` their
-        # one-transfer extensions. At max_hops only the extensions that
-        # return to the start are needed (to drop returning chains).
-        final = hop == max_hops
-
-        def _build(p: DataFrame, final: bool = final) -> DataFrame:
-            e = _ext(p)
-            return e.filter(col("e_dst") == col("start")) if final else e
-
-        # Sampled at every level; see w3_round_tripping.
-        est = _sampled_size(paths, n_paths, _build)
-        level, n = budget.admit(_build(paths), est, f"level {hop + 1}")
-        if hop >= min_hops:
-            returns = level.filter(col("e_dst") == col("start")).select("uetrs")
-            done = paths.join(returns, "uetrs", "left_anti")
-            if not final:
-                onward = level.filter(~array_contains(col("nodes"), col("e_dst")))
-                done = done.join(onward.select("uetrs"), "uetrs", "left_anti")
-            complete.append(
-                _cut_small(
-                    done.select("uetrs", "nodes", "ts_last", "ts_q"), budget, f"complete {hop}"
-                )
+    try:
+        with _copartition_on_key_subset(spark):
+            chains = _w17_levels(
+                budget, edges, n_edges, step, paths, _ext, _advance, min_hops, max_hops
             )
-            # Drop every reference to the previous level before releasing it.
-            done = returns = onward = None
-        if hop == 1:
-            edges.unpersist()
-        paths = None
-        budget.release(held_prev)
-        held_prev = n
-        if final:
-            break
-        paths = _advance(level)
-        n_paths = n
-        level = None
-    step.unpersist()
-
-    chains = complete[0]
-    for c in complete[1:]:
-        chains = chains.unionByName(c)
+    except BaseException:
+        budget.discard()
+        raise
     # Every strict suffix (of length >= min_hops) of each complete chain.
     suffixes = (
         "transform(sequence(2, greatest(2, size(uetrs) - {m} + 1)), "
@@ -1249,8 +1515,11 @@ def cleanup_w1_checkpoints(spark) -> None:
 
     Nothing else removes it (Spark's cleaner does not delete reliable
     checkpoints by default), and left in place it grew with every run and
-    was counted in the measured gold size.
+    was counted in the measured gold size. The W3/W17 path-search files are
+    removed too (cleanup_path_search_spill), for callers such as replay that
+    do not go through the gold detection loop.
     """
+    cleanup_path_search_spill(spark)
     if not _w1_checkpoint_dir():
         return
     # Only this driver's directory: setCheckpointDir writes under a random
@@ -1259,15 +1528,7 @@ def cleanup_w1_checkpoints(spark) -> None:
     path = spark.sparkContext.getCheckpointDir()
     if not path:
         return
-    try:
-        jvm = spark._jvm  # type: ignore[attr-defined]
-        hconf = spark._jsc.hadoopConfiguration()  # type: ignore[attr-defined]
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(path), hconf)
-        p = jvm.org.apache.hadoop.fs.Path(path)
-        if fs.exists(p):
-            fs.delete(p, True)
-    except Exception as e:  # noqa: BLE001
-        print(f"[W1] checkpoint cleanup of {path} failed: {e}")
+    _delete_uri(spark, path, "W1")
 
 
 def w1_connected_components(
