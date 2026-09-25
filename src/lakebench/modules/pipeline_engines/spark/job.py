@@ -619,29 +619,57 @@ def _streaming_concurrent_budget(
     remaining_m = max(0, cluster_cpu_millicores - co_resident_m - datagen_m)
     streaming_budget_m = int(remaining_m * 0.90)
 
-    # Compute each streaming job's uncapped CPU demand
-    demands: dict[JobType, int] = {}
-    for jt in _STREAMING_JOB_TYPES:
-        profile = _resolve_job_profile(jt.value, schema)
-        count = _scale_executor_count(profile, scale)
-        demands[jt] = count * profile["executor_cores"] * 1000
-
-    total_demand_m = sum(demands.values())
-    if total_demand_m == 0:
+    base_caps = _proportional_caps(
+        {jt: dict(_JOB_PROFILES[jt.value]) for jt in _STREAMING_JOB_TYPES},
+        scale,
+        streaming_budget_m,
+    )
+    if not base_caps:
         return {}
+    resolved = {jt: _resolve_job_profile(jt.value, schema) for jt in _STREAMING_JOB_TYPES}
+    overridden = [jt for jt in _STREAMING_JOB_TYPES if resolved[jt] != _JOB_PROFILES[jt.value]]
+    if not overridden:
+        return base_caps
 
-    # Proportional allocation
+    # A schema override (AML bronze-ingest) must not take cores from the
+    # stages it does not touch: they keep the split they had on the base
+    # profiles, and the overridden jobs share only what is left, never less
+    # than the cores their base allocation had.
+    caps = {jt: base_caps[jt] for jt in _STREAMING_JOB_TYPES if jt not in overridden}
+    kept_m = sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in caps)
+    headroom_m = max(0, streaming_budget_m - kept_m)
+    demands = {
+        jt: _scale_executor_count(resolved[jt], scale) * resolved[jt]["executor_cores"] * 1000
+        for jt in overridden
+    }
+    total = sum(demands.values()) or 1
+    for jt in overridden:
+        prof = resolved[jt]
+        exec_cpu_m = prof["executor_cores"] * 1000
+        floor_cores = base_caps[jt] * _JOB_PROFILES[jt.value]["executor_cores"]
+        floor = -(-floor_cores // prof["executor_cores"])  # ceil
+        share = int(headroom_m * demands[jt] / total // exec_cpu_m)
+        caps[jt] = min(_scale_executor_count(prof, scale), max(floor, share))
+    return caps
+
+
+def _proportional_caps(
+    profiles: dict[JobType, dict[str, Any]], scale: float, budget_m: int
+) -> dict[JobType, int]:
+    """Split ``budget_m`` among jobs in proportion to their uncapped CPU
+    demand, at least 2 executors each and never above the uncapped count."""
+    demands = {
+        jt: _scale_executor_count(p, scale) * p["executor_cores"] * 1000
+        for jt, p in profiles.items()
+    }
+    total = sum(demands.values())
+    if total == 0:
+        return {}
     caps: dict[JobType, int] = {}
-    for jt in _STREAMING_JOB_TYPES:
-        profile = _resolve_job_profile(jt.value, schema)
-        fraction = demands[jt] / total_demand_m
-        job_budget_m = streaming_budget_m * fraction
-        exec_cpu_m = profile["executor_cores"] * 1000
-        max_executors = max(2, int(job_budget_m // exec_cpu_m))
-        # Never exceed the uncapped profile count
-        uncapped = _scale_executor_count(profile, scale)
-        caps[jt] = min(max_executors, uncapped)
-
+    for jt, p in profiles.items():
+        job_budget_m = budget_m * demands[jt] / total
+        max_executors = max(2, int(job_budget_m // (p["executor_cores"] * 1000)))
+        caps[jt] = min(max_executors, _scale_executor_count(p, scale))
     return caps
 
 
@@ -1205,6 +1233,8 @@ class SparkJobManager:
         self.config = config
         self.k8s = k8s
         self.namespace = config.get_namespace()
+        # Streaming jobs the concurrent budget capped, for the CLI to show.
+        self.budget_warnings: list[str] = []
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -1272,6 +1302,9 @@ class SparkJobManager:
                     name=job_name,
                     state=JobState.SUBMITTED,
                     message=f"Job {job_name} submitted",
+                    # What was requested after the concurrent budget and any
+                    # override, so the scorecard's CPU-hours match it.
+                    executor_count=int(manifest["spec"]["executor"].get("instances") or 0),
                 )
 
             except ApiException as e:
@@ -1435,11 +1468,15 @@ class SparkJobManager:
         if job_type in _STREAMING_JOB_TYPES and self._cluster_cpu_m is not None:
             budget = _streaming_concurrent_budget(cfg, self._cluster_cpu_m)
             if job_type in budget and budget[job_type] < executor_count:
-                logger.info(
+                logger.warning(
                     "Concurrent budget: %s capped from %d to %d executors",
                     job_type.value,
                     executor_count,
                     budget[job_type],
+                )
+                self.budget_warnings.append(
+                    f"Concurrent budget: {job_type.value} capped from {executor_count} "
+                    f"to {budget[job_type]} executors (cluster too small for the profile)"
                 )
                 executor_count = budget[job_type]
 

@@ -1388,7 +1388,11 @@ def info(
         if override_val is not None:
             streaming_executor_parts.append(f"{job_name}={override_val} (override)")
         else:
-            streaming_executor_parts.append(f"{job_name}={auto_count} (auto)")
+            # info does not read the cluster, so this is the profile count;
+            # the run caps it to the concurrent budget and warns when it does.
+            streaming_executor_parts.append(
+                f"{job_name}={auto_count} (auto, before cluster budget)"
+            )
 
     # Build info lines
     lines = [

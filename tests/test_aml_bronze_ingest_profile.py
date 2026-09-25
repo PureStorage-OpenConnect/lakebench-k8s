@@ -9,7 +9,10 @@ the 1800 s window. The override sizes bronze so the trickle ceiling
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
+
+import pytest
 
 from lakebench.config import LakebenchConfig
 from lakebench.k8s.client import ClusterCapacity
@@ -104,3 +107,105 @@ def test_manifest_deploys_the_override():
     ex = manifest["spec"]["executor"]
     assert ex["instances"] == 5
     assert ex["cores"] == 4
+
+
+_GRID = [(scale, cores) for scale in (1, 10, 100, 500) for cores in (60, 80, 100, 150, 434)]
+
+
+@pytest.mark.parametrize(("scale", "cores"), _GRID)
+def test_the_override_never_takes_cores_from_silver_or_gold(scale, cores):
+    """The pre-override split is the c360 split (same base profiles). Silver
+    and gold keep it; bronze only gets headroom above it, and never fewer
+    cores than its base allocation had."""
+    aml = _streaming_concurrent_budget(_config("financial", scale), cores * 1000)
+    base = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
+    assert aml[JobType.SILVER_STREAM] == base[JobType.SILVER_STREAM]
+    assert aml[JobType.GOLD_REFRESH] == base[JobType.GOLD_REFRESH]
+    assert aml[JobType.BRONZE_INGEST] * 4 >= base[JobType.BRONZE_INGEST] * 2
+
+
+@pytest.mark.parametrize(
+    ("scale", "cores", "expected"),
+    [
+        # c360 split, pinned: the refactor into _proportional_caps must not
+        # move it.
+        (10, 60, (2, 4, 2)),
+        (100, 80, (3, 8, 3)),
+        (500, 150, (8, 16, 8)),
+        (500, 434, (10, 20, 10)),
+    ],
+)
+def test_c360_split_is_unchanged(scale, cores, expected):
+    b = _streaming_concurrent_budget(_config("customer360", scale), cores * 1000)
+    got = (b[JobType.BRONZE_INGEST], b[JobType.SILVER_STREAM], b[JobType.GOLD_REFRESH])
+    assert got == expected
+
+
+def _capacity_k8s(cores):
+    k8s = MagicMock()
+    k8s.get_cluster_capacity.return_value = ClusterCapacity(
+        total_cpu_millicores=cores * 1000,
+        total_memory_bytes=8 * 432 * 1024**3,
+        node_count=8,
+        largest_node_cpu_millicores=cores * 1000 // 8,
+        largest_node_memory_bytes=432 * 1024**3,
+    )
+    return k8s
+
+
+def test_a_capped_stage_is_warned_about_by_name(caplog):
+    import logging
+
+    mgr = SparkJobManager(_config("financial", 10), _capacity_k8s(60))
+    with caplog.at_level(logging.WARNING):
+        manifest = mgr._build_manifest(JobType.BRONZE_INGEST)
+    assert manifest["spec"]["executor"]["instances"] == 3
+    assert mgr.budget_warnings == [
+        "Concurrent budget: bronze-ingest capped from 5 to 3 executors "
+        "(cluster too small for the profile)"
+    ]
+    assert any(
+        r.levelno == logging.WARNING and "bronze-ingest" in r.message for r in caplog.records
+    )
+
+
+def test_scorecard_uses_the_requested_executor_count():
+    """The budget capped bronze to 3; CPU-hours must count 3, not the
+    profile's 5."""
+    from datetime import datetime, timedelta
+
+    from lakebench.metrics.collector import (
+        MetricsCollector,
+        StreamingJobMetrics,
+        build_pipeline_benchmark,
+    )
+
+    collector = MetricsCollector()
+    run = collector.start_run("r", "d", {"workload_schema": "financial", "scale": 10})
+    run.start_time = datetime(2026, 9, 25, 10, 0)
+    run.end_time = run.start_time + timedelta(seconds=1800)
+    run.streaming.append(
+        StreamingJobMetrics(
+            job_name="lakebench-bronze-ingest",
+            job_type="bronze-ingest",
+            elapsed_seconds=1800,
+            total_rows_processed=1000,
+            requested_executors=3,
+            success=True,
+        )
+    )
+    pb = build_pipeline_benchmark(run)
+    bronze = next(s for s in pb.stages if s.stage_name == "bronze")
+    assert bronze.executor_count == 3
+    assert pb.total_core_hours == pytest.approx(3 * 4 * 1800 / 3600)
+
+
+def test_submit_reports_the_requested_count():
+    src = (
+        Path(__file__).resolve().parents[1] / "src/lakebench/modules/pipeline_engines/spark/job.py"
+    ).read_text()
+    assert 'executor_count=int(manifest["spec"]["executor"].get("instances") or 0)' in src
+    sustained = (
+        Path(__file__).resolve().parents[1] / "src/lakebench/cli/_sustained.py"
+    ).read_text()
+    assert "streaming_metrics.requested_executors = requested_executors.get(job_name)" in sustained

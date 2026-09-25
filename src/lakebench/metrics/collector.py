@@ -105,6 +105,9 @@ class StreamingJobMetrics:
     ttd_p50_seconds: float | None = None
     ttd_p95_seconds: float | None = None
     ttd_max_seconds: float | None = None
+    # Executors the submitted manifest requested, after the concurrent
+    # budget and any override. None when unknown (the profile is used).
+    requested_executors: int | None = None
     micro_batch_duration_ms: float = 0.0
     batch_size: int = 0
     total_batches: int = 0
@@ -1411,6 +1414,10 @@ def build_pipeline_benchmark(
                 _override_val = _overrides.get(_override_key)
                 if _override_val is not None:
                     _s_execs = _override_val
+                # The count actually requested wins: the concurrent budget
+                # can cap a stage below both the profile and the override.
+                if sj.requested_executors:
+                    _s_execs = sj.requested_executors
                 _mem_str = _s_profile.get("executor_memory", "0g")
                 # Simple parse: strip trailing 'g'
                 _s_mem = (
