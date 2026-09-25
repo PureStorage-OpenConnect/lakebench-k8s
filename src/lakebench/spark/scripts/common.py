@@ -373,17 +373,65 @@ def ttd_line(cycle, stats):
     """The per-cycle time-to-detect line ``parse_streaming_logs`` reads.
 
     ``stats`` is gold_refresh_financial.ttd_stats: ``alerts`` measured,
-    ``unmatched`` (no related transaction found in silver), ``max_s``, and a
-    histogram ``bins`` of {bin index: count} at ``bin_s`` seconds per bin.
-    The collector merges the bins of every cycle into run-wide percentiles.
+    ``late`` (of those, alerts whose related transactions were all in silver
+    before the previous detection pass read it), ``unmatched`` (no related
+    transaction found in silver), ``max_s``, and a histogram ``bins`` of
+    {bin index: count} at ``bin_s`` seconds per bin. The collector merges
+    the bins of every cycle into run-wide percentiles.
     """
     bins = ",".join(f"{b}:{n}" for b, n in sorted(stats["bins"].items()))
     mx = stats["max_s"]
     return (
-        f"Cycle {cycle}: time to detect alerts={stats['alerts']} "
+        f"Cycle {cycle}: time to detect alerts={stats['alerts']} late={stats['late']} "
         f"unmatched={stats['unmatched']} max={'-' if mx is None else f'{mx:.1f}'}s "
         f"bin={stats['bin_s']}s bins={bins}"
     )
+
+
+# A gold.alerts snapshot lookup that failed (as opposed to None: the table
+# has no snapshot yet, so every alert is new).
+TTD_SNAPSHOT_UNKNOWN = "unknown"
+
+
+class TtdBaseline:
+    """Which gold.alerts snapshot a tick's alerts are compared against.
+
+    Normally the snapshot just before the tick. When a tick's measurement
+    does not happen (lookup failure, exception, a tick that raised), its
+    newly raised alerts would sit in the next tick's snapshot and never be
+    measured, and the ticks lost that way are the slow ones. So the baseline
+    of an unmeasured tick is carried to the next tick, whose alerts are then
+    measured against it: late by the lost tick, never dropped. After
+    ``max_carry`` ticks in a row without a measurement the carried snapshot
+    may have been expired by in-stream maintenance, so the fresh one is used.
+
+    Each baseline carries ``late_before_s``: the newest silver ingest time
+    the tick before the baseline had read. An alert whose evidence was all
+    older than that could have been raised on that tick.
+    """
+
+    def __init__(self, max_carry=3):
+        self.max_carry = max_carry
+        self._carry = None
+        self._misses = 0
+
+    def begin(self, prior, late_before_s):
+        """Start a tick: ``prior`` is its pre-detection snapshot id (None:
+        no snapshot; TTD_SNAPSHOT_UNKNOWN: lookup failed). Returns the
+        (snapshot, late_before_s) to measure against."""
+        carry = self._carry
+        if carry is not None and carry[0] != TTD_SNAPSHOT_UNKNOWN and self._misses < self.max_carry:
+            base = carry
+        else:
+            base = (prior, late_before_s)
+        self._carry = base
+        self._misses += 1
+        return base
+
+    def measured(self):
+        """The tick logged its measurement: the next tick starts fresh."""
+        self._carry = None
+        self._misses = 0
 
 
 def parse_size_gb(s):

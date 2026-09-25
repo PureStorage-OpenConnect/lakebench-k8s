@@ -110,8 +110,8 @@ def _print_pipeline_scorecard(
         # not be silently coerced to "not saturated" via a truthy check.
         if pb.pipeline_saturated is True:
             scores.append("  [yellow]Pipeline saturated (completeness < 95%)[/yellow]")
-        if pb.intake_limit == "trigger_rate":
-            scores.append("  [dim]Intake capped by the trigger rate, not the pipeline[/dim]")
+            if pb.intake_limit == "bronze_capacity":
+                scores.append("  [dim]Bronze ran back to back: its processing is the limit[/dim]")
         if pb.time_to_detect_seconds is not None:
             scores.append(
                 f"  Time to detect: {pb.time_to_detect_seconds:>8.1f}s p50, "

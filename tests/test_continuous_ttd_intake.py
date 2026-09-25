@@ -51,16 +51,37 @@ def _gold_log():
             "Cycle 1: data freshness 400s",
             c.ttd_line(
                 1,
-                {"alerts": 10, "unmatched": 1, "max_s": 318.0, "bin_s": 10, "bins": {25: 4, 31: 6}},
+                {
+                    "alerts": 10,
+                    "late": 0,
+                    "unmatched": 1,
+                    "max_s": 318.0,
+                    "bin_s": 10,
+                    "bins": {25: 4, 31: 6},
+                },
             ),
             "Cycle 2: aggregating 48,577,500 Silver records",
             "Cycle 2: refreshed gold.alerts in 260.0s",
             c.ttd_line(
                 2,
-                {"alerts": 10, "unmatched": 0, "max_s": 612.4, "bin_s": 10, "bins": {40: 9, 61: 1}},
+                {
+                    "alerts": 10,
+                    "late": 1,
+                    "unmatched": 0,
+                    "max_s": 612.4,
+                    "bin_s": 10,
+                    "bins": {40: 9, 61: 1},
+                },
             ),
             # A cycle with nothing new still logs its (empty) line.
-            c.ttd_line(3, {"alerts": 0, "unmatched": 0, "max_s": None, "bin_s": 10, "bins": {}}),
+            "Cycle 3: aggregating 58,000,000 Silver records",
+            c.ttd_line(
+                3,
+                {"alerts": 0, "late": 0, "unmatched": 0, "max_s": None, "bin_s": 10, "bins": {}},
+            ),
+            # A cycle whose measurement failed logs no line.
+            "Cycle 4: aggregating 68,000,000 Silver records",
+            "[metrics] time to detect unavailable on cycle 4: boom",
         ]
     )
 
@@ -69,6 +90,8 @@ def test_time_to_detect_lines_parse_and_merge():
     m = MetricsCollector().parse_streaming_logs(_gold_log(), "gold-refresh")
     assert m.ttd_alerts == 20
     assert m.ttd_unmatched == 1
+    assert m.ttd_late == 1
+    assert m.ttd_unmeasured_cycles == 1
     assert m.ttd_max_seconds == pytest.approx(612.4)
     # Merged bins 25:4, 31:6, 40:9, 61:1. Median = 10th value, in bin 31.
     assert m.ttd_p50_seconds == pytest.approx(320.0)
@@ -76,7 +99,7 @@ def test_time_to_detect_lines_parse_and_merge():
     assert m.ttd_p95_seconds == pytest.approx(410.0)
     # The existing gold lines still parse alongside.
     assert m.freshness_seconds == pytest.approx(400)
-    assert m.total_batches == 2
+    assert m.total_batches == 4
 
 
 def test_time_to_detect_reaches_the_scores():
@@ -95,6 +118,8 @@ def test_time_to_detect_reaches_the_scores():
     assert scores["time_to_detect_p95_seconds"] == pytest.approx(410.0)
     assert scores["time_to_detect_max_seconds"] == pytest.approx(612.4)
     assert scores["time_to_detect_alerts"] == 20
+    assert scores["time_to_detect_late_alerts"] == 1
+    assert scores["time_to_detect_unmeasured_cycles"] == 1
 
 
 def test_financial_run_without_a_measurement_says_none():
@@ -156,13 +181,15 @@ def test_back_to_back_bronze_is_a_capacity_limit():
     assert pb.pipeline_saturated is True
 
 
-def test_idle_bronze_under_a_trigger_cap_is_not_saturation():
-    """Same rows, but bronze spent 8 s of every 30 s trigger working: the
-    trickle rate, not the pipeline, left the corpus undrained."""
+def test_idle_bronze_is_not_called_a_capacity_limit():
+    """Same rows, but bronze was inside a batch for 27% of the window: the
+    limit was not bronze's processing (a trigger cap, a late start or a
+    stall). The ratio verdict is kept: idle time does not prove the
+    pipeline kept pace."""
     pb = _pb(bronze_batches=60, bronze_ms=8_000.0)
-    assert pb.intake_limit == "trigger_rate"
-    assert pb.pipeline_saturated is False
-    assert pb.to_dict()["scores"]["intake_limit"] == "trigger_rate"
+    assert pb.intake_limit == "below_bronze_capacity"
+    assert pb.pipeline_saturated is True
+    assert pb.to_dict()["scores"]["intake_limit"] == "below_bronze_capacity"
 
 
 def test_kept_up_intake_has_no_limit():
@@ -180,8 +207,38 @@ def test_unknown_bronze_timing_keeps_the_ratio_verdict():
 
 def test_gold_refresh_logs_time_to_detect():
     src = (SCRIPTS / "gold_refresh_financial.py").read_text()
-    assert "_log_time_to_detect(spark, cycle, prior_alerts_sid, detection_end_s)" in src
-    assert "log(ttd_line(cycle, ttd_stats(arrivals, detected_s)))" in src
+    assert "if _log_time_to_detect(spark, cycle, ttd_base, detection_end_s):" in src
+    assert "ttd_baseline.measured()" in src
+    assert "log(ttd_line(cycle, stats))" in src
+
+
+def test_an_unmeasured_tick_is_carried_not_dropped():
+    c = _common()
+    b = c.TtdBaseline(max_carry=3)
+    assert b.begin(10, None) == (10, None)
+    b.measured()
+    # Tick 2 starts from its own snapshot, then fails to measure.
+    assert b.begin(20, 100.0) == (20, 100.0)
+    # Tick 3 is measured against tick 2's baseline, so tick 2's new alerts count.
+    assert b.begin(30, 200.0) == (20, 100.0)
+    b.measured()
+    assert b.begin(40, 300.0) == (40, 300.0)
+
+
+def test_a_failed_lookup_is_not_carried():
+    c = _common()
+    b = c.TtdBaseline()
+    assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 1.0) == (c.TTD_SNAPSHOT_UNKNOWN, 1.0)
+    assert b.begin(7, 2.0) == (7, 2.0)
+
+
+def test_a_carried_baseline_gives_way_after_max_carry():
+    """The carried snapshot may be expired by in-stream maintenance."""
+    c = _common()
+    b = c.TtdBaseline(max_carry=2)
+    assert b.begin(1, None) == (1, None)
+    assert b.begin(2, 5.0) == (1, None)
+    assert b.begin(3, 6.0) == (3, 6.0)
 
 
 def test_streaming_job_metrics_default_to_unmeasured():
