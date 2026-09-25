@@ -503,8 +503,12 @@ def _passes(report: dict, prereg: dict) -> dict:
         "level2_on_this_corpus": bool(report["level2"]["holds_on_this_corpus"]),
         "d5_leakage_behavioural": all(bool(per[t].get("leakage_pass")) for t in beh),
         "d7_k_in_band": report["level2"]["k_in_band"] >= report["level2"]["k_required"],
-        "definitional_check": all(
-            bool((per[t].get("definitional_check") or {}).get("pass")) for t in dfn
+        # None when no typology is definitional (section 9 #36), so an empty
+        # subset neither passes nor fails anything.
+        "definitional_check": (
+            all(bool((per[t].get("definitional_check") or {}).get("pass")) for t in dfn)
+            if dfn
+            else None
         ),
         "d2_timing_mixture": None if tm is None else bool(tm["pass"]),
         "d11_density": None if dn is None else bool(dn["pass"]),
