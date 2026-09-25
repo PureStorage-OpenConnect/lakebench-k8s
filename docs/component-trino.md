@@ -136,14 +136,18 @@ lakebench sets Trino's memory properties from the deployed heaps and worker coun
 | Property | Value | Scale 1 | Scale 10 | Scale 100 |
 |---|---|---|---|---|
 | Worker `-Xmx` | 80% of the pod limit | 6553m | 13107m | 39321m |
-| `query.max-memory-per-node` | 40% of that node's heap | 2621MB | 5242MB | 15728MB |
+| `query.max-memory-per-node` | 35% of that node's heap | 2293MB | 4587MB | 13762MB |
 | `memory.heap-headroom-per-node` | 30% of that node's heap (Trino's default) | 1965MB | 3932MB | 11796MB |
-| `query.max-memory` | workers x worker per-node | 2621MB | 10484MB | 62912MB |
-| `query.max-total-memory` | Trino's default, 2 x `query.max-memory` | 5242MB | 20968MB | 125824MB |
+| `query.max-memory` | workers x worker per-node | 2293MB | 9174MB | 55048MB |
+| `query.max-total-memory` | Trino's default, 2 x `query.max-memory` | 4586MB | 18348MB | 110096MB |
 
-The per-node values shown are the worker's; the coordinator gets the same fractions of its own heap. Per-node plus headroom is 70% of the heap, inside Trino's startup check (the two may not exceed the heap). The node's memory pool is heap minus headroom, 70% of the heap, so one query may take about 57% of it. That gives a power run (one query at a time) a third more room than Trino's 30% default. Throughput runs (4 streams) can still oversubscribe a pool, as they could at the default: when the pool fills, Trino blocks and, after `query.low-memory-killer.delay` (5 minutes by default), its low-memory killer fails the largest query. `query.max-total-memory` is deliberately left at Trino's default. Pinning it to the physical worker pool would let a coordinator reservation plus full revocable use on the workers trip it, while the default can never bind before the pools fill.
+The per-node values shown are the worker's; the coordinator gets the same fractions of its own heap. Per-node plus headroom is 65% of the heap, inside Trino's startup check (the two may not exceed the heap). The node's memory pool is heap minus headroom, 70% of the heap, so two queries at the per-node cap fit a node at once. That matters for throughput and composite runs (several streams): when a pool fills, Trino blocks queries and only after `query.low-memory-killer.delay` (5 minutes, longer than the 300 s client timeout) kills the largest, so a blocked stream reads as a timeout. A power run (one query at a time) still gets 17% more per node than Trino's 30% default. `query.max-total-memory` is left at Trino's default, which here is about the physical pool across the workers; pinning it to exactly that pool would let a coordinator reservation plus full revocable use on the workers trip it.
 
-At every autosized scale the new cluster cap is higher than the old effective cap, which was the smaller of 20GB and workers x 30% of the heap (scale 1: 1.9 GB to 2.6 GB; scale 10: 7.7 GB to 10.2 GB; scale 100: 20 GB to 61.4 GB). The values are fixed at deploy time; changing the worker count by hand afterwards does not update them.
+At every autosized scale the new cluster cap is higher than the old effective cap, which was the smaller of 20GB and workers x 30% of the heap (scale 1: 1.9 GB to 2.2 GB; scale 10: 7.7 GB to 9.0 GB; scale 100: 20 GB to 53.8 GB). The values are fixed at deploy time; changing the worker count by hand afterwards does not update them.
+
+### Query timeouts
+
+The benchmark gives each query a client timeout (300 s, or 900 s for the financial workload). Killing the local `kubectl exec` on timeout does not stop the `trino` CLI or its query in the pod; before this was handled, a timed-out query kept holding worker memory and slowed every later query. The executor now passes `--session query_max_run_time=<timeout - 5>s`, so Trino fails the query just before the client gives up, and on a client timeout it also cancels anything still running under the query's unique `--source` tag with `system.runtime.kill_query`. There is deliberately no cluster-wide `query.max-execution-time`: Iceberg and Delta maintenance also runs through the Trino CLI and can legitimately take longer than any benchmark query.
 
 General principles:
 

@@ -155,14 +155,14 @@ def thrift_pod_memory_limit(heap: str) -> str:
 # Per node, Trino splits the heap into headroom (untracked allocations) and a
 # memory pool (heap minus headroom) that all queries share. The headroom stays
 # at Trino's own 30% default, so the pool is 70% of the heap. One query may
-# take 40% of the heap, about 57% of the pool, against Trino's 30% default:
-# the power run executes one query at a time and gets a third more room,
-# while in throughput runs (4 streams) two queries at the cap do not fit a
-# node's pool (0.8 > 0.7) any more than three did at the default (0.9). Past
-# the pool, Trino blocks and after query.low-memory-killer.delay its killer
-# ends the largest query. Trino refuses to start unless per-node + headroom
-# <= heap; here they sum to 70%.
-TRINO_QUERY_MEMORY_PER_NODE_FRACTION = 0.4
+# take 35% of the heap, half the pool, so two cap-sized queries fit a node at
+# once. That gives the power run (one query at a time) 17% more than Trino's
+# 30% default, and throughput and composite runs (several streams) no worse
+# a fit than the default: past the pool, Trino blocks queries and only after
+# query.low-memory-killer.delay (5 minutes, longer than the 300 s client
+# timeout) kills one, so blocking must be the exception. Trino refuses to
+# start unless per-node + headroom <= heap; here they sum to 65%.
+TRINO_QUERY_MEMORY_PER_NODE_FRACTION = 0.35
 TRINO_HEAP_HEADROOM_FRACTION = 0.3
 
 
@@ -186,10 +186,10 @@ def trino_memory_properties(
     - ``query.max-memory`` (user memory, cluster) = workers x worker per-node.
 
     ``query.max-total-memory`` (user + revocable) is left at Trino's default,
-    twice ``query.max-memory``. Pinning it to the physical worker pool would
-    add a failure mode: Trino sums every node, the coordinator included, so a
-    coordinator reservation plus full revocable use on the workers could trip
-    it while the default can never bind before the pools do.
+    twice ``query.max-memory``, which here is about the workers' physical
+    pool. Pinning it to exactly that pool added a failure mode in review:
+    Trino sums every node, the coordinator included, so a coordinator
+    reservation plus full revocable use on the workers could trip it.
     """
     workers = max(1, workers)
     out: dict[str, str] = {}
