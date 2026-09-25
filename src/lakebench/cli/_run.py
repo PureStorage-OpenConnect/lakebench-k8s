@@ -468,7 +468,23 @@ def _maintenance_value(
             f"(pre {noise['pre_range_pct']:.1f}%, post {noise['post_range_pct']:.1f}% "
             "of median seconds)",
         )
+    if abs(value) <= _ROUND_DRIFT_FLOOR_PCT:
+        return (
+            None,
+            n,
+            f"within noise: {value:+.1f}% is under the {_ROUND_DRIFT_FLOOR_PCT:g}% "
+            "drift between rounds of the same run",
+        )
     return value, n, ""
+
+
+# Samples inside a round run back to back, so their range misses drift
+# between rounds: two rounds of the same run with nothing changed between
+# them differed 3-11% in QpH on the live cluster (GOALS repeatability entry,
+# 2026-09-25). A difference within this floor is not reported as a
+# maintenance effect even when the within-round ranges do not overlap.
+# Replace with the measured spread once the repeatability runs land.
+_ROUND_DRIFT_FLOOR_PCT = 11.0
 
 
 def _paired_noise(pre, post) -> dict[str, Any] | None:

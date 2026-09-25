@@ -140,3 +140,36 @@ def test_metrics_json_round_trip_keeps_samples_and_reason(tmp_path):
     loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
     assert loaded.pipeline_benchmark.maintenance_value_reason.startswith("within noise")
     assert loaded.pipeline_benchmark.pre_compaction_benchmark == {"qph": 1700.0, "queries": []}
+
+
+def test_throughput_qph_does_not_fall_with_iterations():
+    """Throughput QpH counts executions, not queries (review finding).
+
+    The wall clock advances one second per execution, so each round runs at
+    3600 executions per hour whatever the sample count.
+    """
+    from unittest.mock import patch
+
+    def _qph(iterations):
+        r = _runner([1.0] * 100)
+        r.config = MagicMock()
+        r.config.architecture.workload.datagen.get_effective_scale.return_value = 1
+        run_exec = r.executor.execute_query.side_effect
+        executed = {"n": 0}
+
+        def _exec(sql, timeout=300):
+            executed["n"] += 1
+            return run_exec(sql, timeout)
+
+        r.executor.execute_query.side_effect = _exec
+        with (
+            patch("lakebench.benchmark.runner.get_benchmark_queries", return_value=_Q),
+            patch(
+                "lakebench.benchmark.runner.time.monotonic",
+                side_effect=lambda: float(executed["n"]),
+            ),
+        ):
+            return r.run_throughput(streams=1, iterations=iterations).qph
+
+    assert _qph(1) == pytest.approx(3600.0)
+    assert _qph(3) == pytest.approx(3600.0)

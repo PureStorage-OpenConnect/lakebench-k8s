@@ -368,8 +368,12 @@ class BenchmarkRunner:
         # Sort by stream_id for deterministic output
         stream_results.sort(key=lambda s: s.stream_id)
 
-        # Throughput QpH: successful queries across all streams / wall clock
-        total_queries = sum(sum(1 for q in s.queries if q.success) for s in stream_results)
+        # Throughput QpH: successful executions across all streams / wall
+        # clock. Each query ran once per sample, so counting queries rather
+        # than samples would divide QpH by ``iterations``.
+        total_queries = sum(
+            sum(len(q.sample_times()) for q in s.queries if q.success) for s in stream_results
+        )
         throughput_qph = (
             (total_queries / wall_seconds) * 3600 if wall_seconds > 0 and total_queries else 0
         )
