@@ -260,16 +260,22 @@ def test_gate_has_no_numeric_threshold_literals(path):
     assert _numeric_literals(path) <= {0, 1, 2}, _numeric_literals(path) - {0, 1, 2}
 
 
-def test_prereg_features_match_aml_features():
+def _tuple_const(name):
     tree = ast.parse(FEATURES_SRC.read_text())
-    cols = None
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "FEATURE_COLUMNS" for t in node.targets
+            isinstance(t, ast.Name) and t.id == name for t in node.targets
         ):
-            cols = [e.value for e in node.value.elts]
+            return [e.value for e in node.value.elts]
+    raise AssertionError(name)
+
+
+def test_prereg_features_match_aml_features():
+    cols = _tuple_const("FEATURE_COLUMNS")
+    hist = _tuple_const("HISTORY_FEATURE_COLUMNS")
     p = json.loads(PREREG.read_text())
-    assert cols == p["features"]
+    assert p["features"] == cols + hist
+    assert p["unit_of_scoring"]["history_features"] == hist
     # AML-GOALS section 9 #32.
     assert "customer_type" in cols and "crr_tier" in cols and "is_customer" not in cols
     for t, f in p["classification"]["defining_feature"].items():
@@ -292,7 +298,12 @@ def test_high_risk_countries_match_generator_corridor_pool():
 
 def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
-    assert p["version"] == "3.3.1"
+    assert p["version"] == "3.4.1"
+    assert "#36" in p["_doc"]
+    u = p["unit_of_scoring"]
+    assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
+    assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 14, 395)
+    assert p["leakage"]["relative_cap_formula"] == "lift_over_prevalence"
     assert p["band"] == {**p["band"], "ap_min": 0.3, "ap_max": 0.8}
     assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
     assert p["shortcut_model"]["max_depth"] == 2
@@ -378,6 +389,7 @@ def test_bootstrap_resamples_groups():
 def test_report_records_groups_and_libraries():
     df = _frame()
     df["group"] = np.arange(len(df)) // 3
+    df["month"] = np.arange(len(df)) % 3  # a unit is (group, month)
     rep = fg.evaluate_gate(df, _prereg())
     assert rep["n_groups"] == len(df) // 3
     libs = rep["libraries"]
@@ -400,6 +412,28 @@ def test_runner_version_check_reads_job_pins():
     assert runner.version_mismatches(off) == {
         "scikit-learn": {"pinned": pins["scikit-learn"], "installed": "0.0"}
     }
+
+
+def test_relative_cap_as_lift_over_prevalence():
+    """Under the lift formula a weak full model does not fail every feature
+    that edges above prevalence; a real shortcut still fails."""
+    df = _frame(n=4000, prev=0.08, separable=False)
+    p = _prereg()
+    p["leakage"] = {**p["leakage"], "relative_cap_formula": "ratio"}
+    ratio = fg.evaluate_gate(df, p)["typologies"]["beh"]
+    p = _prereg()
+    p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence"}
+    lift = fg.evaluate_gate(df, p)["typologies"]["beh"]
+    prev, ap = lift["prevalence"], lift["ap"]
+    sc = lift["shortcuts"]["single_feature"]
+    assert sc["rel_cap"] == pytest.approx(prev + p["leakage"]["shortcut_ap_rel_max"] * (ap - prev))
+    assert sc["rel_cap_formula"] == "lift_over_prevalence"
+    assert ratio["shortcuts"]["single_feature"]["rel_cap_formula"] == "ratio"
+    planted = fg.evaluate_gate(_frame(), p)["typologies"]["beh"]
+    assert planted["shortcuts"]["single_feature"]["pass"] is False
+    p["leakage"]["relative_cap_formula"] = "nonsense"
+    with pytest.raises(ValueError, match="relative_cap_formula"):
+        fg.evaluate_gate(df, p)
 
 
 def test_rank_shortcut_pools_folds_that_chose_different_directions():
@@ -443,4 +477,130 @@ def test_null_group_is_refused():
     df = _frame()
     df["group"] = None
     with pytest.raises(ValueError, match="NULL group"):
+        fg.evaluate_gate(df, _prereg())
+
+
+def test_exclusions_counts_only_and_lift_ratio():
+    df = _frame(n=1500, prev=0.06)
+    df["exclude:beh"] = 0
+    df.loc[:99, "exclude:beh"] = 1
+    rep = fg.evaluate_gate(df, _prereg(), score=False)
+    r = rep["typologies"]["beh"]
+    assert rep["verdict"] == "counts_only" and r["status"] == "counts_only"
+    assert r["n_excluded"] == 100 and r["n_scored"] == 1400 and "ap" not in r
+    assert rep["level2"] is None and "passes" not in rep
+    assert any("n_excluded=100" in line for line in fg.summary_lines(rep))
+    scored = fg.evaluate_gate(df, _prereg())["typologies"]["beh"]
+    assert scored["n_scored"] == 1400
+    assert scored["ap_over_prevalence"] == pytest.approx(scored["ap"] / scored["prevalence"])
+
+
+def test_lifetime_prereg_drops_history_features():
+    p = _prereg()
+    p["unit_of_scoring"] = {"window": "utc_calendar_month", "history_features": ["noise_b"]}
+    life = fg.lifetime_prereg(p)
+    assert life["features"] == ["planted", "noise_a"]
+    assert fg.unit_window(life) == "lifetime" and fg.unit_window(p) == "utc_calendar_month"
+
+
+def test_counts_only_needs_no_sklearn(monkeypatch):
+    monkeypatch.setattr(fg, "_sklearn_available", lambda: False)
+    rep = fg.evaluate_gate(_frame(), _prereg(), score=False)
+    assert rep["verdict"] == "counts_only" and rep["typologies"]["beh"]["n_positives"] > 0
+
+
+def test_behavioural_six_and_empty_definitional_subset():
+    p = json.loads(PREREG.read_text())
+    assert len(p["behavioural_subset"]) == 6 and p["definitional_subset"] == []
+    assert (p["level2"]["n"], p["level2"]["k_in_band"]) == (6, 4)
+    assert "#36" in p["classification"]["note"]
+    q = _prereg()
+    q["behavioural_subset"] = ["beh", "defn"]
+    q["definitional_subset"] = []
+    q["level2"] = {**q["level2"], "n": 2, "k_in_band": 1}
+    rep = fg.evaluate_gate(_frame(), q)
+    assert rep["passes"]["definitional_check"] is None
+    assert "definitional_check" not in rep["typologies"]["defn"]
+
+
+def test_model_outputs_scores_importance_and_card(tmp_path):
+    df = _frame(n=1200)
+    df["group"] = np.arange(len(df))
+    df["month"] = 3
+    df["exclude:defn"] = 0
+    df.loc[:9, "exclude:defn"] = 1
+    rep = fg.evaluate_gate(df, _prereg(), collect_outputs=True)
+    out = rep.pop("_model_outputs")
+    sc = out["scores"]
+    assert list(sc.columns) == ["group", "month", "typology", "label", "score", "fold"]
+    assert (sc["typology"] == "beh").sum() == 1200 and (sc["typology"] == "defn").sum() == 1190
+    beh = sc[sc["typology"] == "beh"].set_index("group")
+    assert (beh["label"].to_numpy() == df["label:beh"].to_numpy()).all()
+    assert set(beh["fold"]) == set(range(_prereg()["cv"]["folds"]))
+    assert beh["score"].between(0, 1).all() and str(beh["score"].dtype) == "float32"
+    imp = out["importance"]
+    top = imp[imp["typology"] == "beh"].sort_values("ap_drop_mean").iloc[-1]
+    assert top["feature"] == "planted" and top["ap_drop_mean"] > 0.5
+    card = out["card"]
+    assert card["features"] == _prereg()["features"] and len(card["features_sha256"]) == 64
+    assert (
+        card["fitted_hyperparameters"]["beh"]["max_iter"]
+        == _prereg()["reference_model"]["max_iter"]
+    )
+    assert card["importance"]["method"] == "permutation_on_held_out_folds"
+    paths = fg.write_model_outputs(out, str(tmp_path / "gate"))
+    back = pd.read_parquet(paths["oof_scores"])
+    assert len(back) == len(sc)
+    assert json.loads(Path(paths["model_card"]).read_text())["unit_key_columns"] == [
+        "group",
+        "month",
+    ]
+    # Not collected unless asked, and never in counts-only mode.
+    assert "_model_outputs" not in fg.evaluate_gate(df, _prereg())
+
+
+def _grouped_frame():
+    df = _frame(n=1200, separable=False)
+    df["group"] = [f"c{i // 3:04d}" for i in range(len(df))]
+    df["month"] = [14 + i % 3 for i in range(len(df))]
+    return df
+
+
+def _numbers(rep):
+    return {
+        t: (r.get("ap"), tuple(r.get("ap_cis") or r.get("ap_ci")))
+        for t, r in rep["typologies"].items()
+    }
+
+
+def test_gate_numbers_do_not_depend_on_pulled_row_order(monkeypatch):
+    """toPandas() row order depends on the partition count; the bootstrap and
+    the model's binning subsample are positional, so the evaluator sorts by the
+    unit key first."""
+    df = _grouped_frame()
+    shuffled = df.sample(frac=1, random_state=7)
+    a = _numbers(fg.evaluate_gate(df, _prereg()))
+    assert a == _numbers(fg.evaluate_gate(shuffled, _prereg()))
+    # Without the sort the shuffle does move the numbers (the test has teeth).
+    monkeypatch.setattr(fg, "UNIT_KEY_COLUMNS", ())
+    assert a != _numbers(fg.evaluate_gate(shuffled, _prereg()))
+
+
+def test_importance_failure_keeps_the_gate_numbers(monkeypatch):
+    def boom(*a, **k):
+        raise MemoryError("no room")
+
+    monkeypatch.setattr(fg, "_permutation_importance", boom)
+    df = _grouped_frame()
+    rep = fg.evaluate_gate(df, _prereg(), collect_outputs=True)
+    assert rep["verdict"] == "ok" and rep["typologies"]["beh"]["ap"] is not None
+    card = rep["_model_outputs"]["card"]
+    assert card["importance_errors"]["beh"] == "no room"
+    assert len(rep["_model_outputs"]["scores"]) > 0
+
+
+def test_duplicate_units_are_refused():
+    df = _grouped_frame()
+    df.loc[1, ["group", "month"]] = df.loc[0, ["group", "month"]].to_numpy()
+    with pytest.raises(ValueError, match="duplicate units"):
         fg.evaluate_gate(df, _prereg())

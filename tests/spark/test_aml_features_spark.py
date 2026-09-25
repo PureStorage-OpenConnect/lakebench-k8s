@@ -4,6 +4,7 @@ right entity key (AML-GOALS D5, D9, A6)."""
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import sys
@@ -162,7 +163,7 @@ def test_feature_columns_match_preregistration(feats):
             / "src/lakebench/spark/data/aml/aml_preregistration.json"
         ).read_text()
     )
-    assert list(af.FEATURE_COLUMNS) == prereg["features"]
+    assert list(af.FEATURE_COLUMNS) + list(af.HISTORY_FEATURE_COLUMNS) == prereg["features"]
     assert set(af.FEATURE_COLUMNS) <= set(feats["A"])
 
 
@@ -447,3 +448,25 @@ def test_subject_labels_refuse_a_missing_seed(spark):
     ids = spark.createDataFrame([(1, 1)], "dg_id long, key long")
     with pytest.raises(ValueError, match="instance seed"):
         af.labels_from_subjects(spark, m, ids)
+
+
+def test_corpus_scale_and_gate_scale(spark, tmp_path):
+    import aml_features as af
+
+    path = str(tmp_path / "acct-scale")
+    spark.createDataFrame(
+        [(i, f"IB{i}") for i in range(1, 23)] + [(3, "IB3b")], "holder_entity_id long, iban string"
+    ).write.parquet(path)
+    info = af.corpus_scale(spark, path, 11)
+    assert info == {"n_entities": 22, "scale": 2.0}
+    prereg = {"corpora": {"entities_per_scale_unit": 11, "gate_scale": 2}}
+    assert af.at_gate_scale(info, prereg)
+    assert not af.at_gate_scale({"n_entities": 11, "scale": 1.0}, prereg)
+    real = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "src/lakebench/spark/data/aml/aml_preregistration.json"
+        ).read_text()
+    )
+    assert real["corpora"]["gate_scale"] == 2
+    assert af.at_gate_scale({"n_entities": 222222}, real)

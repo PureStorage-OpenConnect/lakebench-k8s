@@ -1,19 +1,33 @@
 {
-  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate script loads this file; AML-GOALS.md describes it. Changing any value after a gate run requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a. Every numeric gate in AML-GOALS.md must have a key here (enforced by test).",
-  "version": "3.3.1",
+  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.4.1 is v3.4 final as approved 2026-09-24 (AML-GOALS section 9 #36): the (customer, UTC calendar month) unit with subject-only labels, six behavioural typologies with K = 4 of 6, the lift-over-prevalence relative cap, gate scale 2, and persisted reference-model outputs. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
+  "version": "3.4.1",
   "registered": "2026-09-24",
   "metric": "average_precision",
   "unit_of_scoring": {
     "entity": "customer",
-    "label_role": "participant",
-    "label": "customer participant of any instance of the typology (manifest participant_entity_ids), one-vs-rest over all scored customers; label_role 'subject' (the role typology::subject_index names) is the alternative the gate implements"
+    "window": "utc_calendar_month",
+    "lead_in_days": 14,
+    "burn_in_months": 14,
+    "history_days": 395,
+    "label_role": "subject",
+    "history_features": [
+      "days_since_prior_send",
+      "txn_count_vs_history",
+      "amount_mean_vs_history_median",
+      "frac_counterparties_new"
+    ],
+    "label": "positive for T when the customer is the subject (typology::subject_index) of a T instance whose latest planted row by UETR timestamp falls in the month (dormant_reactivation: rows at or after the burst start only, anchor excluded); one-vs-rest over all scored (customer, month) units",
+    "exclusions": "not scored for T, and counted: months whose window holds that instance's planted rows with the subject as a party while the instance completes in another month; months where the customer is a non-subject participant of T (its planted-row months and the completion month)",
+    "unit_exists": "customer has at least one payment in A = [start(M) - lead_in_days, end(M)); months before burn_in_months are history only",
+    "secondary": "the entity-lifetime unit (features minus history_features, same label role) is reported as an ungated secondary block",
+    "burn_in_note": "14 months (not 13) so the first scored month's history window, lead_in_days + history_days = 409 days before its start, lies inside the corpus"
   },
   "cv": {
     "folds": 5,
     "stratified": true,
     "seed": 7,
     "group_by": "customer",
-    "note": "StratifiedKFold when every row is its own customer, StratifiedGroupKFold otherwise; the bootstrap resamples customers"
+    "note": "StratifiedKFold when every row is its own customer, StratifiedGroupKFold grouped by customer otherwise (the monthly unit); the bootstrap resamples customers"
   },
   "reference_model": {
     "estimator": "HistGradientBoostingClassifier",
@@ -28,10 +42,29 @@
     "single_feature_also_scores_raw_rank": true,
     "raw_rank": "out of fold: direction chosen on the training folds, within-fold percentile ranks pooled"
   },
+  "model_outputs": {
+    "persisted": [
+      "oof_scores",
+      "feature_importance",
+      "model_card"
+    ],
+    "importance": {
+      "method": "permutation_on_held_out_folds",
+      "metric": "average_precision",
+      "n_repeats": 1,
+      "max_threads": 8,
+      "max_threads_note": "memory bound only: each thread holds a copy of a test fold; the importances do not depend on the thread count"
+    },
+    "score_dtype": "float32",
+    "note": "for a possible model-training workload (#36): per-unit out-of-fold scores (unit key, typology, label, score, fold), permutation importances on each fold's held-out rows, the fitted hyperparameters, library versions and the feature list with its sha256; written next to the JSON report (snappy parquet)"
+  },
   "corpora": {
     "calibration_seed": 42,
     "evaluation_seed": 50000042,
     "robustness_seed": 90000042,
+    "gate_scale": 2,
+    "entities_per_scale_unit": 111111,
+    "gate_scale_note": "AML-GOALS section 9 #36: calibration corpora and D0 run at scale 2 (the local runner refuses another scale unless --diagnostic); D8 still compares scale 10 against the gate scale. entities_per_scale_unit mirrors datagen_rs world.rs (population = round(111111 x scale)) and is how a corpus's scale is read back from its account master.",
     "robustness_perturbation": {
       "median_amount_multiplier": 1.2,
       "persona_sd_multiplier": 1.2,
@@ -43,15 +76,14 @@
     "gather_scatter",
     "rapid_layering",
     "stack",
-    "dormant_reactivation"
-  ],
-  "definitional_subset": [
+    "dormant_reactivation",
     "micro_structuring",
     "corridor_high_risk"
   ],
+  "definitional_subset": [],
   "level2": {
-    "k_in_band": 3,
-    "n": 4,
+    "k_in_band": 4,
+    "n": 6,
     "require_on_corpora": [
       "evaluation",
       "robustness"
@@ -69,7 +101,9 @@
     "shortcut_models": [
       "single_feature",
       "feature_pair_depth2"
-    ]
+    ],
+    "relative_cap_formula": "lift_over_prevalence",
+    "relative_cap_definition": "(shortcut_ap - prevalence) <= shortcut_ap_rel_max * (ap - prevalence); the absolute cap is unchanged"
   },
   "scale_invariance": {
     "method": "equivalence: bootstrap CI of (scale10 AP - scale1 AP) lies entirely within [-ap_diff_abs_max, +ap_diff_abs_max]",
@@ -102,7 +136,11 @@
     "frac_weekend",
     "hour_of_day_entropy",
     "customer_type",
-    "crr_tier"
+    "crr_tier",
+    "days_since_prior_send",
+    "txn_count_vs_history",
+    "amount_mean_vs_history_median",
+    "frac_counterparties_new"
   ],
   "classification": {
     "definitional_rule": "a typology is definitional only if the generator conditions its label on the single attribute in defining_feature AND that feature alone reaches AP >= definitional_min_single_ap on the calibration corpus",
@@ -111,7 +149,8 @@
       "corridor_high_risk": "home_country_high_risk"
     },
     "definitional_min_single_ap": 0.95,
-    "reclassification": "behavioural -> definitional is forbidden for this release after any gate run (D0 included); if it happens N stays 4 and the typology counts as a miss. definitional -> behavioural is always allowed."
+    "reclassification": "behavioural -> definitional is forbidden for this release after any gate run (D0 included); if it happens N stays 4 and the typology counts as a miss. definitional -> behavioural is always allowed.",
+    "note": "AML-GOALS section 9 #36 (2026-09-24): micro_structuring and corridor_high_risk moved to the behavioural subset; the definitional subset is empty. defining_feature and definitional_min_single_ap are kept for the record and are unused while the subset is empty."
   },
   "power": {
     "min_positives": 200,
@@ -161,5 +200,5 @@
       10
     ]
   },
-  "features_note": "v3.3: customer_type and crr_tier added (AML-GOALS section 9 #32: the generator conditions on both via the monitored population); is_customer is excluded because only customers are scored. Definitions: src/lakebench/spark/scripts/aml_features.py."
+  "features_note": "v3.3: customer_type and crr_tier added (AML-GOALS section 9 #32); is_customer excluded because only customers are scored. v3.4: four history-relative features for the monthly unit (unit_of_scoring.history_features). Definitions: src/lakebench/spark/scripts/aml_features.py."
 }
