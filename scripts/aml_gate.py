@@ -173,6 +173,10 @@ def main(argv=None) -> int:
         SparkSession.builder.master(args.master)
         .appName("lb-aml-gate-local")
         .config("spark.driver.memory", args.driver_memory)
+        # The monthly unit's frame is collected whole: at scale 2 its Arrow
+        # batches pass 1 GiB (Spark's default cap), so the cap follows the
+        # driver's memory instead.
+        .config("spark.driver.maxResultSize", args.driver_memory)
         .config("spark.ui.enabled", "false")
         .config("spark.sql.session.timeZone", "UTC")
         # Arrow for toPandas: the monthly unit pulls millions of units, which
