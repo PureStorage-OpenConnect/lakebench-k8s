@@ -42,6 +42,20 @@
     "single_feature_also_scores_raw_rank": true,
     "raw_rank": "out of fold: direction chosen on the training folds, within-fold percentile ranks pooled"
   },
+  "model_outputs": {
+    "persisted": [
+      "oof_scores",
+      "feature_importance",
+      "model_card"
+    ],
+    "importance": {
+      "method": "permutation_on_held_out_folds",
+      "metric": "average_precision",
+      "n_repeats": 1
+    },
+    "score_dtype": "float32",
+    "note": "for a possible model-training workload (#36): per-unit out-of-fold scores (unit key, typology, label, score, fold), permutation importances on each fold's held-out rows, the fitted hyperparameters, library versions and the feature list with its sha256; written next to the JSON report (snappy parquet)"
+  },
   "corpora": {
     "calibration_seed": 42,
     "evaluation_seed": 50000042,

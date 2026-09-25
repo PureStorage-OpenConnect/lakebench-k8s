@@ -165,6 +165,13 @@ def test_fidelity_gate_over_silver(spark, tmp_path, monkeypatch):
         report["typologies"]["stack"]["r_precision"]
     )
 
+    outputs = report.pop("_model_outputs")
+    written = ref._write_model_outputs(spark, f"file://{tmp_path}/mo", outputs)
+    back = spark.read.parquet(written["oof_scores"]["path"])
+    assert back.count() == 6 * 120 and set(back.columns) >= {"group", "typology", "score", "fold"}
+    assert spark.read.parquet(written["feature_importance"]["path"]).count() == 6 * len(
+        report["features"]
+    )
     out = tmp_path / "aml_gate_report.json"
     ref._write_text(spark, f"file://{out}", json.dumps(report, default=str))
     assert json.loads(out.read_text())["verdict"] == "ok"
