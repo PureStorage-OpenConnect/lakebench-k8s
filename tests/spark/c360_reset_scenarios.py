@@ -72,11 +72,19 @@ def main():
     )
     # A table whose directory contains a path the reset must keep.
     # Delta, so a plain DROP leaves the files and only the guard decides.
-    wide_dir = f"{wh}/wide/t"
+    wide_dir = f"{wh}/wide/wide_t"
     bronze_df(spark, 3).write.format("delta").option("path", f"file://{wide_dir}").saveAsTable(
         "spark_catalog.other.wide_t"
     )
     out["foreign_files_before"] = _files_under(foreign_dir)
+    # A table whose location is a namespace root holding a sibling table's
+    # files: the name guard keeps the directory.
+    root_dir = f"{wh}/nsroot"
+    bronze_df(spark, 3).write.format("delta").option("path", f"file://{root_dir}").saveAsTable(
+        "spark_catalog.other.rooted_t"
+    )
+    Path(f"{root_dir}/sibling_t").mkdir(parents=True, exist_ok=True)
+    Path(f"{root_dir}/sibling_t/part.parquet").write_bytes(b"x")
 
     # A fresh checkpoint over the full silver table: silver-stream refuses.
     ckpt = f"file://{work}/ckpt/silver-stream"
@@ -105,6 +113,10 @@ def main():
         keep_uris=[f"file://{wide_dir}/_delta_log/"],
     )
     out["wide_files_after"] = _files_under(wide_dir)
+    out["dropped_rooted"] = reset_stream_tables(
+        spark, ["spark_catalog.other.rooted_t"], owned_uris=owned, keep_uris=keep
+    )
+    out["sibling_survives"] = os.path.exists(f"{root_dir}/sibling_t/part.parquet")
     out["dropped_direct"] = dropped
     out["delta_exists_after"] = table_exists(spark, "spark_catalog.silver.delta_t")
     out["delta_files_after"] = _files_under(delta_dir)

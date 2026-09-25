@@ -48,11 +48,12 @@ def test_reset_preflight_submits_bronze_verify_in_reset_mode():
     jm.submit_job.return_value = MagicMock(state=JobState.RUNNING)
     mon = MagicMock()
     mon.wait_for_completion.return_value = _Result(True)
-    assert _sustained._run_c360_continuous_reset(jm, mon, MagicMock()) is True
+    assert _sustained._run_c360_continuous_reset(jm, mon, MagicMock(), timeout_seconds=5400)
     jm.submit_job.assert_called_once_with(
         JobType.BRONZE_VERIFY, cycle_env={"LB_CONTINUOUS_RESET": "1"}
     )
     assert mon.wait_for_completion.call_args.args[0] == "lakebench-bronze-verify"
+    assert mon.wait_for_completion.call_args.kwargs["timeout_seconds"] == 5400
 
 
 @pytest.mark.parametrize(
@@ -63,7 +64,7 @@ def test_reset_preflight_failure_is_reported(submit_state, wait_ok):
     jm.submit_job.return_value = MagicMock(state=submit_state, message="boom")
     mon = MagicMock()
     mon.wait_for_completion.return_value = _Result(wait_ok, "timeout")
-    assert _sustained._run_c360_continuous_reset(jm, mon, MagicMock()) is False
+    assert _sustained._run_c360_continuous_reset(jm, mon, MagicMock(), timeout_seconds=60) is False
 
 
 def test_c360_state_reset_clears_checkpoints_and_c360_landing_zone(monkeypatch):
@@ -108,7 +109,12 @@ class _StopAfterFirstStream(Exception):
     pass
 
 
-def _drive_sustained(monkeypatch, tmp_path, cfg, *, reset_ok=True, owned=True):
+events_ref: dict = {}
+
+
+def _drive_sustained(
+    monkeypatch, tmp_path, cfg, *, reset_ok=True, owned=True, existing=(), force_reset=False
+):
     """Run _run_sustained with every cluster and S3 edge mocked; return the
     ordered list of side effects it performed."""
     monkeypatch.chdir(tmp_path)
@@ -159,13 +165,15 @@ def _drive_sustained(monkeypatch, tmp_path, cfg, *, reset_ok=True, owned=True):
         "_reset_continuous_state",
         lambda c, clear_raw: events.append(f"reset-s3:clear_raw={clear_raw}"),
     )
+    monkeypatch.setattr(_sustained, "_c360_existing_state", lambda c, clear_raw: list(existing))
     monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: MagicMock())
     monkeypatch.setattr(_sustained, "_collect_platform_metrics", lambda *a, **kw: None)
+    events_ref["mon"] = mon
 
     # The run ends at the first stream submit (or an Exit); the finally
     # block may then fail on mocked metrics, which is irrelevant here.
     with pytest.raises(Exception):  # noqa: B017
-        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, True, 60)
+        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, True, 60, force_reset=force_reset)
     return events
 
 
@@ -192,3 +200,84 @@ def test_c360_failed_reset_starts_no_stream(monkeypatch, tmp_path):
 def test_c360_foreign_deployment_is_not_touched(monkeypatch, tmp_path):
     events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), owned=False)
     assert events == ["ownership"]
+
+
+def test_existing_state_refuses_without_force_reset(monkeypatch, tmp_path, capsys):
+    events = _drive_sustained(
+        monkeypatch, tmp_path, _c360_cfg(), existing=["c-s/", "c-b/customer/interactions/"]
+    )
+    assert events == ["ownership"]  # nothing stopped, deleted or submitted
+    out = capsys.readouterr().out
+    assert "--force-reset" in out and "silver.customer_interactions_enriched" in out
+    assert "c-b/customer/interactions/" in out
+
+
+def test_force_reset_proceeds_over_existing_state(monkeypatch, tmp_path):
+    events = _drive_sustained(
+        monkeypatch, tmp_path, _c360_cfg(), existing=["c-s/"], force_reset=True
+    )
+    assert "submit:bronze-verify:{'LB_CONTINUOUS_RESET': '1'}" in events
+    assert any(e.startswith("submit:bronze-ingest") for e in events)
+
+
+def test_reset_timeout_scales_like_the_aml_budget(monkeypatch, tmp_path):
+    from lakebench.spark.job import aml_bronze_verify_timeout_budget
+
+    cfg = _c360_cfg()
+    _drive_sustained(monkeypatch, tmp_path, cfg)
+    scale = cfg.architecture.workload.datagen.get_effective_scale()
+    got = events_ref["mon"].wait_for_completion.call_args.kwargs["timeout_seconds"]
+    assert got == aml_bronze_verify_timeout_budget(scale)
+    assert aml_bronze_verify_timeout_budget(1000) > aml_bronze_verify_timeout_budget(10)
+
+
+def test_existing_state_lists_only_non_empty_prefixes(monkeypatch):
+    cfg = _c360_cfg()
+    raw = MagicMock()
+
+    def list_objects_v2(Bucket, Prefix, MaxKeys):
+        if Bucket == "c-g":
+            raise RuntimeError("NoSuchBucket")
+        if (Bucket, Prefix) == ("c-s", ""):
+            return {"KeyCount": 1}
+        if (Bucket, Prefix) == ("c-b", "checkpoints/bronze-ingest/"):
+            raise RuntimeError("AccessDenied")
+        return {"KeyCount": 0}
+
+    raw.list_objects_v2.side_effect = list_objects_v2
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: MagicMock(raw_client=raw))
+    found = _sustained._c360_existing_state(cfg, clear_raw=True)
+    assert found[0] == "c-s/"
+    assert found[1].startswith("c-b/checkpoints/bronze-ingest/ (could not list")
+    assert len(found) == 2
+    listed = [c.kwargs["Prefix"] for c in raw.list_objects_v2.call_args_list]
+    assert "customer/interactions/" in listed
+    raw.list_objects_v2.reset_mock()
+    _sustained._c360_existing_state(cfg, clear_raw=False)
+    assert "customer/interactions/" not in [
+        c.kwargs["Prefix"] for c in raw.list_objects_v2.call_args_list
+    ]
+
+
+def test_run_command_passes_force_reset(monkeypatch, tmp_path):
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text(
+        "name: c360-flag\n"
+        "platform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
+        "      access_key: x\n      secret_key: y\n"
+    )
+    seen = {}
+    monkeypatch.setattr(
+        "lakebench.cli._sustained._run_sustained",
+        lambda *a, **kw: seen.update(kw),
+    )
+    res = CliRunner().invoke(
+        app, ["run", str(cfg_file), "--sustained", "--skip-deploy", "--force-reset"]
+    )
+    assert seen.get("force_reset") is True, res.output
+    res = CliRunner().invoke(app, ["run", str(cfg_file), "--sustained", "--skip-deploy"])
+    assert seen.get("force_reset") is False, res.output
