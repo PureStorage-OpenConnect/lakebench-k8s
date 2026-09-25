@@ -202,6 +202,7 @@ class MonthWindows:
             "first_scored_month": self.burn_in,
             "lead_in_days": self.lead,
             "history_days": self.history,
+            "first_scored_history_complete": self.history_complete(),
         }
 
     def index(self, ts):
@@ -224,28 +225,94 @@ class MonthWindows:
     def scorable(self, name: str):
         return (col(name) >= lit(self.burn_in)) & (col(name) < lit(self.n_months))
 
-    def history_features(self, cs: DataFrame, in_a: DataFrame) -> DataFrame:
+    def _start_epoch(self, m: int) -> int:
+        """Epoch seconds of 00:00 UTC on the first day of month index m."""
+        from datetime import datetime, timezone
+
+        y, mo = divmod(self.m0 - 1 + m, 12)
+        return int(datetime(self.y0 + y, mo + 1, 1, tzinfo=timezone.utc).timestamp())
+
+    def history_complete(self) -> bool:
+        """True when the first scored month's history window lies entirely
+        inside the corpus (burn-in covers lead-in plus history)."""
+        need = (self.lead + self.history) * _SECONDS_PER_DAY
+        return self._start_epoch(self.burn_in) - need >= self._start_epoch(0)
+
+    def history_features(self, cs: DataFrame, in_a: DataFrame | None = None) -> DataFrame:
         """HISTORY_FEATURE_COLUMNS per (key, month) from the customer's own
-        payment sides ``cs`` and the A-exploded sides ``in_a``."""
+        payment sides ``cs``.
+
+        Each customer's sides are collected once into a time-sorted array and
+        every scorable month's A and H are sliced out of it with array
+        functions, instead of exploding every row into the ~13 history months
+        it belongs to and shuffling that. The history median is exact: the
+        middle element of the sorted slice, or the mean of the two middle
+        elements (what percentile(x, 0.5) returns).
+        """
+        from pyspark.sql import functions as F
+
         unit = ["key", "month"]
-        in_h = cs.withColumn("month", self.h_months(col("ts"))).filter(self.scorable("month"))
-        hist = in_h.groupBy(*unit).agg(
-            count_(lit(1)).cast("double").alias("_n_hist"),
-            expr("percentile(amount_usd, 0.5)").alias("_med_hist"),
+        day = _SECONDS_PER_DAY
+        months = range(self.burn_in, self.n_months)
+        starts = {m: self._start_epoch(m) for m in range(self.n_months + 1)}
+
+        def table(values):
+            return F.array(*[lit(int(v)) for v in values])
+
+        # Indexed by month - burn_in + 1 (element_at is 1-based).
+        a_lo = table(starts[m] - self.lead * day for m in months)
+        a_hi = table(starts[m + 1] for m in months)
+        h_lo = table(starts[m] - (self.lead + self.history) * day for m in months)
+
+        per_key = cs.groupBy("key").agg(
+            F.array_sort(
+                F.collect_list(
+                    struct(
+                        col("ts").cast("long").alias("t"),
+                        col("amount_usd").cast("double").alias("a"),
+                        col("cp").alias("c"),
+                    )
+                )
+            ).alias("_arr")
         )
-        a_agg = in_a.groupBy(*unit).agg(
-            count_(lit(1)).cast("double").alias("_n_a"),
-            mean_("amount_usd").alias("_mean_a"),
-            countDistinct("cp").cast("double").alias("_ncp_a"),
+
+        def stats(m):
+            i = m - lit(self.burn_in) + lit(1)
+            alo, ahi, hlo = F.element_at(a_lo, i), F.element_at(a_hi, i), F.element_at(h_lo, i)
+            a = F.filter(col("_arr"), lambda x: (x["t"] >= alo) & (x["t"] < ahi))
+            h = F.filter(col("_arr"), lambda x: (x["t"] >= hlo) & (x["t"] < alo))
+            hs = F.array_sort(F.transform(h, lambda x: x["a"]))
+            nh = F.size(h)
+            half = F.shiftright(nh, 1)
+            med = (
+                when(nh == 0, lit(None).cast("double"))
+                .when(
+                    (nh % 2) == 1,
+                    F.element_at(hs, half + lit(1)),
+                )
+                .otherwise((F.element_at(hs, half) + F.element_at(hs, half + lit(1))) / lit(2.0))
+            )
+            na = F.size(a)
+            sum_a = F.aggregate(F.transform(a, lambda x: x["a"]), lit(0.0), lambda acc, v: acc + v)
+            cpa = F.array_distinct(
+                F.filter(F.transform(a, lambda x: x["c"]), lambda c: c.isNotNull())
+            )
+            cph = F.array_distinct(F.transform(h, lambda x: x["c"]))
+            return struct(
+                m.alias("month"),
+                nh.cast("double").alias("_n_hist"),
+                med.alias("_med_hist"),
+                na.cast("double").alias("_n_a"),
+                _ratio(sum_a, na.cast("double")).alias("_mean_a"),
+                F.size(cpa).cast("double").alias("_ncp_a"),
+                F.size(F.array_except(cpa, cph)).cast("double").alias("_ncp_new"),
+            )
+
+        month_seq = F.sequence(lit(self.burn_in), lit(self.n_months - 1))
+        agg = per_key.select("key", F.inline(F.transform(month_seq, stats))).filter(
+            col("_n_a") > lit(0)
         )
-        # Counterparties of A that the history never saw.
-        cp_a = in_a.select(*unit, "cp").filter(col("cp").isNotNull()).distinct()
-        cp_h = in_h.select(*unit, "cp").filter(col("cp").isNotNull()).distinct()
-        new_cp = (
-            cp_a.join(cp_h, [*unit, "cp"], "left_anti")
-            .groupBy(*unit)
-            .agg(count_(lit(1)).cast("double").alias("_ncp_new"))
-        )
+
         # Gap from the last send before A to A's first send, when that prior
         # send lies inside H.
         w = Window.partitionBy("key").orderBy(col("ts"), col("uetr"))
@@ -264,24 +331,16 @@ class MonthWindows:
             *unit,
             when(
                 prev_in_h,
-                (col("_first").cast("double") - col("_prev").cast("double"))
-                / lit(float(_SECONDS_PER_DAY)),
+                (col("_first").cast("double") - col("_prev").cast("double")) / lit(float(day)),
             ).alias("days_since_prior_send"),
         )
         per_month = lit(self.history / _DAYS_PER_MONTH)
-        return (
-            a_agg.join(hist, unit, "left")
-            .join(new_cp, unit, "left")
-            .join(first, unit, "left")
-            .select(
-                *unit,
-                "days_since_prior_send",
-                _ratio(col("_n_a"), col("_n_hist") / per_month).alias("txn_count_vs_history"),
-                _ratio(col("_mean_a"), col("_med_hist")).alias("amount_mean_vs_history_median"),
-                _ratio(coalesce(col("_ncp_new"), lit(0.0)), col("_ncp_a")).alias(
-                    "frac_counterparties_new"
-                ),
-            )
+        return agg.join(first, unit, "left").select(
+            *unit,
+            "days_since_prior_send",
+            _ratio(col("_n_a"), col("_n_hist") / per_month).alias("txn_count_vs_history"),
+            _ratio(col("_mean_a"), col("_med_hist")).alias("amount_mean_vs_history_median"),
+            _ratio(col("_ncp_new"), col("_ncp_a")).alias("frac_counterparties_new"),
         )
 
 

@@ -187,3 +187,47 @@ def test_build_gate_inputs_monthly(spark, frames):
             role="participant",
             typologies=ts,
         )
+
+
+def test_burn_in_covers_lead_in_plus_history():
+    import json
+
+    import aml_features as af
+
+    prereg = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "src/lakebench/spark/data/aml/aml_preregistration.json"
+        ).read_text()
+    )
+    u = prereg["unit_of_scoring"]
+    # The default 60-month corpus starts 2021-01.
+    assert af.MonthWindows(2021, 1, 60, u).history_complete()
+    assert not af.MonthWindows(2021, 1, 60, {**u, "burn_in_months": 13}).history_complete()
+
+
+def test_history_median_even_and_odd(spark):
+    """The sliced-array median equals percentile(x, 0.5) for odd and even
+    history counts."""
+    import aml_features as af
+
+    rows = [("h1", 1, 2, t(2, 1), 10.0), ("h2", 1, 3, t(2, 2), 30.0), ("h3", 1, 4, t(2, 3), 20.0)]
+    rows += [("a1", 1, 2, t(3, 20), 20.0)]  # A(Apr) holds Mar 20; H(Apr) holds the three Feb rows
+    rows += [("h4", 9, 2, t(2, 1), 10.0), ("h5", 9, 3, t(2, 2), 40.0), ("a2", 9, 2, t(3, 20), 25.0)]
+    txns = spark.createDataFrame(
+        [(u, o, b, ts, a, "USD", a, "US", "US") for u, o, b, ts, a in rows]
+        + [
+            ("z", 5, 6, t(1, 2), 1.0, "USD", 1.0, "US", "US"),
+            ("y", 5, 6, t(6, 2), 1.0, "USD", 1.0, "US", "US"),
+        ],
+        TXN_SCHEMA,
+    )
+    ents = spark.createDataFrame(
+        [(k, True, "US", "person", "low") for k in (1, 9)],
+        "key long, is_customer boolean, home_country string, customer_type string, crr_tier string",
+    )
+    w = af.MonthWindows.from_txns(txns, CFG)
+    f = {(r["key"], r["month"]): r for r in af.entity_features(txns, ents, w).collect()}
+    assert f[(1, 3)]["amount_mean_vs_history_median"] == pytest.approx(20.0 / 20.0)
+    assert f[(9, 3)]["amount_mean_vs_history_median"] == pytest.approx(25.0 / 25.0)
+    assert f[(9, 3)]["frac_counterparties_new"] == pytest.approx(0.0)
