@@ -394,6 +394,7 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     # P10 TM operations invariants and summary; the batch gate reads them.
     job_metrics.tm_invariants = parsed.tm_invariants
     job_metrics.tm_ops = parsed.tm_ops
+    job_metrics.tm_status = parsed.tm_status
 
 
 # Upstream failures a benchmark may carry without failing the run. Each is a
@@ -535,22 +536,6 @@ def _aml_batch_gate_problems(
             "Could not confirm that detection produced alerts: no per-rule "
             "counts in the gold-finalize driver log and no scoring result."
         )
-    # P10.2 workflow invariants, every cycle. A gold job whose driver log was
-    # parsed (it carries per-rule detection lines) but has no invariant lines
-    # means the operations layer did not run: a failure, not a pass.
-    from lakebench.metrics.tm_ops import tm_gate_problems
-
-    for idx, job in enumerate(gold_jobs, start=1):
-        inv = {int(c): v for c, v in (getattr(job, "tm_invariants", None) or {}).items()}
-        parsed = bool(getattr(job, "alerts_by_rule", None) or getattr(job, "rules_skipped", None))
-        if inv or parsed:
-            label = f"gold-finalize {idx}" if len(gold_jobs) > 1 else "gold-finalize"
-            problems.extend(tm_gate_problems(inv, label=label))
-        else:
-            warnings.append(
-                "Could not confirm the TM workflow invariants: no gold-finalize "
-                "driver log was parsed."
-            )
     # A skipped rule is honest ("not run"), but when its designated typology
     # is in the pre-registered behavioural subset the benchmark has no
     # detector for a typology it claims to measure. Say so every run.
@@ -567,6 +552,59 @@ def _aml_batch_gate_problems(
                     f"typology {target} has no detector in this run."
                 )
     return problems, warnings
+
+
+def _aml_tm_verdict(gold_jobs: list, enabled: bool = True) -> dict:
+    """The P10 TM operations verdict over every gold-finalize cycle.
+
+    Separate from detection: only ``fail`` (the layer ran and an invariant is
+    violated) fails the run. ``not_run`` says why the layer did not run and
+    leaves detection scoring alone; ``unknown`` means no driver log was
+    parsed, the same treatment continuous gives a missing log.
+    """
+    from lakebench.metrics.tm_ops import tm_verdict
+
+    inv: dict = {}
+    sts: dict = {}
+    ops = None
+    parsed = False
+    for job in gold_jobs:
+        j_inv = getattr(job, "tm_invariants", None) or {}
+        j_sts = getattr(job, "tm_status", None) or {}
+        inv.update({int(c): v for c, v in j_inv.items()})
+        sts.update({int(c): v for c, v in j_sts.items()})
+        ops = getattr(job, "tm_ops", None) or ops
+        parsed = parsed or bool(
+            j_inv
+            or j_sts
+            or getattr(job, "alerts_by_rule", None)
+            or getattr(job, "rules_skipped", None)
+            or getattr(job, "rule_errors", None)
+        )
+    verdict = tm_verdict(inv, sts, enabled=enabled, logs_captured=parsed, label="gold-finalize")
+    verdict["invariants"] = {str(c): v for c, v in sorted(inv.items())}
+    verdict["ops"] = ops
+    verdict["mode"] = "batch"
+    return verdict
+
+
+def _report_tm_verdict(verdict: dict, label: str) -> bool:
+    """Print the P10 verdict; True when it must fail the run."""
+    status = verdict.get("status")
+    if status == "fail":
+        for p in verdict.get("problems") or []:
+            print_error(p)
+        return True
+    if status == "pass":
+        print_success(f"{label}: TM operations ran; every workflow invariant passed.")
+    elif status == "disabled":
+        print_info(f"{label}: TM operations disabled (workload.tm_operations.enabled).")
+    else:
+        print_warning(
+            f"{label}: TM operations {status.replace('_', ' ')}: {verdict.get('reason')}. "
+            "The P10 gate is not met; detection results are unaffected."
+        )
+    return False
 
 
 def _behavioural_subset() -> set[str]:
@@ -1689,6 +1727,13 @@ def run(
                 print_warning(_w)
             for _problem in _problems:
                 print_error(_problem)
+                pipeline_success = False
+            # P10 TM operations: its own verdict, recorded for the scorecard.
+            _tm = _aml_tm_verdict(
+                _gold_jobs, enabled=cfg.architecture.workload.tm_operations.enabled
+            )
+            collector.current_run.tm_operations = _tm
+            if _report_tm_verdict(_tm, "AML batch gate"):
                 pipeline_success = False
 
         # -- Phase 5/7: Maintenance ------------------------------------------------
