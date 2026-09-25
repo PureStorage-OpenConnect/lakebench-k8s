@@ -105,6 +105,20 @@ class StreamingJobMetrics:
     ttd_p50_seconds: float | None = None
     ttd_p95_seconds: float | None = None
     ttd_max_seconds: float | None = None
+    # AML gold only, from "Cycle N: time to detect at pass end ..." and
+    # "... rule=<id> ...": every new alert measured at the end of its tick's
+    # detection pass (the definition before per-rule commit times, for
+    # comparison with earlier runs), and per rule at its commit. ttd_by_rule
+    # maps rule_id to {"alerts", "p50_seconds", "p95_seconds", "max_seconds"}.
+    ttd_pass_end_p50_seconds: float | None = None
+    ttd_pass_end_p95_seconds: float | None = None
+    ttd_by_rule: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # AML gold only: one entry per tick from "Cycle N: tick timing ..."
+    # (gold_refresh_financial.tick_timing_line): {"cycle", "silver_rows",
+    # "phases": {name: seconds}}, phases in the order the tick ran them
+    # (probe, detect_setup, one per rule, detect_finish, baseline, count, ttd,
+    # tm, total). Empty when the driver logged none.
+    tick_timings: list[dict[str, Any]] = field(default_factory=list)
     # Executors the submitted manifest requested, after the concurrent
     # budget and any override. None when unknown (the profile is used).
     requested_executors: int | None = None
@@ -1683,6 +1697,69 @@ _TTD_LINE = re.compile(
 )
 
 
+# gold_refresh_financial.ttd_detail_lines: the pass-end and per-rule
+# histograms. Never matches _TTD_LINE ("time to detect alerts=").
+_TTD_DETAIL_LINE = re.compile(
+    r"Cycle (?P<cycle>\d+): time to detect (?:at pass end|rule=(?P<rule>\w+)) "
+    r"alerts=(?P<alerts>\d+) max=(?P<max>[\d.]+|-)s bin=(?P<bin>\d+)s bins=(?P<bins>[\d:,]*)"
+)
+
+
+def _merge_hist(lines: list[re.Match[str]]) -> dict[str, Any] | None:
+    """{"alerts", "p50_seconds", "p95_seconds", "max_seconds"} merged over
+    ``lines`` (same bin width as the first), or None when nothing measured."""
+    if not lines:
+        return None
+    bin_s = int(lines[0]["bin"])
+    bins: dict[int, int] = {}
+    peaks: list[float] = []
+    for m in lines:
+        if int(m["bin"]) != bin_s:
+            continue
+        if m["max"] != "-":
+            peaks.append(float(m["max"]))
+        for pair in filter(None, m["bins"].split(",")):
+            b, n = pair.split(":")
+            bins[int(b)] = bins.get(int(b), 0) + int(n)
+    total = sum(bins.values())
+    if total == 0 or not peaks:
+        return {"alerts": total, "p50_seconds": None, "p95_seconds": None, "max_seconds": None}
+    mx = max(peaks)
+    return {
+        "alerts": total,
+        "p50_seconds": ttd_percentile(bins, bin_s, 0.50, mx),
+        "p95_seconds": ttd_percentile(bins, bin_s, 0.95, mx),
+        "max_seconds": mx,
+    }
+
+
+def _apply_ttd_detail(metrics: StreamingJobMetrics, lines: list[re.Match[str]]) -> None:
+    pass_end = _merge_hist([m for m in lines if m["rule"] is None])
+    if pass_end is not None:
+        metrics.ttd_pass_end_p50_seconds = pass_end["p50_seconds"]
+        metrics.ttd_pass_end_p95_seconds = pass_end["p95_seconds"]
+    for rule in sorted({m["rule"] for m in lines if m["rule"] is not None}):
+        merged = _merge_hist([m for m in lines if m["rule"] == rule])
+        if merged is not None:
+            metrics.ttd_by_rule[rule] = merged
+
+
+# gold_refresh_financial's per-tick phase breakdown (tick_timing_line).
+_TICK_TIMING_LINE = re.compile(
+    r"Cycle (?P<cycle>\d+): tick timing silver_rows=(?P<rows>\d+) (?P<phases>.*)$"
+)
+_TICK_PHASE = re.compile(r"(\w+)=(\d+(?:\.\d+)?)s\b")
+
+
+def parse_tick_timing(line: str) -> dict[str, Any] | None:
+    """{"cycle", "silver_rows", "phases"} from a tick timing line, else None."""
+    m = _TICK_TIMING_LINE.search(line.rstrip())
+    if not m:
+        return None
+    phases = {k: float(v) for k, v in _TICK_PHASE.findall(m["phases"])}
+    return {"cycle": int(m["cycle"]), "silver_rows": int(m["rows"]), "phases": phases}
+
+
 def ttd_percentile(bins: dict[int, int], bin_s: int, q: float, max_s: float) -> float:
     """The q-quantile of a {bin index: count} histogram, at the upper edge of
     the bin that reaches it (so never under the true value), capped at the
@@ -2099,6 +2176,7 @@ class MetricsCollector:
         batch_rows: dict[int, int] = {}
         committed_batches: set[int] = set()
         ttd_lines: list[re.Match[str]] = []
+        ttd_detail: list[re.Match[str]] = []
 
         for line in logs.split("\n"):
             # Bronze: "Batch N: writing X rows to ..."
@@ -2173,8 +2251,20 @@ class MetricsCollector:
                 ttd_lines.append(m)
                 continue
 
+            if job_type == "gold-refresh":
+                m = _TTD_DETAIL_LINE.search(line)
+                if m:
+                    ttd_detail.append(m)
+                    continue
+                # AML gold: "Cycle N: tick timing silver_rows=R probe=Xs ...".
+                tt = parse_tick_timing(line)
+                if tt is not None:
+                    metrics.tick_timings.append(tt)
+                    continue
+
         if job_type == "gold-refresh":
             _apply_ttd(metrics, ttd_lines, batch_ids)
+            _apply_ttd_detail(metrics, ttd_detail)
         metrics.total_batches = len(batch_ids)
         metrics.total_rows_processed = total_rows
 
