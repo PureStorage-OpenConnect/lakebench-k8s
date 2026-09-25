@@ -42,8 +42,66 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `uat/results-<version>.md` with a `# UAT results <version>` heading and a
   results table is required; pre-release and dev versions are refused. See `docs/releasing.md` for the
   repository settings the gates depend on.
+- **QpH is the median of 3 samples per query (LB-150).**
+  `architecture.benchmark.iterations` now defaults to 3 and `lakebench run`
+  passes it to both benchmark rounds (it was ignored before, and the
+  `benchmark --iterations` default of 1 overrode the config). Throughput
+  QpH counts executions. Earlier QpH was a single sample and is not
+  comparable; the perf gate and `reproduce` refuse a QpH taken with a
+  different sample count.
+- **The AML benchmark set grew from 8 to 12 queries** with the investigator
+  class (IQ1-IQ4). `metrics.json` records a `query_set_id`; `compare` and
+  `reproduce` refuse QpH across different or unrecorded sets.
+- **AML customer-scoped rules alert on customers only.** W2, W5, W6, W7 and
+  W8 drop alerts whose entity is not a customer in `silver.entities`; the
+  graph rules (W1, W3, W4, W17) stay unscoped. Alert counts and false
+  positives drop; per-rule numbers are not comparable with earlier runs.
+- **A c360 continuous run over existing state refuses without
+  `--force-reset`.** It lists the non-empty tables, checkpoints and raw
+  prefixes it would delete (LB-142).
 
 ### Added
+- **TM operations layer for AML (GOALS P10 stages 1, 6-9).** After
+  detection, `tm_operations.py` writes `tm_reconciliation`,
+  `scenario_coverage`, `alert_dispositions` and `cases` to gold, with
+  dispositions simulated from the datagen ground truth at a configured
+  analyst and investigator accuracy. Workflow invariants are logged per
+  cycle; a violated invariant fails the run, and a layer that could not run
+  is reported as `not_run` without touching detection scoring. Configured
+  under `architecture.workload.tm_operations`. The AML scorecard gains a
+  Transaction Monitoring Operations section.
+- **Storage settle wait before the post-maintenance round (LB-150).** In
+  batch mode a probe query runs every 60 s after maintenance until two
+  consecutive probes agree within 10% and neither is slower than the
+  pre-maintenance median by more than 10%, capped at 45 minutes.
+  `maintenance_value_pct` is null when the wait is capped or fails. The
+  wait is not a stage and is not counted in time to value. Configured
+  under `architecture.benchmark.maintenance_settle`.
+- **Performance regression gate.** `benchmarks/perf/` holds pinned configs
+  (c360 batch s10, c360 continuous s10, AML batch s1) and
+  `baselines.yaml`; `scripts/perf_gate.py` compares a run with its
+  baseline and refuses runs that are not like for like. The release gate
+  gains a `perf-baselines` check.
+- **Tracked AML fidelity gate.** One feature definition
+  (`spark/scripts/aml_features.py`) feeds a pre-registered reference model
+  on silver (cluster) and bronze (local), scored per (customer, UTC month);
+  the model's outputs are persisted with the report.
+- **AML datagen: monitored population and minimal KYC/CRR.** Half the
+  parties are customers of one reporting bank, accounts carry `home_fi`,
+  and customers carry tenure and a risk rating. Silver refuses NULL KYC on
+  a KYC-era corpus. `--cycle n` gives each multi-cycle run its own streams
+  and keys.
+- **AML rules that can detect their typologies.** New
+  `W17_layering_chain` (scored against `stack`) and a W2 per-beneficiary
+  alert kind; each rule is computed once and replayed instead of twice.
+- **DuckDB runs all eight AML analytical queries and the investigator
+  queries.** Auxiliary financial tables resolve to their layer's bucket,
+  timestamptz columns are cast to text before the fetch, and
+  `cardinality()` is rewritten to `len()`. Every executor now reports the
+  final exception of an engine error, not the first 200 characters of
+  stderr.
+- **Per-file coverage floors** on the scoring, metrics and detection code
+  (`scripts/check_coverage.py`), run in CI.
 - **LB-116: per-rule AML alert counts + errors surfaced into
   `metrics.json`.** ``JobMetrics`` gains ``alerts_by_rule: dict[str,
   int]`` and ``rule_errors: dict[str, str]`` fields. Populated from the
@@ -55,6 +113,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   review caught the earlier non-greedy slurp truncating error text).
 
 ### Fixed
+- **LB-146: Trino coordinator OOM-killed under load.** `-Xmx` equalled the
+  container memory limit, so heap plus native memory exceeded the cgroup
+  limit (exit 137). The coordinator and worker heaps are now 80% of the pod
+  memory limit; pod limits are unchanged.
+- **LB-148: hive-delta-spark-thrift failed 5 of 8 c360 queries.** Q2 and
+  Q7 (delta-spark `ClassCastException`, LB-034) are worked around with
+  `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta +
+  Hive, in the Thrift server and the Spark jobs; Q2 on Delta + Thrift is no
+  longer tolerated as a known failure. The Thrift pod limit is now heap +
+  max(10% of heap, 1 GiB). Delta + Hive + Thrift defaults to 8 cores / 16g
+  heap when unset (fitted down on small nodes); Iceberg keeps 2 / 4g.
+- **LB-147: W3/W17 path search failed at AML scale 10** after executor
+  loss (`CHECKPOINT_RDD_BLOCK_ID_NOT_FOUND`). Path levels are written as
+  Parquet under the gold bucket instead of local checkpoints, the step
+  frames persist to disk only, and the join is partitioned by edge count.
+  Alerts are identical to the previous code on the test graphs.
+- **LB-145: continuous freshness grew with wall clock** once a finite
+  corpus had drained. The trailing idle gold cycles of a drained run are
+  left out of freshness; any other idle cycle still counts as a stall.
+- **LB-144: silver overestimated c360 customers** (14.7M at scale 10 where
+  there are 1M). It now uses a Chao1 estimate over the sample.
+- **LB-141: maintenance value reported when compaction changed nothing.**
+  It is reported only when compaction changed the file count, and no
+  compaction ratio is recorded when the post file count is unknown.
+- **LB-149: destroy kept the namespace** when FlashBlade listed a finished
+  multipart upload and the abort raised `NoSuchUpload`; that is now
+  treated as done.
+- **c360 continuous writers are exactly-once** across a driver restart,
+  bronze-verify fails on columns silver or gold compute on, and Q6 recency
+  uses the data clock.
 - **LB-117 (P2): AML analytical query QpH unstable.** Three S1 iters
   saw QpH 6.6 / 0.0 / 8.2 -- the 0.0 was a spark-thrift OOM mid-benchmark
   on ``aggregate_typology_coverage.sql`` at the AML 16g target, and
