@@ -252,7 +252,10 @@ def main(argv=None) -> int:
         )
         report["secondary_lifetime"] = {
             "gated": False,
-            **{k: sec.get(k) for k in ("unit", "verdict", "n_scored_customers", "typologies")},
+            **{
+                k: sec.get(k)
+                for k in ("unit", "verdict", "n_scored_customers", "n_scored_units", "typologies")
+            },
         }
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
     seed_ok = seed_check["matched_share"] == 1

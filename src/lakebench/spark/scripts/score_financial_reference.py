@@ -143,16 +143,20 @@ def _compute_leakage_bands(spark: SparkSession, silver_txns_name: str, manifest)
 
 
 def _capped_pull(cap_rows: int, sampling: dict):
-    """A gate-frame builder for aml_features.build_gate_inputs that keeps
-    every customer with a label row for an in-scope typology and a seeded
-    sample of the other customers when the frame would exceed ``cap_rows``
-    units (driver memory). Customers are sampled whole, so a customer's months
-    stay together for the grouped CV; each sampled unit carries weight
-    1 / fraction, which the gate uses in fitting and in AP. ``sampling`` is
-    filled with the counts per unit kind for provenance."""
+    """A gate-frame builder for aml_features.build_gate_inputs that bounds
+    the driver pull at about ``cap_rows`` units.
+
+    Every positive unit (a unit labelled positive for any in-scope typology)
+    is kept with weight 1. The other units are kept by sampling customers
+    whole, at the fraction that fills the rest of the cap, each with weight
+    1 / fraction, which the gate uses in fitting and in AP. Sampling by
+    customer keeps a customer's months together for the grouped CV; keeping
+    only positive units (not every unit of a labelled customer) keeps the
+    fraction positive at scale. ``sampling`` gets the counts for provenance."""
     import aml_features as af
 
     def pull(features, labels, typologies, monthly):
+        unit = ["key", "month"] if monthly else ["key"]
         cust = features.filter(col("is_customer")).cache()
         n = cust.count()
         name = "monthly" if monthly else "lifetime"
@@ -160,17 +164,23 @@ def _capped_pull(cap_rows: int, sampling: dict):
             pdf = af.default_pull(cust, labels, typologies, monthly)
             pdf["weight"] = 1.0
             sampling[name] = {"n_units": n, "n_pulled": len(pdf), "negative_fraction": 1.0}
+            cust.unpersist()
             return pdf
-        pos_keys = labels.filter(col("typology_type").isin(*typologies)).select("key").distinct()
-        pos = cust.join(pos_keys, "key", "left_semi")
-        neg = cust.join(pos_keys, "key", "left_anti")
+        lab = labels.filter(col("typology_type").isin(*typologies))
+        if "kind" in lab.columns:
+            lab = lab.filter(col("kind") == "positive")
+        pos_units = lab.select(*unit).distinct()
+        pos = cust.join(pos_units, unit, "left_semi")
+        rest = cust.join(pos_units, unit, "left_anti")
         n_pos = pos.count()
-        frac = min(1.0, max(0.0, (cap_rows - n_pos) / max(1, n - n_pos)))
-        neg_keys = neg.select("key").distinct().sample(withReplacement=False, fraction=frac, seed=0)
-        kept = pos.withColumn("weight", lit(1.0)).unionByName(
-            neg.join(neg_keys, "key", "left_semi").withColumn(
-                "weight", lit(1.0 / frac) if frac > 0 else lit(0.0)
+        if n_pos >= cap_rows:
+            raise ValueError(
+                f"{n_pos} positive units exceed the driver cap {cap_rows}; raise --driver-sample-cap"
             )
+        frac = (cap_rows - n_pos) / max(1, n - n_pos)
+        keys = rest.select("key").distinct().sample(withReplacement=False, fraction=frac, seed=0)
+        kept = pos.withColumn("weight", lit(1.0)).unionByName(
+            rest.join(keys, "key", "left_semi").withColumn("weight", lit(1.0 / frac))
         )
         pdf = af.default_pull(kept, labels, typologies, monthly)
         cust.unpersist()
@@ -201,7 +211,7 @@ def _metric_rows(report: dict) -> list[dict]:
         "precision": None,
         "recall": None,
         "f1": None,
-        "support": report.get("n_scored_customers"),
+        "support": report.get("n_scored_units"),
         "r_precision": None,
         "ap": None,
         "ap_ci_lo": None,
@@ -254,7 +264,13 @@ def _write_metrics(spark, output_prefix: str, rows: list[dict]) -> None:
 
 
 def run_fidelity_gate(
-    spark, manifest, *, cap_rows: int, provenance: dict, silver_txns: str | None = None
+    spark,
+    manifest,
+    *,
+    cap_rows: int,
+    provenance: dict,
+    silver_txns: str | None = None,
+    score: bool = True,
 ) -> dict:
     """Build silver features and evaluate the gate. Returns the report dict."""
     import aml_features as af
@@ -332,15 +348,18 @@ def run_fidelity_gate(
             "sampling": sampling,
             "label_route_agreement_customers": agreement,
         },
+        score=score,
     )
     report["unit_detail"] = inputs["unit"]
     if "secondary_lifetime" in inputs:
-        # Ungated: the lifetime unit kept for comparison, never in passes.
-        sec = evaluate_gate(inputs["secondary_lifetime"], lifetime_prereg(prereg))
-        report["secondary_lifetime"] = {
-            "gated": False,
-            **{k: sec.get(k) for k in ("unit", "verdict", "n_scored_customers", "typologies")},
-        }
+        # Ungated: the lifetime unit kept for comparison, never in passes. Its
+        # failure must not void the gated result.
+        try:
+            sec = evaluate_gate(inputs["secondary_lifetime"], lifetime_prereg(prereg), score=score)
+            keys = ("unit", "verdict", "n_scored_customers", "n_scored_units", "typologies")
+            report["secondary_lifetime"] = {"gated": False, **{k: sec.get(k) for k in keys}}
+        except Exception as e:  # noqa: BLE001
+            report["secondary_lifetime"] = {"gated": False, "verdict": "error", "note": str(e)}
     seed_ok = seed_check["matched_share"] == 1
     if seed_check["claimed_seed"] is not None and not seed_ok:
         report["corpus_role"] = "unverified"
@@ -371,8 +390,15 @@ def main() -> None:
         "--driver-sample-cap",
         type=int,
         default=1_000_000,
-        help="Maximum customers pulled to the driver. Above it every labelled "
-        "customer is kept and the rest are sampled with inverse-fraction weights.",
+        help="Maximum scoring units (customers, or customer-months) pulled to the driver. "
+        "Above it every positive unit is kept and the other customers are sampled whole "
+        "with inverse-fraction weights.",
+    )
+    parser.add_argument(
+        "--counts-only",
+        action="store_true",
+        help="units, labels and counts only: no model and no AP anywhere (smoke tests of a "
+        "unit before its first registered gate run)",
     )
     parser.add_argument(
         "--silver-txns",
@@ -436,6 +462,7 @@ def main() -> None:
             cap_rows=args.driver_sample_cap,
             provenance=provenance,
             silver_txns=args.silver_txns,
+            score=not args.counts_only,
         )
     except Exception as e:  # noqa: BLE001 -- the band gate has shipped; record why this did not
         log(f"WARN: fidelity gate failed: {e}")
@@ -460,7 +487,9 @@ def main() -> None:
             "The band leakage gate still ran."
         )
     spark.stop()
-    if report.get("verdict") in ("error", "empty_frame"):
+    if report.get("verdict") in ("error", "empty_frame") or (
+        args.counts_only and report.get("verdict") != "counts_only"
+    ):
         # Outputs are written, but a crashed gate, or one that scored no
         # customer (a broken key or id map looks like this), must not read as
         # a pass (R6). no_sklearn stays a soft skip: the band gate still ran.
