@@ -80,10 +80,14 @@ def _get_core_v1(context: str | None = None):
 
 
 def _load_cfg(config_file: Path | None, file_option: Path | None):
-    """Load a lakebench config with the same error path other commands use."""
+    """Load a lakebench config with the same error path other commands use.
+
+    Admin commands repair or reclaim existing deployments, so they skip the
+    derived-name length check (LB-153) that deploy relies on.
+    """
     path = resolve_config_path(config_file, file_option)
     try:
-        return load_config(path)
+        return load_config(path, allow_long_names=True)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1) from e

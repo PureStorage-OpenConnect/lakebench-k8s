@@ -189,7 +189,9 @@ def destroy(
 
     # Load configuration
     try:
-        cfg = load_config(config_file)
+        # A namespace too long to finish deploying (LB-153) still has to be
+        # destroyable, so the derived-name length check is skipped here.
+        cfg = load_config(config_file, allow_long_names=True)
     except ConfigFileNotFoundError as e:
         print_error(f"File not found: {e}")
         raise typer.Exit(1)  # noqa: B904

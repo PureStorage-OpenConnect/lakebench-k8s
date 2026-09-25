@@ -11,7 +11,14 @@ import warnings
 from enum import Enum
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1754,6 +1761,105 @@ class SparkConfOverrides(ConfigModel):
 # =============================================================================
 
 
+# Kubernetes caps namespaces, label values and pod volume names at 63
+# characters (a DNS-1123 label). S3 bucket names are at most 63 characters
+# (the 3-character minimum is left to the S3 client, as unit tests use
+# one-letter placeholders).
+K8S_LABEL_MAX = 63
+S3_BUCKET_MAX = 63
+
+# Names lakebench or a Stackable operator derives from the namespace, as
+# (template, when it is rendered, what the object is). The templates are the
+# literal forms in templates/secrets.yaml.j2, templates/hive/stackable-*.yaml.j2
+# and stackable-operator 0.94.0, the version SDP 25.7.0's hive-operator pins:
+#   crates/stackable-operator/src/crd/s3/connection/v1alpha1_impl.rs
+#     volume_name = format!("{secret_class}-s3-credentials")
+#   crates/stackable-operator/src/commons/tls_verification.rs
+#     volume_name = format!("{secret_class}-ca-cert")
+# The metastore pod volume is the tightest: 40 + len(namespace) <= 63, so a
+# Hive recipe accepts a namespace of at most 23 characters. Past that the
+# metastore pod is rejected, no pod is ever created, the hive-operator logs
+# "metastore listener has no adress", and deploy times out after 600 s
+# (LB-153).
+_S3_CRED_CLASS = "lakebench-s3-credentials-{ns}"
+_S3_CA_CLASS = "lakebench-s3-ca-cert-{ns}"
+_DERIVED_NAMES: tuple[tuple[str, str, str], ...] = (
+    (
+        _S3_CRED_CLASS,
+        "all",
+        "label secrets.stackable.tech/class on Secret lakebench-s3-credentials",
+    ),
+    (
+        _S3_CA_CLASS,
+        "ca_cert",
+        "label secrets.stackable.tech/class on Secret lakebench-ca-certificate",
+    ),
+    (
+        _S3_CRED_CLASS + "-s3-credentials",
+        "hive",
+        "Hive metastore pod volume for the Stackable S3 credentials SecretClass",
+    ),
+    (
+        _S3_CA_CLASS + "-ca-cert",
+        "hive+ca_cert",
+        "Hive metastore pod volume for the Stackable S3 CA SecretClass",
+    ),
+)
+
+
+def _applicable_derived_names(cfg: LakebenchConfig) -> list[tuple[str, str]]:
+    """(template, description) for every derived name this config renders."""
+    is_hive = cfg.architecture.catalog.type == CatalogType.HIVE
+    has_ca = bool(cfg.platform.storage.s3.ca_cert)
+    applies = {
+        "all": True,
+        "ca_cert": has_ca,
+        "hive": is_hive,
+        "hive+ca_cert": is_hive and has_ca,
+    }
+    return [(t, what) for t, when, what in _DERIVED_NAMES if applies[when]]
+
+
+def max_namespace_length(cfg: LakebenchConfig) -> int:
+    """Longest namespace this config's catalog and S3 settings accept."""
+    limit = K8S_LABEL_MAX
+    for template, _ in _applicable_derived_names(cfg):
+        limit = min(limit, K8S_LABEL_MAX - len(template.format(ns="")))
+    return limit
+
+
+def derived_name_violations(cfg: LakebenchConfig) -> list[str]:
+    """Return one message per derived name that would exceed its limit.
+
+    Checks the namespace itself, every name in ``_DERIVED_NAMES`` the config
+    renders, and the three bucket names.
+    """
+    ns = cfg.get_namespace()
+    ns_src = "platform.kubernetes.namespace" if cfg.platform.kubernetes.namespace else "name"
+    problems: list[str] = []
+    if len(ns) > K8S_LABEL_MAX:
+        problems.append(
+            f"namespace {ns!r} (from {ns_src}) is {len(ns)} characters; "
+            f"Kubernetes allows at most {K8S_LABEL_MAX}"
+        )
+    for template, what in _applicable_derived_names(cfg):
+        derived = template.format(ns=ns)
+        if len(derived) > K8S_LABEL_MAX:
+            problems.append(
+                f"{what} would be {derived!r} ({len(derived)} characters, limit "
+                f"{K8S_LABEL_MAX}); shorten the namespace (from {ns_src}) to at "
+                f"most {max_namespace_length(cfg)} characters (it is {len(ns)})"
+            )
+    for layer in ("bronze", "silver", "gold"):
+        bucket = getattr(cfg.platform.storage.s3.buckets, layer)
+        if len(bucket) > S3_BUCKET_MAX:
+            problems.append(
+                f"platform.storage.s3.buckets.{layer} {bucket!r} is {len(bucket)} "
+                f"characters; S3 allows at most {S3_BUCKET_MAX}"
+            )
+    return problems
+
+
 class LakebenchConfig(ConfigModel):
     """Root configuration for Lakebench.
 
@@ -1812,6 +1918,27 @@ class LakebenchConfig(ConfigModel):
         """Validate required fields are present."""
         if not self.name:
             raise ValueError("'name' is required")
+        return self
+
+    @model_validator(mode="after")
+    def validate_derived_name_lengths(self, info: ValidationInfo) -> LakebenchConfig:
+        """Refuse a namespace or bucket name that breaks a name derived from it.
+
+        See ``derived_name_violations`` for the objects and limits checked.
+        Without this, a namespace a few characters too long deploys up to
+        the Hive metastore and then hangs until the readiness timeout
+        (LB-153). Teardown and diagnostic commands load with
+        ``allow_long_names`` in the validation context (see ``load_config``)
+        so a deployment that failed this way can still be torn down.
+        """
+        if info.context and info.context.get("allow_long_names"):
+            return self
+        problems = derived_name_violations(self)
+        if problems:
+            raise ValueError(
+                "deployment name/namespace or bucket name too long for a derived "
+                "Kubernetes or S3 name:\n  - " + "\n  - ".join(problems)
+            )
         return self
 
     @model_validator(mode="after")
