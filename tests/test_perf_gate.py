@@ -11,6 +11,7 @@ import importlib.util
 import json
 import shutil
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -78,13 +79,27 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
     stages = [
         {
             "stage_name": name,
-            "stage_type": "batch",
+            "stage_type": "datagen" if name == "datagen" else "batch",
             "elapsed_seconds": secs,
             "success": True,
             "executor_count": executors.get(name, 0),
         }
         for name, secs in stage_s.items()
     ]
+    if over.get("timed", True):
+        # Pipeline stages run back to back from 10:00 and the last one ends
+        # at 10:00 + ttv, as the collector records them. The datagen stage
+        # carries no timestamps (collector.build_pipeline_benchmark).
+        t0 = datetime(2026, 9, 24, 10, 0, 0)
+        cursor = t0
+        timed = [st for st in stages if st["stage_name"] != "datagen"]
+        for st in timed:
+            st["start_time"] = cursor.isoformat()
+            cursor += timedelta(seconds=st["elapsed_seconds"])
+            st["end_time"] = cursor.isoformat()
+        if timed:
+            last_end = max(cursor, t0 + timedelta(seconds=ttv))
+            timed[-1]["end_time"] = last_end.isoformat()
     pods = over.get("pods", 4)
     return {
         "run_id": run_id,
@@ -369,37 +384,24 @@ def test_low_scale_ratio_refused(env, ratio):
     assert any("scale_ratio" in r for r in c.reasons)
 
 
-def test_maintenance_value_none_is_not_measured(env):
-    snap = env.snaps["c360-batch-s10"]
-    _record(
-        env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa", maintenance_value_pct=8.0)
-    )
-    c = _compare(
-        env,
-        "c360-batch-s10",
-        _batch_run(snap, "20260924-110000-bbbbbb", maintenance_value_pct=None),
-    )
-    assert c.verdict == pg.PASS
-    row = _row(c, "maintenance_value_pct")
-    assert row.status == "excluded: not measured" and row.actual is None
+def test_maintenance_value_is_not_gated(env):
+    """A better write layout raises pre-maintenance QpH and lowers the value.
 
-
-def test_maintenance_value_compared_in_points(env):
+    maintenance_value_pct is derived from pre_compaction_qph and composite_qph,
+    both gated on their own; gating it too flagged the improvement as a
+    regression (review probe A).
+    """
     snap = env.snaps["c360-batch-s10"]
-    _record(
-        env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa", maintenance_value_pct=8.0)
-    )
-    # 8 -> 1 is -87% relative but only 7 points; inside the 10-point band.
-    ok = _compare(
-        env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", maintenance_value_pct=1.0)
-    )
-    assert _row(ok, "maintenance_value_pct").status == "ok"
-    bad = _compare(
-        env,
-        "c360-batch-s10",
-        _batch_run(snap, "20260924-120000-cccccc", maintenance_value_pct=-5.0),
-    )
-    assert _row(bad, "maintenance_value_pct").status == "regression"
+    base = _batch_run(snap, "20260924-100000-aaaaaa", maintenance_value_pct=50.0)
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    store = _record(env, "c360-batch-s10", base)
+    assert "maintenance_value_pct" not in store.baselines["c360-batch-s10"].metrics
+    new = _batch_run(snap, "20260925-100000-bbbbbb", maintenance_value_pct=12.5)
+    new["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 400.0
+    c = _compare(env, "c360-batch-s10", new)
+    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    assert _row(c, "pre_compaction_qph").status == "improved"
+    assert all(r.metric != "maintenance_value_pct" for r in c.rows)
 
 
 def test_failed_query_is_missing_and_fails(env):
@@ -737,7 +739,14 @@ def test_continuous_run_with_no_data_cannot_be_recorded(env):
         pg.record_baseline(store, "c360-continuous-s10", run, "abc")
 
 
-def test_continuous_executor_mismatch_refused(env):
+def test_continuous_stage_executor_count_is_not_checked(env):
+    """Known gap: continuous stages carry no realised executor count.
+
+    build_pipeline_benchmark fills a continuous stage's executor_count from
+    the snapshot's executor_overrides, the value the check would compare it
+    with, so a check could never fire on a real run. The gate makes no such
+    claim; a hand-edited count does not change the verdict.
+    """
     snap = env.snaps["c360-continuous-s10"]
     _record(
         env,
@@ -746,8 +755,8 @@ def test_continuous_executor_mismatch_refused(env):
     )
     run = _cont_run(snap, "20260924-110000-bbbbbb", rps=5e4, drained=False, executors=(2, 8, 2))
     c = _compare(env, "c360-continuous-s10", run)
-    assert c.verdict == pg.REFUSED
-    assert any("silver ran 8 executors, pinned 4" in r for r in c.reasons)
+    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    assert not any("executors" in r for r in c.reasons)
 
 
 def test_scale_ratio_above_band_refused(env):
@@ -781,9 +790,79 @@ def test_run_without_datagen_stage_compares_pipeline_only(env):
     del run["datagen_fleet"]
     c = _compare(env, "c360-batch-s10", run)
     assert c.verdict == pg.PASS, pg.format_comparison(c)
-    for metric in ("datagen_seconds", "datagen_mbps_per_pod", "time_to_value_seconds"):
+    for metric in ("datagen_seconds", "datagen_mbps_per_pod"):
         assert _row(c, metric).status.startswith("excluded"), metric
-    assert _row(c, "silver_seconds").status == "ok"
+    # Time to value, GB/s and GB/core-hr describe the pipeline stages only,
+    # so they are still compared.
+    for metric in (
+        "time_to_value_seconds",
+        "pipeline_throughput_gb_per_second",
+        "compute_efficiency_gb_per_core_hour",
+        "silver_seconds",
+    ):
+        assert _row(c, metric).status == "ok", metric
+
+
+def test_ttv_regression_caught_without_datagen_stage(env):
+    """Review probe F: datagen on one side only must not hide a 40% TTV loss."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    run = _batch_run(
+        snap,
+        "20260926-120000-dddddd",
+        ttv=840.0,
+        gbps=0.2 * 600 / 840,
+        stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0},
+    )
+    c = _compare(env, "c360-batch-s10", run)
+    assert c.verdict == pg.REGRESSION, pg.format_comparison(c)
+    assert _row(c, "time_to_value_seconds").status == "regression"
+    assert _row(c, "time_to_value_seconds").actual == pytest.approx(840.0)
+    assert _row(c, "pipeline_throughput_gb_per_second").status == "regression"
+
+
+def test_ttv_recomputed_without_datagen_stage_timestamps(env):
+    """A datagen stage with timestamps (older layout) does not stretch TTV."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    run = _batch_run(snap, "20260924-110000-bbbbbb")
+    dg = run["pipeline_benchmark"]["stages"][0]
+    assert dg["stage_name"] == "datagen"
+    dg["start_time"] = "2026-09-24T08:00:00"
+    dg["end_time"] = "2026-09-24T08:02:00"
+    run["pipeline_benchmark"]["scorecard"]["time_to_value_seconds"] = 7800.0
+    c = _compare(env, "c360-batch-s10", run)
+    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    assert _row(c, "time_to_value_seconds").actual == pytest.approx(600.0)
+
+
+def test_untimed_stages_with_datagen_on_one_side_refused(env):
+    """Without stage timestamps TTV cannot be separated from datagen: refuse."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa", timed=False))
+    same = _batch_run(snap, "20260924-110000-bbbbbb", timed=False, ttv=840.0)
+    c = _compare(env, "c360-batch-s10", same)
+    assert c.verdict == pg.REGRESSION
+    assert _row(c, "time_to_value_seconds").status == "regression"
+    one_side = _batch_run(
+        snap,
+        "20260924-120000-cccccc",
+        timed=False,
+        stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0},
+    )
+    del one_side["datagen_fleet"]
+    c = _compare(env, "c360-batch-s10", one_side)
+    assert c.verdict == pg.REFUSED
+    assert any("cannot be separated from the datagen stage" in r for r in c.reasons)
+
+
+def test_ttv_basis_mismatch_refused(env):
+    snap = env.snaps["c360-batch-s10"]
+    store = _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    assert store.baselines["c360-batch-s10"].ttv_basis == pg.TTV_FROM_STAGES
+    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", timed=False))
+    assert c.verdict == pg.REFUSED
+    assert any("time to value taken from the scorecard" in r for r in c.reasons)
 
 
 def test_failed_benchmark_is_a_regression_not_a_refusal(env):
@@ -822,22 +901,93 @@ def test_release_check_rejects_a_run_older_than_the_baseline(env):
 
 
 def test_stale_datagen_metrics_excluded_not_attributed(env):
-    from datetime import datetime, timedelta, timezone
-
     snap = env.snaps["c360-batch-s10"]
     _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
-    start_utc = datetime.fromisoformat("2026-09-24T10:00:00").astimezone().astimezone(timezone.utc)
     stale = _batch_run(snap, "20260924-110000-bbbbbb", dg_mbps=500.0)
-    stale["datagen_fleet"]["written_at"] = (start_utc - timedelta(hours=30)).isoformat()
+    stale["datagen_fleet"]["written_at"] = "2026-09-22T10:00:00+00:00"
     c = _compare(env, "c360-batch-s10", stale)
     # A much slower datagen from an earlier generate is not this run's number.
     assert c.verdict == pg.PASS, pg.format_comparison(c)
     assert "earlier generate" in _row(c, "datagen_mbps_per_pod").status
+    for metric in ("time_to_value_seconds", "compute_efficiency_gb_per_core_hour"):
+        assert _row(c, metric).status == "ok", metric
     fresh = _batch_run(snap, "20260924-120000-cccccc", dg_mbps=500.0)
-    fresh["datagen_fleet"]["written_at"] = (start_utc - timedelta(minutes=5)).isoformat()
+    fresh["datagen_fleet"]["written_at"] = "2026-09-24T09:55:00+00:00"
     c = _compare(env, "c360-batch-s10", fresh)
     assert c.verdict == pg.REGRESSION
     assert _row(c, "datagen_mbps_per_pod").status == "regression"
+
+
+def test_stale_datagen_does_not_hide_ttv_regression(env):
+    """Review probe E2: a stale sidecar must not drop time to value."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    run = _batch_run(snap, "20260926-110000-cccccc", ttv=840.0)
+    run["start_time"] = "2026-09-26T11:00:00"
+    run["datagen_fleet"]["written_at"] = "2026-09-24T09:00:00+00:00"
+    c = _compare(env, "c360-batch-s10", run)
+    assert c.verdict == pg.REGRESSION, pg.format_comparison(c)
+    assert _row(c, "time_to_value_seconds").status == "regression"
+    assert "earlier generate" in _row(c, "datagen_seconds").status
+
+
+@pytest.mark.parametrize("tz", ["UTC", "Pacific/Kiritimati", "Etc/GMT+12", "Asia/Kolkata"])
+def test_datagen_age_does_not_depend_on_gate_host_zone(env, tz, monkeypatch):
+    import time
+
+    snap = env.snaps["c360-batch-s10"]
+    run = pg.load_run(env.write_run(_batch_run(snap, "20260924-110000-bbbbbb")))
+    monkeypatch.setenv("TZ", tz)
+    time.tzset()
+    try:
+        # Naive start 2026-09-24T10:00: its UTC instant lies somewhere in
+        # 2026-09-23T20:00Z .. 2026-09-24T22:00Z depending on the run host.
+        run.raw["datagen_fleet"]["written_at"] = "2026-09-23T06:00:00+00:00"  # 28h naive
+        assert pg._datagen_stale(run) is None  # 14h in the +14 zone: not provably stale
+        run.raw["datagen_fleet"]["written_at"] = "2026-09-22T19:00:00+00:00"  # 39h naive
+        assert pg._datagen_stale(run)  # at least 25h in every zone
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+
+
+def test_record_refuses_untimed_run_with_stale_datagen(env):
+    snap = env.snaps["c360-batch-s10"]
+    data = _batch_run(snap, "20260924-100000-aaaaaa", timed=False)
+    data["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
+    run = pg.load_run(env.write_run(data))
+    with pytest.raises(pg.PerfGateError, match="stale datagen"):
+        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
+
+
+def test_explicit_run_found_in_second_runs_dir(env, tmp_path):
+    """Review probe C: --perf-run must search uat/perf, not only the first dir."""
+    _accept_both_c360(env)
+    uat = tmp_path / "uat-perf"
+    d = uat / "run-20260926-100000-uuuuuu"
+    d.mkdir(parents=True)
+    data = _batch_run(env.snaps["c360-batch-s10"], "20260926-100000-uuuuuu")
+    (d / "metrics.json").write_text(json.dumps(data))
+    passed, lines = pg.release_check(
+        env.store(), [env.runs, uat], {"c360-batch-s10": "20260926-100000-uuuuuu"}
+    )
+    line = next(ln for ln in lines if "c360-batch-s10" in ln)
+    assert line.startswith("ok"), lines
+    assert "20260926-100000-uuuuuu" in line
+
+
+def test_run_id_with_conflicting_copies_is_refused(env, tmp_path):
+    data = _batch_run(env.snaps["c360-batch-s10"], "20260926-100000-uuuuuu")
+    env.write_run(data)
+    other = tmp_path / "other"
+    d = other / "run-20260926-100000-uuuuuu"
+    d.mkdir(parents=True)
+    changed = copy.deepcopy(data)
+    changed["pipeline_benchmark"]["scorecard"]["composite_qph"] = 1.0
+    (d / "metrics.json").write_text(json.dumps(changed))
+    with pytest.raises(pg.PerfGateError, match="different contents"):
+        pg.load_run("20260926-100000-uuuuuu", [env.runs, other])
+    assert pg.load_run("20260926-100000-uuuuuu", [other]).scores["composite_qph"] == 1.0
 
 
 def test_recorded_config_file_sha_must_match(env):
@@ -865,11 +1015,3 @@ def test_pre_compaction_qph_regression_detected(env):
     c = _compare(env, "c360-batch-s10", worse)
     assert c.verdict == pg.REGRESSION
     assert _row(c, "pre_compaction_qph").status == "regression"
-
-
-def test_relative_tolerance_on_signed_metric_rejected(tmp_path):
-    p = tmp_path / "baselines.yaml"
-    entry = {"config": "x.yaml", "tolerances": {"maintenance_value_pct": {"pct": 10}}}
-    p.write_text(yaml.safe_dump({"schema_version": 1, "baselines": {"x": entry}}))
-    with pytest.raises(pg.PerfGateError, match="signed percentage"):
-        pg.load_store(p)

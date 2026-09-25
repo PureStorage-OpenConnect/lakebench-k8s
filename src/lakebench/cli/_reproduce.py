@@ -91,7 +91,6 @@ _METRIC_TABLE: dict[str, tuple[str, str]] = {
     # _extract_expected_numbers does not emit them, so reproduction packages
     # are unchanged.
     "datagen_mbps_per_pod": ("performance", "higher"),
-    "maintenance_value_pct": ("performance", "higher"),
     "pre_compaction_qph": ("performance", "higher"),
 }
 
