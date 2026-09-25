@@ -12,7 +12,7 @@ from typing import Any
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
 from lakebench.config import LakebenchConfig
-from lakebench.config.schema import CatalogType, require_polaris_client_secret
+from lakebench.config.schema import CatalogType, QueryEngineType, require_polaris_client_secret
 from lakebench.k8s import K8sClient
 
 logger = logging.getLogger(__name__)
@@ -307,6 +307,21 @@ class DeploymentEngine:
         return ".".join(tag.split(".")[:2])
 
     @staticmethod
+    def _trino_heap(cfg: Any, limit: str) -> str:
+        """Trino -Xmx for a pod memory limit (LB-146).
+
+        Strict only when Trino is the active query engine: an unparseable
+        Trino memory on a spark-thrift or duckdb deployment must not stop
+        that deployment's destroy, which also builds this context.
+        """
+        if cfg.architecture.query_engine.type == QueryEngineType.TRINO:
+            return jvm_heap_for_limit(limit)
+        try:
+            return jvm_heap_for_limit(limit)
+        except ValueError:
+            return ""
+
+    @staticmethod
     def _spark_mem_to_k8s(spark_mem: str) -> str:
         """Convert Spark memory format (e.g. ``4g``) to K8s format (e.g. ``4Gi``)."""
         s = spark_mem.strip().lower()
@@ -464,11 +479,11 @@ class DeploymentEngine:
             "trino_worker_cpu": cfg.architecture.query_engine.trino.worker.cpu,
             "trino_worker_memory": cfg.architecture.query_engine.trino.worker.memory,
             # LB-146: heap is a fraction of the pod limit, never equal to it.
-            "trino_coordinator_heap": jvm_heap_for_limit(
-                cfg.architecture.query_engine.trino.coordinator.memory
+            "trino_coordinator_heap": self._trino_heap(
+                cfg, cfg.architecture.query_engine.trino.coordinator.memory
             ),
-            "trino_worker_heap": jvm_heap_for_limit(
-                cfg.architecture.query_engine.trino.worker.memory
+            "trino_worker_heap": self._trino_heap(
+                cfg, cfg.architecture.query_engine.trino.worker.memory
             ),
             "trino_catalog_name": cfg.architecture.query_engine.trino.catalog_name,
             # Trino worker storage (StatefulSet PVCs + spill)
@@ -493,11 +508,6 @@ class DeploymentEngine:
             "spark_thrift_memory": cfg.architecture.query_engine.spark_thrift.memory,
             "spark_thrift_memory_k8s": self._spark_mem_to_k8s(
                 cfg.architecture.query_engine.spark_thrift.memory
-            ),
-            # LB-146: the Thrift server is a client-mode driver inside this
-            # pod, so spark.driver.memory is its -Xmx. Keep it under the limit.
-            "spark_thrift_heap": jvm_heap_for_limit(
-                self._spark_mem_to_k8s(cfg.architecture.query_engine.spark_thrift.memory)
             ),
             "spark_thrift_catalog_name": cfg.architecture.query_engine.spark_thrift.catalog_name,
             "query_engine_type": cfg.architecture.query_engine.type.value,
