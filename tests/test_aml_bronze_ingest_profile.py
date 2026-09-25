@@ -22,11 +22,13 @@ from lakebench.modules.pipeline_engines.spark.job import (
 )
 from lakebench.spark.job import JobType, SparkJobManager
 
-# Measured on the live run: 50 files per 109.7 s on 4 cores.
-_FILES_PER_CORE_S = 50 / 109.7 / 4
+# Measured on the live run: 50 files per 109.7 s on 4 cores, one file per
+# core per wave.
+_WAVE_S = 109.7 / (50 / 4)
+_BATCH_FILES = 50
+_TRIGGER_S = 30
 _CORPUS_FILES_S10 = 1371
 _WINDOW_S = 1800
-_TRICKLE_FILES_PER_S = 50 / 30
 
 
 def _config(schema: str, scale: float) -> LakebenchConfig:
@@ -50,13 +52,14 @@ def _config(schema: str, scale: float) -> LakebenchConfig:
 
 
 def test_financial_bronze_ingest_is_sized_to_drain_scale_10():
+    import math
+
     p = get_job_profile("bronze-ingest", "financial")
-    execs = get_executor_count("bronze-ingest", 10, "financial")
-    cores = execs * p["executor_cores"]
-    rate = cores * _FILES_PER_CORE_S
-    # Bronze out-runs the trickle ceiling, so the trigger rate bounds intake.
-    assert rate >= _TRICKLE_FILES_PER_S
-    drain_s = _CORPUS_FILES_S10 / min(rate, _TRICKLE_FILES_PER_S)
+    cores = get_executor_count("bronze-ingest", 10, "financial") * p["executor_cores"]
+    batch_s = math.ceil(_BATCH_FILES / cores) * _WAVE_S
+    # A batch fits inside the trigger, so the trigger rate bounds intake.
+    assert batch_s < _TRIGGER_S
+    drain_s = _CORPUS_FILES_S10 / _BATCH_FILES * max(batch_s, _TRIGGER_S)
     assert drain_s <= 0.6 * _WINDOW_S
 
 
@@ -66,8 +69,8 @@ def test_c360_bronze_ingest_is_unchanged():
 
 
 def test_override_scales_with_scale_and_respects_the_cap():
-    assert get_executor_count("bronze-ingest", 10, "financial") == 4
-    assert get_executor_count("bronze-ingest", 100, "financial") == 7
+    assert get_executor_count("bronze-ingest", 10, "financial") == 5
+    assert get_executor_count("bronze-ingest", 100, "financial") == 8
     assert get_executor_count("bronze-ingest", 10_000, "financial") <= _MAX_EXECUTORS_SAFE
 
 
@@ -76,8 +79,8 @@ def test_peak_requirements_count_the_override():
     aml = compute_peak_requirements(10, "sustained", "financial")
     c360 = compute_peak_requirements(10, "sustained", "customer360")
     ingest = next(r for r in aml.per_job if r.job_type == "bronze-ingest")
-    assert ingest.executors == 4
-    assert ingest.cpu_cores == 4 * 4 + 2
+    assert ingest.executors == 5
+    assert ingest.cpu_cores == 5 * 4 + 2
     assert aml.cpu_cores - c360.cpu_cores == ingest.cpu_cores - (2 * 2 + 2)
 
 
@@ -85,7 +88,7 @@ def test_concurrent_budget_does_not_cap_the_override_back_to_base():
     """The budget used the base profile, so on any cluster with known
     capacity it capped AML bronze-ingest to the c360 count."""
     budget = _streaming_concurrent_budget(_config("financial", 10), 434_000)
-    assert budget[JobType.BRONZE_INGEST] == 4
+    assert budget[JobType.BRONZE_INGEST] == 5
 
 
 def test_manifest_deploys_the_override():
@@ -99,5 +102,5 @@ def test_manifest_deploys_the_override():
     )
     manifest = SparkJobManager(_config("financial", 10), k8s)._build_manifest(JobType.BRONZE_INGEST)
     ex = manifest["spec"]["executor"]
-    assert ex["instances"] == 4
+    assert ex["instances"] == 5
     assert ex["cores"] == 4

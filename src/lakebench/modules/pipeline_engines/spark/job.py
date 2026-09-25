@@ -221,12 +221,15 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
         # (scale 10, 1800 s window) with the base 2 executors x 2 cores: every
         # micro-batch took the full 50 files (maxFilesPerTrigger) and ran
         # 109.7 s against a 30 s trigger, so bronze was busy 97.5% of the
-        # window and moved 0.456 files/s (0.114 files/s per core). The scale-10
-        # corpus is 1,371 files: 3,000 s to drain, ingest_ratio 0.58. The
-        # trickle ceiling is 50 files / 30 s = 1.67 files/s, 823 s to drain.
-        # 4 executors x 4 cores = 16 cores give ~1.8 files/s at the measured
-        # per-core rate, just above that ceiling, so the trigger rate rather
-        # than bronze bounds intake and the corpus drains in ~55% of the window.
+        # window and moved 0.456 files/s. The scale-10 corpus is 1,371 files:
+        # 3,000 s to drain, ingest_ratio 0.58. The trickle ceiling is 50 files
+        # / 30 s = 1.67 files/s, 823 s to drain.
+        # A batch's files run in waves of one file per core: 50 files on 4
+        # cores is 13 waves, 8.4 s each. 5 executors x 4 cores = 20 cores run
+        # a batch in 3 waves (~25 s), inside the 30 s trigger, so the trigger
+        # rate rather than bronze bounds intake and the corpus drains in ~823 s
+        # (46% of the window). 16 cores would need 4 waves (~34 s) and fall
+        # just short of the trigger.
         # Memory follows the cores: 8g heap (a streaming read-and-append, no
         # aggregation) plus 8g overhead for the S3A upload and Parquet writer
         # buffers of 4 concurrent tasks (the bronze-verify note above: that is
@@ -237,7 +240,7 @@ _SCHEMA_PROFILE_OVERRIDES: dict[str, dict[str, dict[str, Any]]] = {
             "executor_cores": 4,
             "executor_memory": "8g",
             "executor_memory_overhead": "8g",
-            "base_executors": 4,
+            "base_executors": 5,
             "executors_per_100_scale": 4,
             "max_executors": 20,
         },

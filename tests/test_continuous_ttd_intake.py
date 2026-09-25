@@ -289,3 +289,14 @@ def test_every_cycle_unmeasured_is_counted():
 def test_streaming_job_metrics_default_to_unmeasured():
     m = StreamingJobMetrics(job_name="x", job_type="gold-refresh")
     assert m.ttd_alerts is None and m.ttd_p50_seconds is None
+
+
+def test_fallback_is_dropped_with_an_exhausted_carry():
+    """After max_carry the fallback snapshot is as old as the carried one."""
+    c = _common()
+    b = c.TtdBaseline(max_carry=1)
+    b.begin(1, None)
+    b.measured(2)
+    assert b.begin(3, 1.0) == (3, 1.0)  # not measured
+    assert b.begin(4, 2.0) == (3, 1.0)  # carried once
+    assert b.begin(c.TTD_SNAPSHOT_UNKNOWN, 3.0) == (c.TTD_SNAPSHOT_UNKNOWN, 3.0)
