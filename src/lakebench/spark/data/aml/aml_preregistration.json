@@ -1,12 +1,32 @@
 {
   "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate script loads this file; AML-GOALS.md describes it. Changing any value after a gate run requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a. Every numeric gate in AML-GOALS.md must have a key here (enforced by test).",
-  "version": "3.2",
+  "version": "3.3.1",
   "registered": "2026-09-24",
   "metric": "average_precision",
+  "unit_of_scoring": {
+    "entity": "customer",
+    "label_role": "participant",
+    "label": "customer participant of any instance of the typology (manifest participant_entity_ids), one-vs-rest over all scored customers; label_role 'subject' (the role typology::subject_index names) is the alternative the gate implements"
+  },
   "cv": {
     "folds": 5,
     "stratified": true,
-    "seed": 7
+    "seed": 7,
+    "group_by": "customer",
+    "note": "StratifiedKFold when every row is its own customer, StratifiedGroupKFold otherwise; the bootstrap resamples customers"
+  },
+  "reference_model": {
+    "estimator": "HistGradientBoostingClassifier",
+    "max_iter": 100,
+    "learning_rate": 0.1,
+    "max_leaf_nodes": 31,
+    "early_stopping": false
+  },
+  "shortcut_model": {
+    "estimator": "DecisionTreeClassifier",
+    "max_depth": 2,
+    "single_feature_also_scores_raw_rank": true,
+    "raw_rank": "out of fold: direction chosen on the training folds, within-fold percentile ranks pooled"
   },
   "corpora": {
     "calibration_seed": 42,
@@ -41,7 +61,7 @@
   "band": {
     "ap_min": 0.3,
     "ap_max": 0.8,
-    "anchor": "self-chosen; external anchor pending (IBM AMLworld, Altman et al. 2023)"
+    "anchor": "verified 2026-09-24 (AML-GOALS section 9 #34): no primary source reports account-level per-typology AP; nearest analogue Tide (arXiv 2603.01863) GBT PR-AUC 0.70-0.85 transaction-level and treats > 0.90 as trivial, supporting the ceiling; TransXion 0.17-0.29 is transaction-level AP without account aggregates and is not a floor; floor self-chosen"
   },
   "leakage": {
     "shortcut_ap_abs_max": 0.2,
@@ -80,7 +100,9 @@
     "max_gap_over_mean_gap",
     "frac_overnight",
     "frac_weekend",
-    "hour_of_day_entropy"
+    "hour_of_day_entropy",
+    "customer_type",
+    "crr_tier"
   ],
   "classification": {
     "definitional_rule": "a typology is definitional only if the generator conditions its label on the single attribute in defining_feature AND that feature alone reaches AP >= definitional_min_single_ap on the calibration corpus",
@@ -138,5 +160,6 @@
       1,
       10
     ]
-  }
+  },
+  "features_note": "v3.3: customer_type and crr_tier added (AML-GOALS section 9 #32: the generator conditions on both via the monitored population); is_customer is excluded because only customers are scored. Definitions: src/lakebench/spark/scripts/aml_features.py."
 }

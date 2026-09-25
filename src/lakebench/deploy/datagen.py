@@ -11,6 +11,10 @@ import yaml
 
 from .engine import DeploymentResult, DeploymentStatus
 
+#: Top-level datagen seed every deployment generates with. The AML reference
+#: job reads it (LB_DATAGEN_SEED) to name the corpus it scored.
+DATAGEN_SEED = 42
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -79,7 +83,7 @@ class DatagenDeployer:
                 "datagen_payload_kb": self._PAYLOAD_SIZE_BYTES // 1024,
                 "datagen_path_prefix": path_prefix,
                 "datagen_schema": schema_value,
-                "datagen_seed": 42,  # Fixed seed for reproducibility
+                "datagen_seed": DATAGEN_SEED,  # Fixed seed for reproducibility
                 "datagen_resume": False,  # Can be overridden
                 "datagen_cpu": datagen.cpu,
                 "datagen_memory": datagen.memory,
