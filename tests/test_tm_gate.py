@@ -205,3 +205,22 @@ def test_bad_tm_summary_does_not_blank_the_detection_table():
     )
     assert "W2_structuring" in html
     assert "could not be rendered" in html
+
+
+def test_gold_refresh_gets_the_bronze_checkpoint():
+    """The TM layer's in-flight check reads the bronze stream's source log;
+    gold-refresh must see the same checkpoint bronze-ingest writes."""
+    from lakebench.modules.pipeline_engines.spark.job import bronze_ingest_checkpoint_uri
+    from lakebench.spark.job import JobType, SparkJobManager
+    from tests.conftest import make_config
+
+    cfg = make_config(architecture={"workload": {"schema": "financial", "datagen": {"scale": 1}}})
+    k8s = MagicMock()
+    k8s.get_cluster_capacity.return_value = None
+    env = {
+        e["name"]: e.get("value")
+        for e in SparkJobManager(cfg, k8s)._build_manifest(JobType.GOLD_REFRESH)["spec"]["driver"][
+            "env"
+        ]
+    }
+    assert env["LB_FINANCIAL_BRONZE_CHECKPOINT"] == bronze_ingest_checkpoint_uri(cfg)

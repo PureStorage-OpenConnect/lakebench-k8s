@@ -362,12 +362,10 @@ TXN_SKETCH_K = 32
 # are dispositioned over_capacity before the replay (memory bound); within it
 # the replay applies the exact cap after identity matching.
 HARD_CAP_MULTIPLE = 4
-# Source-to-bronze in-flight bound (continuous). The bronze stream ingests
-# raw files oldest first by modification time, so the files not yet in
-# bronze are the newest ones. S3 dates a multipart upload by its start, so a
-# large file can land with an older time than files already ingested: this
-# much reordering is allowed.
-IN_FLIGHT_MTIME_TOLERANCE_S = 900
+# Where the bronze stream keeps its checkpoint (continuous). Its source log
+# names the raw files each micro-batch took, which is how the ledger knows
+# which payments bronze should hold.
+BRONZE_CHECKPOINT = env("LB_FINANCIAL_BRONZE_CHECKPOINT", "")
 
 # Alert queue aging buckets (P10.3 queue health).
 AGING_BUCKETS = ((0, 30, "0-30"), (31, 60, "31-60"), (61, 90, "61-90"), (91, None, "90+"))
@@ -459,9 +457,10 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
         if cur is not None:
             # The alert as detection emits it now; the workflow attributes
             # stay as first seen.
+            # The sketch stays as first seen: later matches compare against
+            # the payments the alert was first raised on.
             a["alert_ts"] = cur["alert_ts"]
             a["content_hash"] = cur["content_hash"]
-            a["txn_sketch"] = cur.get("txn_sketch")
         used.add(a["alert_key"])
         out.append(a)
 
@@ -485,16 +484,29 @@ def match_alerts(current, prior, prev_as_of, as_of, cycle):
     window = EXTENSION_MATCH_DAYS * _MICROS_PER_DAY
     pairs = []
     for ci, c in enumerate(unmatched):
-        cs = set(c.get("txn_sketch") or ())
-        if not cs or c["alert_ts"] is None:
+        if c["alert_ts"] is None:
             continue
+        # Shared payments with each carried alert, computed in Spark against
+        # this alert's full payment list (``ext_overlap``); without it (pure
+        # Python callers), the two sketches are intersected.
+        ext = c.get("ext_overlap") if "ext_overlap" in c else None
+        cs = set(c.get("txn_sketch") or ())
         for p in remaining.get(c["rule_id"]) or ():
             if p["alert_ts"] is None or not (
                 p["alert_ts"] <= c["alert_ts"] <= p["alert_ts"] + window
             ):
                 continue
-            ov = len(cs & set(p.get("txn_sketch") or ()))
-            if ov:
+            psk = p.get("txn_sketch") or ()
+            if "ext_overlap" in c:
+                ov = int((ext or {}).get(p["alert_key"], 0))
+            else:
+                ov = len(cs & set(psk))
+            # At least a quarter of the payments the prior was first raised
+            # on (its sketch): an alert sharing one payment with it is new
+            # activity, not the same alert grown. A quarter, not all: rules
+            # cap related_txn_ids by uetr order, so a grown alert keeps only
+            # part of its first payments in the list.
+            if ov and ov >= max(1, (len(psk) + 3) // 4):
                 pairs.append(
                     (-ov, c["alert_ts"] - p["alert_ts"], p["alert_key"], c["content_hash"], ci, p)
                 )
@@ -874,6 +886,8 @@ _CUR_FIELDS = (
     "crr_tier",
 )
 _PRIOR_FIELDS = _CUR_FIELDS + ("first_seen_cycle", "first_seen_as_of")
+# Current alerts also ship their overlaps with carried alerts.
+_CUR_FIELDS = _CUR_FIELDS + ("ext_overlap",)
 
 
 def apply_cap(alerts, cap, cycle):
@@ -1010,10 +1024,9 @@ def read_at_snapshot(spark, fq_table, snapshot_id):
 # Spark stages
 # ---------------------------------------------------------------------------
 
-# Raw source files already counted, by path (datagen files are immutable):
-# path -> (modification time in ms, rows). A continuous run reads only the
-# files new since its last operations pass. Driver-local; reset when a file
-# disappears.
+# Raw source files already counted, by normalised path -> rows (datagen files
+# are immutable). A continuous run reads only the files new since its last
+# operations pass. Driver-local; reset when a file disappears.
 _SOURCE_SEEN = {}
 
 
@@ -1025,9 +1038,9 @@ def _norm_path(p):
 
 
 def count_source_rows(spark):
-    """Payments the datagen wrote (the raw pacs.008 Parquet), with each
-    file's modification time and rows: ``{"rows", "files": [(mtime_ms,
-    rows)]}``, or None when the files cannot be listed."""
+    """Payments the datagen wrote (the raw pacs.008 Parquet):
+    ``{"rows", "by_path": {normalised path: rows}}``, or None when the files
+    cannot be listed."""
     from bronze_verify_financial import BRONZE_URI, PACS_PREFIX
     from pyspark.sql.functions import input_file_name
 
@@ -1040,62 +1053,69 @@ def count_source_rows(spark):
         listed = {}
         it = fs.listFiles(path, True)
         while it.hasNext():
-            st = it.next()
-            name = st.getPath().toString()
+            name = it.next().getPath().toString()
             if name.endswith(".parquet"):
-                listed[_norm_path(name)] = (name, int(st.getModificationTime()))
+                listed[_norm_path(name)] = name
         if not set(_SOURCE_SEEN) <= set(listed):
             _SOURCE_SEEN.clear()
         new = sorted(k for k in listed if k not in _SOURCE_SEEN)
         if new:
             per = {
                 _norm_path(r[0]): int(r[1])
-                for r in spark.read.parquet(*[listed[k][0] for k in new])
+                for r in spark.read.parquet(*[listed[k] for k in new])
                 .groupBy(input_file_name().alias("f"))
                 .count()
                 .collect()
             }
             for k in new:
-                _SOURCE_SEEN[k] = (listed[k][1], per.get(k, 0))
-        files = [_SOURCE_SEEN[k] for k in listed]
-        return {"rows": sum(r for _, r in files), "files": files}
+                _SOURCE_SEEN[k] = per.get(k, 0)
+        by_path = {k: _SOURCE_SEEN[k] for k in listed}
+        return {"rows": sum(by_path.values()), "by_path": by_path}
     except Exception as e:  # noqa: BLE001
         log(f"[tm] source payment count unavailable: {one_line(e)}")
         return None
 
 
-def bronze_prefix_gap(files, bronze_rows, tolerance_ms=IN_FLIGHT_MTIME_TOLERANCE_S * 1000):
-    """Rows by which bronze differs from any set of raw files the stream
-    could have ingested by now, or None when that cannot be decided.
+def bronze_stream_epoch(spark, fq_table, snapshot_id):
+    """The newest structured-streaming batch (epoch) committed to the bronze
+    table at or before ``snapshot_id``, from Iceberg's snapshot summary
+    (``spark.sql.streaming.epochId``), or None when no snapshot carries one."""
+    try:
+        rows = spark.sql(
+            f"SELECT summary, committed_at, snapshot_id FROM {fq_table}.snapshots"
+        ).collect()
+    except Exception as e:  # noqa: BLE001
+        log(f"[tm] bronze snapshots unreadable: {one_line(e)}")
+        return None
+    at = {r["snapshot_id"]: r["committed_at"] for r in rows}
+    limit = at.get(snapshot_id)
+    epochs = [
+        int(r["summary"]["spark.sql.streaming.epochId"])
+        for r in rows
+        if (r["summary"] or {}).get("spark.sql.streaming.epochId") is not None
+        and (limit is None or r["committed_at"] <= limit)
+    ]
+    return max(epochs) if epochs else None
 
-    The stream takes whole raw files, oldest first by modification time, so
-    bronze holds a time-ordered prefix of the files: every file older than
-    the boundary, none newer, and any subset of those within the tolerance of
-    the boundary (S3 dates a multipart upload by its start). 0 means bronze
-    is consistent with such a prefix; anything else is a lost or duplicated
-    file. ``files``: (mtime_ms, rows) per raw file.
-    """
-    ordered = sorted(files)
-    total = sum(r for _, r in ordered)
-    if bronze_rows >= total:
-        return bronze_rows - total
-    if bronze_rows <= 0:
-        return 0
-    cum, mk = 0, ordered[-1][0]
-    for m, r in ordered:
-        cum += r
-        if cum >= bronze_rows:
-            mk = m
-            break
-    lo, hi = mk - tolerance_ms, mk + tolerance_ms
-    required = sum(r for m, r in ordered if m < lo)
-    sums = {0}
-    for m, r in ordered:
-        if lo <= m <= hi:
-            sums |= {x + r for x in sums}
-            if len(sums) > 200_000:
-                return None
-    return min(abs(bronze_rows - required - x) for x in sums)
+
+def ingested_source_paths(spark, checkpoint, max_batch):
+    """Normalised paths of the raw files the bronze stream took in batches
+    0..``max_batch``, read from its checkpoint's file-source log
+    (``sources/0/<batch>`` and ``.compact`` files: a "v1" line, then one JSON
+    line per file with ``path`` and ``batchId``). None when unreadable."""
+    try:
+        lines = spark.read.text(checkpoint.rstrip("/") + "/sources/0/*").collect()
+    except Exception as e:  # noqa: BLE001
+        log(f"[tm] bronze checkpoint source log unreadable: {one_line(e)}")
+        return None
+    out = set()
+    for (line,) in lines:
+        if not line.startswith("{"):
+            continue
+        rec = json.loads(line)
+        if int(rec.get("batchId", -1)) <= max_batch:
+            out.add(_norm_path(rec["path"]))
+    return out
 
 
 def classify_payments(txns, entities):
@@ -1148,24 +1168,28 @@ DQ_RULES = (
 def reconcile(spark, txns, entities, source, bronze, continuous):
     """Completeness rows (section, item, unit, count, amount) for one cycle.
 
-    ``source``: the raw payment count, or ``{"rows", "files"}`` from
+    ``source``: the raw payment count, or ``{"rows", "by_path"}`` from
     :func:`count_source_rows`. ``bronze``: the bronze row count, or in
-    continuous ``{"rows", "pending"}`` where ``pending`` counts bronze rows
-    newer than silver's ingest watermark (None when it cannot be measured).
+    continuous ``{"rows", "pending", "ingested"}``: ``pending`` counts bronze
+    rows newer than silver's ingest watermark, ``ingested`` is the set of raw
+    files the stream took up to the pinned bronze snapshot (either None when
+    it cannot be measured).
 
     Continuous in-flight payments are bounded, not inferred: rows bronze has
-    not taken yet must be the newest raw files (``bronze_prefix_gap``), and
+    not taken yet must be in raw files the stream has not taken, and
     rows silver has not taken yet must be newer than its watermark. Anything
     else is ``unaccounted`` and fails reconciliation.
     """
     from pyspark.sql.functions import col, count, lit, when
     from pyspark.sql.functions import sum as sum_
 
-    source_rows, files = (
-        (source.get("rows"), source.get("files")) if isinstance(source, dict) else (source, None)
+    source_rows, by_path = (
+        (source.get("rows"), source.get("by_path")) if isinstance(source, dict) else (source, None)
     )
-    bronze_rows, pending = (
-        (bronze.get("rows"), bronze.get("pending")) if isinstance(bronze, dict) else (bronze, None)
+    bronze_rows, pending, ingested = (
+        (bronze.get("rows"), bronze.get("pending"), bronze.get("ingested"))
+        if isinstance(bronze, dict)
+        else (bronze, None, None)
     )
     cls = classify_payments(txns, entities)
     aggs = [count(lit(1)).alias("n"), sum_(col("txn_amount_usd")).alias("usd")]
@@ -1200,11 +1224,15 @@ def reconcile(spark, txns, entities, source, bronze, continuous):
         rows.append(("exclusion", "in_flight_to_bronze", "payments", to_bronze, None))
         rows.append(("exclusion", "in_flight_to_silver", "payments", to_silver, None))
         excluded += to_bronze + to_silver
-        # Bronze must hold a time-ordered prefix of the raw files; a gap is a
-        # lost (or duplicated) file, not data in flight.
+        # Bronze must hold exactly the rows of the raw files its stream took
+        # (the checkpoint's source log up to the pinned snapshot's batch): a
+        # difference is a lost or duplicated file or row, not data in flight.
         unaccounted = None
-        if files is not None and pending is not None:
-            unaccounted = bronze_prefix_gap(files, bronze_rows)
+        if by_path is not None and pending is not None and ingested is not None:
+            if ingested <= set(by_path):
+                expected = sum(by_path[p] for p in ingested)
+                unaccounted = abs(bronze_rows - expected)
+                rows.append(("bound", "bronze_expected", "payments", expected, None))
         rows.append(("completeness", "unaccounted", "payments", unaccounted, None))
     rows.append(("completeness", "excluded", "payments", excluded, None))
     for rule in DQ_RULES:
@@ -1222,14 +1250,18 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         array_sort,
         coalesce,
         col,
+        collect_list,
         concat_ws,
+        count,
         create_map,
         date_add,
         explode,
         expr,
         lit,
+        map_from_entries,
         row_number,
         sha2,
+        struct,
         to_date,
         when,
     )
@@ -1322,6 +1354,34 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         cond = col("priority_score") >= lit(floor)
         band = when(cond, lit(name)) if band is None else band.when(cond, lit(name))
     out = out.withColumn("triage_priority", band.otherwise(lit("low")))
+    # Payments each alert shares with each carried alert on its entity: the
+    # carried alert's frozen first-seen sketch against ALL of this alert's
+    # related payments (not this alert's own sketch, which drifts as the
+    # alert grows). {prior alert_key: shared payments}, NULL when none.
+    if known is not None and "txn_sketch" in known.columns:
+        ph = known.select(
+            "entity_id", col("alert_key").alias("_pk"), explode(col("txn_sketch")).alias("_h")
+        )
+        ch = raw.select(
+            "alert_id",
+            "entity_id",
+            explode(
+                expr(
+                    "array_distinct(transform(coalesce(related_txn_ids, "
+                    "cast(array() as array<string>)), x -> xxhash64(x)))"
+                )
+            ).alias("_h"),
+        )
+        ov = (
+            ch.join(ph, ["entity_id", "_h"])
+            .groupBy("alert_id", "_pk")
+            .agg(count(lit(1)).alias("_n"))
+            .groupBy("alert_id")
+            .agg(map_from_entries(collect_list(struct("_pk", "_n"))).alias("ext_overlap"))
+        )
+        out = out.join(ov, "alert_id", "left")
+    else:
+        out = out.withColumn("ext_overlap", lit(None).cast("map<string,bigint>"))
     # Memory bound only (the exact cap is applied after identity matching,
     # in the replay): past HARD_CAP_MULTIPLE x the cap, a customer's alerts
     # are over_capacity here. Alerts with the content of a carried alert rank
@@ -1330,6 +1390,11 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
     if known is not None:
         k = known.select("entity_id", "content_hash").distinct().withColumn("_known", lit(True))
         out = out.join(k, ["entity_id", "content_hash"], "left")
+        # A grown alert (new content) that shares payments with a carried
+        # one is also known: capping it would write it twice.
+        out = out.withColumn(
+            "_known", when(col("ext_overlap").isNotNull(), lit(True)).otherwise(col("_known"))
+        )
     else:
         out = out.withColumn("_known", lit(None).cast("boolean"))
     rank = Window.partitionBy("entity_id").orderBy(
@@ -2063,7 +2128,7 @@ def _prior_state(spark, base_run_id, cycle, ledger):
     return None, None, None, f"cycle {last}'s tables are unreadable ({reason}); identity restarted"
 
 
-def tm_pass_due(now, clock, params, window_s=0):
+def tm_pass_due(now, clock, params, window_end_s=0):
     """Whether gold-refresh should run an operations pass now.
 
     ``clock``: {"run_start", "start", "end", "elapsed"} of the driver and its
@@ -2071,16 +2136,19 @@ def tm_pass_due(now, clock, params, window_s=0):
     ``continuous_interval_seconds`` have passed since the last pass ENDED
     (so a pass longer than the interval cannot run back to back and starve
     detection); and once more when the window is about to close, early
-    enough for a pass as long as the last one to finish.
+    enough for a pass as long as the last one to finish. ``window_end_s`` is
+    the window's end as an epoch time from the CLI, so a restarted driver
+    times its final pass against the real window.
     """
     if clock.get("end") is None:
         return True
     if now - clock["end"] >= int(params["continuous_interval_seconds"]):
         return True
-    if window_s and window_s > 0:
+    if window_end_s and window_end_s > 0:
         margin = max(120.0, 1.5 * float(clock.get("elapsed") or 0.0) + 60.0)
-        final_at = clock["run_start"] + window_s - margin
-        if now >= final_at and clock["start"] < final_at:
+        final_at = window_end_s - margin
+        # A pass that ended after final_at already covers the tail.
+        if now >= final_at and clock["end"] < final_at:
             return True
     return False
 
@@ -2173,17 +2241,23 @@ def run_tm_operations(
         # any gap is either bounded in-flight data or a loss.
         btable = f"{CATALOG}.{BRONZE_TABLE}"
         if continuous:
-            bronze_df = read_at_snapshot(spark, btable, current_snapshot_id(spark, btable))
+            bsid = current_snapshot_id(spark, btable)
+            bronze_df = read_at_snapshot(spark, btable, bsid)
+            epoch = bronze_stream_epoch(spark, btable, bsid) if bsid is not None else None
             pending = None
             if "ingest_ts" in txns.columns and "ingest_ts" in bronze_df.columns:
                 wm = txns.agg(max_(col("ingest_ts")).alias("w")).collect()[0]["w"]
                 pending = (
                     bronze_df.where(col("ingest_ts") > lit(wm)).count() if wm is not None else None
                 )
-            bronze = {"rows": bronze_df.count(), "pending": pending}
+            bronze = {"rows": bronze_df.count(), "pending": pending, "ingested": None}
         else:
             bronze, _ = iceberg_table_stats(spark, btable)
         source = (source_rows_fn or count_source_rows)(spark)
+        if continuous and epoch is not None and BRONZE_CHECKPOINT:
+            # Read after the bronze pin: the log for every batch up to the
+            # pinned epoch is written before that batch commits.
+            bronze["ingested"] = ingested_source_paths(spark, BRONZE_CHECKPOINT, epoch)
         recon_rows, recon = reconcile(spark, txns, entities, source, bronze, continuous)
 
         # The last completed cycle, at the snapshots its ledger recorded.
@@ -2275,6 +2349,7 @@ def run_tm_operations(
             as_of,
         )
         wrote = True
+        _status("started", cycle_no, "writing the TM tables")
         disp.select(*disp_cols, *run_cols).writeTo(f"{CATALOG}.{GOLD_DISPOSITIONS}").overwrite(
             lit(True)
         )

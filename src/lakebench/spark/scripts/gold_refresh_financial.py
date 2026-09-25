@@ -94,9 +94,9 @@ GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 REFRESH_S = int(env("LB_FINANCIAL_GOLD_REFRESH_S", "60"))
 TM_PARAMS = params_from_env()
-# The continuous window length the CLI runs for (0: unknown), so the TM layer
-# can time a final pass before the window closes.
-WINDOW_S = int(env("LB_CONTINUOUS_WINDOW_S", "0") or 0)
+# When the CLI's continuous window ends, as an epoch time (0: unknown), so the
+# TM layer times a final pass before it closes, also after a driver restart.
+WINDOW_END_S = float(env("LB_CONTINUOUS_WINDOW_END_S", "0") or 0)
 RUN_ID = env("LB_RUN_ID", str(uuid.uuid4()))
 MAX_CONSECUTIVE_FAILURES = int(env("LB_FINANCIAL_GOLD_MAX_FAILS", "5"))
 
@@ -261,9 +261,11 @@ def main() -> None:
                 and newest_ingest_s is not None
                 and newest_bronze_s > newest_ingest_s
             )
+            fresh_sampled = False
             if newest_ingest_s is not None and (newest_ingest_s > last_ingest_s or backlog):
                 log(f"Cycle {cycle}: data freshness {max(0.0, time.time() - newest_ingest_s):.0f}s")
                 last_ingest_s = newest_ingest_s
+                fresh_sampled = True
             # P10 operations layer. It runs every continuous_interval_seconds,
             # measured from the end of the last pass, so detection ticks always
             # run between passes however long a pass takes; plus one final pass
@@ -272,7 +274,7 @@ def main() -> None:
             # (dispositions are simulated from it); a window that ends first
             # reports the layer as not run. Never raises.
             now = time.time()
-            if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_S):
+            if TM_PARAMS["enabled"] and tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_END_S):
                 if silver_rows > 0 and manifest_ready:
                     tm_clock["start"] = now
                     run_tm_operations(
@@ -281,8 +283,10 @@ def main() -> None:
                     tm_clock["end"] = time.time()
                     tm_clock["elapsed"] = tm_clock["end"] - now
                     # Gold was not refreshed while the pass ran: its staleness
-                    # now includes the pass, so it is sampled again here.
-                    if newest_ingest_s is not None:
+                    # now includes the pass, so it is sampled again, on the
+                    # same terms as the tick's sample (only while data is
+                    # moving, so a drained corpus's idle time never counts).
+                    if fresh_sampled:
                         log(
                             f"Cycle {cycle}: data freshness "
                             f"{max(0.0, time.time() - newest_ingest_s):.0f}s"

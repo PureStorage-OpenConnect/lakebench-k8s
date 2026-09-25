@@ -345,19 +345,19 @@ def _query_set(metrics: dict) -> str | None:
     """The query-set id a run's QpH was measured over, or None."""
     if not isinstance(metrics, dict) or "error" in metrics:
         return None
-    from lakebench.benchmark.queries import query_set_id
+    from lakebench.benchmark.queries import legacy_query_set_id
 
     bench = metrics.get("benchmark") or {}
     qb = (metrics.get("pipeline_benchmark") or {}).get("query_benchmark") or {}
     for b in (bench, qb):
         if b.get("query_set_id"):
             return b["query_set_id"]
-    # A run that predates query-set ids: the set it ran, from its recorded
-    # query names (hashed with today's SQL for those names).
+    # A run that predates query-set ids: the pinned historical id of its
+    # query-name set, or "unknown" (never today's SQL, which it may not have
+    # run).
     for b in (bench, qb):
-        names = [q.get("name") or q.get("query_name") for q in b.get("queries") or []]
-        if any(names):
-            return query_set_id(names)
+        if b.get("queries"):
+            return legacy_query_set_id(b["queries"])
     return None
 
 

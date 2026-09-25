@@ -649,7 +649,17 @@ def test_extension_prefers_the_largest_overlap_then_is_deterministic():
 def _group(current, prior, cap, cycle=2, prev=D0 + timedelta(days=60)):
     import json as _json
 
-    rows = [("n", tuple(a.get(f) for f in tm._CUR_FIELDS)) for a in current]
+    # ext_overlap as Spark computes it: each current alert's payments (here
+    # its sketch holds all of them) against each prior's first-seen sketch.
+    cur = []
+    for a in current:
+        ext = {
+            p["alert_key"]: len(set(a["txn_sketch"]) & set(p["txn_sketch"]))
+            for p in prior
+            if set(a["txn_sketch"]) & set(p["txn_sketch"])
+        }
+        cur.append(dict(a, ext_overlap=ext or None))
+    rows = [("n", tuple(a.get(f) for f in tm._CUR_FIELDS)) for a in cur]
     rows += [("p", tuple(a.get(f) for f in tm._PRIOR_FIELDS)) for a in prior]
     p = dict(PARAMS, max_alerts_per_customer=cap)
     out = tm._simulate_group((1, iter(rows)), p, prev + timedelta(days=30), prev, cycle)
@@ -699,29 +709,22 @@ def test_tm_pass_due_interval_from_the_end_of_the_last_pass():
 def test_tm_pass_due_runs_a_final_pass_before_the_window_closes():
     p = {"continuous_interval_seconds": 1800}
     clock = {"run_start": 0.0, "start": 60.0, "end": 240.0, "elapsed": 180.0}
-    window = 900  # shorter than the interval
-    final_at = window - max(120.0, 1.5 * 180 + 60)
-    assert not tm.tm_pass_due(final_at - 1, clock, p, window)
-    assert tm.tm_pass_due(final_at, clock, p, window)
+    window_end = 900.0  # shorter than the interval
+    final_at = window_end - max(120.0, 1.5 * 180 + 60)
+    assert not tm.tm_pass_due(final_at - 1, clock, p, window_end)
+    assert tm.tm_pass_due(final_at, clock, p, window_end)
     clock.update(start=final_at, end=final_at + 180)
-    assert not tm.tm_pass_due(final_at + 200, clock, p, window)  # once
+    assert not tm.tm_pass_due(final_at + 200, clock, p, window_end)  # once
+    # A regular pass that ended after final_at already covered the tail: no
+    # back-to-back final pass that the window end would kill mid-write.
+    clock.update(start=final_at - 10, end=final_at + 170)
+    assert not tm.tm_pass_due(final_at + 171, clock, p, window_end)
+    # A restarted driver (its own run_start late) still uses the CLI window.
+    late = {"run_start": 600.0, "start": 600.0, "end": 605.0, "elapsed": 5.0}
+    assert tm.tm_pass_due(window_end - 120, late, p, window_end)
 
 
 # --- Continuous in-flight bound ---------------------------------------------
-
-
-def test_bronze_must_hold_a_time_ordered_prefix_of_the_raw_files():
-    files = [(1_000_000, 10), (2_000_000, 10), (3_000_000, 10), (9_000_000, 5)]
-    gap = tm.bronze_prefix_gap
-    assert gap(files, 30, tolerance_ms=0) == 0  # newest file in flight
-    assert gap(files, 35, tolerance_ms=0) == 0
-    assert gap(files, 0, tolerance_ms=0) == 0
-    assert gap(files, 25, tolerance_ms=0) == 5  # half a file: not how the stream reads
-    assert gap(files, 40, tolerance_ms=0) == 5  # more than the source
-    # An old file lost while newer ones were ingested.
-    assert gap([(1, 3), (10**9, 50)], 50, tolerance_ms=900_000) == 3
-    # Reordering inside the tolerance is allowed.
-    assert gap([(1_000_000, 10), (1_000_500, 7)], 7, tolerance_ms=1_000) == 0
 
 
 def test_reconciliation_fails_on_unaccounted_and_is_unchecked_when_unbounded():
@@ -748,8 +751,8 @@ def test_schema_bounds():
 def test_continuous_jobs_get_the_cli_run_id_and_window():
     from lakebench.cli._sustained import _streaming_job_env
 
-    env = _streaming_job_env("20260925-101010-abcdef", 900)
-    assert env == {"LB_RUN_ID": "20260925-101010-abcdef", "LB_CONTINUOUS_WINDOW_S": "900"}
+    env = _streaming_job_env("20260925-101010-abcdef", 900, now=1000.0)
+    assert env == {"LB_RUN_ID": "20260925-101010-abcdef", "LB_CONTINUOUS_WINDOW_END_S": "1900"}
     import inspect
 
     from lakebench.cli import _sustained
@@ -769,4 +772,71 @@ def test_gold_refresh_samples_freshness_after_a_tm_pass():
     after = src[i : i + 900]
     assert 'tm_clock["end"] = time.time()' in after
     assert "data freshness" in after
-    assert "tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_S)" in src
+    # Only on the same terms as the tick's own sample: a drained corpus's
+    # idle time must not become the freshness score.
+    assert "if fresh_sampled:" in after
+    assert "tm_pass_due(now, tm_clock, TM_PARAMS, WINDOW_END_S)" in src
+
+
+def test_alert_sharing_one_payment_cannot_take_a_grown_alerts_identity():
+    """Reviewer probe: A grew so far that its own sketch no longer overlaps
+    its prior; B shares one payment with A. B must not take A's key."""
+    prev = D0 + timedelta(days=60)
+    a = _prior(_cur("A", "a", 0, truth=True, txns=[f"a{i}" for i in range(10)]))
+    b = _cur("B", "b", 3, txns=["a0", "b1", "b2"])
+    b["ext_overlap"] = {"a-0": 1}
+    grown = _cur("A2", "a2", 20, txns=[f"a{i}" for i in range(10)] + ["z"])
+    grown["ext_overlap"] = {"a-0": 10}  # the prior's first-seen payments are all in it
+    out = {r["alert_id"]: r for r in tm.match_alerts([b, grown], [a], prev, prev, 2)}
+    assert out["A2"]["alert_key"] == "a-0" and out["A2"]["truth"] is True
+    assert out["B"]["alert_key"] != "a-0"
+    # Even with A2 gone, one shared payment of ten is new activity.
+    out = {r["alert_id"]: r for r in tm.match_alerts([b], [a], prev, prev, 2)}
+    assert out["B"]["alert_key"] != "a-0" and out["A"]["in_current_detection"] is False
+
+
+def test_carried_sketch_stays_as_first_seen():
+    prev = D0 + timedelta(days=60)
+    a = _prior(_cur("A", "a", 0, txns=["x", "y"]))
+    g = _cur("G", "g", 5, txns=["x", "y", "z"])
+    g["ext_overlap"] = {"a-0": 2}
+    (out,) = tm.match_alerts([g], [a], prev, prev, 2)
+    assert out["alert_key"] == "a-0" and out["txn_sketch"] == a["txn_sketch"]
+
+
+def test_interrupted_pass_is_unknown_not_pass():
+    from lakebench.metrics.tm_ops import parse_tm_status, tm_verdict
+
+    logs = (
+        "[tm-status] status=started cycle=1 reason=writing the TM tables\n"
+        "[tm-status] status=ran cycle=1 reason=ok\n"
+        "[tm-invariant] reconciliation: status=pass cycle=1 detail=a\n"
+        "[tm-status] status=started cycle=2 reason=writing the TM tables\n"
+    )
+    from lakebench.metrics.tm_ops import parse_tm_invariants
+
+    v = tm_verdict(parse_tm_invariants(logs), parse_tm_status(logs), continuous=True)
+    assert v["status"] == "unknown" and "[2]" in v["reason"] and not v["problems"]
+
+
+def test_legacy_query_set_ids_are_pinned_not_hashed_from_todays_sql():
+    from lakebench.benchmark.queries import (
+        LEGACY_QUERY_SET_IDS,
+        get_benchmark_queries,
+        legacy_query_set_id,
+        query_set_id,
+    )
+    from lakebench.config.schema import WorkloadSchema
+
+    c360 = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
+    fin = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
+    fin8 = [n for n in fin if not n.startswith("IQ")]
+    assert legacy_query_set_id([{"name": n} for n in c360]) == "qs8-fbcf945fe40f"
+    assert legacy_query_set_id([{"name": n} for n in fin8]) == "qs8-1c2902f0b26a"
+    # A 12-query record from before ids (unscoped investigator SQL) is not
+    # matched to today's SQL.
+    assert legacy_query_set_id([{"name": n} for n in fin]) == "unknown"
+    # Today the pinned sets still have these ids; when a query's SQL changes,
+    # this line fails and the new id makes legacy runs incomparable, as it
+    # should. Update this assertion, never the pinned constants.
+    assert {query_set_id(c360), query_set_id(fin8)} == set(LEGACY_QUERY_SET_IDS.values())
