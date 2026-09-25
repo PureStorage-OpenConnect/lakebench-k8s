@@ -323,11 +323,28 @@ class BenchmarkMetrics:
     streams: int = 1
     stream_results: list[dict[str, Any]] = field(default_factory=list)
     round_meta: BenchmarkRoundMeta | None = None
+    # Identity of the query set QpH was measured over (queries.query_set_id).
+    # None: derive it from ``queries``. "unknown": loaded from a run that
+    # predates the field; never comparable.
+    query_set_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.query_set_id is None:
+            from lakebench.benchmark.queries import query_set_id
+
+            names = [
+                (q.get("name") or q.get("query_name"))
+                if isinstance(q, dict)
+                else getattr(getattr(q, "query", q), "name", None)
+                for q in self.queries or []
+            ]
+            self.query_set_id = query_set_id(names) if any(names) else "unknown"
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d: dict[str, Any] = {
             "benchmark_type": "trino_query",
+            "query_set_id": self.query_set_id,
             "mode": self.mode,
             "cache": self.cache,
             "scale": self.scale,
