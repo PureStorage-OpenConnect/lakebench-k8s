@@ -567,7 +567,7 @@ def evaluate_gate(
         frame[GROUP_COLUMN].nunique() if GROUP_COLUMN in frame.columns else len(frame)
     )
 
-    if not _sklearn_available():
+    if score and not _sklearn_available():
         report.update(verdict="no_sklearn", typologies={}, level2=None)
         return report
     if len(frame) == 0:

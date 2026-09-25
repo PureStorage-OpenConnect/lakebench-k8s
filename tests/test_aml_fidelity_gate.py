@@ -499,3 +499,9 @@ def test_lifetime_prereg_drops_history_features():
     life = fg.lifetime_prereg(p)
     assert life["features"] == ["planted", "noise_a"]
     assert fg.unit_window(life) == "lifetime" and fg.unit_window(p) == "utc_calendar_month"
+
+
+def test_counts_only_needs_no_sklearn(monkeypatch):
+    monkeypatch.setattr(fg, "_sklearn_available", lambda: False)
+    rep = fg.evaluate_gate(_frame(), _prereg(), score=False)
+    assert rep["verdict"] == "counts_only" and rep["typologies"]["beh"]["n_positives"] > 0
