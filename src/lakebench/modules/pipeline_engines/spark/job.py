@@ -1691,6 +1691,14 @@ class SparkJobManager:
                 spark_conf.update(
                     {
                         "spark.sql.catalog.spark_catalog": "org.apache.spark.sql.delta.catalog.DeltaCatalog",
+                        # LB-148 / LB-034: Delta's metadata-only MIN/MAX
+                        # rewrite throws ClassCastException (LocalDate ->
+                        # java.sql.Date) on date partition columns.
+                        # gold_incremental reads max(interaction_date) inside
+                        # a broad except, so if that read hit the crash it
+                        # would silently turn an incremental run into a full
+                        # recompute.
+                        "spark.databricks.delta.optimizeMetadataQuery.enabled": "false",
                         "spark.sql.catalogImplementation": "hive",
                         "spark.hadoop.hive.metastore.uris": hive_uri,
                         "spark.sql.warehouse.dir": f"s3a://{warehouse_bucket}/warehouse/",

@@ -262,6 +262,12 @@ def resolve_auto_sizing(
     # size for Financial (200Gi vs Customer360's 150Gi) per spec §2C.21;
     # workload-specific stage profiles (W1-W7) are applied by ENG-2C.3
     # at manifest-build time, not autosizer time.
+    # -- Spark Thrift on Delta (LB-148) --
+    # Runs before the schema overrides so the financial 24g heap still wins.
+    delta_change = _apply_delta_thrift_default(config, cluster_capacity)
+    if delta_change:
+        changes.append(delta_change)
+
     schema_change = _apply_schema_overrides(config, cluster_capacity)
     if schema_change:
         changes.append(schema_change)
@@ -278,6 +284,64 @@ def resolve_auto_sizing(
             effective_mode,
             ", ".join(changes),
         )
+
+
+# LB-148: Spark Thrift default for Delta tables. The Thrift server is Spark
+# local mode in one pod, so its cores are the query parallelism. Iceberg is
+# compacted before the benchmark and passes all 8 c360 queries at 2 cores /
+# 4g; Delta OPTIMIZE is skipped for Thrift (it OOMs, CLAUDE.md gotcha 21), so
+# Delta queries scan the uncompacted silver table. At 2 cores / 4g, c360 scale
+# 1 Q3 took 343 s run alone against the 300 s query timeout, and Q4/Q5 also
+# timed out. 8 cores gives about 4x the scan parallelism; 16g keeps the 2g
+# per core that passes on Iceberg. The cost is 6 more cores held by an
+# always-on pod, which _co_resident_cpu_m subtracts from the pipeline budget.
+DELTA_THRIFT_CORES = 8
+DELTA_THRIFT_MEMORY_GI = 16
+# Headroom kept below the largest node for kubelet and co-scheduled pods,
+# matching the financial thrift cap below.
+_THRIFT_NODE_MARGIN_GI = 8.0
+_THRIFT_NODE_MARGIN_CORES = 2
+
+
+def _apply_delta_thrift_default(
+    config: LakebenchConfig,
+    cluster_capacity: ClusterCapacity | None = None,
+) -> str | None:
+    """Raise the Spark Thrift defaults for Delta + Hive (LB-148).
+
+    Only fields the user did not set are touched. On a cluster whose
+    largest node cannot hold the default, the target is fitted down with a
+    floor of the schema defaults (2 cores, 4g), never below them.
+    """
+    from lakebench.config.schema import CatalogType, QueryEngineType, TableFormatType
+
+    arch = config.architecture
+    if (
+        arch.query_engine.type != QueryEngineType.SPARK_THRIFT
+        or arch.table_format.type != TableFormatType.DELTA
+        or arch.catalog.type != CatalogType.HIVE
+    ):
+        return None
+
+    cores = DELTA_THRIFT_CORES
+    memory_gi = DELTA_THRIFT_MEMORY_GI
+    if cluster_capacity is not None:
+        node_gi = _largest_node_memory_gi(cluster_capacity)
+        if node_gi is not None:
+            memory_gi = int(max(4.0, min(memory_gi, node_gi - _THRIFT_NODE_MARGIN_GI)))
+        node_cpu_m = getattr(cluster_capacity, "largest_node_cpu_millicores", None)
+        if isinstance(node_cpu_m, int) and node_cpu_m > 0:
+            cores = max(2, min(cores, node_cpu_m // 1000 - _THRIFT_NODE_MARGIN_CORES))
+
+    thrift = arch.query_engine.spark_thrift
+    changes: list[str] = []
+    if _set_if_default(thrift, "cores", cores):
+        changes.append(f"query_engine.spark_thrift.cores={cores}")
+    if _set_if_default(thrift, "memory", f"{memory_gi}g"):
+        changes.append(f"query_engine.spark_thrift.memory={memory_gi}g")
+    if not changes:
+        return None
+    return ", ".join(changes) + " (table_format=delta)"
 
 
 def _apply_schema_overrides(

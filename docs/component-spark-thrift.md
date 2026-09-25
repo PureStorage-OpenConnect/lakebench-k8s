@@ -71,8 +71,8 @@ architecture:
 | Field | Default | Description |
 |---|---|---|
 | `query_engine.type` | `trino` | Set to `spark-thrift` to deploy Spark Thrift Server instead of Trino. |
-| `spark_thrift.cores` | `2` | CPU request and limit for the Spark Thrift pod. |
-| `spark_thrift.memory` | `"4g"` | Memory request and limit. This is the Spark driver memory -- all query processing happens in this single JVM. |
+| `spark_thrift.cores` | `2` (`8` on Delta + Hive) | CPU request and limit for the Spark Thrift pod. The server runs Spark in local mode, so this is the query parallelism. |
+| `spark_thrift.memory` | `"4g"` (`"16g"` on Delta + Hive, `"24g"` on the financial schema) | Spark driver heap -- all query processing happens in this single JVM. The pod memory request and limit are the heap plus max(10% of heap, 1 GiB) for non-heap memory, so `4g` gives a 5 GiB pod. |
 | `spark_thrift.catalog_name` | `"lakehouse"` | The Iceberg catalog name used in SQL queries. Must match the catalog registered in Hive or Polaris. |
 
 ### What the overrides do
