@@ -416,8 +416,17 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
                 streaming_request_under_budget,
             )
 
-            capped = streaming_request_under_budget(cfg, capacity.total_cpu_millicores)
-            if capped.capped and capped.cpu_cores <= avail_cores and capped.memory_gb <= avail_gb:
+            try:
+                capped = streaming_request_under_budget(cfg, capacity.total_cpu_millicores)
+            except Exception as e:  # fall through to the hard failure below
+                logger.debug("Capped continuous request unavailable: %s", e, exc_info=True)
+                capped = None
+            if (
+                capped is not None
+                and capped.capped
+                and capped.cpu_cores <= avail_cores
+                and capped.memory_gb <= avail_gb
+            ):
                 names = ", ".join(capped.capped)
                 logger.warning("Continuous streams will be capped to fit the cluster: %s", names)
                 return PrereqResult(
@@ -426,7 +435,7 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
                     message=(
                         f"WARNING: cluster below the full request ({summary}); "
                         f"running degraded at ~{capped.cpu_cores} cores / "
-                        f"{capped.memory_gb} GB, capped: {names}"
+                        f"{capped.memory_gb} GB with Trino and datagen, capped: {names}"
                     ),
                     hint="\n".join(f"  {s}" for s in shortfalls),
                 )

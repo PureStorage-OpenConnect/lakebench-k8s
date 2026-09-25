@@ -83,8 +83,10 @@ Customer360 split would give it, and the room above that goes upstream first
 bronze, then gold-refresh, then the rest of silver-stream), since a stage
 runs no faster than its input arrives. The capacity preflight passes such a
 cluster with a WARNING naming the capped stages, as long as the capped
-request fits; it fails only when even that does not fit, or when a single
-pod fits no node.
+request plus Trino, Hive/Postgres and datagen fits (AML scale 1-10: 57
+cores); it fails only when even that does not fit, or when a single pod fits
+no node. An explicit `*_executors` count is not capped and is counted as
+set.
 
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
 compares the peak request against your cluster's allocatable capacity and

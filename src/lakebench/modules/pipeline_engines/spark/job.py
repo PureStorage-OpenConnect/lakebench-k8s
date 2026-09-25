@@ -708,7 +708,13 @@ def _streaming_concurrent_budget(
         floor = max(1, floor_cores // resolved[jt]["executor_cores"])
         caps[jt] = min(want[jt], floor)
     used_m = kept_m + sum(caps[jt] * resolved[jt]["executor_cores"] * 1000 for jt in overridden)
-    headroom_m = max(0, streaming_budget_m - used_m)
+    # The base split leaves the drivers to the 10% slack, which the larger
+    # overridden stages outgrow: take the drivers out before sharing, or a
+    # capped AML run asks for a few cores more than the cluster has (100
+    # cores at scale 10: 101 with Trino and datagen).
+    driver_m = sum(resolved[jt]["driver_cores"] * 1000 for jt in _STREAMING_JOB_TYPES)
+    override_budget_m = min(streaming_budget_m, int(max(0, remaining_m - driver_m) * 0.90))
+    headroom_m = max(0, override_budget_m - used_m)
     # A stage with ``keep_up_executors`` is filled only to that count on the
     # first pass (enough to keep pace with its input), so the stages after it
     # are not left at their floor; its surplus comes last.
@@ -728,7 +734,8 @@ def _streaming_concurrent_budget(
 
 @dataclass(frozen=True)
 class BudgetedStreamingRequest:
-    """What the continuous jobs request once the concurrent budget caps them."""
+    """What a continuous run requests once the concurrent budget caps the
+    streams, co-resident pods (Trino, Hive/Postgres, datagen) included."""
 
     cpu_cores: int
     memory_gb: int
@@ -743,28 +750,60 @@ def streaming_request_under_budget(
 
     The capacity preflight uses this when the uncapped peak does not fit: the
     run caps the streams to what fits and warns, so the preflight fails only
-    when even the capped request does not fit.
+    when even the capped request does not fit. The totals include what the
+    budget sets aside and the cluster must also hold (Trino, Hive/Postgres,
+    datagen), and an explicit per-job executor count, which the manifest
+    applies after the budget.
     """
+    from lakebench.config.autosizer import _parse_cpu_millicores, _parse_memory_gi
     from lakebench.config.schema import parse_spark_memory
 
     scale = config.architecture.workload.datagen.scale
     schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
     budget = _streaming_concurrent_budget(config, cluster_cpu_millicores)
+    spark_cfg = config.platform.compute.spark
+    explicit = {
+        JobType.BRONZE_INGEST: spark_cfg.bronze_ingest_executors,
+        JobType.SILVER_STREAM: spark_cfg.silver_stream_executors,
+        JobType.GOLD_REFRESH: spark_cfg.gold_refresh_executors,
+    }
     gib = 1024**3
-    cores = mem = 0
+    cores_m = mem = 0
     capped: list[str] = []
     for jt in _STREAMING_PIPELINE_ORDER:
         prof = _resolve_job_profile(jt.value, schema) or _JOB_PROFILES[jt.value]
         full = _scale_executor_count(prof, scale)
-        n = min(full, budget.get(jt, full))
-        if n < full:
-            capped.append(f"{jt.value} {full} -> {n}")
+        forced = explicit[jt]
+        if forced is not None:
+            n = int(forced)
+        else:
+            n = min(full, budget.get(jt, full))
+            if n < full:
+                capped.append(f"{jt.value} {full} -> {n}")
         exec_bytes = parse_spark_memory(prof["executor_memory"]) + parse_spark_memory(
             prof["executor_memory_overhead"]
         )
-        cores += n * prof["executor_cores"] + prof["driver_cores"]
+        cores_m += (n * prof["executor_cores"] + prof["driver_cores"]) * 1000
         mem += n * exec_bytes + parse_spark_memory(prof["driver_memory"])
-    return BudgetedStreamingRequest(cpu_cores=cores, memory_gb=mem // gib, capped=tuple(capped))
+
+    trino = config.architecture.query_engine.trino
+    datagen = config.architecture.workload.datagen
+    cores_m += (
+        _parse_cpu_millicores(trino.coordinator.cpu)
+        + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
+        + 1000  # Hive + Postgres, as the budget counts them
+        + datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
+    )
+    co_gi = (
+        _parse_memory_gi(trino.coordinator.memory)
+        + trino.worker.replicas * _parse_memory_gi(trino.worker.memory)
+        + datagen.parallelism * _parse_memory_gi(datagen.memory)
+    )
+    return BudgetedStreamingRequest(
+        cpu_cores=-(-cores_m // 1000),
+        memory_gb=int(-(-(mem + co_gi * gib) // gib)),
+        capped=tuple(capped),
+    )
 
 
 def _proportional_caps(
