@@ -66,6 +66,26 @@ def test_continuous_runs_w2w3w4_and_marks_w1w7w8_skipped():
     assert not (run & skip)
 
 
+def test_continuous_runs_the_cheap_rules_before_the_path_searches():
+    """Each rule's alerts are visible when its own write commits, so the
+    single-join rules (W4, W2) run before the multi-level path searches
+    (W17, W3); W17 goes before W3 since it raises far more alerts."""
+    tree = ast.parse(_src(GOLD_REFRESH_PATH))
+    node = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and any(getattr(t, "id", None) == "CONTINUOUS_RULES" for t in n.targets)
+    )
+    order = [e.value for e in node.value.elts]
+    assert order == [
+        "W4_risk_propagation",
+        "W2_structuring",
+        "W17_layering_chain",
+        "W3_round_tripping",
+    ]
+
+
 def test_continuous_reuses_batch_detection_driver():
     """Continuous detection must call the batch run_detection_rules, not fork
     the rules or reimplement a windowed detector. One driver, both modes."""
