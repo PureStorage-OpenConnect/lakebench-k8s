@@ -2407,9 +2407,9 @@ class SparkJobManager:
         # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
         # the report scored and which lakebench revision produced it.
         if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
-            from lakebench.deploy.datagen import DATAGEN_SEED
+            from lakebench.config.datagen_seed import config_seed
 
-            env.append({"name": "LB_DATAGEN_SEED", "value": str(DATAGEN_SEED)})
+            env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
             env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
