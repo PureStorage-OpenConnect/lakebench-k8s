@@ -1,7 +1,7 @@
 {
-  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.4.1 is v3.4 final as approved 2026-09-24 (AML-GOALS section 9 #36): the (customer, UTC calendar month) unit with subject-only labels, six behavioural typologies with K = 4 of 6, the lift-over-prevalence relative cap, gate scale 2, and persisted reference-model outputs. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
-  "version": "3.4.1",
-  "registered": "2026-09-24",
+  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.5.0 (2026-09-25, AML-GOALS section 9 #37/#38) replaces the reference model's hyperparameters, the relative leakage cap and the calibration and evaluation seeds after D0 at v3.4.1 was voided as a harness failure; see changelog. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
+  "version": "3.5.0",
+  "registered": "2026-09-25",
   "metric": "average_precision",
   "unit_of_scoring": {
     "entity": "customer",
@@ -34,7 +34,9 @@
     "max_iter": 100,
     "learning_rate": 0.1,
     "max_leaf_nodes": 31,
-    "early_stopping": false
+    "early_stopping": false,
+    "l2_regularization": 10.0,
+    "_regularization_note": "v3.5.0 (#37/#38): at prevalence 6e-5 to 5e-4 an unregularised log-loss leaf holding a few positives has a Newton step of about n_pos / (n_leaf x prevalence), tens of logits, so scores saturate at 0 and 1 and AP falls to prevalence (D0 at v3.4.1). l2_regularization adds to the leaf hessian and bounds the step. Chosen on the unregistered seed 7777 at scale 0.5 as the smallest tested value (1, 10, 100) with no saturated score and no positive scored 0 on any typology (l2 = 1 still saturated 2% of corridor_high_risk scores); calibrated probabilities kept (no class weighting); min_samples_leaf stays at the default because a large leaf floor caps leaf purity when positives are few."
   },
   "shortcut_model": {
     "estimator": "DecisionTreeClassifier",
@@ -59,9 +61,10 @@
     "note": "for a possible model-training workload (#36): per-unit out-of-fold scores (unit key, typology, label, score, fold), permutation importances on each fold's held-out rows, the fitted hyperparameters, library versions and the feature list with its sha256; written next to the JSON report (snappy parquet)"
   },
   "corpora": {
-    "calibration_seed": 42,
-    "evaluation_seed": 50000042,
+    "calibration_seed": 43,
+    "evaluation_seed": 50000043,
     "robustness_seed": 90000042,
+    "seed_rule": "v3.5.0: a voided or burned look increments the seed by one. D0 at v3.4.1 looked at calibration seed 42 (now 43); the evaluation seed moves with any change after a gate run (50000042 to 50000043). The robustness corpus was never generated and keeps 90000042. Pairwise gaps checked against seed_guard.",
     "gate_scale": 2,
     "entities_per_scale_unit": 111111,
     "gate_scale_note": "AML-GOALS section 9 #36: calibration corpora and D0 run at scale 2 (the local runner refuses another scale unless --diagnostic); D8 still compares scale 10 against the gate scale. entities_per_scale_unit mirrors datagen_rs world.rs (population = round(111111 x scale)) and is how a corpus's scale is read back from its account master.",
@@ -102,8 +105,9 @@
       "single_feature",
       "feature_pair_depth2"
     ],
-    "relative_cap_formula": "lift_over_prevalence",
-    "relative_cap_definition": "(shortcut_ap - prevalence) <= shortcut_ap_rel_max * (ap - prevalence); the absolute cap is unchanged"
+    "relative_cap_formula": "lift_over_prevalence_band_floor",
+    "relative_cap_definition": "(shortcut_ap - prevalence) <= shortcut_ap_rel_max * (max(ap, band.ap_min) - prevalence); the absolute cap is unchanged and applies as well",
+    "relative_cap_rationale": "v3.5.0 (#37/#38): the check asks whether one or two features carry a large share of the signal a typology must have to count. That reference is the band floor unless the model does better. Against the model's own AP alone the cap shrinks to the prevalence as a model weakens, so at prevalence 1e-4 a shortcut a few hundredths above it fails from noise. In band the rule equals lift_over_prevalence; below band the relative cap is at most prevalence + 0.5 x (0.30 - prevalence), about 0.15, under the absolute cap of 0.20, so it is never looser than the absolute cap."
   },
   "scale_invariance": {
     "method": "equivalence: bootstrap CI of (scale10 AP - scale1 AP) lies entirely within [-ap_diff_abs_max, +ap_diff_abs_max]",
@@ -200,5 +204,26 @@
       10
     ]
   },
-  "features_note": "v3.3: customer_type and crr_tier added (AML-GOALS section 9 #32); is_customer excluded because only customers are scored. v3.4: four history-relative features for the monthly unit (unit_of_scoring.history_features). Definitions: src/lakebench/spark/scripts/aml_features.py."
+  "features_note": "v3.3: customer_type and crr_tier added (AML-GOALS section 9 #32); is_customer excluded because only customers are scored. v3.4: four history-relative features for the monthly unit (unit_of_scoring.history_features). Definitions: src/lakebench/spark/scripts/aml_features.py.",
+  "changelog": [
+    {
+      "version": "3.5.0",
+      "date": "2026-09-25",
+      "approved": "AML-GOALS section 9 #37/#38",
+      "changes": [
+        "reference_model: l2_regularization 10 (the v3.4.1 model diverged at monthly prevalence; D0 at v3.4.1 seed 42 void as a harness failure)",
+        "leakage.relative_cap_formula: lift_over_prevalence_band_floor",
+        "corpora: calibration_seed 43, evaluation_seed 50000043 (seed_rule)"
+      ],
+      "unchanged": "band [0.30, 0.80], K = 4 of 6, monthly (customer, UTC month) unit, subject labels, gate scale 2, six behavioural typologies, features, CV, power, absolute leakage cap"
+    },
+    {
+      "version": "3.4.1",
+      "date": "2026-09-24",
+      "approved": "AML-GOALS section 9 #36",
+      "changes": [
+        "monthly subject unit, lift cap, K = 4 of 6, gate scale 2, persisted model outputs"
+      ]
+    }
+  ]
 }

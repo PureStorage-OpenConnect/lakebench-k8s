@@ -298,14 +298,18 @@ def test_high_risk_countries_match_generator_corridor_pool():
 
 def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
-    assert p["version"] == "3.4.1"
-    assert "#36" in p["_doc"]
+    assert p["version"] == "3.5.0"
+    assert "#37/#38" in p["_doc"] and p["changelog"][0]["version"] == "3.5.0"
     u = p["unit_of_scoring"]
     assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")
     assert (u["lead_in_days"], u["burn_in_months"], u["history_days"]) == (14, 14, 395)
-    assert p["leakage"]["relative_cap_formula"] == "lift_over_prevalence"
+    assert p["leakage"]["relative_cap_formula"] == "lift_over_prevalence_band_floor"
+    assert (p["leakage"]["shortcut_ap_abs_max"], p["leakage"]["shortcut_ap_rel_max"]) == (0.2, 0.5)
     assert p["band"] == {**p["band"], "ap_min": 0.3, "ap_max": 0.8}
+    assert (p["level2"]["k_in_band"], p["level2"]["n"]) == (4, 6)
+    assert p["corpora"]["gate_scale"] == 2
     assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
+    assert p["reference_model"]["l2_regularization"] > 0
     assert p["shortcut_model"]["max_depth"] == 2
     assert {k: p["cv"][k] for k in ("folds", "stratified", "seed")} == {
         "folds": 5,
@@ -327,7 +331,9 @@ def test_load_preregistration_prefers_flat_copy(tmp_path, monkeypatch):
 
 def test_passes_summary_and_corpus_role():
     p = _prereg()
-    rep = fg.evaluate_gate(_frame(), p, provenance={"corpus_seed": 42})
+    rep = fg.evaluate_gate(
+        _frame(), p, provenance={"corpus_seed": p["corpora"]["calibration_seed"]}
+    )
     assert rep["corpus_role"] == "calibration"
     assert rep["passes"]["d5_leakage_behavioural"] is False
     assert rep["passes"]["all"] is False
@@ -604,3 +610,52 @@ def test_duplicate_units_are_refused():
     df.loc[1, ["group", "month"]] = df.loc[0, ["group", "month"]].to_numpy()
     with pytest.raises(ValueError, match="duplicate units"):
         fg.evaluate_gate(df, _prereg())
+
+
+def test_band_floor_cap_equals_lift_in_band_and_floors_below():
+    """lift_over_prevalence_band_floor measures the shortcut against
+    max(ap, band floor): a weak model no longer shrinks the cap to the
+    prevalence, and the cap stays under the absolute cap below band."""
+    df = _frame(n=4000, prev=0.08, separable=False)
+    p = _prereg()
+    p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence_band_floor"}
+    weak = fg.evaluate_gate(df, p)["typologies"]["beh"]
+    prev, ap = weak["prevalence"], weak["ap"]
+    assert ap < p["band"]["ap_min"]
+    sc = weak["shortcuts"]["single_feature"]
+    rel = p["leakage"]["shortcut_ap_rel_max"]
+    assert sc["rel_cap"] == pytest.approx(prev + rel * (p["band"]["ap_min"] - prev))
+    assert sc["rel_cap"] <= p["leakage"]["shortcut_ap_abs_max"]
+    assert "model_beats_shortcuts" in weak
+    # In band (a strong model) the rule is the v3.4 lift rule.
+    strong = fg.evaluate_gate(_frame(), p)["typologies"]["beh"]
+    assert strong["ap"] >= p["band"]["ap_min"]
+    cap = strong["shortcuts"]["single_feature"]["rel_cap"]
+    assert cap == pytest.approx(strong["prevalence"] + rel * (strong["ap"] - strong["prevalence"]))
+    assert strong["shortcuts"]["single_feature"]["pass"] is False  # a planted shortcut
+
+
+def test_reference_model_does_not_saturate_at_rare_prevalence():
+    """The v3.4.1 model (no l2) pushed rare positives to scores of exactly
+    0 or 1; the registered model keeps scores inside (0, 1) and ranks a
+    learnable rare positive class well above prevalence."""
+    rng = np.random.default_rng(3)
+    n = 60000
+    y = (rng.random(n) < 4e-4).astype(int)
+    df = pd.DataFrame(
+        {
+            "planted": y * rng.normal(2.0, 1.0, n) + rng.normal(0, 1, n),
+            "noise_a": rng.normal(0, 1, n),
+            "noise_b": rng.normal(0, 1, n),
+            "is_customer": True,
+            "label:beh": y,
+            "label:defn": y,
+        }
+    )
+    p = _prereg()
+    p["power"] = {**p["power"], "min_positives": 5}
+    X, yy = df[p["features"]].to_numpy(float), df["label:beh"].to_numpy(int)
+    folds = fg._folds(yy, np.arange(n), p)
+    oof = fg._oof_scores(lambda: fg._reference_model(p), X, yy, np.ones(n), folds)
+    assert ((oof > 0) & (oof < 1)).all()
+    assert fg._ap(yy, oof, np.ones(n)) > 10 * yy.mean()
