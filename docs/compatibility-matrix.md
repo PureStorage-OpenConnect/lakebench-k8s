@@ -122,7 +122,8 @@ architecture:
 
 ### Delta + Spark Thrift
 
-- **Q2 and Q7 benchmark queries**: `MIN(interaction_date)` triggers the delta-spark
+- **Q2 and Q6 (RFM) benchmark queries**: `MIN(interaction_date)` (Q2) and
+  `MAX(interaction_date)` (Q6) trigger the delta-spark
   `OptimizeMetadataOnlyDeltaQuery` bug (`ClassCastException: LocalDate -> java.sql.Date`)
   through Spark. Trino is not affected (different optimizer). lakebench sets
   `spark.databricks.delta.optimizeMetadataQuery.enabled=false` for Delta + Hive on the

@@ -215,7 +215,7 @@ RECIPE_NOTES: dict[str, RecipeNote] = {
         caveats=(
             "delta-spark's metadata-only MIN/MAX rewrite is disabled "
             "(optimizeMetadataQuery.enabled=false) to avoid its ClassCastException "
-            "on date partition columns, so Q2 and Q7 scan instead. (gotcha 22, LB-148)",
+            "on date partition columns, so Q2 and Q6 scan instead. (gotcha 22, LB-148)",
             "Pre-benchmark OPTIMIZE is skipped; it exhausts Thrift memory. (gotcha 21)",
         ),
     ),
