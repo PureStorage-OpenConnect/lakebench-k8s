@@ -218,7 +218,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
         raise ConfigParseError(f"Failed to parse YAML: {e}")  # noqa: B904
 
 
-def load_config(path: str | Path) -> LakebenchConfig:
+def load_config(path: str | Path, *, allow_long_names: bool = False) -> LakebenchConfig:
     """Load and validate Lakebench configuration from file.
 
     Processing order:
@@ -228,6 +228,9 @@ def load_config(path: str | Path) -> LakebenchConfig:
 
     Args:
         path: Path to configuration YAML file
+        allow_long_names: Skip the derived-name length check (LB-153). Only
+            ``destroy`` sets this, so a deployment whose namespace is too
+            long to finish deploying can still be torn down.
 
     Returns:
         Validated LakebenchConfig object
@@ -246,7 +249,7 @@ def load_config(path: str | Path) -> LakebenchConfig:
         data["name"] = _resolve_auto_name(path.parent)
 
     try:
-        return LakebenchConfig.model_validate(data)
+        return LakebenchConfig.model_validate(data, context={"allow_long_names": allow_long_names})
     except ValidationError as e:
         errors = e.errors()
         error_messages = []
