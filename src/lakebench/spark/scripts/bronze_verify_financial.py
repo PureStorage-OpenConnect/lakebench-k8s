@@ -251,6 +251,15 @@ def _continuous_reset(spark, df):
     # gold-refresh registers it once it appears otherwise.
     spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{MANIFEST_TABLE}")
     register_manifest(spark)
+    # The P10 operations tables are projections of the previous run's alerts
+    # (cases, dispositions, the reconciliation ledger). gold-refresh rebuilds
+    # them from its first tick, but until then a reader would see the old
+    # run's queue as this run's.
+    from tm_operations import GOLD_CASES, GOLD_COVERAGE, GOLD_DISPOSITIONS, GOLD_RECON
+
+    for t in (GOLD_RECON, GOLD_COVERAGE, GOLD_DISPOSITIONS, GOLD_CASES):
+        spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{t} PURGE")
+    log("Continuous reset: dropped the TM operations tables")
 
 
 def _log_bronze_metrics(spark, source_bytes, row_count, elapsed):

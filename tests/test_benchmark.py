@@ -75,9 +75,17 @@ class TestBenchmarkQueriesByDomain:
         from lakebench.config.schema import WorkloadSchema
 
         queries = get_benchmark_queries(WorkloadSchema.FINANCIAL)
-        assert len(queries) == 8, f"expected 8 financial queries, got {len(queries)}"
+        # FQ1-FQ8 plus the four P10 stage-9 investigator queries.
+        assert len(queries) == 12, f"expected 12 financial queries, got {len(queries)}"
         classes = {q.query_class for q in queries}
-        for expected in ("scan", "filter_prune", "aggregation", "analytics", "operational"):
+        for expected in (
+            "scan",
+            "filter_prune",
+            "aggregation",
+            "analytics",
+            "operational",
+            "investigator",
+        ):
             assert expected in classes, f"financial queries missing class {expected}"
         # Sanity: every SQL template references at least one financial-only
         # table placeholder OR the shared {silver_table}/{gold_table}.

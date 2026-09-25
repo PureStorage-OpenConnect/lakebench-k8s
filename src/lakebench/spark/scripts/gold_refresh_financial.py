@@ -85,6 +85,7 @@ from gold_finalize_financial import (
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
+from tm_operations import bootstrap_tm_tables, run_tm_operations
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
@@ -145,6 +146,7 @@ def _bootstrap_gold_tables(spark) -> None:
     )
     for ddl in (DDL_ALERTS, DDL_RISK, DDL_CLUSTERS, DDL_DASH, DDL_STATUS):
         spark.sql(ddl)
+    bootstrap_tm_tables(spark)
     ensure_partition_transform(
         spark, f"{CATALOG}.{GOLD_ALERTS}", "days(alert_ts)", "months(alert_ts)"
     )
@@ -230,6 +232,15 @@ def main() -> None:
                 rules=CONTINUOUS_RULES,
                 skipped_rules=CONTINUOUS_SKIPPED_RULES,
             )
+            # P10 operations layer over this tick's alerts: rebuilt in full
+            # each tick (a projection of the alerts), one reconciliation set
+            # per tick with cycle = tick. Waits for data and for the manifest
+            # (dispositions are simulated from it). Never raises; a failure is
+            # logged as the 'workflow' invariant and fails the continuous gate.
+            if silver_rows > 0 and manifest_ready:
+                run_tm_operations(spark, txns, RUN_ID, cycle=cycle, continuous=True)
+            else:
+                log(f"Cycle {cycle}: [tm] waiting for silver rows and the manifest")
 
             # This run's alerts only. Rules skipped in continuous mode keep
             # alerts from earlier runs, and counting those let the continuous

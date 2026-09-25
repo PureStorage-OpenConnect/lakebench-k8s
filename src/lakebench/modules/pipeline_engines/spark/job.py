@@ -2288,6 +2288,11 @@ class SparkJobManager:
                     "value": str(cfg.architecture.workload.w1_max_vertices),
                 }
             )
+            # P10 operations layer parameters (tm_operations.py).
+            env.extend(
+                {"name": k, "value": v}
+                for k, v in cfg.architecture.workload.tm_operations.env().items()
+            )
 
         # Streaming-specific env vars
         if job_type is not None and job_type in _STREAMING_JOB_TYPES:
@@ -2445,6 +2450,10 @@ class SparkJobManager:
             # pre-registered AML gate features (shared with the local
             # harness scripts/aml_gate.py).
             "aml_features.py",
+            # Library module imported by gold_finalize_financial and
+            # gold_refresh_financial: the P10 operations layer. Executors
+            # import it too (the per-customer workflow replay runs there).
+            "tm_operations.py",
         ]
 
         # Build ConfigMap data

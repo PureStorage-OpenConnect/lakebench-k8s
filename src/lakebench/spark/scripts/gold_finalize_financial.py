@@ -15,6 +15,11 @@ this). Steps:
    rule -- a broken rule does not abort the pipeline; a stderr line
    surfaces the error for postmortem.
 
+4. Runs the transaction-monitoring operations layer on the alerts
+   (tm_operations.py, GOALS P10 stages 1, 6, 7, 8): reconciliation,
+   scenario coverage, L1 dispositions, cases and SAR decisions, then the
+   workflow invariants the CLI gates on.
+
 The detection step means `lakebench run` on a batch AML config produces
 alerts as part of the pipeline itself, so the baseline row is populated
 from `metrics.json` without a separate `lakebench financial replay`
@@ -314,6 +319,12 @@ def main() -> None:
         from detection_rules import cleanup_w1_checkpoints
 
         cleanup_w1_checkpoints(spark)
+
+    # P10: the operations layer on this cycle's alerts. Never raises; a
+    # failure is logged as the 'workflow' invariant, which fails the run.
+    from tm_operations import run_tm_operations
+
+    run_tm_operations(spark, txns, RUN_ID)
 
     elapsed = time.time() - start
     log("=" * 60)
