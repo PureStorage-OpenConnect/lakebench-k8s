@@ -13,8 +13,8 @@ DG_LOCAL_DIR set: ``bronze/pacs008/part-*.parquet``, ``bronze/party.parquet``,
 Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
 
     DG_LOCAL_DIR=/scratch/c datagen_rs/target/release/generate \\
-        --bucket bronze --prefix pacs008/ --seed 42 --scale 1
-    python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 42 --out gate.json
+        --bucket bronze --prefix pacs008/ --seed 43 --scale 2
+    python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 43 --out gate.json
 
 ``--seed`` is checked against the manifest's instance seeds and recorded.
 
