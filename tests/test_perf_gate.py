@@ -931,24 +931,153 @@ def test_stale_datagen_does_not_hide_ttv_regression(env):
     assert "earlier generate" in _row(c, "datagen_seconds").status
 
 
-@pytest.mark.parametrize("tz", ["UTC", "Pacific/Kiritimati", "Etc/GMT+12", "Asia/Kolkata"])
-def test_datagen_age_does_not_depend_on_gate_host_zone(env, tz, monkeypatch):
-    import time
+def test_datagen_age_is_a_lower_bound_over_every_zone(env):
+    """The naive start is read as UTC less the largest offset (+14h).
 
+    _datagen_age_hours never reads the gate host's zone, so the answer is the
+    same on every host.
+    """
     snap = env.snaps["c360-batch-s10"]
     run = pg.load_run(env.write_run(_batch_run(snap, "20260924-110000-bbbbbb")))
-    monkeypatch.setenv("TZ", tz)
-    time.tzset()
-    try:
-        # Naive start 2026-09-24T10:00: its UTC instant lies somewhere in
-        # 2026-09-23T20:00Z .. 2026-09-24T22:00Z depending on the run host.
-        run.raw["datagen_fleet"]["written_at"] = "2026-09-23T06:00:00+00:00"  # 28h naive
-        assert pg._datagen_stale(run) is None  # 14h in the +14 zone: not provably stale
-        run.raw["datagen_fleet"]["written_at"] = "2026-09-22T19:00:00+00:00"  # 39h naive
-        assert pg._datagen_stale(run)  # at least 25h in every zone
-    finally:
-        monkeypatch.delenv("TZ")
-        time.tzset()
+    # Naive start 2026-09-24T10:00; its instant lies in 20:00Z the day
+    # before .. 22:00Z depending on the run host's zone.
+    run.raw["datagen_fleet"]["written_at"] = "2026-09-22T20:01:00+00:00"  # 37.98h naive
+    assert pg._datagen_stale(run) is None
+    run.raw["datagen_fleet"]["written_at"] = "2026-09-22T19:59:00+00:00"  # 38.02h naive
+    assert pg._datagen_stale(run)
+    run.raw["start_time"] = "2026-09-24T10:00:00+00:00"  # an aware start is used as is
+    run.raw["datagen_fleet"]["written_at"] = "2026-09-23T09:59:00+00:00"
+    assert pg._datagen_stale(run)
+
+
+def test_record_refuses_a_batch_run_without_fresh_datagen(env):
+    """A baseline with no datagen numbers would turn datagen gating off."""
+    snap = env.snaps["c360-batch-s10"]
+    stale = _batch_run(snap, "20260924-100000-aaaaaa")
+    stale["datagen_fleet"]["written_at"] = "2026-09-20T10:00:00+00:00"
+    with pytest.raises(pg.PerfGateError, match="earlier generate"):
+        pg.record_baseline(env.store(), "c360-batch-s10", pg.load_run(env.write_run(stale)), "x")
+    none = _batch_run(
+        snap, "20260924-110000-bbbbbb", stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0}
+    )
+    del none["datagen_fleet"]
+    with pytest.raises(pg.PerfGateError, match="no datagen stage"):
+        pg.record_baseline(env.store(), "c360-batch-s10", pg.load_run(env.write_run(none)), "x")
+
+
+def test_multi_cycle_batch_run_refused(env):
+    """Cycles 2..N generate between cycles, inside first-start..last-end."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    run = _batch_run(snap, "20260924-110000-bbbbbb")
+    run["cycles"] = [{"cycle": 1}, {"cycle": 2}]
+    c = _compare(env, "c360-batch-s10", run)
+    assert c.verdict == pg.REFUSED
+    assert any("multi-cycle" in r for r in c.reasons)
+    dup = _batch_run(snap, "20260924-120000-cccccc")
+    dup["pipeline_benchmark"]["stages"].append(dict(dup["pipeline_benchmark"]["stages"][2]))
+    c = _compare(env, "c360-batch-s10", dup)
+    assert any("multi-cycle" in r for r in c.reasons)
+
+
+def test_clock_change_during_run_refused(env):
+    """Timestamps spanning less than the stages' own seconds: DST fall-back."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    run = _batch_run(snap, "20260924-110000-bbbbbb", ttv=450.0)
+    silver, gold = run["pipeline_benchmark"]["stages"][2:4]
+    silver["elapsed_seconds"] += 3600.0  # silver really ran an hour longer
+    c = _compare(env, "c360-batch-s10", run)
+    assert c.verdict == pg.REFUSED
+    assert any("clock change" in r for r in c.reasons)
+
+
+def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
+    """A run built by the real collector and saved by MetricsStorage."""
+    from lakebench.metrics.collector import (
+        BenchmarkMetrics,
+        JobMetrics,
+        PipelineMetrics,
+        build_pipeline_benchmark,
+    )
+
+    t = datetime(2026, 9, 24, 10, 0, 0)
+    ov = snap["spark"]["executor_overrides"]
+    pm = PipelineMetrics(
+        run_id=run_id,
+        deployment_name=snap["name"],
+        start_time=t,
+        success=True,
+        bronze_size_gb=100.0,
+        silver_size_gb=90.0,
+        gold_size_gb=40.0,
+        config_snapshot=snap,
+    )
+    t += timedelta(seconds=300)  # generate inside the run
+    for jt, secs, gb, ex in (
+        ("bronze-verify", 100.0, 100.0, ov["bronze"]),
+        ("silver-build", silver_s, 90.0, ov["silver"]),
+        ("gold-finalize", 150.0, 40.0, ov["gold"]),
+    ):
+        start, t = t, t + timedelta(seconds=secs)
+        pm.jobs.append(
+            JobMetrics(
+                job_name=f"lakebench-{jt}",
+                job_type=jt,
+                start_time=start,
+                end_time=t,
+                elapsed_seconds=secs,
+                success=True,
+                input_size_gb=gb,
+                executor_count=ex,
+                executor_cores=4,
+            )
+        )
+    pm.benchmark = BenchmarkMetrics(
+        mode="power",
+        cache="hot",
+        scale=10,
+        qph=400.0,
+        total_seconds=30.0,
+        queries=[{"name": "Q1", "elapsed_seconds": 30.0, "success": True}],
+    )
+    pm.end_time = t + timedelta(seconds=30)
+    pods = snap["datagen"]["parallelism"]
+    fleet = {
+        "pods_expected": pods,
+        "pods_reported": pods,
+        "data_quality": "complete",
+        "aggregate_mbps": 2000.0,
+        "cpu_hr_per_tb": 6.0,
+        "written_at": "2026-09-24T09:00:00+00:00",
+        "wall_elapsed_max_s": 300.0,
+        "total_bytes_written": 100e9,
+        "cores_total": pods * 4,
+    }
+    pm.datagen_fleet = fleet
+    pm.pipeline_benchmark = build_pipeline_benchmark(pm, datagen_elapsed=300.0, datagen_fleet=fleet)
+    return pm
+
+
+def test_real_collector_run_matches_scorecard_and_gates(env):
+    """Sized stages from the real collector: the gate's numbers are the report's."""
+    from lakebench.metrics.storage import MetricsStorage
+
+    snap = env.snaps["c360-batch-s10"]
+    storage = MetricsStorage(env.runs)
+    base = pg.load_run(storage.save_run(_real_run(snap, "20260924-100000-aaaaaa")))
+    assert pg.run_refusals(base, env.store().pinned("c360-batch-s10")) == []
+    numbers, _ = pg.extract_metrics(base)
+    for key in ("time_to_value_seconds", "pipeline_throughput_gb_per_second"):
+        assert numbers[key] == pytest.approx(base.scores[key], rel=1e-3), key
+    store = env.store()
+    pg.record_baseline(store, "c360-batch-s10", base, "abc")
+    store.save()
+    slow = pg.load_run(storage.save_run(_real_run(snap, "20260925-100000-bbbbbb", silver_s=380.0)))
+    c = pg.compare_run(env.store(), "c360-batch-s10", slow)
+    assert c.verdict == pg.REGRESSION, pg.format_comparison(c)
+    for metric in ("time_to_value_seconds", "pipeline_throughput_gb_per_second"):
+        assert _row(c, metric).status == "regression", metric
 
 
 def test_record_refuses_untimed_run_with_stale_datagen(env):
@@ -974,6 +1103,25 @@ def test_explicit_run_found_in_second_runs_dir(env, tmp_path):
     line = next(ln for ln in lines if "c360-batch-s10" in ln)
     assert line.startswith("ok"), lines
     assert "20260926-100000-uuuuuu" in line
+
+
+def test_auto_discovered_run_with_conflicting_copies_is_refused(env, tmp_path):
+    _accept_both_c360(env)
+    data = _batch_run(env.snaps["c360-batch-s10"], "20260927-100000-zzzzzz")
+    env.write_run(data)
+    uat = tmp_path / "uat-perf"
+    d = uat / "run-20260927-100000-zzzzzz"
+    d.mkdir(parents=True)
+    changed = copy.deepcopy(data)
+    changed["pipeline_benchmark"]["scorecard"]["composite_qph"] = 1.0
+    (d / "metrics.json").write_text(json.dumps(changed))
+    passed, lines = pg.release_check(env.store(), [env.runs, uat])
+    assert not passed
+    assert any("different contents" in ln for ln in lines if "c360-batch-s10" in ln)
+    # A re-serialised identical copy is the same run.
+    (d / "metrics.json").write_text(json.dumps(data, indent=2, sort_keys=True))
+    passed, lines = pg.release_check(env.store(), [env.runs, uat])
+    assert any(ln.startswith("ok") and "c360-batch-s10" in ln for ln in lines), lines
 
 
 def test_run_id_with_conflicting_copies_is_refused(env, tmp_path):
