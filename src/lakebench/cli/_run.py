@@ -1848,7 +1848,7 @@ def run(
                         )
                     else:
                         console.print(f"  Maintenance value: not measured ({_maint_value[2]})")
-                if maint_elapsed > 0 and pre_file_count > 0:
+                if maint_elapsed > 0 and pre_file_count > 0 and post_file_count > 0:
                     ratio = pre_file_count / max(post_file_count, 1)
                     console.print(
                         f"  Files: {pre_file_count:,} -> {post_file_count:,} "
@@ -1963,7 +1963,7 @@ def run(
                             pb.maintenance_pct_of_pipeline = (
                                 maint_elapsed / pb.total_elapsed_seconds
                             ) * 100
-                    if pre_file_count > 0:
+                    if pre_file_count > 0 and post_file_count > 0:
                         pb.pre_compaction_file_count = pre_file_count
                         pb.post_compaction_file_count = post_file_count
                         pb.compaction_ratio = pre_file_count / max(post_file_count, 1)
