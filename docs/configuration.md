@@ -550,6 +550,7 @@ leave these at defaults and control volume via `datagen.scale`.
 |---|---|---|---|
 | `architecture.workload.customer360.unique_customers` | int or null | `null` | Override customer count. Null = derived from scale. |
 | `architecture.workload.customer360.date_range_days` | int or null | `null` | Override date range in days. Null = 365. |
+| `architecture.workload.tm_operations.*` | block | enabled | AML only: the simulated TM operations layer (dispositions, cases, SARs) run after detection. Fields, defaults and ranges are in [aml-scoring.md](aml-scoring.md#the-transaction-monitoring-operations-layer). |
 
 
 ### Architecture -- Benchmark
@@ -560,6 +561,12 @@ leave these at defaults and control volume via `datagen.scale`.
 | `architecture.benchmark.streams` | int | `4` | Concurrent query streams for throughput mode. Range: 1--64. |
 | `architecture.benchmark.cache` | enum | `hot` | Cache mode: `hot` (warm cache) or `cold` (cleared before each query). |
 | `architecture.benchmark.iterations` | int | `3` | Timed runs of each query per benchmark round. QpH is scored from the per-query median and every sample plus the spread is recorded in `metrics.json`. `1` is a quick run with no measured spread; the maintenance value is then not reported. Range: 1--100. |
+| `architecture.benchmark.maintenance_settle.enabled` | bool | `true` | Batch mode: probe until storage settles between maintenance and the post-maintenance round. See [benchmarking.md](benchmarking.md). |
+| `architecture.benchmark.maintenance_settle.max_seconds` | int | `2700` | Longest wait. When reached, the post round still runs and `maintenance_value_pct` is null. Range: 60--14400. |
+| `architecture.benchmark.maintenance_settle.interval_seconds` | int | `60` | Seconds between the starts of consecutive probes. Range: 5--3600. |
+| `architecture.benchmark.maintenance_settle.tolerance_pct` | float | `10.0` | Settled when two consecutive probes differ by at most this percent and neither is slower than the pre-maintenance time by more. Range: above 0, up to 100. |
+| `architecture.benchmark.maintenance_settle.probe_query` | string or null | `null` | Benchmark query to probe with. Null = the workload's first scan-class query. |
+| `architecture.benchmark.maintenance_settle.probe_samples` | int | `1` | Timed runs per probe; the probe time is their median. Range: 1--10. |
 
 ### Architecture -- Table Names
 

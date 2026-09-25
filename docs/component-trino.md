@@ -63,10 +63,10 @@ architecture:
 | `images.trino` | `trinodb/trino:483` | Container image for coordinator and workers. |
 | `query_engine.type` | `trino` | Set to `trino` to deploy Trino. Other values skip Trino deployment. |
 | `trino.coordinator.cpu` | `"2"` | CPU request and limit for the coordinator pod. |
-| `trino.coordinator.memory` | `"8Gi"` | Memory request and limit for the coordinator pod. Also sets JVM `-Xmx`. |
+| `trino.coordinator.memory` | `"8Gi"` | Memory request and limit for the coordinator pod. JVM `-Xmx` is 80% of this limit, leaving room for non-heap memory. |
 | `trino.worker.replicas` | `2` | Number of worker pods. Set to `0` for coordinator-only mode (dev/debug). |
 | `trino.worker.cpu` | `"4"` | CPU request and limit per worker pod. |
-| `trino.worker.memory` | `"16Gi"` | Memory request and limit per worker pod. Also sets JVM `-Xmx`. |
+| `trino.worker.memory` | `"16Gi"` | Memory request and limit per worker pod. JVM `-Xmx` is 80% of this limit, leaving room for non-heap memory. |
 | `trino.worker.spill_enabled` | `true` | Enable spill-to-disk when queries exceed memory. |
 | `trino.worker.spill_max_per_node` | `"40Gi"` | Maximum spill data written per worker before the query fails. |
 | `trino.worker.storage` | `"50Gi"` | PVC size for each worker (used for spill and data directory). |

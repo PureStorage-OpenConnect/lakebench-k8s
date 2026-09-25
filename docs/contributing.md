@@ -15,7 +15,7 @@ contributions.
    ```
 4. **Set up the dev environment:**
    ```bash
-   cd lakebench
+   cd lakebench-k8s
    pip install -e ".[dev]"
    pre-commit install
    ```

@@ -422,14 +422,14 @@ def _render_tm_operations(gold_jobs: list, verdict: dict | None = None) -> str:
         )
         limits = ops.get("sars_by_limit") or {}
         if limits:
-            rows = "".join(
+            limit_rows = "".join(
                 f"<tr><td>{escape(str(k))}</td><td>{_fmt_n(v.get('filed'))}</td>"
                 f"<td>{_fmt_n(v.get('late'))}</td></tr>"
                 for k, v in sorted(limits.items())
             )
             parts.append(
                 "<table><thead><tr><th>Filing limit</th><th>SARs filed</th><th>Filed late</th>"
-                "</tr></thead><tbody>" + rows + "</tbody></table>"
+                "</tr></thead><tbody>" + limit_rows + "</tbody></table>"
                 f"<p>Continuing-activity SARs filed more than 120 days after the prior SAR: "
                 f"{_fmt_n(ops.get('continuing_sars_over_120_days'))}.</p>"
             )

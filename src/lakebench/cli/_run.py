@@ -772,7 +772,7 @@ def _report_tm_verdict(verdict: dict, label: str) -> bool:
         print_info(f"{label}: TM operations disabled (workload.tm_operations.enabled).")
     else:
         print_warning(
-            f"{label}: TM operations {status.replace('_', ' ')}: {verdict.get('reason')}. "
+            f"{label}: TM operations {str(status).replace('_', ' ')}: {verdict.get('reason')}. "
             "The P10 gate is not met; detection results are unaffected."
         )
     return False
@@ -2134,7 +2134,7 @@ def run(
                 benchmark_qph = bench_result.qph
 
                 # Maintenance summary
-                if pre_compaction_qph > 0:
+                if pre_compaction_qph > 0 and _pre_result is not None:
                     _maint_value = _maintenance_value(
                         _pre_result.queries,
                         bench_result.queries,

@@ -377,7 +377,7 @@ def _evaluate_typology(
         return out
 
     folds = _folds(y, groups, prereg)
-    models = [] if sink is not None else None
+    models: list | None = [] if sink is not None else None
     oof = _oof_scores(lambda: _reference_model(prereg), X, y, w, folds, models)
     if sink is not None:
         fold_of = np.empty(len(y), dtype=np.int8)
@@ -388,7 +388,7 @@ def _evaluate_typology(
             sink["importance"] = _permutation_importance(models, X, y, w, folds, features, prereg)
         except Exception as e:  # noqa: BLE001 -- an output, never the gate numbers
             sink["importance"], sink["importance_error"] = [], str(e)
-        fitted = next((m for m in models if m is not None), None)
+        fitted = next((m for m in models or [] if m is not None), None)
         sink["hyperparameters"] = _json_params(fitted) if fitted is not None else None
     ap = _ap(y, oof, w)
     lo, hi = _bootstrap_ci(y, oof, w, groups, prereg)
