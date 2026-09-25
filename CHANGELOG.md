@@ -508,18 +508,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### AML continuous: silver-stream and gold-refresh sizing
 - **Higher cluster minimum for AML continuous.** Under `schema: financial`,
-  silver-stream runs 10 executors x 4 cores (was 4) and gold-refresh 6 x 4
-  (was 2), both adding 8 per 100 scale to the 28 cap, per-executor sizing
-  unchanged. Sized from run-20260925-135005-4b7a97 (scale 10): silver
-  micro-batches took 299 s against a 60 s trigger and fell behind bronze,
-  and gold ticks took 349.5 s against a 300 s refresh interval, together
+  silver-stream runs 10 executors x 4 cores (was 4) with 80 shuffle
+  partitions, and gold-refresh 12 x 4 (was 2) with 96, both adding 8 per 100
+  scale to the 28 cap, per-executor sizing unchanged. Sized from
+  run-20260925-135005-4b7a97 (scale 10): silver micro-batches took 299 s
+  against a 60 s trigger and fell behind bronze, and gold ticks took 349.5 s
+  against a 300 s refresh interval while reading a lagging silver, together
   most of the 1,280 s median time to detect. The preflight minimum is now
-  94 cores / 740 GB at scale 1-10 (was 54 / 340) and 162 cores / 1,348 GB at
-  scale 100 (was 106 / 788).
+  118 cores / 980 GB / 2,300 Gi scratch at scale 1-10 (was 54 / 340 / 700)
+  and 186 cores / 1,588 GB / 3,760 Gi at scale 100 (was 106 / 788 / 1,760).
 - The concurrent budget gives each overridden stage its base-split floor
-  first and shares only the room above the floors, so the total never
-  passes the budget when a schema overrides several stages; whole executors
-  left over by rounding go to the stage that wants most.
+  first and hands the room above the floors upstream first (bronze, silver,
+  gold), so the total stays inside the budget when a schema overrides
+  several stages and a small cluster does not starve bronze to feed an idle
+  silver.
 
 ## [1.5.0] - 2026-09-16
 

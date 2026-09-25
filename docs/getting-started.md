@@ -61,22 +61,24 @@ Continuous mode runs its three streaming jobs at the same time, so the
 minimum is their sum, and it differs by workload. AML (`schema: financial`)
 sizes all three from a measured scale-10 run: bronze-ingest 5 executors x 4
 cores so the corpus drains inside a 30-minute window, silver-stream 10 x 4 so
-a micro-batch finishes inside its 60 s trigger, and gold-refresh 6 x 4 so a
-detection tick finishes inside the 5-minute refresh interval:
+a micro-batch finishes inside its 60 s trigger, and gold-refresh 12 x 4 so a
+detection tick over the whole scale-10 silver finishes inside the 5-minute
+refresh interval:
 
 | Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
 |:---------|------:|------------:|------------:|------------:|
 | Customer360 | 1-10 | 38 cores | 272 GB | 640 Gi |
-| AML | 1-10 | 94 cores | 740 GB | 1,700 Gi |
+| AML | 1-10 | 118 cores | 980 GB | 2,300 Gi |
 | Customer360 | 50 | 56 cores | 438 GB | 1,060 Gi |
-| AML | 50 | 122 cores | 996 GB | 2,320 Gi |
+| AML | 50 | 146 cores | 1,236 GB | 2,920 Gi |
 | Customer360 | 100 | 84 cores | 690 GB | 1,700 Gi |
-| AML | 100 | 162 cores | 1,348 GB | 3,160 Gi |
+| AML | 100 | 186 cores | 1,588 GB | 3,760 Gi |
 
 On a smaller cluster the run caps the streaming jobs to what fits and warns
 naming each capped job. Each AML stage keeps at least the cores the
-Customer360 split would give it, and only the room above that is shared, in
-proportion to what each stage still wants.
+Customer360 split would give it, and the room above that goes upstream first
+(bronze-ingest, then silver-stream, then gold-refresh), since a stage runs no
+faster than its input arrives.
 
 Lakebench checks this for you. The prerequisite phase of `lakebench run`
 compares the peak request against your cluster's allocatable capacity and
