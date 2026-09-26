@@ -620,6 +620,8 @@ class PipelineBenchmark:
         "cycle_progression": "Per-cycle elapsed time, QpH, and table health for multi-cycle batch runs",
         # Maintenance (v1.3)
         "maintenance_elapsed_seconds": "Total seconds spent on expire_snapshots + remove_orphan_files + compaction",
+        "maintenance_stopped": "True when pre-benchmark maintenance stopped early (a statement timed out or the 30 min cap hit); a statement may still have been running, so post_compaction_qph is not a clean measurement and maintenance_value_pct is null",
+        "maintenance_stop_reason": "Why pre-benchmark maintenance stopped",
         "maintenance_pct_of_pipeline": "Maintenance time as percentage of total pipeline time",
         "pre_compaction_file_count": "Iceberg data files before rewrite_data_files / OPTIMIZE",
         "post_compaction_file_count": "Iceberg data files after rewrite_data_files / OPTIMIZE",
@@ -731,6 +733,10 @@ class PipelineBenchmark:
 
     # Maintenance cost metrics (v1.3)
     maintenance_elapsed_seconds: float = 0.0
+    # Pre-benchmark maintenance stopped early (first statement timeout or
+    # the overall cap): a statement may still run, so the post QpH is flagged.
+    maintenance_stopped: bool = False
+    maintenance_stop_reason: str = ""
     maintenance_pct_of_pipeline: float = 0.0
     pre_compaction_file_count: int = 0
     post_compaction_file_count: int = 0
@@ -1249,6 +1255,9 @@ class PipelineBenchmark:
         if self.maintenance_elapsed_seconds > 0:
             batch_scores["maintenance_elapsed_seconds"] = round(self.maintenance_elapsed_seconds, 2)
             batch_scores["maintenance_pct_of_pipeline"] = round(self.maintenance_pct_of_pipeline, 2)
+        if self.maintenance_stopped:
+            batch_scores["maintenance_stopped"] = True
+            batch_scores["maintenance_stop_reason"] = self.maintenance_stop_reason
         if self.pre_compaction_file_count > 0:
             batch_scores["pre_compaction_file_count"] = self.pre_compaction_file_count
             batch_scores["post_compaction_file_count"] = self.post_compaction_file_count

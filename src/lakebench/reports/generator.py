@@ -492,10 +492,32 @@ class ReportGenerator:
             rows.append(f"<tr><td>Compaction ratio</td><td>{ratio:.1f}x</td></tr>")
         if maint_elapsed > 0:
             rows.append(f"<tr><td>Maintenance time</td><td>{maint_elapsed:.0f}s</td></tr>")
+        if pb.maintenance_stopped:
+            from html import escape as _ms_esc
+
+            # Holds for the headline QpH too: it was measured after this.
+            rows.append(
+                "<tr><td>Maintenance outcome</td>"
+                '<td style="color: var(--danger); font-weight: 600">stopped before '
+                f"completion ({_ms_esc(pb.maintenance_stop_reason)}); QpH measured after "
+                "maintenance may include a statement still running</td></tr>"
+            )
         if pre_qph > 0:
             rows.append(f"<tr><td>Pre-compaction QpH</td><td>{pre_qph:.1f}</td></tr>")
         if post_qph > 0:
-            rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
+            if pb.maintenance_stopped:
+                from html import escape as _stop_esc
+
+                rows.append(
+                    f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f} "
+                    '<span style="color: var(--danger); font-weight: 600">'
+                    "(warning: maintenance stopped before completion: "
+                    f"{_stop_esc(pb.maintenance_stop_reason)}; a statement may still "
+                    "have been running, so this is not a clean measurement)</span>"
+                    "</td></tr>"
+                )
+            else:
+                rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
         if value_pct is not None and pre_qph > 0:
             color = "var(--success)" if value_pct > 0 else "var(--danger)"
             rows.append(

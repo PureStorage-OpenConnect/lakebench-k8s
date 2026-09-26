@@ -65,6 +65,15 @@ ANNOTATION_STAMPED_AT = "lakebench.deployment/stamped-at"
 # Bucket tag keys.
 TAG_DEPLOYMENT_NAME = "lakebench.deployment"
 TAG_WORKLOAD_SCHEMA = "lakebench.workload"
+# LB-159: set only on buckets deploy itself created. Destroy deletes a bucket
+# only when it carries this marker (or is listed in the namespace annotation
+# below); buckets deploy adopted are emptied but kept.
+TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
+ANNOTATION_CREATED_BUCKETS = "lakebench.deployment/created-buckets"
+# A fresh random value written by every deploy. Destroy records it at start
+# and stops if it changes: that is a redeploy into the same namespace, which
+# the UID cannot show (same incarnation, or create_namespace=false).
+ANNOTATION_DEPLOY_NONCE = "lakebench.deployment/deploy-nonce"
 
 # Namespace name max length (matches K8s + doubles as the bucket-tag length
 # guard: AWS caps tag values at 256, so 63 chars is well within bounds).
@@ -557,8 +566,13 @@ def write_bucket_ownership_tag(
     bucket: str,
     deployment_name: str,
     workload_schema: str | None = None,
+    created: bool = False,
 ) -> None:
     """Write the ownership tag and verify the round trip.
+
+    ``created`` adds the created-by-lakebench marker (LB-159). The whole tag
+    set is rewritten, so a caller re-tagging a bucket lakebench created on an
+    earlier deploy must pass ``created=True`` again to keep the marker.
 
     Called by ``ensure_buckets`` unconditionally: not only on bucket create.
     A bucket created by a prior deploy that raced ours (or a legacy bucket
@@ -591,6 +605,8 @@ def write_bucket_ownership_tag(
     tag_set = [{"Key": TAG_DEPLOYMENT_NAME, "Value": deployment_name}]
     if workload_schema:
         tag_set.append({"Key": TAG_WORKLOAD_SCHEMA, "Value": workload_schema})
+    if created:
+        tag_set.append({"Key": TAG_CREATED_BY_LAKEBENCH, "Value": "true"})
 
     from botocore.exceptions import ClientError
 
@@ -664,6 +680,78 @@ def read_bucket_ownership_tag(boto_client: Any, bucket: str) -> dict[str, str] |
         raise
 
     return {t["Key"]: t["Value"] for t in resp.get("TagSet", [])}
+
+
+def read_created_buckets(core_v1: Any, namespace: str) -> set[str]:
+    """Buckets the namespace annotation records as created by lakebench.
+
+    Raises on read errors other than NotFound so a caller cannot mistake
+    "could not read" for "none were created" in a way that matters: the
+    only effect of an empty set is that buckets are kept.
+    """
+    from kubernetes.client.rest import ApiException
+
+    try:
+        ns = core_v1.read_namespace(namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return set()
+        raise
+    anns = (ns.metadata.annotations if ns and ns.metadata else None) or {}
+    raw = anns.get(ANNOTATION_CREATED_BUCKETS) or ""
+    if not isinstance(raw, str):
+        return set()
+    return {b.strip() for b in raw.split(",") if b.strip()}
+
+
+def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
+    """Add ``buckets`` to the namespace's created-buckets annotation (LB-159).
+
+    Union with what is already recorded, so a redeploy (which sees the
+    buckets as existing) does not forget that an earlier deploy created them.
+    """
+    if not buckets:
+        return
+    merged = read_created_buckets(core_v1, namespace) | set(buckets)
+    body = {"metadata": {"annotations": {ANNOTATION_CREATED_BUCKETS: ",".join(sorted(merged))}}}
+    core_v1.patch_namespace(namespace, body)
+
+
+def write_deploy_nonce(core_v1: Any, namespace: str) -> str:
+    """Stamp a new deploy nonce on the namespace and return it."""
+    import uuid
+
+    nonce = uuid.uuid4().hex
+    core_v1.patch_namespace(
+        namespace, {"metadata": {"annotations": {ANNOTATION_DEPLOY_NONCE: nonce}}}
+    )
+    return nonce
+
+
+def forget_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
+    """Drop ``buckets`` from the created-buckets annotation after deleting them.
+
+    A namespace that outlives destroy (create_namespace=false, or kept after a
+    failure) would otherwise keep claiming the names, and a bucket later
+    pre-provisioned or adopted under one of them would be deleted by the next
+    destroy. A namespace that is already gone has nothing to forget.
+    """
+    from kubernetes.client.rest import ApiException
+
+    if not buckets:
+        return
+    recorded = read_created_buckets(core_v1, namespace)
+    remaining = recorded - set(buckets)
+    if remaining == recorded:
+        return
+    # A JSON merge patch with null removes the key.
+    value = ",".join(sorted(remaining)) if remaining else None
+    body = {"metadata": {"annotations": {ANNOTATION_CREATED_BUCKETS: value}}}
+    try:
+        core_v1.patch_namespace(namespace, body)
+    except ApiException as e:
+        if e.status != 404:
+            raise
 
 
 def verify_bucket_ownership(
