@@ -348,7 +348,8 @@ def test_registered_look_gets_no_operator_retry(looks_open):
         m = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
         return m["spec"]["restartPolicy"]
 
-    assert policy(_cfg_role(None, "evaluation")) == {"type": "Never"}
+    reg = policy(_cfg_role(None, "evaluation"))
+    assert reg["onFailureRetries"] == 0 and reg["onSubmissionFailureRetries"] == 5
     assert policy(_cfg("financial", 7777))["type"] == "OnFailure"
 
 
@@ -373,3 +374,15 @@ def test_entrypoint_requires_a_financial_seed():
         text=True,
     )
     assert r.returncode == 2 and "--seed is required" in r.stderr
+
+
+def test_registered_look_claims_out_before_spark(tmp_path, looks_open):
+    g = _gate()
+    out = tmp_path / "look.json"
+    out.write_text("{}")  # an earlier look's record
+    argv = ["/nonexistent", "--seed", str(EVAL), "--registered", "evaluation", "--out", str(out)]
+    assert g.main(argv) == 1
+    assert out.read_text() == "{}"
+    missing = tmp_path / "no-such-dir" / "look.json"
+    argv[-1] = str(missing)
+    assert g.main(argv) == 1
