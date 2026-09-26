@@ -262,13 +262,34 @@ mode, and the shipped AML example is batch mode.
   therefore a property of the datagen's typology window arithmetic in
   `datagen_rs/src/typology.rs` (3 to 21 days for `micro_structuring`,
   one civil day for `rapid_layering`), invariant to how fast or slow the
-  stack under test runs -- median pattern-span at scale 10000 on a fast
-  cluster equals median pattern-span at scale 1 on a slow one. A true
-  time-to-detect needs a data-arrival clock in the same frame as the
-  alert, which only exists in multi-cycle (per-cycle ingest timestamp)
-  or sustained mode; it is tracked for a later release (LB-121). Use
-  pattern-span to sanity-check that a rule fires inside its typology
-  window, never as a speed comparison between stacks.
+  stack under test runs. Use pattern-span to sanity-check that a rule
+  fires inside its typology window, never as a speed comparison between
+  stacks.
+- **`time_to_detect_seconds`** (AML continuous mode only) is the real
+  detection latency. Each gold-refresh tick finds the alerts it newly
+  raised: an alert is new when its (rule, entity, sorted related
+  transaction ids) was not in `gold.alerts` at the snapshot before the
+  tick. For each new alert, time to detect is the moment its rule's
+  INSERT into `gold.alerts` committed minus the newest bronze `ingest_ts`
+  among its related transactions, so it runs from the arrival of the
+  last piece of evidence to the alert being visible in gold
+  (`spark/scripts/gold_refresh_financial.py`). Each tick logs a
+  histogram in 10 s bins, and the collector merges every tick into
+  `time_to_detect_seconds` (median), `time_to_detect_p95_seconds` (upper
+  edge of the bin that reaches the 95th percentile, capped at the
+  maximum), `time_to_detect_max_seconds` and `time_to_detect_alerts`
+  (`metrics/collector.py`). `time_to_detect_late_alerts` counts alerts
+  whose evidence was already in silver before the previous pass read it
+  (a re-raise after a rule error, or evidence outside
+  `related_txn_ids`); they stay in the percentiles, so they can only
+  lengthen them. `time_to_detect_unmeasured_cycles` counts ticks that
+  logged no measurement; their alerts are measured one tick late. The
+  ticks also log a pass-end histogram (every new alert measured at the
+  end of the detection pass, the definition used before per-rule commit
+  times) and one histogram per rule, kept with the gold-refresh stage
+  metrics so a rule that got slower is not hidden in the merged figure.
+  Batch runs report no time to detect. AML continuous runs always carry
+  the keys, set to null when nothing was measured.
 
 Precision and recall for AML themselves are honest measurements of
 what they say -- rule alerts joined against manifest rows -- with the
@@ -314,9 +335,45 @@ The scale factor sets bronze volume linearly: scale 1 is 8.4 GB of
 pacs.008 messages (26.7M transactions over 60 months), scale 100 is about
 840 GB, and scale 10000 is a tier-1 universal bank's AML retention target
 at about 84 TB.
-The Pydantic schema accepts up to scale 10000, but scale 500 (~50 TB)
-is the tested ceiling; runs above it have not been verified end-to-end
-and are on the user.
+The Pydantic schema accepts up to scale 10000, but AML has been run end
+to end only up to scale 100 (about 950 GB of bronze measured in
+run-20260925-104703-c02890; runs land 11-13% above the 8.4 GB-per-scale
+estimate). Scale 500 (about 4.2 TB by that estimate) and above are untested;
+results there are on the user.
+
+## Known limitations in v1.6
+
+- **No counter-leakage hard negatives yet.** The generator does not yet
+  plant legitimate accounts built to mimic a typology's shortcut signature
+  (for example naturally long-quiet seasonal or travel accounts that break
+  the dormancy gap signature). The leakage gate still runs, but a
+  detector can still score on such a shortcut where no hard negative
+  exists to punish it. Planned for v1.7.
+- **AML continuous per-rule recall is not scored (LB-168).** Stopping the
+  streams can interrupt a gold-refresh tick and leave rule statuses
+  `pending`; post-run scoring refuses them, and the report says "Recall is
+  not scored in continuous mode". Batch recall is unaffected. Target v1.7.
+- **Stream restarts longer than 1 h are not safe (LB-176).** Continuous
+  Iceberg snapshot expiry is floored at 1 h while streams are live. A
+  bronze-ingest driver down for longer can replay a batch and append
+  duplicates, and a silver stream down for longer may resume from an
+  expired snapshot and fail. Short restarts are fine. Target v1.7.
+- **Delta continuous runs get no effective maintenance.** While streams
+  are live, Delta VACUUM keeps Delta's 7-day default retention, so a
+  continuous Delta run shorter than 7 days removes nothing and its object
+  count grows for the whole run. Delta OPTIMIZE never runs either, so Delta
+  tables are not compacted.
+- **The concurrency degradation ratio is measured in reduced form.**
+  v1.6 measures investigator-query latency on Trino at scale 10, idle
+  against loaded, over 30 executions each. The full measurement (Spark and
+  Trino, scale 10 and 100, idle, beside one other workload and beside
+  everything, at least 100 executions each) moves to v1.7.
+- **AML datagen throughput is published, not gated.** AML datagen reports
+  per-pod write throughput and CPU-hours per TB, characterised up to scale
+  50. Unlike Customer360 (at least 500 MB/s per pod), no release gate fails
+  on the AML figure. Measured: about 240 MB/s per pod at 8 cores
+  (run-20260924-230333-bc5485) and about 119 MB/s per pod on 44 pods at
+  scale 100 (run-20260925-104703-c02890).
 
 ## The transaction-monitoring operations layer
 
@@ -489,4 +546,4 @@ is the one case this cannot tell apart.
 - [`src/lakebench/benchmark/aml_queries.py`](../src/lakebench/benchmark/aml_queries.py) -- rule -> typology mapping and query catalogue.
 - [`src/lakebench/aml/reference_score.py`](../src/lakebench/aml/reference_score.py) -- leakage gate + reference detector library.
 - [`src/lakebench/spark/scripts/score_financial_reference.py`](../src/lakebench/spark/scripts/score_financial_reference.py) -- Spark driver for both, called by `lakebench financial score`.
-- [`docs/financial-benchmark-baselines.md`](financial-benchmark-baselines.md) -- reference-cluster wall-clock and recall numbers, populated per release.
+- [`docs/financial-benchmark-baselines.md`](financial-benchmark-baselines.md) -- test-cluster wall-clock, recall and time-to-detect numbers, populated per release (pending the v1.6 frozen-generator runs).

@@ -17,7 +17,7 @@ from lakebench.config import load_config
 ROOT = Path(__file__).resolve().parents[1]
 
 # Design specs describe proposed config, not current config.
-EXEMPT = {"docs/lakebench.next-spec.md"}
+EXEMPT_PREFIXES = ("docs/internal/",)
 
 # Known doc defects owned elsewhere. strict=True: once the doc is fixed the
 # xfail fails, so the entry gets removed.
@@ -37,7 +37,7 @@ def _blocks():
     files = sorted(ROOT.glob("docs/**/*.md")) + [ROOT / "README.md", ROOT / "CONTRIBUTING.md"]
     for f in files:
         rel = str(f.relative_to(ROOT))
-        if rel in EXEMPT or not f.exists():
+        if rel.startswith(EXEMPT_PREFIXES) or not f.exists():
             continue
         text = f.read_text()
         for m in re.finditer(r"```ya?ml\n(.*?)```", text, re.S):

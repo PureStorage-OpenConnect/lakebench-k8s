@@ -1022,8 +1022,8 @@ def _run_iceberg_compaction(
     # causing benchmark queries to fail.  In batch mode, Delta tables are
     # written in a single Spark job and don't accumulate the small files that
     # OPTIMIZE is designed to fix.  Skip it pre-benchmark to avoid crashing
-    # the query engine.  OPTIMIZE is still run in the sustained monitoring
-    # loop where small-file proliferation is the actual problem.
+    # the query engine.  The continuous loop calls this function too, so
+    # Delta OPTIMIZE never runs in either path.
     if table_format == "delta" and engine_type in ("trino", "spark-thrift"):
         console.print("  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]")
         return
