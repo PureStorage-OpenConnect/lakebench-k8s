@@ -138,6 +138,59 @@ def seed_guard_error(
     )
 
 
+def ledger_path() -> Path:
+    """An append-only record of look claims outside the checkout, so a
+    reverted or stashed aml_registered_looks.json cannot un-spend a seed on
+    this host (LB_AML_LOOKS_LEDGER overrides the location)."""
+    return Path(
+        os.environ.get("LB_AML_LOOKS_LEDGER") or Path.home() / ".lakebench" / "aml_looks.jsonl"
+    )
+
+
+def seed_ever_recorded(seed: int) -> str | None:
+    """Why ``seed`` already has a look anywhere this host can see, or None:
+    the out-of-tree ledger, or any commit on any branch that added it to the
+    tracked record."""
+    from lakebench.config.datagen_seed import looks_path
+
+    led = ledger_path()
+    if led.is_file():
+        for line in led.read_text().splitlines():
+            if line.strip() and int(json.loads(line)["seed"]) == int(seed):
+                return f"seed {seed} is in the look ledger {led}"
+    rec = looks_path()
+    hits = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(ROOT),
+            "log",
+            "--all",
+            "--format=%H",
+            "-S",
+            f'"seed": {int(seed)}',
+            "--",
+            str(rec.relative_to(ROOT)),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    if hits:
+        return f"seed {seed} was recorded in {rec.name} by commit {hits.splitlines()[0]}"
+    return None
+
+
+def append_ledger(entry: dict) -> None:
+    """Append ``entry`` to the ledger and fsync it (raises on failure)."""
+    led = ledger_path()
+    led.parent.mkdir(parents=True, exist_ok=True)
+    with open(led, "a") as f:
+        f.write(json.dumps(entry) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def clean_checkout_error() -> str | None:
     """Why this checkout may not take a registered look, or None: it must be
     a git work tree with no uncommitted change to a tracked file."""
@@ -363,7 +416,7 @@ def main(argv=None) -> int:
         # The look record, the predictions and the pre-registration are read
         # from this checkout: they must be the committed ones, or a look in
         # another worktree (or a reverted record) goes unseen.
-        err = clean_checkout_error()
+        err = clean_checkout_error() or seed_ever_recorded(args.seed)
         if err:
             print(f"refusing: {err}", file=sys.stderr)
             return 1
@@ -540,14 +593,26 @@ def main(argv=None) -> int:
             from lakebench.config.datagen_seed import claim_look, load_predictions
 
             try:
-                # Re-checked here: the file must still be the one checked
-                # before Spark started, and still valid for this look.
-                err = predictions_error(args.generator_image)
+                # Re-checked here: the checkout must still be clean and the
+                # predictions the ones checked before Spark started.
+                err = (
+                    clean_checkout_error()
+                    or seed_ever_recorded(args.seed)
+                    or predictions_error(args.generator_image)
+                )
                 if err:
                     raise ValueError(err)
                 pred, pred_sha = load_predictions(typologies=typologies)
                 if pred_sha != preflight_pred_sha:
                     raise ValueError("the Level-2 predictions changed after the look was checked")
+                append_ledger(
+                    {
+                        "role": args.registered,
+                        "seed": args.seed,
+                        "checkout": str(ROOT),
+                        "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+                )
                 claim_look(
                     args.registered,
                     args.seed,

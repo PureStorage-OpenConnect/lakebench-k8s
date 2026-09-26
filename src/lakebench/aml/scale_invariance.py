@@ -551,6 +551,16 @@ def _weights_ok(w) -> bool:
     return bool(len(w)) and bool(np.all(np.isfinite(w))) and bool(np.all(w > 0))
 
 
+def _seed_key(run: dict):
+    """Sort key: the corpus seed a report records (reports in any order give
+    the same bootstrap streams)."""
+    seed = (run["report"].get("provenance") or {}).get("corpus_seed")
+    try:
+        return (0, int(str(seed)), run["uri"])
+    except (TypeError, ValueError):
+        return (1, 0, run["uri"])
+
+
 def _packaged_prereg_path() -> Path:
     """The tracked pre-registration inside the package; D8 refuses to certify
     under any other file (an override could loosen a tolerance)."""
@@ -745,7 +755,7 @@ def _evaluate(s2_reports, s10_reports, prereg_path, endpoint, jobs) -> dict[str,
     }
     errors: list[str] = out["errors"]
     runs = {
-        "s2": [load_run(r, endpoint) for r in s2_reports],
+        "s2": sorted((load_run(r, endpoint) for r in s2_reports), key=_seed_key),
         "s10": [load_run(r, endpoint) for r in s10_reports],
     }
     facts: dict[str, list] = {"s2": [], "s10": []}

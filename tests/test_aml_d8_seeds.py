@@ -333,3 +333,13 @@ def test_registered_look_needs_a_clean_checkout(monkeypatch):
     assert "clean checkout" in mod.clean_checkout_error()
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: Done(""))
     assert mod.clean_checkout_error() is None
+
+
+def test_out_of_tree_ledger_keeps_a_seed_spent(tmp_path, monkeypatch):
+    mod = _runner()
+    monkeypatch.setenv("LB_AML_LOOKS_LEDGER", str(tmp_path / "ledger.jsonl"))
+    ev = CORPORA["evaluation_seed"]
+    assert mod.seed_ever_recorded(ev) is None  # no ledger, no commit of the record
+    mod.append_ledger({"role": "evaluation", "seed": ev})
+    assert "ledger" in mod.seed_ever_recorded(ev)
+    assert mod.seed_ever_recorded(CORPORA["robustness_seed"]) is None
