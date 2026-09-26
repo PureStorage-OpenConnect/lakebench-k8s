@@ -87,42 +87,32 @@ def build_delta_maintenance_sql(
                 table,
             )
             schema, tbl = "default", table
-        stmts: list[str] = []
         # Trino enforces a 7-day (168h) minimum retention by default.
         # Override the connector session property when a shorter threshold
-        # is requested (e.g. retention_hours=0 on destroy path).
-        if retention_hours < 168.0:
-            stmts.append(f"SET SESSION {catalog}.vacuum_min_retention = '0s'")
-        stmts.append(
+        # is requested (e.g. retention_hours=0 on destroy path). exec_sql
+        # runs each list element as its own `trino --execute` process, so a
+        # separate SET SESSION would be lost before the CALL: send both in
+        # one submission, which the CLI runs in order in one session.
+        call = (
             f"CALL {catalog}.system.vacuum("
             f"schema_name => '{schema}', "
             f"table_name => '{tbl}', "
             f"retention => '{retention_hours}h')"
         )
-        return stmts
-    if engine == "spark-thrift":
-        # DEFENSIVE: an adversarial review anticipated that Spark refuses
-        # VACUUM below the default 7-day retention without
-        # `spark.databricks.delta.retentionDurationCheck.enabled=false`, and
-        # that the destroy caller silently swallows the resulting warning
-        # while DROP TABLE proceeds on top of the failed VACUUM. Live UAT
-        # on Delta 4.0.0 + Spark 4.0.2 + Spark Thrift Server on OCP 4.19
-        # did NOT reproduce that failure (VACUUM RETAIN 0 succeeded silently
-        # both with and without the SET, on a table with no tombstones
-        # older than the just-completed pipeline). The SET is kept as a
-        # defensive precaution -- it is harmless in the observed case, and
-        # protects future Delta versions or destroys on tables with real
-        # tombstone history. Note: because `exec_sql` runs each statement
-        # in a separate beeline invocation, this SET is session-scoped
-        # only to its own connection, not to the following VACUUM.
-        # Combining them into one -e submission would be needed for the
-        # SET to actually gate the VACUUM if a future Delta enforces the
-        # check -- update this + `exec_sql` together if that surfaces.
-        stmts = []
         if retention_hours < 168.0:
-            stmts.append("SET spark.databricks.delta.retentionDurationCheck.enabled=false")
-        stmts.append(f"VACUUM {table} RETAIN {retention_hours} HOURS")
-        return stmts
+            return [f"SET SESSION {catalog}.vacuum_min_retention = '0s'; {call}"]
+        return [call]
+    if engine == "spark-thrift":
+        # Spark refuses VACUUM below the 7-day default retention unless
+        # retentionDurationCheck is off for the session. exec_sql runs each
+        # list element as its own beeline connection, so the SET must travel
+        # in the same `-e` submission as the VACUUM to apply to it. (Live UAT
+        # on Delta 4.0.0 + Spark 4.0.2 did not trip the check on a fresh
+        # table; tables with real tombstone history would.)
+        vacuum = f"VACUUM {table} RETAIN {retention_hours} HOURS"
+        if retention_hours < 168.0:
+            return [f"SET spark.databricks.delta.retentionDurationCheck.enabled=false; {vacuum}"]
+        return [vacuum]
     return []
 
 
