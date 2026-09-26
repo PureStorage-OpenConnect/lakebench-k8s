@@ -21,10 +21,20 @@ driver refuses the robustness seed without it). The generator stamps it into
 the manifest; ``--registered robustness`` requires the stamp and every other
 role refuses it.
 
+D8 (pre-registration scale_invariance) scores each shard of a scale-10
+calibration corpus with ``--d8-shard INDEX`` (features on the whole corpus,
+only the shard's customers scored, uncapped) and every D8 run with
+``--generator-image repo@sha256:<digest>``, the pinned datagen image that
+generated the corpus (host-built corpora are not bit-reproducible across
+hosts and never feed D8). ``--l2-sensitivity`` adds the ungated l2 refits.
+
 ``--seed`` is checked against the manifest's instance seeds and recorded.
 Spent seeds are refused, and so are the evaluation and robustness seeds unless
 ``--registered <role>`` marks this as the registered gate run for that role
-(the report then records the look under ``registered_look``). The manifest is
+(the report then records the look under ``registered_look``). A registered
+look appends its seed to src/lakebench/spark/data/aml/aml_registered_looks.json
+before any model is fitted and its report sha256 before the verdict is
+printed; commit that file after the look. The manifest is
 checked against every guarded seed, so a corpus from one is refused whatever
 ``--seed`` claims.
 
@@ -128,6 +138,81 @@ def seed_guard_error(
     )
 
 
+def predictions_error(generator_image) -> str | None:
+    """Why a registered look may not start on the committed Level-2
+    predictions (AML-GOALS #46 D-8), or None."""
+    from lakebench.aml.fidelity_gate import in_scope_typologies, load_preregistration
+    from lakebench.config.datagen_seed import load_predictions
+
+    prereg, sha = load_preregistration()
+    try:
+        pred, _ = load_predictions(typologies=in_scope_typologies(prereg))
+    except (OSError, ValueError) as e:
+        return f"the Level-2 predictions are not committed: {e}"
+    if pred["prereg_sha256"] != sha:
+        return "the Level-2 predictions were made under another pre-registration file"
+    if pred["generator_image"] != generator_image:
+        return (
+            f"the Level-2 predictions come from image {pred['generator_image']}, not "
+            f"--generator-image {generator_image}"
+        )
+    return None
+
+
+def image_digest_ok(ref: str) -> bool:
+    """True for a digest-pinned image reference: ...@sha256:<64 lowercase hex>."""
+    import re
+
+    return re.fullmatch(r".+@sha256:[0-9a-f]{64}", ref) is not None
+
+
+def emit_report(
+    report: dict, out, registered, seed, summary_lines, print_fn=print, predictions_sha=None
+) -> bool:
+    """Write the report and print its verdict; False when a registered look
+    could not be recorded (nothing verdict-bearing is printed then).
+
+    R3: for a registered evaluation or robustness look the report is written
+    and fsynced, its sha256 is recorded in the tracked look record
+    (datagen_seed.complete_look), and only then is the verdict printed."""
+    text = json.dumps(report, indent=2, default=str) + "\n"
+    if registered in ("evaluation", "robustness"):
+        import hashlib
+
+        from lakebench.config.datagen_seed import complete_look, load_predictions
+
+        try:
+            # The predictions must be the ones the look started with.
+            if predictions_sha is None or load_predictions()[1] != predictions_sha:
+                raise ValueError("the Level-2 predictions changed (or vanished) during the look")
+            with open(out, "w") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            entry = complete_look(registered, seed, digest, str(Path(out).resolve()))
+        except Exception as e:  # noqa: BLE001 -- fail closed: no record, no verdict
+            print_fn(
+                f"the look's report hash could not be recorded ({e}); verdict withheld. The "
+                "seed is spent (recorded when the look started).",
+                file=sys.stderr,
+            )
+            return False
+        print_fn(f"recorded look {entry['role']} seed {entry['seed']} report sha256 {digest}")
+        for line in summary_lines(report):
+            print_fn(line)
+        print_fn(f"wrote {out}")
+        return True
+    for line in summary_lines(report):
+        print_fn(line)
+    if out:
+        Path(out).write_text(text)
+        print_fn(f"wrote {out}")
+    else:
+        print_fn(text, end="")
+    return True
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     if argv is None and "--print-pinned-deps" in sys.argv[1:]:
@@ -173,11 +258,52 @@ def main(argv=None) -> int:
         "report records the look. Spent seeds are always refused",
     )
     ap.add_argument(
+        "--d8-shard",
+        type=int,
+        default=None,
+        metavar="INDEX",
+        help="D8 (scale_invariance.shard_rule): score only this shard of a "
+        "scale_invariance.large_scale calibration corpus. Features and labels are built on "
+        "the whole corpus; customers are sharded by planted-instance component and the plan "
+        "is refused if any instance spans shards",
+    )
+    ap.add_argument(
+        "--generator-image",
+        default=None,
+        metavar="REF",
+        help="the digest-pinned datagen image that generated the corpus "
+        "(registry/repo@sha256:<64 hex>), recorded in the report. Required for a D8 run "
+        "(D8 refuses reports without it) and for a registered look: generator output is "
+        "bit-reproducible only within one build environment, so host-built corpora never "
+        "feed D8, A6 or Level 2",
+    )
+    ap.add_argument(
+        "--l2-sensitivity",
+        action="store_true",
+        help="also refit at each scale_invariance.l2_sensitivity value (ungated D8 secondary)",
+    )
+    ap.add_argument(
         "--require-pass",
         action="store_true",
         help="exit 2 unless every gate passes (passes.all); default exit 0 when the gate ran",
     )
     args = ap.parse_args(argv)
+    if args.generator_image is not None and not image_digest_ok(args.generator_image):
+        print(
+            f"refusing: --generator-image {args.generator_image!r} is not a digest-pinned "
+            "reference (...@sha256:<64 hex>)",
+            file=sys.stderr,
+        )
+        return 1
+    if args.generator_image is None and (
+        args.d8_shard is not None or args.registered in ("evaluation", "robustness")
+    ):
+        print(
+            "refusing: a D8 shard or registered look needs --generator-image (the pinned "
+            "datagen image that generated the corpus)",
+            file=sys.stderr,
+        )
+        return 1
     if args.registered in ("evaluation", "robustness"):
         # A registered look runs exactly as registered, and leaves a record.
         bad = [
@@ -199,6 +325,26 @@ def main(argv=None) -> int:
             return 1
         if args.out is None:
             print("refusing: a registered look needs --out to record it", file=sys.stderr)
+            return 1
+        if args.d8_shard is not None:
+            print("refusing: a registered look is never a D8 shard run", file=sys.stderr)
+            return 1
+        # The look record must be writable before any AP exists: a look whose
+        # record cannot be written would have no verdict to print.
+        from lakebench.config.datagen_seed import looks_path
+
+        try:
+            rec = looks_path()
+            if not os.access(rec, os.W_OK) or not os.access(rec.parent, os.W_OK):
+                raise OSError(f"{rec} is not writable")
+        except OSError as e:
+            print(f"refusing: the look record is not writable: {e}", file=sys.stderr)
+            return 1
+        # #46 D-8: the look needs committed predictions made under this
+        # pre-registration from corpora of this generator image.
+        err = predictions_error(args.generator_image)
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
             return 1
     # Cheap refusal before Spark starts; the manifest check below catches a
     # corpus whose real seed is guarded whatever --seed says.
@@ -305,7 +451,22 @@ def main(argv=None) -> int:
             prereg["corpora"]["entities_per_scale_unit"],
         )
         at_scale = af.at_gate_scale(scale_info, prereg)
-        if not at_scale and not args.diagnostic:
+        si = prereg["scale_invariance"]
+        if args.d8_shard is not None:
+            # A D8 shard is defined on the calibration corpus at the large
+            # scale only; anything else is refused, not marked diagnostic.
+            large_n = round(prereg["corpora"]["entities_per_scale_unit"] * si["large_scale"])
+            why = None
+            if not 0 <= args.d8_shard < si["n_shards"]:
+                why = f"--d8-shard must be in [0, {si['n_shards']})"
+            elif args.seed != prereg["corpora"]["calibration_seed"]:
+                why = "D8 shards are scored on the calibration seed only"
+            elif scale_info["n_entities"] != large_n:
+                why = f"the corpus is not at scale_invariance.large_scale ({scale_info})"
+            if why:
+                print(f"refusing: {why}", file=sys.stderr)
+                return 1
+        elif not at_scale and not args.diagnostic:
             print(
                 f"corpus scale {scale_info['scale']} is not the gate scale "
                 f"{prereg['corpora']['gate_scale']}; refusing (use --diagnostic)",
@@ -321,6 +482,42 @@ def main(argv=None) -> int:
         txns = txns.cache()
         registered_role = prereg["unit_of_scoring"]["label_role"]
         role = args.label_role or registered_role
+        pull = None
+        shard_info = None
+        pred = pred_sha = None
+        if args.d8_shard is not None:
+            plan, shard_info = af.d8_shard_plan(
+                spark,
+                manifest=manifest,
+                id_map=id_map,
+                txns=txns,
+                customers=ents.filter(col("is_customer").cast("boolean")).select("key"),
+                n_shards=si["n_shards"],
+                salt=si["shard_salt"],
+            )
+            shard_info = {"index": args.d8_shard, **shard_info}
+            pull = af.shard_pull(af.default_pull, plan, args.d8_shard)
+        if args.registered in ("evaluation", "robustness") and not args.counts_only:
+            # The corpus is verified as the registered seed's; record the look
+            # before any model exists. From here the seed is spent.
+            from lakebench.config.datagen_seed import claim_look, load_predictions
+
+            try:
+                pred, pred_sha = load_predictions(typologies=typologies)
+                claim_look(
+                    args.registered,
+                    args.seed,
+                    {
+                        "out": str(args.out.resolve()),
+                        "git_sha": _git_sha(),
+                        "prereg_sha256": sha,
+                        "generator_image": args.generator_image,
+                        "level2_predictions_sha256": pred_sha,
+                    },
+                )
+            except Exception as e:  # noqa: BLE001 -- fail closed before any AP exists
+                print(f"refusing: the look could not be recorded: {e}", file=sys.stderr)
+                return 1
         inputs = af.build_gate_inputs(
             spark,
             prereg,
@@ -330,6 +527,7 @@ def main(argv=None) -> int:
             manifest=manifest,
             role=role,
             typologies=typologies,
+            pull=pull,
         )
         features = inputs["lifetime_features"]
         by_participant = af.labels_from_participants(manifest, id_map)
@@ -359,6 +557,9 @@ def main(argv=None) -> int:
             "corpus_seed_check": seed_check,
             "robustness_stamp": stamp,
             "corpus_scale": scale_info,
+            "d8_shard": shard_info,
+            "generator_image": args.generator_image,
+            "level2_predictions_sha256": pred_sha,
             "diagnostic": bool(args.diagnostic),
             "aml_features_sha256": af.source_sha256(),
             "corpus": str(corpus),
@@ -382,6 +583,7 @@ def main(argv=None) -> int:
         provenance={**prov, "spark_seconds": round(t_spark, 1)},
         score=not args.counts_only,
         collect_outputs=args.out is not None and not args.counts_only,
+        l2_values=si["l2_sensitivity"]["values"] if args.l2_sensitivity else None,
     )
     outputs = report.pop("_model_outputs", None)
     if outputs is not None:
@@ -433,6 +635,10 @@ def main(argv=None) -> int:
             },
         }
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
+    if pred is not None and report.get("verdict") == "ok":
+        from lakebench.config.datagen_seed import replication
+
+        report["level2_replication"] = replication(report["typologies"], pred)
     if args.registered is not None:
         # The look itself is the record R3 needs: which role, seed and revision
         # were scored, and when.
@@ -455,14 +661,15 @@ def main(argv=None) -> int:
             add_pass(report, "corpus_seed_verified", seed_ok)
         # A diagnostic run under another label role is never a pass.
         add_pass(report, "registered_label_role", role == registered_role)
-    for line in summary_lines(report):
-        print(line)
-    text = json.dumps(report, indent=2, default=str)
-    if args.out:
-        args.out.write_text(text + "\n")
-        print(f"wrote {args.out}")
-    else:
-        print(text)
+    if not emit_report(
+        report,
+        args.out,
+        args.registered if not args.counts_only else None,
+        args.seed,
+        summary_lines,
+        predictions_sha=pred_sha,
+    ):
+        return 1
     if args.counts_only:
         return 0 if report.get("verdict") == "counts_only" else 1
     if report.get("verdict") != "ok":
