@@ -120,6 +120,30 @@ BEELINE_METASTORE_DOWN = (
     "Connection refused (state=08S01,code=0)"
 )
 TIMEOUT = "exec_sql failed (rc=1): Command timed out"
+# Confirmed live on 2026-09-26 (Trino 483, Spark 4.0.2 / Iceberg 1.10 Thrift).
+LIVE_TRINO_TABLE_MISSING = (
+    "Query 20260926_093512_00042_x7k2p failed: line 1:7: Table 'lakehouse.exp.nope' does not exist"
+)
+LIVE_SPARK_PROCEDURE_TABLE_MISSING = (
+    "Error: org.apache.hive.service.cli.HiveSQLException: Error running query: "
+    "java.lang.IllegalArgumentException: Couldn't load table 'exp.nope' in catalog 'lakehouse'"
+)
+LIVE_SPARK_DML_TABLE_MISSING = (
+    "Error: org.apache.hive.service.cli.HiveSQLException: Error running query: "
+    "[TABLE_OR_VIEW_NOT_FOUND] The table or view `lakehouse`.`exp`.`nope` cannot be found."
+)
+LIVE_TRINO_MIN_RETENTION = (
+    "Query 20260926_093601_00043_x7k2p failed: Retention specified (30.00m) is shorter than "
+    "the minimum retention configured in the system (7.00d). Minimum retention can be changed "
+    "with iceberg.expire_snapshots_min_retention configuration property or "
+    "iceberg.expire_snapshots_min_retention session property"
+)
+LIVE_SPARK_ORPHAN_INTERVAL = (
+    "Error: org.apache.hive.service.cli.HiveSQLException: Error running query: "
+    "java.lang.IllegalArgumentException: Cannot remove orphan files with an interval less "
+    "than 24 hours. Executing this procedure with a short interval may corrupt the table if "
+    "other operations are happening at the same time."
+)
 # Trino table procedures (ALTER TABLE ... EXECUTE, CALL system.vacuum) raise
 # TableNotFoundException, whose message differs from the analyzer's.
 TRINO_PROCEDURE_TABLE_MISSING = (
@@ -157,6 +181,11 @@ def _err(text: str) -> RuntimeError:
         (BEELINE_PROCEDURE_MISSING, False, False),
         (BEELINE_METASTORE_DOWN, False, False),
         (TIMEOUT, False, False),
+        (LIVE_TRINO_TABLE_MISSING, True, False),
+        (LIVE_SPARK_PROCEDURE_TABLE_MISSING, True, False),
+        (LIVE_SPARK_DML_TABLE_MISSING, True, False),
+        (LIVE_TRINO_MIN_RETENTION, False, False),
+        (LIVE_SPARK_ORPHAN_INTERVAL, False, False),
         (TRINO_PROCEDURE_TABLE_MISSING, True, False),
         (TRINO_CATALOG_NOT_FOUND_BARE, False, False),
         (BEELINE_ICEBERG_PROCEDURE_TABLE_MISSING, True, False),
@@ -441,3 +470,111 @@ def test_statement_timeout_is_clipped_to_the_budget():
     )
     assert timeouts[0] == 1800
     assert timeouts[1] == 300 + _BUDGET_GRACE_SECONDS
+
+
+# -- live evidence 2026-09-26: maintenance SQL that actually runs -------------
+
+
+def test_trino_maintenance_sets_the_session_minimum_in_the_same_submission():
+    from lakebench.deploy.iceberg import build_maintenance_sql
+
+    exp, orph = build_maintenance_sql("trino", "lakehouse", "lakehouse.silver.t", "30m")
+    assert exp == (
+        "SET SESSION lakehouse.expire_snapshots_min_retention = '30m'; "
+        "ALTER TABLE lakehouse.silver.t EXECUTE expire_snapshots(retention_threshold => '30m')"
+    )
+    assert orph.startswith("SET SESSION lakehouse.remove_orphan_files_min_retention = '30m'; ")
+    assert "remove_orphan_files(retention_threshold => '30m')" in orph
+    # The catalog comes from config, not a hard-coded name.
+    exp2, _ = build_maintenance_sql("trino", "iceberg_cat", "iceberg_cat.s.t", "1h", "24h")
+    assert exp2.startswith("SET SESSION iceberg_cat.expire_snapshots_min_retention = '1h'; ")
+    assert "remove_orphan_files_min_retention = '24h'" in _
+
+
+def test_trino_maintenance_reaches_one_execute_each():
+    from lakebench.deploy.iceberg import build_maintenance_sql
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (0, "", "")
+    for sql in build_maintenance_sql("trino", "lakehouse", "lakehouse.silver.t", "30m"):
+        exec_sql("trino", k8s, "trino-0", "ns", sql)
+    assert k8s.exec_in_pod.call_count == 2
+    for call in k8s.exec_in_pod.call_args_list:
+        cmd = call.args[1][2]
+        assert cmd.index("SET SESSION") < cmd.index("ALTER TABLE")
+
+
+def test_spark_maintenance_uses_a_timestamp_literal():
+    from datetime import datetime, timezone
+
+    from lakebench.deploy.iceberg import build_maintenance_sql
+
+    now = datetime(2026, 9, 26, 12, 0, 0, tzinfo=timezone.utc)
+    exp, orph = build_maintenance_sql(
+        "spark-thrift", "lakehouse", "lakehouse.silver.t", "30m", "24h", now=now
+    )
+    assert exp == (
+        "CALL lakehouse.system.expire_snapshots(table => 'lakehouse.silver.t', "
+        "older_than => TIMESTAMP '2026-09-26 11:30:00')"
+    )
+    assert "older_than => TIMESTAMP '2026-09-25 12:00:00'" in orph
+    assert "UNIX_TIMESTAMP" not in exp + orph
+
+
+def _sent(k8s):
+    return [
+        c.args[1][-2] if c.args[1][0] != "trino" else c.args[1][2]
+        for c in k8s.exec_in_pod.call_args_list
+    ]
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_continuous_orphans_wait_24h_expire_at_the_threshold():
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (0, "", "")
+    j = MagicMock()
+    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m", live_streams=True)
+    sent = _sent(k8s)
+    assert any("expire_snapshots(retention_threshold => '30m')" in q for q in sent)
+    assert all("'30m'" not in q for q in sent if "remove_orphan_files" in q)
+    assert any("remove_orphan_files(retention_threshold => '24h')" in q for q in sent)
+    d = _journal_details(j, "Iceberg maintenance")
+    assert d["expire_retention"] == "30m" and d["orphan_retention"] == "24h"
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_batch_trino_orphans_use_the_threshold():
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (0, "", "")
+    j = MagicMock()
+    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m")
+    sent = _sent(k8s)
+    assert any("remove_orphan_files(retention_threshold => '30m')" in q for q in sent)
+    assert _journal_details(j, "Iceberg maintenance")["orphan_retention"] == "30m"
+
+
+def test_batch_spark_orphans_never_below_24h():
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (0, "", "")
+    j = MagicMock()
+    with patch(
+        "lakebench.deploy.iceberg.find_maintenance_engine",
+        return_value=("spark-thrift", "thrift-0", "lakehouse"),
+    ):
+        _run_iceberg_maintenance(_cfg("spark-thrift"), k8s, Console(quiet=True), j, "30m")
+    d = _journal_details(j, "Iceberg maintenance")
+    assert d["expire_retention"] == "30m" and d["orphan_retention"] == "24h"
+
+
+def test_continuous_loop_passes_live_streams():
+    import inspect
+
+    import lakebench.cli._sustained as sus
+
+    assert "retention_threshold, live_streams=True" in inspect.getsource(sus)
