@@ -215,7 +215,8 @@
       "date": "2026-09-25",
       "approved": "AML-GOALS section 9 #40/#41 (D2 must pass before the freeze; evaluation and robustness seeds guarded)",
       "changes": [
-        "datagen (not a gated value): D2 baseline timing, 30% of accounts send 75-95% of their expected volume on a steady cadence evenly spaced in calendar mass; counterparties, amounts, totals and typology rows unchanged",
+        "datagen (not a gated value): D2 baseline timing, 30% of accounts are drawn to send 75-95% of their expected volume on a steady cadence evenly spaced in calendar mass (a drawn account whose scheduled count rounds below 4 stays unscheduled, so the scheduled share of all accounts is under 30%). Unchanged by D2: typology rows and the manifest (byte-identical to cca9320/f6d7f33 at the same seed) and total rows; baseline counterparties, amounts and per-account totals are unchanged in distribution, not row by row (every baseline row is re-drawn)",
+        "datagen (not a gated value, commits cca9320/f6d7f33, recorded here because they landed between 3.5.1 and 3.5.2): micro_structuring planted as a crew of 3-8 with 3-8 of 8 payments structured, depth down to 60% of the threshold; dormant_reactivation dormancy 45-365 days, a third of reactivations spread over 4-10 days; corridor_high_risk a run of 2-4 payments over 2-5 weeks",
         "corpora.registered_looks_open (false until the freeze): the evaluation and robustness seeds are refused except as the declared registered run for their role (datagen.corpus_role, scripts/aml_gate.py --registered) while it is true; a looked-at seed is appended to spent_seeds"
       ],
       "unchanged": "every gated value: band, K/N, unit, labels, gate scale, typologies, features, CV, reference and shortcut models, leakage caps, power, timing_mixture band, and the calibration, evaluation and robustness seeds"
