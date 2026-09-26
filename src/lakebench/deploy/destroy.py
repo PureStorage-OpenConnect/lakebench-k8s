@@ -1538,6 +1538,33 @@ def destroy_all(
                     _kclient.CoreV1Api(),
                     exclude=engine.config.get_namespace(),
                 )
+                # LB-177: the namespace records which buckets lakebench
+                # created, possibly under an earlier config. Consider those
+                # too (each still has to pass the ownership check below),
+                # or they leak and the namespace delete erases the record.
+                created_record: set[str] = set()
+                record_unreadable: list[str] = []
+                if namespace_present:
+                    try:
+                        created_record = set(
+                            read_created_buckets(k8s_client.CoreV1Api(), namespace)
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("could not read created-buckets record: %s", e)
+                        record_unreadable.append(f"namespace annotation: {e}")
+                recorded_only = sorted(created_record - set(buckets))
+                recorded_only_set = set(recorded_only)
+                buckets = buckets + recorded_only
+                refused_names: list[str] = []
+                # Recorded-only buckets are not named by the current config.
+                # Review of LB-177: on backends without tagging the only
+                # ownership proof is the name, and another deployment may be
+                # using such a bucket now (S-P6 style shared bronze), so a
+                # non-empty one is left in place, never emptied.
+                held_recorded: list[str] = []
+                # A recorded bucket another deployment's tag now claims is
+                # provably not ours any more; it comes off the record.
+                disowned_recorded: list[str] = []
                 mismatched: list[str] = []
                 legacy_refused: list[str] = []
                 legacy_forced: list[str] = []
@@ -1554,9 +1581,15 @@ def destroy_all(
                         absent_buckets.append(bucket)
                     if v.verdict is IdentityVerdict.MISMATCH:
                         mismatched.append(f"{bucket} ({v.hint})")
+                        refused_names.append(bucket)
+                        if bucket in created_record:
+                            disowned_recorded.append(bucket)
                     elif v.verdict is IdentityVerdict.ABSENT:
-                        if not force_legacy:
+                        # --force-legacy vouches for the config's buckets the
+                        # operator can see, never for a name in the record.
+                        if not force_legacy or bucket in recorded_only_set:
                             legacy_refused.append(bucket)
+                            refused_names.append(bucket)
                         else:
                             legacy_forced.append(bucket)
                             logger.warning(
@@ -1586,7 +1619,18 @@ def destroy_all(
                                 bucket, identity_name, other_deployments
                             )
                         )
-                        if prefix_ok:
+                        if prefix_ok and bucket in recorded_only_set:
+                            try:
+                                resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+                                holds = int(resp.get("KeyCount", 0)) > 0
+                            except Exception:  # noqa: BLE001
+                                holds = True
+                        else:
+                            holds = False
+                        if prefix_ok and holds:
+                            held_recorded.append(bucket)
+                            refused_names.append(bucket)
+                        elif prefix_ok:
                             unsupported_by_prefix.append(bucket)
                             logger.warning(
                                 "destroy: bucket %s on a backend without "
@@ -1600,7 +1644,7 @@ def destroy_all(
                                 DeploymentStatus.IN_PROGRESS,
                                 f"name-prefix ownership: {bucket}",
                             )
-                        elif force_legacy:
+                        elif force_legacy and bucket not in recorded_only_set:
                             unsupported_forced.append(bucket)
                             logger.warning(
                                 "destroy --force-legacy: emptying bucket "
@@ -1622,13 +1666,22 @@ def destroy_all(
                             )
                         else:
                             unsupported_refused.append(bucket)
+                            refused_names.append(bucket)
                 if unsupported_refused and other_deployments is None:
                     # Could not list sibling deployments: a transient cluster
                     # or RBAC problem, not proof the buckets are someone
                     # else's. Keep the namespace so a re-run can finish.
                     bucket_transient_failure = True
-                if mismatched or legacy_refused or unsupported_refused:
+                if mismatched or legacy_refused or unsupported_refused or held_recorded:
                     parts = []
+                    if held_recorded:
+                        parts.append(
+                            "recorded as created by this deployment under an earlier config "
+                            "but not named by this one, and not empty (another deployment "
+                            "may be using it; the bucket name is the only ownership proof "
+                            "here): " + ", ".join(held_recorded) + " (left in place; if it "
+                            "is unused, re-run destroy with a config that names it)"
+                        )
                     if mismatched:
                         parts.append("owned by another deployment: " + "; ".join(mismatched))
                     if legacy_refused:
@@ -1666,216 +1719,234 @@ def destroy_all(
                             "`list namespaces`, or pass --force-legacy "
                             "if you have confirmed these are yours)"
                         )
-                    msg = "Bucket ownership refused; " + " | ".join(parts)
-                    results.append(
-                        DeploymentResult(
-                            component="s3-buckets",
-                            status=DeploymentStatus.FAILED,
-                            message=msg,
-                        )
-                    )
-                    report("s3-buckets", DeploymentStatus.FAILED, msg)
+                    refusal_msg = "Bucket ownership refused; " + " | ".join(parts)
+                    report("s3-buckets", DeploymentStatus.IN_PROGRESS, refusal_msg)
                 else:
-                    legacy = legacy_forced  # preserved local name for summary below
-                    # Re-check the namespace before touching data: a slow
-                    # destroy that lost a race to a concurrent destroy plus a
-                    # redeploy must not empty the redeploy's buckets, which
-                    # reuse the names and pass the same ownership checks.
-                    guard = partial(
-                        _check_same_namespace, engine, namespace, namespace_token_at_start
-                    )
+                    refusal_msg = ""
+                # LB-177: a refusal on one bucket leaves it alone but does not
+                # stop the deployment's other, owned buckets.
+                refused_set = set(refused_names)
+                buckets = [b for b in buckets if b not in refused_set]
+                legacy = legacy_forced  # preserved local name for summary below
+                # Re-check the namespace before touching data: a slow
+                # destroy that lost a race to a concurrent destroy plus a
+                # redeploy must not empty the redeploy's buckets, which
+                # reuse the names and pass the same ownership checks.
+                guard = partial(_check_same_namespace, engine, namespace, namespace_token_at_start)
+                guard()
+                # LB-159: only buckets lakebench created are deleted. The
+                # record is the namespace annotation (all backends) plus
+                # the created tag where tagging works. An unreadable
+                # record keeps the buckets, never deletes them.
+                created_set: set[str] = set(created_record)
+                for tagged in owned_by_tag:
+                    if tagged in created_set:
+                        continue
+                    try:
+                        tags = read_bucket_ownership_tag(s3.raw_client, tagged) or {}
+                    except Exception as e:  # noqa: BLE001
+                        tags = {}
+                        record_unreadable.append(f"{tagged} tags: {e}")
+                    if tags.get(TAG_CREATED_BY_LAKEBENCH) == "true":
+                        created_set.add(tagged)
+                total_deleted = 0
+                vanished: str | None = None
+                for bucket in buckets:
                     guard()
-                    # LB-159: only buckets lakebench created are deleted. The
-                    # record is the namespace annotation (all backends) plus
-                    # the created tag where tagging works. An unreadable
-                    # record keeps the buckets, never deletes them.
-                    created_set: set[str] = set()
-                    record_unreadable: list[str] = []
-                    if namespace_present:
-                        try:
-                            created_set |= read_created_buckets(k8s_client.CoreV1Api(), namespace)
-                        except Exception as e:  # noqa: BLE001
-                            logger.warning("could not read created-buckets record: %s", e)
-                            record_unreadable.append(f"namespace annotation: {e}")
-                    for tagged in owned_by_tag:
-                        if tagged in created_set:
+                    try:
+                        deleted = s3.empty_bucket(bucket, before_batch=guard)
+                    except S3BucketVanished:
+                        # A concurrent destroy of this deployment deleted
+                        # it mid-empty. That run owns the rest of the
+                        # bucket cleanup; carrying on could empty buckets
+                        # a redeploy has since re-created under the names.
+                        vanished = bucket
+                        break
+                    total_deleted += deleted
+                # LB-159: emptying alone leaked one empty bucket per
+                # deployment. Delete only buckets proven to be this
+                # deployment's (ownership tag, or the name-prefix claim
+                # on backends without tagging) and only when lakebench
+                # manages bucket lifecycle (create_buckets). Buckets
+                # emptied on --force-legacy say-so, or pre-provisioned
+                # buckets the config merely references, are kept.
+                if vanished:
+                    # FAILED, not SUCCESS: a hand-deleted bucket would
+                    # otherwise hide the unemptied ones after it. A re-run
+                    # finishes the job once the other destroy is done.
+                    bucket_notes: list[str] = [
+                        f"stopped: bucket {vanished} disappeared while being "
+                        "emptied (most likely a concurrent destroy of this "
+                        "deployment); re-run destroy once it has finished"
+                    ]
+                    delete_failed = True
+                    stop_after_buckets = True
+                else:
+                    deleted_now: list[str] = []
+                    gone_now: list[str] = []
+                    bucket_notes, delete_failed = _delete_owned_buckets(
+                        s3,
+                        buckets,
+                        deletable=(set(owned_by_tag) | set(unsupported_by_prefix)) & created_set,
+                        enabled=delete_buckets,
+                        create_buckets=bool(s3_cfg.create_buckets),
+                        absent=set(absent_buckets),
+                        guard=guard,
+                        on_deleted=deleted_now.append,
+                        on_gone=gone_now.append,
+                    )
+                    # A re-run after a failed record update finds the
+                    # buckets already gone; they still come off the record.
+                    # A "gone" verdict can be stale (the ownership read
+                    # raced a listing lag): forget only on a confirmed 404
+                    # from head_bucket. A bucket that is really there stays
+                    # on the record and the namespace is kept, so a re-run
+                    # empties and deletes it.
+                    confirmed_gone: list[str] = []
+                    still_there: list[str] = []
+                    for b in gone_now:
+                        if b not in created_set or b in deleted_now:
                             continue
                         try:
-                            tags = read_bucket_ownership_tag(s3.raw_client, tagged) or {}
+                            exists = s3.bucket_exists(b)
                         except Exception as e:  # noqa: BLE001
-                            tags = {}
-                            record_unreadable.append(f"{tagged} tags: {e}")
-                        if tags.get(TAG_CREATED_BY_LAKEBENCH) == "true":
-                            created_set.add(tagged)
-                    total_deleted = 0
-                    vanished: str | None = None
-                    for bucket in buckets:
-                        guard()
-                        try:
-                            deleted = s3.empty_bucket(bucket, before_batch=guard)
-                        except S3BucketVanished:
-                            # A concurrent destroy of this deployment deleted
-                            # it mid-empty. That run owns the rest of the
-                            # bucket cleanup; carrying on could empty buckets
-                            # a redeploy has since re-created under the names.
-                            vanished = bucket
-                            break
-                        total_deleted += deleted
-                    # LB-159: emptying alone leaked one empty bucket per
-                    # deployment. Delete only buckets proven to be this
-                    # deployment's (ownership tag, or the name-prefix claim
-                    # on backends without tagging) and only when lakebench
-                    # manages bucket lifecycle (create_buckets). Buckets
-                    # emptied on --force-legacy say-so, or pre-provisioned
-                    # buckets the config merely references, are kept.
-                    if vanished:
-                        # FAILED, not SUCCESS: a hand-deleted bucket would
-                        # otherwise hide the unemptied ones after it. A re-run
-                        # finishes the job once the other destroy is done.
-                        bucket_notes: list[str] = [
-                            f"stopped: bucket {vanished} disappeared while being "
-                            "emptied (most likely a concurrent destroy of this "
-                            "deployment); re-run destroy once it has finished"
-                        ]
+                            still_there.append(f"{b} (could not confirm: {e})")
+                            continue
+                        if exists:
+                            still_there.append(b)
+                        else:
+                            confirmed_gone.append(b)
+                    if still_there:
+                        bucket_notes.append(
+                            "reported absent but not confirmed gone, kept on the "
+                            "created record: " + ", ".join(still_there) + "; re-run destroy"
+                        )
                         delete_failed = True
-                        stop_after_buckets = True
-                    else:
-                        deleted_now: list[str] = []
-                        gone_now: list[str] = []
-                        bucket_notes, delete_failed = _delete_owned_buckets(
-                            s3,
-                            buckets,
-                            deletable=(set(owned_by_tag) | set(unsupported_by_prefix))
-                            & created_set,
-                            enabled=delete_buckets,
-                            create_buckets=bool(s3_cfg.create_buckets),
-                            absent=set(absent_buckets),
-                            guard=guard,
-                            on_deleted=deleted_now.append,
-                            on_gone=gone_now.append,
-                        )
-                        # A re-run after a failed record update finds the
-                        # buckets already gone; they still come off the record.
-                        # A "gone" verdict can be stale (the ownership read
-                        # raced a listing lag): forget only on a confirmed 404
-                        # from head_bucket. A bucket that is really there stays
-                        # on the record and the namespace is kept, so a re-run
-                        # empties and deletes it.
-                        confirmed_gone: list[str] = []
-                        still_there: list[str] = []
-                        for b in gone_now:
-                            if b not in created_set or b in deleted_now:
-                                continue
-                            try:
-                                exists = s3.bucket_exists(b)
-                            except Exception as e:  # noqa: BLE001
-                                still_there.append(f"{b} (could not confirm: {e})")
-                                continue
-                            if exists:
-                                still_there.append(b)
-                            else:
-                                confirmed_gone.append(b)
-                        if still_there:
+                    to_forget = deleted_now + confirmed_gone
+                    if to_forget and namespace_present:
+                        # A namespace that outlives this destroy (kept,
+                        # or create_namespace=false) must not keep
+                        # claiming these names: a bucket later
+                        # pre-provisioned or adopted under one of them
+                        # would otherwise be deleted by the next destroy.
+                        try:
+                            # Never edit a redeploy's record.
+                            guard()
+                            forget_created_buckets(k8s_client.CoreV1Api(), namespace, to_forget)
+                        except _NamespaceReplaced as e:
+                            # A redeploy owns the record now; destroy stops
+                            # later and reports NOT completed.
+                            logger.warning("not updating the created-buckets record: %s", e)
+                        except _NamespaceUnverifiable as e:
                             bucket_notes.append(
-                                "reported absent but not confirmed gone, kept on the "
-                                "created record: " + ", ".join(still_there) + "; re-run destroy"
+                                f"deleted buckets still listed as created ({e}); "
+                                "re-run destroy to clear the record"
                             )
                             delete_failed = True
-                        to_forget = deleted_now + confirmed_gone
-                        if to_forget and namespace_present:
-                            # A namespace that outlives this destroy (kept,
-                            # or create_namespace=false) must not keep
-                            # claiming these names: a bucket later
-                            # pre-provisioned or adopted under one of them
-                            # would otherwise be deleted by the next destroy.
-                            try:
-                                # Never edit a redeploy's record.
-                                guard()
-                                forget_created_buckets(k8s_client.CoreV1Api(), namespace, to_forget)
-                            except _NamespaceReplaced as e:
-                                # A redeploy owns the record now; destroy stops
-                                # later and reports NOT completed.
-                                logger.warning("not updating the created-buckets record: %s", e)
-                            except _NamespaceUnverifiable as e:
-                                bucket_notes.append(
-                                    f"deleted buckets still listed as created ({e}); "
-                                    "re-run destroy to clear the record"
-                                )
-                                delete_failed = True
-                            except Exception as e:  # noqa: BLE001
-                                # A stale record outlives destroy when the
-                                # namespace is kept; a later destroy could then
-                                # delete an adopted bucket of the same name.
-                                logger.error(
-                                    "could not drop deleted buckets %s from the "
-                                    "created-buckets record on %s: %s",
-                                    to_forget,
-                                    namespace,
-                                    e,
-                                )
-                                bucket_notes.append(
-                                    "deleted buckets still listed as created on namespace "
-                                    f"{namespace} ({e}); re-run destroy to clear the record"
-                                )
-                                delete_failed = True
-                        if (
-                            record_unreadable
-                            and delete_buckets
-                            and s3_cfg.create_buckets
-                            and not delete_failed
-                        ):
-                            # The record could not be read, so buckets
-                            # lakebench created may have been kept. Keep the
-                            # namespace (the record) so a re-run can finish.
+                        except Exception as e:  # noqa: BLE001
+                            # A stale record outlives destroy when the
+                            # namespace is kept; a later destroy could then
+                            # delete an adopted bucket of the same name.
+                            logger.error(
+                                "could not drop deleted buckets %s from the "
+                                "created-buckets record on %s: %s",
+                                to_forget,
+                                namespace,
+                                e,
+                            )
                             bucket_notes.append(
-                                "created-bucket record unreadable ("
-                                + "; ".join(record_unreadable)
-                                + "); buckets it would list were kept and the "
-                                "namespace is kept so a re-run can delete them"
+                                "deleted buckets still listed as created on namespace "
+                                f"{namespace} ({e}); re-run destroy to clear the record"
                             )
                             delete_failed = True
-                        if delete_failed:
-                            # The namespace is the ownership record for the
-                            # buckets left behind; keep it so a re-run can
-                            # prove ownership and finish the delete.
-                            bucket_transient_failure = True
-                    notes = []
-                    if legacy:
-                        notes.append(
-                            f"WARN: {len(legacy)} legacy untagged buckets: {', '.join(legacy)}"
+                    if (
+                        record_unreadable
+                        and delete_buckets
+                        and s3_cfg.create_buckets
+                        and not delete_failed
+                    ):
+                        # The record could not be read, so buckets
+                        # lakebench created may have been kept. Keep the
+                        # namespace (the record) so a re-run can finish.
+                        bucket_notes.append(
+                            "created-bucket record unreadable ("
+                            + "; ".join(record_unreadable)
+                            + "); buckets it would list were kept and the "
+                            "namespace is kept so a re-run can delete them"
                         )
-                    if unsupported_by_prefix:
-                        notes.append(
-                            f"{len(unsupported_by_prefix)} buckets emptied by "
-                            "name-prefix (backend does not support tagging): "
-                            + ", ".join(unsupported_by_prefix)
-                        )
-                    if unsupported_forced:
-                        notes.append(
-                            f"WARN: {len(unsupported_forced)} buckets emptied "
-                            "by --force-legacy on a backend without tagging "
-                            "AND without name-prefix match: " + ", ".join(unsupported_forced)
-                        )
-                    notes.extend(bucket_notes)
-                    summary_note = f" ({' | '.join(notes)})" if notes else ""
-                    bucket_status = (
-                        DeploymentStatus.FAILED if delete_failed else DeploymentStatus.SUCCESS
+                        delete_failed = True
+                    if delete_failed:
+                        # The namespace is the ownership record for the
+                        # buckets left behind; keep it so a re-run can
+                        # prove ownership and finish the delete.
+                        bucket_transient_failure = True
+                notes = []
+                if legacy:
+                    notes.append(
+                        f"WARN: {len(legacy)} legacy untagged buckets: {', '.join(legacy)}"
                     )
-                    results.append(
-                        DeploymentResult(
-                            component="s3-buckets",
-                            status=bucket_status,
-                            message=(
-                                f"Emptied {len(buckets)} S3 buckets "
-                                f"({total_deleted} objects)" + summary_note
-                            ),
+                if unsupported_by_prefix:
+                    notes.append(
+                        f"{len(unsupported_by_prefix)} buckets emptied by "
+                        "name-prefix (backend does not support tagging): "
+                        + ", ".join(unsupported_by_prefix)
+                    )
+                if unsupported_forced:
+                    notes.append(
+                        f"WARN: {len(unsupported_forced)} buckets emptied "
+                        "by --force-legacy on a backend without tagging "
+                        "AND without name-prefix match: " + ", ".join(unsupported_forced)
+                    )
+                notes.extend(bucket_notes)
+                if refusal_msg:
+                    notes.append(refusal_msg)
+                    delete_failed = True
+                    if disowned_recorded and namespace_present:
+                        try:
+                            guard()
+                            forget_created_buckets(
+                                k8s_client.CoreV1Api(), namespace, disowned_recorded
+                            )
+                            notes.append(
+                                "now owned by another deployment, dropped from this "
+                                "deployment's record: " + ", ".join(disowned_recorded)
+                            )
+                        except (_NamespaceReplaced, _NamespaceUnverifiable):
+                            raise
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("could not drop disowned buckets from the record: %s", e)
+                            disowned_recorded = []
+                    recorded_refused = sorted(
+                        (refused_set & created_record) - set(disowned_recorded)
+                    )
+                    if recorded_refused:
+                        # Recorded as created by this deployment but not
+                        # deletable now: keep the namespace (the record).
+                        notes.append(
+                            "recorded as created by this deployment but left in place: "
+                            + ", ".join(recorded_refused)
+                            + "; the namespace is kept as their record"
                         )
+                        bucket_transient_failure = True
+                summary_note = f" ({' | '.join(notes)})" if notes else ""
+                bucket_status = (
+                    DeploymentStatus.FAILED if delete_failed else DeploymentStatus.SUCCESS
+                )
+                results.append(
+                    DeploymentResult(
+                        component="s3-buckets",
+                        status=bucket_status,
+                        message=(
+                            f"Emptied {len(buckets)} S3 buckets "
+                            f"({total_deleted} objects)" + summary_note
+                        ),
                     )
-                    report(
-                        "s3-buckets",
-                        bucket_status,
-                        f"S3 buckets emptied ({total_deleted} objects)" + summary_note,
-                    )
+                )
+                report(
+                    "s3-buckets",
+                    bucket_status,
+                    f"S3 buckets emptied ({total_deleted} objects)" + summary_note,
+                )
         except _NamespaceReplaced as e:
             if e.gone:
                 # Nothing proves another destroy finished these buckets (a
