@@ -7,6 +7,7 @@ use crate::arena::ArenaCol;
 use crate::ids::{bic_pool, iban_for, lei_for};
 use crate::kyc::entity_bic_idx;
 use crate::realism as R;
+use crate::robustness::Perturbation;
 use crate::world as W;
 
 /// Stamped on every party, account and manifest row. 0.2 is the first
@@ -68,6 +69,21 @@ pub fn build_world(scale: f64, seed: i64, corpus_months: i64) -> World {
 /// roughly six full-population passes (email being the costly one) from every
 /// bronze pod, which is the dominant fixed per-pod cost.
 pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bool) -> World {
+    build_world_p(scale, seed, corpus_months, bronze_only, &Perturbation::NONE)
+}
+
+/// `build_world_ex` with the robustness perturbation applied to the persona
+/// (crate::robustness): activity-rate and amount log-sds, and the median
+/// amount. `Perturbation::NONE` builds the unperturbed world bit for bit.
+pub fn build_world_p(
+    scale: f64,
+    seed: i64,
+    corpus_months: i64,
+    bronze_only: bool,
+    perturb: &Perturbation,
+) -> World {
+    let sd_mult = perturb.persona_sd;
+    let log_mu_shift = perturb.amount_log_mu_shift();
     let dims = W::dimensions(scale, corpus_months);
     let n = dims.population;
     let pool = bic_pool();
@@ -225,7 +241,7 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
             if i == 0 || t < 0 {
                 0.0
             } else {
-                W::BASELINE_ACTIVITY[t as usize] * W::rate_mult(i as u64, seed)
+                W::BASELINE_ACTIVITY[t as usize] * W::rate_mult_sd(i as u64, seed, sd_mult)
             }
         })
         .collect();
@@ -236,7 +252,7 @@ pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bo
             if i == 0 {
                 0.0
             } else {
-                W::amount_log_shift(i as u64, seed)
+                W::amount_log_shift_p(i as u64, seed, sd_mult, log_mu_shift)
             }
         })
         .collect();

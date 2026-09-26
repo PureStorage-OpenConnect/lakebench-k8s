@@ -557,6 +557,8 @@ def main() -> None:
         # Set only when the deployment declared datagen.corpus_role (the
         # registered evaluation or robustness run); config refused it otherwise.
         "declared_corpus_role": os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
+        # True when the deployment generated with datagen.robustness_perturbation.
+        "robustness_perturbation": os.environ.get("LB_DATAGEN_ROBUSTNESS_PERTURBATION") == "true",
         "manifest": manifest_src,
         "silver_txns": f"{CATALOG}.{args.silver_txns}",
     }

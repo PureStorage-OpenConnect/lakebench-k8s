@@ -18,8 +18,9 @@ use datagen_rs::cycle;
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
 use datagen_rs::metrics::PodMetrics;
-use datagen_rs::model::build_world_ex;
+use datagen_rs::model::build_world_p;
 use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
+use datagen_rs::robustness::{perturbation_for_seed, Perturbation};
 use datagen_rs::s3sink::S3Sink;
 use datagen_rs::timing::{sample_ts_on_day, DayCal};
 use datagen_rs::world::ring_member;
@@ -163,6 +164,42 @@ fn financial_seed() -> i64 {
     seed
 }
 
+const ROBUSTNESS_FLAG: &str = "--robustness-perturbation";
+
+/// True when the bare `--robustness-perturbation` flag is present. A value
+/// attached with `=` is refused rather than guessed at.
+fn robustness_flag() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(a) = args
+        .iter()
+        .find(|a| a.starts_with(&format!("{ROBUSTNESS_FLAG}=")))
+    {
+        eprintln!("{ROBUSTNESS_FLAG} takes no value; got {a:?}");
+        std::process::exit(2);
+    }
+    args.iter().any(|a| a == ROBUSTNESS_FLAG)
+}
+
+/// The perturbation for the financial driver (see
+/// robustness::perturbation_for_seed for the seed rules).
+fn financial_perturbation(seed: i64) -> Perturbation {
+    match perturbation_for_seed(seed, robustness_flag()) {
+        Ok(p) => {
+            if p != Perturbation::NONE {
+                eprintln!(
+                    "robustness perturbation on: median amount x{}, persona sd x{}, dormancy x{}",
+                    p.median_amount, p.persona_sd, p.dormancy
+                );
+            }
+            p
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 struct TypRow {
     orig: u64,
     bene: u64,
@@ -226,6 +263,7 @@ fn pacs008_main() {
         std::process::exit(2);
     }
     let seed = financial_seed();
+    let perturb = financial_perturbation(seed);
     // Multi-cycle runs (datagen_rs::cycle): cycle n of --cycles N emits the
     // one-shot corpus rows whose calendar mass lies in [n/N, (n+1)/N), so the
     // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a
@@ -358,7 +396,7 @@ fn pacs008_main() {
     // A dedicated-bronze pod (writes no reference zones) can skip the
     // reference-only world columns entirely.
     let bronze_only = do_bronze && !do_reference;
-    let w = build_world_ex(scale, seed, corpus_months, bronze_only);
+    let w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
     let t_world = t0.elapsed().as_secs_f64();
     let dims = &w.dims;
     let total_txns = dims.total_txns();
@@ -384,8 +422,9 @@ fn pacs008_main() {
 
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
-    let mut instances =
-        datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
+    let mut instances = datagen_rs::typology::schedule_p(
+        seed, seed, total_txns, pop, start_us, end_us, &w.country, &perturb,
+    );
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
@@ -992,6 +1031,10 @@ fn read_cpu_request_millicores() -> Option<u64> {
 // same fid produce identical bytes.
 // ---------------------------------------------------------------------------
 fn customer360_main() {
+    if robustness_flag() {
+        eprintln!("{ROBUSTNESS_FLAG} applies to the financial schema only");
+        std::process::exit(2);
+    }
     let bucket: String = arg("--bucket", String::new());
     let prefix: String = arg("--prefix", "customer/interactions/".to_string());
     if bucket.is_empty() {

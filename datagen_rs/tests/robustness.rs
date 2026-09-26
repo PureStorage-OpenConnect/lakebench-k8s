@@ -1,0 +1,295 @@
+//! Robustness perturbation (AML-GOALS R3(b), Level 2 condition 5; prereg
+//! corpora.robustness_perturbation). The default path is pinned so the flag
+//! cannot move an unperturbed corpus, and the perturbed path is checked to
+//! move exactly the three registered nuisance parameters, in natural units.
+
+use datagen_rs::model::build_world_ex;
+use datagen_rs::typology::{schedule, Instance};
+
+const DEV_SEED: i64 = 7777;
+const DAY: i64 = 86_400_000_000;
+
+fn fnv(h: &mut u64, bytes: &[u8]) {
+    for &x in bytes {
+        *h ^= x as u64;
+        *h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+}
+
+fn world_digest(activity: &[f64], logshift: &[f64], total: f64) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for v in activity
+        .iter()
+        .chain(logshift)
+        .chain(std::iter::once(&total))
+    {
+        fnv(&mut h, &v.to_bits().to_le_bytes());
+    }
+    h
+}
+
+fn schedule_digest(insts: &[Instance]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for i in insts {
+        fnv(&mut h, i.typ.as_bytes());
+        for p in &i.participants {
+            fnv(&mut h, &p.to_le_bytes());
+        }
+        for v in [
+            i.start_us,
+            i.end_us,
+            i.suppress_start_us,
+            i.suppress_end_us,
+            i.seed,
+            i.rows_per_instance as i64,
+        ] {
+            fnv(&mut h, &v.to_le_bytes());
+        }
+    }
+    h
+}
+
+fn corpus() -> (i64, i64) {
+    let start = 1_600_000_000i64 * 1_000_000;
+    (start, start + 1826 * DAY)
+}
+
+#[test]
+fn default_world_and_schedule_are_pinned() {
+    // Captured on c0d658f (before the perturbation existed) on dev seed 7777.
+    // A change here is an AML data change, not a refactor.
+    let w = build_world_ex(0.05, DEV_SEED, 60, false);
+    let (s, e) = corpus();
+    let insts = schedule(
+        DEV_SEED,
+        w.dims.total_txns(),
+        w.population,
+        s,
+        e,
+        &w.country,
+    );
+    let got = (
+        world_digest(&w.activity, &w.amount_logshift, w.total_activity),
+        schedule_digest(&insts),
+    );
+    assert_eq!(
+        got,
+        (9_930_139_091_025_189_866, 8_773_633_312_168_967_265),
+        "default AML world or schedule changed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The perturbed path moves the three registered parameters, in natural units,
+// and nothing else.
+// ---------------------------------------------------------------------------
+
+use datagen_rs::amounts::native_amount;
+use datagen_rs::hash::Rng;
+use datagen_rs::model::build_world_p;
+use datagen_rs::robustness::{
+    Perturbation, ROBUSTNESS_DORMANCY_RANGE_MULTIPLIER, ROBUSTNESS_MEDIAN_AMOUNT_MULTIPLIER,
+    ROBUSTNESS_PERSONA_SD_MULTIPLIER,
+};
+use datagen_rs::typology::{schedule_p, DORMANCY_MAX_DAYS, DORMANCY_MIN_DAYS};
+use datagen_rs::world::{BASELINE_ACTIVITY, TYPE_PERSON};
+
+const SCALE: f64 = 0.05;
+
+fn only(median_amount: f64, persona_sd: f64, dormancy: f64) -> Perturbation {
+    Perturbation {
+        median_amount,
+        persona_sd,
+        dormancy,
+    }
+}
+
+fn median(mut v: Vec<f64>) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
+}
+
+#[test]
+fn none_is_the_default_path() {
+    // Perturbation::NONE through the _p entry points is the default world and
+    // schedule, bit for bit (the pinned digests above).
+    let w = build_world_p(SCALE, DEV_SEED, 60, false, &Perturbation::NONE);
+    let (s, e) = corpus();
+    let insts = schedule_p(
+        DEV_SEED,
+        DEV_SEED,
+        w.dims.total_txns(),
+        w.population,
+        s,
+        e,
+        &w.country,
+        &Perturbation::NONE,
+    );
+    assert_eq!(
+        (
+            world_digest(&w.activity, &w.amount_logshift, w.total_activity),
+            schedule_digest(&insts),
+        ),
+        (9_930_139_091_025_189_866, 8_773_633_312_168_967_265),
+    );
+}
+
+#[test]
+fn registered_multipliers_are_1_2() {
+    // The prereg's values; tests/test_datagen_seed.py ties these constants to
+    // the JSON itself.
+    assert_eq!(
+        Perturbation::REGISTERED,
+        only(
+            ROBUSTNESS_MEDIAN_AMOUNT_MULTIPLIER,
+            ROBUSTNESS_PERSONA_SD_MULTIPLIER,
+            ROBUSTNESS_DORMANCY_RANGE_MULTIPLIER
+        )
+    );
+    assert_eq!(Perturbation::REGISTERED, only(1.2, 1.2, 1.2));
+}
+
+#[test]
+fn median_amount_moves_the_log_mean_by_ln_m_only() {
+    let base = build_world_p(SCALE, DEV_SEED, 60, false, &Perturbation::NONE);
+    let p = build_world_p(SCALE, DEV_SEED, 60, false, &only(1.2, 1.0, 1.0));
+    let ln_m = 1.2f64.ln();
+    for i in 1..=base.population {
+        let d = p.amount_logshift[i] - base.amount_logshift[i];
+        assert!(
+            (d - ln_m).abs() < 1e-12,
+            "entity {i}: log shift moved by {d}"
+        );
+    }
+    // Not LN_MU * 1.2 (a 5.5x median shift, AML-GOALS section 9 #25).
+    assert!((ln_m - 0.1823).abs() < 1e-4);
+    // Activity untouched.
+    assert_eq!(p.activity, base.activity);
+    // The drawn amounts: same RNG stream, so the population median of persona
+    // draws moves by the multiplier up to round-number snapping.
+    let draws = |w: &datagen_rs::model::World| -> Vec<f64> {
+        let mut rng = Rng::new(99);
+        (0..200_000)
+            .map(|k| {
+                let o = 1 + (k % w.population);
+                native_amount(&mut rng, w.amount_logshift[o], "USD")
+            })
+            .collect()
+    };
+    let r = median(draws(&p)) / median(draws(&base));
+    assert!((r - 1.2).abs() < 0.03, "median amount ratio {r}");
+}
+
+#[test]
+fn persona_sd_scales_the_log_spread_around_fixed_centres() {
+    let base = build_world_p(SCALE, DEV_SEED, 60, false, &Perturbation::NONE);
+    let p = build_world_p(SCALE, DEV_SEED, 60, false, &only(1.0, 1.2, 1.0));
+    let c = -0.5 * datagen_rs::world::AMOUNT_LOG_SD.powi(2);
+    for i in 1..=base.population {
+        // Amount: deviation from the unchanged centre scales by exactly 1.2.
+        let (b, q) = (base.amount_logshift[i] - c, p.amount_logshift[i] - c);
+        assert!((q - 1.2 * b).abs() < 1e-12, "entity {i}: {b} -> {q}");
+        // Activity: log of the rate multiplier (median 1x) scales by 1.2.
+        let t = base.ty[i];
+        if t >= 0 {
+            let per_type = BASELINE_ACTIVITY[t as usize];
+            let (lb, lq) = (
+                (base.activity[i] / per_type).ln(),
+                (p.activity[i] / per_type).ln(),
+            );
+            assert!((lq - 1.2 * lb).abs() < 1e-9, "entity {i}: {lb} -> {lq}");
+        }
+    }
+    // Everything else in the world is the same.
+    assert_eq!(p.ty, base.ty);
+    assert_eq!(p.country, base.country);
+    assert_eq!(p.ccy, base.ccy);
+    assert_eq!(p.ring_sz, base.ring_sz);
+    assert_eq!(p.n_accounts, base.n_accounts);
+    assert_eq!(p.iban, base.iban);
+    assert!(p.ty.contains(&TYPE_PERSON));
+}
+
+#[test]
+fn dormancy_scales_each_episode_and_nothing_else_in_the_schedule() {
+    let w = build_world_p(SCALE * 10.0, DEV_SEED, 60, true, &Perturbation::NONE);
+    let (s, e) = corpus();
+    let run = |p: &Perturbation| {
+        schedule_p(
+            DEV_SEED,
+            DEV_SEED,
+            w.dims.total_txns(),
+            w.population,
+            s,
+            e,
+            &w.country,
+            p,
+        )
+    };
+    let base = run(&Perturbation::NONE);
+    let pert = run(&Perturbation::REGISTERED);
+    // Same instances: planting rates, participants, seeds and row counts.
+    assert_eq!(base.len(), pert.len());
+    let mut n_dorm = 0;
+    let (mut sum_b, mut sum_p) = (0.0, 0.0);
+    for (b, q) in base.iter().zip(&pert) {
+        assert_eq!(
+            (b.typ, &b.participants, b.seed, b.rows_per_instance),
+            (q.typ, &q.participants, q.seed, q.rows_per_instance)
+        );
+        if b.typ != "dormant_reactivation" {
+            // Non-dormant windows do not move.
+            assert_eq!((b.start_us, b.end_us), (q.start_us, q.end_us));
+            assert_eq!((q.suppress_start_us, q.suppress_end_us), (0, 0));
+            continue;
+        }
+        n_dorm += 1;
+        // Burst span unchanged.
+        assert_eq!(b.end_us - b.start_us, q.end_us - q.start_us);
+        let db = (b.start_us - b.suppress_start_us) / DAY;
+        let dq = (q.start_us - q.suppress_start_us) / DAY;
+        // d = floor(45 * r^u) and floor(1.2 * 45 * r^u) for the same u.
+        assert!(
+            dq >= (1.2 * db as f64).floor() as i64 && dq <= (1.2 * (db + 1) as f64).ceil() as i64,
+            "dormancy {db} d -> {dq} d"
+        );
+        let (lo, hi) = (
+            (1.2 * DORMANCY_MIN_DAYS) as i64,
+            (1.2 * DORMANCY_MAX_DAYS) as i64,
+        );
+        assert!(
+            (lo..=hi).contains(&dq),
+            "dormancy {dq} d outside {lo}..={hi}"
+        );
+        sum_b += db as f64;
+        sum_p += dq as f64;
+    }
+    assert!(n_dorm > 20, "only {n_dorm} dormant instances");
+    let r = sum_p / sum_b;
+    assert!((r - 1.2).abs() < 0.01, "mean dormancy ratio {r}");
+}
+
+#[test]
+fn registered_seeds_get_the_right_corpus_only() {
+    use datagen_rs::robustness::{perturbation_for_seed, EVALUATION_SEED, ROBUSTNESS_SEED};
+    // Pure decision function only: the registered seeds are never generated
+    // here.
+    assert!(perturbation_for_seed(ROBUSTNESS_SEED, false).is_err());
+    assert_eq!(
+        perturbation_for_seed(ROBUSTNESS_SEED, true),
+        Ok(Perturbation::REGISTERED)
+    );
+    assert!(perturbation_for_seed(EVALUATION_SEED, true).is_err());
+    assert_eq!(
+        perturbation_for_seed(EVALUATION_SEED, false),
+        Ok(Perturbation::NONE)
+    );
+    assert_eq!(
+        perturbation_for_seed(DEV_SEED, false),
+        Ok(Perturbation::NONE)
+    );
+    assert_eq!(
+        perturbation_for_seed(DEV_SEED, true),
+        Ok(Perturbation::REGISTERED)
+    );
+}
