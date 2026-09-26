@@ -16,6 +16,15 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
     }
 }
 
+// Values are quantised to 1e-9 before hashing. The world is built with
+// f64::exp / f64::ln, which come from the platform libm, so raw bits differ in
+// the last ulp between hosts (RHEL dev host vs the CI runner). Quantising keeps
+// the pin portable while any real data change still moves it. Bit-exact output
+// is only guaranteed within one build environment (the pinned datagen image).
+fn q(v: f64) -> i64 {
+    (v * 1e9).round() as i64
+}
+
 fn world_digest(activity: &[f64], logshift: &[f64], total: f64) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for v in activity
@@ -23,7 +32,7 @@ fn world_digest(activity: &[f64], logshift: &[f64], total: f64) -> u64 {
         .chain(logshift)
         .chain(std::iter::once(&total))
     {
-        fnv(&mut h, &v.to_bits().to_le_bytes());
+        fnv(&mut h, &q(*v).to_le_bytes());
     }
     h
 }
@@ -56,7 +65,8 @@ fn corpus() -> (i64, i64) {
 
 #[test]
 fn default_world_and_schedule_are_pinned() {
-    // Captured on c0d658f (before the perturbation existed) on dev seed 7777.
+    // Quantised digest captured on c9d7202 (corpus output byte-identical to c0d658f,
+    // the pre-perturbation point, verified by hashing all 67 files) on dev seed 7777.
     // A change here is an AML data change, not a refactor.
     let w = build_world_ex(0.05, DEV_SEED, 60, false);
     let (s, e) = corpus();
@@ -74,7 +84,7 @@ fn default_world_and_schedule_are_pinned() {
     );
     assert_eq!(
         got,
-        (9_930_139_091_025_189_866, 8_773_633_312_168_967_265),
+        (10_581_863_675_670_526_329, 8_773_633_312_168_967_265),
         "default AML world or schedule changed"
     );
 }
@@ -130,7 +140,7 @@ fn none_is_the_default_path() {
             world_digest(&w.activity, &w.amount_logshift, w.total_activity),
             schedule_digest(&insts),
         ),
-        (9_930_139_091_025_189_866, 8_773_633_312_168_967_265),
+        (10_581_863_675_670_526_329, 8_773_633_312_168_967_265),
     );
 }
 
