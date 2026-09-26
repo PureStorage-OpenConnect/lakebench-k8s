@@ -65,7 +65,9 @@ def looks_path() -> Path:
     """The look record; raises FileNotFoundError when it is missing, so a
     lost record fails closed instead of reading as "nothing looked at"."""
     here = Path(__file__).resolve().parent
-    for p in (here / LOOKS_FILENAME, _PREREG_PATH.parent / LOOKS_FILENAME):
+    # The packaged path first; the flat path only on the Spark driver, where
+    # the package is absent (a stray copy next to this module never shadows).
+    for p in (_PREREG_PATH.parent / LOOKS_FILENAME, here / LOOKS_FILENAME):
         if p.is_file():
             return p
     raise FileNotFoundError(f"{LOOKS_FILENAME} not found next to {__file__} or {_PREREG_PATH}")
@@ -177,13 +179,11 @@ def complete_look(
     report_path: str,
     meta: dict | None = None,
     path: str | os.PathLike | None = None,
-    claim_if_missing: bool = False,
 ) -> dict:
     """Record the finished look's report sha256 (the report must already be
-    written). The started entry for ``seed`` is completed; with
-    ``claim_if_missing`` (a cluster look, which cannot write this file when it
-    starts) a missing entry is created complete. A seed whose look is already
-    complete is refused: the record never changes a recorded hash."""
+    written) on the started entry for ``seed``. A seed with no started entry,
+    or whose look is already complete, is refused: the record never changes a
+    recorded hash."""
     if role not in PROTECTED_ROLES:
         raise ValueError(f"only {PROTECTED_ROLES} looks are recorded, not {role!r}")
 
@@ -193,9 +193,9 @@ def complete_look(
             raise ValueError(f"seed {seed}: the look is already complete or recorded twice")
         if mine and mine[0]["role"] != role:
             raise ValueError(f"seed {seed} was claimed as {mine[0]['role']!r}, not {role!r}")
-        if not mine and not claim_if_missing:
+        if not mine:
             raise ValueError(f"seed {seed} has no started look to complete")
-        entry = mine[0] if mine else {"role": role, "seed": int(seed)}
+        entry = mine[0]
         entry.update(
             state="complete",
             completed_utc=_utc(),
@@ -203,8 +203,6 @@ def complete_look(
             report_path=str(report_path),
             **(meta or {}),
         )
-        if not mine:
-            doc["looks"].append(entry)
         return entry
 
     return _locked_update(path, update)
@@ -497,7 +495,7 @@ PREDICTIONS_FILENAME = "aml_level2_predictions.json"
 
 def predictions_path() -> Path:
     here = Path(__file__).resolve().parent
-    for p in (here / PREDICTIONS_FILENAME, _PREREG_PATH.parent / PREDICTIONS_FILENAME):
+    for p in (_PREREG_PATH.parent / PREDICTIONS_FILENAME, here / PREDICTIONS_FILENAME):
         if p.is_file():
             return p
     raise FileNotFoundError(

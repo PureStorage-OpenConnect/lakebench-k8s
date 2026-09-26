@@ -54,9 +54,12 @@ the gate scale; the s10 shards come from one corpus and one shard plan, every
 index once, no instance spanning shards and no customer in two shards.
 
 The claim is the intersection of every component (Berger 1982), so no
-multiplicity correction is needed for the false-invariance error; each extra
-component is another chance to fail an invariant corpus, which the power
-simulation accounts for.
+multiplicity correction is needed, but that bounds a false pass only by the
+largest single component's rate: a typology whose true logit shift sits
+exactly at logit_diff_abs_max passes about half the time, which is why the
+smallest detectable shift is reported. Each extra component is another
+chance to fail an invariant corpus; the power simulation covers the AP
+components only (not KS, min_positives or a voided bootstrap).
 
 R7: every tolerance comes from aml_preregistration.json; a unit test fails if
 this module carries a numeric literal other than 0, 1 or 2. Any missing
@@ -281,6 +284,18 @@ def run_logit_stats(arrays: dict, iterations: int, rng) -> dict:
         "n_resamples": len(draws),
         "n_degenerate_resamples": degenerate,
     }
+
+
+def corpus_variance(s2_runs: list[dict], s10_runs: list[dict]) -> float:
+    """tau^2 estimate (reported, not gated): the corpus-level (seed) variance
+    of logit AP, as the s2 between-seed variance (independent corpora) minus
+    the s10 between-shard variance (one corpus, s2-sized shards), floored at
+    0. The s10 SE cannot contain it: the shards share one corpus."""
+    import numpy as np
+
+    a = np.var([r["logit"] for r in s2_runs], ddof=1)
+    b = np.var([r["logit"] for r in s10_runs], ddof=1)
+    return max(0.0, float(a - b))
 
 
 def scale_estimate(runs: list[dict], ci_level: float) -> dict:
@@ -567,6 +582,46 @@ def evaluate_d8(
         }
 
 
+def _gate_code_sha() -> str:
+    import lakebench.aml.fidelity_gate as fg
+
+    return hashlib.sha256(Path(fg.__file__).read_bytes()).hexdigest()
+
+
+def shard_plan_errors(info: dict, prereg: dict) -> list[str]:
+    """Why a recorded shard plan is not the registered one (empty when it
+    is): registered salt, shard count and scored typologies, no instance
+    spanning shards, balanced shards and no giant component."""
+    from lakebench.aml.fidelity_gate import in_scope_typologies
+
+    si = prereg["scale_invariance"]
+    out = []
+    if not isinstance(info, dict):
+        return ["no shard plan recorded"]
+    if info.get("salt") != si["shard_salt"] or info.get("n_shards") != si["n_shards"]:
+        out.append("salt or n_shards differ from scale_invariance")
+    if info.get("typologies") != sorted(in_scope_typologies(prereg)):
+        out.append("the plan's components are not built from the scored typologies")
+    if info.get("spanning_instances") != 0:
+        out.append(f"{info.get('spanning_instances')} instance(s) span shards")
+    cps = info.get("customers_per_shard")
+    n = info.get("n_customers")
+    if not isinstance(cps, list) or len(cps) != si["n_shards"] or not n or min(cps) <= 0:
+        out.append("customers_per_shard missing or a shard is empty")
+    else:
+        ratio = max(cps) / (sum(cps) / len(cps))
+        if ratio > si["shard_balance_max_ratio"]:
+            out.append(f"largest shard {ratio:.3f} x the mean > shard_balance_max_ratio")
+        big = info.get("largest_component")
+        share = (big or 0) / n
+        if big is None or share > si["largest_component_share_max"]:
+            out.append(
+                f"largest planted component {share:.4f} of customers > "
+                "largest_component_share_max (the instance graph percolates)"
+            )
+    return out
+
+
 def _cross_checks(facts: dict, prereg: dict, sha: str, packaged_sha: str | None) -> dict:
     """Checks across runs: identity, the registered seed set and scales, and
     the shard plan."""
@@ -603,6 +658,7 @@ def _cross_checks(facts: dict, prereg: dict, sha: str, packaged_sha: str | None)
             for k in COMPARED_LIBRARIES
         ),
         "distinct_reports": len({f["report_sha256"] for f in every}) == len(every),
+        "current_gate_code": all(f["gate_code_sha256"] == _gate_code_sha() for f in every),
         "s2_registered_seeds": sorted(s for s in map(seed_of, s2) if s is not None) == want_s2
         and len(s2) == len(want_s2),
         "s2_at_gate_scale": bool(s2)
@@ -633,6 +689,7 @@ def _cross_checks(facts: dict, prereg: dict, sha: str, packaged_sha: str | None)
         and all(p == per_shard[0] for p in per_shard),
         "s10_no_spanning_instance": shard_ok
         and all(d.get("spanning_instances") == 0 for d in shards),
+        "s10_plan_sound": shard_ok and all(not shard_plan_errors(d, prereg) for d in shards),
         "s10_scored_within_shard": shard_ok
         and all(
             isinstance(d.get("customers_per_shard"), list)
@@ -767,6 +824,8 @@ def _evaluate(s2_reports, s10_reports, prereg_path, endpoint, jobs) -> dict[str,
             est = {s: scale_estimate(r["runs"][s], pw["ci_level"]) for s in ("s2", "s10")}
             r["s2"], r["s10"] = est["s2"], est["s10"]
             r.update(typology_rule(est["s2"], est["s10"], prereg))
+            # Reported, not gated: the seed-level variance the s10 SE omits.
+            r["corpus_variance_tau2"] = corpus_variance(r["runs"]["s2"], r["runs"]["s10"])
             why += r["reasons"]
         r["reasons"] = why
         r["pass"] = not why

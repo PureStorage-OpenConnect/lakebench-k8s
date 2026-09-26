@@ -8,8 +8,10 @@ the power of the registered rule, not of a sketch of it. The pre-registration
 records the sha256 of this script's stdout (scale_invariance.power_sim); a
 change to the rule or to this script shows up as a different hash.
 
-Model. Per typology, each scale-2 run (one per s2 seed) and each scale-10
-shard is an independent draw of logit(AP) = logit(true AP) + k x s x N(0, 1),
+Model. Per typology, each scale-2 run (one per s2 seed) is a draw of
+logit(AP) = logit(true AP) + tau x N(0, 1) + k x s x N(0, 1), and each
+scale-10 shard shares one corpus effect: logit(true AP) + tau x z0 + k x s x
+N(0, 1), with tau the corpus-level (seed) sd and
 where s is the customer-bootstrap sd of logit(AP) measured on the v6-43
 calibration run (seed 43, scale 2, full refit; analysis in
 lb-scratch/d8stats, boot.py) and k inflates it for refit noise the bootstrap
@@ -20,7 +22,8 @@ resamples estimate it to about 2%).
 The rule, per behavioural typology, exactly as implemented:
 
 - per scale: mean of the run logits; SE = max(s / sqrt(n), between-run sd /
-  sqrt(n)); CI = mean +/- t(n - 1) x SE, back-transformed;
+  sqrt(n)); CI = mean +/- t(n - 1) x SE, back-transformed. The s10 SE cannot
+  see tau (one corpus), so tau > 0 rows show what that costs;
 - gated when either scale's CI touches [band.ap_min, band.ap_max]: pass when
   |mean10 - mean2| <= logit_diff_abs_max, the Welch-Satterthwaite CI of the
   difference is no wider than logit_diff_ci_width_max, and there is no
@@ -67,7 +70,8 @@ SCENARIOS = {
     "S3 rapid_layering x2 (0.0049->0.0098)": {"rapid_layering": (0.0049, 0.0098)},
     "S0b invariant near edge (dormant_reactivation 0.79)": {"dormant_reactivation": (0.79, 0.79)},
 }
-K_VALUES = (1.0, 1.3)
+K_VALUES = (1.0, 1.3, 2.0)
+TAU_VALUES = (0.0, 0.10)
 POWER_TARGETS = (0.80, 0.90)
 
 
@@ -89,16 +93,23 @@ class Rule:
         self.n10 = si["n_shards"]
         self.n2 = n_s2 or 1 + len(prereg["corpora"]["calibration_replicate_seeds"])
 
-    def scale(self, rng, ap, s, k, n):
-        runs = logit(ap) + k * s * rng.standard_normal((N_SIM, n))
-        mean = runs.mean(axis=1)
-        se = np.maximum(s / np.sqrt(n), runs.std(axis=1, ddof=1) / np.sqrt(n))
-        return mean, se, n - 1
-
-    def apply(self, rng, a2, a10, s, k):
+    def apply(self, rng, a2, a10, s, k, tau=0.0):
         """(pass, shift_detected) arrays for one typology."""
-        m2, se2, d2 = self.scale(rng, a2, s, k, self.n2)
-        m10, se10, d10 = self.scale(rng, a10, s, k, self.n10)
+        r2 = (
+            logit(a2)
+            + tau * rng.standard_normal((N_SIM, self.n2))
+            + k * s * rng.standard_normal((N_SIM, self.n2))
+        )
+        r10 = (
+            logit(a10)
+            + tau * rng.standard_normal((N_SIM, 1))
+            + k * s * rng.standard_normal((N_SIM, self.n10))
+        )
+        m2, m10 = r2.mean(axis=1), r10.mean(axis=1)
+        se2 = np.maximum(s / np.sqrt(self.n2), r2.std(axis=1, ddof=1) / np.sqrt(self.n2))
+        se_sh = np.maximum(s / np.sqrt(self.n10), r10.std(axis=1, ddof=1) / np.sqrt(self.n10))
+        se10 = se_sh
+        d2, d10 = self.n2 - 1, self.n10 - 1
         c2, c10 = student_t.ppf(self.q, d2), student_t.ppf(self.q, d10)
         ci2 = (expit(m2 - c2 * se2), expit(m2 + c2 * se2))
         ci10 = (expit(m10 - c10 * se10), expit(m10 + c10 * se10))
@@ -128,15 +139,15 @@ class Rule:
         return ok, detected
 
 
-def pass_probability(rule, rng, scenario, k):
+def pass_probability(rule, rng, scenario, k, tau):
     ok = np.ones(N_SIM, dtype=bool)
     for typ, (ap, s) in BASE.items():
         a2, a10 = scenario.get(typ, (ap, ap))
-        ok &= rule.apply(rng, a2, a10, s, k)[0]
+        ok &= rule.apply(rng, a2, a10, s, k, tau)[0]
     return float(ok.mean())
 
 
-def smallest_detectable_shift(rule, rng, typ, k, target, sign):
+def smallest_detectable_shift(rule, rng, typ, k, tau, target, sign):
     """Smallest AP shift (0.01 steps, from the typology's calibration AP) that
     this typology's own check calls a shift with probability >= target."""
     ap, s = BASE[typ]
@@ -144,7 +155,7 @@ def smallest_detectable_shift(rule, rng, typ, k, target, sign):
         a10 = ap + sign * step / 100
         if not 0 < a10 < 1:
             return None
-        if rule.apply(rng, ap, a10, s, k)[1].mean() >= target:
+        if rule.apply(rng, ap, a10, s, k, tau)[1].mean() >= target:
             return round(step / 100, 2)
     return None
 
@@ -158,23 +169,28 @@ def main() -> int:
         f"rule: |dlogit| <= {registered.dmax}, Welch CI width <= {registered.wmax}, "
         f"band [{registered.lo}, {registered.hi}], CI level {prereg['power']['ci_level']}"
     )
-    designs = [("registered", registered), ("3 s2 runs (not registered)", Rule(prereg, n_s2=3))]
-    for name, rule in designs:
-        for k in K_VALUES:
-            print(f"\n{name}, k={k}: P(D8 passes)")
-            for sname, scen in SCENARIOS.items():
-                print(f"  {sname:52s} {pass_probability(rule, rng, scen, k):.2f}")
+    designs = [
+        ("registered", registered, K_VALUES, TAU_VALUES),
+        ("3 s2 runs (not registered)", Rule(prereg, n_s2=3), K_VALUES[:2], TAU_VALUES[:1]),
+    ]
+    for name, rule, ks, taus in designs:
+        for tau in taus:
+            for k in ks:
+                print(f"\n{name}, k={k}, tau={tau}: P(D8 passes)")
+                for sname, scen in SCENARIOS.items():
+                    p = pass_probability(rule, rng, scen, k, tau)
+                    print(f"  {sname:52s} {p:.2f}")
     print("\nsmallest detectable AP shift (registered rule; own check calls a shift)")
     for typ, (ap, _) in BASE.items():
         if not registered.lo <= ap <= registered.hi:
             continue
-        for k in K_VALUES:
+        for tau in TAU_VALUES:
             cells = []
             for target in POWER_TARGETS:
-                down = smallest_detectable_shift(registered, rng, typ, k, target, -1)
-                up = smallest_detectable_shift(registered, rng, typ, k, target, 1)
+                down = smallest_detectable_shift(registered, rng, typ, 1.3, tau, target, -1)
+                up = smallest_detectable_shift(registered, rng, typ, 1.3, tau, target, 1)
                 cells.append(f"power {target:.2f}: -{down} / +{up}")
-            print(f"  {typ:22s} AP {ap:.3f} k={k}: " + "; ".join(cells))
+            print(f"  {typ:22s} AP {ap:.3f} k=1.3 tau={tau}: " + "; ".join(cells))
     return 0
 
 

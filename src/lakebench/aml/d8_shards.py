@@ -76,5 +76,5 @@ def check_plan(instances: Mapping, shard_of: Mapping) -> None:
     if bad:
         raise ValueError(
             f"D8 shard plan leaks: {len(bad)} planted instance(s) span shards "
-            f"(first: {bad[:3]}); refusing to score"
+            f"(first: {bad[0]}); refusing to score"
         )

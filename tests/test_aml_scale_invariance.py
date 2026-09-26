@@ -166,6 +166,26 @@ def test_components_join_crews_and_shared_counterparties():
     assert d8_shards.component_sizes(reps) == {3: 4, 20: 2}
 
 
+def test_shard_plan_balance_and_giant_component_are_refused():
+    p = copy.deepcopy(REAL)
+    p["behavioural_subset"], p["definitional_subset"] = ["beh"], []
+    ok = {
+        "salt": p["scale_invariance"]["shard_salt"],
+        "n_shards": N_SHARDS,
+        "typologies": ["beh"],
+        "spanning_instances": 0,
+        "customers_per_shard": [1000] * N_SHARDS,
+        "n_customers": 1000 * N_SHARDS,
+        "largest_component": 3,
+    }
+    assert si.shard_plan_errors(ok, p) == []
+    skew = {**ok, "customers_per_shard": [1500, 1000, 1000, 1000, 500]}
+    assert any("mean" in e for e in si.shard_plan_errors(skew, p))
+    giant = {**ok, "largest_component": 1000}
+    assert any("percolates" in e for e in si.shard_plan_errors(giant, p))
+    assert si.shard_plan_errors(None, p)
+
+
 def test_shard_leakage_is_refused():
     instances = {"a": [1, 2], "b": [2, 3], "c": [7, 8]}
     reps = d8_shards.components(instances.values())
@@ -239,6 +259,9 @@ def _run(d: Path, frame, prereg_path, *, scale, seed, shard=None, l2=False):
             "n_shards": N_SHARDS,
             "salt": prereg["scale_invariance"]["shard_salt"],
             "customers_per_shard": [N_UNITS] * N_SHARDS,
+            "n_customers": N_UNITS * N_SHARDS,
+            "largest_component": 3,
+            "typologies": ["beh"],
             "spanning_instances": 0,
             "plan_fingerprint": PLAN_FP,
         }
@@ -413,6 +436,8 @@ def _prov(name, value):
         (_shard_field("salt", "other"), "s10_registered_plan"),
         (_shard_field("customers_per_shard", [1] * N_SHARDS), "s10_scored_within_shard"),
         (_prov("d8_shard", None), "s10_shard_plan_recorded"),
+        (_shard_field("largest_component", N_UNITS), "s10_plan_sound"),
+        (_shard_field("typologies", ["beh", "random"]), "s10_plan_sound"),
         (_prov("corpus", "/corpora/elsewhere"), "s10_one_corpus"),
         (_prov("model_versions", ["other-model"]), "same_model_versions"),
         (_prov("aml_features_sha256", "e" * 64), "same_aml_features_sha256"),
@@ -426,6 +451,8 @@ def _prov(name, value):
         "unregistered_salt",
         "scored_outside_shard",
         "no_shard_block",
+        "giant_component",
+        "components_from_other_typologies",
         "other_corpus",
         "other_generator",
         "other_feature_code",

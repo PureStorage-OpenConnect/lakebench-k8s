@@ -256,7 +256,17 @@ def _numeric_literals(path: Path) -> set:
 
 
 @pytest.mark.parametrize(
-    "path", [GATE_SRC, RUNNER_SRC, D8_SRC, D8_RUNNER_SRC], ids=lambda p: p.name
+    "path",
+    [
+        GATE_SRC,
+        RUNNER_SRC,
+        D8_SRC,
+        D8_RUNNER_SRC,
+        ROOT / "src/lakebench/aml/predictions.py",
+        ROOT / "src/lakebench/aml/d8_shards.py",
+        ROOT / "scripts/aml_level2_predict.py",
+    ],
+    ids=lambda p: p.name,
 )
 def test_gate_has_no_numeric_threshold_literals(path):
     """R7: every threshold comes from the JSON. 0, 1 and 2 are structural
