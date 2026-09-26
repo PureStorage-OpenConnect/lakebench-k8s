@@ -219,3 +219,18 @@ class TestAddRefusesTerminatingNamespace:
             core.return_value.read_namespace.return_value = self._ns(deleting=False)
             mgr._add_namespace_to_watch_impl("my-ns")
         assert run.called, "a live namespace proceeds to the helm upgrade"
+
+    def test_namespace_already_gone_is_not_added(self):
+        """Fix review: destroy can finish deleting it while the deploy waits
+        for the lease; a 404 must refuse, not fail open."""
+        from kubernetes.client.rest import ApiException
+
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch("kubernetes.client.CoreV1Api") as core,
+            patch.object(mgr, "_run") as run,
+        ):
+            core.return_value.read_namespace.side_effect = ApiException(status=404)
+            assert mgr._add_namespace_to_watch_impl("my-ns") is False
+        run.assert_not_called()

@@ -512,5 +512,21 @@ class TestDestroyAllBuckets:
         )
         assert r.status is DeploymentStatus.FAILED
         assert "may still hold data" in r.message
+        assert any(x.component == "secretclass" for x in self._results), (
+            "the skipped cluster-scoped SecretClasses must be named"
+        )
         assert boto.buckets["a-silver"] == ["y"] and boto.buckets["a-gold"] == ["z"]
         assert boto.delete_bucket_calls == []
+
+    def test_created_record_is_not_edited_after_a_redeploy(self):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        # start, before-loop, three empties, three deletes; R lands before
+        # the record update.
+        uids = iter(["uid-1"] * 8)
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            uid=lambda _ns: next(uids, "uid-2"),
+        )
+        assert boto.buckets == {}
+        self.forget.assert_not_called()
