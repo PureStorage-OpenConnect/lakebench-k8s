@@ -1328,3 +1328,13 @@ def test_seed_falls_back_when_the_newest_run_is_refused(env, capsys):
     out = capsys.readouterr().out
     assert "20260924-110000-bbbbbb not usable" in out
     assert env.store().baselines["c360-batch-s10"].run_id == "20260924-100000-aaaaaa"
+
+
+def test_stop_reason_is_named_even_on_a_pass(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    c = _compare(env, "c360-batch-s10", _stopped(_batch_run(snap, "20260924-110000-bbbbbb"), 300.0))
+    assert c.verdict == pg.PASS
+    assert any("maintenance stopped before completion" in r for r in c.reasons)

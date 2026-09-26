@@ -1214,6 +1214,7 @@ def run(
     from lakebench.cli._sustained import (
         MaintenanceBudget,
         _collect_platform_metrics,
+        _live_stream_apps,
         _probe_table_health,
         _run_iceberg_compaction,
         _run_iceberg_maintenance,
@@ -2067,6 +2068,20 @@ def run(
                 # orphan removal and compaction together, and the first
                 # timeout stops the rest.
                 maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)
+                # Stream apps (restartPolicy Always) can still be writing: a
+                # c360 run never stops leftovers. Any present means live.
+                live_apps = _live_stream_apps(cfg.get_namespace())
+                if live_apps:
+                    console.print(
+                        "  [yellow]Stream apps present during pre-benchmark maintenance: "
+                        f"{', '.join(live_apps)}; using live-stream retention[/yellow]"
+                    )
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Pre-benchmark maintenance with live streams",
+                        details={"stream_apps": live_apps},
+                    )
                 _run_iceberg_maintenance(
                     cfg,
                     k8s,
@@ -2074,6 +2089,7 @@ def run(
                     j,
                     retention_threshold=resolve_maintenance_retention(cfg),
                     timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
+                    live_streams=bool(live_apps),
                     budget=maint_budget,
                 )
                 _run_iceberg_compaction(
@@ -2081,6 +2097,7 @@ def run(
                     k8s,
                     console,
                     j,
+                    live_streams=bool(live_apps),
                     timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
                     budget=maint_budget,
                 )

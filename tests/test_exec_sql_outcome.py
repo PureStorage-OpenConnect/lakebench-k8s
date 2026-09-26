@@ -483,12 +483,15 @@ def test_trino_maintenance_sets_the_session_minimum_in_the_same_submission():
         "SET SESSION lakehouse.expire_snapshots_min_retention = '30m'; "
         "ALTER TABLE lakehouse.silver.t EXECUTE expire_snapshots(retention_threshold => '30m')"
     )
-    assert orph.startswith("SET SESSION lakehouse.remove_orphan_files_min_retention = '30m'; ")
-    assert "remove_orphan_files(retention_threshold => '30m')" in orph
+    # Orphans never below 24 h + 10 min, even when asked for less.
+    assert orph == (
+        "SET SESSION lakehouse.remove_orphan_files_min_retention = '1450m'; "
+        "ALTER TABLE lakehouse.silver.t EXECUTE remove_orphan_files(retention_threshold => '1450m')"
+    )
     # The catalog comes from config, not a hard-coded name.
-    exp2, _ = build_maintenance_sql("trino", "iceberg_cat", "iceberg_cat.s.t", "1h", "24h")
+    exp2, orph2 = build_maintenance_sql("trino", "iceberg_cat", "iceberg_cat.s.t", "1h", "48h")
     assert exp2.startswith("SET SESSION iceberg_cat.expire_snapshots_min_retention = '1h'; ")
-    assert "remove_orphan_files_min_retention = '24h'" in _
+    assert "remove_orphan_files_min_retention = '48h'" in orph2
 
 
 def test_trino_maintenance_reaches_one_execute_each():
@@ -523,7 +526,8 @@ def test_spark_maintenance_uses_a_timestamp_literal():
         "CALL lakehouse.system.expire_snapshots(table => 'lakehouse.silver.t', "
         "older_than => TIMESTAMP '2026-09-26 11:30:00+00:00')"
     )
-    assert "older_than => TIMESTAMP '2026-09-25 12:00:00+00:00'" in orph
+    # 24 h asked, 24 h 10 min enforced.
+    assert "older_than => TIMESTAMP '2026-09-25 11:50:00+00:00'" in orph
     assert "UNIX_TIMESTAMP" not in exp + orph
 
 
@@ -535,7 +539,7 @@ def _sent(k8s):
 
 
 @pytest.mark.usefixtures("_engine_pod")
-def test_continuous_orphans_wait_24h_expire_at_the_threshold():
+def test_continuous_floors_expire_at_1h_and_orphans_at_24h10m():
     from lakebench.cli._sustained import _run_iceberg_maintenance
 
     k8s = MagicMock()
@@ -543,27 +547,29 @@ def test_continuous_orphans_wait_24h_expire_at_the_threshold():
     j = MagicMock()
     _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m", live_streams=True)
     sent = _sent(k8s)
-    assert any("expire_snapshots(retention_threshold => '30m')" in q for q in sent)
-    assert all("'30m'" not in q for q in sent if "remove_orphan_files" in q)
-    assert any("remove_orphan_files(retention_threshold => '24h')" in q for q in sent)
+    assert any("expire_snapshots(retention_threshold => '1h')" in q for q in sent)
+    assert any("remove_orphan_files(retention_threshold => '1450m')" in q for q in sent)
     d = _journal_details(j, "Iceberg maintenance")
-    assert d["expire_retention"] == "30m" and d["orphan_retention"] == "24h"
+    assert d["expire_retention"] == "1h" and d["orphan_retention"] == "1450m"
 
 
 @pytest.mark.usefixtures("_engine_pod")
-def test_batch_trino_orphans_use_the_threshold():
+def test_batch_trino_orphans_are_floored_too():
+    """Stream apps may be writing even in batch (restartPolicy Always)."""
     from lakebench.cli._sustained import _run_iceberg_maintenance
 
     k8s = MagicMock()
     k8s.exec_in_pod.return_value = (0, "", "")
     j = MagicMock()
-    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m")
+    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "0s")
     sent = _sent(k8s)
-    assert any("remove_orphan_files(retention_threshold => '30m')" in q for q in sent)
-    assert _journal_details(j, "Iceberg maintenance")["orphan_retention"] == "30m"
+    assert any("expire_snapshots(retention_threshold => '0s')" in q for q in sent)
+    assert all("'0s'" not in q for q in sent if "remove_orphan_files" in q)
+    d = _journal_details(j, "Iceberg maintenance")
+    assert d["expire_retention"] == "0s" and d["orphan_retention"] == "1450m"
 
 
-def test_batch_spark_orphans_never_below_24h():
+def test_batch_spark_orphans_never_below_24h10m():
     from lakebench.cli._sustained import _run_iceberg_maintenance
 
     k8s = MagicMock()
@@ -575,7 +581,7 @@ def test_batch_spark_orphans_never_below_24h():
     ):
         _run_iceberg_maintenance(_cfg("spark-thrift"), k8s, Console(quiet=True), j, "30m")
     d = _journal_details(j, "Iceberg maintenance")
-    assert d["expire_retention"] == "30m" and d["orphan_retention"] == "24h"
+    assert d["expire_retention"] == "30m" and d["orphan_retention"] == "1450m"
 
 
 def test_continuous_loop_passes_live_streams():
@@ -594,3 +600,77 @@ def test_spark_timestamp_is_utc_whatever_the_input_zone():
     cest = timezone(timedelta(hours=2))
     now = datetime(2026, 9, 26, 14, 0, 0, tzinfo=cest)  # 12:00 UTC
     assert _spark_timestamp(1800, now) == "TIMESTAMP '2026-09-26 11:30:00+00:00'"
+
+
+# -- data-safety review: parser, live-stream detection, loop resilience -------
+
+
+@pytest.mark.parametrize("bad", ["7D ", "30", "1.5h", "30min", "", "m", "-1h", "1w"])
+def test_parser_refuses_anything_unvalidated(bad):
+    from lakebench.modules.table_formats.iceberg.maintenance import _parse_threshold_seconds
+
+    if bad == "7D ":
+        assert _parse_threshold_seconds(bad) == 7 * 86400  # case-insensitive, never 7 min
+        return
+    with pytest.raises(ValueError):
+        _parse_threshold_seconds(bad)
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"), [("30m", "30m"), (" 7D ", "7d"), ("1 H", "1h"), ("0s", "0s")]
+)
+def test_config_normalises_valid_thresholds(given, stored):
+    from lakebench.config.schema import SustainedConfig
+
+    assert SustainedConfig(retention_threshold=given).retention_threshold == stored
+
+
+@pytest.mark.parametrize("bad", ["30", "1.5h", "30min", "7days", "1w", ""])
+def test_config_rejects_bad_thresholds(bad):
+    from pydantic import ValidationError
+
+    from lakebench.config.schema import SustainedConfig
+
+    with pytest.raises(ValidationError, match="whole number and one unit"):
+        SustainedConfig(retention_threshold=bad)
+
+
+def test_live_stream_apps_detects_present_apps_and_fails_safe():
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.cli._sustained import _STREAM_APPS, _live_stream_apps
+
+    def get(_g, _v, _ns, _p, name):
+        if name == "lakebench-silver-stream":
+            return {"metadata": {"name": name}}
+        if name == "lakebench-gold-refresh":
+            raise ApiException(status=503)
+        raise ApiException(status=404)
+
+    with patch("kubernetes.client.CustomObjectsApi") as api:
+        api.return_value.get_namespaced_custom_object.side_effect = get
+        live = _live_stream_apps("ns")
+    assert live == ["lakebench-silver-stream", "lakebench-gold-refresh"]
+    assert set(live) <= set(_STREAM_APPS)
+
+
+def test_pre_benchmark_maintenance_uses_live_settings_when_streams_exist():
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod)
+    assert "live_apps = _live_stream_apps(cfg.get_namespace())" in src
+    assert src.count("live_streams=bool(live_apps)") == 2
+    assert "Pre-benchmark maintenance with live streams" in src
+
+
+def test_continuous_loop_survives_a_maintenance_error():
+    import inspect
+
+    import lakebench.cli._sustained as sus
+
+    src = inspect.getsource(sus._run_sustained)
+    i = src.index("_run_iceberg_maintenance(")
+    block = src[src.rfind("try:", 0, i) : i + 400]
+    assert "except Exception" in block and "Maintenance round failed" in block

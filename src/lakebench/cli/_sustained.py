@@ -159,6 +159,38 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
 _STREAM_APPS = ("lakebench-bronze-ingest", "lakebench-silver-stream", "lakebench-gold-refresh")
 
 
+def _live_stream_apps(namespace: str) -> list[str]:
+    """Stream SparkApplications present in *namespace* (any schema).
+
+    Stream apps run with restartPolicy Always, so one that exists is writing
+    or about to. A read error other than 404 counts the app as live
+    (maintenance then takes the safe, live-stream settings).
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    live: list[str] = []
+    try:
+        api = k8s_client.CustomObjectsApi()
+    except Exception:  # noqa: BLE001
+        return list(_STREAM_APPS)
+    for app in _STREAM_APPS:
+        try:
+            api.get_namespaced_custom_object(
+                "sparkoperator.k8s.io", "v1beta2", namespace, "sparkapplications", app
+            )
+        except ApiException as e:
+            if e.status == 404:
+                continue
+            live.append(app)
+            continue
+        except Exception:  # noqa: BLE001
+            live.append(app)
+            continue
+        live.append(app)
+    return live
+
+
 def _stop_leftover_streams(job_manager, namespace: str, timeout_s: int = 120) -> None:
     """Delete stream apps left by an earlier run and wait for their drivers.
 
@@ -859,22 +891,23 @@ def _run_iceberg_maintenance(
     else:
         from lakebench.deploy.iceberg import build_maintenance_sql
         from lakebench.modules.table_formats.iceberg.maintenance import (
+            LIVE_EXPIRE_MIN_RETENTION_SECONDS,
             ORPHAN_MIN_RETENTION_SECONDS,
             _format_duration,
             _parse_threshold_seconds,
         )
 
-        # Policy: expire at the threshold on both engines. Orphan removal at
-        # max(threshold, 24 h) while streams are live (it can delete files a
-        # concurrent commit is about to use) and always on Spark (Iceberg
-        # refuses less); at the threshold on Trino in batch, where nothing
-        # writes at that point.
-        orphan_retention = retention_threshold
-        if live_streams or engine == "spark-thrift":
-            orphan_s = max(
-                _parse_threshold_seconds(retention_threshold), ORPHAN_MIN_RETENTION_SECONDS
+        # Policy: orphan removal never below 24 h + 10 min, on any engine
+        # or path (build_maintenance_sql enforces it too). Expire at the
+        # threshold, floored at 1 h while streams are live.
+        orphan_retention = _format_duration(
+            max(_parse_threshold_seconds(retention_threshold), ORPHAN_MIN_RETENTION_SECONDS)
+        )
+        if live_streams:
+            expire_s = max(
+                _parse_threshold_seconds(retention_threshold), LIVE_EXPIRE_MIN_RETENTION_SECONDS
             )
-            orphan_retention = _format_duration(orphan_s)
+            retention_threshold = _format_duration(expire_s)
 
         def build_sql(tbl):
             return build_maintenance_sql(
@@ -1941,9 +1974,21 @@ def _run_sustained(
 
             # Iceberg retention maintenance
             if elapsed >= next_maintenance_at:
-                _run_iceberg_maintenance(
-                    cfg, k8s, console, j, retention_threshold, live_streams=True
-                )
+                # A plan-building error (a bad retention string, an engine
+                # lookup failure) must not end the continuous run.
+                try:
+                    _run_iceberg_maintenance(
+                        cfg, k8s, console, j, retention_threshold, live_streams=True
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("maintenance round failed: %s", e)
+                    console.print(f"  [yellow]Maintenance round failed: {e}[/yellow]")
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Maintenance round failed",
+                        details={"error": str(e)},
+                    )
                 next_maintenance_at = (time.time() - start) + retention_interval
 
             # Iceberg compaction (v1.1.0)
