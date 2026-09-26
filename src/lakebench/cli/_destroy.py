@@ -97,6 +97,12 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
         print_info(f"Data kept in {used_workdir} (--remove-data to delete)")
 
 
+# Exit code when everything else succeeded but the namespace was still
+# Terminating at --namespace-timeout (LB-157). Distinct from 1 (a step
+# failed) so scripts can wait and re-check instead of treating it as broken.
+EXIT_NAMESPACE_STILL_TERMINATING = 3
+
+
 def destroy(
     config_file: Annotated[
         Path | None,
@@ -185,8 +191,8 @@ def destroy(
                 "Seconds to wait for the namespace to finish terminating "
                 "after the delete is issued (PVC and pod finalizers can "
                 "hold it for minutes). A namespace still terminating at "
-                "the deadline is reported as a warning, not as deleted. "
-                "0 skips the wait."
+                "the deadline is not reported as deleted and destroy exits "
+                f"{EXIT_NAMESPACE_STILL_TERMINATING}. 0 skips the wait."
             ),
         ),
     ] = 600,
@@ -367,7 +373,7 @@ def destroy(
     _journal_safe(j.close_session)
 
     ns_pending = any(
-        r.component == "namespace" and r.status == DeploymentStatus.SKIPPED for r in results
+        r.component == "namespace" and r.details.get("still_terminating") for r in results
     )
     if failed == 0 and ns_pending:
         console.print(
@@ -376,10 +382,11 @@ def destroy(
                 f"\n\n[yellow]Namespace {namespace} is still terminating.[/yellow] "
                 f"Wait until `kubectl get ns {namespace}` returns NotFound "
                 "before re-deploying under the same name.",
-                title="Destroy Complete (namespace still terminating)",
+                title="Destroy Incomplete (namespace still terminating)",
                 expand=False,
             )
         )
+        raise typer.Exit(EXIT_NAMESPACE_STILL_TERMINATING)
     elif failed == 0:
         console.print(
             Panel(

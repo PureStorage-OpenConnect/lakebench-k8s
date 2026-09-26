@@ -1315,3 +1315,74 @@ class TestOwnershipHooksFire:
             metrics_dir=Path("/tmp/nonexistent-metrics"),
         )
         assert s3.empty_bucket.call_count == 3
+
+
+class TestBucketCreationRecord:
+    """LB-159: deploy records which buckets it created; destroy deletes only those."""
+
+    def _deploy(self, ensure_result, prior_tags=None):
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        engine = DeploymentEngine(config, k8s_client=_mock_k8s())
+        client = MagicMock()
+        client._init_error = None
+        client.ensure_buckets.return_value = ensure_result
+        with (
+            patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False),
+            patch("lakebench.s3.S3Client", return_value=client),
+            patch(
+                "lakebench.deploy.ownership.verify_bucket_ownership",
+                return_value=IdentityReport(
+                    verdict=IdentityVerdict.MATCH,
+                    resource_name="b",
+                    expected_deployment=config.name,
+                ),
+            ),
+            patch(
+                "lakebench.deploy.ownership.read_bucket_ownership_tag",
+                side_effect=lambda _b, name: (prior_tags or {}).get(name),
+            ),
+            patch("lakebench.deploy.ownership.write_bucket_ownership_tag") as write,
+            patch("lakebench.deploy.ownership.record_created_buckets") as record,
+            patch("lakebench.k8s.get_k8s_client"),
+            patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
+        ):
+            result = engine._deploy_buckets()
+        created_flags = {c.args[1]: c.kwargs["created"] for c in write.call_args_list}
+        return result, created_flags, record, config
+
+    def test_created_buckets_are_tagged_and_recorded(self):
+        result, flags, record, config = self._deploy(
+            {"lakebench-bronze": True, "lakebench-silver": False, "lakebench-gold": True}
+        )
+        assert result.status == DeploymentStatus.SUCCESS
+        assert flags == {
+            "lakebench-bronze": True,
+            "lakebench-silver": False,
+            "lakebench-gold": True,
+        }
+        record.assert_called_once()
+        assert record.call_args.args[2] == ["lakebench-bronze", "lakebench-gold"]
+
+    def test_redeploy_keeps_the_created_marker(self):
+        from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH, TAG_DEPLOYMENT_NAME
+
+        config_name = _make_config().name
+        prior = {
+            "lakebench-bronze": {
+                TAG_DEPLOYMENT_NAME: config_name,
+                TAG_CREATED_BY_LAKEBENCH: "true",
+            },
+            "lakebench-silver": {TAG_DEPLOYMENT_NAME: config_name},
+        }
+        _, flags, record, _ = self._deploy(
+            {"lakebench-bronze": False, "lakebench-silver": False, "lakebench-gold": False},
+            prior_tags=prior,
+        )
+        assert flags == {
+            "lakebench-bronze": True,
+            "lakebench-silver": False,
+            "lakebench-gold": False,
+        }
+        record.assert_not_called()

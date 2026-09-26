@@ -1155,12 +1155,16 @@ class DeploymentEngine:
         # correctly tagged. Any pre-existing bucket owned by another
         # deployment stops the deploy here.
         from lakebench.deploy.ownership import (
+            TAG_CREATED_BY_LAKEBENCH,
+            TAG_DEPLOYMENT_NAME,
             BucketOwnershipError,
             BucketTaggingUnsupported,
             IdentityVerdict,
             bucket_name_matches_deployment,
             build_identity_from_config,
             list_lakebench_deployment_names,
+            read_bucket_ownership_tag,
+            record_created_buckets,
             verify_bucket_ownership,
             write_bucket_ownership_tag,
         )
@@ -1287,12 +1291,25 @@ class DeploymentEngine:
                         name,
                     )
                 continue
+            # LB-159: keep the created-by-lakebench marker across redeploys
+            # (the tag set is rewritten each time) and add it on create.
+            created_here = bool(results.get(name, False))
+            if not created_here:
+                try:
+                    prior = read_bucket_ownership_tag(boto, name) or {}
+                except Exception:  # noqa: BLE001
+                    prior = {}
+                created_here = (
+                    prior.get(TAG_DEPLOYMENT_NAME) == identity.name
+                    and prior.get(TAG_CREATED_BY_LAKEBENCH) == "true"
+                )
             try:
                 write_bucket_ownership_tag(
                     boto,
                     name,
                     identity.name,
                     workload_schema=identity.workload_schema,
+                    created=created_here,
                 )
             except BucketTaggingUnsupported:
                 # Rare race: verify said tags exist earlier in this
@@ -1334,6 +1351,19 @@ class DeploymentEngine:
         parts = []
         if created:
             parts.append(f"created {', '.join(created)}")
+            # LB-159: the namespace records which buckets lakebench created,
+            # for backends without tagging; destroy deletes only those.
+            try:
+                record_created_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), created)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Could not record created buckets %s on namespace %s (%s); "
+                    "destroy will empty but keep them.",
+                    created,
+                    self.config.get_namespace(),
+                    e,
+                )
+                parts.append("creation not recorded; destroy will keep them")
         if existed:
             parts.append(f"already existed: {', '.join(existed)}")
 

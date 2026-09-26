@@ -49,7 +49,7 @@ class FakeCluster:
         blockers = [PVC_BLOCKER] if self.phase == "Terminating" else []
         return self.phase, blockers
 
-    def delete_namespace(self, name):
+    def delete_namespace(self, name, uid=None):
         if self.phase == "":
             return False
         if self.phase == "Terminating":
@@ -137,6 +137,20 @@ class TestWait:
         assert result.message == "Namespace ns-a deleted"
 
 
+class TestPreconditionRefusal:
+    def test_replaced_namespace_is_left_alone(self):
+        from lakebench.k8s.client import NamespaceReplacedError
+
+        cluster = FakeCluster()
+        cluster.delete_namespace = MagicMock(side_effect=NamespaceReplacedError("uid"))
+        result = destroy_mod._delete_namespace_and_wait(
+            _engine(cluster), "ns-a", 600, lambda *a: None, uid="uid-1"
+        )
+        assert result.status is DeploymentStatus.SUCCESS
+        assert "newer deployment" in result.message
+        cluster.delete_namespace.assert_called_once_with("ns-a", uid="uid-1")
+
+
 class TestConcurrentDestroys:
     def test_second_destroy_sees_terminating_and_does_not_claim(self):
         """S-P4: the second destroy arrives while the first one's delete drains."""
@@ -185,7 +199,7 @@ class TestConcurrentDestroys:
 
 
 class TestDestroyAllWiring:
-    def _run_destroy(self, cluster, timeout=600, uids=None):
+    def _run_destroy(self, cluster, timeout=600, uids=None, uid_fn=None):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
         engine = MagicMock()
@@ -199,7 +213,10 @@ class TestDestroyAllWiring:
             cluster.get_namespace_termination_status
         )
         engine.k8s.delete_namespace.side_effect = cluster.delete_namespace
-        engine.k8s.get_namespace_uid.side_effect = uids or ["uid-1"] * 3
+        uid_seq = iter(uids or [])
+        engine.k8s.get_namespace_uid.side_effect = uid_fn or (
+            lambda _ns: next(uid_seq, uids[-1] if uids else "uid-1")
+        )
         calls: list[str] = []
         manager = MagicMock()
         manager.remove_namespace_from_watch.side_effect = lambda ns, **_kw: calls.append(
@@ -232,7 +249,7 @@ class TestDestroyAllWiring:
         cluster = FakeCluster(drain_polls=None)
         results, reports, calls, engine = self._run_destroy(cluster, timeout=120)
         assert calls == ["unwatch:ns-a"]
-        engine.k8s.delete_namespace.assert_called_once_with("ns-a")
+        engine.k8s.delete_namespace.assert_called_once_with("ns-a", uid="uid-1")
         ns = [r for r in results if r.component == "namespace"]
         assert ns[-1].status is DeploymentStatus.SKIPPED
         assert "still terminating" in ns[-1].message
@@ -244,9 +261,7 @@ class TestDestroyAllWiring:
         """A concurrent destroy finished and a redeploy re-created the name
         (or, S-P3, a deploy created it after this destroy found it absent)."""
         cluster = FakeCluster(drain_polls=1)
-        results, _, calls, engine = self._run_destroy(
-            cluster, uids=[uid_at_start, "uid-2", "uid-2"]
-        )
+        results, _, calls, engine = self._run_destroy(cluster, uids=[uid_at_start, "uid-2"])
         assert calls == [], "the new deployment's namespace must stay watched"
         engine.k8s.delete_namespace.assert_not_called()
         apps = self.apps.return_value
@@ -261,6 +276,50 @@ class TestDestroyAllWiring:
         results, _, calls, engine = self._run_destroy(cluster, uids=["uid-1", "uid-1", "uid-2"])
         assert calls == []
         engine.k8s.delete_namespace.assert_not_called()
+
+    def test_redeploy_during_unwatch_blocks_delete_and_points_at_repair(self):
+        """The lease + helm window: R re-created the name while we un-watched."""
+        cluster = FakeCluster(drain_polls=1)
+        results, _, calls, engine = self._run_destroy(
+            cluster, uids=["uid-1", "uid-1", "uid-1", "uid-2"]
+        )
+        assert calls == ["unwatch:ns-a"]
+        engine.k8s.delete_namespace.assert_not_called()
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.FAILED
+        assert "repair-operator" in ns.message
+
+    def test_delete_carries_the_start_uid_as_precondition(self):
+        cluster = FakeCluster(drain_polls=1)
+        _, _, _, engine = self._run_destroy(cluster)
+        engine.k8s.delete_namespace.assert_called_once_with("ns-a", uid="uid-1")
+
+    def test_unreadable_uid_at_start_refuses_before_touching_anything(self):
+        cluster = FakeCluster(drain_polls=1)
+
+        def boom(_ns):
+            raise K8sResourceError("apiserver 503")
+
+        results, _, calls, engine = self._run_destroy(cluster, uids=None, uid_fn=boom)
+        assert results[-1].component == "ownership-check"
+        assert results[-1].status is DeploymentStatus.FAILED
+        assert calls == []
+        engine.k8s.delete_namespace.assert_not_called()
+
+    def test_unreadable_uid_at_namespace_step_keeps_namespace(self):
+        cluster = FakeCluster(drain_polls=1)
+        n = {"i": 0}
+
+        def flaky(_ns):
+            n["i"] += 1
+            if n["i"] == 3:
+                raise K8sResourceError("apiserver 503")
+            return "uid-1"
+
+        results, _, calls, engine = self._run_destroy(cluster, uid_fn=flaky)
+        assert calls == []
+        engine.k8s.delete_namespace.assert_not_called()
+        assert results[-1].status is DeploymentStatus.FAILED
 
     def test_gone_reports_success(self):
         cluster = FakeCluster(drain_polls=1)
@@ -281,6 +340,20 @@ class TestClient:
         core.delete_namespace.side_effect = ApiException(status=409, reason="Conflict")
         with pytest.raises(NamespaceTerminatingError):
             self._client(core).delete_namespace("ns-a")
+
+    def test_uid_precondition_is_sent_and_mismatch_raises_replaced(self):
+        from lakebench.k8s.client import NamespaceReplacedError
+
+        core = MagicMock()
+        core.delete_namespace.side_effect = ApiException(status=409, reason="Conflict")
+        core.delete_namespace.side_effect.body = (
+            '{"message":"Precondition failed: UID in precondition: uid-1, '
+            'UID in object meta: uid-2"}'
+        )
+        with pytest.raises(NamespaceReplacedError):
+            self._client(core).delete_namespace("ns-a", uid="uid-1")
+        body = core.delete_namespace.call_args.kwargs["body"]
+        assert body.preconditions.uid == "uid-1"
 
     def test_delete_404_race_is_not_a_delete(self):
         core = MagicMock()
@@ -341,3 +414,46 @@ class TestDeployIntoTerminatingNamespace:
         assert "still terminating from an earlier destroy" in result.message
         assert "pvc-protection" in result.message
         eng.k8s.apply_manifest.assert_not_called()
+
+
+class TestCliExitCode:
+    """A namespace still Terminating at the deadline is not "Destroy Complete"."""
+
+    def _invoke(self, results, monkeypatch, tmp_path):
+        from pathlib import Path
+
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        fixture = Path(__file__).parent / "fixtures" / "v14user.yaml"
+        engine = MagicMock()
+        engine.destroy_all.return_value = results
+        with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
+            return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
+
+    def test_still_terminating_exits_3(self, monkeypatch, tmp_path):
+        from lakebench.cli._destroy import EXIT_NAMESPACE_STILL_TERMINATING
+        from lakebench.deploy.engine import DeploymentResult
+
+        results = [
+            DeploymentResult("postgres", DeploymentStatus.SUCCESS, "removed"),
+            DeploymentResult(
+                "namespace",
+                DeploymentStatus.SKIPPED,
+                "Namespace x is still terminating after 600s",
+                details={"still_terminating": True},
+            ),
+        ]
+        out = self._invoke(results, monkeypatch, tmp_path)
+        assert EXIT_NAMESPACE_STILL_TERMINATING == 3
+        assert out.exit_code == 3, out.output
+        assert "Destroy Complete\n" not in out.output
+
+    def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):
+        from lakebench.deploy.engine import DeploymentResult
+
+        results = [DeploymentResult("namespace", DeploymentStatus.SUCCESS, "Namespace x deleted")]
+        out = self._invoke(results, monkeypatch, tmp_path)
+        assert out.exit_code == 0, out.output

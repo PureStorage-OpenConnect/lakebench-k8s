@@ -820,3 +820,41 @@ class TestDeploymentIdentity:
         d = DeploymentIdentity(name="x", api_server="y")
         with pytest.raises(FrozenInstanceError):
             d.name = "z"  # type: ignore[misc]
+
+
+class TestCreatedBucketsRecord:
+    def _ns(self, anns):
+        ns = mock.MagicMock()
+        ns.metadata.annotations = anns
+        return ns
+
+    def test_record_unions_with_existing(self):
+        from lakebench.deploy.ownership import (
+            ANNOTATION_CREATED_BUCKETS,
+            read_created_buckets,
+            record_created_buckets,
+        )
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = self._ns({ANNOTATION_CREATED_BUCKETS: "a-bronze"})
+        record_created_buckets(core, "a", ["a-gold"])
+        body = core.patch_namespace.call_args.args[1]
+        assert body["metadata"]["annotations"][ANNOTATION_CREATED_BUCKETS] == "a-bronze,a-gold"
+        core.read_namespace.return_value = self._ns(
+            {ANNOTATION_CREATED_BUCKETS: " a-bronze, a-gold ,"}
+        )
+        assert read_created_buckets(core, "a") == {"a-bronze", "a-gold"}
+
+    def test_created_tag_written_only_when_asked(self):
+        from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH
+
+        s3 = mock.MagicMock()
+        s3.get_bucket_tagging.return_value = {
+            "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "my-config"}]
+        }
+        write_bucket_ownership_tag(s3, "b1", "my-config", created=True)
+        keys = [t["Key"] for t in s3.put_bucket_tagging.call_args.kwargs["Tagging"]["TagSet"]]
+        assert TAG_CREATED_BY_LAKEBENCH in keys
+        write_bucket_ownership_tag(s3, "b1", "my-config")
+        keys = [t["Key"] for t in s3.put_bucket_tagging.call_args.kwargs["Tagging"]["TagSet"]]
+        assert TAG_CREATED_BY_LAKEBENCH not in keys

@@ -69,7 +69,7 @@ class TestOrdering:
         manager_cls = MagicMock(return_value=manager)
 
         engine = _engine()
-        engine.k8s.delete_namespace.side_effect = lambda ns: calls.append(f"delete:{ns}")
+        engine.k8s.delete_namespace.side_effect = lambda ns, **_kw: calls.append(f"delete:{ns}")
 
         _run_destroy(engine, manager_cls)
 
