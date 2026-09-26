@@ -1553,8 +1553,18 @@ def destroy_all(
                         logger.warning("could not read created-buckets record: %s", e)
                         record_unreadable.append(f"namespace annotation: {e}")
                 recorded_only = sorted(created_record - set(buckets))
+                recorded_only_set = set(recorded_only)
                 buckets = buckets + recorded_only
                 refused_names: list[str] = []
+                # Recorded-only buckets are not named by the current config.
+                # Review of LB-177: on backends without tagging the only
+                # ownership proof is the name, and another deployment may be
+                # using such a bucket now (S-P6 style shared bronze), so a
+                # non-empty one is left in place, never emptied.
+                held_recorded: list[str] = []
+                # A recorded bucket another deployment's tag now claims is
+                # provably not ours any more; it comes off the record.
+                disowned_recorded: list[str] = []
                 mismatched: list[str] = []
                 legacy_refused: list[str] = []
                 legacy_forced: list[str] = []
@@ -1572,8 +1582,12 @@ def destroy_all(
                     if v.verdict is IdentityVerdict.MISMATCH:
                         mismatched.append(f"{bucket} ({v.hint})")
                         refused_names.append(bucket)
+                        if bucket in created_record:
+                            disowned_recorded.append(bucket)
                     elif v.verdict is IdentityVerdict.ABSENT:
-                        if not force_legacy:
+                        # --force-legacy vouches for the config's buckets the
+                        # operator can see, never for a name in the record.
+                        if not force_legacy or bucket in recorded_only_set:
                             legacy_refused.append(bucket)
                             refused_names.append(bucket)
                         else:
@@ -1605,7 +1619,18 @@ def destroy_all(
                                 bucket, identity_name, other_deployments
                             )
                         )
-                        if prefix_ok:
+                        if prefix_ok and bucket in recorded_only_set:
+                            try:
+                                resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+                                holds = int(resp.get("KeyCount", 0)) > 0
+                            except Exception:  # noqa: BLE001
+                                holds = True
+                        else:
+                            holds = False
+                        if prefix_ok and holds:
+                            held_recorded.append(bucket)
+                            refused_names.append(bucket)
+                        elif prefix_ok:
                             unsupported_by_prefix.append(bucket)
                             logger.warning(
                                 "destroy: bucket %s on a backend without "
@@ -1619,7 +1644,7 @@ def destroy_all(
                                 DeploymentStatus.IN_PROGRESS,
                                 f"name-prefix ownership: {bucket}",
                             )
-                        elif force_legacy:
+                        elif force_legacy and bucket not in recorded_only_set:
                             unsupported_forced.append(bucket)
                             logger.warning(
                                 "destroy --force-legacy: emptying bucket "
@@ -1647,8 +1672,16 @@ def destroy_all(
                     # or RBAC problem, not proof the buckets are someone
                     # else's. Keep the namespace so a re-run can finish.
                     bucket_transient_failure = True
-                if mismatched or legacy_refused or unsupported_refused:
+                if mismatched or legacy_refused or unsupported_refused or held_recorded:
                     parts = []
+                    if held_recorded:
+                        parts.append(
+                            "recorded as created by this deployment under an earlier config "
+                            "but not named by this one, and not empty (another deployment "
+                            "may be using it; the bucket name is the only ownership proof "
+                            "here): " + ", ".join(held_recorded) + " (left in place; if it "
+                            "is unused, re-run destroy with a config that names it)"
+                        )
                     if mismatched:
                         parts.append("owned by another deployment: " + "; ".join(mismatched))
                     if legacy_refused:
@@ -1868,8 +1901,25 @@ def destroy_all(
                 if refusal_msg:
                     notes.append(refusal_msg)
                     delete_failed = True
-                    recorded_refused = sorted(refused_set & created_record)
-                    if recorded_refused and delete_buckets and s3_cfg.create_buckets:
+                    if disowned_recorded and namespace_present:
+                        try:
+                            guard()
+                            forget_created_buckets(
+                                k8s_client.CoreV1Api(), namespace, disowned_recorded
+                            )
+                            notes.append(
+                                "now owned by another deployment, dropped from this "
+                                "deployment's record: " + ", ".join(disowned_recorded)
+                            )
+                        except (_NamespaceReplaced, _NamespaceUnverifiable):
+                            raise
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("could not drop disowned buckets from the record: %s", e)
+                            disowned_recorded = []
+                    recorded_refused = sorted(
+                        (refused_set & created_record) - set(disowned_recorded)
+                    )
+                    if recorded_refused:
                         # Recorded as created by this deployment but not
                         # deletable now: keep the namespace (the record).
                         notes.append(
