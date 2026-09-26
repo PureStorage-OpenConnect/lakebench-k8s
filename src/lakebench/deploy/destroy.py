@@ -1786,6 +1786,23 @@ def destroy_all(
         )
         from lakebench.spark import SparkOperatorManager
 
+        def _same_incarnation_in_lease() -> None:
+            # Runs while the cluster lease is held, right before the helm
+            # upgrade. A redeploy's watch-list add takes the same lease, so a
+            # namespace re-created before this point is caught here and one
+            # re-created after it re-adds its entry once we release: the
+            # redeploy's entry is never the one removed. Gone ("") is fine.
+            try:
+                uid_in_lease = engine.k8s.get_namespace_uid(namespace)
+            except Exception as e:  # noqa: BLE001
+                raise _NamespaceUnverifiable(
+                    f"could not read namespace {namespace} UID: {e}"
+                ) from e
+            if uid_in_lease and uid_in_lease != namespace_uid_at_start:
+                raise _NamespaceReplaced(
+                    f"namespace {namespace} is now a newer deployment with the same name"
+                )
+
         spark_op_cfg = engine.config.platform.compute.spark.operator
         watch_list_ok = True
         try:
@@ -1794,7 +1811,9 @@ def destroy_all(
                 version=spark_op_cfg.version,
                 job_namespace=namespace,
                 kube_context=engine.config.platform.kubernetes.context,
-            ).remove_namespace_from_watch(namespace, strict=True)
+            ).remove_namespace_from_watch(
+                namespace, strict=True, precondition=_same_incarnation_in_lease
+            )
             report(
                 "spark-operator-watch",
                 DeploymentStatus.SUCCESS,
@@ -1832,6 +1851,30 @@ def destroy_all(
                 )
                 report("namespace", DeploymentStatus.FAILED, msg)
                 return results
+        except _NamespaceReplaced as e:
+            msg = (
+                f"Namespace {namespace} was already deleted by another run; {e}. "
+                "Its watch-list entry and the namespace were left alone"
+            )
+            logger.warning(msg)
+            results.append(
+                DeploymentResult(
+                    component="namespace", status=DeploymentStatus.SUCCESS, message=msg
+                )
+            )
+            report("namespace", DeploymentStatus.SUCCESS, msg)
+            return results
+        except _NamespaceUnverifiable as e:
+            msg = (
+                f"Namespace {namespace!r} NOT deleted and its watch-list entry NOT "
+                f"changed: {e}. Re-run destroy when the API server is reachable."
+            )
+            logger.error(msg)
+            results.append(
+                DeploymentResult(component="namespace", status=DeploymentStatus.FAILED, message=msg)
+            )
+            report("namespace", DeploymentStatus.FAILED, msg)
+            return results
         except WatchListMutationError as e:
             # ADR-F1: watch-list drop failed. Do NOT delete the namespace
             # after this: the operator would crash-loop on a watched

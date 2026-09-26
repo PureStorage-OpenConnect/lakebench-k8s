@@ -9,6 +9,7 @@ import logging
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -589,7 +590,13 @@ class SparkOperatorManager:
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
         return self._add_namespace_to_watch(namespace)
 
-    def remove_namespace_from_watch(self, namespace: str, *, strict: bool = False) -> bool:
+    def remove_namespace_from_watch(
+        self,
+        namespace: str,
+        *,
+        strict: bool = False,
+        precondition: Callable[[], None] | None = None,
+    ) -> bool:
         """Drop a namespace from the operator's watch list before deleting it.
 
         A watched namespace that does not exist is not a harmless leftover:
@@ -611,12 +618,21 @@ class SparkOperatorManager:
                 any failure raises ``WatchListMutationError`` instead of
                 returning False. Destroy paths use strict=True; older
                 internal callers keep the historical bool contract.
+            precondition: Called right before the watch list is read and
+                changed; with ``strict`` it runs while the cluster lease is
+                held. Raising aborts the call with the watch list untouched
+                and the exception propagates unchanged. Destroy uses it to
+                re-check the namespace UID inside the lease, so a same-named
+                redeploy (whose watch-list add takes the same lease) can never
+                have its entry removed by a slow destroy of the old one.
 
         Returns:
             True if the watch list no longer contains the namespace.
         """
         if strict:
-            return self._remove_namespace_from_watch_locked(namespace)
+            return self._remove_namespace_from_watch_locked(namespace, precondition)
+        if precondition is not None:
+            precondition()
         for attempt in range(self._HELM_CONFLICT_RETRIES):
             try:
                 watched = self._get_watched_namespaces()
@@ -693,7 +709,9 @@ class SparkOperatorManager:
 
         return False
 
-    def _remove_namespace_from_watch_locked(self, namespace: str) -> bool:
+    def _remove_namespace_from_watch_locked(
+        self, namespace: str, precondition: Callable[[], None] | None = None
+    ) -> bool:
         """Strict variant of ``remove_namespace_from_watch``.
 
         Acquires the cluster-wide lease so parallel destroys cannot race
@@ -722,6 +740,8 @@ class SparkOperatorManager:
 
         try:
             with cluster_lock(core_v1, timeout=_WATCH_LIST_LOCK_TIMEOUT_S):
+                if precondition is not None:
+                    precondition()
                 ok = self._remove_namespace_from_watch_impl(namespace)
         except ClusterLockHeld as e:
             raise WatchListMutationError(
