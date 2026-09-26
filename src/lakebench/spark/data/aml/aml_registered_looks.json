@@ -1,0 +1,4 @@
+{
+  "_doc": "AML-GOALS R3: the record of registered evaluation and robustness looks (pre-registration 3.6.0). A registered look appends its seed here when it starts (state started: the seed is spent from then on, whatever happens next) and its report sha256 before any verdict is printed (state complete): scripts/aml_gate.py --registered does both, scripts/aml_record_look.py completes a cluster look. config/datagen_seed.py treats every seed here as spent. Commit this file after a look; never edit or remove an entry.",
+  "looks": []
+}

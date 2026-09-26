@@ -492,6 +492,21 @@ def _evaluate_typology(
     return out
 
 
+def _l2_sensitivity(X, y, w, groups, prereg: dict, values) -> dict[str, float | None]:
+    """{str(l2): out-of-fold AP} with the reference model refitted at each
+    l2_regularization on the registered folds (ungated D8 secondary)."""
+    import copy
+
+    folds = _folds(y, groups, prereg)
+    out: dict[str, float | None] = {}
+    for v in values:
+        p = copy.deepcopy(prereg)
+        p["reference_model"]["l2_regularization"] = float(v)
+        oof = _oof_scores(lambda p=p: _reference_model(p), X, y, w, folds)
+        out[str(float(v))] = _ap(y, oof, w)
+    return out
+
+
 def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
     l2 = prereg["level2"]
     beh = list(prereg["behavioural_subset"])
@@ -505,7 +520,7 @@ def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
     k = sum(c["counts_in_band"] for c in counted)
     all_ap = all(per[t].get("status") == "ok" for t in beh)
     all_leak = all(per[t].get("leakage_pass") for t in beh)
-    return {
+    out = {
         "k_in_band": k,
         "k_required": l2["k_in_band"],
         "n": l2["n"],
@@ -516,6 +531,28 @@ def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
         "note": "Level 2 also requires the evaluation and robustness corpora "
         f"({', '.join(l2['require_on_corpora'])}); this is one corpus.",
     }
+    of = l2.get("original_four")
+    if of:
+        four = list(of["typologies"])
+        if all(t in beh for t in four):
+            k4 = sum(c["counts_in_band"] for c in counted if c["typology"] in four)
+            ok4 = all(per[t].get("status") == "ok" and per[t].get("leakage_pass") for t in four)
+            out["original_four"] = {
+                "gated": False,
+                "typologies": four,
+                "k_in_band": k4,
+                "k_required": of["k_in_band"],
+                "n": len(four),
+                "holds_on_this_corpus": bool(k4 >= of["k_in_band"] and ok4),
+                "source": of.get("source"),
+            }
+        else:
+            out["original_four"] = {
+                "gated": False,
+                "available": False,
+                "reason": "level2.original_four names typologies outside behavioural_subset",
+            }
+    return out
 
 
 def _timing_mixture(counts: dict | None, prereg: dict) -> dict | None:
@@ -564,6 +601,10 @@ def corpus_role(seed, prereg: dict) -> str:
     for role in ("calibration", "evaluation", "robustness"):
         if str(prereg["corpora"].get(f"{role}_seed")) == str(seed):
             return role
+    # D8's scale-2 replicates of the calibration corpus (v3.6.0) are
+    # calibration corpora: tuning may look at them.
+    if str(seed) in {str(s) for s in prereg["corpora"].get("calibration_replicate_seeds") or []}:
+        return "calibration"
     return "other"
 
 
@@ -610,8 +651,14 @@ def evaluate_gate(
     provenance: dict | None = None,
     score: bool = True,
     collect_outputs: bool = False,
+    l2_values: list | None = None,
 ) -> dict[str, Any]:
     """Run every gate on ``frame`` and return one JSON-serialisable report.
+
+    ``l2_values`` (scale_invariance.l2_sensitivity.values) also refits the
+    reference model per typology at each l2_regularization and records the
+    out-of-fold AP under report["l2_sensitivity"]: an ungated secondary that
+    never enters passes.
 
     ``score=False`` stops before any model: per typology only n_scored,
     n_positives, prevalence and n_excluded (a smoke test that must not look at
@@ -690,6 +737,7 @@ def evaluate_gate(
     report["n_groups"] = int(len(np.unique(groups)))
     per = {}
     sinks: dict[str, dict] = {}
+    sens: dict[str, dict] = {}
     for t in typologies:
         y = frame[LABEL_PREFIX + t].to_numpy(dtype=int)
         keep = np.ones(len(y), dtype=bool)
@@ -712,7 +760,15 @@ def evaluate_gate(
         if sink is not None and "scores" in sink:
             sinks[t] = sink
         per[t]["n_excluded"] = int((~keep).sum())
+        if l2_values and score and per[t].get("status") == "ok":
+            sens[t] = _l2_sensitivity(X[keep], y[keep], w[keep], groups[keep], prereg, l2_values)
     report["typologies"] = per
+    if l2_values and score:
+        report["l2_sensitivity"] = {
+            "gated": False,
+            "values": [float(v) for v in l2_values],
+            "typologies": sens,
+        }
     if not score:
         report.update(verdict="counts_only", level2=None)
         return report
@@ -896,6 +952,20 @@ def summary_lines(report: dict) -> list[str]:
             f"(need {l2['k_required']}), leakage all pass={l2['all_pass_leakage']}, "
             f"holds={l2['holds_on_this_corpus']}"
         )
+        of = l2.get("original_four") or {}
+        if "k_in_band" in of:
+            lines.append(
+                f"  Original four behavioural (ungated, {of.get('source')}): "
+                f"{of['k_in_band']}/{of['n']} in band (need {of['k_required']}), "
+                f"holds={of['holds_on_this_corpus']}"
+            )
+    rep_ = report.get("level2_replication")
+    if rep_:
+        for t, r in (rep_.get("typologies") or {}).items():
+            lines.append(
+                f"  replication {t}: predicted {r.get('predicted_ap')} PI {r.get('pi')} "
+                f"observed {r.get('observed_ap')} inside={r.get('inside_pi')}"
+            )
     tm = report.get("timing_mixture")
     if tm:
         lines.append(

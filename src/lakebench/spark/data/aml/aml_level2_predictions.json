@@ -1,0 +1,4 @@
+{
+  "_doc": "AML-GOALS section 9 #46 (D-8): per-typology predicted evaluation AP with a prediction interval, derived from the scale-2 calibration runs (calibration seed plus corpora.calibration_replicate_seeds, pinned datagen image) by scripts/aml_level2_predict.py with the method in level2.predictions of the pre-registration. Committed before any registered look; a registered evaluation or robustness look refuses to start while predictions is null, hashes this file into its report and look record, and withholds its verdict if the file changes during the look. Never edit after a look.",
+  "predictions": null
+}
