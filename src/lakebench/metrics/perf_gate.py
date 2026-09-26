@@ -520,6 +520,19 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     for name, times in per_query.items():
         numbers[f"{QUERY_QPH_PREFIX}{name}"] = 3600.0 / statistics.median(times)
 
+    if scores.get("maintenance_stopped") is True:
+        # Pre-benchmark maintenance stopped early (a statement timed out or
+        # the cap hit); a rewrite may still have been running during the
+        # benchmark, so post-maintenance QpH is not a measurement. Pre-
+        # maintenance QpH was taken before and stays gated.
+        why = "pre-benchmark maintenance stopped before completion"
+        reason = scores.get("maintenance_stop_reason")
+        if reason:
+            why += f" ({reason})"
+        for key in [k for k in numbers if k == "composite_qph" or k.startswith(QUERY_QPH_PREFIX)]:
+            del numbers[key]
+            excluded[key] = why
+
     fleet = run.raw.get("datagen_fleet") or {}
     pod_mbps = [
         float(p["throughput_mbps"])
@@ -1070,6 +1083,12 @@ def record_baseline(
     numbers, excluded = extract_metrics(run)
     if not numbers:
         raise PerfGateError(f"run {run.run_id} has no performance numbers")
+    if run.scores.get("maintenance_stopped") is True:
+        raise PerfGateError(
+            f"run {run.run_id} cannot be a baseline for {name}: pre-benchmark maintenance "
+            f"stopped before completion ({run.scores.get('maintenance_stop_reason') or 'unknown'}), "
+            "so its post-maintenance QpH is not a measurement"
+        )
     # A batch baseline without datagen numbers turns datagen gating off for
     # every later run (they are excluded as "present on one side only"), so
     # it has to come from a run with a fresh generate.
