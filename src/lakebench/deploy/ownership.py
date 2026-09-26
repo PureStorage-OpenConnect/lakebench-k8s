@@ -70,6 +70,10 @@ TAG_WORKLOAD_SCHEMA = "lakebench.workload"
 # below); buckets deploy adopted are emptied but kept.
 TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
 ANNOTATION_CREATED_BUCKETS = "lakebench.deployment/created-buckets"
+# A fresh random value written by every deploy. Destroy records it at start
+# and stops if it changes: that is a redeploy into the same namespace, which
+# the UID cannot show (same incarnation, or create_namespace=false).
+ANNOTATION_DEPLOY_NONCE = "lakebench.deployment/deploy-nonce"
 
 # Namespace name max length (matches K8s + doubles as the bucket-tag length
 # guard: AWS caps tag values at 256, so 63 chars is well within bounds).
@@ -711,6 +715,17 @@ def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
     merged = read_created_buckets(core_v1, namespace) | set(buckets)
     body = {"metadata": {"annotations": {ANNOTATION_CREATED_BUCKETS: ",".join(sorted(merged))}}}
     core_v1.patch_namespace(namespace, body)
+
+
+def write_deploy_nonce(core_v1: Any, namespace: str) -> str:
+    """Stamp a new deploy nonce on the namespace and return it."""
+    import uuid
+
+    nonce = uuid.uuid4().hex
+    core_v1.patch_namespace(
+        namespace, {"metadata": {"annotations": {ANNOTATION_DEPLOY_NONCE: nonce}}}
+    )
+    return nonce
 
 
 def forget_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:

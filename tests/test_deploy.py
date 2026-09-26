@@ -843,6 +843,44 @@ class TestOwnershipHooksFire:
         assert kwargs["deployment_name"] == "test-deploy"
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.write_deploy_nonce")
+    @patch("lakebench.deploy.ownership.stamp_namespace")
+    def test_every_deploy_stamps_a_fresh_nonce(self, mock_stamp, mock_nonce, _mock_ocp):
+        """A destroy already running on this namespace compares the nonce; a
+        redeploy into the same (still Active, or kept) namespace must change it."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        k8s.namespace_exists.return_value = True
+        engine = DeploymentEngine(config, k8s_client=k8s)
+        mock_stamp.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="test-deploy",
+            expected_deployment="test-deploy",
+        )
+        with patch("kubernetes.client.CoreV1Api"):
+            result = engine._deploy_namespace()
+        assert result.status != DeploymentStatus.FAILED
+        mock_nonce.assert_called_once()
+
+        mock_nonce.side_effect = RuntimeError("apiserver 503")
+        with patch("kubernetes.client.CoreV1Api"):
+            result = engine._deploy_namespace()
+        assert result.status == DeploymentStatus.FAILED
+        assert "nonce" in result.message
+
+    def test_write_deploy_nonce_is_fresh_each_time(self):
+        from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE, write_deploy_nonce
+
+        core = MagicMock()
+        a = write_deploy_nonce(core, "ns")
+        b = write_deploy_nonce(core, "ns")
+        assert a != b
+        body = core.patch_namespace.call_args.args[1]
+        assert body["metadata"]["annotations"][ANNOTATION_DEPLOY_NONCE] == b
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     @patch("lakebench.deploy.ownership.stamp_namespace")
     def test_deploy_namespace_refuses_on_mismatch(self, mock_stamp, _mock_ocp):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict

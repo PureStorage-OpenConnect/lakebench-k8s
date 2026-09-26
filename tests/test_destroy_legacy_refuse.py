@@ -157,7 +157,7 @@ class TestNamespaceAbsent:
         # delete -- the whole point of the escape hatch.
         # The delete carries the namespace UID read at destroy start (LB-157).
         engine.k8s.delete_namespace.assert_called_once_with(
-            "lb-test", uid=engine.k8s.get_namespace_uid.return_value
+            "lb-test", uid=str(engine.k8s.get_namespace_uid.return_value)
         )
 
     def test_mismatch_refuses_regardless_of_force_legacy(self):

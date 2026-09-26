@@ -496,26 +496,21 @@ class SparkOperatorManager:
             raise _WatchListReadError(f"error reading Helm values: {e}") from e
 
     def _namespace_is_terminating(self, namespace: str) -> bool:
-        """True if the namespace is being deleted or no longer exists.
+        """True unless the namespace provably exists and is not being deleted.
 
         Gone counts as terminating: a destroy can finish deleting the
         namespace while a deploy waits for the lease, and adding a namespace
-        that does not exist crash-loops the operator. Other read errors
-        (no cluster, transient) return False so the add proceeds as before.
+        that does not exist crash-loops the operator for every deployment.
+        Any read failure (429, 5xx, transport, no client) also refuses: under
+        API throttling a "probably fine" add is exactly the crash-loop route.
         """
         try:
             from kubernetes import client as k8s_client
-            from kubernetes.client.rest import ApiException
 
             ns = k8s_client.CoreV1Api().read_namespace(namespace)
-        except ApiException as e:
-            if e.status == 404:
-                return True
-            logger.warning("Could not read namespace %s before adding it: %s", namespace, e)
-            return False
         except Exception as e:  # noqa: BLE001
-            logger.debug("Could not read namespace %s: %s", namespace, e)
-            return False
+            logger.warning("Could not read namespace %s before adding it: %s", namespace, e)
+            return True
         meta = getattr(ns, "metadata", None)
         ts = getattr(meta, "deletion_timestamp", None)
         # The client deserialises it as a datetime; anything else (absent,
@@ -1009,7 +1004,8 @@ class SparkOperatorManager:
                 # watching a namespace about to vanish, which crash-loops it
                 # for every deployment on the cluster.
                 logger.error(
-                    "Refusing to add %s to the watch list: the namespace is being deleted or gone",
+                    "Refusing to add %s to the watch list: the namespace is being deleted, "
+                    "gone, or could not be read",
                     namespace,
                 )
                 return False
