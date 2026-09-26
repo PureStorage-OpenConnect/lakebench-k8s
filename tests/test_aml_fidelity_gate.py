@@ -26,6 +26,8 @@ from lakebench.aml import fidelity_gate as fg  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 GATE_SRC = ROOT / "src/lakebench/aml/fidelity_gate.py"
 RUNNER_SRC = ROOT / "scripts/aml_gate.py"
+D8_SRC = ROOT / "src/lakebench/aml/scale_invariance.py"
+D8_RUNNER_SRC = ROOT / "scripts/aml_d8.py"
 FEATURES_SRC = ROOT / "src/lakebench/spark/scripts/aml_features.py"
 PREREG = ROOT / "src/lakebench/spark/data/aml/aml_preregistration.json"
 TYPOLOGY_RS = ROOT / "datagen_rs/src/typology.rs"
@@ -253,7 +255,9 @@ def _numeric_literals(path: Path) -> set:
     return out
 
 
-@pytest.mark.parametrize("path", [GATE_SRC, RUNNER_SRC], ids=lambda p: p.name)
+@pytest.mark.parametrize(
+    "path", [GATE_SRC, RUNNER_SRC, D8_SRC, D8_RUNNER_SRC], ids=lambda p: p.name
+)
 def test_gate_has_no_numeric_threshold_literals(path):
     """R7: every threshold comes from the JSON. 0, 1 and 2 are structural
     (indexing, halves of a two-sided interval); anything else is suspect."""
@@ -538,7 +542,11 @@ def test_model_outputs_scores_importance_and_card(tmp_path):
     rep = fg.evaluate_gate(df, _prereg(), collect_outputs=True)
     out = rep.pop("_model_outputs")
     sc = out["scores"]
-    assert list(sc.columns) == ["group", "month", "typology", "label", "score", "fold"]
+    assert list(sc.columns) == ["group", "month", "typology", "label", "score", "fold", "weight"]
+    assert (sc["weight"] == 1).all()
+    units = out["unit_features"]
+    assert list(units.columns) == ["group", "month", *_prereg()["features"], "weight"]
+    assert len(units) == len(df)
     assert (sc["typology"] == "beh").sum() == 1200 and (sc["typology"] == "defn").sum() == 1190
     beh = sc[sc["typology"] == "beh"].set_index("group")
     assert (beh["label"].to_numpy() == df["label:beh"].to_numpy()).all()
@@ -557,6 +565,7 @@ def test_model_outputs_scores_importance_and_card(tmp_path):
     paths = fg.write_model_outputs(out, str(tmp_path / "gate"))
     back = pd.read_parquet(paths["oof_scores"])
     assert len(back) == len(sc)
+    assert len(pd.read_parquet(paths["unit_features"])) == len(df)
     assert json.loads(Path(paths["model_card"]).read_text())["unit_key_columns"] == [
         "group",
         "month",

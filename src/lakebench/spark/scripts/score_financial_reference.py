@@ -208,33 +208,47 @@ def _write_text(spark, uri: str, text: str) -> None:
         out.close()
 
 
+def _write_pandas_parquet(spark, pdf, path: str, types: dict, default: str) -> None:
+    """Write a pandas frame to ``path`` as snappy parquet through Spark. The
+    driver has pandas but no pyarrow, so rows go to Spark in chunks."""
+    cols = list(pdf.columns)
+    schema = ", ".join(f"`{c}` {types.get(c, default)}" for c in cols)
+    chunk = 200_000
+    df = None
+    for lo in range(0, len(pdf), chunk):
+        part = pdf.iloc[lo : lo + chunk]
+        rows = [
+            tuple(v.item() if hasattr(v, "item") else v for v in r)
+            for r in part.itertuples(index=False, name=None)
+        ]
+        piece = spark.createDataFrame(rows, schema)
+        df = piece if df is None else df.unionByName(piece)
+    df.write.mode("overwrite").option("compression", "snappy").parquet(path)
+
+
 def _write_model_outputs(spark, prefix: str, outputs: dict) -> dict:
-    """oof_scores.parquet, feature_importance.parquet and model_card.json
-    under ``prefix``. The driver has pandas but no pyarrow, so the scores go
-    to Spark as row chunks; the pull is already capped at --driver-sample-cap
-    units, which bounds the table at that many units per typology."""
+    """oof_scores.parquet, unit_features.parquet, feature_importance.parquet
+    and model_card.json under ``prefix``. The pull is already capped at
+    --driver-sample-cap units, which bounds the scores table at that many
+    units per typology and the unit table at that many units."""
     import json as _json
 
     out = {}
+    keys = {"group": "long", "month": "int"}
     scores = outputs["scores"]
     if len(scores):
-        cols = list(scores.columns)
-        types = {"group": "long", "month": "int", "typology": "string"}
-        types |= {"label": "tinyint", "score": "float", "fold": "tinyint"}
-        schema = ", ".join(f"`{c}` {types.get(c, 'string')}" for c in cols)
-        chunk = 200_000
-        df = None
-        for lo in range(0, len(scores), chunk):
-            part = scores.iloc[lo : lo + chunk]
-            rows = [
-                tuple(v.item() if hasattr(v, "item") else v for v in r)
-                for r in part.astype({"typology": str}).itertuples(index=False, name=None)
-            ]
-            piece = spark.createDataFrame(rows, schema)
-            df = piece if df is None else df.unionByName(piece)
+        types = keys | {"typology": "string", "label": "tinyint", "score": "float"}
+        types |= {"fold": "tinyint", "weight": "double"}
         path = f"{prefix}/oof_scores.parquet"
-        df.write.mode("overwrite").option("compression", "snappy").parquet(path)
+        _write_pandas_parquet(spark, scores.astype({"typology": str}), path, types, "string")
         out["oof_scores"] = {"path": path, "rows": int(len(scores))}
+    units = outputs.get("unit_features")
+    if units is not None and len(units):
+        # Features and weight are doubles (the gate casts every feature to
+        # float); D8 compares their distributions across scales.
+        path = f"{prefix}/unit_features.parquet"
+        _write_pandas_parquet(spark, units, path, keys, "double")
+        out["unit_features"] = {"path": path, "rows": int(len(units))}
     imp = outputs["importance"]
     if len(imp):
         path = f"{prefix}/feature_importance.parquet"

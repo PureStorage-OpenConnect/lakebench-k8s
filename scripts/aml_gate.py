@@ -278,7 +278,9 @@ def main(argv=None) -> int:
     )
     outputs = report.pop("_model_outputs", None)
     if outputs is not None:
-        base = str(args.out.with_suffix(""))
+        # Absolute, so the paths recorded in the report resolve from anywhere
+        # (scale_invariance.py reads them back).
+        base = str(args.out.resolve().with_suffix(""))
         # Written before the report, so a failure here (a full disk) must be
         # recorded rather than lose the gate numbers.
         try:

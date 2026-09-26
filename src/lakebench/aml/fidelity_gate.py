@@ -737,6 +737,11 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
 
     parts, imp = [], []
     keys = [c for c in UNIT_KEY_COLUMNS if c in frame.columns]
+    weight = (
+        frame["weight"].to_numpy(dtype=float)
+        if "weight" in frame.columns
+        else np.ones(len(frame), dtype=float)
+    )
     for t, sink in sinks.items():
         rows = sink["rows"]
         df = frame.iloc[rows][keys].reset_index(drop=True)
@@ -744,11 +749,20 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
         df["label"] = sink["scores"]["label"]
         df["score"] = sink["scores"]["score"].astype(np.float32)
         df["fold"] = sink["scores"]["fold"]
+        # The unit's weight in fitting and AP (1 unless the cluster sampled
+        # negatives), so AP can be recomputed from this table alone (D8).
+        df["weight"] = weight[rows]
         parts.append(df)
         imp += [{"typology": t, **r} for r in sink["importance"]]
     scores = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if len(scores):
         scores["typology"] = scores["typology"].astype("category")
+    # Every scored unit's features and weight: the D8 per-feature
+    # distribution comparison reads this (scale_invariance.py).
+    unit_features = frame[keys].reset_index(drop=True)
+    for f in features:
+        unit_features[f] = frame[f].to_numpy(dtype=float)
+    unit_features["weight"] = weight
     card = {
         "prereg_version": report.get("prereg_version"),
         "prereg_sha256": report.get("prereg_sha256"),
@@ -768,18 +782,28 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
         "score_note": "out-of-fold probability from the fold model that did not train on the "
         "unit; excluded units are not scored",
     }
-    return {"scores": scores, "importance": pd.DataFrame(imp), "card": card}
+    return {
+        "scores": scores,
+        "importance": pd.DataFrame(imp),
+        "card": card,
+        "unit_features": unit_features,
+    }
 
 
 def write_model_outputs(outputs: dict, base: str) -> dict:
-    """Write ``base``_oof_scores.parquet, ``base``_feature_importance.parquet
-    and ``base``_model_card.json locally (snappy parquet). Returns
-    {name: path}."""
+    """Write ``base``_oof_scores.parquet, ``base``_feature_importance.parquet,
+    ``base``_model_card.json and (when present) ``base``_unit_features.parquet
+    locally (snappy parquet). Returns {name: path}."""
     paths = {
         "oof_scores": f"{base}_oof_scores.parquet",
         "feature_importance": f"{base}_feature_importance.parquet",
         "model_card": f"{base}_model_card.json",
     }
+    if outputs.get("unit_features") is not None:
+        paths["unit_features"] = f"{base}_unit_features.parquet"
+        outputs["unit_features"].to_parquet(
+            paths["unit_features"], compression="snappy", index=False
+        )
     outputs["scores"].to_parquet(paths["oof_scores"], compression="snappy", index=False)
     outputs["importance"].to_parquet(paths["feature_importance"], compression="snappy", index=False)
     with open(paths["model_card"], "w") as fh:
