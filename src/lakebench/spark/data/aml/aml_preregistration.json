@@ -1,6 +1,6 @@
 {
   "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.5.0 (2026-09-25, AML-GOALS section 9 #37/#38) replaces the reference model's hyperparameters, the relative leakage cap and the calibration and evaluation seeds after D0 at v3.4.1 was voided as a harness failure; see changelog. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
-  "version": "3.5.2",
+  "version": "3.6.0",
   "registered": "2026-09-25",
   "metric": "average_precision",
   "unit_of_scoring": {
@@ -66,6 +66,8 @@
     "registered_looks_note": "The evaluation and robustness seeds may be generated and scored only as the registered run for their role (datagen.corpus_role, scripts/aml_gate.py --registered), and only while this is true. It is set true with the datagen freeze; after a registered look its seed is appended to spent_seeds, which refuses any second look.",
     "spent_seeds_note": "Seeds retired by seed_rule: 42 was looked at by the voided D0 at v3.4.1 (AML-GOALS section 9 #38), 50000042 was the evaluation seed before v3.5.0 moved it. The cluster datagen refuses a spent seed for the financial schema (lakebench/config/datagen_seed.py). Append a seed here when a look at it is voided or burned.",
     "calibration_seed": 43,
+    "calibration_replicate_seeds": [123456832, 246913621, 370370410, 493827199],
+    "calibration_replicate_seeds_note": "v3.6.0 (AML-GOALS section 9 #45): scale-2 replicates of the calibration corpus for D8 (scale_invariance.s2). Calibration role: tuning use is allowed, and the gate reports them as calibration. Chosen as 43 + k x 123456789 for k = 1..4, the first four of that progression that pass every check in tests/test_aml_d8_seeds.py against each other and against 42, 43, 50000042, 50000043 and 90000042: (1) seed_guard.rule, every pairwise gap more than max_n_inst_scale100 from a multiple of TID_SEED_STRIDE; (2) gaps above 4096, because datagen salts are seed + small offsets (world.rs, kyc.rs: up to 1616) and hash_normal reads salt and salt + 1, which is why 44 and 45 are refused (they reuse seed 43's persona draws); (3) (s1 + a) XOR (s2 + b) >= 2^24 for every offset a, b < 2048, so the realism.rs and world.rs id ^ (seed + offset) hashes cannot alias two corpora within a scale-100 population (11.1M entities); (4) hashed instance seeds (typology.rs, 2e5 instances per tid, tids 0-14) pairwise disjoint (D10); (5) not spent, not the evaluation or robustness seed, accepted by config/datagen_seed.py aml_seed_error. Four, not two: with two replicates (three s2 runs) the corrected rule's s2 SE has 2 degrees of freedom and an invariant generator passes 0.33 to 0.68 of the time (power_sim).",
     "evaluation_seed": 50000043,
     "robustness_seed": 90000042,
     "seed_rule": "v3.5.0: a voided or burned look increments the seed by one. D0 at v3.4.1 looked at calibration seed 42 (now 43); the evaluation seed moves with any change after a gate run (50000042 to 50000043). The robustness corpus was never generated and keeps 90000042. Pairwise gaps checked against seed_guard.",
@@ -95,7 +97,26 @@
       "evaluation",
       "robustness"
     ],
-    "if_robustness_fails": "publish as 'Level 2 on evaluation corpus, not robust'; do not claim Level 2"
+    "if_robustness_fails": "publish as 'Level 2 on evaluation corpus, not robust'; do not claim Level 2",
+    "original_four": {
+      "typologies": [
+        "gather_scatter",
+        "rapid_layering",
+        "stack",
+        "dormant_reactivation"
+      ],
+      "k_in_band": 3,
+      "source": "AML-GOALS section 9 #19 (K = 3 of 4), before #36 moved micro_structuring and corridor_high_risk into the behavioural subset",
+      "gated": false,
+      "note": "#46 D-8: reported beside the K = 4 of 6 result in every gate report (level2.original_four); never enters passes"
+    },
+    "predictions": {
+      "pi_level": 0.95,
+      "record": "src/lakebench/spark/data/aml/aml_level2_predictions.json",
+      "method": "per behavioural typology, from the scale-2 calibration runs (corpora.calibration_seed and corpora.calibration_replicate_seeds, pinned datagen image): logit(AP) and its customer-bootstrap sd per run, recomputed from oof_scores as in D8; s_run = max(between-run sd of logit AP, root-mean-square bootstrap sd); predicted AP = expit(mean logit); prediction interval = expit(mean +/- t(n - 1) x s_run x sqrt(1 + 1/n)) at (1 + pi_level) / 2 (src/lakebench/aml/predictions.py, scripts/aml_level2_predict.py)",
+      "framing": "#46 D-8: Level 2 is published as 'calibrated difficulty replicates out of sample'. A registered evaluation or robustness look refuses to start without committed predictions made under this pre-registration and generator image, records their sha256 in its report and look record, withholds its verdict if the file changes during the look, and reports observed AP against each interval (level2_replication, ungated). The robustness corpus is perturbed by design; its comparison is reported, not read as a replication failure.",
+      "if_d8_or_a6_fails": "#46 D-7: the evaluation and robustness looks still run; the result is published with 'scale invariance not shown' or 'A6 not confirmed' beside it; no re-freeze"
+    }
   },
   "band": {
     "ap_min": 0.3,
@@ -114,9 +135,95 @@
     "relative_cap_rationale": "v3.5.0 (#37/#38): the check asks whether one or two features carry a large share of the signal a typology must have to count. That reference is the band floor unless the model does better. Against the model's own AP alone the cap shrinks to the prevalence as a model weakens, so at prevalence 1e-4 a shortcut a few hundredths above it fails from noise. In band the rule equals lift_over_prevalence; below band the relative cap is at most prevalence + 0.5 x (0.30 - prevalence), about 0.15, under the absolute cap of 0.20, so it is never looser than the absolute cap."
   },
   "scale_invariance": {
-    "method": "equivalence: bootstrap CI of (scale10 AP - scale1 AP) lies entirely within [-ap_diff_abs_max, +ap_diff_abs_max]",
-    "ap_diff_abs_max": 0.05,
-    "ks_stat_max": 0.1
+    "rule": "Per behavioural typology, s2 = the scale-2 runs (corpora.calibration_seed and corpora.calibration_replicate_seeds, one gate run each at corpora.gate_scale) and s10 = the n_shards shards of one large_scale corpus on corpora.calibration_seed. Each scale's estimate is the mean of logit(AP) over its runs; its SE is max(sqrt(sum of the runs' customer-bootstrap variances of logit AP) / n, between-run sd / sqrt(n)); its CI is estimate +/- t(n - 1) x SE at (1 + power.ci_level) / 2, back-transformed. A typology is gated when either scale's CI touches [band.ap_min, band.ap_max]; it passes when |logit_s10 - logit_s2| <= logit_diff_abs_max, the difference CI (difference_ci) is no wider than logit_diff_ci_width_max, and there is no confident verdict flip. A typology whose CIs lie wholly outside the band at both scales passes when both are on the same side; its AP ratio and ratio CI are reported, not gated. Every run needs power.min_positives positives; fewer is a miss. D8 passes when every behavioural typology passes, every feature passes KS, and every provenance check holds.",
+    "not_an_equivalence_test": "D8 is a registered decision rule with simulated operating characteristics (power_sim), not an equivalence test. A pass means no logit shift above logit_diff_abs_max was seen with a difference CI no wider than logit_diff_ci_width_max; it does not bound the true shift, and shifts below smallest_detectable_shift are expected to pass. Reports quote the smallest detectable shift beside every verdict.",
+    "logit_diff_abs_max": 0.3,
+    "logit_diff_ci_width_max": 0.7,
+    "ci_width_note": "a wider difference CI is a miss (underpowered), never a pass",
+    "difference_ci": "Welch-Satterthwaite: (logit_s10 - logit_s2) +/- t(df) x sqrt(SE2^2 + SE10^2), df = (SE2^2 + SE10^2)^2 / (SE2^4 / (n2 - 1) + SE10^4 / (n10 - 1)), at (1 + power.ci_level) / 2",
+    "confident_flip": "the point AP is in the band at one scale and outside it at the other, and both scales' CIs are clear of every band edge (wholly inside or wholly outside the band): a miss",
+    "ks_stat_max": 0.1,
+    "ks_note": "unchanged: weighted two-sample KS statistic per registered feature, pooled s2 runs against pooled s10 shards (together the whole s10 corpus); NaN counts as a point mass below every finite value",
+    "large_scale": 10,
+    "n_shards": 5,
+    "shard_salt": "lakebench-d8-shard-v1",
+    "shard_balance_max_ratio": 1.05,
+    "largest_component_share_max": 0.001,
+    "shard_rule": "Customers are sharded by connected component of the planted-instance graph of the scored typologies (behavioural and definitional; the other planted typologies share parties so widely that their graph percolates, 68% of party keys in one component at scales 2 and 10, and they carry no scored label): every party of every such instance, from its participant list and from both parties of its planted payments, and two instances sharing any party (a crew member, a counterparty) are one component, so no instance, crew or counterparty-linked typology instance spans shards. Component to shard: pmod(xxhash64(shard_salt, component representative), n_shards), the representative being the smallest key; a customer in no instance is its own component. The runner and D8 refuse a plan in which any instance's customers span shards, the largest shard exceeds shard_balance_max_ratio x the mean, or the largest component exceeds largest_component_share_max of the customers. Features and labels are built on the full s10 corpus; each shard's units are scored alone with the s2 code path (scripts/aml_gate.py --d8-shard), uncapped: a report whose provenance.sampling shows negative_fraction < 1 (a driver sample cap that bound) is refused.",
+    "provenance": "every run: the packaged pre-registration (sha256), same unit, registered label role, feature list, aml_features and fidelity_gate code sha256, generator model versions, generator image (digest-pinned, equal), numerical libraries and adapter; verdict ok; not diagnostic; corpus_fully_keyed, corpus_seed_verified and registered_label_role true; persisted oof_scores and unit_features match the fingerprints the report recorded; all reports distinct. s2: at corpora.gate_scale, on exactly the registered seeds, each once. s10: one corpus at large_scale on corpora.calibration_seed, one shard plan (same fingerprint, salt and n_shards), every index 0..n_shards-1 once, disjoint customers.",
+    "generator": "Every corpus that feeds D8, A6 or the Level-2 claim (the scale-2 calibration seed and its replicates, the scale-10 shards, the evaluation and robustness looks) is generated by the pinned datagen image, never by a host-built binary: generator output is bit-reproducible only within one build environment (the world's f64 exp/ln come from the platform libm and differ in the last ulp between hosts, integrate 9ae4043). Each gate run records the image as a digest-pinned reference (scripts/aml_gate.py --generator-image repo@sha256:<64 hex>, required for a D8 shard and a registered look); D8 refuses a run without one and requires the same image, and the same manifest model_version, in every run. Corpora generated before this rule by a host build (for example rep-v6-43) are not D8 legs.",
+    "l2_sensitivity": {
+      "values": [1.0, 100.0],
+      "gated": false,
+      "note": "ungated secondary: every D8 run is also refitted with reference_model.l2_regularization at each value (scripts/aml_gate.py --l2-sensitivity); D8 reports the logit-mean difference per typology at each value beside the verdict. It never changes the verdict."
+    },
+    "power_sim": {
+      "script": "scripts/aml_d8_power_sim.py",
+      "stdout_sha256": "a2372a4b5dd22a6bbdfe752d5b8b39b9cf65f013f4b15e24afc748d69604880c",
+      "produced_with": {
+        "python": "3.11",
+        "numpy": "2.4.6",
+        "scipy": "1.17.1"
+      },
+      "model": "per s2 run logit(AP) = logit(true AP) + tau x N(0,1) + k x s x N(0,1); per s10 shard the same with one shared corpus draw tau x z0; s = customer-bootstrap sd of logit AP on the v6-43 calibration run (seed 43, scale 2, full refit); k = 1.0, 1.3, 2.0 (refit noise the bootstrap misses; halfA/halfB replicates suggest about 1.3, 95% CI roughly 0.85 to 2.9); tau = 0 and 0.10",
+      "results": {
+        "invariant_pass_probability_tau0": {
+          "k1.0": 1.0,
+          "k1.3": 0.9,
+          "k2.0": 0.13
+        },
+        "invariant_pass_probability_tau0.10": {
+          "k1.0": 0.89,
+          "k1.3": 0.68,
+          "k2.0": 0.07
+        },
+        "pass_probability_under_shift_k1.3_tau0": {
+          "micro_structuring +0.10 mid-band": 0.06,
+          "gather_scatter -0.10 mid-band": 0.07,
+          "corridor_high_risk -0.07": 0.28,
+          "dormant_reactivation 0.76->0.84 band crossing": 0.01,
+          "corridor_high_risk 0.34->0.26 band crossing": 0.09,
+          "dormant_reactivation 0.78->0.82 small crossing": 0.64
+        },
+        "pass_probability_under_shift_k1.3_tau0.10": {
+          "micro_structuring +0.10 mid-band": 0.12,
+          "gather_scatter -0.10 mid-band": 0.12,
+          "corridor_high_risk -0.07": 0.27,
+          "dormant_reactivation 0.76->0.84 band crossing": 0.05,
+          "corridor_high_risk 0.34->0.26 band crossing": 0.18,
+          "dormant_reactivation 0.78->0.82 small crossing": 0.45
+        },
+        "three_s2_runs_not_registered_invariant_pass_tau0": {
+          "k1.0": 0.68,
+          "k1.3": 0.32
+        },
+        "boundary_note": "a typology whose true shift is exactly logit_diff_abs_max passes about half the time; out-of-band typologies are gated on side only (the owner decision), so large shifts below 0.30 AP pass"
+      }
+    },
+    "smallest_detectable_shift": {
+      "definition": "smallest AP shift from the calibration AP (0.01 steps) that the typology's own check calls a shift (|dlogit| above logit_diff_abs_max, or a confident flip) with probability >= 0.80, power_sim at k = 1.3; shifts below it are expected to pass",
+      "power_0.80_k1.3": {
+        "gather_scatter": [-0.09, 0.08],
+        "dormant_reactivation": [-0.08, 0.07],
+        "micro_structuring": [-0.1, 0.09],
+        "corridor_high_risk": [-0.08, 0.07]
+      },
+      "power_0.90_k1.3": {
+        "gather_scatter": [-0.1, 0.08],
+        "dormant_reactivation": [-0.09, 0.08],
+        "micro_structuring": [-0.11, 0.1],
+        "corridor_high_risk": [-0.09, 0.07]
+      },
+      "per_run": "each D8 verdict also reports, per gated typology, the logit shift its own SEs detect with probability power_target: logit_diff_abs_max + z(power_target) x sqrt(SE2^2 + SE10^2)",
+      "power_target": 0.8,
+      "power_0.80_k1.3_tau0.10": {
+        "gather_scatter": [-0.1, 0.08],
+        "dormant_reactivation": [-0.09, 0.08],
+        "micro_structuring": [-0.11, 0.1],
+        "corridor_high_risk": [-0.09, 0.08]
+      }
+    },
+    "corpus_variance_note": "The s10 shards share one corpus, so the s10 SE contains no corpus-level (seed) variance tau^2; the s2 SE does, through the between-seed sd. Adding an estimate of tau^2 from five s2 runs was simulated and rejected before registration: its noise cut the invariant pass probability to 0.28 to 0.39 at k = 1.3 with tau = 0. Instead D8 reports corpus_variance_tau2 (s2 between-seed variance minus s10 between-shard variance, floored at 0) per typology, ungated, and power_sim records what tau = 0.10 costs (invariant pass 0.68, a 0.10 mid-band shift passes 0.12 at k = 1.3). A second scale-10 seed would identify tau; not taken for v1.6. The estimate is biased toward 0: shards are balanced on customers, not positives (positives per shard vary by about 17%), so the between-shard variance carries prevalence noise the s2 runs do not; read a zero as 'not shown', not as tau = 0."
   },
   "threshold_cliff": {
     "window_rel": 0.1,
@@ -203,13 +310,32 @@
   "density": {
     "target_frac_rows": 0.001,
     "tolerance_pp": 0.0002,
-    "scales": [
-      1,
-      10
-    ]
+    "scales": [1, 10]
   },
   "features_note": "v3.3: customer_type and crr_tier added (AML-GOALS section 9 #32); is_customer excluded because only customers are scored. v3.4: four history-relative features for the monthly unit (unit_of_scoring.history_features). Definitions: src/lakebench/spark/scripts/aml_features.py.",
   "changelog": [
+    {
+      "version": "3.6.0",
+      "date": "2026-09-26",
+      "approved": "AML-GOALS section 9 #45 (D8 replaced, owner decision) with the statistics reviewer's corrections, registered before any scale-10, replicate or evaluation corpus exists; level2 additions per AML-GOALS section 9 #46 (D-7, D-8)",
+      "changes": [
+        "scale_invariance: the 3.5.x rule (95% CI of AP_s10 - AP_s2 inside +/-0.05) is replaced by the logit rule in scale_invariance.rule (thresholds 0.30 and 0.70, confident-flip and out-of-band side rules, KS unchanged)",
+        "scale_invariance: s10 = logit-mean over n_shards = 5 component-disjoint customer shards of one scale-10 corpus on the calibration seed, features on the full corpus, each shard scored uncapped with the s2 code; SE = max(bootstrap, between-shard sd / sqrt(5)), t(4)",
+        "scale_invariance: s2 = logit-mean over the calibration seed and four replicate seeds; SE = max(bootstrap, between-seed sd / sqrt(5)), t(4); difference CI Welch-Satterthwaite",
+        "corpora.calibration_replicate_seeds: [123456832, 246913621, 370370410, 493827199] (why: calibration_replicate_seeds_note)",
+        "deviation from the brief, recorded: the corrections as briefed (two replicate seeds, t(2) on max(bootstrap, between-seed sd / sqrt(3))) give an invariant generator a 0.00 pass probability at the 0.70 width cap, because gather_scatter's difference CI is about 0.77 to 0.89 wide at the median (depending on how the two scales' t intervals combine); four replicates with a Welch difference CI give 1.00 (k = 1.0) and 0.90 (k = 1.3), see power_sim",
+        "scale_invariance.power_sim: script and the sha256 of its stdout; smallest_detectable_shift from it",
+        "scale_invariance.l2_sensitivity: l2_regularization 1 and 100 refits, ungated secondary",
+        "fidelity_gate.corpus_role reports a replicate seed as calibration",
+        "aml_registered_looks.json (next to this file): a registered evaluation or robustness look appends its seed when it starts and its report sha256 before any verdict is printed; datagen_seed treats every recorded seed as spent",
+        "scale_invariance.generator: every D8, A6 and Level-2 corpus comes from the pinned datagen image (digest recorded per gate run, equal across D8 runs); host-built corpora such as rep-v6-43 are not D8 legs",
+        "level2.original_four (#46 D-8): gather_scatter, rapid_layering, stack, dormant_reactivation at K = 3 of 4 (#19), reported beside K = 4 of 6, ungated",
+        "level2.predictions (#46 D-8): committed predicted evaluation AP and prediction interval per typology from the calibration runs; required, hashed and change-checked by every registered look; level2.predictions.if_d8_or_a6_fails records D-7",
+        "review fixes before any corpus exists: shard components from the scored typologies only (the all-typology graph percolated), shard balance and giant-component caps; D8 requires the current fidelity_gate code; the s10 SE omits corpus-level variance (one corpus), reported as corpus_variance_tau2 and costed in power_sim (k = 2.0 and tau = 0.10 rows); registered looks run only through the local runner (the cluster driver refuses them) on a clean checkout",
+        "look integrity: a registered look also appends its claim to an out-of-tree ledger (~/.lakebench/aml_looks.jsonl) and refuses a seed found there or in any commit of the record, so reverting the record cannot un-spend it; predictions require the current fidelity_gate code"
+      ],
+      "unchanged": "every other gated value: band, K/N, unit, labels, gate scale, typologies, features, CV, reference and shortcut models, leakage caps, power, timing_mixture, density, and the calibration, evaluation and robustness seeds (no evaluation or robustness data exists, so the evaluation seed need not move)"
+    },
     {
       "version": "3.5.2",
       "date": "2026-09-25",
