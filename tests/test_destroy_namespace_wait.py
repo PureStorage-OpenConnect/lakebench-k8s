@@ -19,7 +19,12 @@ from kubernetes.client.rest import ApiException
 
 from lakebench.deploy import destroy as destroy_mod
 from lakebench.deploy.engine import DeploymentStatus
-from lakebench.k8s.client import K8sClient, K8sResourceError, NamespaceTerminatingError
+from lakebench.k8s.client import (
+    K8sClient,
+    K8sResourceError,
+    NamespaceReplacedError,
+    NamespaceTerminatingError,
+)
 
 PVC_BLOCKER = (
     "Some content in the namespace has finalizers remaining: "
@@ -199,7 +204,7 @@ class TestConcurrentDestroys:
 
 
 class TestDestroyAllWiring:
-    def _run_destroy(self, cluster, timeout=600, uids=None, uid_fn=None):
+    def _run_destroy(self, cluster, timeout=600, uids=None, uid_fn=None, on_lease=None):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
         engine = MagicMock()
@@ -212,18 +217,29 @@ class TestDestroyAllWiring:
         engine.k8s.get_namespace_termination_status.side_effect = (
             cluster.get_namespace_termination_status
         )
-        engine.k8s.delete_namespace.side_effect = cluster.delete_namespace
+        calls: list[str] = []
+
+        def delete(ns, uid=None):
+            calls.append("delete")
+            return cluster.delete_namespace(ns, uid=uid)
+
+        engine.k8s.delete_namespace.side_effect = delete
         uid_seq = iter(uids or [])
         engine.k8s.get_namespace_uid.side_effect = uid_fn or (
             lambda _ns: next(uid_seq, uids[-1] if uids else "uid-1")
         )
-        calls: list[str] = []
         manager = MagicMock()
 
-        def unwatch(ns, strict=False, precondition=None):
+        def unwatch(ns, strict=False, precondition=None, then=None):
+            # Mirrors the lease: precondition, helm change, then, release.
+            if on_lease is not None:
+                on_lease(engine)
             if precondition is not None:
                 precondition()
             calls.append(f"unwatch:{ns}")
+            if then is not None:
+                then()
+            calls.append("release")
 
         manager.remove_namespace_from_watch.side_effect = unwatch
         match = IdentityReport(
@@ -238,9 +254,11 @@ class TestDestroyAllWiring:
             patch("lakebench.deploy.ownership.verify_namespace_identity", return_value=match),
             patch("kubernetes.client.CoreV1Api"),
             patch("kubernetes.client.AppsV1Api") as apps,
+            patch("kubernetes.client.CustomObjectsApi") as custom,
             patch("lakebench.deploy.destroy.logger"),
         ):
             self.apps = apps
+            self.custom = custom
             results = destroy_mod.destroy_all(
                 engine,
                 clean_buckets=False,
@@ -252,7 +270,9 @@ class TestDestroyAllWiring:
     def test_unwatch_precedes_delete_and_result_reflects_the_wait(self):
         cluster = FakeCluster(drain_polls=None)
         results, reports, calls, engine = self._run_destroy(cluster, timeout=120)
-        assert calls == ["unwatch:ns-a"]
+        # Finding 3 (race review): the delete is issued before the lease is
+        # released, so a same-name deploy's add sees it Terminating.
+        assert calls == ["unwatch:ns-a", "delete", "release"]
         engine.k8s.delete_namespace.assert_called_once_with("ns-a", uid="uid-1")
         ns = [r for r in results if r.component == "namespace"]
         assert ns[-1].status is DeploymentStatus.SKIPPED
@@ -281,15 +301,30 @@ class TestDestroyAllWiring:
         assert calls == []
         engine.k8s.delete_namespace.assert_not_called()
 
+    def test_redeploy_during_infra_teardown_keeps_its_secretclass(self):
+        """Race review finding 3: A2 finished and R redeployed while A1 was
+        still tearing down; A1 must not delete R's cluster-scoped SecretClass."""
+        cluster = FakeCluster(drain_polls=1)
+        # start, post-bucket, query engine, catalog, postgres; R before RBAC.
+        results, _, calls, engine = self._run_destroy(cluster, uids=["uid-1"] * 5 + ["uid-2"])
+        assert not self.custom.return_value.delete_cluster_custom_object.called
+        assert calls == []
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert "Stopped before RBAC" in ns.message
+
     def test_redeploy_while_waiting_for_the_lease_keeps_its_watch_entry(self):
         """R re-created the name between the pre-check and the lease: the
         in-lease check refuses, so R's watch entry is never removed."""
         cluster = FakeCluster(drain_polls=1)
-        # start, post-bucket, pre-unwatch, then R lands before the in-lease check.
+        state = {"uid": "uid-1"}
+
+        def redeploy(_engine):
+            state["uid"] = "uid-2"
+
         results, _, calls, engine = self._run_destroy(
-            cluster, uids=["uid-1", "uid-1", "uid-1", "uid-2"]
+            cluster, uid_fn=lambda _ns: state["uid"], on_lease=redeploy
         )
-        assert calls == [], "the redeploy's watch entry must not be removed"
+        assert "unwatch:ns-a" not in calls, "the redeploy's watch entry must not be removed"
         engine.k8s.delete_namespace.assert_not_called()
         ns = [r for r in results if r.component == "namespace"][-1]
         assert ns.status is DeploymentStatus.SUCCESS
@@ -297,32 +332,88 @@ class TestDestroyAllWiring:
 
     def test_unreadable_uid_inside_the_lease_changes_nothing(self):
         cluster = FakeCluster(drain_polls=1)
-        n = {"i": 0}
+        state = {"fail": False}
 
-        def flaky(_ns):
-            n["i"] += 1
-            if n["i"] == 4:
+        def uid(_ns):
+            if state["fail"]:
                 raise K8sResourceError("apiserver 503")
             return "uid-1"
 
-        results, _, calls, engine = self._run_destroy(cluster, uid_fn=flaky)
-        assert calls == []
+        results, _, calls, engine = self._run_destroy(
+            cluster, uid_fn=uid, on_lease=lambda _e: state.update(fail=True)
+        )
+        assert "unwatch:ns-a" not in calls
         engine.k8s.delete_namespace.assert_not_called()
         ns = [r for r in results if r.component == "namespace"][-1]
         assert ns.status is DeploymentStatus.FAILED
         assert "watch-list entry NOT" in ns.message
 
-    def test_redeploy_during_unwatch_blocks_delete_and_points_at_repair(self):
-        """After the helm call (lease released): R re-created the name."""
+    def test_in_lease_delete_refused_by_uid_precondition_is_left_alone(self):
         cluster = FakeCluster(drain_polls=1)
-        results, _, calls, engine = self._run_destroy(
-            cluster, uids=["uid-1", "uid-1", "uid-1", "uid-1", "uid-2"]
-        )
-        assert calls == ["unwatch:ns-a"]
-        engine.k8s.delete_namespace.assert_not_called()
+
+        def replaced(ns, uid=None):
+            raise NamespaceReplacedError("uid precondition failed")
+
+        cluster.delete_namespace = replaced
+        results, _, calls, _ = self._run_destroy(cluster)
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.SUCCESS
+        assert "left alone" in ns.message
+        assert calls.count("delete") == 1
+
+    def test_redeploy_during_unwatch_blocks_delete_and_points_at_repair(self):
+        """In-lease delete failed (API error), then R re-created the name
+        after the lease was released: fall back, do not delete, say repair."""
+        cluster = FakeCluster(drain_polls=1)
+        state = {"uid": "uid-1"}
+
+        def flaky_delete(ns, uid=None):
+            state["uid"] = "uid-2"  # R lands once the lease is released
+            raise K8sResourceError("apiserver 500")
+
+        cluster.delete_namespace = flaky_delete
+        results, _, calls, engine = self._run_destroy(cluster, uid_fn=lambda _ns: state["uid"])
+        assert "unwatch:ns-a" in calls
+        assert calls.count("delete") == 1, "the fallback must not delete the redeploy"
         ns = [r for r in results if r.component == "namespace"][-1]
         assert ns.status is DeploymentStatus.FAILED
         assert "repair-operator" in ns.message
+
+    def test_gone_mid_teardown_still_drops_the_watch_entry(self):
+        """Namespace deleted by hand during infra teardown: skip the rest of
+        the by-name teardown but still un-watch (else the operator
+        crash-loops), and never report it as this run's delete."""
+        cluster = FakeCluster(drain_polls=1)
+        n = {"i": 0}
+
+        def uid(_ns):
+            n["i"] += 1
+            if n["i"] >= 3:
+                cluster.phase = ""
+                return ""
+            return "uid-1"
+
+        results, _, calls, engine = self._run_destroy(cluster, uid_fn=uid)
+        assert "unwatch:ns-a" in calls
+        # The UID-guarded delete on a gone namespace is a harmless 404.
+        assert cluster.deletes == 0
+        apps = self.apps.return_value
+        assert not apps.delete_namespaced_stateful_set.called
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.SUCCESS
+        assert "already gone" in ns.message
+
+    def test_absent_at_start_is_never_deleted(self):
+        """Start UID empty: a namespace that appears later is a new deploy."""
+        cluster = FakeCluster(drain_polls=1)
+        state = {"uid": ""}
+
+        results, _, calls, engine = self._run_destroy(
+            cluster,
+            uid_fn=lambda _ns: state["uid"],
+            on_lease=lambda _e: None,
+        )
+        engine.k8s.delete_namespace.assert_not_called()
 
     def test_delete_carries_the_start_uid_as_precondition(self):
         cluster = FakeCluster(drain_polls=1)

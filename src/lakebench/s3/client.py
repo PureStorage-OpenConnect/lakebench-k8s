@@ -435,6 +435,7 @@ class S3Client:
         bucket_name: str,
         max_wait: int = 300,
         progress_callback: Callable[[str, int], None] | None = None,
+        before_batch: Callable[[], None] | None = None,
     ) -> int:
         """Delete all objects and abort incomplete multipart uploads in a bucket.
 
@@ -445,6 +446,10 @@ class S3Client:
             bucket_name: Name of the bucket to empty
             max_wait: Maximum seconds to wait for bucket to be fully empty
             progress_callback: Optional callback(bucket_name, running_deleted_count)
+            before_batch: Optional check run before every delete batch and
+                multipart-abort pass. Raising stops the empty with the
+                exception propagated unchanged; destroy uses it to stop mid
+                bucket when the namespace is replaced underneath it.
 
         Returns:
             Number of objects deleted
@@ -468,6 +473,8 @@ class S3Client:
                     if not objects:
                         continue
                     delete_objects = [{"Key": obj["Key"]} for obj in objects]
+                    if before_batch is not None:
+                        before_batch()
                     resp = self._client.delete_objects(
                         Bucket=bucket_name,
                         Delete={"Objects": delete_objects},
@@ -491,7 +498,10 @@ class S3Client:
                 # 2. Abort all incomplete multipart uploads
                 mp_paginator = self._client.get_paginator("list_multipart_uploads")
                 for page in mp_paginator.paginate(Bucket=bucket_name):
-                    for upload in page.get("Uploads", []):
+                    uploads = page.get("Uploads", [])
+                    if uploads and before_batch is not None:
+                        before_batch()
+                    for upload in uploads:
                         # FlashBlade can still list an upload that its async
                         # GC or a writer has already finished (LB-149). Gone
                         # is the state we want; step 3 still verifies it.

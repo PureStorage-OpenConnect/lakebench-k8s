@@ -1320,7 +1320,7 @@ class TestOwnershipHooksFire:
 class TestBucketCreationRecord:
     """LB-159: deploy records which buckets it created; destroy deletes only those."""
 
-    def _deploy(self, ensure_result, prior_tags=None):
+    def _deploy(self, ensure_result, prior_tags=None, mismatch=()):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
         config = _make_config()
@@ -1333,10 +1333,13 @@ class TestBucketCreationRecord:
             patch("lakebench.s3.S3Client", return_value=client),
             patch(
                 "lakebench.deploy.ownership.verify_bucket_ownership",
-                return_value=IdentityReport(
-                    verdict=IdentityVerdict.MATCH,
-                    resource_name="b",
+                side_effect=lambda _b, name, _id: IdentityReport(
+                    verdict=(
+                        IdentityVerdict.MISMATCH if name in mismatch else IdentityVerdict.MATCH
+                    ),
+                    resource_name=name,
                     expected_deployment=config.name,
+                    hint="owned by someone else",
                 ),
             ),
             patch(
@@ -1386,3 +1389,15 @@ class TestBucketCreationRecord:
             "lakebench-gold": False,
         }
         record.assert_not_called()
+
+    def test_failure_on_a_later_bucket_still_records_the_created_ones(self):
+        """Review finding: the record used to be written after the ownership
+        loop, so a deploy failing on silver left bronze unrecorded and every
+        later destroy kept it for good on FlashBlade."""
+        result, _, record, _ = self._deploy(
+            {"lakebench-bronze": True, "lakebench-silver": False, "lakebench-gold": False},
+            mismatch={"lakebench-silver"},
+        )
+        assert result.status == DeploymentStatus.FAILED
+        record.assert_called_once()
+        assert record.call_args.args[2] == ["lakebench-bronze"]

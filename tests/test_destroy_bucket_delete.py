@@ -33,6 +33,10 @@ class FakeBoto:
         self.delete_bucket_calls: list[str] = []
         self.vanish: set[str] = set()  # buckets deleted by "another destroy" when listed
 
+    def get_bucket_tagging(self, Bucket):
+        # Owned but not marked created (adopted); tests override as needed.
+        return {"TagSet": [{"Key": "lakebench.deployment", "Value": "a"}]}
+
     def head_bucket(self, Bucket):
         if Bucket not in self.buckets:
             raise ClientError({"Error": {"Code": "404"}}, "HeadBucket")
@@ -216,6 +220,7 @@ class TestDestroyAllBuckets:
         uid=None,
         namespace_present=True,
         create_namespace=False,
+        created_error=None,
     ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
@@ -265,12 +270,18 @@ class TestDestroyAllBuckets:
             patch("lakebench.s3.S3Client", return_value=_s3(boto)),
             patch(
                 "lakebench.deploy.ownership.read_created_buckets",
-                return_value=created_record,
+                **(
+                    {"side_effect": created_error}
+                    if created_error
+                    else {"return_value": created_record}
+                ),
             ),
+            patch("lakebench.deploy.ownership.forget_created_buckets") as forget,
             patch("lakebench.spark.SparkOperatorManager"),
         ):
             core.return_value.list_namespace.return_value.items = []
             results = destroy_mod.destroy_all(engine, clean_buckets=True, force_legacy=force_legacy)
+            self.forget = forget
         self._results = results
         return [r for r in results if r.component == "s3-buckets"][-1]
 
@@ -387,8 +398,8 @@ class TestDestroyAllBuckets:
 
     def test_redeploy_between_buckets_stops_mid_step(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["r/new"], "a-gold": ["r/new"]})
-        # start, before-loop, before bronze; then the redeploy lands.
-        uids = iter(["uid-1", "uid-1", "uid-1"])
+        # start, before-loop, before bronze, bronze delete batch; then R lands.
+        uids = iter(["uid-1"] * 4)
         self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
@@ -396,6 +407,19 @@ class TestDestroyAllBuckets:
         )
         assert boto.buckets["a-bronze"] == []
         assert boto.buckets["a-silver"] == ["r/new"] and boto.buckets["a-gold"] == ["r/new"]
+        assert boto.delete_bucket_calls == []
+
+    def test_redeploy_while_a_bucket_is_being_emptied_stops_before_the_next_batch(self):
+        """A large bucket empties over many batches; R can land mid-bucket."""
+        boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
+        # start, before-loop, before bronze; R lands before bronze's first batch.
+        uids = iter(["uid-1"] * 3)
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            uid=lambda _ns: next(uids, "uid-2"),
+        )
+        assert boto.buckets["a-bronze"] == ["r/new"]
         assert boto.delete_bucket_calls == []
 
     def test_redeploy_before_bucket_delete_stops_deletes(self):
@@ -451,3 +475,42 @@ class TestDestroyAllBuckets:
         self.engine.k8s.delete_namespace.assert_not_called()
         ns = [x for x in self._results if x.component == "namespace"][-1]
         assert "NOT deleted" in ns.message
+
+    # -- second full review ------------------------------------------------
+
+    def test_deleted_buckets_are_dropped_from_the_created_record(self):
+        """A namespace that outlives destroy must stop claiming deleted names,
+        or a bucket later pre-provisioned under one is deleted next time."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        self._run(boto, dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"))
+        self.forget.assert_called_once()
+        assert self.forget.call_args.args[1:] == ("a", ["a-bronze", "a-silver", "a-gold"])
+
+    def test_unreadable_created_record_fails_and_keeps_the_namespace(self):
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
+            created_error=RuntimeError("apiserver 503"),
+            create_namespace=True,
+        )
+        assert r.status is DeploymentStatus.FAILED
+        assert "record unreadable" in r.message
+        assert set(boto.buckets) == {"a-bronze", "a-silver", "a-gold"}
+        self.engine.k8s.delete_namespace.assert_not_called()
+
+    def test_namespace_deleted_mid_bucket_step_is_failed_not_success(self):
+        """Nothing proves another destroy finished the rest (kubectl delete ns
+        looks the same) and the ownership record is gone."""
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["y"], "a-gold": ["z"]})
+        # start, before-loop, before bronze, bronze batch; then the ns is gone.
+        uids = iter(["uid-1"] * 4)
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            uid=lambda _ns: next(uids, ""),
+        )
+        assert r.status is DeploymentStatus.FAILED
+        assert "may still hold data" in r.message
+        assert boto.buckets["a-silver"] == ["y"] and boto.buckets["a-gold"] == ["z"]
+        assert boto.delete_bucket_calls == []

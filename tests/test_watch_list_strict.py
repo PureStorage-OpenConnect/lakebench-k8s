@@ -35,7 +35,7 @@ class TestStrictMode:
         ) as mock_locked:
             r = mgr.remove_namespace_from_watch("my-ns", strict=True)
         assert r is True
-        mock_locked.assert_called_once_with("my-ns", None)
+        mock_locked.assert_called_once_with("my-ns", None, None)
 
     def test_nonstrict_does_not_engage_lock(self):
         mgr = _mgr()
@@ -153,3 +153,69 @@ class TestPrecondition:
                 mgr.remove_namespace_from_watch("my-ns", strict=True, precondition=refuse)
         impl.assert_not_called()
         assert events == ["lock", "unlock"], "the lease must still be released"
+
+    def test_then_runs_under_the_lease_only_after_a_successful_removal(self):
+        mgr = _mgr()
+        events: list[str] = []
+        with (
+            patch("kubernetes.client.CoreV1Api"),
+            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=self._lock(events)),
+            patch.object(
+                mgr,
+                "_remove_namespace_from_watch_impl",
+                side_effect=lambda ns: events.append("helm") or True,
+            ),
+        ):
+            mgr.remove_namespace_from_watch(
+                "my-ns", strict=True, then=lambda: events.append("delete")
+            )
+        assert events == ["lock", "helm", "delete", "unlock"]
+
+        events.clear()
+        with (
+            patch("kubernetes.client.CoreV1Api"),
+            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=self._lock(events)),
+            patch.object(mgr, "_remove_namespace_from_watch_impl", return_value=False),
+        ):
+            with pytest.raises(WatchListMutationError):
+                mgr.remove_namespace_from_watch(
+                    "my-ns", strict=True, then=lambda: events.append("delete")
+                )
+        assert "delete" not in events
+
+
+class TestAddRefusesTerminatingNamespace:
+    """Race review finding 1: a deploy's add must not re-list a namespace a
+    destroy has just un-watched and deleted (the operator would crash-loop)."""
+
+    def _ns(self, deleting: bool):
+        import datetime
+
+        ns = MagicMock()
+        ns.metadata.deletion_timestamp = (
+            datetime.datetime(2026, 9, 25, tzinfo=datetime.timezone.utc) if deleting else None
+        )
+        return ns
+
+    def test_terminating_namespace_is_not_added(self):
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch("kubernetes.client.CoreV1Api") as core,
+            patch.object(mgr, "_run") as run,
+        ):
+            core.return_value.read_namespace.return_value = self._ns(deleting=True)
+            assert mgr._add_namespace_to_watch_impl("my-ns") is False
+        run.assert_not_called()
+
+    def test_live_namespace_is_added(self):
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch.object(mgr, "_filter_existing_namespaces", return_value=["other"]),
+            patch("kubernetes.client.CoreV1Api") as core,
+            patch.object(mgr, "_run", return_value=MagicMock(returncode=1, stderr="boom")) as run,
+        ):
+            core.return_value.read_namespace.return_value = self._ns(deleting=False)
+            mgr._add_namespace_to_watch_impl("my-ns")
+        assert run.called, "a live namespace proceeds to the helm upgrade"

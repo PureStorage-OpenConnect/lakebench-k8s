@@ -1190,6 +1190,23 @@ class DeploymentEngine:
             context=self.config.platform.kubernetes.context or "",
             namespace=self.config.get_namespace(),
         )
+        # LB-159: the namespace records which buckets lakebench created, for
+        # backends without tagging; destroy deletes only those. Recorded
+        # before the ownership loop so a deploy that fails on a later bucket
+        # still leaves a record for the ones it already created.
+        creation_recorded = True
+        if created:
+            try:
+                record_created_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), created)
+            except Exception as e:  # noqa: BLE001
+                creation_recorded = False
+                logger.warning(
+                    "Could not record created buckets %s on namespace %s (%s); "
+                    "destroy will empty but keep them.",
+                    created,
+                    self.config.get_namespace(),
+                    e,
+                )
         other_deployments = list_lakebench_deployment_names(
             _kclient.CoreV1Api(), exclude=self.config.get_namespace()
         )
@@ -1351,18 +1368,7 @@ class DeploymentEngine:
         parts = []
         if created:
             parts.append(f"created {', '.join(created)}")
-            # LB-159: the namespace records which buckets lakebench created,
-            # for backends without tagging; destroy deletes only those.
-            try:
-                record_created_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), created)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    "Could not record created buckets %s on namespace %s (%s); "
-                    "destroy will empty but keep them.",
-                    created,
-                    self.config.get_namespace(),
-                    e,
-                )
+            if not creation_recorded:
                 parts.append("creation not recorded; destroy will keep them")
         if existed:
             parts.append(f"already existed: {', '.join(existed)}")

@@ -192,7 +192,8 @@ def destroy(
                 "after the delete is issued (PVC and pod finalizers can "
                 "hold it for minutes). A namespace still terminating at "
                 "the deadline is not reported as deleted and destroy exits "
-                f"{EXIT_NAMESPACE_STILL_TERMINATING}. 0 skips the wait."
+                f"{EXIT_NAMESPACE_STILL_TERMINATING}. 0 skips the wait, so "
+                "destroy exits 3 unless the namespace is already gone."
             ),
         ),
     ] = 600,
