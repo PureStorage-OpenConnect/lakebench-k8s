@@ -649,6 +649,12 @@ The JSON structure includes:
 ```json
 {
   "run_id": "20260201-143052-a1b2c3",
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0",
+    "git_sha": "<40-char commit, or null outside a git checkout>",
+    "git_dirty": false
+  },
   "pipeline_benchmark": {
     "pipeline_mode": "batch",
     "scorecard": {
@@ -666,6 +672,12 @@ The JSON structure includes:
   }
 }
 ```
+
+`maintenance_policy_id` names the table-maintenance policy the run was
+measured under (see `docs/perf-regression-gate.md`); `provenance` records
+the lakebench version and, from a git checkout, the commit and whether
+tracked files had uncommitted changes. Container image versions are in
+`config_snapshot.images`.
 
 ### HTML Reports
 
