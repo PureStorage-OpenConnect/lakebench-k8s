@@ -364,6 +364,17 @@ def run_fidelity_gate(
     # there would label the wrong silver entity.
     dup_ibans = af.duplicate_ibans(spark, ACCOUNT_PATH)
     scale_info = af.corpus_scale(spark, ACCOUNT_PATH, prereg["corpora"]["entities_per_scale_unit"])
+    if (
+        score
+        and provenance.get("declared_corpus_role") in ("evaluation", "robustness")
+        and not af.at_gate_scale(scale_info, prereg)
+    ):
+        # SystemExit, not Exception: main() must not record this as a gate
+        # error and carry on; the registered look is never spent off scale.
+        raise SystemExit(
+            f"refusing the registered {provenance['declared_corpus_role']} look: the corpus "
+            f"is not at corpora.gate_scale ({scale_info})"
+        )
     seed = provenance.get("corpus_seed")
     seed_check = af.corpus_seed_check(manifest, int(seed) if seed not in (None, "") else None)
     agreement = af.label_agreement(
@@ -433,16 +444,13 @@ def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> None:
     hold a corpus from a manual Job). A registered run must also be verified:
     the manifest has to come from the claimed seed."""
     try:
-        from lakebench.config.datagen_seed import PROTECTED_ROLES, aml_seed_error
+        from lakebench.config.datagen_seed import PROTECTED_ROLES, aml_seed_error, spent_from
     except ImportError:  # flat on the driver
-        from datagen_seed import PROTECTED_ROLES, aml_seed_error
+        from datagen_seed import PROTECTED_ROLES, aml_seed_error, spent_from
     from fidelity_gate import load_preregistration
 
     corpora = load_preregistration()[0]["corpora"]
-    guarded = sorted(
-        {int(x) for x in corpora.get("spent_seeds", [])}
-        | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES}
-    )
+    guarded = sorted(spent_from(corpora) | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES})
     matched = [g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0]
     raw = os.environ.get("LB_DATAGEN_SEED")
     claimed = int(raw) if raw not in (None, "") else None

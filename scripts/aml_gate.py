@@ -173,6 +173,28 @@ def main(argv=None) -> int:
         help="exit 2 unless every gate passes (passes.all); default exit 0 when the gate ran",
     )
     args = ap.parse_args(argv)
+    if args.registered in ("evaluation", "robustness"):
+        # A registered look runs exactly as registered, and leaves a record.
+        bad = [
+            flag
+            for flag, on in (
+                ("--diagnostic", args.diagnostic),
+                ("--label-role", args.label_role is not None),
+                ("--allow-version-mismatch", args.allow_version_mismatch),
+                ("--prereg", args.prereg is not None),
+                ("LB_AML_PREREG_PATH", bool(os.environ.get("LB_AML_PREREG_PATH"))),
+            )
+            if on
+        ]
+        if bad:
+            print(
+                f"refusing: a registered {args.registered} look cannot run with {', '.join(bad)}",
+                file=sys.stderr,
+            )
+            return 1
+        if args.out is None:
+            print("refusing: a registered look needs --out to record it", file=sys.stderr)
+            return 1
     # Cheap refusal before Spark starts; the manifest check below catches a
     # corpus whose real seed is guarded whatever --seed says.
     err = seed_guard_error(args.seed, args.registered, [], args.counts_only)

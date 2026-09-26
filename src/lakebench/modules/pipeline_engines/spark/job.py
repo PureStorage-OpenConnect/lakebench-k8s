@@ -2120,6 +2120,14 @@ class SparkJobManager:
             }
         )
 
+        if (
+            job_type == JobType.SCORE_FINANCIAL_REFERENCE
+            and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
+        ):
+            # A registered look runs once: an operator retry after the gate
+            # computed AP (a crash or an error verdict) would look again.
+            _restart_policy = {"type": "Never"}
+
         manifest = {
             "apiVersion": "sparkoperator.k8s.io/v1beta2",
             "kind": "SparkApplication",
@@ -2505,9 +2513,11 @@ class SparkJobManager:
                 logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
         # The AML seed guard (stdlib only) ships flat too, so the reference
         # job refuses a corpus from a spent or unregistered protected seed.
+        # Fail at build time, not three driver attempts later.
         _seed_mod = _package_dir() / "config" / "datagen_seed.py"
-        if _seed_mod.exists():
-            data["datagen_seed.py"] = _seed_mod.read_text()
+        if not _seed_mod.exists():
+            raise FileNotFoundError(f"AML seed guard missing from the package: {_seed_mod}")
+        data["datagen_seed.py"] = _seed_mod.read_text()
 
         # AML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via
