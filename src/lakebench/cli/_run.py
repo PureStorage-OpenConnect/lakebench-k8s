@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 # Per-statement kubectl-exec timeout for pre-benchmark compaction (seconds).
 PRE_BENCHMARK_COMPACTION_TIMEOUT = 1800
+# Same bound for pre-benchmark expire_snapshots / remove_orphan_files.
+PRE_BENCHMARK_MAINTENANCE_TIMEOUT = 1800
 
 
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
@@ -2040,8 +2042,15 @@ def run(
                 console.print()
                 console.print("[bold]Running maintenance[/bold]")
                 _maint_start = datetime.now()
+                # Same as compaction below: wait for expire_snapshots and
+                # orphan removal to finish before the benchmark starts.
                 _run_iceberg_maintenance(
-                    cfg, k8s, console, j, retention_threshold=resolve_maintenance_retention(cfg)
+                    cfg,
+                    k8s,
+                    console,
+                    j,
+                    retention_threshold=resolve_maintenance_retention(cfg),
+                    timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
                 )
                 # A kubectl-exec timeout does not stop rewrite_data_files, and
                 # the benchmark must not start while it still runs: wait for

@@ -663,6 +663,7 @@ def _run_iceberg_maintenance(
     console: Console,
     j,
     retention_threshold: str,
+    timeout: int = 30,
 ) -> None:
     """Run table maintenance (format-aware).
 
@@ -672,6 +673,9 @@ def _run_iceberg_maintenance(
     Engine-aware: uses Trino (preferred) or Spark Thrift Server.
     DuckDB cannot run maintenance -- skipped with a warning.
     Failures on individual tables are logged but do not abort.
+
+    ``timeout`` bounds each statement's kubectl exec. A timeout does not stop
+    the statement server-side, so the pre-benchmark caller passes a long one.
     """
     from lakebench.deploy.iceberg import (
         exec_sql,
@@ -720,12 +724,15 @@ def _run_iceberg_maintenance(
         def build_sql(tbl):
             return build_maintenance_sql(engine, catalog, tbl, retention_threshold)
 
+    import time as _time
+
     from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
 
     maintained = 0
     expected_ops = 0
     failures: list[str] = []
     timed_out: list[str] = []
+    started = _time.monotonic()
     for table in table_names:
         ops = build_sql(table)
         expected_ops += len(ops)
@@ -733,7 +740,7 @@ def _run_iceberg_maintenance(
             # exec_sql raises on a real failure (non-zero exit) and on a
             # kubectl-exec timeout; a round is recorded, never fatal to the run.
             try:
-                exec_sql(engine, k8s, pod_name, namespace, sql)
+                exec_sql(engine, k8s, pod_name, namespace, sql, timeout=timeout)
                 maintained += 1
             except ExecSqlTimeout as e:
                 # Not a failure: the engine may still be running it.
@@ -747,11 +754,12 @@ def _run_iceberg_maintenance(
                 failures.append(f"{table}: {e}")
                 logger.warning("%s maintenance failed for %s: %s", table_format.title(), table, e)
 
+    elapsed = _time.monotonic() - started
     colour = "yellow" if failures or timed_out else "green"
     extra = f", {len(timed_out)} timed out (may still be running)" if timed_out else ""
     console.print(
         f"  [{colour}]{table_format.title()} maintenance ({engine}): {maintained}/{expected_ops} "
-        f"operations{extra}[/{colour}] (threshold: {retention_threshold})"
+        f"operations{extra}[/{colour}] (threshold: {retention_threshold}, {elapsed:.0f}s)"
     )
     _journal_safe(
         j.record,
@@ -767,6 +775,8 @@ def _run_iceberg_maintenance(
             "operations_timed_out": len(timed_out),
             "failures": failures[:5],
             "timed_out": timed_out[:5],
+            "elapsed_seconds": round(elapsed, 1),
+            "statement_timeout_seconds": timeout,
         },
     )
 
