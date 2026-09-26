@@ -243,6 +243,7 @@ class TestDestroyAllBuckets:
         ):
             core.return_value.list_namespace.return_value.items = []
             results = destroy_mod.destroy_all(engine, clean_buckets=True, force_legacy=force_legacy)
+        self._results = results
         return [r for r in results if r.component == "s3-buckets"][-1]
 
     def test_owned_by_tag_and_prefix_are_deleted(self):
@@ -268,8 +269,10 @@ class TestDestroyAllBuckets:
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["y"], "a-gold": ["z"]})
         boto.vanish = {"a-bronze"}
         r = self._run(boto, {"a-bronze": "MATCH", "a-silver": "MATCH", "a-gold": "MATCH"})
-        assert r.status is DeploymentStatus.SUCCESS
+        assert r.status is DeploymentStatus.FAILED, "unemptied buckets must not read as success"
         assert "concurrent destroy" in r.message
+        assert self._results[-1].component == "namespace"
+        assert "Stopped before infrastructure teardown" in self._results[-1].message
         assert boto.buckets == {"a-silver": ["y"], "a-gold": ["z"]}
         assert boto.delete_bucket_calls == []
 

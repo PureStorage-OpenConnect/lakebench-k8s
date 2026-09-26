@@ -199,7 +199,7 @@ class TestDestroyAllWiring:
             cluster.get_namespace_termination_status
         )
         engine.k8s.delete_namespace.side_effect = cluster.delete_namespace
-        engine.k8s.get_namespace_uid.side_effect = uids or ["uid-1", "uid-1"]
+        engine.k8s.get_namespace_uid.side_effect = uids or ["uid-1"] * 3
         calls: list[str] = []
         manager = MagicMock()
         manager.remove_namespace_from_watch.side_effect = lambda ns, **_kw: calls.append(
@@ -216,8 +216,10 @@ class TestDestroyAllWiring:
             patch("lakebench.spark.SparkOperatorManager", MagicMock(return_value=manager)),
             patch("lakebench.deploy.ownership.verify_namespace_identity", return_value=match),
             patch("kubernetes.client.CoreV1Api"),
+            patch("kubernetes.client.AppsV1Api") as apps,
             patch("lakebench.deploy.destroy.logger"),
         ):
+            self.apps = apps
             results = destroy_mod.destroy_all(
                 engine,
                 clean_buckets=False,
@@ -242,11 +244,23 @@ class TestDestroyAllWiring:
         """A concurrent destroy finished and a redeploy re-created the name
         (or, S-P3, a deploy created it after this destroy found it absent)."""
         cluster = FakeCluster(drain_polls=1)
-        results, _, calls, engine = self._run_destroy(cluster, uids=[uid_at_start, "uid-2"])
+        results, _, calls, engine = self._run_destroy(
+            cluster, uids=[uid_at_start, "uid-2", "uid-2"]
+        )
         assert calls == [], "the new deployment's namespace must stay watched"
         engine.k8s.delete_namespace.assert_not_called()
+        apps = self.apps.return_value
+        assert not apps.delete_namespaced_stateful_set.called, "new postgres must survive"
+        assert not apps.delete_namespaced_deployment.called, "new components must survive"
         ns = [r for r in results if r.component == "namespace"]
         assert "newer deployment" in ns[-1].message
+
+    def test_recreated_during_infra_teardown_is_not_deleted(self):
+        """The guard at the namespace step still catches a late redeploy."""
+        cluster = FakeCluster(drain_polls=1)
+        results, _, calls, engine = self._run_destroy(cluster, uids=["uid-1", "uid-1", "uid-2"])
+        assert calls == []
+        engine.k8s.delete_namespace.assert_not_called()
 
     def test_gone_reports_success(self):
         cluster = FakeCluster(drain_polls=1)

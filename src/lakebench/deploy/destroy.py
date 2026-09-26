@@ -743,6 +743,7 @@ def destroy_all(
     # buckets are not provably ours, so keeping the namespace gains nothing
     # and would block destroy forever.
     bucket_transient_failure = False
+    stop_after_buckets = False
     if clean_buckets and not data_steps_allowed:
         results.append(
             DeploymentResult(
@@ -993,12 +994,16 @@ def destroy_all(
                     # emptied on --force-legacy say-so, or pre-provisioned
                     # buckets the config merely references, are kept.
                     if vanished:
+                        # FAILED, not SUCCESS: a hand-deleted bucket would
+                        # otherwise hide the unemptied ones after it. A re-run
+                        # finishes the job once the other destroy is done.
                         bucket_notes: list[str] = [
-                            f"stopped: bucket {vanished} was deleted by a concurrent "
-                            "destroy of this deployment, which owns the rest of the "
-                            "bucket cleanup"
+                            f"stopped: bucket {vanished} disappeared while being "
+                            "emptied (most likely a concurrent destroy of this "
+                            "deployment); re-run destroy once it has finished"
                         ]
-                        delete_failed = False
+                        delete_failed = True
+                        stop_after_buckets = True
                     else:
                         bucket_notes, delete_failed = _delete_owned_buckets(
                             s3,
@@ -1055,6 +1060,32 @@ def destroy_all(
                 )
             )
             report("s3-buckets", DeploymentStatus.FAILED, f"S3 cleanup failed: {e}")
+
+    # A concurrent destroy may have finished while this run emptied buckets,
+    # and a redeploy re-created the namespace. Every step below deletes
+    # components by name inside the namespace, so stop here rather than tear
+    # down the newer deployment (review of LB-157/LB-159).
+    try:
+        uid_after_buckets: str | None = engine.k8s.get_namespace_uid(namespace)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("could not re-read namespace uid: %s", e)
+        uid_after_buckets = None
+    newer_incarnation = bool(
+        uid_after_buckets
+        and namespace_uid_at_start is not None
+        and uid_after_buckets != namespace_uid_at_start
+    )
+    if stop_after_buckets or newer_incarnation:
+        msg = f"Stopped before infrastructure teardown: namespace {namespace} " + (
+            "is now a newer deployment with the same name; it was left alone"
+            if newer_incarnation
+            else "is being cleaned up by a concurrent destroy; re-run destroy after it finishes"
+        )
+        logger.warning(msg)
+        status = DeploymentStatus.SUCCESS if newer_incarnation else DeploymentStatus.FAILED
+        results.append(DeploymentResult(component="namespace", status=status, message=msg))
+        report("namespace", status, msg)
+        return results
 
     # Step 5: Remove observability stack (kube-prometheus-stack)
     if engine.config.observability.enabled:
