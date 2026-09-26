@@ -1167,9 +1167,13 @@ def destroy_all(
                             # pre-provisioned or adopted under one of them
                             # would otherwise be deleted by the next destroy.
                             try:
+                                # Never edit a redeploy's record.
+                                guard()
                                 forget_created_buckets(
                                     k8s_client.CoreV1Api(), namespace, deleted_now
                                 )
+                            except (_NamespaceReplaced, _NamespaceUnverifiable) as e:
+                                logger.warning("not updating the created-buckets record: %s", e)
                             except Exception as e:  # noqa: BLE001
                                 logger.warning(
                                     "could not drop deleted buckets %s from the "
@@ -1376,7 +1380,7 @@ def destroy_all(
                         f"namespace {namespace} is now a newer deployment with the same name"
                     )
 
-            from lakebench.k8s.client import NamespaceReplacedError
+            from lakebench.k8s.client import NamespaceReplacedError, NamespaceTerminatingError
 
             in_lease: dict[str, object] = {}
 
@@ -1389,14 +1393,25 @@ def destroy_all(
                 # deleted namespace. Errors fall back to the delete below.
                 if not namespace_uid_at_start:
                     return
-                try:
-                    in_lease["issued"] = bool(
-                        engine.k8s.delete_namespace(namespace, uid=namespace_uid_at_start)
-                    )
-                except NamespaceReplacedError:
-                    in_lease["replaced"] = True
-                except Exception as e:  # noqa: BLE001
-                    logger.debug("in-lease namespace delete failed: %s", e)
+                for attempt in (1, 2):
+                    try:
+                        in_lease["issued"] = bool(
+                            engine.k8s.delete_namespace(namespace, uid=namespace_uid_at_start)
+                        )
+                        return
+                    except NamespaceReplacedError:
+                        in_lease["replaced"] = True
+                        return
+                    except NamespaceTerminatingError:
+                        # Another destroy started it; a Terminating namespace
+                        # cannot be re-added, so waiting outside is safe.
+                        in_lease["terminating"] = True
+                        return
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "in-lease namespace delete attempt %d failed: %s", attempt, e
+                        )
+                        in_lease["error"] = e
 
             spark_op_cfg = engine.config.platform.compute.spark.operator
             watch_list_ok = True
@@ -1421,6 +1436,24 @@ def destroy_all(
                     raise _NamespaceReplaced(
                         f"namespace {namespace} is now a newer deployment with the same name"
                     )
+                if "error" in in_lease and "issued" not in in_lease:
+                    # Deleting outside the lease would let a same-name deploy
+                    # re-add the entry first (operator crash loop). Keep the
+                    # namespace: it is un-watched but intact, and a re-run of
+                    # destroy deletes it.
+                    msg = (
+                        f"Namespace {namespace!r} NOT deleted: the delete failed while the "
+                        f"watch-list lease was held ({in_lease['error']}). It is no longer "
+                        "watched by the Spark Operator; re-run destroy to delete it."
+                    )
+                    logger.error(msg)
+                    results.append(
+                        DeploymentResult(
+                            component="namespace", status=DeploymentStatus.FAILED, message=msg
+                        )
+                    )
+                    report("namespace", DeploymentStatus.FAILED, msg)
+                    return results
                 if "issued" in in_lease:
                     report(
                         "namespace",
@@ -1564,6 +1597,22 @@ def destroy_all(
     # and a redeploy re-created the namespace. Every step below deletes
     # components by name inside the namespace, so stop here rather than tear
     # down the newer deployment (review of LB-157/LB-159).
+    def _note_secretclasses_left() -> None:
+        # The namespace vanished mid-run and teardown by name stopped; say
+        # which cluster-scoped objects were left rather than report clean.
+        if any(r.component == "rbac" for r in results):
+            return
+        left = (
+            f"Cluster-scoped SecretClasses lakebench-s3-credentials-{namespace} "
+            f"and lakebench-s3-ca-cert-{namespace} were not deleted (a redeploy "
+            "may own them now); delete them by hand if no deployment "
+            f"named {namespace} exists"
+        )
+        results.append(
+            DeploymentResult(component="secretclass", status=DeploymentStatus.SKIPPED, message=left)
+        )
+        report("secretclass", DeploymentStatus.SKIPPED, left)
+
     def _stop_if_changed(before: str) -> list[DeploymentResult] | None:
         """Re-check the incarnation before a teardown step (None: carry on).
 
@@ -1583,6 +1632,7 @@ def destroy_all(
                 )
                 logger.warning(note)
                 report("namespace", DeploymentStatus.IN_PROGRESS, note)
+                _note_secretclasses_left()
                 return _namespace_step()
             msg = f"Stopped before {before}: {e}; it was left alone"
             status = DeploymentStatus.SUCCESS
@@ -1598,6 +1648,7 @@ def destroy_all(
 
     unverifiable_msg = None
     if namespace_gone_midway:
+        _note_secretclasses_left()
         return _namespace_step()
     if replaced_msg is None and not stop_after_buckets:
         stopped = _stop_if_changed("infrastructure teardown")

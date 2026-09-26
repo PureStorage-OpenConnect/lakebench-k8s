@@ -361,23 +361,28 @@ class TestDestroyAllWiring:
         assert "left alone" in ns.message
         assert calls.count("delete") == 1
 
-    def test_redeploy_during_unwatch_blocks_delete_and_points_at_repair(self):
-        """In-lease delete failed (API error), then R re-created the name
-        after the lease was released: fall back, do not delete, say repair."""
+    def test_in_lease_delete_error_keeps_the_namespace(self):
+        """Fix review: deleting outside the lease after an in-lease error would
+        let a same-name deploy re-add the entry first. Fail closed instead."""
         cluster = FakeCluster(drain_polls=1)
-        state = {"uid": "uid-1"}
 
         def flaky_delete(ns, uid=None):
-            state["uid"] = "uid-2"  # R lands once the lease is released
             raise K8sResourceError("apiserver 500")
 
         cluster.delete_namespace = flaky_delete
-        results, _, calls, engine = self._run_destroy(cluster, uid_fn=lambda _ns: state["uid"])
-        assert "unwatch:ns-a" in calls
-        assert calls.count("delete") == 1, "the fallback must not delete the redeploy"
+        results, _, calls, engine = self._run_destroy(cluster)
+        assert calls == ["unwatch:ns-a", "delete", "delete", "release"]
         ns = [r for r in results if r.component == "namespace"][-1]
         assert ns.status is DeploymentStatus.FAILED
-        assert "repair-operator" in ns.message
+        assert "re-run destroy" in ns.message
+
+    def test_in_lease_delete_finding_terminating_waits(self):
+        cluster = FakeCluster(phase="Terminating", drain_polls=1)
+        results, _, calls, _ = self._run_destroy(cluster)
+        assert calls == ["unwatch:ns-a", "delete", "release"]
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.SUCCESS
+        assert "another run" in ns.message
 
     def test_gone_mid_teardown_still_drops_the_watch_entry(self):
         """Namespace deleted by hand during infra teardown: skip the rest of
@@ -402,6 +407,9 @@ class TestDestroyAllWiring:
         ns = [r for r in results if r.component == "namespace"][-1]
         assert ns.status is DeploymentStatus.SUCCESS
         assert "already gone" in ns.message
+        sc = [r for r in results if r.component == "secretclass"]
+        assert sc and sc[0].status is DeploymentStatus.SKIPPED
+        assert "lakebench-s3-credentials-ns-a" in sc[0].message
 
     def test_absent_at_start_is_never_deleted(self):
         """Start UID empty: a namespace that appears later is a new deploy."""
