@@ -474,15 +474,15 @@ window consumed. A short ratio says only that the corpus outlasted the window;
 `intake_limit` says why:
 
 - `trickle_rate`: bronze ran a micro-batch on at least 90% of the window's
-  triggers and at least 95% of the triggers between its first and last batch
-  (so a mid-window stall shows), each batch inside the trigger, with corpus
+  triggers and all but 5% (at least one) of the triggers between its first
+  and last batch (so a mid-window stall shows), each batch inside the trigger, with corpus
   left. The trickle, not the pipeline, bounded intake. If silver also kept up
   (its batches finished inside the silver trigger and it committed all but
   two silver triggers and one bronze trigger of what bronze took), the run is
   not saturated, the report shows a warning rather than a failure, and
-  `corpus_drain_seconds` gives the window that would drain the corpus. If
-  silver's commits or batch times were not logged, `pipeline_saturated` is
-  null (unknown) and the report warns.
+  `corpus_drain_seconds` gives the window that would drain the corpus. A
+  silver that logged batches but no commit is stuck and saturated. If silver
+  logged nothing, `pipeline_saturated` is null (unknown) and the report warns.
 - `bronze_capacity`: bronze ran back to back. Its processing is the limit and
   rows/s is its capacity.
 - `below_bronze_capacity`: bronze was idle for part of the window but did not

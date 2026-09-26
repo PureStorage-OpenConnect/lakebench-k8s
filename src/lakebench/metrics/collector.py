@@ -1071,7 +1071,10 @@ class PipelineBenchmark:
         if bronze.total_batches < _TRIGGER_COVERAGE * bronze.elapsed_seconds / trigger_s:
             return False
         span_triggers = bronze.batch_span_seconds / trigger_s + 1
-        return bronze.total_batches >= _TRIGGER_REGULARITY * span_triggers
+        # At least one missed trigger is always allowed, so a short run is
+        # not failed for a single skipped trigger.
+        missed = max(1.0, (1 - _TRIGGER_REGULARITY) * span_triggers)
+        return bronze.total_batches >= span_triggers - missed
 
     def _silver_kept_pace(
         self, silver: list[StageMetrics], silver_committed: int | None, bronze_rows: int
@@ -1085,14 +1088,19 @@ class PipelineBenchmark:
         batches overrun its trigger is behind however small the gap. None
         when the commits, batch times or trigger config are unknown.
         """
-        if not silver or silver_committed is None:
+        if not silver:
+            return None
+        if silver_committed is None or any(not st.latency_ms for st in silver):
+            # A silver that logged batches but no commit is stuck, the worst
+            # case, not an unmeasured one. Only a silver with no batch lines
+            # at all is unknown.
+            if any(st.total_batches or st.input_rows for st in silver):
+                return False
             return None
         sustained = self.config_snapshot.get("sustained") or {}
         silver_trigger_s = _interval_seconds(sustained.get("silver_trigger_interval"))
         bronze_trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
         if not silver_trigger_s or not bronze_trigger_s:
-            return None
-        if any(not s.latency_ms for s in silver):
             return None
         if any(s.latency_ms / 1000.0 >= silver_trigger_s for s in silver if s.latency_ms):
             return False
