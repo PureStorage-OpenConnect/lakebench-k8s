@@ -1885,3 +1885,69 @@ fn scheduled_events_enumerate_once_and_are_evenly_spaced_in_mass() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// c360 golden output
+// ---------------------------------------------------------------------------
+
+/// FNV-1a over every cell of a batch, rendered through arrow's own display
+/// formatter, column by column. Independent of the Parquet encoder, so a
+/// parquet crate bump does not move it; any change to a c360 value does.
+fn batch_digest(b: &arrow::record_batch::RecordBatch) -> u64 {
+    use arrow::util::display::{ArrayFormatter, FormatOptions};
+    let opts = FormatOptions::default().with_null("<null>");
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for &x in bytes {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    for (field, col) in b.schema().fields().iter().zip(b.columns()) {
+        eat(field.name().as_bytes());
+        eat(format!("{:?}", field.data_type()).as_bytes());
+        // Timestamps with a named zone need chrono-tz to render; hash
+        // their epoch values instead.
+        let col = match field.data_type() {
+            arrow::datatypes::DataType::Timestamp(_, _) => {
+                arrow::compute::cast(col, &arrow::datatypes::DataType::Int64).unwrap()
+            }
+            _ => col.clone(),
+        };
+        let f = ArrayFormatter::try_new(col.as_ref(), &opts).unwrap();
+        for i in 0..col.len() {
+            eat(f.value(i).to_string().as_bytes());
+        }
+    }
+    h
+}
+
+#[test]
+fn c360_output_is_pinned() {
+    // The programme reuses c360 s10/s100 evidence only while the c360
+    // generator's output is unchanged (PROGRAMME section 5). These digests
+    // were captured from integrate/v1.5.0's merge base with lane T (ab585eb)
+    // and confirmed against a full generate run hashed file by file. A
+    // change here is a c360 data change: re-run the c360 evidence, then
+    // update the digests deliberately.
+    use datagen_rs::customer360::{build_batch, Config};
+    use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
+    let loyalty = LoyaltyLookup::build(43, 10_000);
+    let sampler = CustomerIdSampler::new(10_000);
+    let got: Vec<u64> = [0u64, 1, 7]
+        .iter()
+        .map(|&fid| {
+            let mut cfg = Config::new(43, fid, 300);
+            cfg.customer_id_max = 10_000;
+            batch_digest(&build_batch(&cfg, &loyalty, &sampler))
+        })
+        .collect();
+    let want: Vec<u64> = vec![
+        17_364_953_605_523_935_220,
+        12_687_529_150_934_121_339,
+        12_107_885_961_841_994_623,
+    ];
+    assert_eq!(got, want, "c360 generator output changed");
+}
