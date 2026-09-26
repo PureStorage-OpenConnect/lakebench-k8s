@@ -284,3 +284,27 @@ def test_delta_vacuum_reaches_trino_in_one_execute():
     cmd = k8s.exec_in_pod.call_args.args[1]
     assert cmd[:2] == ["trino", "--execute"]
     assert cmd[2].index("SET SESSION") < cmd[2].index("CALL lakehouse.system.vacuum")
+
+
+def test_pre_benchmark_maintenance_waits_for_completion():
+    """expire_snapshots / orphan removal must not overlap the benchmark."""
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod)
+    assert "timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT" in src
+    assert run_mod.PRE_BENCHMARK_MAINTENANCE_TIMEOUT >= 1800
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_maintenance_passes_its_timeout_and_journals_elapsed():
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (0, "", "")
+    j = MagicMock()
+    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m", timeout=1800)
+    assert {c.kwargs["timeout"] for c in k8s.exec_in_pod.call_args_list} == {1800}
+    d = _journal_details(j, "Iceberg maintenance")
+    assert "elapsed_seconds" in d and d["statement_timeout_seconds"] == 1800
