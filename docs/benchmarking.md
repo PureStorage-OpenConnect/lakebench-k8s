@@ -630,7 +630,7 @@ rounds for trend analysis.
 | Gold latency >> refresh interval | Silver table too large for gold executors | Increase `gold_refresh_executors` |
 | QpH dropping across rounds | Table growth degrading queries | Add Trino workers or memory |
 | Q9 contention > 20% | Benchmark rounds colliding with gold rewrites | Increase `gold_refresh_interval` or `benchmark_interval` |
-| `total_s3_objects` growing unbounded | Retention not keeping pace with snapshot growth | Decrease `retention_threshold` or `retention_interval` |
+| `total_s3_objects` growing unbounded | Maintenance not keeping pace, or failing | Iceberg: check the journal's Iceberg maintenance events for timed-out or failed statements, then decrease `retention_interval`. Lowering `retention_threshold` below `1h` does nothing while streams are live (expiry is floored at 1 h, orphan removal at 24 h 10 min). Tables created before metadata retention was added keep every `metadata.json`; recreate them with a fresh deployment. Delta: continuous mode has no effective table maintenance in v1.6 |
 
 ---
 

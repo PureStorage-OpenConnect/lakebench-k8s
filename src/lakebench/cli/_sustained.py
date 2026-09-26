@@ -1999,6 +1999,12 @@ def _run_sustained(
             print_info(
                 f"Iceberg retention: every {retention_interval}s (threshold: {retention_threshold})"
             )
+            from lakebench.config.loader import retention_floor_advisory
+
+            floor_msg = retention_floor_advisory(cfg)
+            if floor_msg and cfg.architecture.pipeline.mode.value != "sustained":
+                # Continuous configs already warned at load.
+                print_warning(floor_msg)
 
         # Iceberg compaction scheduling (v1.1.0)
         compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
