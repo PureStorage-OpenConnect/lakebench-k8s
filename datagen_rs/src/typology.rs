@@ -12,6 +12,7 @@
 
 use crate::hash::{splitmix64, Rng};
 use crate::kyc::is_customer;
+use crate::robustness::Perturbation;
 use crate::world::{entity_type, TYPE_PERSON};
 
 pub struct Spec {
@@ -344,6 +345,34 @@ pub fn schedule_ex(
     corpus_end_us: i64,
     country: &[&'static str],
 ) -> Vec<Instance> {
+    schedule_p(
+        world_seed,
+        seed,
+        total_rows,
+        population,
+        corpus_start_us,
+        corpus_end_us,
+        country,
+        &Perturbation::NONE,
+    )
+}
+
+/// `schedule_ex` under the robustness perturbation (crate::robustness): every
+/// dormant_reactivation dormancy length is multiplied by `perturb.dormancy`.
+/// No draw is added or removed, so instances, participants and row counts are
+/// those of the unperturbed schedule. `Perturbation::NONE` reproduces
+/// `schedule_ex` bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_p(
+    world_seed: i64,
+    seed: i64,
+    total_rows: i64,
+    population: usize,
+    corpus_start_us: i64,
+    corpus_end_us: i64,
+    country: &[&'static str],
+    perturb: &Perturbation,
+) -> Vec<Instance> {
     let pool = person_pool(population, world_seed);
     let corridor = corridor_pool(&pool, country);
     let cust_of = |v: &[u64]| -> Vec<u64> {
@@ -523,7 +552,11 @@ pub fn schedule_ex(
                     // about once a month goes 45 days without a send about one
                     // time in five). Short episodes miss an absolute 90-day
                     // rule; that miss is honest.
-                    let d_days = (DORMANCY_MIN_DAYS
+                    // Robustness perturbation: both bounds scale by
+                    // perturb.dormancy, so each draw is m times its
+                    // unperturbed length. 45.0 * 1.0 is exact, so the
+                    // default is bit-identical.
+                    let d_days = ((DORMANCY_MIN_DAYS * perturb.dormancy)
                         * (DORMANCY_MAX_DAYS / DORMANCY_MIN_DAYS).powf(rng.unit()))
                         as i64;
                     let dur = (d_days * day).min(max_dur);
