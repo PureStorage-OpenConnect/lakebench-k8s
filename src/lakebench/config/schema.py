@@ -761,9 +761,10 @@ class SustainedConfig(ConfigModel):
         default=50,
         ge=1,
         description=(
-            "Max Parquet files bronze-ingest reads per micro-batch. "
-            "This is the primary throughput cap for the streaming pipeline. "
-            "At 50 files * ~122K rows/file, each batch processes ~6.1M rows."
+            "Max Parquet files bronze-ingest reads per trigger. With "
+            "bronze_trigger_interval it sets the offered load, which does not "
+            "change with scale: 50 files per 30 s is about 107 MB/s (c360: "
+            "15,491 rows per 64 MB file, ~775K rows per trigger)."
         ),
     )
     bronze_target_file_size_mb: int = Field(

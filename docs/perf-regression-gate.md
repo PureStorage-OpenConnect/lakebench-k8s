@@ -70,8 +70,8 @@ A run is refused, never compared, when:
   report it as missing, a regression;
 - it is a continuous run in which no data flowed (`ingest_ratio` or rows/s
   zero or missing), whose `ingest_ratio` is above 1.05 (bronze ingested more
-  rows than datagen produced, which inflates rows/s; below 1 is saturation
-  and stays comparable), or whose freshness was not measured;
+  rows than datagen produced, which inflates rows/s; below 1 is a corpus
+  larger than the trickle rate x window, or saturation, and stays comparable), or whose freshness was not measured;
 - it is a continuous run whose window (stage seconds) differs from the pinned
   `run_duration` by more than 10%. A `--duration` override is not recorded in
   the snapshot, so this is how it is caught;
