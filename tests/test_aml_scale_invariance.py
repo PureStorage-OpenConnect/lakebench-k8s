@@ -53,9 +53,11 @@ def _prereg_dict():
 
 
 @pytest.fixture
-def prereg_path(tmp_path):
+def prereg_path(tmp_path, monkeypatch):
+    """The cut-down pre-registration, standing in for the packaged file."""
     path = tmp_path / "prereg.json"
     path.write_text(json.dumps(_prereg_dict()))
+    monkeypatch.setattr(si, "_packaged_prereg_path", lambda: path)
     return path
 
 
@@ -88,14 +90,20 @@ def _run(tmp_path, name, frame, prereg_path, *, scale, seed=SEED, mutate=None):
             "corpus_seed": seed,
             "corpus_seed_check": {"claimed_seed": seed, "matched_share": 1},
             "corpus_scale": {"n_entities": round(eps * scale), "scale": scale},
+            "label_role": prereg["unit_of_scoring"]["label_role"],
+            "aml_features_sha256": "f" * 64,
+            "model_versions": ["test-model"],
         },
         collect_outputs=True,
     )
+    fg.add_pass(rep, "corpus_fully_keyed", True)
+    fg.add_pass(rep, "registered_label_role", True)
     outputs = rep.pop("_model_outputs")
     d = tmp_path / name
     d.mkdir()
     paths = fg.write_model_outputs(outputs, str(d / "gate"))
-    rep["model_outputs"] = {k: {"path": v} for k, v in paths.items()}
+    fps = fg.output_fingerprints(outputs)
+    rep["model_outputs"] = {k: {"path": v, "fingerprint": fps.get(k)} for k, v in paths.items()}
     if mutate:
         mutate(rep, paths)
     out = d / "gate.json"
@@ -107,9 +115,13 @@ def _gate_scale():
     return _prereg_dict()["corpora"]["gate_scale"]
 
 
+def _large_scale():
+    return max(_prereg_dict()["density"]["scales"])
+
+
 def _pair(tmp_path, prereg_path, small, large, **kw):
     a = _run(tmp_path, "small", small, prereg_path, scale=_gate_scale())
-    b = _run(tmp_path, "large", large, prereg_path, scale=_gate_scale() * 5, **kw)
+    b = _run(tmp_path, "large", large, prereg_path, scale=_large_scale(), **kw)
     return si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
 
 
@@ -161,7 +173,7 @@ def test_missing_typology_fails(tmp_path, prereg_path):
         rep["typologies"].pop("beh")
 
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
-    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5, mutate=drop)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale(), mutate=drop)
     v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
     assert v["pass"] is False
     assert any("missing" in w for w in v["typologies"]["beh"]["reasons"])
@@ -178,7 +190,7 @@ def test_typology_absent_from_scores_fails(tmp_path, prereg_path):
         "large",
         _frame(15000, 2),
         prereg_path,
-        scale=_gate_scale() * 5,
+        scale=_large_scale(),
         mutate=empty_scores,
     )
     v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
@@ -204,7 +216,7 @@ def test_missing_unit_features_is_an_error(tmp_path, prereg_path):
         rep["model_outputs"].pop("unit_features")
 
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
-    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5, mutate=drop)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale(), mutate=drop)
     v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
     assert v["verdict"] == "error" and v["pass"] is False
     assert "unit_features" in v["errors"][0]
@@ -217,7 +229,7 @@ def test_seed_mismatch_fails(tmp_path, prereg_path):
 
 def test_small_not_at_gate_scale_fails(tmp_path, prereg_path):
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale() * 3)
-    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale())
     v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
     assert v["pass"] is False and v["checks"]["small_at_gate_scale"] is False
 
@@ -226,7 +238,7 @@ def test_changed_preregistration_fails(tmp_path, prereg_path):
     """A report scored under another pre-registration (a tolerance tuned after
     the fact) cannot be compared under this one."""
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
-    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale())
     p = _prereg_dict()
     p["scale_invariance"]["ap_diff_abs_max"] = p["scale_invariance"]["ap_diff_abs_max"] * 2
     other = tmp_path / "other.json"
@@ -241,7 +253,7 @@ def test_report_verdict_not_ok_fails(tmp_path, prereg_path):
         rep["verdict"] = "error"
 
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
-    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5, mutate=bad)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale(), mutate=bad)
     v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
     assert v["pass"] is False
 
@@ -320,7 +332,7 @@ def test_cli_exit_codes(tmp_path, prereg_path):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
-    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale())
     out = tmp_path / "d8.json"
     args = ["--small", str(a), "--large", str(b), "--prereg", str(prereg_path)]
     assert mod.main([*args, "--out", str(out)]) == 0
@@ -329,13 +341,13 @@ def test_cli_exit_codes(tmp_path, prereg_path):
     assert mod.main([*missing, "--prereg", str(prereg_path)]) == 1
     c = tmp_path / "shifted"
     c.mkdir()
-    s = _run(c, "large", _frame(15000, 2, shift=0.5), prereg_path, scale=_gate_scale() * 5)
+    s = _run(c, "large", _frame(15000, 2, shift=0.5), prereg_path, scale=_large_scale())
     assert mod.main(["--small", str(a), "--large", str(s), "--prereg", str(prereg_path)]) == 2
 
 
 def test_verdict_records_report_hashes(tmp_path, prereg_path):
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
-    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale())
     v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
     assert v["inputs"]["small"]["report_sha256"] == hashlib.sha256(a.read_bytes()).hexdigest()
     assert v["prereg_sha256"] == hashlib.sha256(prereg_path.read_bytes()).hexdigest()
@@ -352,8 +364,130 @@ def test_cluster_style_string_typology_column_reads(tmp_path, prereg_path):
 
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
     b = _run(
-        tmp_path, "large", _frame(15000, 2), prereg_path, scale=_gate_scale() * 5, mutate=as_string
+        tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale(), mutate=as_string
     )
     v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
     assert v["pass"] is True, v["errors"]
     assert v["typologies"]["beh"]["large"]["n_scored"] == 15000
+
+
+# ---------------------------------------------------------------------------
+# Review findings: provenance and stale-file cases that must not pass
+# ---------------------------------------------------------------------------
+
+
+def _perturb_scores(rep, paths):
+    sc = pd.read_parquet(paths["oof_scores"])
+    sc["score"] = (sc["score"] * 0.999).astype("float32")
+    sc.to_parquet(paths["oof_scores"], index=False)
+
+
+def _perturb_feature(rep, paths):
+    uf = pd.read_parquet(paths["unit_features"])
+    uf["noise_b"] = uf["noise_b"] + 1e-9
+    uf.to_parquet(paths["unit_features"], index=False)
+
+
+def _set_pass(name, value):
+    def f(rep, paths):
+        rep["passes"][name] = value
+
+    return f
+
+
+def _set_prov(name, value):
+    def f(rep, paths):
+        rep["provenance"][name] = value
+
+    return f
+
+
+def _set_scale(factor):
+    def f(rep, paths):
+        eps = _prereg_dict()["corpora"]["entities_per_scale_unit"]
+        rep["provenance"]["corpus_scale"]["n_entities"] = round(eps * _large_scale() * factor)
+
+    return f
+
+
+@pytest.mark.parametrize(
+    "mutate,expect",
+    [
+        (_perturb_scores, "fingerprint"),
+        (_perturb_feature, None),
+        (_set_pass("corpus_fully_keyed", False), "corpus_fully_keyed"),
+        (_set_pass("registered_label_role", False), "registered_label_role"),
+        (_set_pass("library_versions_match", False), "library_versions_match"),
+        (_set_prov("label_role", "participant"), "label_role"),
+        (_set_prov("model_versions", ["other-model"]), "same_generator"),
+        (_set_prov("aml_features_sha256", "e" * 64), "same_feature_code"),
+        (_set_scale(0.5), "large_at_registered_scale"),
+    ],
+    ids=[
+        "stale_scores",
+        "stale_unit_features",
+        "not_fully_keyed",
+        "label_role_override_pass",
+        "library_mismatch",
+        "label_role_participant",
+        "other_generator",
+        "other_feature_code",
+        "large_not_at_registered_scale",
+    ],
+)
+def test_provenance_and_stale_outputs_fail(tmp_path, prereg_path, mutate, expect):
+    a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale(), mutate=mutate)
+    v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
+    assert v["pass"] is False and v["verdict"] in ("fail", "error")
+    text = json.dumps(v)
+    if expect:
+        assert expect in text
+    if mutate is _perturb_feature:
+        assert v["features"]["noise_b"]["fingerprint_match"] is False
+
+
+def test_non_calibration_seed_fails(tmp_path, prereg_path):
+    other = SEED + 1  # role "other"
+    a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale(), seed=other)
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale(), seed=other)
+    v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
+    assert v["pass"] is False
+    assert any("corpus_role" in e for e in v["errors"])
+
+
+def test_unpackaged_preregistration_is_refused(tmp_path, prereg_path, monkeypatch):
+    """Both runs and D8 under the same overridden file still fail: only the
+    packaged pre-registration can certify."""
+    a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
+    b = _run(tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale())
+    monkeypatch.setattr(si, "_packaged_prereg_path", lambda: PREREG)
+    v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
+    assert v["pass"] is False and v["checks"]["packaged_preregistration"] is False
+    assert v["prereg_override"]["path"] == str(prereg_path)
+
+
+def test_same_report_twice_fails(tmp_path, prereg_path):
+    a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
+    v = si.evaluate_d8(str(a), str(a), prereg_path=str(prereg_path))
+    assert v["pass"] is False
+
+
+def test_fingerprint_is_order_and_dtype_independent():
+    df = pd.DataFrame(
+        {
+            "group": np.arange(6, dtype=np.int64),
+            "label": np.array([0, 1, 0, 1, 0, 0], dtype=np.int8),
+            "score": np.array([0.1, 0.9, -0.0, np.nan, 0.2, 0.3], dtype=np.float32),
+            "weight": np.ones(6),
+        }
+    )
+    cols = list(fg.SCORES_FINGERPRINT_COLUMNS)
+    base = fg.fingerprint(df, cols)
+    other = df.sample(frac=1, random_state=3).astype({"group": np.int32, "label": np.int64})
+    other["score"] = other["score"].astype(np.float64)
+    other.loc[other["score"] == 0, "score"] = 0.0
+    assert fg.fingerprint(other, cols) == base
+    changed = df.copy()
+    changed.loc[0, "score"] = np.float32(0.1000001)
+    assert fg.fingerprint(changed, cols) != base

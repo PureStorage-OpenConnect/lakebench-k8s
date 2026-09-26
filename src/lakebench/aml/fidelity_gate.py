@@ -790,6 +790,57 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
     }
 
 
+#: Columns of oof_scores covered by its per-typology fingerprint: what D8
+#: reads back to recompute AP.
+SCORES_FINGERPRINT_COLUMNS = ("group", "label", "score", "weight")
+
+
+def _canonical(series):
+    """A column as int64 codes (integers, bools, float bit patterns with one
+    NaN and no negative zero) or str objects, so the same values hash the same
+    whichever writer (pandas here, Spark on the cluster) and reader produced
+    the dtype."""
+    import numpy as np
+    import pandas as pd
+
+    if pd.api.types.is_bool_dtype(series) or pd.api.types.is_integer_dtype(series):
+        return pd.Series(series.to_numpy(dtype=np.int64))
+    if pd.api.types.is_float_dtype(series):
+        a = series.to_numpy(dtype=np.float64) + 0.0
+        a[np.isnan(a)] = np.nan
+        return pd.Series(a.view(np.int64))
+    return pd.Series(series.astype(str).to_numpy(dtype=object))
+
+
+def fingerprint(frame, columns) -> str:
+    """Order-independent content hash of ``columns`` of ``frame``: the
+    wrapping uint64 sum of per-row hashes. Lets D8 prove a persisted table is
+    the one this report scored (a stale file from another run on the same
+    corpus has the same row counts)."""
+    import numpy as np
+    import pandas as pd
+
+    canon = pd.DataFrame({c: _canonical(frame[c].reset_index(drop=True)) for c in columns})
+    rows = pd.util.hash_pandas_object(canon, index=False).to_numpy(dtype=np.uint64)
+    return format(int(np.sum(rows, dtype=np.uint64)), "016x")
+
+
+def output_fingerprints(outputs: dict) -> dict:
+    """{"oof_scores": {typology: fp}, "unit_features": {column: fp}}: scores
+    row-wise per typology over SCORES_FINGERPRINT_COLUMNS, the unit table per
+    column (D8 reads it one column at a time)."""
+    out: dict[str, dict] = {"oof_scores": {}, "unit_features": {}}
+    scores = outputs.get("scores")
+    if scores is not None and len(scores):
+        typ = scores["typology"].astype(str)
+        for t in sorted(typ.unique()):
+            out["oof_scores"][t] = fingerprint(scores[typ == t], SCORES_FINGERPRINT_COLUMNS)
+    units = outputs.get("unit_features")
+    if units is not None:
+        out["unit_features"] = {c: fingerprint(units, [c]) for c in units.columns}
+    return out
+
+
 def write_model_outputs(outputs: dict, base: str) -> dict:
     """Write ``base``_oof_scores.parquet, ``base``_feature_importance.parquet,
     ``base``_model_card.json and (when present) ``base``_unit_features.parquet
