@@ -1400,12 +1400,13 @@ def test_live_streams_run_cannot_be_a_baseline(env, capsys):
 def _simulate_continuous_loop(run, ri, ci, bench_s, warmup=300, bench_interval=300):
     """(maintenance rounds, compaction rounds) the _run_sustained loop fires.
 
-    Worst case: every maintenance and compaction round uses its whole budget,
+    Worst case: every maintenance and compaction round uses its whole budget
+    plus the statement grace,
     every maintenance round ends on a timeout (so compaction is held one
     statement timeout), and each in-stream benchmark round takes bench_s and
     wins the loop pass (it `continue`s). Mirrors the order in _run_sustained.
     """
-    from lakebench.cli._sustained import continuous_round_bounds
+    from lakebench.cli._sustained import _BUDGET_GRACE_SECONDS, continuous_round_bounds
 
     t, next_round, next_maint, next_comp = 0.0, float(warmup), float(ri), float(ci)
     last_round = hold = 0.0
@@ -1420,7 +1421,8 @@ def _simulate_continuous_loop(run, ri, ci, bench_s, warmup=300, bench_interval=3
         if elapsed >= next_maint:
             b = continuous_round_bounds(ri, run - t)
             if b:
-                t += b[1]
+                # The last statement may overrun the budget by the grace.
+                t += b[1] + _BUDGET_GRACE_SECONDS
                 maint += 1
                 hold = t + b[0]
             next_maint = t + ri
@@ -1430,7 +1432,7 @@ def _simulate_continuous_loop(run, ri, ci, bench_s, warmup=300, bench_interval=3
             else:
                 b = continuous_round_bounds(ci, run - t)
                 if b:
-                    t += b[1]
+                    t += b[1] + _BUDGET_GRACE_SECONDS
                     comp += 1
                 next_comp = t + ci
         wake = min(elapsed + 30, next_round if bench_s else run, next_maint, next_comp, run)
@@ -1461,4 +1463,4 @@ def test_continuous_pinned_config_fires_maintenance_and_compaction():
 def test_loop_model_rejects_the_old_cadence():
     """Guards the model: retention_interval = run_duration fired nothing."""
     assert _simulate_continuous_loop(1800, 1800, 3600, 0)[0] == 0
-    assert _simulate_continuous_loop(1800, 600, 900, 120)[0] < 2  # the first try
+    assert _simulate_continuous_loop(1800, 600, 900, 60)[0] < 2  # the first try
