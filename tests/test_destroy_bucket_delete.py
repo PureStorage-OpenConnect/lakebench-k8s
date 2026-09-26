@@ -200,8 +200,10 @@ class TestDestroyAllBuckets:
     """End to end through destroy_all's bucket step with verdicts per bucket."""
 
     _on_sql = None
+    sql_timeouts: list[int] = []
 
-    def _exec(self, _engine, _k8s, _pod, _ns, sql):
+    def _exec(self, _engine, _k8s, _pod, _ns, sql, timeout=30):
+        self.sql_timeouts.append(timeout)
         if self._on_sql:
             self._on_sql(sql)
 
@@ -237,6 +239,7 @@ class TestDestroyAllBuckets:
     ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
+        self.sql_timeouts = []
         engine = MagicMock()
         cfg = engine.config
         cfg.name = "a"
@@ -697,10 +700,17 @@ class TestDestroyAllBuckets:
         boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
 
         def missing(sql):
+            # Real Trino CLI output, as exec_sql wraps it.
             if "gold" in sql and sql.startswith("DROP"):
-                raise RuntimeError("Query failed: Schema 'gold' does not exist")
+                raise RuntimeError(
+                    "exec_sql failed (rc=1): Query 20260926_101010_00002_abcde failed: "
+                    "line 1:1: Schema 'gold' does not exist"
+                )
             if "gold" in sql:
-                raise RuntimeError("Query failed: TABLE_NOT_FOUND: Table 'gold.t' does not exist")
+                raise RuntimeError(
+                    "exec_sql failed (rc=1): Query 20260926_101010_00001_abcde failed: "
+                    "line 1:13: Table 'lakehouse.gold.t' does not exist"
+                )
 
         self._on_sql = missing
         try:
@@ -713,6 +723,8 @@ class TestDestroyAllBuckets:
             self._on_sql = None
         tables = [x for x in self._results if x.component == "table-cleanup"][-1]
         assert tables.status is DeploymentStatus.SUCCESS, tables.message
+        # Maintenance on a large table runs for minutes; 30 s killed it.
+        assert self.sql_timeouts and min(self.sql_timeouts) >= 600
 
     def test_stale_absent_verdict_is_not_forgotten(self):
         """The tag read said NoSuchBucket but the bucket is there: keep it on
@@ -729,3 +741,25 @@ class TestDestroyAllBuckets:
         assert r.status is DeploymentStatus.FAILED
         assert "not confirmed gone" in r.message
         self.engine.k8s.delete_namespace.assert_not_called()
+
+    def test_missing_catalog_fails_table_cleanup(self):
+        """Only table/schema-missing is a clean skip; a missing catalog is not."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+
+        def no_catalog(sql):
+            raise RuntimeError(
+                "exec_sql failed (rc=1): Query 20260926_101010_00003_abcde failed: "
+                "line 1:13: Catalog 'lakehouse' not found"
+            )
+
+        self._on_sql = no_catalog
+        try:
+            self._run(
+                boto,
+                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+                maint=("trino", "trino-coordinator-0", "lakehouse"),
+            )
+        finally:
+            self._on_sql = None
+        tables = [x for x in self._results if x.component == "table-cleanup"][-1]
+        assert tables.status is DeploymentStatus.FAILED

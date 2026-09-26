@@ -38,6 +38,12 @@ DEFAULT_NAMESPACE_WAIT_TIMEOUT = 600
 _NAMESPACE_POLL_SECONDS = 3.0
 _NAMESPACE_PROGRESS_SECONDS = 30.0
 
+# Per-statement timeout for destroy's table maintenance and DROP. Maintenance
+# at 0s retention and remove_orphan_files on a large table run for minutes;
+# the 30 s exec default killed them client-side (and, before exec_sql checked
+# the exit code, reported them as done).
+_TABLE_SQL_TIMEOUT = 600
+
 # Delays before each in-lease namespace delete attempt (seconds).
 _IN_LEASE_DELETE_BACKOFF = (0.0, 2.0, 5.0)
 
@@ -49,17 +55,31 @@ _sleep = time.sleep
 # Engine errors meaning "this table (or its schema) is not there": a pipeline
 # that never wrote a table (deploy-only, generate-only, failed before gold, or
 # a re-run after the drop) is a clean teardown, not a failed one.
+#
+# Anchored on the engines' own error forms, never free text, so an echoed SQL
+# line or a missing catalog / procedure / metastore error cannot match:
+# - Trino CLI: "Query <id> failed: [line N:M: ]Table 'c.s.t' does not exist"
+#   (error code TABLE_NOT_FOUND) and "... Schema 's' does not exist"
+#   (SCHEMA_NOT_FOUND); the codes themselves appear with --debug.
+# - Spark (beeline): "[TABLE_OR_VIEW_NOT_FOUND]" and "[SCHEMA_NOT_FOUND]"
+#   error classes.
+_TRINO_FAILED = r"Query \S+ failed: (?:line \d+:\d+: )?"
+_SCHEMA_MISSING_PATTERNS = (
+    _TRINO_FAILED + r"Schema '[^'\n]+' does not exist",
+    r"\[SCHEMA_NOT_FOUND\]",
+    r"\bSCHEMA_NOT_FOUND\b",
+)
 _TABLE_MISSING_RE = re.compile(
-    r"TABLE_NOT_FOUND|TABLE_OR_VIEW_NOT_FOUND|SCHEMA_NOT_FOUND|NoSuchTableException"
-    r"|NoSuchNamespaceException|Table or view not found"
-    r"|\b(table|schema|namespace)\b[^\n]{0,200}?\bdoes not exist",
-    re.IGNORECASE,
+    "|".join(
+        (
+            _TRINO_FAILED + r"Table '[^'\n]+' does not exist",
+            r"\[TABLE_OR_VIEW_NOT_FOUND\]",
+            r"\bTABLE_NOT_FOUND\b",
+        )
+        + _SCHEMA_MISSING_PATTERNS
+    )
 )
-_SCHEMA_MISSING_RE = re.compile(
-    r"SCHEMA_NOT_FOUND|NoSuchNamespaceException"
-    r"|\b(schema|namespace)\b[^\n]{0,200}?\bdoes not exist",
-    re.IGNORECASE,
-)
+_SCHEMA_MISSING_RE = re.compile("|".join(_SCHEMA_MISSING_PATTERNS))
 
 
 def _is_table_missing(e: Exception) -> bool:
@@ -1303,7 +1323,14 @@ def destroy_all(
                         # destructive; re-check before each statement.
                         _check_same_namespace(engine, namespace, namespace_token_at_start)
                         try:
-                            exec_sql(maint_engine, engine.k8s, pod_name, namespace, sql)
+                            exec_sql(
+                                maint_engine,
+                                engine.k8s,
+                                pod_name,
+                                namespace,
+                                sql,
+                                timeout=_TABLE_SQL_TIMEOUT,
+                            )
                         except Exception as e:
                             if _is_table_missing(e):
                                 # Nothing to maintain; skip the rest for it.
@@ -1321,7 +1348,14 @@ def destroy_all(
                     if drop_sql:
                         _check_same_namespace(engine, namespace, namespace_token_at_start)
                         try:
-                            exec_sql(maint_engine, engine.k8s, pod_name, namespace, drop_sql)
+                            exec_sql(
+                                maint_engine,
+                                engine.k8s,
+                                pod_name,
+                                namespace,
+                                drop_sql,
+                                timeout=_TABLE_SQL_TIMEOUT,
+                            )
                         except Exception as e:
                             if _is_schema_missing(e):
                                 # DROP ... IF EXISTS still errors on some
