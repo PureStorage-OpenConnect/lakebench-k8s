@@ -960,6 +960,7 @@ class K8sClient:
         command: list[str],
         namespace: str | None = None,
         container: str | None = None,
+        timeout: int = 30,
     ) -> tuple[int, str, str]:
         """Execute a command in a pod.
 
@@ -968,6 +969,8 @@ class K8sClient:
             command: Command to execute
             namespace: Namespace
             container: Container name (optional)
+            timeout: Seconds before the local kubectl exec is killed; the
+                result is then ``(1, "", "Command timed out")``.
 
         Returns:
             Tuple of (exit_code, stdout, stderr)
@@ -986,7 +989,7 @@ class K8sClient:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout,
             )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:

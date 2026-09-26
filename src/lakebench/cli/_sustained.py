@@ -722,19 +722,24 @@ def _run_iceberg_maintenance(
 
     maintained = 0
     expected_ops = 0
+    failures: list[str] = []
     for table in table_names:
         ops = build_sql(table)
         expected_ops += len(ops)
         for sql in ops:
+            # exec_sql raises on a real failure (non-zero exit, timeout);
+            # a failed round is recorded, never fatal to the run.
             try:
                 exec_sql(engine, k8s, pod_name, namespace, sql)
                 maintained += 1
             except Exception as e:
+                failures.append(f"{table}: {e}")
                 logger.warning("%s maintenance failed for %s: %s", table_format.title(), table, e)
 
+    colour = "yellow" if failures else "green"
     console.print(
-        f"  {table_format.title()} maintenance ({engine}): {maintained}/{expected_ops} "
-        f"operations (threshold: {retention_threshold})"
+        f"  [{colour}]{table_format.title()} maintenance ({engine}): {maintained}/{expected_ops} "
+        f"operations[/{colour}] (threshold: {retention_threshold})"
     )
     _journal_safe(
         j.record,
@@ -746,6 +751,8 @@ def _run_iceberg_maintenance(
             "retention_threshold": retention_threshold,
             "operations_succeeded": maintained,
             "operations_total": expected_ops,
+            "operations_failed": len(failures),
+            "failures": failures[:5],
         },
     )
 
@@ -824,17 +831,38 @@ def _run_iceberg_compaction(
             return build_compaction_sql(engine, catalog, tbl, file_size_threshold)
 
     compacted = 0
+    total_ops = 0
+    failures: list[str] = []
     for table in table_names:
         for sql in build_sql(table):
+            total_ops += 1
+            # exec_sql raises on a real failure (non-zero exit, timeout); a
+            # failed compaction is recorded, never fatal to the run.
             try:
                 exec_sql(engine, k8s, pod_name, namespace, sql)
                 compacted += 1
             except Exception as e:
+                failures.append(f"{table}: {e}")
                 logger.warning("%s compaction failed for %s: %s", table_format.title(), table, e)
 
+    colour = "yellow" if failures else "green"
     console.print(
-        f"  {table_format.title()} compaction ({engine}): {compacted}/{len(table_names)} "
-        f"tables (threshold: {file_size_threshold})"
+        f"  [{colour}]{table_format.title()} compaction ({engine}): {compacted}/{total_ops} "
+        f"operations on {len(table_names)} tables[/{colour}] (threshold: {file_size_threshold})"
+    )
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_HEALTH,
+        message=f"{table_format.title()} compaction",
+        details={
+            "engine": engine,
+            "table_format": table_format,
+            "file_size_threshold": file_size_threshold,
+            "operations_succeeded": compacted,
+            "operations_total": total_ops,
+            "operations_failed": len(failures),
+            "failures": failures[:5],
+        },
     )
 
 

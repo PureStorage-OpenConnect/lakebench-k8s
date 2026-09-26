@@ -219,12 +219,19 @@ def exec_sql(
     pod_name: str,
     namespace: str,
     sql: str,
+    timeout: int = 30,
 ) -> None:
-    """Execute a single SQL statement on the given engine pod."""
+    """Execute a single SQL statement on the given engine pod.
+
+    Raises ``RuntimeError`` when the statement fails (non-zero exit from the
+    Trino CLI or beeline, a kubectl exec error, or ``timeout`` expiring), with
+    the engine's stdout and stderr in the message. ``K8sClient.exec_in_pod``
+    never raises, so ignoring its result reported every failure as success.
+    """
     if engine == "trino":
-        k8s.exec_in_pod(pod_name, ["trino", "--execute", sql], namespace)
+        result = k8s.exec_in_pod(pod_name, ["trino", "--execute", sql], namespace, timeout=timeout)
     elif engine == "spark-thrift":
-        k8s.exec_in_pod(
+        result = k8s.exec_in_pod(
             pod_name,
             [
                 "/opt/spark/bin/beeline",
@@ -236,7 +243,14 @@ def exec_sql(
             ],
             namespace,
             container="spark-thrift",
+            timeout=timeout,
         )
+    else:
+        raise ValueError(f"Unsupported engine for exec_sql: {engine}")
+    rc, stdout, stderr = result
+    if rc != 0:
+        detail = " | ".join(x.strip() for x in (stdout or "", stderr or "") if x and x.strip())
+        raise RuntimeError(f"exec_sql failed (rc={rc}): {detail or 'no output'}")
 
 
 def query_sql(
