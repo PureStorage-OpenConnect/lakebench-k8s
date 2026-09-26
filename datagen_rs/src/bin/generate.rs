@@ -711,7 +711,11 @@ fn pacs008_main() {
         let i1 = base_start(fid + 1).min(slice_i1).max(i0);
         let n_base = (i1 - i0) as usize;
 
-        let cap = n_base + n_typ;
+        // Scheduled rows (D2) arrive in proportion to the random ones; size
+        // for them too so the six row vectors do not reallocate to 2x.
+        let n_sched_est =
+            (n_base as u128 * regular.n_sched as u128 / regular.n_rand.max(1) as u128) as usize;
+        let cap = n_base + n_typ + n_sched_est + n_sched_est / 10;
         let mut orig = Vec::with_capacity(cap);
         let mut bene = Vec::with_capacity(cap);
         let mut ts_us = Vec::with_capacity(cap);
