@@ -636,3 +636,56 @@ class TestDestroyAllBuckets:
         assert boto.buckets == {}
         assert r.status is DeploymentStatus.FAILED
         assert "still listed as created" in r.message
+
+    # -- fourth review ----------------------------------------------------
+
+    def test_rerun_forgets_recorded_buckets_that_are_already_gone(self):
+        """After a failed record update the buckets are gone; a re-run must
+        still take them off the record (create_namespace=false keeps it)."""
+        boto = FakeBoto({"a-gold": []})
+        self._run(
+            boto,
+            {"a-bronze": "NOT_FOUND", "a-silver": "NOT_FOUND", "a-gold": "MATCH"},
+            created={"a-bronze", "a-silver", "a-gold"},
+        )
+        self.forget.assert_called_once()
+        assert sorted(self.forget.call_args.args[2]) == ["a-bronze", "a-gold", "a-silver"]
+
+    def test_unreadable_uid_before_record_update_is_failed(self):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        calls = {"n": 0}
+
+        def uid(_ns):
+            calls["n"] += 1
+            # pre-bucket reads, before-loop, three empties, three deletes;
+            # the read guarding the record update fails.
+            if calls["n"] == self.PRE + 8:
+                raise RuntimeError("apiserver 503")
+            return "uid-1"
+
+        r = self._run(boto, dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"), uid=uid)
+        assert boto.buckets == {}
+        self.forget.assert_not_called()
+        assert r.status is DeploymentStatus.FAILED
+        assert "still listed as created" in r.message
+
+    def test_failed_table_statements_fail_the_step(self):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+
+        def fail_drop(sql):
+            if sql.startswith("DROP"):
+                raise RuntimeError("TABLE_NOT_FOUND")
+
+        self._on_sql = fail_drop
+        try:
+            self._run(
+                boto,
+                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+                maint=("trino", "trino-coordinator-0", "lakehouse"),
+            )
+        finally:
+            self._on_sql = None
+        tables = [x for x in self._results if x.component == "table-cleanup"][-1]
+        assert tables.status is DeploymentStatus.FAILED
+        assert "2 failed statement" in tables.message
+        assert boto.buckets == {}, "later steps still run"
