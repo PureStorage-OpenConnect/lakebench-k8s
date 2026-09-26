@@ -495,6 +495,9 @@ class SparkOperatorManager:
         except Exception as e:
             raise _WatchListReadError(f"error reading Helm values: {e}") from e
 
+    # Delays before each namespace read in _namespace_is_terminating (s).
+    _NS_READ_BACKOFF = (0.0, 0.5, 1.5)
+
     def _namespace_is_terminating(self, namespace: str) -> bool:
         """True unless the namespace provably exists and is not being deleted.
 
@@ -504,12 +507,35 @@ class SparkOperatorManager:
         Any read failure (429, 5xx, transport, no client) also refuses: under
         API throttling a "probably fine" add is exactly the crash-loop route.
         """
-        try:
-            from kubernetes import client as k8s_client
+        from kubernetes.client.rest import ApiException
 
-            ns = k8s_client.CoreV1Api().read_namespace(namespace)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("Could not read namespace %s before adding it: %s", namespace, e)
+        ns = None
+        for attempt, delay in enumerate(self._NS_READ_BACKOFF, start=1):
+            if delay:
+                time.sleep(delay)
+            try:
+                from kubernetes import client as k8s_client
+
+                ns = k8s_client.CoreV1Api().read_namespace(namespace)
+                break
+            except ApiException as e:
+                if e.status == 404:
+                    return True
+                logger.warning(
+                    "Could not read namespace %s before adding it (attempt %d): %s",
+                    namespace,
+                    attempt,
+                    e,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Could not read namespace %s before adding it (attempt %d): %s",
+                    namespace,
+                    attempt,
+                    e,
+                )
+        if ns is None:
+            # A transient 429/5xx is retried above; a persistent one refuses.
             return True
         meta = getattr(ns, "metadata", None)
         ts = getattr(meta, "deletion_timestamp", None)

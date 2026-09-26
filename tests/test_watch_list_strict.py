@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from lakebench.deploy.cluster_lock import ClusterLockError, ClusterLockHeld
+from lakebench.modules.pipeline_engines.spark import operator as mgr_mod
 from lakebench.modules.pipeline_engines.spark.operator import (
     SparkOperatorManager,
     WatchListMutationError,
@@ -236,11 +237,12 @@ class TestAddRefusesTerminatingNamespace:
         run.assert_not_called()
 
     @pytest.mark.parametrize("status", [429, 500, 503])
-    def test_unreadable_namespace_is_not_added(self, status):
+    def test_unreadable_namespace_is_not_added(self, status, monkeypatch):
         """Third review: under API throttling a failed read must refuse the
         add, not treat the namespace as live (crash-loop route)."""
         from kubernetes.client.rest import ApiException
 
+        monkeypatch.setattr(mgr_mod.time, "sleep", lambda _s: None)
         mgr = _mgr()
         with (
             patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
@@ -251,13 +253,36 @@ class TestAddRefusesTerminatingNamespace:
             assert mgr._add_namespace_to_watch_impl("my-ns") is False
         run.assert_not_called()
 
-    def test_transport_error_is_not_added(self):
+    def test_transport_error_is_not_added(self, monkeypatch):
         mgr = _mgr()
         with (
             patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
             patch("kubernetes.client.CoreV1Api") as core,
             patch.object(mgr, "_run") as run,
         ):
+            monkeypatch.setattr(mgr_mod.time, "sleep", lambda _s: None)
             core.return_value.read_namespace.side_effect = ConnectionError("reset")
             assert mgr._add_namespace_to_watch_impl("my-ns") is False
         run.assert_not_called()
+
+    def test_one_transient_error_is_retried_then_added(self, monkeypatch):
+        """Fourth review: a single 429 must not fail deploy after postgres,
+        catalog and engine are up; retry the read, then proceed."""
+        from kubernetes.client.rest import ApiException
+
+        slept: list[float] = []
+        monkeypatch.setattr(mgr_mod.time, "sleep", lambda sec: slept.append(sec))
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch.object(mgr, "_filter_existing_namespaces", return_value=["other"]),
+            patch("kubernetes.client.CoreV1Api") as core,
+            patch.object(mgr, "_run", return_value=MagicMock(returncode=1, stderr="x")) as run,
+        ):
+            core.return_value.read_namespace.side_effect = [
+                ApiException(status=429),
+                self._ns(deleting=False),
+            ]
+            mgr._add_namespace_to_watch_impl("my-ns")
+        assert run.called
+        assert slept == [0.5]

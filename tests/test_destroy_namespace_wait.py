@@ -430,6 +430,26 @@ class TestDestroyAllWiring:
         assert ns.status is DeploymentStatus.FAILED
         assert "repair-operator" in ns.message
 
+    def test_redeploy_during_a_backoff_sleep_is_not_deleted(self, monkeypatch):
+        """Fourth review: the nonce can change while the retry sleeps; the
+        next attempt must re-check before deleting."""
+        cluster = FakeCluster(drain_polls=1)
+        state = {"nonce": "n-1"}
+        monkeypatch.setattr(destroy_mod, "_sleep", lambda _s: state.update(nonce="n-2"))
+
+        def throttled_then_ok(ns, uid=None):
+            if state["nonce"] == "n-1":
+                raise K8sResourceError("429 Too Many Requests")
+            return cluster.delete_namespace_real(ns, uid=uid)
+
+        cluster.delete_namespace_real = cluster.delete_namespace
+        cluster.delete_namespace = throttled_then_ok
+        results, _, calls, _ = self._run_destroy(cluster, nonce_fn=lambda _ns, _k: state["nonce"])
+        assert calls.count("delete") == 1, "no attempt after the redeploy"
+        assert cluster.deletes == 0
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.FAILED
+
     def test_in_lease_retries_back_off(self, monkeypatch):
         """429s under parallel UAT: retry after 2 s, then 5 s, still in the lease."""
         cluster = FakeCluster(drain_polls=1)

@@ -269,12 +269,14 @@ def _delete_owned_buckets(
     absent: set[str] | None = None,
     guard: Callable[[], None] | None = None,
     on_deleted: Callable[[str], None] | None = None,
+    on_gone: Callable[[str], None] | None = None,
 ) -> tuple[list[str], bool]:
     """Delete the emptied buckets this deployment owns; report the rest.
 
     ``guard`` runs before each delete and raises to stop when the namespace
     changed underneath this destroy (the buckets may be a redeploy's now).
-    ``on_deleted`` is called with each bucket this call deleted.
+    ``on_deleted`` is called with each bucket this call deleted, ``on_gone``
+    with each one already absent (a re-run after a delete).
 
     Returns ``(notes, failed)``: summary notes naming deleted, already-gone
     and kept buckets with the reason, and whether any delete errored.
@@ -292,6 +294,8 @@ def _delete_owned_buckets(
     for bucket in buckets:
         if absent and bucket in absent:
             gone.append(bucket)
+            if on_gone is not None:
+                on_gone(bucket)
             continue
         if bucket not in deletable:
             kept.append(bucket)
@@ -305,6 +309,8 @@ def _delete_owned_buckets(
                     on_deleted(bucket)
             else:
                 gone.append(bucket)
+                if on_gone is not None:
+                    on_gone(bucket)
         except Exception as e:  # noqa: BLE001
             logger.error("Could not delete emptied bucket %s: %s", bucket, e)
             errors.append(f"{bucket}: {e}")
@@ -720,22 +726,28 @@ def destroy_all(
                 # deleted namespace. Errors fall back to the delete below.
                 if not namespace_uid_at_start:
                     return
-                # A same-namespace redeploy writes a new nonce without the
-                # lease; re-check right before the delete (the UID
-                # precondition cannot see it). On a change, fall through to
-                # the post-unwatch check, which keeps the namespace and points
-                # at repair-operator.
-                try:
-                    if _read_incarnation(engine, namespace) != namespace_token_at_start:
-                        return
-                except Exception as e:  # noqa: BLE001
-                    in_lease["error"] = e
-                    return
                 errored = False
                 for attempt, delay in enumerate(_IN_LEASE_DELETE_BACKOFF, start=1):
                     if delay:
                         # 429s under parallel load: back off before retrying.
                         _sleep(delay)
+                    # A same-namespace redeploy writes a new nonce without the
+                    # lease (possibly during a backoff sleep); re-check right
+                    # before every attempt, since the UID precondition cannot
+                    # see it. On a change, fall through to the post-unwatch
+                    # check, which keeps the namespace and points at
+                    # repair-operator.
+                    try:
+                        token_now = _read_incarnation(engine, namespace)
+                    except Exception as e:  # noqa: BLE001
+                        in_lease["error"] = e
+                        continue
+                    if token_now != namespace_token_at_start:
+                        if errored and not token_now:
+                            # Gone after a lost reply: our delete completed.
+                            in_lease.pop("error", None)
+                            in_lease["issued"] = False
+                        return
                     # Only the last attempt's outcome counts: a first attempt
                     # whose reply was lost can make the next see Terminating.
                     in_lease.pop("error", None)
@@ -1248,6 +1260,7 @@ def destroy_all(
                 tables = engine.config.architecture.tables
                 schema = engine.config.architecture.workload.schema_type.value
                 tables_to_drop = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
+                failed_sql: list[str] = []
                 # Run maintenance before dropping tables to clean S3
                 for table in tables_to_drop:
                     if table_format == "delta":
@@ -1267,6 +1280,7 @@ def destroy_all(
                         try:
                             exec_sql(maint_engine, engine.k8s, pod_name, namespace, sql)
                         except Exception as e:
+                            failed_sql.append(f"{sql.split()[0]} {table}: {e}")
                             logger.warning(
                                 "%s maintenance failed (table may not exist): %s",
                                 table_format.title(),
@@ -1280,19 +1294,23 @@ def destroy_all(
                         try:
                             exec_sql(maint_engine, engine.k8s, pod_name, namespace, drop_sql)
                         except Exception as e:
+                            failed_sql.append(f"DROP {table}: {e}")
                             logger.warning("DROP TABLE failed for %s: %s", table, e)
+                if failed_sql:
+                    table_status = DeploymentStatus.FAILED
+                    table_msg = (
+                        f"{table_format.title()} table cleanup had {len(failed_sql)} failed "
+                        f"statement(s) (via {maint_engine}): " + "; ".join(failed_sql[:5])
+                    )
+                else:
+                    table_status = DeploymentStatus.SUCCESS
+                    table_msg = f"{table_format.title()} tables dropped (via {maint_engine})"
                 results.append(
                     DeploymentResult(
-                        component="table-cleanup",
-                        status=DeploymentStatus.SUCCESS,
-                        message=f"{table_format.title()} tables dropped (via {maint_engine})",
+                        component="table-cleanup", status=table_status, message=table_msg
                     )
                 )
-                report(
-                    "table-cleanup",
-                    DeploymentStatus.SUCCESS,
-                    f"{table_format.title()} tables dropped (via {maint_engine})",
-                )
+                report("table-cleanup", table_status, table_msg)
             else:
                 engine_type = engine.config.architecture.query_engine.type.value
                 msg = (
@@ -1631,6 +1649,7 @@ def destroy_all(
                         stop_after_buckets = True
                     else:
                         deleted_now: list[str] = []
+                        gone_now: list[str] = []
                         bucket_notes, delete_failed = _delete_owned_buckets(
                             s3,
                             buckets,
@@ -1641,8 +1660,14 @@ def destroy_all(
                             absent=set(absent_buckets),
                             guard=guard,
                             on_deleted=deleted_now.append,
+                            on_gone=gone_now.append,
                         )
-                        if deleted_now and namespace_present:
+                        # A re-run after a failed record update finds the
+                        # buckets already gone; they still come off the record.
+                        to_forget = deleted_now + [
+                            b for b in gone_now if b in created_set and b not in deleted_now
+                        ]
+                        if to_forget and namespace_present:
                             # A namespace that outlives this destroy (kept,
                             # or create_namespace=false) must not keep
                             # claiming these names: a bucket later
@@ -1651,11 +1676,17 @@ def destroy_all(
                             try:
                                 # Never edit a redeploy's record.
                                 guard()
-                                forget_created_buckets(
-                                    k8s_client.CoreV1Api(), namespace, deleted_now
-                                )
-                            except (_NamespaceReplaced, _NamespaceUnverifiable) as e:
+                                forget_created_buckets(k8s_client.CoreV1Api(), namespace, to_forget)
+                            except _NamespaceReplaced as e:
+                                # A redeploy owns the record now; destroy stops
+                                # later and reports NOT completed.
                                 logger.warning("not updating the created-buckets record: %s", e)
+                            except _NamespaceUnverifiable as e:
+                                bucket_notes.append(
+                                    f"deleted buckets still listed as created ({e}); "
+                                    "re-run destroy to clear the record"
+                                )
+                                delete_failed = True
                             except Exception as e:  # noqa: BLE001
                                 # A stale record outlives destroy when the
                                 # namespace is kept; a later destroy could then
@@ -1663,7 +1694,7 @@ def destroy_all(
                                 logger.error(
                                     "could not drop deleted buckets %s from the "
                                     "created-buckets record on %s: %s",
-                                    deleted_now,
+                                    to_forget,
                                     namespace,
                                     e,
                                 )
