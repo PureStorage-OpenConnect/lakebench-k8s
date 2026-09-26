@@ -106,7 +106,9 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def seed_guard_error(claimed, registered, matched, counts_only=False) -> str | None:
+def seed_guard_error(
+    claimed, registered, matched, counts_only=False, claim_verified=None
+) -> str | None:
     """Why the gate must refuse this corpus, or None (AML-GOALS R3).
 
     ``matched`` lists the guarded seeds (spent, evaluation, robustness) the
@@ -116,7 +118,9 @@ def seed_guard_error(claimed, registered, matched, counts_only=False) -> str | N
     """
     from lakebench.config.datagen_seed import _corpora, aml_seed_error
 
-    return aml_seed_error(_corpora(), claimed, registered, matched, counts_only)
+    return aml_seed_error(
+        _corpora(), claimed, registered, matched, counts_only, claim_verified=claim_verified
+    )
 
 
 def main(argv=None) -> int:
@@ -233,7 +237,13 @@ def main(argv=None) -> int:
         matched = [
             g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0
         ]
-        err = seed_guard_error(args.seed, args.registered, matched, args.counts_only)
+        err = seed_guard_error(
+            args.seed,
+            args.registered,
+            matched,
+            args.counts_only,
+            claim_verified=seed_check["matched_share"] == 1,
+        )
         if err:
             print(f"refusing: {err}", file=sys.stderr)
             return 1

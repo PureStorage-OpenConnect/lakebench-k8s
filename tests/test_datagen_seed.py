@@ -270,3 +270,22 @@ def test_flat_copy_imports_without_lakebench(tmp_path):
         [sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, text=True
     )
     assert r.returncode == 0, r.stderr
+
+
+def test_registered_run_needs_a_verified_corpus(looks_open):
+    g = _gate()
+    # A seed-43 corpus scored as the registered evaluation run: the manifest
+    # does not come from the evaluation seed, so the look is refused.
+    assert "not verified" in g.seed_guard_error(EVAL, "evaluation", [], claim_verified=False)
+    assert g.seed_guard_error(EVAL, "evaluation", [EVAL], claim_verified=True) is None
+    # Generation time (no corpus yet) is not a verification failure.
+    assert ds.aml_seed_error(ds._corpora(), EVAL, "evaluation") is None
+
+
+def test_cluster_refusal_runs_before_anything_is_written():
+    src = (
+        Path(__file__).resolve().parents[1]
+        / "src/lakebench/spark/scripts/score_financial_reference.py"
+    ).read_text()
+    main = src[src.index("def main()") :]
+    assert main.index("_refuse_guarded_corpus(") < main.index("compute_leakage_gate(")

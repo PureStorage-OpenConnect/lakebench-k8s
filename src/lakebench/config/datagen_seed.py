@@ -81,13 +81,18 @@ def aml_seed_error(
     corpus_role: str | None = None,
     matched: list[int] | tuple[int, ...] = (),
     counts_only: bool = False,
+    claim_verified: bool | None = None,
 ) -> str | None:
     """Why ``seed`` may not be generated or scored, or None.
 
     ``corpora`` is the pre-registration's ``corpora`` block (passed in so the
     flat copy on the Spark driver can use it). ``matched`` lists guarded seeds
     whose instance seeds a corpus's manifest reproduces: the corpus's real seed
-    whatever ``seed`` claims. ``counts_only`` is a units-and-labels smoke run
+    whatever ``seed`` claims. ``claim_verified`` is whether the manifest was
+    checked to come wholly from ``seed`` (None: no corpus yet, as at
+    generation time); a registered run on a corpus that is not verified is
+    refused, so the one look is never spent on the wrong corpus.
+    ``counts_only`` is a units-and-labels smoke run
     that computes no AP; it is not a look, so it may touch a protected corpus
     but never a spent one.
     """
@@ -112,6 +117,12 @@ def aml_seed_error(
         want = int(corpora[f"{corpus_role}_seed"])
         if eff != want:
             return f"corpus_role {corpus_role!r} is registered for seed {want}, not {eff}"
+        if corpus_role in PROTECTED_ROLES and claim_verified is False:
+            return (
+                f"the corpus is not verified as seed {want}'s: its manifest does not "
+                "wholly come from that seed, so the registered look would be spent on "
+                "another corpus"
+            )
         if corpus_role in PROTECTED_ROLES and not corpora.get("registered_looks_open", False):
             return (
                 f"registered {corpus_role} runs are closed: the pre-registration's "
