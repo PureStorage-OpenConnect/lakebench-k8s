@@ -39,28 +39,11 @@ baselines:
   c360-continuous-s10:
     config: c360-continuous-s10.yaml
     required: true
-    status: accepted
-    run_id: 20260925-153533-529c12
-    git_sha: f6c7795cf105301baf3eff92fa6d3f545494cda0
-    config_hash: 374366ccbe8717576ca37f0df450456abd34cbac657d02c6fe20b1412e31e669
-    fingerprint_hash: e9935307c7ece7fe57c636d93dd7681ced7ceafb2de5e32e97bc6029ed08ec14
-    recorded_at: '2026-09-25T22:07:40+00:00'
-    corpus_drained: true
-    metrics:
-      composite_qph: 830.6
-      compute_efficiency_gb_per_core_hour: 28.046
-      data_freshness_seconds: 89.0
-      pipeline_throughput_gb_per_second: 0.2181
-      query_qph_Q1_full_aggregation_scan: 683.6308
-      query_qph_Q2_filtered_aggregation: 565.9488
-      query_qph_Q3_customer_segmentation: 684.4106
-      query_qph_Q4_churn_risk_analysis: 908.4027
-      query_qph_Q5_revenue_trend_ma7: 1051.0949
-      query_qph_Q6_customer_rfm: 727.5667
-      query_qph_Q7_channel_conversion_funnel: 964.3718
-      query_qph_Q9_executive_dashboard: 1745.0315
-    notes: No existing run matches this pinned config (see docs/perf-regression-gate.md,
-      "Seeding"). Record the first run of it.
+    status: pending first run
+    notes: Previous baseline run 20260925-153533-529c12 (f6c7795) is void as a perf
+      reference. It was measured before f63cb38, when no Iceberg expire_snapshots or
+      remove_orphan_files statement ever succeeded (LB-174), so it measured a pipeline
+      with no snapshot maintenance. Re-record from the first run on the frozen tree.
   aml-batch-s1:
     config: aml-batch-s1.yaml
     required: false
