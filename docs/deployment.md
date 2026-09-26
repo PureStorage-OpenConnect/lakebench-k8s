@@ -147,32 +147,52 @@ irreversible. Without `--force`, you will be prompted for confirmation.
 
 The destroy engine follows a specific sequence to ensure clean removal:
 
-1. **SparkApplications** -- Deletes all running and completed Spark jobs.
-2. **Spark pods** -- Force-deletes any orphaned driver and executor pods.
-3. **Datagen jobs** -- Deletes Kubernetes batch Jobs and pods from data generation.
-4. **Iceberg maintenance** -- Runs `expire_snapshots` and `remove_orphan_files`
-   on all tables via the deployed query engine (Trino or Spark Thrift Server).
-   Skipped when the engine is DuckDB (read-only) or `none`.
-5. **Drop tables** -- Drops all Iceberg tables (`bronze`, `silver`, `gold`) via
-   the query engine.
-6. **S3 buckets** -- Empties all three S3 buckets, including aborting incomplete
-   multipart uploads.
-7. **Grafana** -- Removes the Grafana Deployment and ConfigMaps.
-8. **Prometheus** -- Removes the Prometheus StatefulSet and PVCs.
-9. **Trino** -- Removes the coordinator Deployment, worker StatefulSet, PVCs,
-   Services, and ConfigMaps.
-10. **Hive/Polaris** -- Removes the HiveCluster CRD or Polaris Deployment.
-11. **PostgreSQL** -- Removes the StatefulSet, Service, and PVCs.
-12. **RBAC and Secrets** -- Removes the Spark ServiceAccount, Role, RoleBinding,
-    and all Secrets.
-13. **Scratch StorageClass** -- Removes the cluster-scoped StorageClass (best-effort).
-14. **Namespace** -- Deletes the Kubernetes namespace.
+1. **Ownership check** -- Refuses to continue if the namespace carries
+   another deployment's identity annotations, targets a different cluster, or
+   has no lakebench annotations at all (unless `--force-legacy`).
+2. **SparkApplications** -- Deletes all running and completed Spark jobs.
+3. **Spark pods** -- Force-deletes any orphaned driver and executor pods.
+4. **Datagen jobs** -- Deletes Kubernetes batch Jobs and pods from data generation.
+5. **Drop tables** -- Drops the workload's tables via the deployed query engine
+   (Trino or Spark Thrift Server). Destroy runs no table maintenance: no
+   Iceberg `expire_snapshots` or `remove_orphan_files` and no Delta `VACUUM`,
+   because the buckets are emptied right after. Skipped when the engine is
+   DuckDB or `none`.
+6. **S3 buckets** -- Empties the buckets, including aborting incomplete
+   multipart uploads, then deletes only the buckets this deployment created
+   (see below).
+7. **Observability** -- Uninstalls the kube-prometheus-stack release if
+   observability was enabled.
+8. **Query engine** -- Removes the configured engine (Trino, Spark Thrift
+   Server, or DuckDB).
+9. **Catalog** -- Removes the HiveCluster, Polaris, or Unity deployment.
+10. **PostgreSQL** -- Removes the StatefulSet, Service, and PVCs.
+11. **RBAC and Secrets** -- Removes the Spark ServiceAccount, Role,
+    RoleBinding, and Secrets.
+12. **Namespace** -- Removes the namespace from the Spark Operator watch list,
+    deletes it (only when `create_namespace` is true), and waits until it is
+    NotFound before reporting it deleted.
+
+Destroy never deletes the scratch StorageClass. It is shared, cluster-scoped
+infrastructure that other deployments on the same cluster use.
+
+Only buckets lakebench created are deleted. Deploy records each bucket it
+creates (the `lakebench.deployment/created-buckets` namespace annotation, plus
+a `lakebench.created` tag where the backend supports tagging), and destroy
+deletes a bucket only when it is in that record and its ownership checks out.
+Pre-provisioned buckets (`create_buckets: false`), buckets deploy adopted, and
+`--keep-buckets` runs are emptied but kept. If a recorded bucket cannot be
+emptied or deleted, destroy keeps the namespace, because its annotations are
+the only ownership record a re-run can use to finish the job.
 
 ### Command Flags
 
 | Flag | Short | Description |
 |---|---|---|
 | `--force` / `--yes` | `-y` | Skip the confirmation prompt |
+
+See the [CLI reference](cli-reference.md#destroy) for the full flag list
+(`--keep-buckets`, `--namespace-timeout`, `--force-legacy`, and others).
 
 ### Examples
 

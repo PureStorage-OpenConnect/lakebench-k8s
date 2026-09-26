@@ -375,6 +375,29 @@ class TestContinuousDocsTable:
                 )
 
 
+class TestAmlBatchDocsTable:
+    """The AML batch minimums in getting-started.md come from
+    compute_peak_requirements(scale, "batch", "financial")."""
+
+    DOC = Path(__file__).resolve().parents[1] / "docs" / "getting-started.md"
+    ROW = re.compile(
+        r"^\| AML batch \| ([\d-]+) \| ([\d,]+) cores \| ([\d,]+) GB \| ([\d,]+) Gi \|",
+        re.MULTILINE,
+    )
+
+    @pytest.mark.skipif(not DOC.exists(), reason="docs not present in this checkout")
+    def test_aml_batch_table_matches_profiles(self):
+        rows = self.ROW.findall(self.DOC.read_text())
+        assert len(rows) == 3, "AML batch minimums table not found in docs/getting-started.md"
+        for scales, cores, memory, scratch in rows:
+            documented = tuple(int(v.replace(",", "")) for v in (cores, memory, scratch))
+            for scale in {int(x) for x in scales.split("-")}:
+                peak = compute_peak_requirements(scale, "batch", "financial")
+                assert (peak.cpu_cores, peak.memory_gb, peak.scratch_gb) == documented, (
+                    f"docs/getting-started.md AML batch scale {scale} is stale."
+                )
+
+
 class TestPrerequisiteWiring:
     """The check must actually be registered in run_prerequisites()."""
 

@@ -57,6 +57,25 @@ Three things surprise people about this table:
   needs 60 GB on one node. A cluster with 512 GB spread across sixteen 32 GB
   nodes has enough total memory on paper and still cannot schedule the job.
 
+The table above is the Customer360 workload. AML (`schema: financial`) batch
+requests come from the same function, `compute_peak_requirements(scale,
+"batch", "financial")`. They match Customer360 except for scratch at scale
+100, where the AML bronze-verify job (11 executors with 500 Gi PVCs, for its
+CTAS fallback) sets the scratch peak:
+
+| Workload | Scale | Minimum CPU | Minimum RAM | Scratch PVC |
+|:---------|------:|------------:|------------:|------------:|
+| AML batch | 1-10 | 36 cores | 512 GB | 2,400 Gi |
+| AML batch | 50 | 52 cores | 752 GB | 3,600 Gi |
+| AML batch | 100 | 76 cores | 1,112 GB | 5,500 Gi |
+
+These are the Spark pipeline's requests. Data generation runs before the
+pipeline and can be the larger demand: the AML scale-100 generate in
+run-20260925-104703-c02890 ran 44 datagen pods at 8 cores, about 350 cores
+at once (measured, not derived from `compute_peak_requirements`). The pod
+count is `architecture.workload.datagen.parallelism`; set it lower on a
+smaller cluster and generation takes longer.
+
 Continuous mode runs its three streaming jobs at the same time, so the
 minimum is their sum, and it differs by workload. AML (`schema: financial`)
 sizes all three from a measured scale-10 run: bronze-ingest 5 executors x 4
@@ -75,6 +94,10 @@ detect grows with it:
 | AML | 50 | 198 cores | 1,756 GB | 4,220 Gi |
 | Customer360 | 100 | 84 cores | 690 GB | 1,700 Gi |
 | AML | 100 | 222 cores | 1,948 GB | 4,660 Gi |
+
+The AML scale-10 continuous run run-20260925-180003-bb3df4 ran at exactly
+this split (bronze-ingest 5, silver-stream 10, gold-refresh 12 executors at 4
+cores each).
 
 On a smaller cluster the run caps the streaming jobs to what fits and warns
 naming each capped job. Each AML stage keeps at least the cores the
@@ -383,10 +406,12 @@ lakebench destroy lakebench.yaml
 
 You will be prompted to confirm. Add `--force` to skip the confirmation prompt.
 
-The destroy sequence runs in the correct order: kill running Spark jobs, clean
-up datagen pods, run Iceberg maintenance (expire snapshots, remove orphan
-files), drop tables, empty S3 buckets, tear down infrastructure in reverse
-deploy order, and finally delete the namespace.
+The destroy sequence runs in this order: kill running Spark jobs, clean up
+datagen pods, drop tables (no snapshot expiry, orphan removal, or VACUUM runs
+first), empty the S3 buckets and delete the ones lakebench created, tear down
+infrastructure in reverse deploy order, and finally delete the namespace and
+wait for it to be gone. If a bucket lakebench created cannot be deleted, the
+namespace is kept so a re-run can finish.
 
 ---
 

@@ -273,8 +273,9 @@ Sustained streaming pipelines create new Iceberg snapshots every micro-batch.
 Without periodic maintenance, snapshot metadata and orphan data files grow
 unbounded -- a 24-hour run can produce over a million S3 objects.
 
-Lakebench runs periodic `expire_snapshots` and `remove_orphan_files` during
-the sustained monitoring loop. Two config fields control the schedule:
+Lakebench runs periodic `expire_snapshots` and `remove_orphan_files` (Delta:
+`VACUUM`) during the continuous monitoring loop. Two config fields control the
+schedule:
 
 ```yaml
 architecture:
@@ -284,12 +285,30 @@ architecture:
       retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
 ```
 
+`retention_threshold` must be a whole number and one unit (`s`, `m`, `h` or
+`d`); anything else is rejected when the config loads. The threshold is not
+applied as-is everywhere:
+
+- **Snapshot expiry** is floored at 1 h while streams are live, so a stream
+  is never left without the snapshot it is reading.
+- **Orphan-file removal** never uses less than 24 h 10 min, on any engine or
+  path, so files a running writer has not yet committed are not deleted.
+- **Delta VACUUM** keeps Delta's 7-day default retention while streams are
+  live. A continuous Delta run shorter than 7 days therefore gets no effective
+  cleanup, and `total_s3_objects` grows for the whole run.
+
+Before v1.6 none of this maintenance worked. Trino refused every
+`expire_snapshots` and `remove_orphan_files` below its 7-day system minimum,
+the Spark Thrift form failed a parameter-binding error, and Delta VACUUM never
+applied its retention (LB-172, LB-173, LB-174). Continuous numbers from v1.5
+and earlier were measured with no snapshot expiry and no VACUUM.
+
 Maintenance uses whichever query engine is deployed:
 
 | Engine | Maintenance Support | Method |
 |--------|:-------------------:|--------|
-| Trino | Yes | `ALTER TABLE ... EXECUTE expire_snapshots(...)` |
-| Spark Thrift | Yes | `CALL catalog.system.expire_snapshots(...)` via beeline |
+| Trino | Yes | `SET SESSION <catalog>.expire_snapshots_min_retention = ...; ALTER TABLE ... EXECUTE expire_snapshots(...)` in one submission (likewise for `remove_orphan_files`) |
+| Spark Thrift | Iceberg only | `CALL catalog.system.expire_snapshots(table => ..., older_than => TIMESTAMP '...')` via beeline. Delta VACUUM is skipped (it runs Spark Thrift out of memory) |
 | DuckDB | No | Read-only -- maintenance is skipped |
 
 When `query_engine.type` is `duckdb` or `none`, maintenance is skipped with

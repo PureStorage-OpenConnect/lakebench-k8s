@@ -511,7 +511,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.mode` | enum | `batch` | Pipeline execution mode: `batch` (sequential medallion jobs) or `sustained` (concurrent streaming jobs). The `--sustained` CLI flag overrides this. |
 | `architecture.pipeline.pattern` | enum | `medallion` | Pipeline pattern: `medallion`, `streaming`, `batch`, or `custom`. |
 | `architecture.pipeline.cycles` | int | `1` | Batch iterations (1--50). Cycle 1 is full overwrite; cycles 2+ are incremental append/merge. Simulates multi-day lakehouse behavior. Only valid when `mode: batch`. See [Multi-Cycle Batch](#multi-cycle-batch). |
-| `architecture.pipeline.pre_benchmark_maintenance` | bool | `true` | Run Iceberg compaction + expire_snapshots before the benchmark phase. Ensures QpH is measured against compacted tables, not fragmented small files from multi-cycle ingestion. |
+| `architecture.pipeline.pre_benchmark_maintenance` | bool | `true` | Run table maintenance before the benchmark phase so QpH is measured against maintained tables. Iceberg: `expire_snapshots`, `remove_orphan_files` (never below 24 h 10 min) and compaction of silver and gold. Delta: `VACUUM` on Trino only; Delta `OPTIMIZE` is never run. All statements share one 30-minute budget; the first statement timeout or the deadline stops the rest, and the perf gate then treats post-maintenance QpH as not a measurement. |
 | `architecture.pipeline.sustained.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
 | `architecture.pipeline.sustained.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
 | `architecture.pipeline.sustained.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
@@ -520,7 +520,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.sustained.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
 | `architecture.pipeline.sustained.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
 | `architecture.pipeline.sustained.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
-| `architecture.pipeline.sustained.retention_interval` | int | `1800` | Seconds between Iceberg maintenance rounds (`expire_snapshots` + `remove_orphan_files`). Range: 300--7200. |
+| `architecture.pipeline.sustained.retention_interval` | int | `1800` | Seconds between table maintenance rounds during a continuous run: Iceberg `expire_snapshots` + `remove_orphan_files`, or Delta `VACUUM` (Trino only). While streams are live Delta `VACUUM` keeps Delta's 7-day default retention, so a run shorter than 7 days gets no effective Delta cleanup. Range: 300--7200. |
 | `architecture.pipeline.sustained.retention_threshold` | string | `30m` | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, expiry is floored at `1h`. Orphan-file removal never uses less than 24 h 10 min, on any engine. |
 | `architecture.pipeline.sustained.compaction_enabled` | bool | `true` | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during sustained runs. |
 | `architecture.pipeline.sustained.compaction_interval` | int | `0` | Seconds between compaction rounds. `0` = 2x `retention_interval` (default: 3600s). Range: 0--14400. |
@@ -681,9 +681,14 @@ architecture:
    switching silver-build to `.append()` and gold-finalize to incremental
    merge based on a watermark on `max(interaction_date)`.
 4. After all cycles, if `pre_benchmark_maintenance` is true, Lakebench runs
-   `expire_snapshots` (with `retention_threshold='0s'`) and Iceberg
-   compaction (`optimize` on Trino or `rewrite_data_files` on Spark Thrift)
-   before the benchmark phase.
+   `expire_snapshots` (with `retention_threshold='0s'`, or the retention
+   horizon when `architecture.workload.retention_workload` is set),
+   `remove_orphan_files` (at least 24 h 10 min, so recent orphans survive),
+   and Iceberg compaction (`optimize` on Trino or `rewrite_data_files` on
+   Spark Thrift) before the benchmark phase, all inside one 30-minute budget.
+   If stream apps are still present, expiry is floored at 1 h, AML gold is
+   not compacted, and the run is flagged `maintenance_live_streams`, so the
+   perf gate does not treat its post-maintenance QpH as a measurement.
 
 ### Table health tracking
 

@@ -127,7 +127,12 @@ cost and value of table maintenance by running the benchmark twice:
 1. **Pre-compaction benchmark** -- runs the 8-query power benchmark on
    uncompacted data (many small files from the pipeline).
 2. **Maintenance** -- runs Iceberg `expire_snapshots` + `remove_orphan_files`
-   + `rewrite_data_files` (compaction), or Delta `VACUUM`.
+   (floor 24 h 10 min) + `rewrite_data_files` (compaction of silver and gold),
+   or Delta `VACUUM` on Trino (Delta `OPTIMIZE` is never run). Every
+   statement shares one 30-minute budget. The first statement timeout or the
+   deadline stops the rest, and the benchmark runs anyway. Before v1.6 the
+   expire and orphan statements always failed (LB-172, LB-174), so v1.5
+   batch maintenance was compaction only.
 3. **Storage settle wait** -- probes one query until storage has settled
    after the maintenance burst (see below).
 4. **Post-compaction benchmark** -- runs the same 8 queries on compacted data.
@@ -630,7 +635,7 @@ rounds for trend analysis.
 | Gold latency >> refresh interval | Silver table too large for gold executors | Increase `gold_refresh_executors` |
 | QpH dropping across rounds | Table growth degrading queries | Add Trino workers or memory |
 | Q9 contention > 20% | Benchmark rounds colliding with gold rewrites | Increase `gold_refresh_interval` or `benchmark_interval` |
-| `total_s3_objects` growing unbounded | Retention not keeping pace with snapshot growth | Decrease `retention_threshold` or `retention_interval` |
+| `total_s3_objects` growing unbounded | Retention not keeping pace with snapshot growth, or a Delta run (live-stream VACUUM keeps 7 days, so it removes nothing in a shorter run) | Iceberg: decrease `retention_threshold` or `retention_interval` (expiry is floored at 1 h and orphan removal at 24 h 10 min). Delta: expected for runs under 7 days |
 
 ---
 

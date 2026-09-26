@@ -8,7 +8,7 @@ for the run's workload schema is looked up via
 render.
 
 Only ``domain_label`` is consumed today, per the ENG-2C.5 rescope in
-docs/lakebench.next-spec-addendum.md A.4. The ``render_detail_html``
+docs/internal/lakebench.next-spec-addendum.md A.4. The ``render_detail_html``
 hook exists so Financial can slot in Investigator-panel rows and
 Customer 360 can move its existing panels off the hardcoded generator
 path without another interface change.
