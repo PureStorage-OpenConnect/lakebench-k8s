@@ -159,36 +159,50 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
 _STREAM_APPS = ("lakebench-bronze-ingest", "lakebench-silver-stream", "lakebench-gold-refresh")
 
 
-def _live_stream_apps(namespace: str) -> list[str]:
+# Per-read bound when looking for stream apps; a timeout counts as live.
+_STREAM_PROBE_TIMEOUT_S = 10
+
+
+def _live_stream_apps(namespace: str) -> tuple[list[str], list[str]]:
     """Stream SparkApplications present in *namespace* (any schema).
 
-    Stream apps run with restartPolicy Always, so one that exists is writing
-    or about to. A read error other than 404 counts the app as live
-    (maintenance then takes the safe, live-stream settings).
+    Returns ``(live, read_errors)``. Stream apps run with restartPolicy
+    Always, so one that exists is writing or about to. A read error other
+    than 404, including a timeout, counts the app as live (maintenance then
+    takes the safe, live-stream settings) and is listed in ``read_errors``.
     """
     from kubernetes import client as k8s_client
     from kubernetes.client.rest import ApiException
 
     live: list[str] = []
+    errors: list[str] = []
     try:
         api = k8s_client.CustomObjectsApi()
-    except Exception:  # noqa: BLE001
-        return list(_STREAM_APPS)
+    except Exception as e:  # noqa: BLE001
+        return list(_STREAM_APPS), [f"no Kubernetes client: {e}"]
     for app in _STREAM_APPS:
         try:
             api.get_namespaced_custom_object(
-                "sparkoperator.k8s.io", "v1beta2", namespace, "sparkapplications", app
+                "sparkoperator.k8s.io",
+                "v1beta2",
+                namespace,
+                "sparkapplications",
+                app,
+                _request_timeout=_STREAM_PROBE_TIMEOUT_S,
             )
         except ApiException as e:
             if e.status == 404:
                 continue
             live.append(app)
+            errors.append(f"{app}: HTTP {e.status}")
             continue
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            # Timeouts (urllib3 ReadTimeoutError) and transport errors.
             live.append(app)
+            errors.append(f"{app}: {type(e).__name__}: {e}")
             continue
         live.append(app)
-    return live
+    return live, errors
 
 
 def _stop_leftover_streams(job_manager, namespace: str, timeout_s: int = 120) -> None:

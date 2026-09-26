@@ -462,6 +462,24 @@ def ttv_basis(run: RunRecord) -> str:
     return TTV_FROM_SCORECARD
 
 
+def post_qph_unmeasured(scores: dict) -> str:
+    """Why the run's post-maintenance QpH is not a measurement, or ""."""
+    parts = []
+    if scores.get("maintenance_stopped") is True:
+        parts.append(
+            "pre-benchmark maintenance stopped before completion ("
+            + (scores.get("maintenance_stop_reason") or "unknown")
+            + ")"
+        )
+    if scores.get("maintenance_live_streams") is True:
+        parts.append(
+            "streams were live during pre-benchmark maintenance ("
+            + (scores.get("maintenance_live_streams_reason") or "unknown")
+            + ")"
+        )
+    return "; ".join(parts)
+
+
 def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     """Numbers the gate compares, plus the metrics it deliberately left out.
 
@@ -524,15 +542,12 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     for name, times in per_query.items():
         numbers[f"{QUERY_QPH_PREFIX}{name}"] = 3600.0 / statistics.median(times)
 
-    if scores.get("maintenance_stopped") is True:
-        # Pre-benchmark maintenance stopped early (a statement timed out or
-        # the cap hit); a rewrite may still have been running during the
-        # benchmark, so post-maintenance QpH is not a measurement. Pre-
-        # maintenance QpH was taken before and stays gated.
-        why = "pre-benchmark maintenance stopped before completion"
-        reason = scores.get("maintenance_stop_reason")
-        if reason:
-            why += f" ({reason})"
+    why = post_qph_unmeasured(scores)
+    if why:
+        # A stopped maintenance (a rewrite may still have run during the
+        # benchmark) or live streams (writers active during it): post-
+        # maintenance QpH is not a measurement. Pre-maintenance QpH was taken
+        # before and stays gated.
         for key in [k for k in numbers if k == "composite_qph" or k.startswith(QUERY_QPH_PREFIX)]:
             del numbers[key]
             excluded[key] = why
@@ -1027,13 +1042,12 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
     for metric in sorted(set(actual) - set(baseline.metrics) - set(excluded)):
         _band, direction = _classify_direction(metric)
         result.rows.append(Row(metric, None, actual[metric], None, direction, "-", "new"))
-    stopped = run.scores.get("maintenance_stopped") is True
+    unmeasured = post_qph_unmeasured(run.scores)
+    stopped = bool(unmeasured)
     if stopped:
         # Always said, whatever the verdict: post-maintenance QpH was left out.
         result.reasons.append(
-            "pre-benchmark maintenance stopped before completion ("
-            + (run.scores.get("maintenance_stop_reason") or "unknown")
-            + "); post-maintenance QpH is not a measurement and was not gated"
+            unmeasured + "; post-maintenance QpH is not a measurement and was not gated"
         )
     if regressed:
         result.verdict = REGRESSION
@@ -1107,10 +1121,10 @@ def record_baseline(
     numbers, excluded = extract_metrics(run)
     if not numbers:
         raise PerfGateError(f"run {run.run_id} has no performance numbers")
-    if run.scores.get("maintenance_stopped") is True:
+    unmeasured = post_qph_unmeasured(run.scores)
+    if unmeasured:
         raise PerfGateError(
-            f"run {run.run_id} cannot be a baseline for {name}: pre-benchmark maintenance "
-            f"stopped before completion ({run.scores.get('maintenance_stop_reason') or 'unknown'}), "
+            f"run {run.run_id} cannot be a baseline for {name}: {unmeasured}, "
             "so its post-maintenance QpH is not a measurement"
         )
     # A batch baseline without datagen numbers turns datagen gating off for
