@@ -1258,7 +1258,9 @@ def run(
     except Exception as e:
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
-    resolve_auto_sizing(cfg, cluster_cap)
+    # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
+    for cut in resolve_auto_sizing(cfg, cluster_cap) or []:
+        print_warning(f"Auto-sizing: {cut}")
 
     # Auto-scale timeout if not explicitly set
     if timeout is None:
