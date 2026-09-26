@@ -35,7 +35,7 @@ class TestStrictMode:
         ) as mock_locked:
             r = mgr.remove_namespace_from_watch("my-ns", strict=True)
         assert r is True
-        mock_locked.assert_called_once_with("my-ns")
+        mock_locked.assert_called_once_with("my-ns", None)
 
     def test_nonstrict_does_not_engage_lock(self):
         mgr = _mgr()
@@ -107,3 +107,49 @@ class TestStrictMode:
             patch.object(mgr, "_remove_namespace_from_watch_impl", return_value=True),
         ):
             assert mgr._remove_namespace_from_watch_locked("my-ns") is True
+
+
+class TestPrecondition:
+    """Destroy re-checks the namespace UID inside the lease (lane Y finding 3)."""
+
+    def _lock(self, events):
+        cm_ctx = MagicMock()
+        cm_ctx.__enter__ = MagicMock(side_effect=lambda *a: events.append("lock"))
+        cm_ctx.__exit__ = MagicMock(side_effect=lambda *a: events.append("unlock") and False)
+        return cm_ctx
+
+    def test_precondition_runs_inside_the_lease_before_the_change(self):
+        mgr = _mgr()
+        events: list[str] = []
+        with (
+            patch("kubernetes.client.CoreV1Api"),
+            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=self._lock(events)),
+            patch.object(
+                mgr,
+                "_remove_namespace_from_watch_impl",
+                side_effect=lambda ns: events.append("helm") or True,
+            ),
+        ):
+            mgr.remove_namespace_from_watch(
+                "my-ns", strict=True, precondition=lambda: events.append("check")
+            )
+        assert events == ["lock", "check", "helm", "unlock"]
+
+    def test_raising_precondition_leaves_the_watch_list_alone(self):
+        class Replaced(Exception):
+            pass
+
+        def refuse():
+            raise Replaced("newer incarnation")
+
+        mgr = _mgr()
+        events: list[str] = []
+        with (
+            patch("kubernetes.client.CoreV1Api"),
+            patch("lakebench.deploy.cluster_lock.cluster_lock", return_value=self._lock(events)),
+            patch.object(mgr, "_remove_namespace_from_watch_impl") as impl,
+        ):
+            with pytest.raises(Replaced):
+                mgr.remove_namespace_from_watch("my-ns", strict=True, precondition=refuse)
+        impl.assert_not_called()
+        assert events == ["lock", "unlock"], "the lease must still be released"

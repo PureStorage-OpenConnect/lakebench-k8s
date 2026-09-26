@@ -219,9 +219,13 @@ class TestDestroyAllWiring:
         )
         calls: list[str] = []
         manager = MagicMock()
-        manager.remove_namespace_from_watch.side_effect = lambda ns, **_kw: calls.append(
-            f"unwatch:{ns}"
-        )
+
+        def unwatch(ns, strict=False, precondition=None):
+            if precondition is not None:
+                precondition()
+            calls.append(f"unwatch:{ns}")
+
+        manager.remove_namespace_from_watch.side_effect = unwatch
         match = IdentityReport(
             verdict=IdentityVerdict.MATCH,
             resource_name="ns-a",
@@ -277,11 +281,42 @@ class TestDestroyAllWiring:
         assert calls == []
         engine.k8s.delete_namespace.assert_not_called()
 
-    def test_redeploy_during_unwatch_blocks_delete_and_points_at_repair(self):
-        """The lease + helm window: R re-created the name while we un-watched."""
+    def test_redeploy_while_waiting_for_the_lease_keeps_its_watch_entry(self):
+        """R re-created the name between the pre-check and the lease: the
+        in-lease check refuses, so R's watch entry is never removed."""
         cluster = FakeCluster(drain_polls=1)
+        # start, post-bucket, pre-unwatch, then R lands before the in-lease check.
         results, _, calls, engine = self._run_destroy(
             cluster, uids=["uid-1", "uid-1", "uid-1", "uid-2"]
+        )
+        assert calls == [], "the redeploy's watch entry must not be removed"
+        engine.k8s.delete_namespace.assert_not_called()
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.SUCCESS
+        assert "left alone" in ns.message
+
+    def test_unreadable_uid_inside_the_lease_changes_nothing(self):
+        cluster = FakeCluster(drain_polls=1)
+        n = {"i": 0}
+
+        def flaky(_ns):
+            n["i"] += 1
+            if n["i"] == 4:
+                raise K8sResourceError("apiserver 503")
+            return "uid-1"
+
+        results, _, calls, engine = self._run_destroy(cluster, uid_fn=flaky)
+        assert calls == []
+        engine.k8s.delete_namespace.assert_not_called()
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.FAILED
+        assert "watch-list entry NOT" in ns.message
+
+    def test_redeploy_during_unwatch_blocks_delete_and_points_at_repair(self):
+        """After the helm call (lease released): R re-created the name."""
+        cluster = FakeCluster(drain_polls=1)
+        results, _, calls, engine = self._run_destroy(
+            cluster, uids=["uid-1", "uid-1", "uid-1", "uid-1", "uid-2"]
         )
         assert calls == ["unwatch:ns-a"]
         engine.k8s.delete_namespace.assert_not_called()
