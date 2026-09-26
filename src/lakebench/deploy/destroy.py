@@ -28,6 +28,182 @@ logger = logging.getLogger(__name__)
 LAKEBENCH_NAMESPACE_LABEL = "app.kubernetes.io/managed-by=lakebench"
 
 
+# LB-157: a namespace delete returns as soon as the API server accepts it; the
+# namespace then sits in Terminating until its content is gone (a PVC held by
+# kubernetes.io/pvc-protection until its pod stops can take minutes). Destroy
+# waits for NotFound before it says "deleted".
+DEFAULT_NAMESPACE_WAIT_TIMEOUT = 600
+_NAMESPACE_POLL_SECONDS = 3.0
+_NAMESPACE_PROGRESS_SECONDS = 30.0
+
+# Indirection so tests can drive the wait with a fake clock.
+_monotonic = time.monotonic
+_sleep = time.sleep
+
+
+def _namespace_state(engine, namespace: str) -> tuple[str | None, list[str]]:
+    """Return ``(phase, blockers)``; phase ``""`` is gone, ``None`` is unknown."""
+    try:
+        phase, blockers = engine.k8s.get_namespace_termination_status(namespace)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("reading namespace %s failed: %s", namespace, e)
+        return None, []
+    return str(phase), list(blockers)
+
+
+def _delete_namespace_and_wait(
+    engine,
+    namespace: str,
+    timeout: int,
+    report: Callable[[str, DeploymentStatus, str], None],
+) -> DeploymentResult:
+    """Delete the namespace and wait until it is NotFound.
+
+    Reports who started the deletion honestly: a namespace that was already
+    Terminating (a concurrent or earlier destroy) or already gone is never
+    reported as deleted by this run. A namespace still present at the
+    deadline is a warning (SKIPPED) naming what remains.
+    """
+    from lakebench.k8s.client import NamespaceTerminatingError
+
+    start = _monotonic()
+    phase, _ = _namespace_state(engine, namespace)
+    started_here = False
+    if phase == "":
+        return DeploymentResult(
+            component="namespace",
+            status=DeploymentStatus.SUCCESS,
+            message=f"Namespace {namespace} already gone; nothing to delete",
+        )
+    if phase == "Terminating":
+        report(
+            "namespace",
+            DeploymentStatus.IN_PROGRESS,
+            f"Namespace {namespace} is already being deleted (another destroy?); waiting",
+        )
+    else:
+        try:
+            started_here = bool(engine.k8s.delete_namespace(namespace))
+        except NamespaceTerminatingError:
+            report(
+                "namespace",
+                DeploymentStatus.IN_PROGRESS,
+                f"Namespace {namespace} is already being deleted (another destroy?); waiting",
+            )
+        except Exception as e:  # noqa: BLE001
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.FAILED,
+                message=str(e),
+            )
+        else:
+            if not started_here:
+                return DeploymentResult(
+                    component="namespace",
+                    status=DeploymentStatus.SUCCESS,
+                    message=f"Namespace {namespace} already gone; nothing to delete",
+                )
+
+    who = "" if started_here else " (deletion started by another run)"
+    deadline = start + max(0, timeout)
+    last_progress = start
+    last_blockers: list[str] = []
+    while True:
+        phase, blockers = _namespace_state(engine, namespace)
+        now = _monotonic()
+        if phase == "":
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.SUCCESS,
+                message=f"Namespace {namespace} deleted{who}",
+                elapsed_seconds=now - start,
+            )
+        if phase is not None:
+            last_blockers = blockers
+        if now >= deadline:
+            break
+        if now - last_progress >= _NAMESPACE_PROGRESS_SECONDS:
+            last_progress = now
+            detail = f"; blocked by: {'; '.join(last_blockers)}" if last_blockers else ""
+            report(
+                "namespace",
+                DeploymentStatus.IN_PROGRESS,
+                f"Waiting for namespace {namespace} to terminate "
+                f"({int(now - start)}s/{timeout}s){detail}",
+            )
+        _sleep(min(_NAMESPACE_POLL_SECONDS, max(0.0, deadline - now)))
+
+    remaining = f" Remaining: {'; '.join(last_blockers)}." if last_blockers else ""
+    msg = (
+        f"Namespace {namespace} is still terminating after {timeout}s{who}; "
+        f"it is NOT deleted yet.{remaining} Kubernetes finishes the deletion "
+        f"once those resources are released; check with `kubectl get ns {namespace}` "
+        "before re-deploying under the same name."
+    )
+    logger.warning(msg)
+    return DeploymentResult(
+        component="namespace",
+        status=DeploymentStatus.SKIPPED,
+        message=msg,
+        elapsed_seconds=_monotonic() - start,
+    )
+
+
+def _delete_owned_buckets(
+    s3,
+    buckets: list[str],
+    deletable: set[str],
+    enabled: bool,
+    create_buckets: bool,
+    absent: set[str] | None = None,
+) -> tuple[list[str], bool]:
+    """Delete the emptied buckets this deployment owns; report the rest.
+
+    Returns ``(notes, failed)``: summary notes naming deleted, already-gone
+    and kept buckets with the reason, and whether any delete errored.
+    """
+    if not enabled:
+        return [f"kept (--keep-buckets): {', '.join(buckets)}"], False
+    if not create_buckets:
+        return [
+            "kept (create_buckets=false, buckets are pre-provisioned): " + ", ".join(buckets)
+        ], False
+    removed: list[str] = []
+    gone: list[str] = []
+    kept: list[str] = []
+    errors: list[str] = []
+    for bucket in buckets:
+        if absent and bucket in absent:
+            gone.append(bucket)
+            continue
+        if bucket not in deletable:
+            kept.append(bucket)
+            continue
+        try:
+            if s3.delete_bucket(bucket):
+                removed.append(bucket)
+            else:
+                gone.append(bucket)
+        except Exception as e:  # noqa: BLE001
+            logger.error("Could not delete emptied bucket %s: %s", bucket, e)
+            errors.append(f"{bucket}: {e}")
+    notes: list[str] = []
+    if removed:
+        notes.append("deleted buckets: " + ", ".join(removed))
+    if gone:
+        notes.append("already gone: " + ", ".join(gone))
+    if kept:
+        notes.append("kept (ownership not proven by tag or name prefix): " + ", ".join(kept))
+    if errors:
+        notes.append(
+            "emptied but NOT deleted: "
+            + "; ".join(errors)
+            + " (delete by hand, or re-run destroy with --force-legacy once "
+            "the namespace is gone)"
+        )
+    return notes, bool(errors)
+
+
 def _is_last_lakebench_namespace(namespace_names: list[str], current: str) -> bool:
     """Return True iff `current` is the only lakebench-labeled namespace left.
 
@@ -92,6 +268,8 @@ def destroy_all(
     clean_buckets: bool = True,
     allow_unverified_cluster: bool = False,
     force_legacy: bool = False,
+    namespace_wait_timeout: int = DEFAULT_NAMESPACE_WAIT_TIMEOUT,
+    delete_buckets: bool = True,
 ) -> list[DeploymentResult]:
     """Destroy all deployed components.
 
@@ -113,6 +291,12 @@ def destroy_all(
             (the design invariant is "destroy refuses without proof
             of ownership"; a warn-and-proceed defeats it). Foreign
             annotations/tags are refused regardless of this flag.
+        namespace_wait_timeout: Seconds to wait, after issuing the namespace
+            delete, for the namespace to be gone (LB-157). 0 skips the wait.
+            A namespace still Terminating at the deadline is reported as a
+            warning (status SKIPPED), never as deleted.
+        delete_buckets: After emptying, delete the buckets this deployment
+            provably owns (LB-159). False empties them and keeps them.
 
     Returns:
         List of destruction results
@@ -581,11 +765,16 @@ def destroy_all(
                     f"S3 init failed: {s3._init_error}",
                 )
             else:
-                buckets = [
-                    s3_cfg.buckets.bronze,
-                    s3_cfg.buckets.silver,
-                    s3_cfg.buckets.gold,
-                ]
+                # dict.fromkeys: one bucket may back two layers; handle it once.
+                buckets = list(
+                    dict.fromkeys(
+                        [
+                            s3_cfg.buckets.bronze,
+                            s3_cfg.buckets.silver,
+                            s3_cfg.buckets.gold,
+                        ]
+                    )
+                )
                 # Ownership check per bucket: refuse to empty a bucket
                 # that carries another deployment's tag OR that has no
                 # lakebench ownership tag at all (legacy). The design
@@ -627,8 +816,14 @@ def destroy_all(
                 unsupported_refused: list[str] = []
                 unsupported_forced: list[str] = []
                 unsupported_by_prefix: list[str] = []
+                owned_by_tag: list[str] = []
+                absent_buckets: list[str] = []
                 for bucket in buckets:
                     v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
+                    if v.verdict is IdentityVerdict.MATCH:
+                        owned_by_tag.append(bucket)
+                    elif v.verdict is IdentityVerdict.NOT_FOUND:
+                        absent_buckets.append(bucket)
                     if v.verdict is IdentityVerdict.MISMATCH:
                         mismatched.append(f"{bucket} ({v.hint})")
                     elif v.verdict is IdentityVerdict.ABSENT:
@@ -758,6 +953,21 @@ def destroy_all(
                     for bucket in buckets:
                         deleted = s3.empty_bucket(bucket)
                         total_deleted += deleted
+                    # LB-159: emptying alone leaked one empty bucket per
+                    # deployment. Delete only buckets proven to be this
+                    # deployment's (ownership tag, or the name-prefix claim
+                    # on backends without tagging) and only when lakebench
+                    # manages bucket lifecycle (create_buckets). Buckets
+                    # emptied on --force-legacy say-so, or pre-provisioned
+                    # buckets the config merely references, are kept.
+                    bucket_notes, delete_failed = _delete_owned_buckets(
+                        s3,
+                        buckets,
+                        deletable=set(owned_by_tag) | set(unsupported_by_prefix),
+                        enabled=delete_buckets,
+                        create_buckets=bool(s3_cfg.create_buckets),
+                        absent=set(absent_buckets),
+                    )
                     notes = []
                     if legacy:
                         notes.append(
@@ -765,31 +975,35 @@ def destroy_all(
                         )
                     if unsupported_by_prefix:
                         notes.append(
-                            f"{len(unsupported_by_prefix)} buckets destroyed by "
+                            f"{len(unsupported_by_prefix)} buckets emptied by "
                             "name-prefix (backend does not support tagging): "
                             + ", ".join(unsupported_by_prefix)
                         )
                     if unsupported_forced:
                         notes.append(
-                            f"WARN: {len(unsupported_forced)} buckets destroyed "
+                            f"WARN: {len(unsupported_forced)} buckets emptied "
                             "by --force-legacy on a backend without tagging "
                             "AND without name-prefix match: " + ", ".join(unsupported_forced)
                         )
+                    notes.extend(bucket_notes)
                     summary_note = f" ({' | '.join(notes)})" if notes else ""
+                    bucket_status = (
+                        DeploymentStatus.FAILED if delete_failed else DeploymentStatus.SUCCESS
+                    )
                     results.append(
                         DeploymentResult(
                             component="s3-buckets",
-                            status=DeploymentStatus.SUCCESS,
+                            status=bucket_status,
                             message=(
-                                f"Cleaned {len(buckets)} S3 buckets "
+                                f"Emptied {len(buckets)} S3 buckets "
                                 f"({total_deleted} objects)" + summary_note
                             ),
                         )
                     )
                     report(
                         "s3-buckets",
-                        DeploymentStatus.SUCCESS,
-                        f"S3 buckets cleaned ({total_deleted} objects)" + summary_note,
+                        bucket_status,
+                        f"S3 buckets emptied ({total_deleted} objects)" + summary_note,
                     )
         except Exception as e:
             bucket_transient_failure = True
@@ -1402,23 +1616,8 @@ def destroy_all(
             return results
 
         report("namespace", DeploymentStatus.IN_PROGRESS, f"Deleting namespace {namespace}...")
-        try:
-            engine.k8s.delete_namespace(namespace)
-            results.append(
-                DeploymentResult(
-                    component="namespace",
-                    status=DeploymentStatus.SUCCESS,
-                    message=f"Deleted namespace: {namespace}",
-                )
-            )
-            report("namespace", DeploymentStatus.SUCCESS, f"Namespace {namespace} deleted")
-        except Exception as e:
-            results.append(
-                DeploymentResult(
-                    component="namespace",
-                    status=DeploymentStatus.FAILED,
-                    message=str(e),
-                )
-            )
+        ns_result = _delete_namespace_and_wait(engine, namespace, namespace_wait_timeout, report)
+        results.append(ns_result)
+        report("namespace", ns_result.status, ns_result.message)
 
     return results

@@ -176,6 +176,32 @@ def destroy(
             ),
         ),
     ] = False,
+    namespace_timeout: Annotated[
+        int,
+        typer.Option(
+            "--namespace-timeout",
+            min=0,
+            help=(
+                "Seconds to wait for the namespace to finish terminating "
+                "after the delete is issued (PVC and pod finalizers can "
+                "hold it for minutes). A namespace still terminating at "
+                "the deadline is reported as a warning, not as deleted. "
+                "0 skips the wait."
+            ),
+        ),
+    ] = 600,
+    keep_buckets: Annotated[
+        bool,
+        typer.Option(
+            "--keep-buckets",
+            help=(
+                "Empty the S3 buckets but do not delete them. By default "
+                "destroy deletes the emptied buckets this deployment "
+                "provably owns (ownership tag, or name prefix on backends "
+                "without tagging) when create_buckets is true."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """Tear down lakehouse infrastructure.
 
@@ -275,9 +301,18 @@ def destroy(
             if group != _dg_current_group:
                 _dg_current_group = group
                 console.print(f"  [dim]{group}[/dim]")
-            _dg_step_start[component] = time.time()
+            if component in _dg_step_start:
+                # A repeat for a step already running is a progress line
+                # (e.g. waiting for the namespace to terminate); show it and
+                # keep the step's start time.
+                console.print(f"    [dim]{message}[/dim]")
+            else:
+                _dg_step_start[component] = time.time()
         elif status == DeploymentStatus.SKIPPED:
             _dg_step_start.pop(component, None)
+            if component == "namespace":
+                # The namespace was kept or is still terminating: never silent.
+                console.print(f"    [yellow]![/yellow] {message}")
         elif status == DeploymentStatus.SUCCESS:
             elapsed = time.time() - _dg_step_start.pop(component, time.time())
             console.print(f"    [green]+[/green] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
@@ -307,6 +342,8 @@ def destroy(
             progress_callback=on_progress,
             allow_unverified_cluster=allow_unverified_cluster,
             force_legacy=force_legacy,
+            namespace_wait_timeout=namespace_timeout,
+            delete_buckets=not keep_buckets,
         )
     except K8sConnectionError as e:
         print_error(f"Kubernetes connection failed: {e}")
@@ -329,7 +366,21 @@ def destroy(
     _journal_safe(j.end_command, success=failed == 0)
     _journal_safe(j.close_session)
 
-    if failed == 0:
+    ns_pending = any(
+        r.component == "namespace" and r.status == DeploymentStatus.SKIPPED for r in results
+    )
+    if failed == 0 and ns_pending:
+        console.print(
+            Panel(
+                f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
+                f"\n\n[yellow]Namespace {namespace} is still terminating.[/yellow] "
+                f"Wait until `kubectl get ns {namespace}` returns NotFound "
+                "before re-deploying under the same name.",
+                title="Destroy Complete (namespace still terminating)",
+                expand=False,
+            )
+        )
+    elif failed == 0:
         console.print(
             Panel(
                 f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
