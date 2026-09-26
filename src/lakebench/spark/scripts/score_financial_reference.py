@@ -366,23 +366,6 @@ def run_fidelity_gate(
     scale_info = af.corpus_scale(spark, ACCOUNT_PATH, prereg["corpora"]["entities_per_scale_unit"])
     seed = provenance.get("corpus_seed")
     seed_check = af.corpus_seed_check(manifest, int(seed) if seed not in (None, "") else None)
-    # AML-GOALS R3: refuse a corpus from a spent seed, or from the evaluation
-    # or robustness seed outside its declared registered run, whatever seed the
-    # deployment claims (a bucket can hold a corpus from a manual Job).
-    try:
-        from lakebench.config.datagen_seed import PROTECTED_ROLES, aml_seed_error
-    except ImportError:  # flat on the driver
-        from datagen_seed import PROTECTED_ROLES, aml_seed_error
-    corpora = prereg["corpora"]
-    guarded = sorted(
-        {int(x) for x in corpora.get("spent_seeds", [])}
-        | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES}
-    )
-    matched = [g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0]
-    claimed = int(seed) if seed not in (None, "") else None
-    guard_err = aml_seed_error(corpora, claimed, provenance.get("declared_corpus_role"), matched)
-    if guard_err:
-        raise SystemExit(f"refusing to score this corpus: {guard_err}")
     agreement = af.label_agreement(
         af.labels_from_participants(manifest, id_map).join(
             features.filter(col("is_customer")).select("key"), "key", "left_semi"
@@ -443,6 +426,43 @@ def run_fidelity_gate(
     return report
 
 
+def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> None:
+    """AML-GOALS R3: refuse, before anything is computed or written, a corpus
+    from a spent seed, or from the evaluation or robustness seed outside its
+    declared registered run, whatever seed the deployment claims (a bucket can
+    hold a corpus from a manual Job). A registered run must also be verified:
+    the manifest has to come from the claimed seed."""
+    try:
+        from lakebench.config.datagen_seed import PROTECTED_ROLES, aml_seed_error
+    except ImportError:  # flat on the driver
+        from datagen_seed import PROTECTED_ROLES, aml_seed_error
+    from fidelity_gate import load_preregistration
+
+    corpora = load_preregistration()[0]["corpora"]
+    guarded = sorted(
+        {int(x) for x in corpora.get("spent_seeds", [])}
+        | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES}
+    )
+    matched = [g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0]
+    raw = os.environ.get("LB_DATAGEN_SEED")
+    claimed = int(raw) if raw not in (None, "") else None
+    verified = (
+        af.corpus_seed_check(manifest, claimed)["matched_share"] == 1
+        if claimed is not None
+        else False
+    )
+    err = aml_seed_error(
+        corpora,
+        claimed,
+        os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
+        matched,
+        counts_only,
+        claim_verified=verified,
+    )
+    if err:
+        raise SystemExit(f"refusing to score this corpus: {err}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Leakage gate + AML fidelity gate (silver).")
     parser.add_argument("--manifest", required=True, help="S3 URI to manifest.parquet")
@@ -497,6 +517,7 @@ def main() -> None:
     manifest_src = af.manifest_glob(args.manifest)
     manifest = af.read_manifest(spark, args.manifest)
     af.check_manifest(manifest)
+    _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
     manifest_n = manifest.count()
     if manifest_n == 0:
         raise SystemExit(
