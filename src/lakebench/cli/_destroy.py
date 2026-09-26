@@ -204,8 +204,9 @@ def destroy(
             help=(
                 "Empty the S3 buckets but do not delete them. By default "
                 "destroy deletes the emptied buckets this deployment "
-                "provably owns (ownership tag, or name prefix on backends "
-                "without tagging) when create_buckets is true."
+                "created (listed in the namespace's created-buckets record) "
+                "and provably owns (ownership tag, or name prefix on "
+                "backends without tagging) when create_buckets is true."
             ),
         ),
     ] = False,

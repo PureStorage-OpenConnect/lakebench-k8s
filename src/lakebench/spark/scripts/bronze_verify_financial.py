@@ -26,7 +26,7 @@ BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 #     {root}/bronze/party.parquet            (reference table)
 #     {root}/bronze/account.parquet          (reference table)
 #     {root}/manifest/manifest*.parquet      (typology ground truth; one file per cycle)
-# LB-089: prior to PR-F this script assumed the flat datagen_py layout
+# LB-165: prior to PR-F this script assumed the flat datagen_py layout
 # where the ROOT prefix directly held the pacs.008 files, and Spark
 # listing the ROOT hit the three subdirs and failed with
 # UNABLE_TO_INFER_SCHEMA. PACS_PATH is derived from the root plus the
@@ -41,7 +41,7 @@ PACS_PREFIX = env(
 # rule_precision, rule_recall, rule_pattern_span, and aggregate_typology_coverage
 # all read `{catalog}.bronze.manifest`; without a registration here the
 # whole scoring stack fails at Trino with 'Table does not exist'.
-# LB-089 round 1 fixed only the pacs.008 read; round 2 (this) adds the
+# LB-165 round 1 fixed only the pacs.008 read; round 2 (this) adds the
 # manifest registration so an AML benchmark actually produces recall.
 MANIFEST_PATH = env(
     "LB_FINANCIAL_MANIFEST_PATH",
@@ -481,7 +481,7 @@ def main() -> None:
             """)
             log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")
 
-        # Manifest registration (LB-089 round 2). One file, small; CTAS
+        # Manifest registration (LB-165 round 2). One file, small; CTAS
         # unconditionally. Failure of the pacs.008 registration above
         # would have already raised, so if we're here the catalog and
         # the SparkSession are known good. Manifest failure is however

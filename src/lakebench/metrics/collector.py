@@ -601,7 +601,7 @@ class PipelineBenchmark:
         "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up)",
         "corpus_drain_seconds": "When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
         "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
-        "time_to_detect_seconds": "AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the end of the detection pass that first raised it (lower is better)",
+        "time_to_detect_seconds": "AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the commit of the rule's alerts on the tick that first raised it (lower is better)",
         "time_to_detect_p95_seconds": "AML continuous. 95th percentile of time_to_detect (histogram bin upper edge, 10 s bins)",
         "time_to_detect_max_seconds": "AML continuous. Longest time to detect of any newly raised alert",
         "time_to_detect_alerts": "AML continuous. Newly raised alerts the time to detect is measured over",
