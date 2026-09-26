@@ -14,7 +14,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoes
 
 from lakebench.config import LakebenchConfig
 from lakebench.config.schema import CatalogType, QueryEngineType, require_polaris_client_secret
-from lakebench.k8s import K8sClient
+from lakebench.k8s import K8sClient, K8sResourceError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,10 @@ def image_tag(image: str) -> str:
 # OOM-kills the container (exit 137) before the JVM ever reports a heap OOM.
 # Trino's deployment guidance is 70-85% of the memory available to the JVM.
 JVM_HEAP_FRACTION = 0.8
+
+# LB-157: how long deploy waits for a same-named namespace that an earlier
+# destroy left Terminating before failing with an explicit message.
+_TERMINATING_NAMESPACE_WAIT_SECONDS = 120
 
 _MEM_UNITS_BYTES = {
     "Ki": 2**10,
@@ -901,7 +905,33 @@ class DeploymentEngine:
         if self.k8s.namespace_exists(namespace):
             phase = self.k8s.get_namespace_phase(namespace)
             if phase == "Terminating":
-                self.k8s.wait_for_namespace_deleted(namespace, timeout=120)
+                # LB-157: an earlier destroy of this name is still finishing.
+                # Creating into it fails with a confusing 403/409 from the API
+                # server, so wait a bounded time and then say what is wrong.
+                try:
+                    self.k8s.wait_for_namespace_deleted(
+                        namespace, timeout=_TERMINATING_NAMESPACE_WAIT_SECONDS
+                    )
+                except K8sResourceError:
+                    blockers: list[str] = []
+                    try:
+                        _, blockers = self.k8s.get_namespace_termination_status(namespace)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    remaining = f" Remaining: {'; '.join(blockers)}." if blockers else ""
+                    return DeploymentResult(
+                        component="namespace",
+                        status=DeploymentStatus.FAILED,
+                        message=(
+                            f"Namespace {namespace!r} is still terminating from an "
+                            f"earlier destroy after waiting "
+                            f"{_TERMINATING_NAMESPACE_WAIT_SECONDS}s.{remaining} "
+                            "A namespace cannot be re-created while it is being "
+                            f"deleted; wait until `kubectl get ns {namespace}` "
+                            "returns NotFound, then re-run deploy."
+                        ),
+                        elapsed_seconds=time.time() - start,
+                    )
             else:
                 pre_existing = True
 
@@ -1001,6 +1031,24 @@ class DeploymentEngine:
                     "identity annotations. Pass --force-legacy on `lakebench "
                     "deploy` to claim it (destroy still refuses until "
                     "the admin migrate-deployment command ships)."
+                ),
+                elapsed_seconds=time.time() - start,
+            )
+
+        # Every deploy stamps a new nonce, so a destroy already running on
+        # this namespace sees the redeploy and stops before it touches the
+        # new deployment's jobs, tables or buckets.
+        from lakebench.deploy.ownership import write_deploy_nonce
+
+        try:
+            write_deploy_nonce(core_v1, namespace)
+        except Exception as e:  # noqa: BLE001
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    f"Could not stamp the deploy nonce on namespace {namespace!r} ({e}); "
+                    "a concurrent destroy could not tell this deploy apart. Re-run deploy."
                 ),
                 elapsed_seconds=time.time() - start,
             )
@@ -1125,12 +1173,16 @@ class DeploymentEngine:
         # correctly tagged. Any pre-existing bucket owned by another
         # deployment stops the deploy here.
         from lakebench.deploy.ownership import (
+            TAG_CREATED_BY_LAKEBENCH,
+            TAG_DEPLOYMENT_NAME,
             BucketOwnershipError,
             BucketTaggingUnsupported,
             IdentityVerdict,
             bucket_name_matches_deployment,
             build_identity_from_config,
             list_lakebench_deployment_names,
+            read_bucket_ownership_tag,
+            record_created_buckets,
             verify_bucket_ownership,
             write_bucket_ownership_tag,
         )
@@ -1156,6 +1208,23 @@ class DeploymentEngine:
             context=self.config.platform.kubernetes.context or "",
             namespace=self.config.get_namespace(),
         )
+        # LB-159: the namespace records which buckets lakebench created, for
+        # backends without tagging; destroy deletes only those. Recorded
+        # before the ownership loop so a deploy that fails on a later bucket
+        # still leaves a record for the ones it already created.
+        creation_recorded = True
+        if created:
+            try:
+                record_created_buckets(_kclient.CoreV1Api(), self.config.get_namespace(), created)
+            except Exception as e:  # noqa: BLE001
+                creation_recorded = False
+                logger.warning(
+                    "Could not record created buckets %s on namespace %s (%s); "
+                    "destroy will empty but keep them.",
+                    created,
+                    self.config.get_namespace(),
+                    e,
+                )
         other_deployments = list_lakebench_deployment_names(
             _kclient.CoreV1Api(), exclude=self.config.get_namespace()
         )
@@ -1257,12 +1326,25 @@ class DeploymentEngine:
                         name,
                     )
                 continue
+            # LB-159: keep the created-by-lakebench marker across redeploys
+            # (the tag set is rewritten each time) and add it on create.
+            created_here = bool(results.get(name, False))
+            if not created_here:
+                try:
+                    prior = read_bucket_ownership_tag(boto, name) or {}
+                except Exception:  # noqa: BLE001
+                    prior = {}
+                created_here = (
+                    prior.get(TAG_DEPLOYMENT_NAME) == identity.name
+                    and prior.get(TAG_CREATED_BY_LAKEBENCH) == "true"
+                )
             try:
                 write_bucket_ownership_tag(
                     boto,
                     name,
                     identity.name,
                     workload_schema=identity.workload_schema,
+                    created=created_here,
                 )
             except BucketTaggingUnsupported:
                 # Rare race: verify said tags exist earlier in this
@@ -1304,6 +1386,8 @@ class DeploymentEngine:
         parts = []
         if created:
             parts.append(f"created {', '.join(created)}")
+            if not creation_recorded:
+                parts.append("creation not recorded; destroy will keep them")
         if existed:
             parts.append(f"already existed: {', '.join(existed)}")
 
@@ -1513,12 +1597,16 @@ class DeploymentEngine:
         clean_buckets: bool = True,
         allow_unverified_cluster: bool = False,
         force_legacy: bool = False,
+        namespace_wait_timeout: int | None = None,
+        delete_buckets: bool = True,
     ) -> list[DeploymentResult]:
         """Destroy all deployed components.
 
         Delegates to deploy.destroy.destroy_all() -- see that module
-        for the full implementation.
+        for the full implementation. ``namespace_wait_timeout=None`` uses
+        the destroy module's default.
         """
+        from lakebench.deploy.destroy import DEFAULT_NAMESPACE_WAIT_TIMEOUT
         from lakebench.deploy.destroy import destroy_all as _destroy_all
 
         return _destroy_all(
@@ -1527,4 +1615,10 @@ class DeploymentEngine:
             clean_buckets=clean_buckets,
             allow_unverified_cluster=allow_unverified_cluster,
             force_legacy=force_legacy,
+            namespace_wait_timeout=(
+                DEFAULT_NAMESPACE_WAIT_TIMEOUT
+                if namespace_wait_timeout is None
+                else namespace_wait_timeout
+            ),
+            delete_buckets=delete_buckets,
         )

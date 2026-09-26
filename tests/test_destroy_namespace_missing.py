@@ -33,6 +33,10 @@ def _engine(namespace_exists: bool) -> MagicMock:
     cfg.platform.compute.spark.operator.namespace = "spark-operator"
     cfg.platform.compute.spark.operator.version = "2.5.1"
     engine.k8s.namespace_exists.return_value = namespace_exists
+    # Keep the incarnation reads consistent with namespace_exists: an absent
+    # namespace has no UID (a UID appearing later is a new deploy).
+    engine.k8s.get_namespace_uid.return_value = "uid-1" if namespace_exists else ""
+    engine.k8s.get_namespace_annotation.return_value = "n-1"
     return engine
 
 

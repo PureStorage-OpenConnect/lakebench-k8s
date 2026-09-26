@@ -35,6 +35,12 @@ from lakebench.k8s import K8sConnectionError, get_k8s_client
 
 logger = logging.getLogger(__name__)
 
+# Seconds a statement may run past the pre-benchmark budget before it is cut.
+_BUDGET_GRACE_SECONDS = 30
+
+# Delta's default VACUUM retention (hours).
+_DELTA_DEFAULT_RETENTION_HOURS = 168.0
+
 
 _C360_REQUIRED_STREAM_JOBS = ("bronze-ingest", "silver-stream")
 
@@ -657,12 +663,131 @@ def resolve_maintenance_retention(cfg) -> str:
     return f"{days}d"
 
 
+class MaintenanceBudget:
+    """One bound shared by the pre-benchmark maintenance and compaction.
+
+    The benchmark must not start while a statement still runs, so those
+    callers use long per-statement timeouts; this caps the total. The first
+    statement timeout (the engine may be stuck, and the statement may still
+    be running) or the deadline stops every remaining statement, which is
+    then reported as not attempted.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        import time as _time
+
+        self._clock = _time.monotonic
+        self.seconds = seconds
+        self.deadline = self._clock() + seconds
+        self.stopped = ""
+
+    def remaining(self) -> float:
+        return self.deadline - self._clock()
+
+    def statement_timeout(self, per_statement: int) -> int:
+        """Per-statement timeout clipped to what is left of the budget."""
+        return max(1, min(per_statement, int(self.remaining()) + _BUDGET_GRACE_SECONDS))
+
+    def exhausted(self) -> bool:
+        if not self.stopped and self._clock() > self.deadline:
+            self.stopped = f"pre-benchmark maintenance exceeded its {int(self.seconds)}s cap"
+        return bool(self.stopped)
+
+
+def _operative(sql: str) -> str:
+    """The statement that matters in a combined submission ("SET ...; VACUUM")."""
+    last = sql.strip().rstrip(";").split(";")[-1].split()
+    return last[0] if last else sql
+
+
+def _run_statements(
+    plan: list[tuple[str, str]],
+    *,
+    engine: str,
+    k8s,
+    pod_name: str,
+    namespace: str,
+    timeout: int,
+    what: str,
+    budget: MaintenanceBudget | None = None,
+) -> dict:
+    """Run ``(table, sql)`` statements; never raises for a statement.
+
+    Returns counts plus failures, timeouts and statements not attempted.
+    With ``budget`` the first timeout or the deadline stops the rest.
+    """
+    from lakebench.deploy.iceberg import exec_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+
+    out: dict = {
+        "succeeded": 0,
+        "failures": [],
+        "timed_out": [],
+        "not_attempted": [],
+    }
+    for n, (table, sql) in enumerate(plan):
+        if budget is not None and budget.exhausted():
+            out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n:]]
+            break
+        # exec_sql raises on a real failure (non-zero exit) and on a
+        # kubectl-exec timeout; neither is fatal to the run. Under a budget
+        # the statement gets at most what is left of it (plus a small grace),
+        # so the budget bounds the total; a statement cut short by it counts
+        # as timed out.
+        stmt_timeout = budget.statement_timeout(timeout) if budget is not None else timeout
+        try:
+            exec_sql(engine, k8s, pod_name, namespace, sql, timeout=stmt_timeout)
+            out["succeeded"] += 1
+        except ExecSqlTimeout as e:
+            # Not a failure: the engine may still be running it.
+            out["timed_out"].append(f"{_operative(sql)} {table}: {e}")
+            logger.warning("%s timed out for %s (may still be running)", what, table)
+            if budget is not None:
+                budget.stopped = f"{_operative(sql)} {table} timed out after {stmt_timeout}s"
+                out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n + 1 :]]
+                break
+        except Exception as e:
+            out["failures"].append(f"{_operative(sql)} {table}: {e}")
+            logger.warning("%s failed for %s: %s", what, table, e)
+    return out
+
+
+def _print_outcome(console, label: str, out: dict, total: int, tail: str) -> None:
+    bad = out["failures"] or out["timed_out"] or out["not_attempted"]
+    colour = "yellow" if bad else "green"
+    extra = ""
+    if out["timed_out"]:
+        extra += f", {len(out['timed_out'])} timed out (may still be running)"
+    if out["not_attempted"]:
+        extra += f", {len(out['not_attempted'])} not attempted"
+    console.print(
+        f"  [{colour}]{label}: {out['succeeded']}/{total} operations{extra}[/{colour}] {tail}"
+    )
+
+
+def _outcome_details(out: dict, total: int, budget: MaintenanceBudget | None) -> dict:
+    return {
+        "operations_succeeded": out["succeeded"],
+        "operations_total": total,
+        "operations_failed": len(out["failures"]),
+        "operations_timed_out": len(out["timed_out"]),
+        "operations_not_attempted": len(out["not_attempted"]),
+        "failures": out["failures"][:5],
+        "timed_out": out["timed_out"][:5],
+        "not_attempted": out["not_attempted"][:20],
+        "stopped": budget.stopped if budget is not None else "",
+    }
+
+
 def _run_iceberg_maintenance(
     cfg,
     k8s,
     console: Console,
     j,
     retention_threshold: str,
+    timeout: int = 30,
+    live_streams: bool = False,
+    budget: MaintenanceBudget | None = None,
 ) -> None:
     """Run table maintenance (format-aware).
 
@@ -672,11 +797,14 @@ def _run_iceberg_maintenance(
     Engine-aware: uses Trino (preferred) or Spark Thrift Server.
     DuckDB cannot run maintenance -- skipped with a warning.
     Failures on individual tables are logged but do not abort.
+
+    ``timeout`` bounds each statement's kubectl exec. A timeout does not stop
+    the statement server-side, so the pre-benchmark caller passes a long one
+    and a ``budget``. ``live_streams``: continuous streams are reading; Delta
+    VACUUM then keeps Delta's default 7-day retention (a lagging stream
+    would otherwise hit FileNotFound on a vacuumed file).
     """
-    from lakebench.deploy.iceberg import (
-        exec_sql,
-        find_maintenance_engine,
-    )
+    from lakebench.deploy.iceberg import find_maintenance_engine
 
     namespace = cfg.get_namespace()
     engine_type = cfg.architecture.query_engine.type.value
@@ -711,6 +839,18 @@ def _run_iceberg_maintenance(
         )
 
         retention_hours = parse_retention_to_hours(retention_threshold)
+        if live_streams and retention_hours < _DELTA_DEFAULT_RETENTION_HOURS:
+            # Policy: never VACUUM below Delta's default while streams are
+            # live; no retention override is sent.
+            console.print("  [dim]Delta VACUUM at default 7d retention (live streams)[/dim]")
+            _journal_safe(
+                j.record,
+                EventType.STREAMING_HEALTH,
+                message="Delta VACUUM at default 7d retention (live streams)",
+                details={"requested_retention": retention_threshold},
+            )
+            retention_hours = _DELTA_DEFAULT_RETENTION_HOURS
+            retention_threshold = "168h"
 
         def build_sql(tbl):
             return build_delta_maintenance_sql(engine, catalog, tbl, retention_hours)
@@ -720,21 +860,27 @@ def _run_iceberg_maintenance(
         def build_sql(tbl):
             return build_maintenance_sql(engine, catalog, tbl, retention_threshold)
 
-    maintained = 0
-    expected_ops = 0
-    for table in table_names:
-        ops = build_sql(table)
-        expected_ops += len(ops)
-        for sql in ops:
-            try:
-                exec_sql(engine, k8s, pod_name, namespace, sql)
-                maintained += 1
-            except Exception as e:
-                logger.warning("%s maintenance failed for %s: %s", table_format.title(), table, e)
+    import time as _time
 
-    console.print(
-        f"  {table_format.title()} maintenance ({engine}): {maintained}/{expected_ops} "
-        f"operations (threshold: {retention_threshold})"
+    plan = [(table, sql) for table in table_names for sql in build_sql(table)]
+    started = _time.monotonic()
+    out = _run_statements(
+        plan,
+        engine=engine,
+        k8s=k8s,
+        pod_name=pod_name,
+        namespace=namespace,
+        timeout=timeout,
+        what=f"{table_format.title()} maintenance",
+        budget=budget,
+    )
+    elapsed = _time.monotonic() - started
+    _print_outcome(
+        console,
+        f"{table_format.title()} maintenance ({engine})",
+        out,
+        len(plan),
+        f"(threshold: {retention_threshold}, {elapsed:.0f}s)",
     )
     _journal_safe(
         j.record,
@@ -744,8 +890,9 @@ def _run_iceberg_maintenance(
             "engine": engine,
             "table_format": table_format,
             "retention_threshold": retention_threshold,
-            "operations_succeeded": maintained,
-            "operations_total": expected_ops,
+            **_outcome_details(out, len(plan), budget),
+            "elapsed_seconds": round(elapsed, 1),
+            "statement_timeout_seconds": timeout,
         },
     )
 
@@ -757,6 +904,8 @@ def _run_iceberg_compaction(
     j,
     file_size_threshold: str = "128MB",
     live_streams: bool = False,
+    timeout: int = 30,
+    budget: MaintenanceBudget | None = None,
 ) -> None:
     """Run table compaction (format-aware).
 
@@ -769,9 +918,12 @@ def _run_iceberg_compaction(
 
     Merges small files produced by streaming micro-batches or repeated
     incremental writes.  DuckDB cannot run compaction -- skipped.
+
+    ``timeout`` bounds each statement's kubectl exec. A timeout does not stop
+    the rewrite server-side, so the pre-benchmark caller passes a long one:
+    the benchmark must not start while rewrite_data_files still runs.
     """
     from lakebench.deploy.iceberg import (
-        exec_sql,
         find_maintenance_engine,
     )
 
@@ -823,18 +975,40 @@ def _run_iceberg_compaction(
         def build_sql(tbl):
             return build_compaction_sql(engine, catalog, tbl, file_size_threshold)
 
-    compacted = 0
-    for table in table_names:
-        for sql in build_sql(table):
-            try:
-                exec_sql(engine, k8s, pod_name, namespace, sql)
-                compacted += 1
-            except Exception as e:
-                logger.warning("%s compaction failed for %s: %s", table_format.title(), table, e)
+    import time as _time
 
-    console.print(
-        f"  {table_format.title()} compaction ({engine}): {compacted}/{len(table_names)} "
-        f"tables (threshold: {file_size_threshold})"
+    plan = [(table, sql) for table in table_names for sql in build_sql(table)]
+    started = _time.monotonic()
+    out = _run_statements(
+        plan,
+        engine=engine,
+        k8s=k8s,
+        pod_name=pod_name,
+        namespace=namespace,
+        timeout=timeout,
+        what=f"{table_format.title()} compaction",
+        budget=budget,
+    )
+    elapsed = _time.monotonic() - started
+    _print_outcome(
+        console,
+        f"{table_format.title()} compaction ({engine}) on {len(table_names)} tables",
+        out,
+        len(plan),
+        f"(threshold: {file_size_threshold}, {elapsed:.0f}s)",
+    )
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_HEALTH,
+        message=f"{table_format.title()} compaction",
+        details={
+            "engine": engine,
+            "table_format": table_format,
+            "file_size_threshold": file_size_threshold,
+            **_outcome_details(out, len(plan), budget),
+            "elapsed_seconds": round(elapsed, 1),
+            "statement_timeout_seconds": timeout,
+        },
     )
 
 
@@ -1744,7 +1918,9 @@ def _run_sustained(
 
             # Iceberg retention maintenance
             if elapsed >= next_maintenance_at:
-                _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold)
+                _run_iceberg_maintenance(
+                    cfg, k8s, console, j, retention_threshold, live_streams=True
+                )
                 next_maintenance_at = (time.time() - start) + retention_interval
 
             # Iceberg compaction (v1.1.0)

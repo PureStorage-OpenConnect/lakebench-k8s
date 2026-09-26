@@ -76,6 +76,38 @@ class K8sResourceError(K8sError):
     pass
 
 
+class NamespaceTerminatingError(K8sResourceError):
+    """Raised when a namespace delete is refused because it is already terminating.
+
+    The API server answers a delete on a namespace whose deletion is already
+    in progress with 409 Conflict. The caller did not start that deletion, so
+    it must not report the namespace as deleted by itself.
+    """
+
+    pass
+
+
+class NamespaceReplacedError(K8sResourceError):
+    """Raised when a UID-preconditioned namespace delete finds a different UID.
+
+    The name now belongs to a newer namespace (a redeploy re-created it); the
+    delete was refused by the API server and nothing was deleted.
+    """
+
+    pass
+
+
+# Namespace status conditions that name what is holding a Terminating
+# namespace open (remaining pods/PVCs, finalizers such as pvc-protection).
+_NAMESPACE_BLOCKING_CONDITIONS = (
+    "NamespaceContentRemaining",
+    "NamespaceFinalizersRemaining",
+    "NamespaceDeletionContentFailure",
+    "NamespaceDeletionDiscoveryFailure",
+    "NamespaceDeletionGroupVersionParsingFailure",
+)
+
+
 @dataclass
 class K8sContext:
     """Kubernetes context information."""
@@ -210,6 +242,55 @@ class K8sClient:
                 return ""
             raise K8sResourceError(f"Error reading namespace phase: {e}")  # noqa: B904
 
+    def get_namespace_uid(self, name: str) -> str:
+        """Return the namespace's UID, or ``""`` when it does not exist.
+
+        A UID identifies one incarnation of a name: a namespace deleted and
+        re-created by a later deploy has the same name and a new UID.
+        """
+        try:
+            ns = self._core_v1.read_namespace(name)
+        except ApiException as e:
+            if e.status == 404:
+                return ""
+            raise K8sResourceError(f"Error reading namespace: {e}")  # noqa: B904
+        return str(ns.metadata.uid or "")
+
+    def get_namespace_annotation(self, name: str, key: str) -> str:
+        """Return one annotation of a namespace, ``""`` if unset or absent."""
+        try:
+            ns = self._core_v1.read_namespace(name)
+        except ApiException as e:
+            if e.status == 404:
+                return ""
+            raise K8sResourceError(f"Error reading namespace: {e}")  # noqa: B904
+        anns = (ns.metadata.annotations if ns.metadata else None) or {}
+        value = anns.get(key, "")
+        return value if isinstance(value, str) else ""
+
+    def get_namespace_termination_status(self, name: str) -> tuple[str, list[str]]:
+        """Return a namespace's phase and what is blocking its deletion.
+
+        Returns:
+            ``(phase, blockers)``. ``phase`` is ``""`` when the namespace does
+            not exist. ``blockers`` holds the messages of the namespace's
+            true deletion conditions, for example "Some resources are
+            remaining: persistentvolumeclaims. has 1 resource instances".
+        """
+        try:
+            ns = self._core_v1.read_namespace(name)
+        except ApiException as e:
+            if e.status == 404:
+                return "", []
+            raise K8sResourceError(f"Error reading namespace: {e}")  # noqa: B904
+        status = ns.status
+        phase = (status.phase if status else "") or ""
+        blockers: list[str] = []
+        for cond in (status.conditions if status else None) or []:
+            if cond.type in _NAMESPACE_BLOCKING_CONDITIONS and cond.status == "True":
+                blockers.append(cond.message or cond.reason or cond.type)
+        return phase, blockers
+
     def wait_for_namespace_deleted(self, name: str, timeout: int = 120) -> None:
         """Wait for a namespace to be fully deleted."""
         import time
@@ -277,22 +358,50 @@ class K8sClient:
             raise K8sResourceError(f"Failed to create namespace: {e}")  # noqa: B904
 
     @retry_k8s_api
-    def delete_namespace(self, name: str) -> bool:
+    def delete_namespace(self, name: str, uid: str | None = None) -> bool:
         """Delete a namespace.
 
         Args:
             name: Namespace name
 
+        Args:
+            name: Namespace name
+            uid: When set, the delete carries a UID precondition so the API
+                server refuses it if the name now belongs to a different
+                namespace (LB-157).
+
         Returns:
-            True if deleted, False if didn't exist
+            True if this call started the deletion, False if the namespace
+            did not exist.
+
+        Raises:
+            NamespaceTerminatingError: the namespace is already being
+                deleted (by another destroy, or an earlier one).
+            NamespaceReplacedError: ``uid`` did not match.
         """
         if not self.namespace_exists(name):
             return False
 
         try:
-            self._core_v1.delete_namespace(name)
+            if uid:
+                self._core_v1.delete_namespace(
+                    name,
+                    body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid)),
+                )
+            else:
+                self._core_v1.delete_namespace(name)
             return True
         except ApiException as e:
+            if e.status == 404:
+                return False
+            if e.status == 409 and "precondition" in str(e.body or e.reason or "").lower():
+                raise NamespaceReplacedError(  # noqa: B904
+                    f"Namespace '{name}' now has a different UID; delete refused"
+                )
+            if e.status == 409:
+                raise NamespaceTerminatingError(  # noqa: B904
+                    f"Namespace '{name}' is already being deleted"
+                )
             raise K8sResourceError(f"Failed to delete namespace: {e}")  # noqa: B904
 
     def secret_exists(self, name: str, namespace: str | None = None) -> bool:
@@ -851,6 +960,7 @@ class K8sClient:
         command: list[str],
         namespace: str | None = None,
         container: str | None = None,
+        timeout: int = 30,
     ) -> tuple[int, str, str]:
         """Execute a command in a pod.
 
@@ -859,6 +969,8 @@ class K8sClient:
             command: Command to execute
             namespace: Namespace
             container: Container name (optional)
+            timeout: Seconds before the local kubectl exec is killed; the
+                result is then ``(1, "", "Command timed out")``.
 
         Returns:
             Tuple of (exit_code, stdout, stderr)
@@ -877,7 +989,7 @@ class K8sClient:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=timeout,
             )
             return result.returncode, result.stdout, result.stderr
         except subprocess.TimeoutExpired:

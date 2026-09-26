@@ -35,6 +35,13 @@ from lakebench.k8s import K8sConnectionError
 
 logger = logging.getLogger(__name__)
 
+# Per-statement kubectl-exec timeout for pre-benchmark compaction (seconds).
+PRE_BENCHMARK_COMPACTION_TIMEOUT = 1800
+# Same bound for pre-benchmark expire_snapshots / remove_orphan_files.
+PRE_BENCHMARK_MAINTENANCE_TIMEOUT = 1800
+# Overall cap for pre-benchmark maintenance and compaction together (seconds).
+PRE_BENCHMARK_MAINTENANCE_CAP = 1800
+
 
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
     """Load the per-pod datagen metrics sidecar written by `lakebench generate`.
@@ -447,7 +454,13 @@ def _data_file_total(health: dict[str, int]) -> int:
 
 
 def _maintenance_value(
-    pre, post, pre_files: int, post_files: int, maint_elapsed: float, settle=None
+    pre,
+    post,
+    pre_files: int,
+    post_files: int,
+    maint_elapsed: float,
+    settle=None,
+    stopped_reason: str = "",
 ) -> tuple[float | None, int, str]:
     """(value %, paired queries, reason) for the pre/post maintenance rounds.
 
@@ -461,9 +474,15 @@ def _maintenance_value(
     None when the wait was disabled. A wait that did not settle leaves the
     value None: the post round measured storage still working off the
     maintenance burst (LB-150).
+
+    *stopped_reason* is set when pre-benchmark maintenance was stopped (a
+    statement timed out or the overall cap hit). A timed-out statement may
+    still be running server-side, so the post round is not measurable.
     """
     if maint_elapsed <= 0:
         return None, 0, "maintenance did not run"
+    if stopped_reason:
+        return None, 0, f"maintenance stopped before completion ({stopped_reason})"
     if pre_files <= 0 or post_files <= 0:
         return None, 0, "data file counts unavailable"
     if post_files >= pre_files:
@@ -1193,6 +1212,7 @@ def run(
     import uuid
 
     from lakebench.cli._sustained import (
+        MaintenanceBudget,
         _collect_platform_metrics,
         _probe_table_health,
         _run_iceberg_compaction,
@@ -1950,6 +1970,10 @@ def run(
         _pre_record = None
         _pre_result = None
         _maint_value = None
+        # Set when pre-benchmark maintenance was stopped (timeout or cap): a
+        # statement may still be running, so the post-maintenance QpH is not
+        # a clean measurement.
+        maint_stop_reason = ""
         _maint_end = None
         _settle = None
         pre_file_count = 0
@@ -2037,10 +2061,42 @@ def run(
                 console.print()
                 console.print("[bold]Running maintenance[/bold]")
                 _maint_start = datetime.now()
+                # The benchmark must not start while a maintenance statement
+                # still runs (a kubectl-exec timeout does not stop it), so each
+                # statement may take up to 30 min; one budget caps expire,
+                # orphan removal and compaction together, and the first
+                # timeout stops the rest.
+                maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)
                 _run_iceberg_maintenance(
-                    cfg, k8s, console, j, retention_threshold=resolve_maintenance_retention(cfg)
+                    cfg,
+                    k8s,
+                    console,
+                    j,
+                    retention_threshold=resolve_maintenance_retention(cfg),
+                    timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
+                    budget=maint_budget,
                 )
-                _run_iceberg_compaction(cfg, k8s, console, j)
+                _run_iceberg_compaction(
+                    cfg,
+                    k8s,
+                    console,
+                    j,
+                    timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
+                    budget=maint_budget,
+                )
+                maint_stop_reason = maint_budget.stopped
+                if maint_budget.stopped:
+                    console.print(
+                        f"  [yellow]Pre-benchmark maintenance stopped: {maint_budget.stopped}; "
+                        "the remaining statements were not attempted. The benchmark runs "
+                        "anyway; a timed-out statement may still be running.[/yellow]"
+                    )
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Pre-benchmark maintenance stopped",
+                        details={"outcome": "timed_out", "reason": maint_budget.stopped},
+                    )
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
                 maint_elapsed = (datetime.now() - _maint_start).total_seconds()
                 _maint_end = time.monotonic()
@@ -2168,6 +2224,7 @@ def run(
                         post_file_count,
                         maint_elapsed,
                         _settle,
+                        stopped_reason=maint_stop_reason,
                     )
                     if _maint_value[0] is not None:
                         console.print(
@@ -2293,6 +2350,9 @@ def run(
 
                 # Populate maintenance cost metrics (v1.3)
                 try:
+                    if maint_stop_reason:
+                        pb.maintenance_stopped = True
+                        pb.maintenance_stop_reason = maint_stop_reason
                     if maint_elapsed > 0:
                         pb.maintenance_elapsed_seconds = maint_elapsed
                         if pb.total_elapsed_seconds > 0:
