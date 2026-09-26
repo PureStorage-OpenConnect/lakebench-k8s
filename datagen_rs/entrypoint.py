@@ -105,6 +105,9 @@ def main() -> int:
     # No default for financial: AML seeds are pre-registered and 42 is spent
     # (the Rust driver refuses spent seeds too). c360 keeps 42.
     ap.add_argument("--seed", type=int, default=None)
+    # Robustness corpus (financial only): forwarded to the Rust driver, which
+    # applies corpora.robustness_perturbation (datagen_rs/src/robustness.rs).
+    ap.add_argument("--robustness-perturbation", action="store_true")
     # Multi-cycle runs (datagen_rs/src/cycle.rs). AML: cycle n of --cycles N
     # emits the one-shot corpus rows in calendar-mass slice [n/N, (n+1)/N),
     # so the union of all cycles is the one-shot corpus. c360: cycle n > 0
@@ -241,6 +244,13 @@ def main() -> int:
     if args.cycles != 1:
         common += ["--cycles", str(args.cycles)]
 
+    if args.robustness_perturbation and args.schema != "financial":
+        print(
+            "[entrypoint] --robustness-perturbation applies to the financial schema only",
+            file=sys.stderr,
+        )
+        return 2
+
     if args.schema == "financial":
         # Rust driver only knows all/bronze/reference. Map the K8s
         # template's `batch` alias to `all`.
@@ -253,7 +263,12 @@ def main() -> int:
             "--mode",
             rust_mode,
         ]
+        # Forwarded only when set, so a default argv is unchanged.
+        if args.robustness_perturbation:
+            cmd.append("--robustness-perturbation")
         summary = f"scale={args.scale} corpus_months={args.corpus_months} mode={rust_mode}"
+        if args.robustness_perturbation:
+            summary += " robustness_perturbation=on"
     else:  # customer360
         cmd = common + [
             "--target-tb",

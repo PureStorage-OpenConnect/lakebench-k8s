@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from lakebench.config.datagen_seed import config_seed
+from lakebench.config.datagen_seed import config_perturbation, config_seed
 
 from .engine import DeploymentResult, DeploymentStatus
 
@@ -84,6 +84,9 @@ class DatagenDeployer:
                 # From config, or the pre-registration's calibration seed for
                 # financial (config/datagen_seed.py); spent seeds are refused.
                 "datagen_seed": config_seed(cfg),
+                # Robustness corpus flag (financial only), checked against
+                # the declared corpus role (config/datagen_seed.py).
+                "datagen_robustness_perturbation": config_perturbation(cfg),
                 "datagen_resume": False,  # Can be overridden
                 "datagen_cpu": datagen.cpu,
                 "datagen_memory": datagen.memory,

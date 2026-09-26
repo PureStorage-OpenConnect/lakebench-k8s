@@ -58,10 +58,49 @@ def _corpora() -> dict:
 
 
 # The robustness look scores seed 90000042 with corpora.robustness_perturbation
-# applied by datagen. Until datagen implements it (programme step 2b, lane T2)
-# a registered robustness run is refused: it would spend the seed on an
-# unperturbed corpus. T2 sets this True in the same change as the flag.
-ROBUSTNESS_PERTURBATION_IMPLEMENTED = False
+# applied by datagen (datagen_rs/src/robustness.rs, --robustness-perturbation;
+# lane T2). A registered robustness run needs datagen.robustness_perturbation
+# (``perturbation_error``), and the Rust driver refuses the robustness seed
+# without the flag, so the seed is never spent on an unperturbed corpus.
+ROBUSTNESS_PERTURBATION_IMPLEMENTED = True
+
+
+def perturbation_error(schema: str, corpus_role: str | None, perturbation: bool) -> str | None:
+    """Why ``datagen.robustness_perturbation`` may not take this value, or None.
+
+    The perturbation belongs to the financial schema. The registered
+    robustness run must have it (its corpus is the perturbed one by
+    definition, AML-GOALS R3(b)); a declared calibration or evaluation run must
+    not. Without a declared role it is free on any seed the seed guard allows,
+    so a perturbed dev corpus can be generated for testing.
+    """
+    if perturbation and schema != "financial":
+        return "datagen.robustness_perturbation applies to the financial schema only"
+    if corpus_role == "robustness" and not perturbation:
+        return (
+            "corpus_role 'robustness' needs datagen.robustness_perturbation: true "
+            "(corpora.robustness_perturbation); the registered robustness corpus is "
+            "the perturbed one"
+        )
+    if perturbation and corpus_role in ("calibration", "evaluation"):
+        return f"a {corpus_role} corpus is never perturbed: unset datagen.robustness_perturbation"
+    return None
+
+
+def check_perturbation(schema: str, corpus_role: str | None, perturbation: bool) -> None:
+    """Raise ValueError when ``perturbation_error`` refuses the combination."""
+    err = perturbation_error(schema, corpus_role, perturbation)
+    if err:
+        raise ValueError(err)
+
+
+def config_perturbation(cfg) -> bool:
+    """``datagen.robustness_perturbation`` for a LakebenchConfig, checked."""
+    workload = cfg.architecture.workload
+    dg = workload.datagen
+    on = bool(getattr(dg, "robustness_perturbation", False))
+    check_perturbation(workload.schema_type.value, getattr(dg, "corpus_role", None), on)
+    return on
 
 
 def spent_from(corpora: dict) -> frozenset[int]:

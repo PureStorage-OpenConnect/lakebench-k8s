@@ -980,6 +980,12 @@ class DatagenConfig(ConfigModel):
     # as the registered gate run for that role. Set without a seed, the role's
     # registered seed is used.
     corpus_role: Literal["calibration", "evaluation", "robustness"] | None = None
+    # Robustness corpus (financial only; AML-GOALS R3(b)): datagen shifts the
+    # nuisance parameters by corpora.robustness_perturbation in the
+    # pre-registration (median amount, persona sds, dormancy, each x1.2 in
+    # natural units). Required with corpus_role: robustness, refused with a
+    # calibration or evaluation role. Off: output is unchanged.
+    robustness_perturbation: bool = False
     parallelism: int = Field(default=4, ge=1)
     # Datagen output file size. Per-thread generator memory scales with it
     # (about 4.8x for financial, 3.0x for c360, measured), so the old 512mb
@@ -1189,9 +1195,12 @@ class WorkloadConfig(ConfigModel):
         # regenerate a corpus that has already been looked at, and an
         # evaluation or robustness seed without its declared role would burn
         # it (AML-GOALS R3).
-        from lakebench.config.datagen_seed import resolve_seed
+        from lakebench.config.datagen_seed import check_perturbation, resolve_seed
 
         resolve_seed(self.datagen.seed, self.schema_type.value, self.datagen.corpus_role)
+        check_perturbation(
+            self.schema_type.value, self.datagen.corpus_role, self.datagen.robustness_perturbation
+        )
         return self
 
 

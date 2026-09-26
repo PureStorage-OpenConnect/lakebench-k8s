@@ -69,7 +69,15 @@ pub fn hash_normal(id: u64, salt: i64) -> f64 {
 /// than a per-type constant.
 #[inline]
 pub fn rate_mult(id: u64, seed: i64) -> f64 {
-    (RATE_LOG_SD * hash_normal(id, seed + 909)).exp()
+    rate_mult_sd(id, seed, 1.0)
+}
+
+/// `rate_mult` with the log-sd multiplied by `sd_mult` (the robustness
+/// perturbation, crate::robustness). `sd_mult` = 1.0 is bit-identical to
+/// `rate_mult`: `RATE_LOG_SD * 1.0` is exact.
+#[inline]
+pub fn rate_mult_sd(id: u64, seed: i64, sd_mult: f64) -> f64 {
+    ((RATE_LOG_SD * sd_mult) * hash_normal(id, seed + 909)).exp()
 }
 
 /// Per-account additive shift to the log-normal amount mean, recentred by
@@ -84,7 +92,22 @@ pub fn rate_mult(id: u64, seed: i64) -> f64 {
 /// so a larger sd cannot silently starve the band past the leakage gate.
 #[inline]
 pub fn amount_log_shift(id: u64, seed: i64) -> f64 {
-    AMOUNT_LOG_SD * hash_normal(id, seed + 1010) - 0.5 * AMOUNT_LOG_SD * AMOUNT_LOG_SD
+    amount_log_shift_p(id, seed, 1.0, 0.0)
+}
+
+/// `amount_log_shift` under the robustness perturbation (crate::robustness).
+/// The log-sd is multiplied by `sd_mult` around an unchanged centre (the
+/// recentring stays at the base `AMOUNT_LOG_SD`), so the population median of
+/// per-account typical amounts does not move with the sd; then `log_mu_shift`
+/// = ln(median multiplier) is added, which multiplies every account's median
+/// amount, and the population median, by that multiplier. (1.0, 0.0) is
+/// bit-identical to the unperturbed shift: `AMOUNT_LOG_SD * 1.0` is exact and
+/// adding 0.0 changes at most the sign of a zero, which `exp` and addition
+/// ignore.
+#[inline]
+pub fn amount_log_shift_p(id: u64, seed: i64, sd_mult: f64, log_mu_shift: f64) -> f64 {
+    (AMOUNT_LOG_SD * sd_mult) * hash_normal(id, seed + 1010) - 0.5 * AMOUNT_LOG_SD * AMOUNT_LOG_SD
+        + log_mu_shift
 }
 
 // Accounts-per-entity CDF: 70/22/6/2 -> 1..4 accounts.

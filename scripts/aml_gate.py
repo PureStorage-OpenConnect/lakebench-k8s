@@ -16,6 +16,9 @@ Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
         --bucket bronze --prefix pacs008/ --seed 43 --scale 2
     python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 43 --out gate.json
 
+The robustness corpus is generated with ``--robustness-perturbation`` (the
+driver refuses the robustness seed without it).
+
 ``--seed`` is checked against the manifest's instance seeds and recorded.
 Spent seeds are refused, and so are the evaluation and robustness seeds unless
 ``--registered <role>`` marks this as the registered gate run for that role

@@ -17,6 +17,7 @@ pub mod party;
 pub mod placement;
 pub mod realism;
 pub mod regular;
+pub mod robustness;
 pub mod s3sink;
 pub mod schema;
 pub mod timing;

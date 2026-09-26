@@ -2422,6 +2422,9 @@ class SparkJobManager:
             if role is not None:
                 # The declared role of a registered run, recorded in the report.
                 env.append({"name": "LB_DATAGEN_CORPUS_ROLE", "value": role})
+            if cfg.architecture.workload.datagen.robustness_perturbation:
+                # The corpus was generated with the robustness perturbation.
+                env.append({"name": "LB_DATAGEN_ROBUSTNESS_PERTURBATION", "value": "true"})
             env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
