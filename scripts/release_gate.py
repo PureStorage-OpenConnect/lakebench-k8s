@@ -241,7 +241,9 @@ def _table_data_rows(text: str) -> list[str]:
 _RUN_ID = re.compile(r"\b(\d{8}-\d{6}-[0-9a-f]{6})\b")
 # Anything shaped like a run id; a token that matches this but not _RUN_ID
 # (wrong case, separator or length) is a typo the check must not skip.
-_RUN_ID_LIKE = re.compile(r"\d{8}[-_]\d{6}[-_][0-9A-Za-z]+")
+# Leading word characters are part of the token, so "120260926-..." is
+# malformed rather than read as the id inside it.
+_RUN_ID_LIKE = re.compile(r"[0-9A-Za-z_]*\d{8}[-_]\d{6}[-_][0-9A-Za-z]+")
 # An explicit path to a metrics.json named in the results file.
 _METRICS_PATH = re.compile(r"[\w./-]*metrics\.json")
 # Where cited runs are looked up, relative to the repository root: the local
@@ -293,6 +295,26 @@ def _unresolved_run_ids(rows: list[str]) -> tuple[list[str], list[str], list[str
     return cited, missing, malformed
 
 
+def _local_only_run_ids(rows: list[str], cited: list[str]) -> list[str]:
+    """Cited ids whose evidence is only in directories the workflow cannot see."""
+    text = "\n".join(rows)
+    root = ROOT.resolve()
+    named = set()
+    for token in _METRICS_PATH.findall(text):
+        path = (ROOT / token).resolve()
+        if path.is_relative_to(root) and path.is_file():
+            rid = _metrics_run_id(path)
+            if rid:
+                named.add(rid)
+    checked_in = [ROOT / d for d in UAT_RUN_DIRS if d.startswith("uat/")]
+    return [
+        rid
+        for rid in cited
+        if rid not in named
+        and not any(_metrics_run_id(d / f"run-{rid}" / "metrics.json") == rid for d in checked_in)
+    ]
+
+
 def check_uat_results() -> Result:
     cv = _load_script("check_version")
     version = cv.package_version()
@@ -325,8 +347,18 @@ def check_uat_results() -> Result:
             f"{rel}: {len(missing)} of {len(cited)} cited run id(s) have no metrics.json "
             f"({where}, or a metrics.json path named in the file): " + ", ".join(missing),
         )
+    local_only = _local_only_run_ids(rows, cited)
+    note = (
+        f"; {len(local_only)} resolved only outside uat/ (lakebench-output/ is not "
+        "committed), so the release workflow will fail until their metrics.json is "
+        "checked in under uat/runs/"
+        if local_only
+        else ""
+    )
     return Result(
-        "uat-results", PASS, f"{rel}: {len(rows)} result rows, {len(cited)} run ids resolved"
+        "uat-results",
+        PASS,
+        f"{rel}: {len(rows)} result rows, {len(cited)} run ids resolved{note}",
     )
 
 
