@@ -113,6 +113,10 @@ PASS = "PASS"
 REGRESSION = "REGRESSION"
 REFUSED = "REFUSED"
 NO_BASELINE = "NO_BASELINE"
+# Pre-benchmark maintenance stopped and no QpH metric was left to gate: the
+# run can prove neither a pass nor a regression (e.g. scale >= 50, where no
+# pre-maintenance benchmark runs). Never a pass.
+NOT_COMPARABLE = "NOT_COMPARABLE"
 
 # Placeholders for the ${VAR} references in pinned configs. Only used when
 # the variable is unset; values never reach the fingerprint (identity and
@@ -1025,7 +1029,22 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
         result.rows.append(Row(metric, None, actual[metric], None, direction, "-", "new"))
     if regressed:
         result.verdict = REGRESSION
+    elif run.scores.get("maintenance_stopped") is True and not any(
+        _is_qph_metric(r.metric) and not r.status.startswith("excluded") and r.status != "new"
+        for r in result.rows
+    ):
+        result.verdict = NOT_COMPARABLE
+        result.reasons.append(
+            "pre-benchmark maintenance stopped before completion ("
+            + (run.scores.get("maintenance_stop_reason") or "unknown")
+            + "), so post-maintenance QpH is not a measurement and no QpH metric was left "
+            "to gate; the cause of the stop may itself be a regression"
+        )
     return result
+
+
+def _is_qph_metric(metric: str) -> bool:
+    return metric in ("composite_qph", "pre_compaction_qph") or metric.startswith(QUERY_QPH_PREFIX)
 
 
 def format_comparison(c: Comparison) -> str:

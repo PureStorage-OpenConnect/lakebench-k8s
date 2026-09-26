@@ -1273,3 +1273,58 @@ def test_stopped_maintenance_cannot_be_a_baseline(env):
     run = pg.load_run(env.write_run(_stopped(_batch_run(snap, "20260924-100000-aaaaaa"))))
     with pytest.raises(pg.PerfGateError, match="maintenance"):
         pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
+
+
+def test_stopped_maintenance_with_no_qph_left_is_not_comparable(env, capsys):
+    """Scale >= 50 has no pre-maintenance round: with post QpH excluded nothing
+    QpH-shaped is gated, so the run must not read as a pass."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    stopped = _stopped(_batch_run(snap, "20260924-110000-bbbbbb", qph=100.0, query_scale=4.0))
+    c = _compare(env, "c360-batch-s10", stopped)
+    assert c.verdict == pg.NOT_COMPARABLE
+    assert not c.ok
+    assert any("OPTIMIZE lakehouse.gold.t timed out" in r for r in c.reasons)
+
+    cli = _load_script("perf_gate")
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    rc = cli.main([*base, "compare", "c360-batch-s10", "--run", "20260924-110000-bbbbbb"])
+    assert rc != 0
+    assert "NOT_COMPARABLE" in capsys.readouterr().out
+
+    passed, lines = pg.release_check(env.store(), env.runs)
+    line = next(ln for ln in lines if "c360-batch-s10" in ln)
+    assert not line.startswith("ok")
+    assert "maintenance stopped" in line
+
+
+def test_seed_skips_stopped_runs_and_uses_the_next_newest(env, capsys):
+    cli = _load_script("perf_gate")
+    snap = env.snaps["c360-batch-s10"]
+    env.write_run(_batch_run(snap, "20260924-100000-aaaaaa"))
+    env.write_run(_stopped(_batch_run(snap, "20260924-110000-bbbbbb")))
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    assert cli.main([*base, "seed", "--write"]) == 0
+    out = capsys.readouterr().out
+    assert "skipping 20260924-110000-bbbbbb" in out
+    assert "20260924-110000-bbbbbb not usable" not in out, "skipped, never attempted"
+    assert env.store().baselines["c360-batch-s10"].run_id == "20260924-100000-aaaaaa"
+
+
+def test_seed_falls_back_when_the_newest_run_is_refused(env, capsys):
+    """A refused candidate (no datagen stage) must not abort the seed loop."""
+    cli = _load_script("perf_gate")
+    snap = env.snaps["c360-batch-s10"]
+    env.write_run(_batch_run(snap, "20260924-100000-aaaaaa"))
+    env.write_run(
+        _batch_run(
+            snap,
+            "20260924-110000-bbbbbb",
+            stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0},
+        )
+    )
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    assert cli.main([*base, "seed", "--write"]) == 0
+    out = capsys.readouterr().out
+    assert "20260924-110000-bbbbbb not usable" in out
+    assert env.store().baselines["c360-batch-s10"].run_id == "20260924-100000-aaaaaa"
