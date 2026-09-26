@@ -128,7 +128,8 @@ fn gaps(paths: &[PathBuf]) -> BTreeMap<String, Vec<i64>> {
 
 #[test]
 fn union_of_cycles_is_the_one_shot_corpus() {
-    let tmp = std::env::temp_dir().join(format!("lb-cycles-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-cycles-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let one = tmp.join("one");
     let multi = tmp.join("multi");
@@ -186,7 +187,10 @@ fn cycle_arguments_are_strict() {
         vec!["--cycle=x"],
     ] {
         let st = Command::new(env!("CARGO_BIN_EXE_generate"))
-            .env("DG_LOCAL_DIR", std::env::temp_dir().join("lb-cycles-bad"))
+            .env(
+                "DG_LOCAL_DIR",
+                std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-cycles-bad"),
+            )
             .args(["--bucket", "b", "--seed", "7777", "--scale", SCALE])
             .args(&bad)
             .output()
@@ -207,7 +211,10 @@ fn financial_seed_is_required_strict_and_never_spent() {
         vec!["--seed"],
     ] {
         let st = Command::new(env!("CARGO_BIN_EXE_generate"))
-            .env("DG_LOCAL_DIR", std::env::temp_dir().join("lb-seed-bad"))
+            .env(
+                "DG_LOCAL_DIR",
+                std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-seed-bad"),
+            )
             .args(["--bucket", "b", "--scale", SCALE])
             .args(&bad)
             .output()
@@ -248,7 +255,8 @@ fn total_txns(dir: &Path, extra: &[&str]) -> u64 {
 fn rows_are_independent_of_threads_file_size_and_nodes() {
     // Every row, scheduled (D2) ones included, lands in exactly one file
     // whatever the layout: same multiset of rows, and exactly total_txns.
-    let tmp = std::env::temp_dir().join(format!("lb-layout-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-layout-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let a = tmp.join("a");
     let b = tmp.join("b2");
@@ -285,7 +293,8 @@ fn rows_are_independent_of_threads_file_size_and_nodes() {
 
 /// FNV-1a over every file the customer360 driver writes, in path order.
 fn c360_driver_digest(threads: &str) -> (u64, usize) {
-    let dir = std::env::temp_dir().join(format!("lb-c360-{}-{threads}", std::process::id()));
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-c360-{}-{threads}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let out = Command::new(env!("CARGO_BIN_EXE_generate"))
         .env("DG_LOCAL_DIR", &dir)

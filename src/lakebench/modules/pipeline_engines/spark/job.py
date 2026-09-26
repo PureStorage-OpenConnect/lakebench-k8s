@@ -2126,7 +2126,14 @@ class SparkJobManager:
         ):
             # A registered look runs once: an operator retry after the gate
             # computed AP (a crash or an error verdict) would look again.
-            _restart_policy = {"type": "Never"}
+            # Submission retries stay: they run before the driver starts,
+            # so no AP exists yet (shared Ivy cache race, see above).
+            _restart_policy = {
+                "type": "OnFailure",
+                "onFailureRetries": 0,
+                "onSubmissionFailureRetries": 5,
+                "onSubmissionFailureRetryInterval": 60,
+            }
 
         manifest = {
             "apiVersion": "sparkoperator.k8s.io/v1beta2",

@@ -201,6 +201,16 @@ def main(argv=None) -> int:
     if err:
         print(f"refusing: {err}", file=sys.stderr)
         return 1
+    if args.registered in ("evaluation", "robustness"):
+        # Claim --out before Spark starts: exclusive create, so the record is
+        # writable before any AP exists and a second run on the same path is
+        # refused instead of overwriting the first look's record.
+        try:
+            with open(args.out, "x") as f:
+                f.write(json.dumps({"registered_look": args.registered, "state": "started"}))
+        except OSError as e:
+            print(f"refusing: cannot claim --out {args.out} for the look: {e}", file=sys.stderr)
+            return 1
 
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     import aml_features as af
