@@ -14,7 +14,8 @@ local harness scripts/aml_gate.py). Two independent things this script does:
    feature code the local harness runs over bronze), labels each customer by
    manifest participation, and runs ``gate.evaluate_gate``: out-of-fold AP per
    in-scope typology with a bootstrap CI and n_positives, the D5 single and
-   pair shortcuts against the leakage caps, the definitional check, the D7
+   pair shortcuts, nuisance-only model and nuisance ablation against the
+   leakage caps, the definitional check, the D7
    band and K-of-N summary, D2 timing mixture and D11 density. Every constant
    comes from ``aml_preregistration.json`` (packaged flat next to this script).
    Emits ``aml_gate_report.json`` (the full report) and

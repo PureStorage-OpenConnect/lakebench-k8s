@@ -153,6 +153,7 @@ module = [
     "joblib.*",
     "scipy",
     "scipy.*",
+    "threadpoolctl",
 ]
 ignore_missing_imports = true
 
