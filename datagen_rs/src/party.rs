@@ -472,6 +472,23 @@ pub fn build_manifest(
     seed: i64,
     inst_uids: &std::collections::HashMap<String, Vec<u64>>,
 ) -> RecordBatch {
+    build_manifest_p(
+        instances,
+        seed,
+        inst_uids,
+        &crate::robustness::Perturbation::NONE,
+    )
+}
+
+/// `build_manifest` with the robustness perturbation stamped into every row's
+/// injection_parameters (crate::robustness::Perturbation::manifest_entries).
+/// `Perturbation::NONE` adds nothing, so the manifest is unchanged.
+pub fn build_manifest_p(
+    instances: &[Instance],
+    seed: i64,
+    inst_uids: &std::collections::HashMap<String, Vec<u64>>,
+    perturb: &crate::robustness::Perturbation,
+) -> RecordBatch {
     use crate::ids::uuid_v4_into;
     use arrow::array::TimestampMicrosecondArray;
     let m = instances.len();
@@ -517,14 +534,22 @@ pub fn build_manifest(
     let start: Vec<i64> = instances.iter().map(|i| i.start_us).collect();
     let end: Vec<i64> = instances.iter().map(|i| i.end_us).collect();
 
-    // injection_parameters map: one entry per instance {rows_per_instance: N}
-    let keys = StringArray::from_iter_values(vec!["rows_per_instance".to_string(); m]);
-    let vals = StringArray::from_iter_values(
-        instances
-            .iter()
-            .map(|i| i.rows_per_instance.to_string())
-            .collect::<Vec<_>>(),
-    );
+    // injection_parameters map: {rows_per_instance: N} per instance, plus the
+    // robustness stamp on every instance of a perturbed corpus.
+    let stamp = perturb.manifest_entries();
+    let per_row = 1 + stamp.len();
+    let mut key_vals: Vec<String> = Vec::with_capacity(m * per_row);
+    let mut val_vals: Vec<String> = Vec::with_capacity(m * per_row);
+    for i in instances {
+        key_vals.push("rows_per_instance".to_string());
+        val_vals.push(i.rows_per_instance.to_string());
+        for (k, v) in &stamp {
+            key_vals.push((*k).to_string());
+            val_vals.push(v.clone());
+        }
+    }
+    let keys = StringArray::from_iter_values(key_vals);
+    let vals = StringArray::from_iter_values(val_vals);
     let entries = StructArray::new(
         Fields::from(vec![
             Field::new("key", DataType::Utf8, false),
@@ -541,7 +566,13 @@ pub fn build_manifest(
         ])),
         false,
     ));
-    let map = MapArray::new(entries_field, offsets(&vec![1i32; m]), entries, None, false);
+    let map = MapArray::new(
+        entries_field,
+        offsets(&vec![per_row as i32; m]),
+        entries,
+        None,
+        false,
+    );
 
     let cols: Vec<ArrayRef> = vec![
         sarr(tid),

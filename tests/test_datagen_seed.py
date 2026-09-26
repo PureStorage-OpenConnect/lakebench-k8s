@@ -106,10 +106,12 @@ _CORPORA = json.loads(PREREG.read_text())["corpora"]
 EVAL, ROBUST = _CORPORA["evaluation_seed"], _CORPORA["robustness_seed"]
 
 
-def _cfg_role(seed, role):
+def _cfg_role(seed, role, perturb=None):
     dg = {"corpus_role": role}
     if seed is not None:
         dg["seed"] = seed
+    # The registered robustness corpus is the perturbed one.
+    dg["robustness_perturbation"] = role == "robustness" if perturb is None else perturb
     return make_config(architecture={"workload": {"schema": "financial", "datagen": dg}})
 
 
@@ -132,14 +134,8 @@ def test_registered_looks_are_closed_until_the_freeze():
         _cfg_role(EVAL, "evaluation")
 
 
-@pytest.fixture
-def perturbation_on(monkeypatch):
-    """Datagen applies corpora.robustness_perturbation (lane T2)."""
-    monkeypatch.setattr(ds, "ROBUSTNESS_PERTURBATION_IMPLEMENTED", True)
-
-
 @pytest.mark.parametrize(("seed", "role"), [(EVAL, "evaluation"), (ROBUST, "robustness")])
-def test_protected_seed_allowed_with_its_role(seed, role, looks_open, perturbation_on):
+def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
     assert ds.config_seed(_cfg_role(seed, role)) == seed
     # The role alone selects its registered seed.
     assert ds.config_seed(_cfg_role(None, role)) == seed
@@ -197,7 +193,7 @@ def _gate():
     return mod
 
 
-def test_gate_guard_refuses_unregistered_looks(looks_open, perturbation_on):
+def test_gate_guard_refuses_unregistered_looks(looks_open):
     g = _gate()
     # Calibration and unregistered seeds score freely.
     assert g.seed_guard_error(43, None, []) is None
@@ -297,11 +293,14 @@ def test_cluster_refusal_runs_before_anything_is_written():
     assert main.index("_refuse_guarded_corpus(") < main.index("compute_leakage_gate(")
 
 
-def test_robustness_look_refused_until_the_perturbation_exists(looks_open):
-    assert ds.ROBUSTNESS_PERTURBATION_IMPLEMENTED is False
-    err = ds.aml_seed_error(ds._corpora(), ROBUST, "robustness", [ROBUST], claim_verified=True)
-    assert err is not None and "perturbation" in err
-    # Evaluation is unaffected.
+def test_robustness_look_allowed_now_the_perturbation_exists(looks_open):
+    # Lane T2: datagen applies corpora.robustness_perturbation, so the
+    # registered robustness look is no longer refused on that ground.
+    assert ds.ROBUSTNESS_PERTURBATION_IMPLEMENTED is True
+    assert (
+        ds.aml_seed_error(ds._corpora(), ROBUST, "robustness", [ROBUST], claim_verified=True)
+        is None
+    )
     assert ds.aml_seed_error(ds._corpora(), EVAL, "evaluation", [EVAL], claim_verified=True) is None
 
 
