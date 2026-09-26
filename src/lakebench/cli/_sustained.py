@@ -27,6 +27,7 @@ from lakebench.cli._helpers import (
     print_info,
     print_success,
     print_warning,
+    write_run_report,
 )
 from lakebench.config.schema import PipelineMode
 from lakebench.journal import CommandName, EventType
@@ -287,6 +288,135 @@ def _c360_existing_state(cfg, *, clear_raw: bool) -> list[str]:
         if resp.get("KeyCount", len(resp.get("Contents", []))):
             found.append(f"{bucket}/{prefix}")
     return found
+
+
+def _c360_only_fresh_generate(cfg, existing: list[str]) -> bool:
+    """True when the only state found is the raw landing zone (LB-154).
+
+    That is the documented deploy -> generate -> run flow on a deployment
+    that has never run: no tables, no stream checkpoints, just a raw corpus.
+    Any other entry, including a prefix that could not be listed, is not a
+    fresh generate and keeps the refusal. Whether replacing the corpus is
+    safe is a separate question, see ``_c360_raw_replace_problem``.
+    """
+    raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+    raw_entry = f"{cfg.platform.storage.s3.buckets.bronze}/{raw}/"
+    return bool(existing) and all(e == raw_entry for e in existing)
+
+
+# A raw corpus up to this multiple of the run's own approx_bronze_gb is
+# replaced without --force-reset: regenerating it costs no more than the
+# datagen this run does anyway. Measured c360 corpora land at about 1.2x.
+_RAW_REPLACE_SIZE_FACTOR = 1.5
+
+
+def _datagen_job_state(namespace: str) -> tuple[str, str]:
+    """State of the lakebench-datagen Job: absent, finished, unfinished or
+    unknown, plus a detail for unknown.
+
+    Unfinished unless a terminal condition (Complete or Failed) says
+    otherwise: a Job just created, or backing off between pod retries, has
+    no active pods yet but will still write and still hold cores.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    try:
+        job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return "absent", ""
+        return "unknown", str(e.reason)
+    except Exception as e:  # noqa: BLE001
+        return "unknown", str(e)
+    conditions = getattr(job.status, "conditions", None) or []
+    finished = any(
+        getattr(c, "type", None) in ("Complete", "Failed")
+        and str(getattr(c, "status", "")) == "True"
+        for c in conditions
+    )
+    return ("finished" if finished else "unfinished"), ""
+
+
+# How long a continuous run waits for its datagen Job to finish before it
+# budgets the streams with datagen's cores still reserved (LB-158).
+_DATAGEN_RELEASE_WAIT_S = 300
+
+
+def _datagen_released(namespace: str, *, deployed_here: bool, poll_s: float = 10.0) -> bool:
+    """True when the streaming budget may drop datagen's reservation.
+
+    Finished (Complete or Failed) releases. No lakebench-datagen Job releases
+    only when this run deployed datagen itself: with --skip-generate another
+    writer may be populating bronze under a different name, and the budget
+    keeps its old reservation then. An unfinished Job is polled for up to
+    ``_DATAGEN_RELEASE_WAIT_S``; unknown never releases.
+    """
+    deadline = time.time() + _DATAGEN_RELEASE_WAIT_S
+    announced = False
+    while True:
+        state, detail = _datagen_job_state(namespace)
+        if state == "finished" or (state == "absent" and deployed_here):
+            print_info("Datagen has finished; the streaming budget does not reserve its cores")
+            return True
+        # Unfinished and unknown are polled until the deadline: one API blip
+        # must not keep the reservation when datagen finished long ago.
+        if state not in ("unfinished", "unknown") or time.time() >= deadline:
+            break
+        if not announced:
+            print_info(
+                f"Waiting up to {_DATAGEN_RELEASE_WAIT_S}s for datagen to finish before "
+                "sizing the streams..."
+            )
+            announced = True
+        time.sleep(poll_s)
+    reason = {
+        "unfinished": f"datagen still running after {_DATAGEN_RELEASE_WAIT_S}s",
+        "absent": "--skip-generate and no lakebench-datagen Job (another writer may be active)",
+        "unknown": f"datagen state unknown ({detail})",
+    }.get(state, state)
+    print_warning(f"Streams are budgeted with datagen's cores reserved: {reason}")
+    return False
+
+
+def _c360_raw_replace_problem(cfg) -> str | None:
+    """Why a raw-only corpus must not be replaced silently, or None.
+
+    Refuses (fails closed) when a datagen Job is still active, since its
+    pods would keep writing into the cleared prefix, and when the corpus is
+    larger than this run regenerates (an earlier generate at a larger
+    scale is hours of work the continuous run would not rebuild).
+    """
+    from lakebench.s3 import S3Client
+
+    state, detail = _datagen_job_state(cfg.get_namespace())
+    if state == "unfinished":
+        return "a lakebench-datagen Job has not finished; wait for it to complete"
+    if state == "unknown":
+        return f"could not check for a running datagen Job: {detail}"
+
+    s3_cfg = cfg.platform.storage.s3
+    raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+    try:
+        info = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=s3_cfg.ca_cert,
+            verify_ssl=s3_cfg.verify_ssl,
+        ).get_bucket_size(s3_cfg.buckets.bronze, prefix=f"{raw}/")
+    except Exception as e:  # noqa: BLE001
+        return f"could not size the raw corpus: {e}"
+    size_gb = (info.size_bytes or 0) / 1024**3
+    limit_gb = cfg.get_scale_dimensions().approx_bronze_gb * _RAW_REPLACE_SIZE_FACTOR
+    if size_gb > limit_gb:
+        return (
+            f"the raw corpus is {size_gb:,.0f} GB, more than this run regenerates "
+            f"(limit {limit_gb:,.0f} GB at this scale)"
+        )
+    return None
 
 
 def _refuse_c360_reset(cfg, existing: list[str]) -> None:
@@ -1294,10 +1424,23 @@ def _run_sustained(
         _require_reset_ownership(cfg)
         if cfg.architecture.workload.schema_type.value != "financial" and not force_reset:
             # c360 keeps existing state unless the operator asks to drop it:
-            # a scale-100 corpus from `lakebench generate` or a batch run's
-            # tables took hours to build.
+            # a large raw corpus or a batch run's tables took hours to build.
+            # A raw-only corpus no larger than this run regenerates, with no
+            # datagen still writing, is the plain deploy -> generate -> run
+            # flow and is replaced (LB-154).
             _existing = _c360_existing_state(cfg, clear_raw=not skip_generate)
-            if _existing:
+            _raw_only = _c360_only_fresh_generate(cfg, _existing)
+            _raw_problem = _c360_raw_replace_problem(cfg) if _raw_only else None
+            if _raw_only and _raw_problem is None:
+                print_info(
+                    f"Found only raw data in {_existing[0]} (no tables, no stream "
+                    "checkpoints). A continuous run generates its own data, so it "
+                    "will be replaced; a separate generate is not needed before "
+                    "`run --sustained`."
+                )
+            elif _existing:
+                if _raw_problem:
+                    print_info(f"Raw data is not replaced automatically: {_raw_problem}.")
                 _refuse_c360_reset(cfg, _existing)
                 pipeline_success = False
                 raise typer.Exit(1)
@@ -1406,6 +1549,15 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(1)
 
+        # The corpus is finite and usually written within minutes; a finished
+        # datagen Job holds no cores, so the streaming budget stops reserving
+        # them (LB-158). Wait a bounded time for it so the executor counts do
+        # not depend on a race with one API read. Unfinished or unknown keeps
+        # the reservation, so the streams never over-commit the cluster.
+        job_manager.datagen_running = not _datagen_released(
+            cfg.get_namespace(), deployed_here=not skip_generate
+        )
+
         # Launch all streaming jobs concurrently
         console.print()
         console.print("[bold]Launching continuous jobs...[/bold]")
@@ -1414,7 +1566,12 @@ def _run_sustained(
             j.record,
             EventType.STREAMING_START,
             message="Starting streaming pipeline",
-            details={"jobs": [name for _, name in streaming_jobs]},
+            details={
+                "jobs": [name for _, name in streaming_jobs],
+                # LB-158: whether the budget reserved datagen's cores, so
+                # runs with different executor counts can be told apart.
+                "datagen_cores_reserved": job_manager.datagen_running,
+            },
         )
 
         submitted = []
@@ -1913,7 +2070,7 @@ def _run_sustained(
                     f"  Duration: {run_duration}s ({run_duration / 60:.0f} min)\n"
                     f"  Streaming jobs: {len(submitted)}\n\n"
                     f"Query results: lakebench query --example count\n"
-                    f"Generate report: lakebench report",
+                    f"Report: report.html in the run directory",
                     title="Sustained Pipeline Complete",
                     expand=False,
                 )
@@ -2020,5 +2177,6 @@ def _run_sustained(
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
+            write_run_report(metrics_storage, run_id)
 
         _journal_safe(j.end_command, success=pipeline_success)

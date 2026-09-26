@@ -906,3 +906,73 @@ class TestAutoSizingClusterAware:
         # Should still scale up (sequential phases -- each gets full budget)
         assert config.platform.compute.spark.executor.instances > 8
         assert config.architecture.workload.datagen.parallelism > 10
+
+
+class TestDatagenCutIsExplicit:
+    """LB-160: at scale 250 and 500 `lakebench generate` cut a configured
+    43-pod datagen to 38 and 30 with no visible message. The cut itself is
+    real (the Trino tier's workers hold 85 and 165 of 434 cores), so it
+    stays, but it is returned and logged with its arithmetic."""
+
+    @staticmethod
+    def _cfg(scale):
+        return LakebenchConfig(
+            name="dg-cut",
+            architecture={
+                "workload": {
+                    "datagen": {"scale": scale, "parallelism": 43, "cpu": "8", "memory": "12Gi"}
+                },
+            },
+        )
+
+    @staticmethod
+    def _cap():
+        return ClusterCapacity(434_000, 8 * 432 * 1024**3, 8, 54_000, 432 * 1024**3)
+
+    @pytest.mark.parametrize(("scale", "pods"), [(250, 38), (500, 30)])
+    def test_sweep_cut_is_returned_with_its_reason(self, scale, pods, caplog):
+        cfg = self._cfg(scale)
+        with caplog.at_level("WARNING", logger="lakebench.config.autosizer"):
+            cuts = resolve_auto_sizing(cfg, self._cap())
+        assert cfg.architecture.workload.datagen.parallelism == pods
+        dg = [c for c in cuts if c.startswith("datagen.parallelism")]
+        assert len(dg) == 1
+        assert f"43 -> {pods}" in dg[0]
+        assert "434 allocatable cores" in dg[0] and "Trino" in dg[0]
+        # The arithmetic is stated, including the even rounding (LB-160 review).
+        if scale == 250:
+            assert "= 39 pods of 8 cores, rounded down to an even 38" in dg[0]
+        assert "set in config" in dg[0]
+        assert any(f"43 -> {pods}" in r.getMessage() for r in caplog.records)
+
+    def test_no_cut_no_warning(self):
+        cfg = self._cfg(100)
+        cuts = resolve_auto_sizing(cfg, self._cap())
+        assert cfg.architecture.workload.datagen.parallelism == 43
+        assert not [c for c in cuts if c.startswith("datagen")]
+
+    def test_generate_prints_the_cut(self, tmp_path, monkeypatch):
+        from unittest import mock
+
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+
+        cfg_file = tmp_path / "c.yaml"
+        cfg_file.write_text(
+            "name: dg-cut\n"
+            "platform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
+            "      access_key: x\n      secret_key: y\n"
+            "architecture:\n  workload:\n    datagen:\n"
+            "      scale: 500\n      parallelism: 43\n      cpu: '8'\n      memory: 12Gi\n"
+        )
+        k8s = mock.MagicMock()
+        k8s.get_cluster_capacity.return_value = self._cap()
+        monkeypatch.setattr("lakebench.cli._generate.get_k8s_client", lambda **kw: k8s)
+        # generate imports DeploymentEngine inside the function; stop there.
+        monkeypatch.setattr(
+            "lakebench.deploy.DeploymentEngine", mock.MagicMock(side_effect=SystemExit(3))
+        )
+        res = CliRunner().invoke(app, ["generate", str(cfg_file), "--yes"])
+        out = " ".join(res.output.split())
+        assert "43 -> 30" in out, (out[-2000:], repr(res.exception))
