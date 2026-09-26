@@ -22,7 +22,7 @@ runtime, never refused.
 
 | Backend | Status | Region strict | Bucket tagging | Notes |
 |---|---|---|---|---|
-| **Pure Storage FlashBlade** | Validated 2026-07-25, tagging re-checked 2026-09-21 | No | **No (LB-088)** | Reference platform. Path-style required. |
+| **Pure Storage FlashBlade** | Validated 2026-07-25, tagging re-checked 2026-09-21 | No | **No (LB-164)** | Reference platform. Path-style required. |
 | **Garage** 1.0.1+ | Validated 2026-07-25 | Yes | -- | Default for local mode. Apache 2.0, 21.7 MB image. |
 | **AWS S3** | Not yet validated | Yes | Yes | Set `path_style: false` for virtual-hosted addressing. |
 | **MinIO** | Not yet validated | -- | Yes | Community edition is maintenance-only since 2025. |
@@ -70,7 +70,7 @@ defect.
 Both behaviours are legitimate. FlashBlade accepts any region; Garage rejects a
 mismatch. Lakebench sets the region explicitly so both work.
 
-### Bucket tagging and ownership discipline (LB-088)
+### Bucket tagging and ownership discipline (LB-164)
 
 Lakebench stamps every bucket it creates with a `lakebench.deployment` tag so
 `destroy` can refuse to empty a bucket that belongs to a different deployment.

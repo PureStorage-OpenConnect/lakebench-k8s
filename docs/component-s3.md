@@ -89,7 +89,7 @@ objects (especially on FlashBlade).
 | Permission | Used By | Purpose |
 |---|---|---|
 | `s3:CreateBucket` | CLI (boto3) | Auto-create bronze/silver/gold buckets during `lakebench deploy`. Only needed when `create_buckets: true` (the default). Set `create_buckets: false` if buckets are pre-provisioned or credentials lack this permission. |
-| `s3:DeleteBucket` | CLI (boto3) | Delete buckets during `lakebench destroy`. Not strictly required -- destroy will skip bucket deletion and log a warning if this permission is missing. |
+| `s3:DeleteBucket` | CLI (boto3) | Delete the buckets deploy created during `lakebench destroy`. Required when `create_buckets: true` unless you pass `--keep-buckets`: without it the bucket delete fails, destroy reports FAILED, and the namespace is kept as the buckets' ownership record. |
 
 ### Example IAM Policy (AWS Format)
 
