@@ -473,6 +473,7 @@ def test_relative_cap_as_lift_over_prevalence():
         "shortcut_models": ["single_feature", "feature_pair"],
     }
     del p["leakage"]["ablation"]
+    p["leakage"]["nuisance_features"] = []
     ratio = fg.evaluate_gate(df, p)["typologies"]["beh"]
     p = _prereg()
     p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence"}
@@ -892,6 +893,10 @@ def test_leakage_block_fails_closed():
     del p["leakage"]["ablation"]
     with pytest.raises(ValueError, match="ablation is missing"):
         fg.evaluate_gate(_frame(), p)
+    # Missing ablation is refused even when nuisance_only is not registered.
+    p["leakage"]["shortcut_models"] = ["single_feature", "feature_pair"]
+    with pytest.raises(ValueError, match="ablation is missing"):
+        fg._leakage_sets(p)
     q = _prereg()
     q["leakage"] = {**q["leakage"], "relative_cap_formula": "ratio"}
     with pytest.raises(ValueError, match="lift"):
@@ -907,7 +912,11 @@ def test_secondary_lifetime_skips_the_new_fits():
     life = fg.lifetime_prereg(p, secondary=True)
     assert life["shortcut_model"]["also_reference_model"] is False
     assert "ablation" not in life["leakage"]
-    rep = fg.evaluate_gate(_frame(), life)
+    # Only the caller can declare the secondary block: the same prereg on
+    # the primary path is refused.
+    with pytest.raises(ValueError, match="ablation is missing"):
+        fg.evaluate_gate(_frame(), life)
+    rep = fg.evaluate_gate(_frame(), life, secondary=True)
     r = rep["typologies"]["beh"]
     assert "ablation" not in r and set(r["shortcuts"]) == set(p["leakage"]["shortcut_models"])
     assert r["shortcuts"]["feature_pair"]["best"]["ref_ap"] is None

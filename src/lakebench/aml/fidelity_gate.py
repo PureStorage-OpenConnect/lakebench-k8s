@@ -116,8 +116,6 @@ def lifetime_prereg(prereg: dict, secondary: bool = False) -> dict:
             p["shortcut_model"]["also_reference_model"] = False
         if "ablation" in skips:
             p["leakage"].pop("ablation", None)
-            # Tells _leakage_sets the ablation was dropped on purpose.
-            p["leakage"]["secondary_lifetime_skips_applied"] = True
     hist = set((p.get("unit_of_scoring") or {}).get("history_features", []))
     p["features"] = [f for f in p["features"] if f not in hist]
     p.setdefault("unit_of_scoring", {})["window"] = "lifetime"
@@ -128,11 +126,13 @@ def lifetime_prereg(prereg: dict, secondary: bool = False) -> dict:
     return p
 
 
-def _leakage_sets(prereg: dict) -> tuple[list[str], dict[str, list[str]]]:
+def _leakage_sets(prereg: dict, secondary: bool = False) -> tuple[list[str], dict[str, list[str]]]:
     """(nuisance_features, ablation feature_groups) from the leakage block,
     checked against the feature list: the nuisance features must all be
     features, and the groups must partition the features exactly, so a typo
-    in the pre-registration fails loudly instead of shrinking the check."""
+    in the pre-registration fails loudly instead of shrinking the check.
+    ``secondary`` (the ungated lifetime block, lifetime_prereg(secondary=True))
+    is the only case allowed to run without the ablation."""
     lk = prereg["leakage"]
     features = list(prereg["features"])
     nuis = list(lk.get("nuisance_features") or [])
@@ -140,15 +140,11 @@ def _leakage_sets(prereg: dict) -> tuple[list[str], dict[str, list[str]]]:
     if missing:
         raise ValueError(f"leakage.nuisance_features not in features: {missing}")
     abl = lk.get("ablation")
-    if (
-        abl is None
-        and nuis
-        and "nuisance_only" in lk.get("shortcut_models", [])
-        and not lk.get("secondary_lifetime_skips_applied")
-    ):
-        # Fail closed: a 3.6.0 leakage block without its ablation would
-        # silently skip the gated nuisance drop.
-        raise ValueError("leakage.ablation is missing while nuisance_only is registered")
+    if abl is None and nuis and not secondary:
+        # Fail closed: registered nuisance features without their ablation
+        # would silently skip the gated nuisance drop. Only the caller, never
+        # the pre-registration, can declare the ungated secondary block.
+        raise ValueError("leakage.ablation is missing while nuisance_features is registered")
     if abl is not None:
         want = {"method": "leave_one_group_out", "model": "reference_model"}
         bad = {k: abl.get(k) for k, v in want.items() if abl.get(k) != v}
@@ -497,7 +493,7 @@ def _bootstrap_ci(y, score, w, groups, prereg: dict) -> tuple[float | None, floa
 
 
 def _evaluate_typology(
-    name, X, y, w, groups, features, prereg, kind, score=True, sink=None
+    name, X, y, w, groups, features, prereg, kind, score=True, sink=None, secondary=False
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -551,7 +547,7 @@ def _evaluate_typology(
     use_rank = sm.get("single_feature_also_scores_raw_rank")
     use_ref = bool(sm.get("also_reference_model"))
     lk = prereg["leakage"]
-    nuis, feat_groups = _leakage_sets(prereg)
+    nuis, feat_groups = _leakage_sets(prereg, secondary)
     nf = len(features)
 
     def ref_model():
@@ -834,12 +830,17 @@ def evaluate_gate(
     provenance: dict | None = None,
     score: bool = True,
     collect_outputs: bool = False,
+    secondary: bool = False,
 ) -> dict[str, Any]:
     """Run every gate on ``frame`` and return one JSON-serialisable report.
 
     ``score=False`` stops before any model: per typology only n_scored,
     n_positives, prevalence and n_excluded (a smoke test that must not look at
     AP), verdict "counts_only", no level2 or passes.
+
+    ``secondary=True`` marks the ungated secondary lifetime block (built with
+    lifetime_prereg(secondary=True)), the one run allowed without the nuisance
+    ablation.
 
     ``collect_outputs=True`` also returns the reference model's outputs under
     report["_model_outputs"] (callers pop it and write files): per-unit
@@ -854,7 +855,7 @@ def evaluate_gate(
     typologies = in_scope_typologies(prereg)
     # Before any model: a malformed leakage block must not surface only after
     # AP exists (a registered look would be spent on a crash).
-    _leakage_sets(prereg)
+    _leakage_sets(prereg, secondary)
     report: dict[str, Any] = {
         "gate": "aml-fidelity",
         "prereg_version": prereg.get("version"),
@@ -932,6 +933,7 @@ def evaluate_gate(
             kind,
             score=score,
             sink=sink,
+            secondary=secondary,
         )
         if sink is not None and "scores" in sink:
             sinks[t] = sink

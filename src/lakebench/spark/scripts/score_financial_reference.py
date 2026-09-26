@@ -421,7 +421,10 @@ def run_fidelity_gate(
         # failure must not void the gated result.
         try:
             sec = evaluate_gate(
-                inputs["secondary_lifetime"], lifetime_prereg(prereg, secondary=True), score=score
+                inputs["secondary_lifetime"],
+                lifetime_prereg(prereg, secondary=True),
+                score=score,
+                secondary=True,
             )
             keys = ("unit", "verdict", "n_scored_customers", "n_scored_units", "typologies")
             report["secondary_lifetime"] = {"gated": False, **{k: sec.get(k) for k in keys}}

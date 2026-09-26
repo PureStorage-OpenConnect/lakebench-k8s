@@ -410,6 +410,7 @@ def main(argv=None) -> int:
                 inputs["secondary_lifetime"],
                 lifetime_prereg(prereg, secondary=True),
                 score=not args.counts_only,
+                secondary=True,
             )
         except Exception as e:  # noqa: BLE001
             sec = {"verdict": "error", "note": str(e)}
