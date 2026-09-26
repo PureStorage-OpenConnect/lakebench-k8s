@@ -967,6 +967,11 @@ def _run_local_mode(
     snapshot = build_config_snapshot(cfg)
     snapshot["local"] = True
     collector.start_run(run_id, cfg.name, snapshot)
+    if collector.current_run is not None:
+        # Local mode runs no table maintenance.
+        from lakebench.metrics.maintenance_policy import skipped_policy_id
+
+        collector.current_run.maintenance_policy_id = skipped_policy_id()
 
     # Reconnect to the running stack. Garage keeps metadata on the host, so
     # this reuses the existing key and buckets rather than minting new ones.
@@ -1438,6 +1443,11 @@ def run(
 
     config_snapshot = build_config_snapshot(cfg)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    if skip_maintenance and collector.current_run is not None:
+        # No table maintenance: not comparable with runs under the policy.
+        from lakebench.metrics.maintenance_policy import skipped_policy_id
+
+        collector.current_run.maintenance_policy_id = skipped_policy_id()
 
     pipeline_success = True
     _datagen_elapsed = 0.0

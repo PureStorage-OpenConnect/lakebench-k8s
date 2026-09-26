@@ -28,6 +28,7 @@ from typing import Any
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.benchmark.queries import legacy_query_set_id
+from lakebench.metrics.maintenance_policy import recorded_policy
 
 from .collector import (
     BenchmarkMetrics,
@@ -448,6 +449,7 @@ class MetricsStorage:
             datagen_fleet=data.get("datagen_fleet"),
             financial_scoring=data.get("financial_scoring"),
             tm_operations=data.get("tm_operations"),
+            maintenance_policy_id=recorded_policy(data),
         )
 
         if data.get("end_time"):

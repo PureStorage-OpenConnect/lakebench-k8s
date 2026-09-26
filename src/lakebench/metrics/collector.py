@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar
 
+from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+
 logger = logging.getLogger(__name__)
 
 
@@ -296,6 +298,11 @@ class PipelineMetrics:
     # is where its TM section comes from.
     tm_operations: dict[str, Any] | None = None
 
+    # Table-maintenance policy the run was measured under
+    # (metrics/maintenance_policy.py). A run gets the current id; a record
+    # loaded without one is the legacy policy (set by the storage loader).
+    maintenance_policy_id: str = MAINTENANCE_POLICY_ID
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = {
@@ -312,6 +319,7 @@ class PipelineMetrics:
             "queries": [q.to_dict() for q in self.queries],
             "streaming": [s.to_dict() for s in self.streaming],
             "config_snapshot": self.config_snapshot,
+            "maintenance_policy_id": self.maintenance_policy_id,
         }
         if self.benchmark is not None:
             d["benchmark"] = self.benchmark.to_dict()
@@ -1831,6 +1839,16 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
             "streams": cfg.architecture.benchmark.streams,
             "cache": cfg.architecture.benchmark.cache,
             "iterations": cfg.architecture.benchmark.iterations,
+        },
+        # What table maintenance the config asks for. Part of the perf-gate
+        # fingerprint: a run with maintenance turned down or off measures
+        # something else than one under the full policy.
+        "maintenance": {
+            "pre_benchmark_maintenance": pipeline.pre_benchmark_maintenance,
+            "retention_interval": pipeline.sustained.retention_interval,
+            "retention_threshold": pipeline.sustained.retention_threshold,
+            "compaction_enabled": pipeline.sustained.compaction_enabled,
+            "compaction_interval": pipeline.sustained.compaction_interval,
         },
     }
 
