@@ -73,7 +73,13 @@ import json
 import re
 from datetime import date, timedelta
 
-from common import env, iceberg_table_stats, log, one_line
+from common import (
+    ICEBERG_V2_SNAPPY_PROPS_SQL,
+    env,
+    iceberg_table_stats,
+    log,
+    one_line,
+)
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
@@ -153,7 +159,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_RECON} (
     amount_usd     DECIMAL(38, 2),
     computed_ts    TIMESTAMP NOT NULL
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_COVERAGE = f"""
@@ -168,7 +174,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_COVERAGE} (
     run_id               STRING NOT NULL,
     computed_ts          TIMESTAMP NOT NULL
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_DISPOSITIONS = f"""
@@ -208,7 +214,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_DISPOSITIONS} (
     run_id                STRING NOT NULL,
     computed_ts           TIMESTAMP NOT NULL
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_CASES = f"""
@@ -251,7 +257,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_CASES} (
     run_id                         STRING NOT NULL,
     computed_ts                    TIMESTAMP NOT NULL
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 TM_DDLS = (

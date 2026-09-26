@@ -292,6 +292,15 @@ Maintenance uses whichever query engine is deployed:
 | Spark Thrift | Yes | `CALL catalog.system.expire_snapshots(...)` via beeline |
 | DuckDB | No | Read-only -- maintenance is skipped |
 
+`expire_snapshots` does not delete old `metadata.json` files; each commit
+leaves one behind. Every Iceberg table lakebench creates therefore sets
+`write.metadata.delete-after-commit.enabled=true` and
+`write.metadata.previous-versions-max=50`, so each commit deletes metadata
+files beyond the newest 50. This applies to tables created by the current
+version. A table that already exists in a reused catalog keeps its old
+properties until it is recreated (a fresh deployment, or a run that replaces
+the table).
+
 When `query_engine.type` is `duckdb` or `none`, maintenance is skipped with
 a log message. Failures on individual tables (e.g., a table that doesn't exist
 yet early in the run) are logged but do not abort the pipeline.

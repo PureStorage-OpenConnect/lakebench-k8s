@@ -14,7 +14,14 @@ import sys
 import time
 from enum import Enum
 
-from common import env, get_daily_kpi_aggregations, log, set_utc_session
+from common import (
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
+    env,
+    get_daily_kpi_aggregations,
+    log,
+    set_utc_session,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
@@ -136,6 +143,8 @@ def gold_simple_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
         daily_kpis_consolidated.writeTo(gold_tbl)
         .tableProperty("write.format.default", "parquet")
         .tableProperty("write.parquet.compression-codec", "snappy")
+        .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+        .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
         .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
         .createOrReplace()
     )
@@ -175,6 +184,8 @@ def gold_two_phase_agg(spark, silver_tbl: str, gold_tbl: str) -> int:
         daily_kpis_consolidated.writeTo(gold_tbl)
         .tableProperty("write.format.default", "parquet")
         .tableProperty("write.parquet.compression-codec", "snappy")
+        .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+        .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
         .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
         .createOrReplace()
     )
@@ -243,6 +254,8 @@ def gold_incremental(spark, silver_tbl: str, gold_tbl: str) -> int:
             new_kpis_consolidated.writeTo(gold_tbl)
             .tableProperty("write.format.default", "parquet")
             .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
             .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
             .create()
         )
