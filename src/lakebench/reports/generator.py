@@ -135,6 +135,17 @@ class ReportGenerator:
                 # The configured trickle bounded intake and the pipeline kept
                 # pace with it (LB-156): a caveat on the ratio, not a failure.
                 warnings.append(pb.trickle_note() or "Intake held to the trickle rate")
+            elif (
+                is_sustained
+                and pb.ingest_ratio is not None
+                and pb.ingest_ratio < 0.95
+                and pb.intake_limit == "trickle_rate"
+                and pb.pipeline_saturated is None
+            ):
+                warnings.append(
+                    f"Ingest ratio {pb.ingest_ratio:.2f}: intake held to the trickle rate, "
+                    "but silver's pace was not measured, so saturation is unknown"
+                )
             elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
                 cause = (
                     "intake held to the trickle rate, silver did not keep pace"
@@ -244,6 +255,16 @@ class ReportGenerator:
             ratio_badge = (
                 f'<span style="color: var(--warning);" title="{note}">'
                 "Held to trickle rate (not saturated)</span>"
+            )
+            ratio_value = f"{pb.ingest_ratio:.2f}"
+        elif (
+            pb.ingest_ratio < 0.95
+            and pb.intake_limit == "trickle_rate"
+            and pb.pipeline_saturated is None
+        ):
+            ratio_badge = (
+                '<span style="color: var(--warning);">Held to trickle rate '
+                "(silver pace unmeasured)</span>"
             )
             ratio_value = f"{pb.ingest_ratio:.2f}"
         elif pb.ingest_ratio < 0.95:
@@ -559,6 +580,12 @@ class ReportGenerator:
             ):
                 indicators.append(
                     ("Ingest Ratio", "status-warning", f"{ratio:.2f} held to trickle rate")
+                )
+            elif (
+                ratio < 0.95 and pb.intake_limit == "trickle_rate" and pb.pipeline_saturated is None
+            ):
+                indicators.append(
+                    ("Ingest Ratio", "status-warning", f"{ratio:.2f} trickle, silver unmeasured")
                 )
             elif ratio < 0.95:
                 indicators.append(("Ingest Ratio", "status-failed", f"{ratio:.2f} SATURATED"))

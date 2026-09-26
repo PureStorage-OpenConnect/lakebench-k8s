@@ -96,6 +96,9 @@ class StreamingJobMetrics:
     # Silver only: rows of micro-batches that logged a commit. None when no
     # commit line was seen (unknown, so a run cannot count as drained).
     committed_rows: int | None = None
+    # Bronze only: seconds from the first to the last micro-batch that wrote
+    # rows, from the log timestamps. None with fewer than two such batches.
+    batch_span_seconds: float | None = None
     # AML gold only: time to detect, merged from every cycle's histogram
     # ("Cycle N: time to detect ..."). None when no cycle logged one.
     ttd_alerts: int | None = None
@@ -446,6 +449,7 @@ class StageMetrics:
     freshness_active_seconds: float | None = None  # all but the trailing idle run (LB-145)
     trailing_idle_cycles: int = 0  # gold cycles after silver last moved
     committed_rows: int | None = None  # silver: rows in committed micro-batches
+    batch_span_seconds: float | None = None  # bronze: first to last batch that wrote rows
     # AML gold: time to detect over newly raised alerts (None = not measured)
     ttd_alerts: int | None = None
     ttd_unmatched: int = 0
@@ -921,9 +925,10 @@ class PipelineBenchmark:
         if self.intake_limit == "trickle_rate":
             if self.sustained_throughput_rps > 0:
                 self.corpus_drain_seconds = datagen_rows / self.sustained_throughput_rps
-            self.pipeline_saturated = not self._silver_kept_pace(
-                silver, silver_committed, total_bronze_rows
-            )
+            # None: bronze held the trickle but silver's pace is unmeasured,
+            # so saturation is unknown rather than asserted either way.
+            kept = self._silver_kept_pace(silver, silver_committed, total_bronze_rows)
+            self.pipeline_saturated = None if kept is None else not kept
 
         # Time to detect (AML continuous): the gold stage's merged histogram.
         gold = next((s for s in streaming if s.stage_name == "gold"), None)
@@ -1003,6 +1008,17 @@ class PipelineBenchmark:
         if total_core_hours > 0:
             self.compute_efficiency_gb_per_core_hour = total_input_gb / total_core_hours
 
+    def trickle_summary(self) -> str | None:
+        """Short line for the CLI score panel when the trickle rate bounded
+        intake; None otherwise."""
+        if self.intake_limit != "trickle_rate":
+            return None
+        if self.pipeline_saturated is False:
+            return "Intake held to the trickle rate, not saturated: rows/s is the offered load"
+        if self.pipeline_saturated is True:
+            return "Intake held to the trickle rate; silver did not keep pace with it"
+        return "Intake held to the trickle rate; silver pace unmeasured, saturation unknown"
+
     def trickle_note(self) -> str | None:
         """One plain sentence for a run whose intake the trickle rate
         bounded (intake_limit "trickle_rate"), for the CLI and the report;
@@ -1033,13 +1049,16 @@ class PipelineBenchmark:
 
     def _bronze_kept_to_trigger(self, bronze: StageMetrics) -> bool:
         """True when bronze ran a micro-batch on nearly every trigger of the
-        window and each finished inside its trigger.
+        window and of its active span, and each finished inside its trigger.
 
         With files left in the corpus, that is the pattern of a stream held
         to max_files_per_trigger per trigger: a late start or a stall drops
         batches (Spark runs no batch on a trigger with no new files), and a
-        bronze that overruns its trigger runs fewer, longer batches. Unknown
-        trigger config proves nothing and returns False.
+        bronze that overruns its trigger runs fewer, longer batches. The
+        window count catches a late start; the span count (first to last
+        batch, from the log timestamps) catches a stall that batches logged
+        after the window would otherwise pad out. Unknown trigger config or
+        span proves nothing and returns False.
         """
         sustained = self.config_snapshot.get("sustained") or {}
         trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
@@ -1047,27 +1066,37 @@ class PipelineBenchmark:
             return False
         if bronze.latency_ms / 1000.0 >= trigger_s:
             return False
-        triggers = bronze.elapsed_seconds / trigger_s
-        return bronze.total_batches >= _TRIGGER_COVERAGE * triggers
+        if bronze.batch_span_seconds is None:
+            return False
+        if bronze.total_batches < _TRIGGER_COVERAGE * bronze.elapsed_seconds / trigger_s:
+            return False
+        span_triggers = bronze.batch_span_seconds / trigger_s + 1
+        return bronze.total_batches >= _TRIGGER_REGULARITY * span_triggers
 
     def _silver_kept_pace(
         self, silver: list[StageMetrics], silver_committed: int | None, bronze_rows: int
-    ) -> bool:
-        """True when silver committed all but the rows bronze could add in
-        one silver trigger, one silver batch and one bronze trigger: the lag
-        of a silver stream that keeps up and was stopped mid-cycle. Unknown
-        commits or trigger config prove nothing and return False."""
+    ) -> bool | None:
+        """Whether silver kept pace with what bronze took.
+
+        True when every silver stage's mean batch finished inside the silver
+        trigger and silver committed all but the rows bronze could add in two
+        silver triggers and one bronze trigger: the most a silver that keeps
+        up can trail when the window stops it mid-cycle. A silver whose
+        batches overrun its trigger is behind however small the gap. None
+        when the commits, batch times or trigger config are unknown.
+        """
         if not silver or silver_committed is None:
-            return False
+            return None
         sustained = self.config_snapshot.get("sustained") or {}
         silver_trigger_s = _interval_seconds(sustained.get("silver_trigger_interval"))
         bronze_trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
         if not silver_trigger_s or not bronze_trigger_s:
+            return None
+        if any(not s.latency_ms for s in silver):
+            return None
+        if any(s.latency_ms / 1000.0 >= silver_trigger_s for s in silver if s.latency_ms):
             return False
-        silver_batch_s = max((s.latency_ms or 0.0) for s in silver) / 1000.0
-        allowed_lag = self.sustained_throughput_rps * (
-            silver_trigger_s + silver_batch_s + bronze_trigger_s
-        )
+        allowed_lag = self.sustained_throughput_rps * (2 * silver_trigger_s + bronze_trigger_s)
         return bronze_rows - silver_committed <= allowed_lag
 
     def _scores_dict(self) -> dict[str, Any]:
@@ -1555,6 +1584,7 @@ def build_pipeline_benchmark(
             freshness_active_seconds=sj.freshness_active_seconds,
             trailing_idle_cycles=sj.trailing_idle_cycles,
             committed_rows=sj.committed_rows,
+            batch_span_seconds=sj.batch_span_seconds,
             ttd_alerts=sj.ttd_alerts,
             ttd_unmatched=sj.ttd_unmatched,
             ttd_late=sj.ttd_late,
@@ -1791,6 +1821,16 @@ _BRONZE_BUSY_BOUND = 0.8
 # stream startup (60 of 60 triggers ran on the LB-156 scale-100 run; 0.9
 # leaves 180 s of an 1800 s window at a 30 s trigger).
 _TRIGGER_COVERAGE = 0.9
+
+# Share of the triggers between bronze's first and last batch that must have
+# run one. A trickle-held stream runs on every trigger (processingTime starts
+# each batch on the next trigger boundary), so this only absorbs a missed
+# trigger or two; a mid-window stall shows here even when a tail of batches
+# after the window pads the whole-window count.
+_TRIGGER_REGULARITY = 0.95
+
+# Timestamp of common.log's "[lb] <iso> - msg" prefix.
+_LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
 
 _INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
 
@@ -2299,6 +2339,8 @@ class MetricsCollector:
         # Silver: rows per batch id, and the batch ids that logged a commit.
         batch_rows: dict[int, int] = {}
         committed_batches: set[int] = set()
+        # Bronze: log timestamps of the batches that wrote rows.
+        write_times: list[datetime] = []
         ttd_lines: list[re.Match[str]] = []
         ttd_detail: list[re.Match[str]] = []
 
@@ -2306,6 +2348,12 @@ class MetricsCollector:
             # Bronze: "Batch N: writing X rows to ..."
             m = re.search(r"Batch (\d+): writing ([\d,]+) rows", line)
             if m:
+                ts = _LOG_TS.search(line)
+                if ts:
+                    try:
+                        write_times.append(datetime.fromisoformat(ts.group(1)))
+                    except ValueError:
+                        pass
                 batch_ids.add(int(m.group(1)))
                 total_rows += int(m.group(2).replace(",", ""))
                 continue
@@ -2391,6 +2439,8 @@ class MetricsCollector:
             _apply_ttd_detail(metrics, ttd_detail)
         metrics.total_batches = len(batch_ids)
         metrics.total_rows_processed = total_rows
+        if len(write_times) >= 2:
+            metrics.batch_span_seconds = (max(write_times) - min(write_times)).total_seconds()
 
         if batch_durations:
             metrics.micro_batch_duration_ms = (sum(batch_durations) / len(batch_durations)) * 1000

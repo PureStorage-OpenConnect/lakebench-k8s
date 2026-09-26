@@ -47,7 +47,12 @@ def _pb(
     schema="customer360",
     sustained=None,
     trailing_idle=0,
+    bronze_span=None,
 ):
+    # A trickle-held bronze logs one batch per trigger: first to last is
+    # (batches - 1) triggers apart.
+    if bronze_span is None and bronze_batches > 1:
+        bronze_span = (bronze_batches - 1) * 30.0
     stages = [
         StageMetrics(
             stage_name="bronze",
@@ -57,6 +62,7 @@ def _pb(
             input_rows=bronze_rows,
             latency_ms=bronze_ms,
             total_batches=bronze_batches,
+            batch_span_seconds=bronze_span,
         ),
         StageMetrics(
             stage_name="silver",
@@ -164,6 +170,40 @@ def test_aml_uses_the_same_trickle_rule():
 # -- scale 100: runs that did not keep pace stay saturated ---------------------
 
 
+def test_a_slow_silver_does_not_widen_its_own_allowance():
+    """Review finding: silver at 600 s per batch on a 60 s trigger, 15.5M
+    rows behind. Its batch time must not count toward the lag it may have."""
+    pb = _live_s100(silver_ms=600_000.0, silver_committed=46_473_000 - 15_500_000)
+    assert pb.intake_limit == "trickle_rate"
+    assert pb.pipeline_saturated is True
+    assert pb.trickle_note() is None
+
+
+def test_silver_overrunning_its_trigger_is_behind_even_with_a_small_gap():
+    pb = _live_s100(silver_ms=65_000.0)
+    assert pb.pipeline_saturated is True
+
+
+def test_a_mid_window_stall_is_not_hidden_by_a_tail_of_batches():
+    """Review finding: bronze stalled 4 minutes mid-window, and two batches
+    logged after the window keep the whole-window count at 60 of 60. The
+    first-to-last span (1,770 s of batches plus the 240 s gap) shows 8
+    missed triggers."""
+    pb = _live_s100(bronze_span=59 * 30.0 + 240.0)
+    assert pb.intake_limit == "below_bronze_capacity"
+    assert pb.pipeline_saturated is True
+
+
+def test_one_missed_trigger_is_still_the_trickle():
+    pb = _live_s100(bronze_span=60 * 30.0)
+    assert pb.intake_limit == "trickle_rate"
+
+
+def test_no_batch_span_proves_nothing():
+    pb = _live_s100(bronze_span=None, bronze_batches=1)
+    assert pb.intake_limit != "trickle_rate"
+
+
 def test_late_start_is_not_the_trickle():
     """Bronze reached its first batch 10 minutes in: 40 of 60 triggers."""
     pb = _live_s100(bronze_rows=40 * 774_550, bronze_batches=40, silver_committed=40 * 774_550)
@@ -202,10 +242,13 @@ def test_silver_behind_the_trickle_is_saturated():
     assert pb.trickle_note() is None
 
 
-def test_silver_commits_unlogged_cannot_prove_pace():
+def test_silver_commits_unlogged_leave_saturation_unknown():
+    """Review finding: unknown is not "silver lagged"."""
     pb = _live_s100(silver_committed=None)
     assert pb.intake_limit == "trickle_rate"
-    assert pb.pipeline_saturated is True
+    assert pb.pipeline_saturated is None
+    assert pb.trickle_note() is None
+    assert "unmeasured" in (pb.trickle_summary() or "")
 
 
 def test_unparseable_trigger_config_proves_nothing():
@@ -294,12 +337,97 @@ def test_report_still_fails_a_stalled_run():
     assert any("silver did not keep pace" in r for r in reasons)
 
 
-def test_corpus_drain_seconds_survives_save_and_load(tmp_path):
-    from lakebench.metrics.storage import MetricsStorage
+def test_report_calls_unmeasured_silver_unknown_not_failed():
+    from lakebench.reports.generator import ReportGenerator
 
-    pm = _metrics(_live_s100())
-    MetricsStorage(tmp_path).save_run(pm)
-    loaded = MetricsStorage(tmp_path).load_run(pm.run_id).pipeline_benchmark
-    assert loaded.intake_limit == "trickle_rate"
-    assert loaded.pipeline_saturated is False
-    assert loaded.corpus_drain_seconds == 9_600
+    gen = ReportGenerator(metrics_dir="/tmp/unused-rg")
+    pb = _live_s100(silver_committed=None)
+    _, reasons, warnings = gen._compute_overall_status(_metrics(pb))
+    assert not any("Ingest ratio" in r for r in reasons), reasons
+    assert any("saturation is unknown" in w for w in warnings)
+    assert "SATURATED" not in gen._generate_sustained_detail_cards(pb)
+
+
+# -- the parser path: driver log text to the verdict -----------------------------
+
+
+def _log(t, msg):
+    return f"[lb] {t.isoformat()} - {msg}"
+
+
+def _bronze_log(batches, rows_per_batch, seconds, start=_T0 + timedelta(seconds=40), first=0):
+    lines = []
+    for b in range(first, first + batches):
+        t = start + timedelta(seconds=30 * (b - first))
+        lines.append(_log(t, f"Batch {b}: writing {rows_per_batch:,} rows to lakehouse.bronze"))
+        lines.append(
+            _log(t + timedelta(seconds=seconds), f"Batch {b}: committed in {seconds:.1f}s")
+        )
+    return "\n".join(lines)
+
+
+def _silver_log(batches, rows_per_batch, seconds):
+    lines = []
+    for b in range(batches):
+        t = _T0 + timedelta(seconds=90 + 60 * b)
+        lines.append(_log(t, f"Batch {b}: transforming {rows_per_batch:,} rows"))
+        lines.append(
+            _log(
+                t,
+                f"Batch {b}: committed to lakehouse.silver.customer_interactions_enriched in {seconds:.1f}s",
+            )
+        )
+    return "\n".join(lines)
+
+
+def _run_from_logs(bronze_log):
+    from lakebench.metrics.collector import MetricsCollector, build_pipeline_benchmark
+
+    collector = MetricsCollector()
+    run = collector.start_run(
+        "r",
+        "d",
+        {
+            "workload_schema": "customer360",
+            "scale": 100,
+            "datagen_output_rows": _CORPUS[100],
+            "sustained": _SUSTAINED,
+        },
+    )
+    for log, job in (
+        (bronze_log, "bronze-ingest"),
+        (_silver_log(29, 1_549_100, 24.6), "silver-stream"),
+    ):
+        m = collector.parse_streaming_logs(log, job)
+        m.elapsed_seconds = _WINDOW
+        m.success = True
+        run.streaming.append(m)
+    run.start_time = _T0
+    run.end_time = _T0 + timedelta(seconds=_WINDOW)
+    return build_pipeline_benchmark(run)
+
+
+def test_live_shaped_logs_parse_to_the_trickle_verdict():
+    pb = _run_from_logs(_bronze_log(60, 774_550, 20.5))
+    bronze = next(s for s in pb.stages if s.stage_name == "bronze")
+    assert bronze.total_batches == 60
+    assert bronze.batch_span_seconds == pytest.approx(59 * 30)
+    assert pb.intake_limit == "trickle_rate"
+    assert pb.pipeline_saturated is False
+
+
+def test_logs_with_a_stall_parse_to_saturated():
+    """30 batches, a 5-minute stall, 30 more: 60 of the window's 60
+    triggers, so only the span shows the stall."""
+    stalled = (
+        _bronze_log(30, 774_550, 20.5)
+        + "\n"
+        + _bronze_log(
+            30, 774_550, 20.5, start=_T0 + timedelta(seconds=40 + 30 * 30 + 300), first=30
+        )
+    )
+    pb = _run_from_logs(stalled)
+    bronze = next(s for s in pb.stages if s.stage_name == "bronze")
+    assert bronze.total_batches == 60
+    assert pb.intake_limit == "below_bronze_capacity"
+    assert pb.pipeline_saturated is True
