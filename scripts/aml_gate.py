@@ -156,6 +156,7 @@ def main(argv=None) -> int:
         library_versions,
         lifetime_prereg,
         load_preregistration,
+        output_fingerprints,
         summary_lines,
         write_model_outputs,
     )
@@ -289,6 +290,10 @@ def main(argv=None) -> int:
                 name: {"path": p, "bytes": os.path.getsize(p)} for name, p in paths.items()
             }
             report["model_outputs"]["oof_scores"]["rows"] = int(len(outputs["scores"]))
+            # Content hashes D8 checks the files against (scale_invariance.py).
+            for name, fps in output_fingerprints(outputs).items():
+                if name in report["model_outputs"]:
+                    report["model_outputs"][name]["fingerprint"] = fps
         except Exception as e:  # noqa: BLE001
             report["model_outputs"] = {"error": str(e)}
     report["unit_detail"] = inputs["unit"]

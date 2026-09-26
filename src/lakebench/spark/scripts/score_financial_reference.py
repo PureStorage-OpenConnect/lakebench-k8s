@@ -233,7 +233,16 @@ def _write_model_outputs(spark, prefix: str, outputs: dict) -> dict:
     units per typology and the unit table at that many units."""
     import json as _json
 
+    from fidelity_gate import output_fingerprints
+
     out = {}
+    # Content hashes of the tables as scored, which D8 checks the written
+    # files against; a failure here leaves them absent (D8 then fails closed).
+    try:
+        fps = output_fingerprints(outputs)
+    except Exception as e:  # noqa: BLE001 -- an output, never the gate numbers
+        log(f"WARN: output fingerprints not computed: {e}")
+        fps = {}
     keys = {"group": "long", "month": "int"}
     scores = outputs["scores"]
     if len(scores):
@@ -242,6 +251,8 @@ def _write_model_outputs(spark, prefix: str, outputs: dict) -> dict:
         path = f"{prefix}/oof_scores.parquet"
         _write_pandas_parquet(spark, scores.astype({"typology": str}), path, types, "string")
         out["oof_scores"] = {"path": path, "rows": int(len(scores))}
+        if fps.get("oof_scores"):
+            out["oof_scores"]["fingerprint"] = fps["oof_scores"]
     units = outputs.get("unit_features")
     if units is not None and len(units):
         # Features and weight are doubles (the gate casts every feature to
@@ -249,6 +260,8 @@ def _write_model_outputs(spark, prefix: str, outputs: dict) -> dict:
         path = f"{prefix}/unit_features.parquet"
         _write_pandas_parquet(spark, units, path, keys, "double")
         out["unit_features"] = {"path": path, "rows": int(len(units))}
+        if fps.get("unit_features"):
+            out["unit_features"]["fingerprint"] = fps["unit_features"]
     imp = outputs["importance"]
     if len(imp):
         path = f"{prefix}/feature_importance.parquet"

@@ -18,13 +18,18 @@ D8 reads two of them:
 
 What passes, all of it required (the verdict is the conjunction):
 
-- Provenance: both reports ran (verdict ok) under the pre-registration file
-  loaded here (sha256 equal), on the same verified seed, the small run at the
-  gate scale and the large run at a larger scale, on the same unit, feature
-  list and numerical libraries.
+- Provenance: both reports ran (verdict ok) under the packaged
+  pre-registration (sha256 equal to the tracked file, so no override can
+  loosen a tolerance), on the same verified calibration seed, the small run
+  at corpora.gate_scale and the large run at the top of density.scales (see
+  LARGE_SCALE_SOURCE), on the same unit, registered label role, feature list,
+  feature code (aml_features sha256), generator model version and numerical
+  libraries, each with its own corpus_fully_keyed / seed / label-role passes
+  true, and the two reports are different files.
 - Integrity: each scores table agrees with its report on n_scored and
-  n_positives per typology, and each unit table on n_scored_units, so the
-  files are the ones the report scored.
+  n_positives per typology, each unit table on n_scored_units, and both on
+  the content fingerprints the gate recorded when it wrote them, so the files
+  are the ones the report scored (not a later run's on the same prefix).
 - AP equivalence, per behavioural typology: both runs have status ok and at
   least power.min_positives positives, and the percentile CI (power.ci_level,
   power.bootstrap_iterations resamples of customers, drawn independently in
@@ -57,15 +62,43 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 from typing import Any
 
-from lakebench.aml.fidelity_gate import load_preregistration
+from lakebench.aml.fidelity_gate import (
+    PREREG_FILENAME,
+    SCORES_FINGERPRINT_COLUMNS,
+    fingerprint,
+    load_preregistration,
+)
 
 GATE_NAME = "aml-d8-scale-invariance"
 #: Numerical packages that must agree between the runs (A6: like with like).
 #: Python itself is recorded but not compared: the cluster driver runs 3.10.
 COMPARED_LIBRARIES = ("numpy", "scipy", "pandas", "sklearn", "joblib", "threadpoolctl")
 S3_SCHEMES = ("s3://", "s3a://")
+#: The pre-registration has no D8-specific large scale. D8 takes the larger
+#: scale from density.scales, the registered pair D11 is measured at (1 and
+#: 10), whose top is the "scale 10" D8 names; the large run must be exactly
+#: that scale and above corpora.gate_scale.
+LARGE_SCALE_SOURCE = "density.scales"
+#: D8 confirms the freeze on the calibration corpus (AML-GOALS 5a); a report
+#: on the evaluation or robustness seed before the freeze burns that seed.
+REQUIRED_CORPUS_ROLE = "calibration"
+#: Entry-point checks the gate runners record in passes that D8 needs true in
+#: both runs when present (corpus_fully_keyed must be present).
+REQUIRED_PASSES = ("corpus_fully_keyed", "corpus_seed_verified", "registered_label_role")
+#: Checked only when present: the local runner records it, the cluster does
+#: not (the driver installs the pins).
+PASSES_IF_PRESENT = ("library_versions_match",)
+
+
+def _packaged_prereg_path() -> Path:
+    """The tracked pre-registration inside the package; D8 refuses to certify
+    under any other file (an override could loosen a tolerance)."""
+    import lakebench.aml.fidelity_gate as fg
+
+    return Path(fg.__file__).resolve().parent.parent / "spark" / "data" / "aml" / PREREG_FILENAME
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +327,29 @@ def _provenance(run: dict, prereg: dict, sha: str) -> tuple[dict, list[str]]:
         "git_sha": prov.get("git_sha"),
         "libraries": rep.get("libraries"),
     }
+    facts.update(
+        passes=rep.get("passes"),
+        label_role=prov.get("label_role"),
+        aml_features_sha256=prov.get("aml_features_sha256"),
+        model_versions=prov.get("model_versions"),
+        sampling=prov.get("sampling"),
+    )
     why = []
+    passes = rep.get("passes") or {}
+    for name in REQUIRED_PASSES:
+        if passes.get(name) is not True and (name == "corpus_fully_keyed" or name in passes):
+            why.append(f"report passes.{name} is not true")
+    for name in PASSES_IF_PRESENT:
+        if name in passes and passes[name] is not True:
+            why.append(f"report passes.{name} is not true")
+    if prov.get("label_role") != (prereg.get("unit_of_scoring") or {}).get("label_role"):
+        why.append("report label_role is not the registered one")
+    if rep.get("corpus_role") != REQUIRED_CORPUS_ROLE:
+        why.append(f"corpus_role {rep.get('corpus_role')!r}, not {REQUIRED_CORPUS_ROLE!r}")
+    if not prov.get("aml_features_sha256"):
+        why.append("report records no aml_features_sha256")
+    if not prov.get("model_versions"):
+        why.append("report records no generator model_versions")
     if rep.get("verdict") != "ok":
         why.append(f"report verdict {rep.get('verdict')!r}, not 'ok'")
     if rep.get("prereg_sha256") != sha:
@@ -308,6 +363,35 @@ def _provenance(run: dict, prereg: dict, sha: str) -> tuple[dict, list[str]]:
     if rep.get("features") != list(prereg["features"]):
         why.append("report feature list differs from the pre-registration's")
     return facts, why
+
+
+def _fingerprints(run: dict, name: str) -> dict:
+    entry = (run["report"].get("model_outputs") or {}).get(name) or {}
+    fp = entry.get("fingerprint")
+    return fp if isinstance(fp, dict) else {}
+
+
+def _caveats(facts: dict) -> list[str]:
+    """Ungated differences between the runs other than scale, recorded so a
+    reader can weigh the verdict (AML-GOALS A6 owns adapter parity)."""
+    out = []
+    if facts["small"].get("adapter") != facts["large"].get("adapter"):
+        out.append(
+            f"adapters differ (small {facts['small'].get('adapter')}, large "
+            f"{facts['large'].get('adapter')}): feature or label differences between them "
+            "read as scale variance"
+        )
+    for role in ("small", "large"):
+        for unit, smp in ((facts[role].get("sampling") or {}) or {}).items():
+            frac = (smp or {}).get("negative_fraction")
+            if frac is not None and frac < 1:
+                out.append(
+                    f"{role} run ({unit}) fitted and scored on sampled negatives "
+                    f"(fraction {frac}, inverse weights): the reference model's absolute "
+                    "l2_regularization and row-count leaf floor do not scale with weight, so "
+                    "its AP is not the same estimator as an unsampled run"
+                )
+    return out
 
 
 def _typology_arrays(sub) -> dict:
@@ -348,6 +432,8 @@ def evaluate_d8(
 
 def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, Any]:
     prereg, sha = load_preregistration(prereg_path)
+    packaged = _packaged_prereg_path()
+    packaged_sha = hashlib.sha256(packaged.read_bytes()).hexdigest() if packaged.is_file() else None
     si = prereg["scale_invariance"]
     pw = prereg["power"]
     corpora = prereg["corpora"]
@@ -358,6 +444,11 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
         "objective": "AML-GOALS 5a D8",
         "prereg_version": prereg.get("version"),
         "prereg_sha256": sha,
+        "prereg_packaged_sha256": packaged_sha,
+        "prereg_override": {
+            "path": str(prereg_path) if prereg_path else None,
+            "env": os.environ.get("LB_AML_PREREG_PATH"),
+        },
         "tolerances": {
             "ap_diff_abs_max": si["ap_diff_abs_max"],
             "ks_stat_max": si["ks_stat_max"],
@@ -381,13 +472,28 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
         errors += [f"{role}: {w}" for w in why]
     out["inputs"] = facts
     s, lg = facts["small"], facts["large"]
-    gate_n = round(corpora["entities_per_scale_unit"] * corpora["gate_scale"])
+    eps = corpora["entities_per_scale_unit"]
+    gate_n = round(eps * corpora["gate_scale"])
+    large_scale = max(prereg["density"]["scales"])
+    large_n = round(eps * large_scale)
+    out["scales"] = {
+        "small": corpora["gate_scale"],
+        "large": large_scale,
+        "large_source": LARGE_SCALE_SOURCE,
+    }
     checks: dict[str, Any] = {
+        "packaged_preregistration": sha == packaged_sha,
+        "nonempty_registration": bool(typologies) and bool(features),
         "same_seed": s["corpus_seed"] not in (None, "")
         and str(s["corpus_seed"]) == str(lg["corpus_seed"]),
         "small_at_gate_scale": s["n_entities"] == gate_n,
-        "large_above_gate_scale": lg["n_entities"] is not None and lg["n_entities"] > gate_n,
+        "large_at_registered_scale": large_scale > corpora["gate_scale"]
+        and lg["n_entities"] == large_n,
         "same_unit": s["unit"] is not None and s["unit"] == lg["unit"],
+        "same_feature_code": bool(s["aml_features_sha256"])
+        and s["aml_features_sha256"] == lg["aml_features_sha256"],
+        "same_generator": bool(s["model_versions"]) and s["model_versions"] == lg["model_versions"],
+        "distinct_reports": s["report_sha256"] != lg["report_sha256"],
         "same_libraries": all(
             (s["libraries"] or {}).get(k) is not None
             and (s["libraries"] or {}).get(k) == (lg["libraries"] or {}).get(k)
@@ -399,7 +505,7 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
             errors.append(f"provenance check {name} failed")
 
     # ---- AP equivalence per behavioural typology --------------------------
-    score_cols = ["group", "label", "score", "weight"]
+    score_cols = list(SCORES_FINGERPRINT_COLUMNS)
     scores_uri = {role: _output_uri(run, "oof_scores") for role, run in runs.items()}
     per_t: dict[str, Any] = {}
     bound = si["ap_diff_abs_max"]
@@ -412,9 +518,11 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
             if rt is None:
                 why.append(f"{role}: typology missing from the report")
                 continue
-            arr = _typology_arrays(
-                read_parquet_columns(scores_uri[role], score_cols, endpoint, typology=t)
-            )
+            sub = read_parquet_columns(scores_uri[role], score_cols, endpoint, typology=t)
+            arr = _typology_arrays(sub)
+            want_fp = _fingerprints(run, "oof_scores").get(t)
+            if want_fp is None or fingerprint(sub, SCORES_FINGERPRINT_COLUMNS) != want_fp:
+                why.append(f"{role}: oof_scores rows do not match the report's fingerprint")
             n, n_pos = len(arr["y"]), int(arr["y"].sum())
             r[role] = {
                 "status": rt.get("status"),
@@ -440,12 +548,19 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
             if lo is None:
                 why.append("bootstrap CI undefined (a resample had no positive)")
             r["within_bounds"] = lo is not None and -bound <= lo and hi <= bound
+            # Diagnostic, not a gate: a CI wider than the whole tolerance
+            # interval cannot fit inside it whatever the point difference, so
+            # the miss is a power shortfall rather than evidence of variance.
+            width = r.get("diff_ci_width")
+            r["ci_wider_than_tolerance"] = width is not None and width > 2 * bound
         r["reasons"] = why
         r["pass"] = not why and bool(r.get("within_bounds"))
         per_t[t] = r
     out["typologies"] = per_t
 
     # ---- Per-feature distribution match -----------------------------------
+    import pandas as pd
+
     unit_uri = {role: _output_uri(run, "unit_features") for role, run in runs.items()}
     weights = {}
     units_ok = True
@@ -463,6 +578,11 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
         if not _weights_ok(weights[role]):
             errors.append(f"{role}: unit_features weights missing, non-finite or non-positive")
             units_ok = False
+    for role, run in runs.items():
+        if _fingerprints(run, "unit_features").get("weight") != fingerprint(
+            pd.DataFrame({"weight": weights[role]}), ["weight"]
+        ):
+            errors.append(f"{role}: unit_features weight does not match the report's fingerprint")
     per_f: dict[str, Any] = {}
     if units_ok:
         for f in features:
@@ -471,7 +591,16 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
                 for role in runs
             }
             ks = weighted_ks(col["small"], weights["small"], col["large"], weights["large"])
-            per_f[f] = {"ks": ks, "pass": ks < si["ks_stat_max"]}
+            fp_ok = all(
+                _fingerprints(runs[role], "unit_features").get(f)
+                == fingerprint(pd.DataFrame({f: col[role]}), [f])
+                for role in runs
+            )
+            per_f[f] = {
+                "ks": ks,
+                "fingerprint_match": fp_ok,
+                "pass": fp_ok and ks < si["ks_stat_max"],
+            }
     out["features"] = per_f
 
     ap_pass = bool(per_t) and all(r["pass"] for r in per_t.values())
@@ -481,6 +610,7 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
         "ap_equivalence_all_behavioural": ap_pass,
         "ks_all_features": ks_pass,
     }
+    out["caveats"] = _caveats(facts)
     out["pass"] = bool(not errors and all(out["checks"].values()))
     out["verdict"] = "pass" if out["pass"] else "fail"
     return out
