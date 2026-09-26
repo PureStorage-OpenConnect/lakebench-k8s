@@ -87,6 +87,16 @@ class NamespaceTerminatingError(K8sResourceError):
     pass
 
 
+class NamespaceReplacedError(K8sResourceError):
+    """Raised when a UID-preconditioned namespace delete finds a different UID.
+
+    The name now belongs to a newer namespace (a redeploy re-created it); the
+    delete was refused by the API server and nothing was deleted.
+    """
+
+    pass
+
+
 # Namespace status conditions that name what is holding a Terminating
 # namespace open (remaining pods/PVCs, finalizers such as pvc-protection).
 _NAMESPACE_BLOCKING_CONDITIONS = (
@@ -336,11 +346,17 @@ class K8sClient:
             raise K8sResourceError(f"Failed to create namespace: {e}")  # noqa: B904
 
     @retry_k8s_api
-    def delete_namespace(self, name: str) -> bool:
+    def delete_namespace(self, name: str, uid: str | None = None) -> bool:
         """Delete a namespace.
 
         Args:
             name: Namespace name
+
+        Args:
+            name: Namespace name
+            uid: When set, the delete carries a UID precondition so the API
+                server refuses it if the name now belongs to a different
+                namespace (LB-157).
 
         Returns:
             True if this call started the deletion, False if the namespace
@@ -349,16 +365,27 @@ class K8sClient:
         Raises:
             NamespaceTerminatingError: the namespace is already being
                 deleted (by another destroy, or an earlier one).
+            NamespaceReplacedError: ``uid`` did not match.
         """
         if not self.namespace_exists(name):
             return False
 
         try:
-            self._core_v1.delete_namespace(name)
+            if uid:
+                self._core_v1.delete_namespace(
+                    name,
+                    body=client.V1DeleteOptions(preconditions=client.V1Preconditions(uid=uid)),
+                )
+            else:
+                self._core_v1.delete_namespace(name)
             return True
         except ApiException as e:
             if e.status == 404:
                 return False
+            if e.status == 409 and "precondition" in str(e.body or e.reason or "").lower():
+                raise NamespaceReplacedError(  # noqa: B904
+                    f"Namespace '{name}' now has a different UID; delete refused"
+                )
             if e.status == 409:
                 raise NamespaceTerminatingError(  # noqa: B904
                     f"Namespace '{name}' is already being deleted"

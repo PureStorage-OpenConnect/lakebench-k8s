@@ -106,6 +106,11 @@ class TestS3DeleteBucket:
             _s3(boto).delete_bucket("a-bronze", max_wait=10)
         assert boto.buckets["a-bronze"] == ["new-deploy/part-0.parquet"]
 
+    def test_default_retry_budget_covers_flashblade_ghost_counts(self):
+        import inspect
+
+        assert inspect.signature(S3Client.delete_bucket).parameters["max_wait"].default >= 300
+
     def test_never_empty_raises_at_the_bound(self):
         boto = FakeBoto({"a-bronze": []}, lag=10**6)
         with patch("time.monotonic", side_effect=[0.0] + [1000.0] * 10):
@@ -145,7 +150,7 @@ class TestDeleteOwnedBuckets:
         text = " | ".join(notes)
         assert "deleted buckets: a-bronze, a-silver" in text
         assert "already gone: a-gone" in text
-        assert "kept (ownership not proven" in text and "legacy-gold" in text
+        assert "kept (not created by lakebench" in text and "legacy-gold" in text
 
     def test_absent_bucket_reported_as_gone_not_kept(self):
         notes, _ = destroy_mod._delete_owned_buckets(
@@ -199,14 +204,28 @@ class TestDestroyAllBuckets:
 
     _layers: tuple[str, str, str] | None = None
 
-    def _run(self, boto, verdicts, *, create_buckets=True, force_legacy=False, other=()):
+    def _run(
+        self,
+        boto,
+        verdicts,
+        *,
+        create_buckets=True,
+        force_legacy=False,
+        other=(),
+        created=None,
+        uid=None,
+        namespace_present=True,
+        create_namespace=False,
+    ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
         engine = MagicMock()
         cfg = engine.config
         cfg.name = "a"
         cfg.get_namespace.return_value = "a"
-        cfg.platform.kubernetes.create_namespace = False
+        cfg.platform.kubernetes.create_namespace = create_namespace
+        cfg.platform.compute.spark.operator.namespace = "spark-operator"
+        cfg.platform.compute.spark.operator.version = "2.5.1"
         cfg.platform.kubernetes.context = ""
         cfg.observability.enabled = False
         s3_cfg = cfg.platform.storage.s3
@@ -215,7 +234,11 @@ class TestDestroyAllBuckets:
         s3_cfg.buckets.silver = silver
         s3_cfg.buckets.gold = gold
         s3_cfg.create_buckets = create_buckets
-        engine.k8s.namespace_exists.return_value = True
+        engine.k8s.namespace_exists.return_value = namespace_present
+        engine.k8s.get_namespace_uid.side_effect = uid or (lambda _ns: "uid-1")
+        self.engine = engine
+        # Default: deploy recorded all three as created (LB-159 marker).
+        created_record = set(verdicts) if created is None else set(created)
 
         def verify(_boto, bucket, _name):
             return IdentityReport(
@@ -240,6 +263,11 @@ class TestDestroyAllBuckets:
             patch("kubernetes.client.CustomObjectsApi"),
             patch("lakebench.deploy.destroy.logger"),
             patch("lakebench.s3.S3Client", return_value=_s3(boto)),
+            patch(
+                "lakebench.deploy.ownership.read_created_buckets",
+                return_value=created_record,
+            ),
+            patch("lakebench.spark.SparkOperatorManager"),
         ):
             core.return_value.list_namespace.return_value.items = []
             results = destroy_mod.destroy_all(engine, clean_buckets=True, force_legacy=force_legacy)
@@ -292,7 +320,7 @@ class TestDestroyAllBuckets:
         )
         assert r.status is DeploymentStatus.SUCCESS
         assert set(boto.buckets) == {"a-bronze"} and boto.buckets["a-bronze"] == []
-        assert "kept (ownership not proven" in r.message
+        assert "kept (not created by lakebench" in r.message
 
     def test_pre_provisioned_buckets_are_emptied_but_kept(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
@@ -314,3 +342,112 @@ class TestDestroyAllBuckets:
         )
         assert r.status is DeploymentStatus.FAILED
         assert boto.delete_bucket_calls == []
+
+    # -- LB-159 owner decision: delete only what lakebench created --------
+
+    def test_adopted_bucket_is_emptied_but_kept(self):
+        """MATCH by tag (e.g. adopted with deploy --force-legacy) is not creation."""
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
+        r = self._run(
+            boto,
+            {"a-bronze": "MATCH", "a-silver": "MATCH", "a-gold": "UNSUPPORTED"},
+            created={"a-silver"},
+        )
+        assert r.status is DeploymentStatus.SUCCESS
+        assert set(boto.buckets) == {"a-bronze", "a-gold"}
+        assert boto.buckets["a-bronze"] == [], "adopted buckets are still emptied"
+        assert "kept (not created by lakebench" in r.message
+
+    def test_created_tag_marks_a_bucket_for_deletion(self):
+        from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH, TAG_DEPLOYMENT_NAME
+
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        boto.get_bucket_tagging = lambda Bucket: {
+            "TagSet": [{"Key": TAG_DEPLOYMENT_NAME, "Value": "a"}]
+            + ([{"Key": TAG_CREATED_BY_LAKEBENCH, "Value": "true"}] if Bucket == "a-gold" else [])
+        }
+        self._run(boto, dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"), created=set())
+        assert boto.delete_bucket_calls == ["a-gold"]
+
+    # -- UID re-check around bucket data (silent data loss guard) ---------
+
+    def test_redeploy_before_emptying_leaves_its_buckets_alone(self):
+        """D1 finished, R redeployed and wrote bronze; slow D2 must not empty it."""
+        boto = FakeBoto({"a-bronze": ["r/bronze-0"], "a-silver": [], "a-gold": []})
+        uids = iter(["uid-1"])
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            uid=lambda _ns: next(uids, "uid-2"),
+        )
+        assert boto.buckets["a-bronze"] == ["r/bronze-0"]
+        assert boto.delete_bucket_calls == []
+        assert "newer deployment" in r.message
+        assert "newer deployment" in self._results[-1].message
+
+    def test_redeploy_between_buckets_stops_mid_step(self):
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["r/new"], "a-gold": ["r/new"]})
+        # start, before-loop, before bronze; then the redeploy lands.
+        uids = iter(["uid-1", "uid-1", "uid-1"])
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            uid=lambda _ns: next(uids, "uid-2"),
+        )
+        assert boto.buckets["a-bronze"] == []
+        assert boto.buckets["a-silver"] == ["r/new"] and boto.buckets["a-gold"] == ["r/new"]
+        assert boto.delete_bucket_calls == []
+
+    def test_redeploy_before_bucket_delete_stops_deletes(self):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        # start, before-loop, three empties; the redeploy lands before deletes.
+        uids = iter(["uid-1"] * 5)
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            uid=lambda _ns: next(uids, "uid-2"),
+        )
+        assert boto.delete_bucket_calls == []
+        assert set(boto.buckets) == {"a-bronze", "a-silver", "a-gold"}
+
+    def test_absent_then_present_namespace_stops_force_legacy_wipe(self):
+        """Namespace absent at start (--force-legacy by name), then R creates it."""
+        boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            force_legacy=True,
+            namespace_present=False,
+            uid=lambda _ns: "uid-r",
+        )
+        assert boto.buckets["a-bronze"] == ["r/new"]
+        assert boto.delete_bucket_calls == []
+
+    def test_unreadable_uid_during_bucket_step_keeps_everything(self):
+        calls = {"n": 0}
+
+        def uid(_ns):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise RuntimeError("apiserver 503")
+            return "uid-1"
+
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
+        r = self._run(boto, dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"), uid=uid)
+        assert r.status is DeploymentStatus.FAILED
+        assert boto.buckets["a-bronze"] == ["x"]
+        assert self._results[-1].status is DeploymentStatus.FAILED
+
+    def test_failed_bucket_delete_keeps_the_namespace(self):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        boto.delete_bucket = MagicMock(side_effect=_err("AccessDenied"))
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            create_namespace=True,
+        )
+        assert r.status is DeploymentStatus.FAILED
+        assert "--force-legacy" not in r.message
+        self.engine.k8s.delete_namespace.assert_not_called()
+        ns = [x for x in self._results if x.component == "namespace"][-1]
+        assert "NOT deleted" in ns.message

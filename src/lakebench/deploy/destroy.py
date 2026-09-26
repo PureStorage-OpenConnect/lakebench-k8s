@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from functools import partial
 from typing import TYPE_CHECKING
 
 from lakebench.deploy.engine import DeploymentResult, DeploymentStatus
@@ -41,6 +42,36 @@ _monotonic = time.monotonic
 _sleep = time.sleep
 
 
+class _NamespaceReplaced(Exception):
+    """The namespace is no longer the incarnation this destroy started on."""
+
+
+class _NamespaceUnverifiable(Exception):
+    """The namespace UID could not be read, so its incarnation is unknown."""
+
+
+def _check_same_namespace(engine, namespace: str, uid_at_start: str) -> None:
+    """Refuse to go on if the namespace changed since destroy started.
+
+    ``uid_at_start`` is ``""`` when the namespace was absent. Changed means a
+    different UID, present after absent, or absent after present: in every
+    case another destroy finished and a redeploy may own the name (and, on
+    reused bucket names, the buckets) now. A read error fails closed.
+    """
+    try:
+        uid_now = engine.k8s.get_namespace_uid(namespace)
+    except Exception as e:  # noqa: BLE001
+        raise _NamespaceUnverifiable(f"could not read namespace {namespace} UID: {e}") from e
+    if uid_now != uid_at_start:
+        if not uid_now:
+            raise _NamespaceReplaced(
+                f"namespace {namespace} was deleted by another destroy while this one ran"
+            )
+        raise _NamespaceReplaced(
+            f"namespace {namespace} is now a newer deployment with the same name"
+        )
+
+
 def _namespace_state(engine, namespace: str) -> tuple[str | None, list[str]]:
     """Return ``(phase, blockers)``; phase ``""`` is gone, ``None`` is unknown."""
     try:
@@ -56,15 +87,20 @@ def _delete_namespace_and_wait(
     namespace: str,
     timeout: int,
     report: Callable[[str, DeploymentStatus, str], None],
+    uid: str = "",
 ) -> DeploymentResult:
     """Delete the namespace and wait until it is NotFound.
+
+    ``uid`` (the namespace UID when destroy started) is sent as a delete
+    precondition, so a namespace a redeploy re-created under the same name
+    is refused by the API server instead of deleted.
 
     Reports who started the deletion honestly: a namespace that was already
     Terminating (a concurrent or earlier destroy) or already gone is never
     reported as deleted by this run. A namespace still present at the
     deadline is a warning (SKIPPED) naming what remains.
     """
-    from lakebench.k8s.client import NamespaceTerminatingError
+    from lakebench.k8s.client import NamespaceReplacedError, NamespaceTerminatingError
 
     start = _monotonic()
     phase, _ = _namespace_state(engine, namespace)
@@ -83,7 +119,19 @@ def _delete_namespace_and_wait(
         )
     else:
         try:
-            started_here = bool(engine.k8s.delete_namespace(namespace))
+            if uid:
+                started_here = bool(engine.k8s.delete_namespace(namespace, uid=uid))
+            else:
+                started_here = bool(engine.k8s.delete_namespace(namespace))
+        except NamespaceReplacedError:
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.SUCCESS,
+                message=(
+                    f"Namespace {namespace} was already deleted by another run; the "
+                    f"namespace now named {namespace} is a newer deployment and was left alone"
+                ),
+            )
         except NamespaceTerminatingError:
             report(
                 "namespace",
@@ -160,6 +208,7 @@ def _delete_namespace_and_wait(
         status=DeploymentStatus.SKIPPED,
         message=msg,
         elapsed_seconds=_monotonic() - start,
+        details={"still_terminating": True},
     )
 
 
@@ -170,8 +219,12 @@ def _delete_owned_buckets(
     enabled: bool,
     create_buckets: bool,
     absent: set[str] | None = None,
+    guard: Callable[[], None] | None = None,
 ) -> tuple[list[str], bool]:
     """Delete the emptied buckets this deployment owns; report the rest.
+
+    ``guard`` runs before each delete and raises to stop when the namespace
+    changed underneath this destroy (the buckets may be a redeploy's now).
 
     Returns ``(notes, failed)``: summary notes naming deleted, already-gone
     and kept buckets with the reason, and whether any delete errored.
@@ -193,6 +246,8 @@ def _delete_owned_buckets(
         if bucket not in deletable:
             kept.append(bucket)
             continue
+        if guard is not None:
+            guard()
         try:
             if s3.delete_bucket(bucket):
                 removed.append(bucket)
@@ -207,13 +262,13 @@ def _delete_owned_buckets(
     if gone:
         notes.append("already gone: " + ", ".join(gone))
     if kept:
-        notes.append("kept (ownership not proven by tag or name prefix): " + ", ".join(kept))
+        notes.append("kept (not created by lakebench, or ownership not proven): " + ", ".join(kept))
     if errors:
         notes.append(
             "emptied but NOT deleted: "
             + "; ".join(errors)
-            + " (delete by hand, or re-run destroy with --force-legacy once "
-            "the namespace is gone)"
+            + " (the namespace is kept as their ownership record; fix the error "
+            "and re-run destroy)"
         )
     return notes, bool(errors)
 
@@ -357,11 +412,24 @@ def destroy_all(
     # the same deployment can finish and a redeploy re-create the name while
     # this run is still working; the watch-list and namespace steps compare
     # against this and leave a newer namespace alone.
-    try:
-        namespace_uid_at_start: str | None = engine.k8s.get_namespace_uid(namespace)
-    except Exception as e:  # noqa: BLE001
-        logger.debug("could not read namespace uid: %s", e)
-        namespace_uid_at_start = None
+    # Fails closed: without the UID none of those guards can work.
+    namespace_uid_at_start = ""
+    if namespace_present:
+        try:
+            namespace_uid_at_start = engine.k8s.get_namespace_uid(namespace)
+        except Exception as e:  # noqa: BLE001
+            msg = (
+                f"Could not read the UID of namespace {namespace!r} ({e}). Destroy "
+                "needs it to avoid touching a same-named redeploy; nothing was "
+                "changed. Re-run when the API server is reachable."
+            )
+            results.append(
+                DeploymentResult(
+                    component="ownership-check", status=DeploymentStatus.FAILED, message=msg
+                )
+            )
+            report("ownership-check", DeploymentStatus.FAILED, msg)
+            return results
     if namespace_present:
         identity = build_identity_from_config(
             engine.config,
@@ -744,6 +812,7 @@ def destroy_all(
     # and would block destroy forever.
     bucket_transient_failure = False
     stop_after_buckets = False
+    replaced_msg: str | None = None
     if clean_buckets and not data_steps_allowed:
         results.append(
             DeploymentResult(
@@ -756,6 +825,11 @@ def destroy_all(
     elif clean_buckets:
         report("s3-buckets", DeploymentStatus.IN_PROGRESS, "Cleaning S3 buckets...")
         try:
+            from lakebench.deploy.ownership import (
+                TAG_CREATED_BY_LAKEBENCH,
+                read_bucket_ownership_tag,
+                read_created_buckets,
+            )
             from lakebench.s3 import S3BucketVanished, S3Client
 
             s3_cfg = engine.config.platform.storage.s3
@@ -973,9 +1047,35 @@ def destroy_all(
                     report("s3-buckets", DeploymentStatus.FAILED, msg)
                 else:
                     legacy = legacy_forced  # preserved local name for summary below
+                    # Re-check the namespace before touching data: a slow
+                    # destroy that lost a race to a concurrent destroy plus a
+                    # redeploy must not empty the redeploy's buckets, which
+                    # reuse the names and pass the same ownership checks.
+                    guard = partial(
+                        _check_same_namespace, engine, namespace, namespace_uid_at_start
+                    )
+                    guard()
+                    # LB-159: only buckets lakebench created are deleted. The
+                    # record is the namespace annotation (all backends) plus
+                    # the created tag where tagging works. An unreadable
+                    # record keeps the buckets, never deletes them.
+                    created_set: set[str] = set()
+                    if namespace_present:
+                        try:
+                            created_set |= read_created_buckets(k8s_client.CoreV1Api(), namespace)
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("could not read created-buckets record: %s", e)
+                    for tagged in owned_by_tag:
+                        try:
+                            tags = read_bucket_ownership_tag(s3.raw_client, tagged) or {}
+                        except Exception:  # noqa: BLE001
+                            tags = {}
+                        if tags.get(TAG_CREATED_BY_LAKEBENCH) == "true":
+                            created_set.add(tagged)
                     total_deleted = 0
                     vanished: str | None = None
                     for bucket in buckets:
+                        guard()
                         try:
                             deleted = s3.empty_bucket(bucket)
                         except S3BucketVanished:
@@ -1008,11 +1108,18 @@ def destroy_all(
                         bucket_notes, delete_failed = _delete_owned_buckets(
                             s3,
                             buckets,
-                            deletable=set(owned_by_tag) | set(unsupported_by_prefix),
+                            deletable=(set(owned_by_tag) | set(unsupported_by_prefix))
+                            & created_set,
                             enabled=delete_buckets,
                             create_buckets=bool(s3_cfg.create_buckets),
                             absent=set(absent_buckets),
+                            guard=guard,
                         )
+                        if delete_failed:
+                            # The namespace is the ownership record for the
+                            # buckets left behind; keep it so a re-run can
+                            # prove ownership and finish the delete.
+                            bucket_transient_failure = True
                     notes = []
                     if legacy:
                         notes.append(
@@ -1050,6 +1157,16 @@ def destroy_all(
                         bucket_status,
                         f"S3 buckets emptied ({total_deleted} objects)" + summary_note,
                     )
+        except _NamespaceReplaced as e:
+            replaced_msg = str(e)
+            results.append(
+                DeploymentResult(
+                    component="s3-buckets",
+                    status=DeploymentStatus.SUCCESS,
+                    message=f"Stopped before touching buckets further: {e}",
+                )
+            )
+            report("s3-buckets", DeploymentStatus.SUCCESS, f"Stopped: {e}")
         except Exception as e:
             bucket_transient_failure = True
             results.append(
@@ -1065,24 +1182,31 @@ def destroy_all(
     # and a redeploy re-created the namespace. Every step below deletes
     # components by name inside the namespace, so stop here rather than tear
     # down the newer deployment (review of LB-157/LB-159).
-    try:
-        uid_after_buckets: str | None = engine.k8s.get_namespace_uid(namespace)
-    except Exception as e:  # noqa: BLE001
-        logger.debug("could not re-read namespace uid: %s", e)
-        uid_after_buckets = None
-    newer_incarnation = bool(
-        uid_after_buckets
-        and namespace_uid_at_start is not None
-        and uid_after_buckets != namespace_uid_at_start
-    )
-    if stop_after_buckets or newer_incarnation:
-        msg = f"Stopped before infrastructure teardown: namespace {namespace} " + (
-            "is now a newer deployment with the same name; it was left alone"
-            if newer_incarnation
-            else "is being cleaned up by a concurrent destroy; re-run destroy after it finishes"
-        )
+    unverifiable_msg = None
+    if replaced_msg is None:
+        try:
+            _check_same_namespace(engine, namespace, namespace_uid_at_start)
+        except _NamespaceReplaced as e:
+            replaced_msg = str(e)
+        except _NamespaceUnverifiable as e:
+            unverifiable_msg = str(e)
+    if replaced_msg or unverifiable_msg or stop_after_buckets:
+        if replaced_msg:
+            msg = f"Stopped before infrastructure teardown: {replaced_msg}; it was left alone"
+            status = DeploymentStatus.SUCCESS
+        elif unverifiable_msg:
+            msg = (
+                f"Stopped before infrastructure teardown: {unverifiable_msg}. "
+                "Re-run destroy when the API server is reachable."
+            )
+            status = DeploymentStatus.FAILED
+        else:
+            msg = (
+                f"Stopped before infrastructure teardown: namespace {namespace} is "
+                "being cleaned up by a concurrent destroy; re-run destroy after it finishes"
+            )
+            status = DeploymentStatus.FAILED
         logger.warning(msg)
-        status = DeploymentStatus.SUCCESS if newer_incarnation else DeploymentStatus.FAILED
         results.append(DeploymentResult(component="namespace", status=status, message=msg))
         report("namespace", status, msg)
         return results
@@ -1617,11 +1741,21 @@ def destroy_all(
         # finished first, S-P3/S-P4). Un-watching or deleting it would break
         # that deployment, so leave it alone.
         try:
-            uid_now: str | None = engine.k8s.get_namespace_uid(namespace)
+            uid_now = engine.k8s.get_namespace_uid(namespace)
         except Exception as e:  # noqa: BLE001
-            logger.debug("could not re-read namespace uid: %s", e)
-            uid_now = None
-        if uid_now and namespace_uid_at_start is not None and uid_now != namespace_uid_at_start:
+            # Fail closed: an unknown incarnation is never un-watched or deleted.
+            msg = (
+                f"Namespace {namespace!r} NOT deleted: could not read its UID ({e}), "
+                "so this destroy cannot tell it from a same-named redeploy. "
+                "Re-run destroy when the API server is reachable."
+            )
+            results.append(
+                DeploymentResult(component="namespace", status=DeploymentStatus.FAILED, message=msg)
+            )
+            report("namespace", DeploymentStatus.FAILED, msg)
+            return results
+        # Gone ("") is fine: un-watching a deleted namespace is what we want.
+        if uid_now and uid_now != namespace_uid_at_start:
             msg = (
                 f"Namespace {namespace} was already deleted by another run; the "
                 f"namespace now named {namespace} is a newer deployment and was left alone"
@@ -1666,6 +1800,38 @@ def destroy_all(
                 DeploymentStatus.SUCCESS,
                 f"Dropped {namespace} from Spark Operator watch list",
             )
+            # The lease + helm call can take tens of seconds. If a redeploy
+            # re-created the name in that window, the entry just removed may
+            # have been the redeploy's: do not delete it, and say how to
+            # restore the watch.
+            try:
+                uid_after_unwatch = engine.k8s.get_namespace_uid(namespace)
+            except Exception as e:  # noqa: BLE001
+                uid_after_unwatch = None
+                unwatch_err: Exception | None = e
+            else:
+                unwatch_err = None
+            if uid_after_unwatch is None or (
+                uid_after_unwatch and uid_after_unwatch != namespace_uid_at_start
+            ):
+                msg = (
+                    f"Namespace {namespace!r} NOT deleted: "
+                    + (
+                        f"could not re-read its UID ({unwatch_err})"
+                        if uid_after_unwatch is None
+                        else "it is now a newer deployment with the same name"
+                    )
+                    + ". It may have lost its Spark Operator watch entry; run "
+                    "`lakebench admin repair-operator`."
+                )
+                logger.error(msg)
+                results.append(
+                    DeploymentResult(
+                        component="namespace", status=DeploymentStatus.FAILED, message=msg
+                    )
+                )
+                report("namespace", DeploymentStatus.FAILED, msg)
+                return results
         except WatchListMutationError as e:
             # ADR-F1: watch-list drop failed. Do NOT delete the namespace
             # after this: the operator would crash-loop on a watched
@@ -1710,7 +1876,9 @@ def destroy_all(
             return results
 
         report("namespace", DeploymentStatus.IN_PROGRESS, f"Deleting namespace {namespace}...")
-        ns_result = _delete_namespace_and_wait(engine, namespace, namespace_wait_timeout, report)
+        ns_result = _delete_namespace_and_wait(
+            engine, namespace, namespace_wait_timeout, report, uid=namespace_uid_at_start
+        )
         results.append(ns_result)
         report("namespace", ns_result.status, ns_result.message)
 

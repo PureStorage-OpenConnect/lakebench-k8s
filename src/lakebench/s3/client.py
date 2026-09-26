@@ -555,13 +555,14 @@ class S3Client:
                 )
             raise S3BucketError(f"Failed to empty bucket {bucket_name}: {e}")  # noqa: B904
 
-    def delete_bucket(self, bucket_name: str, max_wait: int = 60) -> bool:
+    def delete_bucket(self, bucket_name: str, max_wait: int = 300) -> bool:
         """Delete a bucket that ``empty_bucket`` has already emptied (LB-159).
 
         The caller is responsible for proving the bucket is this
         deployment's; this method only removes it. ``BucketNotEmpty`` is
-        retried within ``max_wait``: FlashBlade can still count objects for
-        a moment after ``empty_bucket`` verified the listing empty. The
+        retried within ``max_wait``: FlashBlade garbage-collects aborted
+        multipart uploads asynchronously and can refuse the delete for a
+        while after ``empty_bucket`` verified the listing empty (gotcha 2). The
         bucket is deliberately NOT re-emptied here: if it filled up again,
         the writer may be a redeploy that re-created the name, and its data
         is not ours to delete.
