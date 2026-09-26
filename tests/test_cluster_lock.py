@@ -333,6 +333,35 @@ class TestStealBetweenReadAndDelete:
         assert state is not None and state.holder == "ghost@host@x"
         assert api.cm is None
 
+    def test_expired_only_names_a_holder_who_stole_on_the_last_attempt(self):
+        api = _FakeLockApi()
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        api.put("ghost@host@x", past, 60)
+        reads = {"n": 0}
+        orig_read = api.read_namespaced_config_map
+
+        def _read(name, namespace):
+            reads["n"] += 1
+            # Keep the ghost expired but changed for two rounds, then steal.
+            api.after_read = api.touch if reads["n"] < 3 else (lambda: api.steal("late@host@z"))
+            return orig_read(name, namespace)
+
+        api.read_namespaced_config_map = _read
+        with pytest.raises(ClusterLockHeld) as ei:
+            force_release_cluster_lock(api, expired_only=True)
+        assert ei.value.holder == "late@host@z"
+        assert api.cm is not None and api.cm.data["holder"] == "late@host@z"
+
+    def test_transport_error_on_release_does_not_shadow_the_body(self):
+        class Boom(RuntimeError):
+            pass
+
+        api = _FakeLockApi()
+        with pytest.raises(Boom):
+            with cluster_lock(api, ttl_seconds=60, timeout=1, holder="me@here@abc"):
+                api.read_namespaced_config_map = MagicMock(side_effect=OSError("conn reset"))
+                raise Boom("body failed")
+
     def test_force_is_unconditional(self):
         api = _FakeLockApi()
         api.put("live@host@a", _now_iso(), 3600)
