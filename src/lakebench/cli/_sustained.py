@@ -161,6 +161,9 @@ _STREAM_APPS = ("lakebench-bronze-ingest", "lakebench-silver-stream", "lakebench
 
 # Per-read bound when looking for stream apps; a timeout counts as live.
 _STREAM_PROBE_TIMEOUT_S = 10
+# Spark Operator states after which an app no longer runs (retries exhausted
+# or finished). Anything else, including no status yet, counts as live.
+_TERMINAL_APP_STATES = frozenset({"COMPLETED", "FAILED"})
 
 
 def _live_stream_apps(namespace: str) -> tuple[list[str], list[str]]:
@@ -182,7 +185,7 @@ def _live_stream_apps(namespace: str) -> tuple[list[str], list[str]]:
         return list(_STREAM_APPS), [f"no Kubernetes client: {e}"]
     for app in _STREAM_APPS:
         try:
-            api.get_namespaced_custom_object(
+            obj = api.get_namespaced_custom_object(
                 "sparkoperator.k8s.io",
                 "v1beta2",
                 namespace,
@@ -200,6 +203,15 @@ def _live_stream_apps(namespace: str) -> tuple[list[str], list[str]]:
             # Timeouts (urllib3 ReadTimeoutError) and transport errors.
             live.append(app)
             errors.append(f"{app}: {type(e).__name__}: {e}")
+            continue
+        state = ""
+        if isinstance(obj, dict):
+            state = str(
+                ((obj.get("status") or {}).get("applicationState") or {}).get("state") or ""
+            )
+        if state.upper() in _TERMINAL_APP_STATES:
+            # A leftover app that has finished writes nothing; counting it
+            # would turn QpH gating off for every later run here.
             continue
         live.append(app)
     return live, errors

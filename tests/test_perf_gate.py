@@ -1361,8 +1361,11 @@ def test_live_streams_are_treated_like_a_stopped_maintenance(env):
         "c360-batch-s10",
         _live(_batch_run(snap, "20260924-110000-bbbbbb", qph=100.0, query_scale=4.0), 300.0),
     )
-    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    # The pre round ran with the same writers live, so nothing QpH-shaped
+    # is gated: never a pass.
+    assert c.verdict == pg.NOT_COMPARABLE, pg.format_comparison(c)
     assert _row(c, "composite_qph").status.startswith("excluded")
+    assert _row(c, "pre_compaction_qph").status.startswith("excluded")
     assert any("streams were live" in r for r in c.reasons)
 
 

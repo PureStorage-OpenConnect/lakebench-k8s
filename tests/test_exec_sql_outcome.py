@@ -714,3 +714,21 @@ def test_live_streams_nulls_the_maintenance_value():
         [], [], 66, 61, 180.0, None, live_streams_reason="stream apps present: x"
     )
     assert value is None and "streams were live" in reason
+
+
+def test_finished_leftover_stream_apps_are_not_live():
+    from lakebench.cli._sustained import _live_stream_apps
+
+    states = {
+        "lakebench-bronze-ingest": "COMPLETED",
+        "lakebench-silver-stream": "FAILED",
+        "lakebench-gold-refresh": "RUNNING",
+    }
+
+    def get(_g, _v, _ns, _p, name, _request_timeout=None):
+        return {"status": {"applicationState": {"state": states[name]}}}
+
+    with patch("kubernetes.client.CustomObjectsApi") as api:
+        api.return_value.get_namespaced_custom_object.side_effect = get
+        live, errors = _live_stream_apps("ns")
+    assert live == ["lakebench-gold-refresh"] and errors == []
