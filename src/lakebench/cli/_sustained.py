@@ -309,6 +309,75 @@ def _c360_only_fresh_generate(cfg, existing: list[str]) -> bool:
 _RAW_REPLACE_SIZE_FACTOR = 1.5
 
 
+def _datagen_job_state(namespace: str) -> tuple[str, str]:
+    """State of the lakebench-datagen Job: absent, finished, unfinished or
+    unknown, plus a detail for unknown.
+
+    Unfinished unless a terminal condition (Complete or Failed) says
+    otherwise: a Job just created, or backing off between pod retries, has
+    no active pods yet but will still write and still hold cores.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    try:
+        job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return "absent", ""
+        return "unknown", str(e.reason)
+    except Exception as e:  # noqa: BLE001
+        return "unknown", str(e)
+    conditions = getattr(job.status, "conditions", None) or []
+    finished = any(
+        getattr(c, "type", None) in ("Complete", "Failed")
+        and str(getattr(c, "status", "")) == "True"
+        for c in conditions
+    )
+    return ("finished" if finished else "unfinished"), ""
+
+
+# How long a continuous run waits for its datagen Job to finish before it
+# budgets the streams with datagen's cores still reserved (LB-158).
+_DATAGEN_RELEASE_WAIT_S = 300
+
+
+def _datagen_released(namespace: str, *, deployed_here: bool, poll_s: float = 10.0) -> bool:
+    """True when the streaming budget may drop datagen's reservation.
+
+    Finished (Complete or Failed) releases. No lakebench-datagen Job releases
+    only when this run deployed datagen itself: with --skip-generate another
+    writer may be populating bronze under a different name, and the budget
+    keeps its old reservation then. An unfinished Job is polled for up to
+    ``_DATAGEN_RELEASE_WAIT_S``; unknown never releases.
+    """
+    deadline = time.time() + _DATAGEN_RELEASE_WAIT_S
+    announced = False
+    while True:
+        state, detail = _datagen_job_state(namespace)
+        if state == "finished" or (state == "absent" and deployed_here):
+            print_info("Datagen has finished; the streaming budget does not reserve its cores")
+            return True
+        # Unfinished and unknown are polled until the deadline: one API blip
+        # must not keep the reservation when datagen finished long ago.
+        if state not in ("unfinished", "unknown") or time.time() >= deadline:
+            break
+        if not announced:
+            print_info(
+                f"Waiting up to {_DATAGEN_RELEASE_WAIT_S}s for datagen to finish before "
+                "sizing the streams..."
+            )
+            announced = True
+        time.sleep(poll_s)
+    reason = {
+        "unfinished": f"datagen still running after {_DATAGEN_RELEASE_WAIT_S}s",
+        "absent": "--skip-generate and no lakebench-datagen Job (another writer may be active)",
+        "unknown": f"datagen state unknown ({detail})",
+    }.get(state, state)
+    print_warning(f"Streams are budgeted with datagen's cores reserved: {reason}")
+    return False
+
+
 def _c360_raw_replace_problem(cfg) -> str | None:
     """Why a raw-only corpus must not be replaced silently, or None.
 
@@ -317,29 +386,13 @@ def _c360_raw_replace_problem(cfg) -> str | None:
     larger than this run regenerates (an earlier generate at a larger
     scale is hours of work the continuous run would not rebuild).
     """
-    from kubernetes import client as k8s_client
-    from kubernetes.client.rest import ApiException
-
     from lakebench.s3 import S3Client
 
-    try:
-        job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", cfg.get_namespace())
-        # Unfinished unless a terminal condition says otherwise: a Job just
-        # created, or backing off between pod retries, has no active pods
-        # yet and would still write into the cleared prefix.
-        conditions = getattr(job.status, "conditions", None) or []
-        finished = any(
-            getattr(c, "type", None) in ("Complete", "Failed")
-            and str(getattr(c, "status", "")) == "True"
-            for c in conditions
-        )
-        if not finished:
-            return "a lakebench-datagen Job has not finished; wait for it to complete"
-    except ApiException as e:
-        if e.status != 404:
-            return f"could not check for a running datagen Job: {e.reason}"
-    except Exception as e:  # noqa: BLE001
-        return f"could not check for a running datagen Job: {e}"
+    state, detail = _datagen_job_state(cfg.get_namespace())
+    if state == "unfinished":
+        return "a lakebench-datagen Job has not finished; wait for it to complete"
+    if state == "unknown":
+        return f"could not check for a running datagen Job: {detail}"
 
     s3_cfg = cfg.platform.storage.s3
     raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
@@ -1495,6 +1548,15 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(1)
 
+        # The corpus is finite and usually written within minutes; a finished
+        # datagen Job holds no cores, so the streaming budget stops reserving
+        # them (LB-158). Wait a bounded time for it so the executor counts do
+        # not depend on a race with one API read. Unfinished or unknown keeps
+        # the reservation, so the streams never over-commit the cluster.
+        job_manager.datagen_running = not _datagen_released(
+            cfg.get_namespace(), deployed_here=not skip_generate
+        )
+
         # Launch all streaming jobs concurrently
         console.print()
         console.print("[bold]Launching continuous jobs...[/bold]")
@@ -1503,7 +1565,12 @@ def _run_sustained(
             j.record,
             EventType.STREAMING_START,
             message="Starting streaming pipeline",
-            details={"jobs": [name for _, name in streaming_jobs]},
+            details={
+                "jobs": [name for _, name in streaming_jobs],
+                # LB-158: whether the budget reserved datagen's cores, so
+                # runs with different executor counts can be told apart.
+                "datagen_cores_reserved": job_manager.datagen_running,
+            },
         )
 
         submitted = []
