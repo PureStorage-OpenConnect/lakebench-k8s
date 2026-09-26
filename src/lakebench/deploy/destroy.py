@@ -43,6 +43,8 @@ _NAMESPACE_PROGRESS_SECONDS = 30.0
 # the 30 s exec default killed them client-side (and, before exec_sql checked
 # the exit code, reported them as done).
 _TABLE_SQL_TIMEOUT = 600
+# Overall bound on destroy's table step (financial: 17 tables x 3 statements).
+_TABLE_STEP_CAP = 1800
 
 # Delays before each in-lease namespace delete attempt (seconds).
 _IN_LEASE_DELETE_BACKOFF = (0.0, 2.0, 5.0)
@@ -61,8 +63,13 @@ _sleep = time.sleep
 # - Trino CLI: "Query <id> failed: [line N:M: ]Table 'c.s.t' does not exist"
 #   (error code TABLE_NOT_FOUND) and "... Schema 's' does not exist"
 #   (SCHEMA_NOT_FOUND); the codes themselves appear with --debug.
+#   Table procedures (ALTER TABLE ... EXECUTE, CALL system.vacuum) raise
+#   TableNotFoundException instead: "Query <id> failed: Table 's.t' not found".
 # - Spark (beeline): "[TABLE_OR_VIEW_NOT_FOUND]" and "[SCHEMA_NOT_FOUND]"
-#   error classes.
+#   error classes; Iceberg Spark procedures (CALL <cat>.system.*) wrap a
+#   NoSuchTableException as "Couldn't load table '<t>' in catalog '<c>'".
+# These shapes come from the engines' sources and are not yet confirmed
+# against live output; the release matrix (R14) confirms them per recipe.
 _TRINO_FAILED = r"Query \S+ failed: (?:line \d+:\d+: )?"
 _SCHEMA_MISSING_PATTERNS = (
     _TRINO_FAILED + r"Schema '[^'\n]+' does not exist",
@@ -73,6 +80,8 @@ _TABLE_MISSING_RE = re.compile(
     "|".join(
         (
             _TRINO_FAILED + r"Table '[^'\n]+' does not exist",
+            _TRINO_FAILED + r"Table '[^'\n]+' not found",
+            r"Couldn't load table '[^'\n]+' in catalog '[^'\n]+'",
             r"\[TABLE_OR_VIEW_NOT_FOUND\]",
             r"\bTABLE_NOT_FOUND\b",
         )
@@ -1306,7 +1315,9 @@ def destroy_all(
                 schema = engine.config.architecture.workload.schema_type.value
                 tables_to_drop = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
                 failed_sql: list[str] = []
-                # Run maintenance before dropping tables to clean S3
+                # The plan: maintenance per table (before the drop, to clean
+                # S3), then the drops. Kind "m" is maintenance, "d" a drop.
+                plan: list[tuple[str, str, str]] = []
                 for table in tables_to_drop:
                     if table_format == "delta":
                         from lakebench.deploy.delta_maintenance import (
@@ -1318,52 +1329,66 @@ def destroy_all(
                         from lakebench.deploy.iceberg import build_maintenance_sql
 
                         maint_sqls = build_maintenance_sql(maint_engine, catalog, table, "0s")
-                    for sql in maint_sqls:
-                        # Maintenance at 0s retention and orphan removal are
-                        # destructive; re-check before each statement.
-                        _check_same_namespace(engine, namespace, namespace_token_at_start)
-                        try:
-                            exec_sql(
-                                maint_engine,
-                                engine.k8s,
-                                pod_name,
-                                namespace,
-                                sql,
-                                timeout=_TABLE_SQL_TIMEOUT,
-                            )
-                        except Exception as e:
-                            if _is_table_missing(e):
-                                # Nothing to maintain; skip the rest for it.
-                                logger.info("%s not present, maintenance skipped", table)
-                                break
-                            failed_sql.append(f"{sql.split()[0]} {table}: {e}")
-                            logger.warning(
-                                "%s maintenance failed (table may not exist): %s",
-                                table_format.title(),
-                                e,
-                            )
-                # Now drop the tables
+                    plan.extend(("m", table, sql) for sql in maint_sqls)
                 for table in tables_to_drop:
                     drop_sql = build_drop_table_sql(maint_engine, table)
                     if drop_sql:
-                        _check_same_namespace(engine, namespace, namespace_token_at_start)
-                        try:
-                            exec_sql(
-                                maint_engine,
-                                engine.k8s,
-                                pod_name,
-                                namespace,
-                                drop_sql,
-                                timeout=_TABLE_SQL_TIMEOUT,
-                            )
-                        except Exception as e:
-                            if _is_schema_missing(e):
-                                # DROP ... IF EXISTS still errors on some
-                                # engines when the schema itself is absent.
-                                logger.info("%s: schema not present, nothing to drop", table)
-                                continue
-                            failed_sql.append(f"DROP {table}: {e}")
-                            logger.warning("DROP TABLE failed for %s: %s", table, e)
+                        plan.append(("d", table, drop_sql))
+
+                from lakebench.modules.table_formats.iceberg.maintenance import (
+                    ExecSqlTimeout,
+                )
+
+                step_start = _monotonic()
+                skip_maint: set[str] = set()
+                not_attempted: list[str] = []
+                stop_reason = ""
+                for n, (kind, table, sql) in enumerate(plan):
+                    if kind == "m" and table in skip_maint:
+                        continue
+                    if _monotonic() - step_start > _TABLE_STEP_CAP:
+                        stop_reason = f"table step exceeded its {_TABLE_STEP_CAP}s cap"
+                        not_attempted = [f"{t}: {q}" for _, t, q in plan[n:]]
+                        break
+                    # Maintenance at 0s retention, orphan removal and DROP are
+                    # destructive; re-check the incarnation before each one.
+                    _check_same_namespace(engine, namespace, namespace_token_at_start)
+                    try:
+                        exec_sql(
+                            maint_engine,
+                            engine.k8s,
+                            pod_name,
+                            namespace,
+                            sql,
+                            timeout=_TABLE_SQL_TIMEOUT,
+                        )
+                    except ExecSqlTimeout as e:
+                        # The engine may still be running it; queueing more
+                        # statements behind a stuck coordinator only adds
+                        # hours. Stop the step here.
+                        failed_sql.append(f"{sql.split()[0]} {table}: {e}")
+                        stop_reason = f"statement timed out after {_TABLE_SQL_TIMEOUT}s"
+                        not_attempted = [f"{t}: {q}" for _, t, q in plan[n + 1 :]]
+                        break
+                    except Exception as e:
+                        if kind == "m" and _is_table_missing(e):
+                            # Never written (partial deployment): nothing to
+                            # maintain, skip the rest of its maintenance.
+                            logger.info("%s not present, maintenance skipped", table)
+                            skip_maint.add(table)
+                            continue
+                        if kind == "d" and _is_schema_missing(e):
+                            # DROP ... IF EXISTS still errors on some engines
+                            # when the schema itself is absent.
+                            logger.info("%s: schema not present, nothing to drop", table)
+                            continue
+                        failed_sql.append(f"{sql.split()[0]} {table}: {e}")
+                        logger.warning("%s cleanup statement failed for %s: %s", kind, table, e)
+                if stop_reason:
+                    failed_sql.append(
+                        f"stopped ({stop_reason}); {len(not_attempted)} statement(s) not "
+                        "attempted: " + "; ".join(not_attempted[:5])
+                    )
                 if failed_sql:
                     table_status = DeploymentStatus.FAILED
                     table_msg = (

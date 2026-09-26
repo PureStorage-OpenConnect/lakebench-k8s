@@ -213,6 +213,15 @@ def build_drop_table_sql(engine: str, table: str) -> str:
     return ""
 
 
+class ExecSqlTimeout(RuntimeError):
+    """The local kubectl exec timed out. The statement may still be running
+    on the engine: a timeout is not proof that it failed or stopped."""
+
+
+# K8sClient.exec_in_pod's result for an expired timeout.
+_EXEC_TIMEOUT_SENTINEL = "Command timed out"
+
+
 def exec_sql(
     engine: str,
     k8s: K8sClient,
@@ -248,6 +257,10 @@ def exec_sql(
     else:
         raise ValueError(f"Unsupported engine for exec_sql: {engine}")
     rc, stdout, stderr = result
+    if rc != 0 and (stderr or "").strip() == _EXEC_TIMEOUT_SENTINEL and not (stdout or "").strip():
+        raise ExecSqlTimeout(
+            f"exec_sql timed out after {timeout}s (the statement may still be running)"
+        )
     if rc != 0:
         detail = " | ".join(x.strip() for x in (stdout or "", stderr or "") if x and x.strip())
         raise RuntimeError(f"exec_sql failed (rc={rc}): {detail or 'no output'}")

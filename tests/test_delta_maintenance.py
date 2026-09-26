@@ -86,11 +86,14 @@ class TestBuildDeltaMaintenanceSql:
             table="lakehouse.bronze.events",
             retention_hours=0.0,
         )
-        # Short retention: SET SESSION first, then catalog-qualified CALL
-        assert len(stmts) == 2
-        assert "SET SESSION lakehouse.vacuum_min_retention = '0s'" in stmts[0]
-        assert "CALL lakehouse.system.vacuum" in stmts[1]
-        assert "retention => '0.0h'" in stmts[1]
+        # Short retention: SET SESSION then the CALL, in ONE submission.
+        # exec_sql runs each element as its own `trino --execute` process, so
+        # a separate SET would be lost and VACUUM would hit the 7-day minimum.
+        assert len(stmts) == 1
+        set_part, call_part = stmts[0].split("; ", 1)
+        assert set_part == "SET SESSION lakehouse.vacuum_min_retention = '0s'"
+        assert call_part.startswith("CALL lakehouse.system.vacuum")
+        assert "retention => '0.0h'" in call_part
 
     def test_spark_thrift_vacuum(self):
         stmts = build_delta_maintenance_sql(
@@ -116,9 +119,11 @@ class TestBuildDeltaMaintenanceSql:
             table="lakehouse.bronze.events",
             retention_hours=0.0,
         )
-        assert len(stmts) == 2
-        assert "spark.databricks.delta.retentionDurationCheck.enabled=false" in stmts[0]
-        assert "VACUUM lakehouse.bronze.events RETAIN 0.0 HOURS" == stmts[1]
+        # One beeline -e submission, so the SET applies to the VACUUM.
+        assert stmts == [
+            "SET spark.databricks.delta.retentionDurationCheck.enabled=false; "
+            "VACUUM lakehouse.bronze.events RETAIN 0.0 HOURS"
+        ]
 
     def test_duckdb_returns_empty(self):
         stmts = build_delta_maintenance_sql(

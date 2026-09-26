@@ -763,3 +763,46 @@ class TestDestroyAllBuckets:
             self._on_sql = None
         tables = [x for x in self._results if x.component == "table-cleanup"][-1]
         assert tables.status is DeploymentStatus.FAILED
+
+    # -- full review of f9dfda6: bound the table step ------------------------
+
+    def _run_tables(self, on_sql, boto=None):
+        boto = boto or FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        self._on_sql = on_sql
+        try:
+            self._run(
+                boto,
+                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+                maint=("trino", "trino-coordinator-0", "lakehouse"),
+            )
+        finally:
+            self._on_sql = None
+        return [x for x in self._results if x.component == "table-cleanup"][-1]
+
+    def test_first_statement_timeout_stops_the_table_step(self):
+        from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+
+        ran: list[str] = []
+
+        def hang(sql):
+            ran.append(sql)
+            raise ExecSqlTimeout("exec_sql timed out after 600s (may still be running)")
+
+        tables = self._run_tables(hang)
+        assert ran == ["EXPIRE lakehouse.silver.t"]
+        assert tables.status is DeploymentStatus.FAILED
+        assert "not attempted" in tables.message and "5 statement(s)" in tables.message
+
+    def test_table_step_has_an_overall_cap(self, monkeypatch):
+        clock = {"t": 0.0}
+
+        def tick():
+            clock["t"] += 700.0  # each statement "takes" 700 s
+            return clock["t"]
+
+        monkeypatch.setattr(destroy_mod, "_monotonic", tick)
+        ran: list[str] = []
+        tables = self._run_tables(ran.append)
+        assert 0 < len(ran) < 6
+        assert tables.status is DeploymentStatus.FAILED
+        assert "cap" in tables.message

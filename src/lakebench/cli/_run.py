@@ -35,6 +35,9 @@ from lakebench.k8s import K8sConnectionError
 
 logger = logging.getLogger(__name__)
 
+# Per-statement kubectl-exec timeout for pre-benchmark compaction (seconds).
+PRE_BENCHMARK_COMPACTION_TIMEOUT = 1800
+
 
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
     """Load the per-pod datagen metrics sidecar written by `lakebench generate`.
@@ -2040,7 +2043,12 @@ def run(
                 _run_iceberg_maintenance(
                     cfg, k8s, console, j, retention_threshold=resolve_maintenance_retention(cfg)
                 )
-                _run_iceberg_compaction(cfg, k8s, console, j)
+                # A kubectl-exec timeout does not stop rewrite_data_files, and
+                # the benchmark must not start while it still runs: wait for
+                # completion (up to 30 min per statement).
+                _run_iceberg_compaction(
+                    cfg, k8s, console, j, timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT
+                )
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
                 maint_elapsed = (datetime.now() - _maint_start).total_seconds()
                 _maint_end = time.monotonic()

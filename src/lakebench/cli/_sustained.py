@@ -720,26 +720,38 @@ def _run_iceberg_maintenance(
         def build_sql(tbl):
             return build_maintenance_sql(engine, catalog, tbl, retention_threshold)
 
+    from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+
     maintained = 0
     expected_ops = 0
     failures: list[str] = []
+    timed_out: list[str] = []
     for table in table_names:
         ops = build_sql(table)
         expected_ops += len(ops)
         for sql in ops:
-            # exec_sql raises on a real failure (non-zero exit, timeout);
-            # a failed round is recorded, never fatal to the run.
+            # exec_sql raises on a real failure (non-zero exit) and on a
+            # kubectl-exec timeout; a round is recorded, never fatal to the run.
             try:
                 exec_sql(engine, k8s, pod_name, namespace, sql)
                 maintained += 1
+            except ExecSqlTimeout as e:
+                # Not a failure: the engine may still be running it.
+                timed_out.append(f"{table}: {e}")
+                logger.warning(
+                    "%s maintenance timed out for %s (may still be running)",
+                    table_format.title(),
+                    table,
+                )
             except Exception as e:
                 failures.append(f"{table}: {e}")
                 logger.warning("%s maintenance failed for %s: %s", table_format.title(), table, e)
 
-    colour = "yellow" if failures else "green"
+    colour = "yellow" if failures or timed_out else "green"
+    extra = f", {len(timed_out)} timed out (may still be running)" if timed_out else ""
     console.print(
         f"  [{colour}]{table_format.title()} maintenance ({engine}): {maintained}/{expected_ops} "
-        f"operations[/{colour}] (threshold: {retention_threshold})"
+        f"operations{extra}[/{colour}] (threshold: {retention_threshold})"
     )
     _journal_safe(
         j.record,
@@ -752,7 +764,9 @@ def _run_iceberg_maintenance(
             "operations_succeeded": maintained,
             "operations_total": expected_ops,
             "operations_failed": len(failures),
+            "operations_timed_out": len(timed_out),
             "failures": failures[:5],
+            "timed_out": timed_out[:5],
         },
     )
 
@@ -764,6 +778,7 @@ def _run_iceberg_compaction(
     j,
     file_size_threshold: str = "128MB",
     live_streams: bool = False,
+    timeout: int = 30,
 ) -> None:
     """Run table compaction (format-aware).
 
@@ -776,6 +791,10 @@ def _run_iceberg_compaction(
 
     Merges small files produced by streaming micro-batches or repeated
     incremental writes.  DuckDB cannot run compaction -- skipped.
+
+    ``timeout`` bounds each statement's kubectl exec. A timeout does not stop
+    the rewrite server-side, so the pre-benchmark caller passes a long one:
+    the benchmark must not start while rewrite_data_files still runs.
     """
     from lakebench.deploy.iceberg import (
         exec_sql,
@@ -830,25 +849,42 @@ def _run_iceberg_compaction(
         def build_sql(tbl):
             return build_compaction_sql(engine, catalog, tbl, file_size_threshold)
 
+    import time as _time
+
+    from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+
     compacted = 0
     total_ops = 0
     failures: list[str] = []
+    timed_out: list[str] = []
+    started = _time.monotonic()
     for table in table_names:
         for sql in build_sql(table):
             total_ops += 1
-            # exec_sql raises on a real failure (non-zero exit, timeout); a
-            # failed compaction is recorded, never fatal to the run.
+            # exec_sql raises on a real failure (non-zero exit) and on a
+            # kubectl-exec timeout; neither is fatal to the run.
             try:
-                exec_sql(engine, k8s, pod_name, namespace, sql)
+                exec_sql(engine, k8s, pod_name, namespace, sql, timeout=timeout)
                 compacted += 1
+            except ExecSqlTimeout as e:
+                timed_out.append(f"{table}: {e}")
+                logger.warning(
+                    "%s compaction timed out for %s after %ss (may still be running)",
+                    table_format.title(),
+                    table,
+                    timeout,
+                )
             except Exception as e:
                 failures.append(f"{table}: {e}")
                 logger.warning("%s compaction failed for %s: %s", table_format.title(), table, e)
+    elapsed = _time.monotonic() - started
 
-    colour = "yellow" if failures else "green"
+    colour = "yellow" if failures or timed_out else "green"
+    extra = f", {len(timed_out)} timed out (may still be running)" if timed_out else ""
     console.print(
         f"  [{colour}]{table_format.title()} compaction ({engine}): {compacted}/{total_ops} "
-        f"operations on {len(table_names)} tables[/{colour}] (threshold: {file_size_threshold})"
+        f"operations on {len(table_names)} tables{extra}[/{colour}] "
+        f"(threshold: {file_size_threshold}, {elapsed:.0f}s)"
     )
     _journal_safe(
         j.record,
@@ -861,7 +897,11 @@ def _run_iceberg_compaction(
             "operations_succeeded": compacted,
             "operations_total": total_ops,
             "operations_failed": len(failures),
+            "operations_timed_out": len(timed_out),
             "failures": failures[:5],
+            "timed_out": timed_out[:5],
+            "elapsed_seconds": round(elapsed, 1),
+            "statement_timeout_seconds": timeout,
         },
     )
 
