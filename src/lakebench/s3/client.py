@@ -537,6 +537,46 @@ class S3Client:
         except ClientError as e:
             raise S3BucketError(f"Failed to empty bucket {bucket_name}: {e}")  # noqa: B904
 
+    def delete_bucket(self, bucket_name: str, max_wait: int = 120) -> bool:
+        """Delete a bucket that ``empty_bucket`` has already emptied (LB-159).
+
+        The caller is responsible for proving the bucket is this
+        deployment's; this method only removes it. ``BucketNotEmpty`` is
+        retried within ``max_wait``: FlashBlade can still list objects or
+        uploads for a moment after they are deleted, so the bucket is
+        re-emptied (which verifies empty again) and the delete retried.
+
+        Returns:
+            True if this call deleted the bucket, False if it was already gone.
+
+        Raises:
+            S3BucketError: any other error, or still not empty at ``max_wait``.
+        """
+        import time
+
+        self._check_client()
+        start = time.monotonic()
+        while True:
+            try:
+                self._client.delete_bucket(Bucket=bucket_name)
+                return True
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code in ("NoSuchBucket", "404"):
+                    return False
+                if code != "BucketNotEmpty":
+                    raise S3BucketError(  # noqa: B904
+                        f"Failed to delete bucket {bucket_name}: {e}"
+                    )
+            elapsed = time.monotonic() - start
+            if elapsed > max_wait:
+                raise S3BucketError(
+                    f"delete_bucket({bucket_name}) still BucketNotEmpty after "
+                    f"{max_wait}s; the bucket was emptied but not deleted."
+                )
+            time.sleep(3)
+            self.empty_bucket(bucket_name, max_wait=max(1, int(max_wait - elapsed)))
+
     def ensure_buckets(self, bucket_names: list[str]) -> dict[str, bool]:
         """Ensure all specified buckets exist, creating if necessary.
 

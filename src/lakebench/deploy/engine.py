@@ -14,7 +14,7 @@ from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoes
 
 from lakebench.config import LakebenchConfig
 from lakebench.config.schema import CatalogType, QueryEngineType, require_polaris_client_secret
-from lakebench.k8s import K8sClient
+from lakebench.k8s import K8sClient, K8sResourceError
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,10 @@ def image_tag(image: str) -> str:
 # OOM-kills the container (exit 137) before the JVM ever reports a heap OOM.
 # Trino's deployment guidance is 70-85% of the memory available to the JVM.
 JVM_HEAP_FRACTION = 0.8
+
+# LB-157: how long deploy waits for a same-named namespace that an earlier
+# destroy left Terminating before failing with an explicit message.
+_TERMINATING_NAMESPACE_WAIT_SECONDS = 120
 
 _MEM_UNITS_BYTES = {
     "Ki": 2**10,
@@ -901,7 +905,33 @@ class DeploymentEngine:
         if self.k8s.namespace_exists(namespace):
             phase = self.k8s.get_namespace_phase(namespace)
             if phase == "Terminating":
-                self.k8s.wait_for_namespace_deleted(namespace, timeout=120)
+                # LB-157: an earlier destroy of this name is still finishing.
+                # Creating into it fails with a confusing 403/409 from the API
+                # server, so wait a bounded time and then say what is wrong.
+                try:
+                    self.k8s.wait_for_namespace_deleted(
+                        namespace, timeout=_TERMINATING_NAMESPACE_WAIT_SECONDS
+                    )
+                except K8sResourceError:
+                    blockers: list[str] = []
+                    try:
+                        _, blockers = self.k8s.get_namespace_termination_status(namespace)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    remaining = f" Remaining: {'; '.join(blockers)}." if blockers else ""
+                    return DeploymentResult(
+                        component="namespace",
+                        status=DeploymentStatus.FAILED,
+                        message=(
+                            f"Namespace {namespace!r} is still terminating from an "
+                            f"earlier destroy after waiting "
+                            f"{_TERMINATING_NAMESPACE_WAIT_SECONDS}s.{remaining} "
+                            "A namespace cannot be re-created while it is being "
+                            f"deleted; wait until `kubectl get ns {namespace}` "
+                            "returns NotFound, then re-run deploy."
+                        ),
+                        elapsed_seconds=time.time() - start,
+                    )
             else:
                 pre_existing = True
 
@@ -1513,12 +1543,16 @@ class DeploymentEngine:
         clean_buckets: bool = True,
         allow_unverified_cluster: bool = False,
         force_legacy: bool = False,
+        namespace_wait_timeout: int | None = None,
+        delete_buckets: bool = True,
     ) -> list[DeploymentResult]:
         """Destroy all deployed components.
 
         Delegates to deploy.destroy.destroy_all() -- see that module
-        for the full implementation.
+        for the full implementation. ``namespace_wait_timeout=None`` uses
+        the destroy module's default.
         """
+        from lakebench.deploy.destroy import DEFAULT_NAMESPACE_WAIT_TIMEOUT
         from lakebench.deploy.destroy import destroy_all as _destroy_all
 
         return _destroy_all(
@@ -1527,4 +1561,10 @@ class DeploymentEngine:
             clean_buckets=clean_buckets,
             allow_unverified_cluster=allow_unverified_cluster,
             force_legacy=force_legacy,
+            namespace_wait_timeout=(
+                DEFAULT_NAMESPACE_WAIT_TIMEOUT
+                if namespace_wait_timeout is None
+                else namespace_wait_timeout
+            ),
+            delete_buckets=delete_buckets,
         )

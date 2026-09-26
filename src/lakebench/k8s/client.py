@@ -76,6 +76,28 @@ class K8sResourceError(K8sError):
     pass
 
 
+class NamespaceTerminatingError(K8sResourceError):
+    """Raised when a namespace delete is refused because it is already terminating.
+
+    The API server answers a delete on a namespace whose deletion is already
+    in progress with 409 Conflict. The caller did not start that deletion, so
+    it must not report the namespace as deleted by itself.
+    """
+
+    pass
+
+
+# Namespace status conditions that name what is holding a Terminating
+# namespace open (remaining pods/PVCs, finalizers such as pvc-protection).
+_NAMESPACE_BLOCKING_CONDITIONS = (
+    "NamespaceContentRemaining",
+    "NamespaceFinalizersRemaining",
+    "NamespaceDeletionContentFailure",
+    "NamespaceDeletionDiscoveryFailure",
+    "NamespaceDeletionGroupVersionParsingFailure",
+)
+
+
 @dataclass
 class K8sContext:
     """Kubernetes context information."""
@@ -210,6 +232,29 @@ class K8sClient:
                 return ""
             raise K8sResourceError(f"Error reading namespace phase: {e}")  # noqa: B904
 
+    def get_namespace_termination_status(self, name: str) -> tuple[str, list[str]]:
+        """Return a namespace's phase and what is blocking its deletion.
+
+        Returns:
+            ``(phase, blockers)``. ``phase`` is ``""`` when the namespace does
+            not exist. ``blockers`` holds the messages of the namespace's
+            true deletion conditions, for example "Some resources are
+            remaining: persistentvolumeclaims. has 1 resource instances".
+        """
+        try:
+            ns = self._core_v1.read_namespace(name)
+        except ApiException as e:
+            if e.status == 404:
+                return "", []
+            raise K8sResourceError(f"Error reading namespace: {e}")  # noqa: B904
+        status = ns.status
+        phase = (status.phase if status else "") or ""
+        blockers: list[str] = []
+        for cond in (status.conditions if status else None) or []:
+            if cond.type in _NAMESPACE_BLOCKING_CONDITIONS and cond.status == "True":
+                blockers.append(cond.message or cond.reason or cond.type)
+        return phase, blockers
+
     def wait_for_namespace_deleted(self, name: str, timeout: int = 120) -> None:
         """Wait for a namespace to be fully deleted."""
         import time
@@ -284,7 +329,12 @@ class K8sClient:
             name: Namespace name
 
         Returns:
-            True if deleted, False if didn't exist
+            True if this call started the deletion, False if the namespace
+            did not exist.
+
+        Raises:
+            NamespaceTerminatingError: the namespace is already being
+                deleted (by another destroy, or an earlier one).
         """
         if not self.namespace_exists(name):
             return False
@@ -293,6 +343,12 @@ class K8sClient:
             self._core_v1.delete_namespace(name)
             return True
         except ApiException as e:
+            if e.status == 404:
+                return False
+            if e.status == 409:
+                raise NamespaceTerminatingError(  # noqa: B904
+                    f"Namespace '{name}' is already being deleted"
+                )
             raise K8sResourceError(f"Failed to delete namespace: {e}")  # noqa: B904
 
     def secret_exists(self, name: str, namespace: str | None = None) -> bool:
