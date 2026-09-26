@@ -537,6 +537,8 @@ def force_release_cluster_lock(core_v1: Any, *, expired_only: bool) -> LeaseStat
         if current is None:
             return state
         state = current
+    if not state.is_expired():
+        raise _held_error(state)
     raise ClusterLockError(
         f"lease kept changing after {_DELETE_ATTEMPTS} attempts; re-run release-lock"
     )
@@ -567,6 +569,8 @@ def cluster_lock(
     finally:
         try:
             release_cluster_lock(core_v1, handle)
-        except ClusterLockError as e:
-            # Log but do not shadow whatever the body raised.
+        except Exception as e:  # noqa: BLE001
+            # Log but do not shadow whatever the body raised. Transport
+            # errors (urllib3 MaxRetryError and friends) are not
+            # ApiException and would otherwise replace the body's error.
             logger.warning("cluster_lock: release failed on exit: %s", e)
