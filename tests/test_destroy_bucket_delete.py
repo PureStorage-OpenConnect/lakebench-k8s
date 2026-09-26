@@ -588,8 +588,8 @@ class TestDestroyAllBuckets:
         assert r.status is DeploymentStatus.FAILED
         assert "NOT completed" in r.message
 
-    def test_redeploy_during_table_maintenance_stops_before_the_next_statement(self):
-        """VACUUM at 0h retention and DROP TABLE must not run against R."""
+    def test_redeploy_during_table_cleanup_stops_before_the_next_drop(self):
+        """DROP TABLE must not run against R."""
         boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
         state = {"uid": "uid-1"}
         ran: list[str] = []
@@ -605,11 +605,10 @@ class TestDestroyAllBuckets:
                 dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
                 uid=lambda _ns: state["uid"],
                 maint=("trino", "trino-coordinator-0", "lakehouse"),
-                table_format="delta",
             )
         finally:
             self._on_sql = None
-        assert len(ran) == 1 and "lakehouse.system.vacuum" in ran[0] and "'t'" in ran[0]
+        assert ran == ["DROP lakehouse.silver.t"]
         assert boto.buckets["a-bronze"] == ["r/new"]
         assert r.status is DeploymentStatus.FAILED
 
@@ -812,28 +811,10 @@ class TestDestroyAllBuckets:
         assert tables.status is DeploymentStatus.FAILED
         assert "cap" in tables.message
 
-    def test_combined_statement_is_labelled_by_vacuum_and_skips_are_not_listed(self):
-        from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
-
+    def test_combined_statement_is_labelled_by_its_operative_statement(self):
         assert destroy_mod._operative_sql("SET SESSION x = '0s'; CALL c.system.vacuum()") == "CALL"
         assert destroy_mod._operative_sql("SET a=b; VACUUM t RETAIN 0 HOURS") == "VACUUM"
-
-        def run(sql):
-            if "'silver'" in sql:
-                raise RuntimeError(
-                    "exec_sql failed (rc=1): Query 1 failed: line 1:7: "
-                    "Table 'lakehouse.silver.t' does not exist"
-                )
-            raise ExecSqlTimeout("timed out")
-
-        tables = self._run_tables(run, table_format="delta")
-        # silver VACUUM skipped (missing), gold VACUUM timed out; the two
-        # drops remain, labelled by the operative statement, never SET.
-        assert "CALL lakehouse.gold.t: timed out" in tables.message
-        assert "SET lakehouse" not in tables.message
-        assert "2 statement(s) not attempted" in tables.message
-
-    # -- live evidence 2026-09-26: Iceberg maintenance in destroy -------------
+        assert destroy_mod._operative_sql("DROP TABLE IF EXISTS t") == "DROP"
 
     def test_iceberg_destroy_skips_snapshot_and_orphan_maintenance(self):
         """The buckets are emptied and deleted right after; only DROP runs."""
@@ -853,3 +834,11 @@ class TestDestroyAllBuckets:
 
         tables = self._run_tables(missing, table_format="delta")
         assert tables.status is DeploymentStatus.SUCCESS, tables.message
+
+    def test_delta_destroy_skips_vacuum_and_only_drops(self):
+        """Policy 2026-09-26: the buckets are emptied and deleted right after."""
+        ran: list[str] = []
+        tables = self._run_tables(ran.append, table_format="delta")
+        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert tables.status is DeploymentStatus.SUCCESS
+        assert "maintenance skipped" in tables.message

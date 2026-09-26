@@ -123,10 +123,11 @@ def _format_duration(seconds: int) -> str:
 
 
 def _spark_timestamp(seconds_ago: int, now: datetime | None = None) -> str:
-    """A Spark TIMESTAMP literal *seconds_ago* before now (UTC)."""
+    """A Spark TIMESTAMP literal *seconds_ago* before now, with an explicit
+    +00:00 offset so it does not depend on the Thrift session time zone."""
     now = now or datetime.now(timezone.utc)
-    ts = now - timedelta(seconds=seconds_ago)
-    return f"TIMESTAMP '{ts.strftime('%Y-%m-%d %H:%M:%S')}'"
+    ts = (now - timedelta(seconds=seconds_ago)).astimezone(timezone.utc)
+    return f"TIMESTAMP '{ts.strftime('%Y-%m-%d %H:%M:%S')}+00:00'"
 
 
 def build_maintenance_sql(
@@ -149,8 +150,10 @@ def build_maintenance_sql(
     system minimum ("Retention specified (30.00m) is shorter than the
     minimum retention configured in the system (7.00d)"), verified live
     2026-09-26; the SET only lasts for its own CLI process, hence one
-    submission. Spark: ``CALL <catalog>.system.<proc>`` with a TIMESTAMP
-    literal computed here in UTC; the old ``CAST((UNIX_TIMESTAMP() - N) *
+    submission (a single ``trino --execute "SET SESSION ...; ALTER TABLE
+    ..."`` succeeded live for both procedures, 2026-09-26). Spark:
+    ``CALL <catalog>.system.<proc>`` with a TIMESTAMP literal computed here
+    in UTC with an explicit ``+00:00`` offset; the old ``CAST((UNIX_TIMESTAMP() - N) *
     1000 AS BIGINT)`` always failed "number of args and params must match
     after binding" (live, 2026-09-26).
     """

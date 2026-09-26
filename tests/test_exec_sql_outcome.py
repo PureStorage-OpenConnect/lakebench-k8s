@@ -492,6 +492,11 @@ def test_trino_maintenance_sets_the_session_minimum_in_the_same_submission():
 
 
 def test_trino_maintenance_reaches_one_execute_each():
+    """SET SESSION and the ALTER travel in one `trino --execute`. Verified live
+    2026-09-26: `trino --execute "SET SESSION
+    lakehouse.expire_snapshots_min_retention = '0s'; ALTER TABLE ... EXECUTE
+    expire_snapshots(...)"` succeeded as one submission, and the same for
+    remove_orphan_files."""
     from lakebench.deploy.iceberg import build_maintenance_sql
 
     k8s = MagicMock()
@@ -513,11 +518,12 @@ def test_spark_maintenance_uses_a_timestamp_literal():
     exp, orph = build_maintenance_sql(
         "spark-thrift", "lakehouse", "lakehouse.silver.t", "30m", "24h", now=now
     )
+    # An explicit offset, so the Thrift session time zone cannot shift it.
     assert exp == (
         "CALL lakehouse.system.expire_snapshots(table => 'lakehouse.silver.t', "
-        "older_than => TIMESTAMP '2026-09-26 11:30:00')"
+        "older_than => TIMESTAMP '2026-09-26 11:30:00+00:00')"
     )
-    assert "older_than => TIMESTAMP '2026-09-25 12:00:00'" in orph
+    assert "older_than => TIMESTAMP '2026-09-25 12:00:00+00:00'" in orph
     assert "UNIX_TIMESTAMP" not in exp + orph
 
 
@@ -578,3 +584,13 @@ def test_continuous_loop_passes_live_streams():
     import lakebench.cli._sustained as sus
 
     assert "retention_threshold, live_streams=True" in inspect.getsource(sus)
+
+
+def test_spark_timestamp_is_utc_whatever_the_input_zone():
+    from datetime import datetime, timedelta, timezone
+
+    from lakebench.modules.table_formats.iceberg.maintenance import _spark_timestamp
+
+    cest = timezone(timedelta(hours=2))
+    now = datetime(2026, 9, 26, 14, 0, 0, tzinfo=cest)  # 12:00 UTC
+    assert _spark_timestamp(1800, now) == "TIMESTAMP '2026-09-26 11:30:00+00:00'"
