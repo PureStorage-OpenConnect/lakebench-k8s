@@ -9,11 +9,9 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from .engine import DeploymentResult, DeploymentStatus
+from lakebench.config.datagen_seed import config_perturbation, config_seed
 
-#: Top-level datagen seed every deployment generates with. The AML reference
-#: job reads it (LB_DATAGEN_SEED) to name the corpus it scored.
-DATAGEN_SEED = 42
+from .engine import DeploymentResult, DeploymentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +81,12 @@ class DatagenDeployer:
                 "datagen_payload_kb": self._PAYLOAD_SIZE_BYTES // 1024,
                 "datagen_path_prefix": path_prefix,
                 "datagen_schema": schema_value,
-                "datagen_seed": DATAGEN_SEED,  # Fixed seed for reproducibility
+                # From config, or the pre-registration's calibration seed for
+                # financial (config/datagen_seed.py); spent seeds are refused.
+                "datagen_seed": config_seed(cfg),
+                # Robustness corpus flag (financial only), checked against
+                # the declared corpus role (config/datagen_seed.py).
+                "datagen_robustness_perturbation": config_perturbation(cfg),
                 "datagen_resume": False,  # Can be overridden
                 "datagen_cpu": datagen.cpu,
                 "datagen_memory": datagen.memory,

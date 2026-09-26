@@ -113,6 +113,10 @@ PASS = "PASS"
 REGRESSION = "REGRESSION"
 REFUSED = "REFUSED"
 NO_BASELINE = "NO_BASELINE"
+# Pre-benchmark maintenance stopped and no QpH metric was left to gate: the
+# run can prove neither a pass nor a regression (e.g. scale >= 50, where no
+# pre-maintenance benchmark runs). Never a pass.
+NOT_COMPARABLE = "NOT_COMPARABLE"
 
 # Placeholders for the ${VAR} references in pinned configs. Only used when
 # the variable is unset; values never reach the fingerprint (identity and
@@ -458,6 +462,24 @@ def ttv_basis(run: RunRecord) -> str:
     return TTV_FROM_SCORECARD
 
 
+def post_qph_unmeasured(scores: dict) -> str:
+    """Why the run's post-maintenance QpH is not a measurement, or ""."""
+    parts = []
+    if scores.get("maintenance_stopped") is True:
+        parts.append(
+            "pre-benchmark maintenance stopped before completion ("
+            + (scores.get("maintenance_stop_reason") or "unknown")
+            + ")"
+        )
+    if scores.get("maintenance_live_streams") is True:
+        parts.append(
+            "streams were live during pre-benchmark maintenance ("
+            + (scores.get("maintenance_live_streams_reason") or "unknown")
+            + ")"
+        )
+    return "; ".join(parts)
+
+
 def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
     """Numbers the gate compares, plus the metrics it deliberately left out.
 
@@ -519,6 +541,25 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
             per_query.setdefault(str(name), []).append(float(elapsed))
     for name, times in per_query.items():
         numbers[f"{QUERY_QPH_PREFIX}{name}"] = 3600.0 / statistics.median(times)
+
+    why = post_qph_unmeasured(scores)
+    if why:
+        # A stopped maintenance (a rewrite may still have run during the
+        # benchmark) or live streams (writers active during it): post-
+        # maintenance QpH is not a measurement. Pre-maintenance QpH was taken
+        # before and stays gated.
+        # Stream apps present at maintenance were present during the
+        # pre-maintenance round too, so that number is under load as well.
+        live = scores.get("maintenance_live_streams") is True
+        for key in [
+            k
+            for k in numbers
+            if k == "composite_qph"
+            or k.startswith(QUERY_QPH_PREFIX)
+            or (live and k == "pre_compaction_qph")
+        ]:
+            del numbers[key]
+            excluded[key] = why
 
     fleet = run.raw.get("datagen_fleet") or {}
     pod_mbps = [
@@ -1010,9 +1051,28 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
     for metric in sorted(set(actual) - set(baseline.metrics) - set(excluded)):
         _band, direction = _classify_direction(metric)
         result.rows.append(Row(metric, None, actual[metric], None, direction, "-", "new"))
+    unmeasured = post_qph_unmeasured(run.scores)
+    stopped = bool(unmeasured)
+    if stopped:
+        # Always said, whatever the verdict: post-maintenance QpH was left out.
+        result.reasons.append(
+            unmeasured + "; post-maintenance QpH is not a measurement and was not gated"
+        )
     if regressed:
         result.verdict = REGRESSION
+    elif stopped and not any(
+        _is_qph_metric(r.metric) and not r.status.startswith("excluded") and r.status != "new"
+        for r in result.rows
+    ):
+        result.verdict = NOT_COMPARABLE
+        result.reasons.append(
+            "no QpH metric was left to gate; the cause of the stop may itself be a regression"
+        )
     return result
+
+
+def _is_qph_metric(metric: str) -> bool:
+    return metric in ("composite_qph", "pre_compaction_qph") or metric.startswith(QUERY_QPH_PREFIX)
 
 
 def format_comparison(c: Comparison) -> str:
@@ -1070,6 +1130,12 @@ def record_baseline(
     numbers, excluded = extract_metrics(run)
     if not numbers:
         raise PerfGateError(f"run {run.run_id} has no performance numbers")
+    unmeasured = post_qph_unmeasured(run.scores)
+    if unmeasured:
+        raise PerfGateError(
+            f"run {run.run_id} cannot be a baseline for {name}: {unmeasured}, "
+            "so its post-maintenance QpH is not a measurement"
+        )
     # A batch baseline without datagen numbers turns datagen gating off for
     # every later run (they are excluded as "present on one side only"), so
     # it has to come from a run with a fresh generate.

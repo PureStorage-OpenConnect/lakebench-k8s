@@ -174,7 +174,7 @@ def test_tm_tables_are_in_iceberg_maintenance():
         ),
         patch(
             "lakebench.deploy.iceberg.exec_sql",
-            side_effect=lambda e, k, p, n, sql: sent.append(sql),
+            side_effect=lambda e, k, p, n, sql, timeout=30: sent.append(sql),
         ),
     ):
         _run_iceberg_maintenance(cfg, MagicMock(), MagicMock(), MagicMock(), "30m")

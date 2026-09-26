@@ -419,3 +419,88 @@ def test_report_shows_settle_rows():
     pm, _ = _pb_with_settle(_wait(clock, [10.0, 20.0] * 100, max_seconds=600))
     html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(pm)
     assert "did not settle within 600s" in html
+
+
+# -- pre-benchmark maintenance stopped early (review of 79db73c) ----------------
+
+
+def test_stopped_maintenance_nulls_the_maintenance_value():
+    value, n, reason = _maintenance_value(
+        _PRE, _POST, 66, 61, 180.0, _settle(True), stopped_reason="OPTIMIZE gold.t timed out"
+    )
+    assert value is None
+    assert "maintenance stopped before completion" in reason
+
+
+def test_stopped_maintenance_is_persisted_and_flagged_in_the_report(tmp_path):
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.reports.generator import ReportGenerator
+
+    pm, pb = _pb_with_settle(None)
+    pb.maintenance_stopped = True
+    pb.maintenance_stop_reason = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
+
+    path = MetricsStorage(tmp_path).save_run(pm)
+    scores = json.loads(path.read_text())["pipeline_benchmark"]["scores"]
+    assert scores["maintenance_stopped"] is True
+    assert scores["maintenance_stop_reason"].startswith("OPTIMIZE")
+
+    loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
+    assert loaded.pipeline_benchmark.maintenance_stopped is True
+    html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(loaded)
+    assert "maintenance stopped before completion" in html
+    assert "not a clean measurement" in html
+
+
+def test_completed_maintenance_is_not_flagged(tmp_path):
+    from lakebench.reports.generator import ReportGenerator
+
+    pm, pb = _pb_with_settle(None)
+    assert "maintenance_stopped" not in pb.to_dict()["scorecard"]
+    html = ReportGenerator(metrics_dir="/tmp/unused-rg")._generate_maintenance_section(pm)
+    assert "stopped before completion" not in html
+
+
+def test_run_passes_the_stop_reason_and_records_it():
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod)
+    assert "stopped_reason=maint_stop_reason" in src
+    assert "pb.maintenance_stopped = True" in src
+
+
+def test_headline_qph_is_flagged_when_maintenance_stopped():
+    from lakebench.reports.generator import ReportGenerator
+
+    rg = ReportGenerator(metrics_dir="/tmp/unused-rg")
+    pm, pb = _pb_with_settle(None)
+    assert "qph-stop-warning" not in rg._generate_batch_summary(pm)
+    assert "qph-stop-warning" not in rg._generate_qph_card(pm)
+    pb.maintenance_stopped = True
+    pb.maintenance_stop_reason = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
+    for html in (rg._generate_batch_summary(pm), rg._generate_qph_card(pm)):
+        assert "qph-stop-warning" in html
+        assert "maintenance stopped before completion" in html
+
+
+def test_live_streams_are_persisted_and_flagged_in_the_report(tmp_path):
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.reports.generator import ReportGenerator
+
+    pm, pb = _pb_with_settle(None)
+    pb.maintenance_live_streams = True
+    pb.maintenance_live_streams_reason = (
+        "stream apps present or unreadable: lakebench-silver-stream"
+    )
+    path = MetricsStorage(tmp_path).save_run(pm)
+    scores = json.loads(path.read_text())["pipeline_benchmark"]["scores"]
+    assert scores["maintenance_live_streams"] is True
+    loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
+    assert loaded.pipeline_benchmark.maintenance_live_streams is True
+    rg = ReportGenerator(metrics_dir="/tmp/unused-rg")
+    section = rg._generate_maintenance_section(loaded)
+    assert "Streams during maintenance" in section and "writers active" in section
+    for html in (rg._generate_batch_summary(loaded), rg._generate_qph_card(loaded)):
+        assert "qph-stop-warning" in html and "streams were live" in html

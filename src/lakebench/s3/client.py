@@ -34,6 +34,17 @@ class S3AuthError(S3Error):
     pass
 
 
+class S3BucketVanished(S3Error):
+    """A bucket disappeared while it was being emptied.
+
+    Raised instead of returning quietly: the usual cause is a concurrent
+    destroy of the same deployment, and the caller must not go on to clean
+    buckets a later redeploy may already have re-created under the same names.
+    """
+
+    pass
+
+
 class S3BucketError(S3Error):
     """Raised when bucket operations fail."""
 
@@ -424,6 +435,7 @@ class S3Client:
         bucket_name: str,
         max_wait: int = 300,
         progress_callback: Callable[[str, int], None] | None = None,
+        before_batch: Callable[[], None] | None = None,
     ) -> int:
         """Delete all objects and abort incomplete multipart uploads in a bucket.
 
@@ -434,6 +446,10 @@ class S3Client:
             bucket_name: Name of the bucket to empty
             max_wait: Maximum seconds to wait for bucket to be fully empty
             progress_callback: Optional callback(bucket_name, running_deleted_count)
+            before_batch: Optional check run before every delete batch and
+                multipart-abort pass. Raising stops the empty with the
+                exception propagated unchanged; destroy uses it to stop mid
+                bucket when the namespace is replaced underneath it.
 
         Returns:
             Number of objects deleted
@@ -457,6 +473,8 @@ class S3Client:
                     if not objects:
                         continue
                     delete_objects = [{"Key": obj["Key"]} for obj in objects]
+                    if before_batch is not None:
+                        before_batch()
                     resp = self._client.delete_objects(
                         Bucket=bucket_name,
                         Delete={"Objects": delete_objects},
@@ -480,7 +498,10 @@ class S3Client:
                 # 2. Abort all incomplete multipart uploads
                 mp_paginator = self._client.get_paginator("list_multipart_uploads")
                 for page in mp_paginator.paginate(Bucket=bucket_name):
-                    for upload in page.get("Uploads", []):
+                    uploads = page.get("Uploads", [])
+                    if uploads and before_batch is not None:
+                        before_batch()
+                    for upload in uploads:
                         # FlashBlade can still list an upload that its async
                         # GC or a writer has already finished (LB-149). Gone
                         # is the state we want; step 3 still verifies it.
@@ -535,7 +556,56 @@ class S3Client:
                 time.sleep(3)
 
         except ClientError as e:
+            # A concurrent destroy of the same deployment can delete the
+            # bucket while this loop is listing it (LB-159).
+            if e.response.get("Error", {}).get("Code", "") in ("NoSuchBucket", "404"):
+                raise S3BucketVanished(  # noqa: B904
+                    f"bucket {bucket_name} was deleted while being emptied "
+                    f"(after {deleted_count} object(s))"
+                )
             raise S3BucketError(f"Failed to empty bucket {bucket_name}: {e}")  # noqa: B904
+
+    def delete_bucket(self, bucket_name: str, max_wait: int = 300) -> bool:
+        """Delete a bucket that ``empty_bucket`` has already emptied (LB-159).
+
+        The caller is responsible for proving the bucket is this
+        deployment's; this method only removes it. ``BucketNotEmpty`` is
+        retried within ``max_wait``: FlashBlade garbage-collects aborted
+        multipart uploads asynchronously and can refuse the delete for a
+        while after ``empty_bucket`` verified the listing empty (gotcha 2). The
+        bucket is deliberately NOT re-emptied here: if it filled up again,
+        the writer may be a redeploy that re-created the name, and its data
+        is not ours to delete.
+
+        Returns:
+            True if this call deleted the bucket, False if it was already gone.
+
+        Raises:
+            S3BucketError: any other error, or still not empty at ``max_wait``.
+        """
+        import time
+
+        self._check_client()
+        start = time.monotonic()
+        while True:
+            try:
+                self._client.delete_bucket(Bucket=bucket_name)
+                return True
+            except ClientError as e:
+                code = e.response.get("Error", {}).get("Code", "")
+                if code in ("NoSuchBucket", "404"):
+                    return False
+                if code != "BucketNotEmpty":
+                    raise S3BucketError(  # noqa: B904
+                        f"Failed to delete bucket {bucket_name}: {e}"
+                    )
+            elapsed = time.monotonic() - start
+            if elapsed > max_wait:
+                raise S3BucketError(
+                    f"delete_bucket({bucket_name}) still BucketNotEmpty after "
+                    f"{max_wait}s; something wrote to it after it was emptied."
+                )
+            time.sleep(3)
 
     def ensure_buckets(self, bucket_names: list[str]) -> dict[str, bool]:
         """Ensure all specified buckets exist, creating if necessary.

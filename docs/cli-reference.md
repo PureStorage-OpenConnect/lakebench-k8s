@@ -228,7 +228,7 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-preflight` | `--skip-deploy` | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
-| `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete |
+| `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --sustained` is not needed |
 | `--deploy-only` | | `false` | Deploy infrastructure and exit |
 | `--generate-only` | | `false` | Deploy + generate data and exit |
 | `--sustained` | | `false` | Run streaming pipeline instead of batch |
@@ -402,11 +402,30 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--local` | | `false` | Tear down the local stack instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
+| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 3 unless the namespace is already gone |
+| `--keep-buckets` | | `false` | Empty the S3 buckets but do not delete them |
 
 Removes everything in the correct order: Spark jobs, orphaned pods, datagen
 jobs, Iceberg table maintenance, DROP TABLEs, S3 bucket contents, Grafana,
 Prometheus, Trino, Hive/Polaris, PostgreSQL, RBAC, scratch StorageClass,
 and the namespace.
+
+S3 buckets are emptied, then deleted only if lakebench created them: deploy
+records each bucket it creates (a `lakebench.created` tag where the backend
+supports tagging, and the `lakebench.deployment/created-buckets` namespace
+annotation). Buckets deploy adopted, pre-provisioned buckets
+(`create_buckets: false`), and buckets emptied under `--force-legacy` are
+emptied but kept. If a bucket delete fails, the namespace is kept as the
+ownership record so a re-run can finish.
+
+Destroy waits for the namespace to be gone before reporting it deleted. If a
+concurrent destroy of the same deployment finished first and a redeploy has
+re-created the name, destroy stops and leaves the new deployment alone.
+
+Exit codes: `0` everything removed; `1` a step failed (see the summary);
+`3` everything else succeeded but the namespace was still terminating at
+`--namespace-timeout` (usually a PVC or pod finalizer; check with
+`kubectl get ns <namespace>` before re-deploying under the same name).
 
 ### report
 

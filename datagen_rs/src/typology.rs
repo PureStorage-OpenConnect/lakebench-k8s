@@ -12,6 +12,7 @@
 
 use crate::hash::{splitmix64, Rng};
 use crate::kyc::is_customer;
+use crate::robustness::Perturbation;
 use crate::world::{entity_type, TYPE_PERSON};
 
 pub struct Spec {
@@ -104,6 +105,9 @@ pub const SPECS: [Spec; 15] = [
         severity: "strategic",
         rows_per_instance: 3,
     },
+    // corridor_high_risk's rows_per_instance is its budget unit: the
+    // schedule spends round(budget) rows in total, as a run of 2 to 4
+    // payments per instance (the Instance carries its own count).
     Spec {
         tid: 9,
         name: "corridor_high_risk",
@@ -172,6 +176,10 @@ const TID_SEED_STRIDE: i64 = 100_000_000;
 /// deterministic pool of participants regardless of the US-heavy home
 /// distribution.
 const HIGH_RISK_CC: [&str; 6] = ["AE", "CN", "SG", "HK", "MX", "IN"];
+
+/// dormant_reactivation episode length bounds, days (log-uniform between).
+pub const DORMANCY_MIN_DAYS: f64 = 45.0;
+pub const DORMANCY_MAX_DAYS: f64 = 365.0;
 
 #[derive(Clone)]
 pub struct Instance {
@@ -337,6 +345,34 @@ pub fn schedule_ex(
     corpus_end_us: i64,
     country: &[&'static str],
 ) -> Vec<Instance> {
+    schedule_p(
+        world_seed,
+        seed,
+        total_rows,
+        population,
+        corpus_start_us,
+        corpus_end_us,
+        country,
+        &Perturbation::NONE,
+    )
+}
+
+/// `schedule_ex` under the robustness perturbation (crate::robustness): every
+/// dormant_reactivation dormancy length is multiplied by `perturb.dormancy`.
+/// No draw is added or removed, so instances, participants and row counts are
+/// those of the unperturbed schedule. `Perturbation::NONE` reproduces
+/// `schedule_ex` bit for bit.
+#[allow(clippy::too_many_arguments)]
+pub fn schedule_p(
+    world_seed: i64,
+    seed: i64,
+    total_rows: i64,
+    population: usize,
+    corpus_start_us: i64,
+    corpus_end_us: i64,
+    country: &[&'static str],
+    perturb: &Perturbation,
+) -> Vec<Instance> {
     let pool = person_pool(population, world_seed);
     let corridor = corridor_pool(&pool, country);
     let cust_of = |v: &[u64]| -> Vec<u64> {
@@ -405,7 +441,15 @@ pub fn schedule_ex(
                 0
             };
         let n_inst = ((budget / emitted_per_instance as f64).round() as i64).max(1);
-        for j in 0..n_inst {
+        // Rows this typology emits in total. Every typology but
+        // corridor_high_risk spends emitted_per_instance per instance, so the
+        // loop below runs n_inst times as it always has; corridor_high_risk
+        // draws a row count per instance and spends the same total, so its
+        // density, and the row count every other part of the corpus is laid
+        // out from, are unchanged.
+        let mut rows_left = n_inst * emitted_per_instance as i64;
+        let mut j: i64 = 0;
+        while rows_left > 0 {
             // Hashed, not added: `seed + tid * stride + j` made seed s+1's
             // instance j the same draw as seed s's instance j+1, so different
             // seeds produced shifted copies of one schedule (LB-139).
@@ -417,6 +461,16 @@ pub fn schedule_ex(
             let mut participants = pick_distinct(&mut rng, src_pool, spec.participants);
             let mut placed =
                 enforce_subject(&mut participants, subject, src_cust, world_seed, &mut rng);
+            // micro_structuring: a crew of 3 to 8 depositors, not always 8.
+            // Structurers reuse a few people for repeated deposits (FinCEN's
+            // "smurfing"), so a crew smaller than the deposit count is the
+            // common case. The collector (the subject) stays last.
+            if spec.name == "micro_structuring" {
+                let crew = 3 + rng.below(6) as usize;
+                let collector = participants[participants.len() - 1];
+                participants.truncate(crew.min(participants.len() - 1));
+                participants.push(collector);
+            }
             // Dormant instances: re-draw until the originator is unused, so each
             // dormant account owns exactly one dormancy window (see finding 2
             // above). Bounded; a collision is rare (birthday over ~n_inst in the
@@ -434,6 +488,8 @@ pub fn schedule_ex(
             // Dormancy suppression window, set only by the dormant_reactivation
             // arm below; (0, 0) means "no suppression" for every other typology.
             let mut suppress: (i64, i64) = (0, 0);
+            // Rows in the manifest window; only corridor_high_risk varies it.
+            let mut inst_rows = spec.rows_per_instance;
             // Duration model per typology name. Comments explain the intent.
             let (start, end) = match spec.name {
                 // rapid_layering: whole chain lands within one civil day.
@@ -469,20 +525,40 @@ pub fn schedule_ex(
                 // rows_per_instance + 1.
                 "dormant_reactivation" => {
                     let day = 86_400_000_000i64;
-                    let anchor_pad = 3 * day; // room before S for the anchor send
-                    let burst_span = 2 * day;
+                    // Room before S for the anchor send.
+                    let anchor_pad = 3 * day;
+                    // A third of the reactivations are the account coming back
+                    // into use over four to ten days; the rest are sudden (the
+                    // burst inside two days). Self-chosen split. Kept short
+                    // so few reactivations straddle a month boundary, where
+                    // the monthly unit would see the burst without its gap.
+                    let burst_span = if rng.unit() < 1.0 / 3.0 {
+                        (4 + rng.below(7) as i64) * day
+                    } else {
+                        2 * day
+                    };
                     // Cap the episode to what the corpus can hold so a short
                     // corpus never produces a negative placement range; a corpus
                     // shorter than ~90d then yields a sub-threshold gap that
                     // simply never fires (honest, not a crash).
                     let max_dur =
                         (corpus_end_us - corpus_start_us - anchor_pad - burst_span).max(day);
-                    // Dormancy length: log-uniform over 60..365 days. The old
+                    // Dormancy length: log-uniform over 45..365 days. The old
                     // 95..179 range was chosen to clear W8's 90-day threshold,
                     // which made W8's dormancy recall partly built into the
-                    // data (LB-138, AML-GOALS R2). Some episodes are now too
-                    // short for an absolute 90-day rule; that miss is honest.
-                    let d_days = (60.0f64 * (365.0f64 / 60.0).powf(rng.unit())) as i64;
+                    // data (LB-138, AML-GOALS R2). The floor moved from 60 to
+                    // 45 days so the short end overlaps the quiet spells a
+                    // normal low-activity account has (an account sending
+                    // about once a month goes 45 days without a send about one
+                    // time in five). Short episodes miss an absolute 90-day
+                    // rule; that miss is honest.
+                    // Robustness perturbation: both bounds scale by
+                    // perturb.dormancy, so each draw is m times its
+                    // unperturbed length. 45.0 * 1.0 is exact, so the
+                    // default is bit-identical.
+                    let d_days = ((DORMANCY_MIN_DAYS * perturb.dormancy)
+                        * (DORMANCY_MAX_DAYS / DORMANCY_MIN_DAYS).powf(rng.unit()))
+                        as i64;
                     let dur = (d_days * day).min(max_dur);
                     let lo = corpus_start_us + anchor_pad;
                     let hi = corpus_end_us - dur - burst_span;
@@ -499,12 +575,19 @@ pub fn schedule_ex(
                     suppress = (s_dorm, burst_end);
                     (burst_start, burst_end)
                 }
-                // corridor_high_risk: single-transaction pattern, so the
-                // window can be as small as one minute.
+                // corridor_high_risk: a run of 2 to 4 payments from the
+                // subject to one counterparty in a higher-risk jurisdiction
+                // over two to five weeks, so the corridor carries a share
+                // of the account's flow for a while (W7's "corridors to
+                // high-risk jurisdictions" is about where an account's money
+                // goes, which one payment among dozens cannot show). The
+                // count is capped by the typology's remaining row budget.
                 "corridor_high_risk" => {
                     let offset = (rng.unit() * span as f64 * 0.95) as i64;
                     let s = corpus_start_us + offset;
-                    let e = (s + 60_000_000).min(corpus_end_us);
+                    let dur = (14 + rng.below(22) as i64) * 86_400_000_000;
+                    inst_rows = ((2 + rng.below(3)) as i64).min(rows_left) as usize;
+                    let e = (s + dur).min(corpus_end_us);
                     (s, e)
                 }
                 // tbml_repeated_invoice: 6 transactions on the same edge
@@ -515,13 +598,15 @@ pub fn schedule_ex(
                     let e = (s + 7 * 86_400_000_000).min(corpus_end_us);
                     (s, e)
                 }
-                // micro_structuring: many small structured transactions
-                // over a 3-day window (distinct from fan_in's 1-3 day
-                // burst by having more origs and a shorter window).
+                // micro_structuring: a campaign of deposits into one collector
+                // over 3 to 21 days. The old fixed 3-day window put every
+                // deposit into one burst; structuring campaigns run for weeks
+                // so no single day or branch sees the pattern.
                 "micro_structuring" => {
                     let offset = (rng.unit() * span as f64 * 0.95) as i64;
                     let s = corpus_start_us + offset;
-                    let e = (s + 3 * 86_400_000_000).min(corpus_end_us);
+                    let dur = (3 + rng.below(19) as i64) * 86_400_000_000;
+                    let e = (s + dur).min(corpus_end_us);
                     (s, e)
                 }
                 // cross_border_cycle: like `cycle` but tighter (2-4 days)
@@ -567,12 +652,19 @@ pub fn schedule_ex(
                 workload: spec.workload,
                 severity: spec.severity,
                 seed: iseed,
-                rows_per_instance: spec.rows_per_instance,
+                rows_per_instance: inst_rows,
                 corpus_start_us,
                 corpus_end_us,
                 suppress_start_us: suppress.0,
                 suppress_end_us: suppress.1,
             });
+            rows_left -= (inst_rows
+                + if spec.name == "dormant_reactivation" {
+                    1
+                } else {
+                    0
+                }) as i64;
+            j += 1;
         }
     }
     if subject_misses > 0 {
@@ -806,18 +898,32 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 });
             }
         }
-        // Many origs, one bene, structured amounts, 3-day window. Distinct
-        // from fan_in by density (rows_per_instance=8 not 5) and window.
+        // A crew of depositors paying one collector over the campaign. Every
+        // crew member deposits at least once and the rest of the deposits go
+        // to crew members at random, so some people deposit more than once.
+        // 3 to 8 of the 8 deposits are structured (under the threshold, see
+        // amounts::structuring_amount); the others are the depositor's own
+        // ordinary payments, since a smurf does not put every payment in the
+        // band and a collector that received nothing else would be a label.
         "micro_structuring" => {
             let bene = *p.last().unwrap();
-            let n = (inst.rows_per_instance).min(p.len() - 1);
+            let crew = &p[..p.len() - 1];
+            let n = inst.rows_per_instance;
+            let mut structured_left = (3 + rng.below(6) as usize).min(n);
             for i in 0..n {
-                let orig = p[i];
+                let orig = if i < crew.len() {
+                    crew[i]
+                } else {
+                    crew[rng.below(crew.len() as u64) as usize]
+                };
+                // Selection sampling: exactly structured_left of the rows.
+                let structuring = (rng.below((n - i) as u64) as usize) < structured_left;
+                structured_left -= structuring as usize;
                 rows.push(TxRow {
                     orig,
                     bene,
                     ts_us: uu(&mut rng, s, e),
-                    structuring: true,
+                    structuring,
                 });
             }
         }
@@ -838,12 +944,10 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
                 });
             }
         }
-        // Single transaction between participants both drawn from the
-        // corridor pool -> non-US, non-US country tuple. Amount is a
-        // normal lognormal draw; the corridor country pair is the signal,
-        // not the amount. To emit a genuinely "large" transaction we
-        // would need an amount-channel hook in emit.rs, which is a
-        // larger change deferred to a follow-up.
+        // A run of payments on one edge between participants both drawn from
+        // the corridor pool (a higher-risk-country tuple). Amounts are the
+        // sender's own persona draws; the corridor, repeated over weeks, is
+        // the signal, not the amount.
         "corridor_high_risk" => {
             // splitmix64 to jitter which participant is orig vs bene per
             // instance without adding an extra rng draw.
@@ -853,12 +957,14 @@ pub fn emit_instance(inst: &Instance) -> Vec<TxRow> {
             } else {
                 (p[1], p[0])
             };
-            rows.push(TxRow {
-                orig: a,
-                bene: b,
-                ts_us: uu(&mut rng, s, e),
-                structuring: false,
-            });
+            for _ in 0..inst.rows_per_instance {
+                rows.push(TxRow {
+                    orig: a,
+                    bene: b,
+                    ts_us: uu(&mut rng, s, e),
+                    structuring: false,
+                });
+            }
         }
         _ => {}
     }

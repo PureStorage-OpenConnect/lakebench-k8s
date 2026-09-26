@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import warnings
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import (
     BaseModel,
@@ -796,9 +796,24 @@ class SustainedConfig(ConfigModel):
         default="30m",
         description=(
             "Iceberg snapshot retention threshold passed to Trino "
-            "(e.g. '30m', '1h', '7d'). Snapshots older than this are expired."
+            "(e.g. '30m', '1h', '7d'). Snapshots older than this are expired. "
+            "A whole number and one unit: s, m, h or d."
         ),
     )
+
+    @field_validator("retention_threshold")
+    @classmethod
+    def _validate_retention_threshold(cls, v: str) -> str:
+        # The maintenance parser used to guess: an unknown unit read as
+        # minutes ("7D" -> 7 min) and "1.5h" / "30min" raised mid-run.
+        import re as _re
+
+        if not isinstance(v, str) or not _re.fullmatch(r"\s*\d+\s*[smhdSMHD]\s*", v):
+            raise ValueError(
+                f"retention_threshold {v!r} is not a duration: use a whole number and one "
+                "unit, s, m, h or d (for example '30m', '1h', '7d')"
+            )
+        return "".join(v.split()).lower()
 
     # Iceberg compaction -- periodic rewrite_data_files / optimize to
     # merge small files produced by streaming micro-batches.  Heavier
@@ -979,6 +994,21 @@ class DatagenConfig(ConfigModel):
     )
 
     mode: DatagenMode = DatagenMode.AUTO
+    # Top-level generator seed. Unset: the AML pre-registration's calibration
+    # seed for the financial schema, 42 otherwise (config/datagen_seed.py). A
+    # financial seed the pre-registration lists as spent is refused.
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    # AML corpus role (financial only). The evaluation and robustness seeds are
+    # refused unless the run declares its role here: each is generated once,
+    # as the registered gate run for that role. Set without a seed, the role's
+    # registered seed is used.
+    corpus_role: Literal["calibration", "evaluation", "robustness"] | None = None
+    # Robustness corpus (financial only; AML-GOALS R3(b)): datagen shifts the
+    # nuisance parameters by corpora.robustness_perturbation in the
+    # pre-registration (median amount, persona sds, dormancy, each x1.2 in
+    # natural units). Required with corpus_role: robustness, refused with a
+    # calibration or evaluation role. Off: output is unchanged.
+    robustness_perturbation: bool = False
     parallelism: int = Field(default=4, ge=1)
     # Datagen output file size. Per-thread generator memory scales with it
     # (about 4.8x for financial, 3.0x for c360, measured), so the old 512mb
@@ -1181,6 +1211,20 @@ class WorkloadConfig(ConfigModel):
     tm_operations: TmOperationsConfig = Field(default_factory=TmOperationsConfig)
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _seed_allowed(self) -> WorkloadConfig:
+        # Refused at load, before anything is deployed: a spent AML seed would
+        # regenerate a corpus that has already been looked at, and an
+        # evaluation or robustness seed without its declared role would burn
+        # it (AML-GOALS R3).
+        from lakebench.config.datagen_seed import check_perturbation, resolve_seed
+
+        resolve_seed(self.datagen.seed, self.schema_type.value, self.datagen.corpus_role)
+        check_perturbation(
+            self.schema_type.value, self.datagen.corpus_role, self.datagen.robustness_perturbation
+        )
+        return self
 
 
 # Supported component combinations (catalog, table_format, query_engine).

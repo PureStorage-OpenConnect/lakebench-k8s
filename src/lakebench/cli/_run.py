@@ -20,6 +20,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
     resolve_config_path,
+    write_run_report,
 )
 from lakebench.config import (
     ConfigError,
@@ -33,6 +34,13 @@ from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
 logger = logging.getLogger(__name__)
+
+# Per-statement kubectl-exec timeout for pre-benchmark compaction (seconds).
+PRE_BENCHMARK_COMPACTION_TIMEOUT = 1800
+# Same bound for pre-benchmark expire_snapshots / remove_orphan_files.
+PRE_BENCHMARK_MAINTENANCE_TIMEOUT = 1800
+# Overall cap for pre-benchmark maintenance and compaction together (seconds).
+PRE_BENCHMARK_MAINTENANCE_CAP = 1800
 
 
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
@@ -142,7 +150,7 @@ def _print_pipeline_scorecard(
     if scores:
         body += "\n\n[bold]Scores[/bold]\n" + "\n".join(scores)
 
-    body += f"\n\nTotal: {total_time:.0f}s\n\nFull report: [bold]lakebench report[/bold]"
+    body += f"\n\nTotal: {total_time:.0f}s\n\nReport: report.html in the run directory"
 
     console.print()
     console.print(Panel(body, title="Pipeline Complete", expand=False))
@@ -446,7 +454,14 @@ def _data_file_total(health: dict[str, int]) -> int:
 
 
 def _maintenance_value(
-    pre, post, pre_files: int, post_files: int, maint_elapsed: float, settle=None
+    pre,
+    post,
+    pre_files: int,
+    post_files: int,
+    maint_elapsed: float,
+    settle=None,
+    stopped_reason: str = "",
+    live_streams_reason: str = "",
 ) -> tuple[float | None, int, str]:
     """(value %, paired queries, reason) for the pre/post maintenance rounds.
 
@@ -460,9 +475,17 @@ def _maintenance_value(
     None when the wait was disabled. A wait that did not settle leaves the
     value None: the post round measured storage still working off the
     maintenance burst (LB-150).
+
+    *stopped_reason* is set when pre-benchmark maintenance was stopped (a
+    statement timed out or the overall cap hit). A timed-out statement may
+    still be running server-side, so the post round is not measurable.
     """
     if maint_elapsed <= 0:
         return None, 0, "maintenance did not run"
+    if stopped_reason:
+        return None, 0, f"maintenance stopped before completion ({stopped_reason})"
+    if live_streams_reason:
+        return None, 0, f"streams were live during maintenance ({live_streams_reason})"
     if pre_files <= 0 or post_files <= 0:
         return None, 0, "data file counts unavailable"
     if post_files >= pre_files:
@@ -1022,6 +1045,7 @@ def _run_local_mode(
     )
     if metrics_path:
         print_info(f"Metrics saved to {metrics_path}")
+        write_run_report(metrics_storage, run_id)
         print_info(f"Run ID: {run_id}")
         _journal_safe(
             j.record,
@@ -1191,7 +1215,9 @@ def run(
     import uuid
 
     from lakebench.cli._sustained import (
+        MaintenanceBudget,
         _collect_platform_metrics,
+        _live_stream_apps,
         _probe_table_health,
         _run_iceberg_compaction,
         _run_iceberg_maintenance,
@@ -1258,7 +1284,9 @@ def run(
     except Exception as e:
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
-    resolve_auto_sizing(cfg, cluster_cap)
+    # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
+    for cut in resolve_auto_sizing(cfg, cluster_cap) or []:
+        print_warning(f"Auto-sizing: {cut}")
 
     # Auto-scale timeout if not explicitly set
     if timeout is None:
@@ -1318,7 +1346,19 @@ def run(
     if not skip_deploy:
         from lakebench.cli._prerequisites import run_prerequisites
 
-        prereq_report = run_prerequisites(cfg)
+        # The --sustained flag does not write back to the config, so the
+        # capacity check is told the mode the run will use (LB-155). Datagen
+        # is left out only where the run itself releases its cores: under
+        # --skip-generate with a finished lakebench-datagen Job (LB-158).
+        _use_sustained = bool(
+            sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
+        )
+        _datagen_runs = True
+        if _use_sustained and skip_generate:
+            from lakebench.cli._sustained import _datagen_job_state
+
+            _datagen_runs = _datagen_job_state(cfg.get_namespace())[0] != "finished"
+        prereq_report = run_prerequisites(cfg, sustained=_use_sustained, datagen_runs=_datagen_runs)
         for check in prereq_report.checks:
             icon = "[green]+[/green]" if check.passed else "[red]x[/red]"
             console.print(f"  {icon} {check.name}: {check.message}")
@@ -1934,6 +1974,13 @@ def run(
         _pre_record = None
         _pre_result = None
         _maint_value = None
+        # Set when pre-benchmark maintenance was stopped (timeout or cap): a
+        # statement may still be running, so the post-maintenance QpH is not
+        # a clean measurement.
+        maint_stop_reason = ""
+        # Set when streams were (or may have been) writing during pre-benchmark
+        # maintenance: the post-maintenance QpH was then measured under load.
+        maint_live_reason = ""
         _maint_end = None
         _settle = None
         pre_file_count = 0
@@ -2021,10 +2068,62 @@ def run(
                 console.print()
                 console.print("[bold]Running maintenance[/bold]")
                 _maint_start = datetime.now()
+                # The benchmark must not start while a maintenance statement
+                # still runs (a kubectl-exec timeout does not stop it), so each
+                # statement may take up to 30 min; one budget caps expire,
+                # orphan removal and compaction together, and the first
+                # timeout stops the rest.
+                maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)
+                # Stream apps (restartPolicy Always) can still be writing: a
+                # c360 run never stops leftovers. Any present means live.
+                live_apps, live_errors = _live_stream_apps(cfg.get_namespace())
+                if live_apps:
+                    maint_live_reason = (
+                        f"stream apps present or unreadable: {', '.join(live_apps)}"
+                        + (f" (read errors: {'; '.join(live_errors)})" if live_errors else "")
+                    )
+                    console.print(
+                        "  [yellow]Stream apps present during pre-benchmark maintenance: "
+                        f"{', '.join(live_apps)}; using live-stream retention[/yellow]"
+                    )
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Pre-benchmark maintenance with live streams",
+                        details={"stream_apps": live_apps, "read_errors": live_errors},
+                    )
                 _run_iceberg_maintenance(
-                    cfg, k8s, console, j, retention_threshold=resolve_maintenance_retention(cfg)
+                    cfg,
+                    k8s,
+                    console,
+                    j,
+                    retention_threshold=resolve_maintenance_retention(cfg),
+                    timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
+                    live_streams=bool(live_apps),
+                    budget=maint_budget,
                 )
-                _run_iceberg_compaction(cfg, k8s, console, j)
+                _run_iceberg_compaction(
+                    cfg,
+                    k8s,
+                    console,
+                    j,
+                    live_streams=bool(live_apps),
+                    timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
+                    budget=maint_budget,
+                )
+                maint_stop_reason = maint_budget.stopped
+                if maint_budget.stopped:
+                    console.print(
+                        f"  [yellow]Pre-benchmark maintenance stopped: {maint_budget.stopped}; "
+                        "the remaining statements were not attempted. The benchmark runs "
+                        "anyway; a timed-out statement may still be running.[/yellow]"
+                    )
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Pre-benchmark maintenance stopped",
+                        details={"outcome": "timed_out", "reason": maint_budget.stopped},
+                    )
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
                 maint_elapsed = (datetime.now() - _maint_start).total_seconds()
                 _maint_end = time.monotonic()
@@ -2152,6 +2251,8 @@ def run(
                         post_file_count,
                         maint_elapsed,
                         _settle,
+                        stopped_reason=maint_stop_reason,
+                        live_streams_reason=maint_live_reason,
                     )
                     if _maint_value[0] is not None:
                         console.print(
@@ -2277,6 +2378,12 @@ def run(
 
                 # Populate maintenance cost metrics (v1.3)
                 try:
+                    if maint_stop_reason:
+                        pb.maintenance_stopped = True
+                        pb.maintenance_stop_reason = maint_stop_reason
+                    if maint_live_reason:
+                        pb.maintenance_live_streams = True
+                        pb.maintenance_live_streams_reason = maint_live_reason
                     if maint_elapsed > 0:
                         pb.maintenance_elapsed_seconds = maint_elapsed
                         if pb.total_elapsed_seconds > 0:
@@ -2323,7 +2430,7 @@ def run(
                             "[green]Pipeline complete[/green]\n\n"
                             + "\n".join(f"  {n}: {el:.0f}s" for n, _, el in results)
                             + f"\n\nTotal: {_total:.0f}s{_qph}"
-                            + "\n\nFull report: [bold]lakebench report[/bold]",
+                            + "\n\nReport: report.html in the run directory",
                             title="Pipeline Complete",
                             expand=False,
                         )
@@ -2332,6 +2439,7 @@ def run(
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
+            write_run_report(metrics_storage, run_id)
 
             _journal_safe(
                 j.record,

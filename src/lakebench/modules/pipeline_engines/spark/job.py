@@ -631,12 +631,19 @@ def compute_peak_requirements(
 def _streaming_concurrent_budget(
     config: LakebenchConfig,
     cluster_cpu_millicores: int | None,
+    *,
+    datagen_running: bool = True,
 ) -> dict[JobType, int]:
     """Compute max executor count per streaming job for concurrent execution.
 
     In sustained mode, datagen + 3 streaming jobs share the cluster.
     Divides the available CPU (after Trino + infra + datagen) among
     streaming jobs proportionally to their uncapped demand.
+
+    ``datagen_running=False`` drops the datagen reservation: the continuous
+    corpus is finite and usually written before the streams start, and a
+    finished Job holds no cores (LB-158). The default stays conservative
+    for callers that cannot know whether datagen is still running.
 
     Returns:
         Dict mapping each streaming JobType to its capped executor count.
@@ -662,9 +669,9 @@ def _streaming_concurrent_budget(
         + 1000  # Hive + Postgres
     )
 
-    # Datagen runs concurrently with streaming
+    # Datagen runs concurrently with streaming while its Job is unfinished
     datagen = config.architecture.workload.datagen
-    datagen_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
+    datagen_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu) if datagen_running else 0
 
     # Budget for all streaming jobs combined (90% of remaining after co-resident + datagen)
     remaining_m = max(0, cluster_cpu_millicores - co_resident_m - datagen_m)
@@ -748,7 +755,7 @@ class BudgetedStreamingRequest:
 
 
 def streaming_request_under_budget(
-    config: LakebenchConfig, cluster_cpu_millicores: int
+    config: LakebenchConfig, cluster_cpu_millicores: int, *, datagen_running: bool = True
 ) -> BudgetedStreamingRequest:
     """Continuous-mode request after ``_streaming_concurrent_budget`` caps it.
 
@@ -764,7 +771,9 @@ def streaming_request_under_budget(
 
     scale = config.architecture.workload.datagen.scale
     schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
-    budget = _streaming_concurrent_budget(config, cluster_cpu_millicores)
+    budget = _streaming_concurrent_budget(
+        config, cluster_cpu_millicores, datagen_running=datagen_running
+    )
     spark_cfg = config.platform.compute.spark
     explicit = {
         JobType.BRONZE_INGEST: spark_cfg.bronze_ingest_executors,
@@ -795,16 +804,17 @@ def streaming_request_under_budget(
 
     trino = config.architecture.query_engine.trino
     datagen = config.architecture.workload.datagen
+    dg_pods = datagen.parallelism if datagen_running else 0
     cores_m += (
         _parse_cpu_millicores(trino.coordinator.cpu)
         + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
         + 1000  # Hive + Postgres, as the budget counts them
-        + datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
+        + dg_pods * _parse_cpu_millicores(datagen.cpu)
     )
     co_gi = (
         _parse_memory_gi(trino.coordinator.memory)
         + trino.worker.replicas * _parse_memory_gi(trino.worker.memory)
-        + datagen.parallelism * _parse_memory_gi(datagen.memory)
+        + dg_pods * _parse_memory_gi(datagen.memory)
     )
     return BudgetedStreamingRequest(
         cpu_cores=-(-cores_m // 1000),
@@ -1398,6 +1408,9 @@ class SparkJobManager:
         self.namespace = config.get_namespace()
         # Streaming jobs the concurrent budget capped, for the CLI to show.
         self.budget_warnings: list[str] = []
+        # Whether the streaming budget reserves datagen's cores. The
+        # continuous CLI clears it once the datagen Job has finished (LB-158).
+        self.datagen_running: bool = True
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -1630,7 +1643,9 @@ class SparkJobManager:
         # Streaming: cap to concurrent budget (all 3 jobs + datagen share cluster)
         capped_from = executor_count
         if job_type in _STREAMING_JOB_TYPES and self._cluster_cpu_m is not None:
-            budget = _streaming_concurrent_budget(cfg, self._cluster_cpu_m)
+            budget = _streaming_concurrent_budget(
+                cfg, self._cluster_cpu_m, datagen_running=self.datagen_running
+            )
             if job_type in budget and budget[job_type] < executor_count:
                 logger.warning(
                     "Concurrent budget: %s capped from %d to %d executors",
@@ -2356,6 +2371,21 @@ class SparkJobManager:
             }
         )
 
+        if (
+            job_type == JobType.SCORE_FINANCIAL_REFERENCE
+            and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
+        ):
+            # A registered look runs once: an operator retry after the gate
+            # computed AP (a crash or an error verdict) would look again.
+            # Submission retries stay: they run before the driver starts,
+            # so no AP exists yet (shared Ivy cache race, see above).
+            _restart_policy = {
+                "type": "OnFailure",
+                "onFailureRetries": 0,
+                "onSubmissionFailureRetries": 5,
+                "onSubmissionFailureRetryInterval": 60,
+            }
+
         manifest = {
             "apiVersion": "sparkoperator.k8s.io/v1beta2",
             "kind": "SparkApplication",
@@ -2643,9 +2673,16 @@ class SparkJobManager:
         # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
         # the report scored and which lakebench revision produced it.
         if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
-            from lakebench.deploy.datagen import DATAGEN_SEED
+            from lakebench.config.datagen_seed import config_seed
 
-            env.append({"name": "LB_DATAGEN_SEED", "value": str(DATAGEN_SEED)})
+            env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
+            role = cfg.architecture.workload.datagen.corpus_role
+            if role is not None:
+                # The declared role of a registered run, recorded in the report.
+                env.append({"name": "LB_DATAGEN_CORPUS_ROLE", "value": role})
+            if cfg.architecture.workload.datagen.robustness_perturbation:
+                # The corpus was generated with the robustness perturbation.
+                env.append({"name": "LB_DATAGEN_ROBUSTNESS_PERTURBATION", "value": "true"})
             env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
@@ -2735,6 +2772,13 @@ class SparkJobManager:
             if _mod_path.exists():
                 data[_aml_mod] = _mod_path.read_text()
                 logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
+        # The AML seed guard (stdlib only) ships flat too, so the reference
+        # job refuses a corpus from a spent or unregistered protected seed.
+        # Fail at build time, not three driver attempts later.
+        _seed_mod = _package_dir() / "config" / "datagen_seed.py"
+        if not _seed_mod.exists():
+            raise FileNotFoundError(f"AML seed guard missing from the package: {_seed_mod}")
+        data["datagen_seed.py"] = _seed_mod.read_text()
 
         # AML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via

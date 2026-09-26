@@ -1442,11 +1442,15 @@ class TestSparkOperatorNamespaceWatching:
         assert "lakebench,lakebench-test" in status.message
 
     @patch(
+        "lakebench.spark.operator.SparkOperatorManager._namespace_is_terminating",
+        return_value=False,
+    )
+    @patch(
         "lakebench.spark.operator.SparkOperatorManager._filter_existing_namespaces",
         side_effect=lambda ns: ns,
     )
     @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
-    def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter):
+    def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter, _mock_live):
         """When can_heal=True, adds namespace via helm upgrade + restart + verify."""
         from lakebench.spark.operator import SparkOperatorManager
 
@@ -1761,7 +1765,7 @@ class TestReferenceScoreWiring:
     def test_reference_job_carries_seed_and_git_sha(self, monkeypatch):
         """The fidelity gate names the corpus seed and revision it scored
         (AML-GOALS R6); only the reference job gets them."""
-        from lakebench.deploy.datagen import DATAGEN_SEED
+        from lakebench.config.datagen_seed import NON_AML_DEFAULT_SEED
         from lakebench.modules.pipeline_engines.spark import job as jobmod
 
         monkeypatch.setattr(jobmod, "_lakebench_git_sha", lambda: "abc123")
@@ -1771,7 +1775,7 @@ class TestReferenceScoreWiring:
             return {e["name"]: e.get("value") for e in mgr._build_env_vars(jt)}
 
         ref = env(JobType.SCORE_FINANCIAL_REFERENCE)
-        assert ref["LB_DATAGEN_SEED"] == str(DATAGEN_SEED)
+        assert ref["LB_DATAGEN_SEED"] == str(NON_AML_DEFAULT_SEED)
         assert ref["LB_GIT_SHA"] == "abc123"
         other = env(JobType.SCORE_FINANCIAL)
         assert "LB_DATAGEN_SEED" not in other and "LB_GIT_SHA" not in other

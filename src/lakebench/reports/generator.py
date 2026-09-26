@@ -36,6 +36,41 @@ def _format_duration_ms(ms: float | None) -> str:
     return "-"
 
 
+def _post_qph_caveat(pb) -> str:
+    """Why post-maintenance QpH is not a clean measurement, or ""."""
+    if pb is None:
+        return ""
+    parts = []
+    if getattr(pb, "maintenance_stopped", False):
+        parts.append(
+            "maintenance stopped before completion ("
+            + (getattr(pb, "maintenance_stop_reason", "") or "unknown")
+            + "); a statement may still have been running"
+        )
+    if getattr(pb, "maintenance_live_streams", False):
+        parts.append(
+            "streams were live during maintenance ("
+            + (getattr(pb, "maintenance_live_streams_reason", "") or "unknown")
+            + "); the benchmark ran with writers active"
+        )
+    return "; ".join(parts)
+
+
+def _qph_stop_warning(metrics) -> str:
+    """Warning on a headline QpH measured after a stopped maintenance or with
+    streams live."""
+    caveat = _post_qph_caveat(getattr(metrics, "pipeline_benchmark", None))
+    if not caveat:
+        return ""
+    from html import escape
+
+    return (
+        ' <span class="qph-stop-warning" style="color: var(--danger); font-size: 0.5em;" '
+        f'title="{escape(caveat)}">'
+        f"WARNING: {escape(caveat)}, so this is not a clean measurement</span>"
+    )
+
+
 class ReportGenerator:
     """Generates HTML benchmark reports."""
 
@@ -492,10 +527,40 @@ class ReportGenerator:
             rows.append(f"<tr><td>Compaction ratio</td><td>{ratio:.1f}x</td></tr>")
         if maint_elapsed > 0:
             rows.append(f"<tr><td>Maintenance time</td><td>{maint_elapsed:.0f}s</td></tr>")
+        if pb.maintenance_stopped:
+            from html import escape as _ms_esc
+
+            # Holds for the headline QpH too: it was measured after this.
+            rows.append(
+                "<tr><td>Maintenance outcome</td>"
+                '<td style="color: var(--danger); font-weight: 600">stopped before '
+                f"completion ({_ms_esc(pb.maintenance_stop_reason)}); QpH measured after "
+                "maintenance may include a statement still running</td></tr>"
+            )
+        if pb.maintenance_live_streams:
+            from html import escape as _ls_esc
+
+            rows.append(
+                "<tr><td>Streams during maintenance</td>"
+                '<td style="color: var(--danger); font-weight: 600">live '
+                f"({_ls_esc(pb.maintenance_live_streams_reason)}); QpH measured after "
+                "maintenance ran with writers active</td></tr>"
+            )
         if pre_qph > 0:
             rows.append(f"<tr><td>Pre-compaction QpH</td><td>{pre_qph:.1f}</td></tr>")
         if post_qph > 0:
-            rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
+            caveat = _post_qph_caveat(pb)
+            if caveat:
+                from html import escape as _stop_esc
+
+                rows.append(
+                    f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f} "
+                    '<span style="color: var(--danger); font-weight: 600">'
+                    f"(warning: {_stop_esc(caveat)}, so this is not a clean "
+                    "measurement)</span></td></tr>"
+                )
+            else:
+                rows.append(f"<tr><td>Post-compaction QpH</td><td>{post_qph:.1f}</td></tr>")
         if value_pct is not None and pre_qph > 0:
             color = "var(--success)" if value_pct > 0 else "var(--danger)"
             rows.append(
@@ -1496,7 +1561,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">QpH</div>
-                <div class="card-value">{qph:,.1f}</div>
+                <div class="card-value">{qph:,.1f}{_qph_stop_warning(metrics)}</div>
                 <div class="card-hint">queries per hour -- higher is better</div>
                 <div class="card-hint2">{qph_hint2}</div>
             </div>
@@ -1764,7 +1829,7 @@ class ReportGenerator:
         return f"""
             <div class="card">
                 <div class="card-label">QpH ({b.cache})</div>
-                <div class="card-value">{b.qph:.1f}</div>
+                <div class="card-value">{b.qph:.1f}{_qph_stop_warning(metrics)}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     {mode_label}, scale {b.scale}
                 </div>
