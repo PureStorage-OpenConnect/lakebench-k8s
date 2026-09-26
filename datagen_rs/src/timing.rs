@@ -97,6 +97,11 @@ fn holidays(cc: &str) -> &'static [(u32, u32)] {
     }
 }
 
+/// Most days a sampled day rolls forward to reach a business day. The
+/// generator's per-file scheduled-row lookback (bin/generate.rs) is derived
+/// from it: raise it and the lookback follows, so no rolled row is dropped.
+pub const MAX_ROLL_DAYS: usize = 5;
+
 /// Precomputed per-day calendar facts for a corpus window.
 pub struct DayCal {
     start_epoch_day: i64,
@@ -204,10 +209,16 @@ impl DayCal {
         !hol.contains(&md)
     }
 
+    /// The business day `day` rolls forward to for country `cc` (the day
+    /// `sample_ts_on_day` places a row on).
+    pub fn rolled_day(&self, day: usize, cc: &str) -> usize {
+        self.roll(day.min(self.span - 1), cc)
+    }
+
     /// Roll a sampled day forward to the next business day for the country.
     fn roll(&self, mut day: usize, cc: &str) -> usize {
         let hol = holidays(cc);
-        for _ in 0..5 {
+        for _ in 0..MAX_ROLL_DAYS {
             if self.is_business(day, hol) {
                 break;
             }

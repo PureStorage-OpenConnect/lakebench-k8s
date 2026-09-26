@@ -162,7 +162,7 @@ def test_cycle_is_forwarded_only_when_nonzero(schema, cycle, monkeypatch):
         captured["cmd"] = cmd
         raise SystemExit(0)
 
-    argv = ["entrypoint.py", "--schema", schema, "--bucket", "b"]
+    argv = ["entrypoint.py", "--schema", schema, "--bucket", "b", "--seed", "7777"]
     if cycle:
         argv += ["--cycle", str(cycle), "--cycles", "5"]
     with patch.object(sys, "argv", argv):

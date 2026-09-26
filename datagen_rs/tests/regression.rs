@@ -782,13 +782,19 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             inst.suppress_start_us < inst.start_us,
             "suppress must start before burst"
         );
-        // Dormancy length (window start -> burst start) is 60..365 days
+        // Dormancy length (window start -> burst start) is 45..365 days
         // (log-uniform; not tied to W8's 90-day threshold, LB-138).
         let dorm = (inst.start_us - inst.suppress_start_us) / day;
         assert!(
-            (59..=366).contains(&dorm),
-            "dormancy {} days outside 60..365",
+            (44..=366).contains(&dorm),
+            "dormancy {} days outside 45..365",
             dorm
+        );
+        // The reactivation is sudden (2 days) or gradual (4 to 10 days).
+        let burst = (inst.end_us - inst.start_us) / day;
+        assert!(
+            burst == 2 || (4..=10).contains(&burst),
+            "burst span {burst} days"
         );
 
         let rows = emit_instance(inst);
@@ -817,11 +823,11 @@ fn dormancy_schedule_and_emit_produce_a_real_gap() {
             assert_eq!(r.orig, inst.participants[0], "burst orig = dormant account");
         }
         // The originator gap (anchor -> earliest burst row) is the dormancy
-        // plus the anchor offset: at least the 60-day minimum.
+        // plus the anchor offset: at least the 45-day minimum.
         let first_burst = rows[1..].iter().map(|r| r.ts_us).min().unwrap();
         assert!(
-            first_burst - rows[0].ts_us > 60 * day,
-            "originator gap not > 60d: {} days",
+            first_burst - rows[0].ts_us > 45 * day,
+            "originator gap not > 45d: {} days",
             (first_burst - rows[0].ts_us) / day
         );
     }
@@ -1615,4 +1621,333 @@ fn structuring_amounts_are_in_minor_units() {
             assert_eq!(v, v.round(), "fractional {ccy} {v}");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Typology realism rework (lane T): micro_structuring, corridor_high_risk,
+// dormant_reactivation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn structured_amounts_stay_under_the_threshold_without_a_band_edge_cliff() {
+    // Under the threshold always, never deeper than STRUCTURED_MAX_DEPTH, and
+    // no step at 90% of the threshold (W2's band floor, R2): the densities in
+    // the 2%-wide bins either side of it agree within 25%.
+    use datagen_rs::amounts::{reporting_threshold, structuring_amount, STRUCTURED_MAX_DEPTH};
+    for ccy in ["USD", "EUR", "JPY", "KRW", "AED", "INR"] {
+        let t = reporting_threshold(ccy);
+        let mut rng = Rng::new(0x5EED);
+        let (mut below, mut above, mut in_band, mut top) = (0usize, 0usize, 0usize, 0usize);
+        let n = 200_000;
+        for _ in 0..n {
+            let v = structuring_amount(&mut rng, ccy);
+            assert!(v < t, "{ccy} {v} not under {t}");
+            assert!(
+                v >= t * (1.0 - STRUCTURED_MAX_DEPTH) - 1.0,
+                "{ccy} {v} too deep"
+            );
+            let f = v / t;
+            if (0.88..0.90).contains(&f) {
+                below += 1;
+            }
+            if (0.90..0.92).contains(&f) {
+                above += 1;
+            }
+            if f >= 0.9 {
+                in_band += 1;
+            }
+            if f >= 0.99 {
+                top += 1;
+            }
+        }
+        let r = above as f64 / below as f64;
+        assert!(
+            (0.95..1.2).contains(&r),
+            "{ccy}: step at 0.9T, ratio {r:.3}"
+        );
+        // No pile-up on the threshold: the top 1% of the range holds about
+        // 5% of the mass (triangular density), not the ~16% a u^2 depth gave.
+        assert!(top as f64 / (n as f64) < 0.06, "{ccy}: {top} in the top 1%");
+        // Under half of the structured deposits sit in W2's band.
+        let share = in_band as f64 / n as f64;
+        assert!(
+            (0.40..0.48).contains(&share),
+            "{ccy}: band share {share:.3}"
+        );
+    }
+}
+
+#[test]
+fn micro_structuring_is_a_crew_campaign_with_mixed_amounts() {
+    use datagen_rs::typology::{emit_instance, subject_index};
+    let (insts, _) = kyc_schedule(42);
+    let day = 86_400_000_000i64;
+    let mut crews = std::collections::BTreeSet::new();
+    let mut structured = std::collections::BTreeSet::new();
+    let mut n = 0;
+    for inst in insts.iter().filter(|i| i.typ == "micro_structuring") {
+        n += 1;
+        let crew = inst.participants.len() - 1;
+        assert!((3..=8).contains(&crew), "{}: crew {crew}", inst.id);
+        crews.insert(crew);
+        let collector = inst.participants[subject_index(inst.typ, crew + 1, inst.seed)];
+        assert_eq!(collector, *inst.participants.last().unwrap());
+        let span = (inst.end_us - inst.start_us) / day;
+        assert!(
+            (3..=21).contains(&span),
+            "{}: campaign {span} days",
+            inst.id
+        );
+        let rows = emit_instance(inst);
+        assert_eq!(rows.len(), inst.rows_per_instance);
+        assert!(rows.iter().all(|r| r.bene == collector));
+        // Every crew member deposits at least once.
+        for &m in &inst.participants[..crew] {
+            assert!(
+                rows.iter().any(|r| r.orig == m),
+                "{}: idle crew member",
+                inst.id
+            );
+        }
+        let k = rows.iter().filter(|r| r.structuring).count();
+        assert!((3..=8).contains(&k), "{}: {k} structured", inst.id);
+        structured.insert(k);
+    }
+    assert!(n > 20, "too few instances: {n}");
+    // The draws actually vary.
+    assert!(
+        crews.len() >= 4 && structured.len() >= 4,
+        "{crews:?} {structured:?}"
+    );
+}
+
+#[test]
+fn corridor_high_risk_is_a_run_on_one_edge_with_the_old_row_total() {
+    use datagen_rs::typology::{emit_instance, subject_index, SPECS};
+    let (insts, _) = kyc_schedule(42);
+    let total_rows = 20_000i64 * 4 * 60;
+    // The typology spends exactly the rows the one-row-per-instance layout
+    // did, so density and the rest of the corpus layout are unchanged.
+    let budget = 0.001 * total_rows as f64 / SPECS.len() as f64;
+    let legacy = (budget.round() as i64).max(1) as usize;
+    let cor: Vec<_> = insts
+        .iter()
+        .filter(|i| i.typ == "corridor_high_risk")
+        .collect();
+    let emitted: usize = cor.iter().map(|i| emit_instance(i).len()).sum();
+    assert_eq!(emitted, legacy);
+    let day = 86_400_000_000i64;
+    for (j, inst) in cor.iter().enumerate() {
+        let rows = emit_instance(inst);
+        assert_eq!(rows.len(), inst.rows_per_instance);
+        // 2..=4 per run; only the last run can be cut short by the budget.
+        if j + 1 < cor.len() {
+            assert!(
+                (2..=4).contains(&rows.len()),
+                "{}: {} rows",
+                inst.id,
+                rows.len()
+            );
+        }
+        let s = inst.participants[subject_index(inst.typ, 2, inst.seed)];
+        assert!(
+            rows.iter().all(|r| r.orig == s),
+            "{}: subject not the sender",
+            inst.id
+        );
+        assert!(
+            rows.windows(2).all(|w| w[0].bene == w[1].bene),
+            "{}: one edge",
+            inst.id
+        );
+        let span = (inst.end_us - inst.start_us) / day;
+        assert!((14..=35).contains(&span), "{}: {span} days", inst.id);
+    }
+}
+
+#[test]
+fn only_the_reworked_typologies_have_their_own_amount_stream() {
+    // The replay in generate.rs keeps every other typology's amounts
+    // byte-identical only if these draw counts match the old layout: 3 draws
+    // per persona amount (Box-Muller pair + snap draw), 1 per band amount.
+    use datagen_rs::amounts::{native_amount, own_amount_stream, structuring_amount};
+    use datagen_rs::typology::SPECS;
+    for spec in SPECS.iter() {
+        let want = match spec.name {
+            "corridor_high_risk" | "dormant_reactivation" => Some(3),
+            "micro_structuring" => Some(1),
+            _ => None,
+        };
+        assert_eq!(own_amount_stream(spec.name), want, "{}", spec.name);
+    }
+    // Draws consumed by f: the next value from its stream is the (k+1)-th
+    // value of a fresh stream with the same seed.
+    let draws = |f: &dyn Fn(&mut Rng)| -> usize {
+        let mut a = Rng::new(9);
+        f(&mut a);
+        let next = a.next_u64();
+        let mut fresh = Rng::new(9);
+        (0..16).find(|_| fresh.next_u64() == next).unwrap()
+    };
+    assert_eq!(
+        draws(&|r| {
+            native_amount(r, 0.2, "EUR");
+        }),
+        3
+    );
+    assert_eq!(
+        draws(&|r| {
+            structuring_amount(r, "USD");
+        }),
+        1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Scheduled baseline sends (regular.rs, AML-GOALS D2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scheduled_sends_keep_row_count_and_expected_volume() {
+    use datagen_rs::model::build_world;
+    use datagen_rs::regular::{Regular, SCHEDULED_ACCOUNT_SHARE};
+    let w = build_world(0.05, 7777, 60);
+    let n_base = 1_000_000u64;
+    let r = Regular::build(&w.activity, n_base, 7777);
+    assert_eq!(r.n_rand + r.n_sched, n_base);
+    let sched: u64 = r.classes.iter().map(|c| c.len()).sum();
+    assert_eq!(sched, r.n_sched);
+    // uids are contiguous after the random rows and never overlap.
+    let mut next = r.n_rand;
+    for c in &r.classes {
+        assert_eq!(c.uid_base, next);
+        next += c.len();
+    }
+    assert_eq!(next, n_base);
+    // Expected sends per account are unchanged: scheduled events plus the
+    // account's share of the random rows equal its old activity share.
+    let total_w: f64 = w.activity[1..].iter().sum();
+    let resid_w: f64 = r.residual_weight[1..].iter().sum();
+    let mut k_of = vec![0u64; w.population + 1];
+    for c in &r.classes {
+        for &a in &c.members {
+            k_of[a as usize] = c.k;
+        }
+    }
+    let n_members = k_of.iter().filter(|&&k| k > 0).count() as f64;
+    let share = n_members / w.population as f64;
+    assert!(share > 0.5 * SCHEDULED_ACCOUNT_SHARE && share <= SCHEDULED_ACCOUNT_SHARE + 0.02);
+    for (a, &k) in k_of.iter().enumerate().skip(1) {
+        let old = n_base as f64 * w.activity[a] / total_w;
+        let new = k as f64 + r.n_rand as f64 * r.residual_weight[a] / resid_w;
+        assert!(
+            (new - old).abs() <= 0.5 + 1e-6 * old,
+            "account {a}: {old} -> {new}"
+        );
+    }
+}
+
+#[test]
+fn scheduled_events_enumerate_once_and_are_evenly_spaced_in_mass() {
+    use datagen_rs::model::build_world;
+    use datagen_rs::regular::Regular;
+    let w = build_world(0.02, 11, 60);
+    let r = Regular::build(&w.activity, 400_000, 11);
+    for c in r.classes.iter().take(40) {
+        // Mass windows tiling [0, 1] cover every event exactly once.
+        let mut seen = 0u64;
+        let mut last = 0u64;
+        for i in 0..97 {
+            let lo = i as f64 / 97.0;
+            let hi = if i == 96 {
+                1.0 + 1e-9
+            } else {
+                (i + 1) as f64 / 97.0
+            };
+            let (a, b) = c.events_between(lo, hi);
+            assert_eq!(a, last, "gap or overlap in class k={}", c.k);
+            seen += b - a;
+            last = b;
+        }
+        assert_eq!(seen, c.len());
+        // Each account's events are one per 1/k of calendar mass.
+        let a0 = c.account(0);
+        let m: Vec<f64> = (0..c.len())
+            .filter(|&j| c.account(j) == a0)
+            .map(|j| c.nominal_mass(j))
+            .collect();
+        assert_eq!(m.len() as u64, c.k);
+        for p in m.windows(2) {
+            assert!(
+                (p[1] - p[0] - 1.0 / c.k as f64).abs() < 1e-9,
+                "uneven cadence"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// c360 golden output
+// ---------------------------------------------------------------------------
+
+/// FNV-1a over every cell of a batch, rendered through arrow's own display
+/// formatter, column by column. Independent of the Parquet encoder, so a
+/// parquet crate bump does not move it; any change to a c360 value does.
+fn batch_digest(b: &arrow::record_batch::RecordBatch) -> u64 {
+    use arrow::util::display::{ArrayFormatter, FormatOptions};
+    let opts = FormatOptions::default().with_null("<null>");
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |bytes: &[u8]| {
+        for &x in bytes {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    };
+    for (field, col) in b.schema().fields().iter().zip(b.columns()) {
+        eat(field.name().as_bytes());
+        eat(format!("{:?}", field.data_type()).as_bytes());
+        // Timestamps with a named zone need chrono-tz to render; hash
+        // their epoch values instead.
+        let col = match field.data_type() {
+            arrow::datatypes::DataType::Timestamp(_, _) => {
+                arrow::compute::cast(col, &arrow::datatypes::DataType::Int64).unwrap()
+            }
+            _ => col.clone(),
+        };
+        let f = ArrayFormatter::try_new(col.as_ref(), &opts).unwrap();
+        for i in 0..col.len() {
+            eat(f.value(i).to_string().as_bytes());
+        }
+    }
+    h
+}
+
+#[test]
+fn c360_output_is_pinned() {
+    // The programme reuses c360 s10/s100 evidence only while the c360
+    // generator's output is unchanged (PROGRAMME section 5). These digests
+    // were captured from integrate/v1.5.0's merge base with lane T (ab585eb)
+    // and confirmed against a full generate run hashed file by file. A
+    // change here is a c360 data change: re-run the c360 evidence, then
+    // update the digests deliberately.
+    use datagen_rs::customer360::{build_batch, Config};
+    use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
+    let loyalty = LoyaltyLookup::build(43, 10_000);
+    let sampler = CustomerIdSampler::new(10_000);
+    let got: Vec<u64> = [0u64, 1, 7]
+        .iter()
+        .map(|&fid| {
+            let mut cfg = Config::new(43, fid, 300);
+            cfg.customer_id_max = 10_000;
+            batch_digest(&build_batch(&cfg, &loyalty, &sampler))
+        })
+        .collect();
+    let want: Vec<u64> = vec![
+        17_364_953_605_523_935_220,
+        12_687_529_150_934_121_339,
+        12_107_885_961_841_994_623,
+    ];
+    assert_eq!(got, want, "c360 generator output changed");
 }

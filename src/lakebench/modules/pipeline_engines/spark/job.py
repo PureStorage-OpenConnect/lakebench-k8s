@@ -2371,6 +2371,21 @@ class SparkJobManager:
             }
         )
 
+        if (
+            job_type == JobType.SCORE_FINANCIAL_REFERENCE
+            and cfg.architecture.workload.datagen.corpus_role in ("evaluation", "robustness")
+        ):
+            # A registered look runs once: an operator retry after the gate
+            # computed AP (a crash or an error verdict) would look again.
+            # Submission retries stay: they run before the driver starts,
+            # so no AP exists yet (shared Ivy cache race, see above).
+            _restart_policy = {
+                "type": "OnFailure",
+                "onFailureRetries": 0,
+                "onSubmissionFailureRetries": 5,
+                "onSubmissionFailureRetryInterval": 60,
+            }
+
         manifest = {
             "apiVersion": "sparkoperator.k8s.io/v1beta2",
             "kind": "SparkApplication",
@@ -2658,9 +2673,13 @@ class SparkJobManager:
         # AML fidelity gate provenance (AML-GOALS R6, R3): which corpus seed
         # the report scored and which lakebench revision produced it.
         if job_type == JobType.SCORE_FINANCIAL_REFERENCE:
-            from lakebench.deploy.datagen import DATAGEN_SEED
+            from lakebench.config.datagen_seed import config_seed
 
-            env.append({"name": "LB_DATAGEN_SEED", "value": str(DATAGEN_SEED)})
+            env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
+            role = cfg.architecture.workload.datagen.corpus_role
+            if role is not None:
+                # The declared role of a registered run, recorded in the report.
+                env.append({"name": "LB_DATAGEN_CORPUS_ROLE", "value": role})
             env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
@@ -2750,6 +2769,13 @@ class SparkJobManager:
             if _mod_path.exists():
                 data[_aml_mod] = _mod_path.read_text()
                 logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
+        # The AML seed guard (stdlib only) ships flat too, so the reference
+        # job refuses a corpus from a spent or unregistered protected seed.
+        # Fail at build time, not three driver attempts later.
+        _seed_mod = _package_dir() / "config" / "datagen_seed.py"
+        if not _seed_mod.exists():
+            raise FileNotFoundError(f"AML seed guard missing from the package: {_seed_mod}")
+        data["datagen_seed.py"] = _seed_mod.read_text()
 
         # AML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via

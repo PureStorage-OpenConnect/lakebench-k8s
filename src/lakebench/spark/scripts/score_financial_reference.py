@@ -364,6 +364,17 @@ def run_fidelity_gate(
     # there would label the wrong silver entity.
     dup_ibans = af.duplicate_ibans(spark, ACCOUNT_PATH)
     scale_info = af.corpus_scale(spark, ACCOUNT_PATH, prereg["corpora"]["entities_per_scale_unit"])
+    if (
+        score
+        and provenance.get("declared_corpus_role") in ("evaluation", "robustness")
+        and not af.at_gate_scale(scale_info, prereg)
+    ):
+        # SystemExit, not Exception: main() must not record this as a gate
+        # error and carry on; the registered look is never spent off scale.
+        raise SystemExit(
+            f"refusing the registered {provenance['declared_corpus_role']} look: the corpus "
+            f"is not at corpora.gate_scale ({scale_info})"
+        )
     seed = provenance.get("corpus_seed")
     seed_check = af.corpus_seed_check(manifest, int(seed) if seed not in (None, "") else None)
     agreement = af.label_agreement(
@@ -426,6 +437,40 @@ def run_fidelity_gate(
     return report
 
 
+def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> None:
+    """AML-GOALS R3: refuse, before anything is computed or written, a corpus
+    from a spent seed, or from the evaluation or robustness seed outside its
+    declared registered run, whatever seed the deployment claims (a bucket can
+    hold a corpus from a manual Job). A registered run must also be verified:
+    the manifest has to come from the claimed seed."""
+    try:
+        from lakebench.config.datagen_seed import PROTECTED_ROLES, aml_seed_error, spent_from
+    except ImportError:  # flat on the driver
+        from datagen_seed import PROTECTED_ROLES, aml_seed_error, spent_from
+    from fidelity_gate import load_preregistration
+
+    corpora = load_preregistration()[0]["corpora"]
+    guarded = sorted(spent_from(corpora) | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES})
+    matched = [g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0]
+    raw = os.environ.get("LB_DATAGEN_SEED")
+    claimed = int(raw) if raw not in (None, "") else None
+    verified = (
+        af.corpus_seed_check(manifest, claimed)["matched_share"] == 1
+        if claimed is not None
+        else False
+    )
+    err = aml_seed_error(
+        corpora,
+        claimed,
+        os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
+        matched,
+        counts_only,
+        claim_verified=verified,
+    )
+    if err:
+        raise SystemExit(f"refusing to score this corpus: {err}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Leakage gate + AML fidelity gate (silver).")
     parser.add_argument("--manifest", required=True, help="S3 URI to manifest.parquet")
@@ -480,6 +525,7 @@ def main() -> None:
     manifest_src = af.manifest_glob(args.manifest)
     manifest = af.read_manifest(spark, args.manifest)
     af.check_manifest(manifest)
+    _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
     manifest_n = manifest.count()
     if manifest_n == 0:
         raise SystemExit(
@@ -508,6 +554,9 @@ def main() -> None:
     provenance = {
         "git_sha": os.environ.get("LB_GIT_SHA", "unknown"),
         "corpus_seed": os.environ.get("LB_DATAGEN_SEED"),
+        # Set only when the deployment declared datagen.corpus_role (the
+        # registered evaluation or robustness run); config refused it otherwise.
+        "declared_corpus_role": os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
         "manifest": manifest_src,
         "silver_txns": f"{CATALOG}.{args.silver_txns}",
     }

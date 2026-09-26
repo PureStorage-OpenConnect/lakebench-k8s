@@ -102,7 +102,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--schema", default="financial", choices=SUPPORTED_SCHEMAS)
     # Shared args -- both schemas consume these.
-    ap.add_argument("--seed", type=int, default=42)
+    # No default for financial: AML seeds are pre-registered and 42 is spent
+    # (the Rust driver refuses spent seeds too). c360 keeps 42.
+    ap.add_argument("--seed", type=int, default=None)
     # Multi-cycle runs (datagen_rs/src/cycle.rs). AML: cycle n of --cycles N
     # emits the one-shot corpus rows in calendar-mass slice [n/N, (n+1)/N),
     # so the union of all cycles is the one-shot corpus. c360: cycle n > 0
@@ -162,6 +164,15 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if args.seed is None:
+        if args.schema == "financial":
+            print(
+                "[entrypoint] --seed is required for the financial schema (AML seeds are "
+                "pre-registered; see corpora in aml_preregistration.json)",
+                file=sys.stderr,
+            )
+            return 2
+        args.seed = 42
 
     if not args.bucket:
         print("[entrypoint] --bucket is required (or set BRONZE_BUCKET env)", file=sys.stderr)
