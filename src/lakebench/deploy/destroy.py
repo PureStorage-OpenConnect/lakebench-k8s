@@ -118,6 +118,20 @@ def _delete_namespace_and_wait(
                 message=f"Namespace {namespace} deleted{who}",
                 elapsed_seconds=now - start,
             )
+        if phase == "Active":
+            # The delete was accepted (or another run's was), so the old
+            # namespace is gone: an Active one is a new namespace a
+            # concurrent deploy created under the same name. Do not wait on
+            # it and do not touch it.
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.SUCCESS,
+                message=(
+                    f"Namespace {namespace} deleted{who}; a new namespace with the "
+                    "same name now exists (created by a concurrent deploy)"
+                ),
+                elapsed_seconds=now - start,
+            )
         if phase is not None:
             last_blockers = blockers
         if now >= deadline:
@@ -339,6 +353,15 @@ def destroy_all(
     # steps below therefore require a verified namespace or --force-legacy.
     ownership_proven = False
     namespace_present = engine.k8s.namespace_exists(namespace)
+    # The incarnation this destroy is about (LB-157). A concurrent destroy of
+    # the same deployment can finish and a redeploy re-create the name while
+    # this run is still working; the watch-list and namespace steps compare
+    # against this and leave a newer namespace alone.
+    try:
+        namespace_uid_at_start: str | None = engine.k8s.get_namespace_uid(namespace)
+    except Exception as e:  # noqa: BLE001
+        logger.debug("could not read namespace uid: %s", e)
+        namespace_uid_at_start = None
     if namespace_present:
         identity = build_identity_from_config(
             engine.config,
@@ -732,7 +755,7 @@ def destroy_all(
     elif clean_buckets:
         report("s3-buckets", DeploymentStatus.IN_PROGRESS, "Cleaning S3 buckets...")
         try:
-            from lakebench.s3 import S3Client
+            from lakebench.s3 import S3BucketVanished, S3Client
 
             s3_cfg = engine.config.platform.storage.s3
             s3 = S3Client(
@@ -950,8 +973,17 @@ def destroy_all(
                 else:
                     legacy = legacy_forced  # preserved local name for summary below
                     total_deleted = 0
+                    vanished: str | None = None
                     for bucket in buckets:
-                        deleted = s3.empty_bucket(bucket)
+                        try:
+                            deleted = s3.empty_bucket(bucket)
+                        except S3BucketVanished:
+                            # A concurrent destroy of this deployment deleted
+                            # it mid-empty. That run owns the rest of the
+                            # bucket cleanup; carrying on could empty buckets
+                            # a redeploy has since re-created under the names.
+                            vanished = bucket
+                            break
                         total_deleted += deleted
                     # LB-159: emptying alone leaked one empty bucket per
                     # deployment. Delete only buckets proven to be this
@@ -960,14 +992,22 @@ def destroy_all(
                     # manages bucket lifecycle (create_buckets). Buckets
                     # emptied on --force-legacy say-so, or pre-provisioned
                     # buckets the config merely references, are kept.
-                    bucket_notes, delete_failed = _delete_owned_buckets(
-                        s3,
-                        buckets,
-                        deletable=set(owned_by_tag) | set(unsupported_by_prefix),
-                        enabled=delete_buckets,
-                        create_buckets=bool(s3_cfg.create_buckets),
-                        absent=set(absent_buckets),
-                    )
+                    if vanished:
+                        bucket_notes: list[str] = [
+                            f"stopped: bucket {vanished} was deleted by a concurrent "
+                            "destroy of this deployment, which owns the rest of the "
+                            "bucket cleanup"
+                        ]
+                        delete_failed = False
+                    else:
+                        bucket_notes, delete_failed = _delete_owned_buckets(
+                            s3,
+                            buckets,
+                            deletable=set(owned_by_tag) | set(unsupported_by_prefix),
+                            enabled=delete_buckets,
+                            create_buckets=bool(s3_cfg.create_buckets),
+                            absent=set(absent_buckets),
+                        )
                     notes = []
                     if legacy:
                         notes.append(
@@ -1540,6 +1580,29 @@ def destroy_all(
         )
         report("namespace", DeploymentStatus.FAILED, keep_msg)
         return results
+    if engine.config.platform.kubernetes.create_namespace:
+        # A different, live incarnation of the name belongs to a redeploy
+        # that started after this destroy began (a concurrent destroy
+        # finished first, S-P3/S-P4). Un-watching or deleting it would break
+        # that deployment, so leave it alone.
+        try:
+            uid_now: str | None = engine.k8s.get_namespace_uid(namespace)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("could not re-read namespace uid: %s", e)
+            uid_now = None
+        if uid_now and namespace_uid_at_start is not None and uid_now != namespace_uid_at_start:
+            msg = (
+                f"Namespace {namespace} was already deleted by another run; the "
+                f"namespace now named {namespace} is a newer deployment and was left alone"
+            )
+            logger.warning(msg)
+            results.append(
+                DeploymentResult(
+                    component="namespace", status=DeploymentStatus.SUCCESS, message=msg
+                )
+            )
+            report("namespace", DeploymentStatus.SUCCESS, msg)
+            return results
     if engine.config.platform.kubernetes.create_namespace:
         # Drop the namespace from the Spark Operator's watch list FIRST. The
         # operator crash-loops on a watched namespace that does not exist

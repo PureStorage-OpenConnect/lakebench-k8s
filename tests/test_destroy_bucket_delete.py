@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 
 from lakebench.deploy import destroy as destroy_mod
 from lakebench.deploy.engine import DeploymentStatus
-from lakebench.s3.client import S3BucketError, S3Client
+from lakebench.s3.client import S3BucketError, S3BucketVanished, S3Client
 
 
 def _err(code: str) -> ClientError:
@@ -31,6 +31,7 @@ class FakeBoto:
         self.buckets = {k: list(v) for k, v in buckets.items()}
         self.lag = lag  # DeleteBucket answers BucketNotEmpty this many times
         self.delete_bucket_calls: list[str] = []
+        self.vanish: set[str] = set()  # buckets deleted by "another destroy" when listed
 
     def head_bucket(self, Bucket):
         if Bucket not in self.buckets:
@@ -41,6 +42,9 @@ class FakeBoto:
 
         class _P:
             def paginate(self, Bucket, **_kw):
+                if Bucket in fake.vanish:
+                    fake.buckets.pop(Bucket, None)
+                    raise ClientError({"Error": {"Code": "NoSuchBucket"}}, "ListObjectsV2")
                 keys = fake.buckets.get(Bucket, [])
                 if op == "list_objects_v2":
                     return [{"Contents": [{"Key": k} for k in keys], "KeyCount": len(keys)}]
@@ -92,15 +96,32 @@ class TestS3DeleteBucket:
         assert _s3(boto).delete_bucket("a-bronze") is True
         assert boto.delete_bucket_calls == ["a-bronze"] * 3
 
-    def test_late_object_is_re_emptied_then_deleted(self):
-        boto = FakeBoto({"a-bronze": ["late/part-0.parquet"]})
-        assert _s3(boto).delete_bucket("a-bronze") is True
+    def test_refilled_bucket_is_not_re_emptied(self):
+        """Data that reappears after the verified empty may be a redeploy's."""
+        boto = FakeBoto({"a-bronze": ["new-deploy/part-0.parquet"]})
+        with (
+            patch("time.monotonic", side_effect=[0.0, 5.0, 1000.0]),
+            pytest.raises(S3BucketError, match="BucketNotEmpty"),
+        ):
+            _s3(boto).delete_bucket("a-bronze", max_wait=10)
+        assert boto.buckets["a-bronze"] == ["new-deploy/part-0.parquet"]
 
     def test_never_empty_raises_at_the_bound(self):
         boto = FakeBoto({"a-bronze": []}, lag=10**6)
         with patch("time.monotonic", side_effect=[0.0] + [1000.0] * 10):
             with pytest.raises(S3BucketError, match="BucketNotEmpty"):
                 _s3(boto).delete_bucket("a-bronze", max_wait=120)
+
+    def test_bucket_deleted_mid_empty_raises_vanished(self):
+        """S-P4: the other destroy deletes the bucket while this one lists it."""
+        boto = FakeBoto({"a-bronze": ["x"]})
+
+        def vanish(op):
+            raise ClientError({"Error": {"Code": "NoSuchBucket"}}, "ListObjectsV2")
+
+        boto.get_paginator = vanish
+        with pytest.raises(S3BucketVanished):
+            _s3(boto).empty_bucket("a-bronze")
 
     def test_other_errors_raise(self):
         boto = FakeBoto({"a-bronze": []})
@@ -169,6 +190,15 @@ class TestDeleteOwnedBuckets:
 class TestDestroyAllBuckets:
     """End to end through destroy_all's bucket step with verdicts per bucket."""
 
+    def _run_layers(self, boto, bronze, silver, gold):
+        self._layers = (bronze, silver, gold)
+        try:
+            return self._run(boto, dict.fromkeys(self._layers, "MATCH"))
+        finally:
+            self._layers = None
+
+    _layers: tuple[str, str, str] | None = None
+
     def _run(self, boto, verdicts, *, create_buckets=True, force_legacy=False, other=()):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
@@ -180,9 +210,10 @@ class TestDestroyAllBuckets:
         cfg.platform.kubernetes.context = ""
         cfg.observability.enabled = False
         s3_cfg = cfg.platform.storage.s3
-        s3_cfg.buckets.bronze = "a-bronze"
-        s3_cfg.buckets.silver = "a-silver"
-        s3_cfg.buckets.gold = "a-gold"
+        bronze, silver, gold = self._layers or ("a-bronze", "a-silver", "a-gold")
+        s3_cfg.buckets.bronze = bronze
+        s3_cfg.buckets.silver = silver
+        s3_cfg.buckets.gold = gold
         s3_cfg.create_buckets = create_buckets
         engine.k8s.namespace_exists.return_value = True
 
@@ -220,6 +251,27 @@ class TestDestroyAllBuckets:
         assert r.status is DeploymentStatus.SUCCESS
         assert boto.buckets == {}
         assert "deleted buckets: a-bronze, a-silver, a-gold" in r.message
+
+    def test_bucket_shared_by_two_layers_is_deleted_once(self):
+        boto = FakeBoto({"a-bronze": ["x"], "a-gold": []})
+        boto_calls = boto.delete_bucket_calls
+        r = self._run_layers(boto, bronze="a-bronze", silver="a-bronze", gold="a-gold")
+        assert r.status is DeploymentStatus.SUCCESS
+        assert boto_calls == ["a-bronze", "a-gold"]
+        assert "already gone" not in r.message
+
+    def test_bucket_vanishing_mid_empty_stops_the_bucket_step(self):
+        """S-P4: the other destroy deleted a bucket; do not touch the rest.
+
+        A redeploy may re-create the names before this slow run gets to them.
+        """
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["y"], "a-gold": ["z"]})
+        boto.vanish = {"a-bronze"}
+        r = self._run(boto, {"a-bronze": "MATCH", "a-silver": "MATCH", "a-gold": "MATCH"})
+        assert r.status is DeploymentStatus.SUCCESS
+        assert "concurrent destroy" in r.message
+        assert boto.buckets == {"a-silver": ["y"], "a-gold": ["z"]}
+        assert boto.delete_bucket_calls == []
 
     def test_foreign_bucket_refuses_and_nothing_is_deleted(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})

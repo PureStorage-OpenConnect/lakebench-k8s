@@ -34,6 +34,17 @@ class S3AuthError(S3Error):
     pass
 
 
+class S3BucketVanished(S3Error):
+    """A bucket disappeared while it was being emptied.
+
+    Raised instead of returning quietly: the usual cause is a concurrent
+    destroy of the same deployment, and the caller must not go on to clean
+    buckets a later redeploy may already have re-created under the same names.
+    """
+
+    pass
+
+
 class S3BucketError(S3Error):
     """Raised when bucket operations fail."""
 
@@ -535,16 +546,25 @@ class S3Client:
                 time.sleep(3)
 
         except ClientError as e:
+            # A concurrent destroy of the same deployment can delete the
+            # bucket while this loop is listing it (LB-159).
+            if e.response.get("Error", {}).get("Code", "") in ("NoSuchBucket", "404"):
+                raise S3BucketVanished(  # noqa: B904
+                    f"bucket {bucket_name} was deleted while being emptied "
+                    f"(after {deleted_count} object(s))"
+                )
             raise S3BucketError(f"Failed to empty bucket {bucket_name}: {e}")  # noqa: B904
 
-    def delete_bucket(self, bucket_name: str, max_wait: int = 120) -> bool:
+    def delete_bucket(self, bucket_name: str, max_wait: int = 60) -> bool:
         """Delete a bucket that ``empty_bucket`` has already emptied (LB-159).
 
         The caller is responsible for proving the bucket is this
         deployment's; this method only removes it. ``BucketNotEmpty`` is
-        retried within ``max_wait``: FlashBlade can still list objects or
-        uploads for a moment after they are deleted, so the bucket is
-        re-emptied (which verifies empty again) and the delete retried.
+        retried within ``max_wait``: FlashBlade can still count objects for
+        a moment after ``empty_bucket`` verified the listing empty. The
+        bucket is deliberately NOT re-emptied here: if it filled up again,
+        the writer may be a redeploy that re-created the name, and its data
+        is not ours to delete.
 
         Returns:
             True if this call deleted the bucket, False if it was already gone.
@@ -572,10 +592,9 @@ class S3Client:
             if elapsed > max_wait:
                 raise S3BucketError(
                     f"delete_bucket({bucket_name}) still BucketNotEmpty after "
-                    f"{max_wait}s; the bucket was emptied but not deleted."
+                    f"{max_wait}s; something wrote to it after it was emptied."
                 )
             time.sleep(3)
-            self.empty_bucket(bucket_name, max_wait=max(1, int(max_wait - elapsed)))
 
     def ensure_buckets(self, bucket_names: list[str]) -> dict[str, bool]:
         """Ensure all specified buckets exist, creating if necessary.
