@@ -56,17 +56,28 @@ The gate requires `uat/results-<version>.md`, for example
 `uat/results-1.6.0.md`, with a heading line that is exactly
 `# UAT results <version>` and a markdown table with at least one data row.
 It is the record of the live-cluster runs behind the release: one row per
-recipe, workload and mode tested, with its result and the run id that
-resolves to `lakebench-output/runs/run-<id>/metrics.json`. The gate checks
-the heading and that a row exists; the maintainer who tags is responsible
-for the content.
+recipe, workload and mode tested, with its result and the run id
+(`YYYYMMDD-HHMMSS-xxxxxx`). The gate checks the heading, that a row exists,
+that the table cites at least one run id, that no id in the table is
+malformed, and that every cited run id resolves to a `metrics.json` whose
+`run_id` matches: `lakebench-output/runs/run-<id>/`, `uat/runs/run-<id>/`,
+`uat/perf/run-<id>/`, `$LAKEBENCH_PERF_RUNS_DIR/run-<id>/`, or a
+`.../metrics.json` path inside the repository named in the table. Ids in
+prose outside the table are not checked. `lakebench-output/` is not
+committed, so for the check to pass in the release workflow the cited runs'
+`metrics.json` must be checked in under `uat/runs/` (or `uat/perf/`). The
+maintainer who tags is still responsible for the content.
 
 ### Performance baselines
 
-The `perf-baselines` check fails the release when a required pinned perf
-config (`benchmarks/perf/`) has no accepted baseline, has no run, or its run
-regressed or was refused. Check in the `metrics.json` of each required perf
-run as `uat/perf/run-<id>/metrics.json` so the check can see it in CI. See
+The `perf-baselines` check fails when a required pinned perf config
+(`benchmarks/perf/`) has no accepted baseline, has no run, or its run
+regressed or was refused. It is not in the release workflow's `--only` list
+(`release.yml` runs examples, version, changelog, em-dashes and
+uat-results), so it does not block a tag by itself: run it locally as part
+of the whole gate above before tagging. Check in the `metrics.json` of each
+required perf run as `uat/perf/run-<id>/metrics.json` so the result can be
+reproduced from the repository. See
 [perf-regression-gate.md](perf-regression-gate.md).
 
 ## After tagging
