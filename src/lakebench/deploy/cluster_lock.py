@@ -426,97 +426,120 @@ def acquire_cluster_lock(
     )
 
 
+_DELETE_ATTEMPTS = 3
+
+
 def release_cluster_lock(core_v1: Any, handle: LeaseHandle) -> None:
     """Release the lease held by ``handle``.
 
     Idempotent: a lease that has been stolen or admin-released is
     treated as already-gone and returns cleanly. Any other error
     (RBAC, transport) raises.
+
+    The delete is conditional on the resourceVersion and uid of the read
+    that confirmed ownership. A 409 means the object changed in between.
+    That is either a steal (holder or acquired-at now differ, so we
+    leave it) or a write that kept our data, such as a label or
+    annotation, in which case we re-read and try again rather than leak
+    our own lease until its TTL.
     """
     from kubernetes.client.exceptions import ApiException
 
-    try:
-        cm = core_v1.read_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
-    except ApiException as e:
-        if e.status == 404:
-            return
-        raise ClusterLockError(f"cannot read lease for release: {e}") from e
+    for _ in range(_DELETE_ATTEMPTS):
+        try:
+            cm = core_v1.read_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
+        except ApiException as e:
+            if e.status == 404:
+                return
+            raise ClusterLockError(f"cannot read lease for release: {e}") from e
 
-    data = cm.data or {}
-    if data.get("holder") != handle.holder or data.get("acquired-at") != handle.acquired_at:
-        logger.warning(
-            "cluster_lock: release skipped; lease no longer ours "
-            "(current holder=%r acquired_at=%r)",
-            data.get("holder"),
-            data.get("acquired-at"),
-        )
-        return
-
-    try:
-        _delete_if_unchanged(
-            core_v1, cm.metadata.resource_version, getattr(cm.metadata, "uid", None)
-        )
-    except ApiException as e:
-        if e.status == 404:
-            return
-        if e.status == 409:
-            # Stolen (or re-created) between our read and our delete: the
-            # lease is someone else's now, so leave it.
+        data = cm.data or {}
+        if data.get("holder") != handle.holder or data.get("acquired-at") != handle.acquired_at:
             logger.warning(
-                "cluster_lock: release skipped; lease changed after it was read "
-                "(read resourceVersion %s)",
-                cm.metadata.resource_version,
+                "cluster_lock: release skipped; lease no longer ours "
+                "(current holder=%r acquired_at=%r)",
+                data.get("holder"),
+                data.get("acquired-at"),
             )
             return
-        raise ClusterLockError(f"cannot delete lease: {e}") from e
+
+        try:
+            _delete_if_unchanged(
+                core_v1, cm.metadata.resource_version, getattr(cm.metadata, "uid", None)
+            )
+            return
+        except ApiException as e:
+            if e.status == 404:
+                return
+            if e.status != 409:
+                raise ClusterLockError(f"cannot delete lease: {e}") from e
+            logger.info(
+                "cluster_lock: lease changed after it was read (resourceVersion %s); re-checking",
+                cm.metadata.resource_version,
+            )
+    raise ClusterLockError(
+        f"lease kept changing under release after {_DELETE_ATTEMPTS} attempts; "
+        "it may still be held by this process until its TTL"
+    )
+
+
+def _held_error(state: LeaseState) -> ClusterLockHeld:
+    return ClusterLockHeld(
+        holder=state.holder,
+        acquired_at=state.acquired_at,
+        ttl_seconds=state.ttl_seconds,
+        expires_at=datetime.fromtimestamp(state.expires_at_epoch, tz=timezone.utc).isoformat(
+            timespec="seconds"
+        ),
+    )
 
 
 def force_release_cluster_lock(core_v1: Any, *, expired_only: bool) -> LeaseState | None:
     """Admin recovery path. Returns the pre-delete state, or None if absent.
 
     ``expired_only=True`` refuses to delete a lease whose TTL has not
-    yet elapsed. That is the default for the ``admin release-lock``
-    command; callers who genuinely want to break a live lease must
-    opt in with ``expired_only=False``.
+    yet elapsed, and deletes only the exact object it judged expired
+    (resourceVersion and uid preconditions). A holder that stole the
+    lease in the meantime has a fresh TTL and keeps it. That is the
+    default for the ``admin release-lock`` command; callers who
+    genuinely want to break a live lease must opt in with
+    ``expired_only=False``, which deletes unconditionally.
     """
     from kubernetes.client.exceptions import ApiException
 
     state = read_cluster_lock(core_v1)
     if state is None:
         return None
-    if expired_only and not state.is_expired():
-        raise ClusterLockHeld(
-            holder=state.holder,
-            acquired_at=state.acquired_at,
-            ttl_seconds=state.ttl_seconds,
-            expires_at=datetime.fromtimestamp(state.expires_at_epoch, tz=timezone.utc).isoformat(
-                timespec="seconds"
-            ),
-        )
-    try:
-        if expired_only:
-            # Delete only the lease we judged expired. A holder that stole
-            # it in the meantime has a fresh TTL and must keep it.
-            _delete_if_unchanged(core_v1, state.resource_version, state.uid)
-        else:
+
+    if not expired_only:
+        try:
             core_v1.delete_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
-    except ApiException as e:
-        if e.status == 404:
-            return state
-        if e.status == 409 and expired_only:
-            current = read_cluster_lock(core_v1)
-            if current is None:
+        except ApiException as e:
+            if e.status == 404:
                 return state
-            raise ClusterLockHeld(
-                holder=current.holder,
-                acquired_at=current.acquired_at,
-                ttl_seconds=current.ttl_seconds,
-                expires_at=datetime.fromtimestamp(
-                    current.expires_at_epoch, tz=timezone.utc
-                ).isoformat(timespec="seconds"),
-            ) from e
-        raise ClusterLockError(f"cannot force-delete lease: {e}") from e
-    return state
+            raise ClusterLockError(f"cannot force-delete lease: {e}") from e
+        return state
+
+    for _ in range(_DELETE_ATTEMPTS):
+        if not state.is_expired():
+            raise _held_error(state)
+        try:
+            _delete_if_unchanged(core_v1, state.resource_version, state.uid)
+            return state
+        except ApiException as e:
+            if e.status == 404:
+                return state
+            if e.status != 409:
+                raise ClusterLockError(f"cannot force-delete lease: {e}") from e
+        # Changed since we judged it. Re-judge the current object: a steal
+        # is live and raises above; a write that kept it expired is retried.
+        current = read_cluster_lock(core_v1)
+        if current is None:
+            return state
+        state = current
+    raise ClusterLockError(
+        f"lease kept changing after {_DELETE_ATTEMPTS} attempts; re-run release-lock"
+    )
 
 
 @contextmanager

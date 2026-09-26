@@ -72,6 +72,23 @@ class TestReleaseLock:
         assert "no lease" in r.output.lower()
 
 
+class TestReleaseLockErrors:
+    def test_lock_error_is_a_message_not_a_traceback(self):
+        from lakebench.deploy.cluster_lock import ClusterLockError
+
+        with (
+            patch("lakebench.cli._admin._get_core_v1"),
+            patch(
+                "lakebench.deploy.cluster_lock.force_release_cluster_lock",
+                side_effect=ClusterLockError("cannot force-delete lease: (403) Forbidden"),
+            ),
+        ):
+            r = runner.invoke(admin_app, ["release-lock"])
+        assert r.exit_code == 1
+        assert r.exception is None or isinstance(r.exception, SystemExit)
+        assert "403" in r.output
+
+
 class TestMigrateDeployment:
     def _fake_core_and_custom(self, namespace_exists=True, already_migrated=False):
         core = MagicMock()
