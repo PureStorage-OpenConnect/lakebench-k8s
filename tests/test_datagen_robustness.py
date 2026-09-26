@@ -214,3 +214,168 @@ def test_reference_job_records_the_perturbation(monkeypatch):
     assert "LB_DATAGEN_ROBUSTNESS_PERTURBATION" not in env(_cfg(seed=7777))
     on = env(_cfg(seed=7777, robustness_perturbation=True))
     assert on["LB_DATAGEN_ROBUSTNESS_PERTURBATION"] == "true"
+
+
+# ---------------------------------------------------------------------------
+# Manifest stamp: the robustness look reads the perturbation from the corpus
+# ---------------------------------------------------------------------------
+
+ROBUST = CORPORA["robustness_seed"]
+MULT = {
+    mkey: [str(CORPORA["robustness_perturbation"][pkey])]
+    for pkey, mkey in ds.MANIFEST_MULTIPLIER_KEYS.items()
+}
+
+
+def test_manifest_keys_match_the_generator():
+    for name, key in [
+        ("MANIFEST_STAMP_KEY", ds.MANIFEST_STAMP_KEY),
+        ("MANIFEST_MEDIAN_AMOUNT_KEY", ds.MANIFEST_MULTIPLIER_KEYS["median_amount_multiplier"]),
+        ("MANIFEST_PERSONA_SD_KEY", ds.MANIFEST_MULTIPLIER_KEYS["persona_sd_multiplier"]),
+        ("MANIFEST_DORMANCY_KEY", ds.MANIFEST_MULTIPLIER_KEYS["dormancy_range_multiplier"]),
+    ]:
+        m = re.search(rf'pub const {name}: &str = "([^"]+)";', RUST)
+        assert m and m.group(1) == key, name
+    assert set(ds.MANIFEST_MULTIPLIER_KEYS) == set(CORPORA["robustness_perturbation"]) - {"note"}
+
+
+def _stamped(n=10, **override):
+    vals = {ds.MANIFEST_STAMP_KEY: "true", **{k: v[0] for k, v in MULT.items()}, **override}
+    return ds.summarise_stamp([(vals, n)])
+
+
+def _plain(n=10):
+    return ds.summarise_stamp([(dict.fromkeys(ds.MANIFEST_KEYS), n)])
+
+
+def test_summarise_stamp():
+    assert _plain()["n_stamped"] == 0 and _plain()["n_instances"] == 10
+    s = _stamped()
+    assert s["n_stamped"] == 10 and s["multipliers"] == MULT
+    # A stamp that is not exactly "true" does not count.
+    assert _stamped(**{ds.MANIFEST_STAMP_KEY: "false"})["n_stamped"] == 0
+
+
+def test_robustness_role_needs_the_stamp():
+    err = ds.perturbation_stamp_error(CORPORA, "robustness", _plain())
+    assert err and "no robustness stamp" in err
+    assert ds.perturbation_stamp_error(CORPORA, "robustness", _stamped()) is None
+    # Empty manifest: not a stamped corpus.
+    assert ds.perturbation_stamp_error(CORPORA, "robustness", _plain(0))
+
+
+def test_robustness_role_needs_the_registered_multipliers():
+    bad = _stamped(**{ds.MANIFEST_MULTIPLIER_KEYS["dormancy_range_multiplier"]: "1.1"})
+    assert "dormancy_range_multiplier" in ds.perturbation_stamp_error(CORPORA, "robustness", bad)
+    junk = _stamped(**{ds.MANIFEST_MULTIPLIER_KEYS["persona_sd_multiplier"]: "x"})
+    assert ds.perturbation_stamp_error(CORPORA, "robustness", junk)
+
+
+@pytest.mark.parametrize("role", ["calibration", "evaluation"])
+def test_other_roles_refuse_the_stamp(role):
+    assert "never perturbed" in ds.perturbation_stamp_error(CORPORA, role, _stamped())
+    assert ds.perturbation_stamp_error(CORPORA, role, _plain()) is None
+
+
+def test_mixed_manifest_refused():
+    mixed = ds.summarise_stamp(
+        [
+            ({ds.MANIFEST_STAMP_KEY: "true", **{k: v[0] for k, v in MULT.items()}}, 5),
+            (dict.fromkeys(ds.MANIFEST_KEYS), 5),
+        ]
+    )
+    for role in (None, "robustness", "evaluation"):
+        assert "mixed" in ds.perturbation_stamp_error(CORPORA, role, mixed)
+
+
+def test_declared_must_match_the_corpus():
+    assert "declares" in ds.perturbation_stamp_error(CORPORA, None, _plain(), declared=True)
+    assert "declares" in ds.perturbation_stamp_error(CORPORA, None, _stamped(), declared=False)
+    assert ds.perturbation_stamp_error(CORPORA, None, _stamped(), declared=True) is None
+    assert ds.perturbation_stamp_error(CORPORA, None, _plain(), declared=False) is None
+    # Locally nothing is declared: a perturbed dev corpus scores freely.
+    assert ds.perturbation_stamp_error(CORPORA, None, _stamped()) is None
+
+
+@pytest.fixture
+def scorer(monkeypatch):
+    """score_financial_reference with pyspark stubbed (not installed here)."""
+    import importlib
+
+    for mod in ("pyspark", "pyspark.sql", "pyspark.sql.functions"):
+        monkeypatch.setitem(sys.modules, mod, MagicMock())
+    monkeypatch.syspath_prepend(str(REPO / "src/lakebench/spark/scripts"))
+    monkeypatch.syspath_prepend(str(REPO / "src/lakebench/aml"))
+    sys.modules.pop("score_financial_reference", None)
+    ref = importlib.import_module("score_financial_reference")
+    import fidelity_gate
+
+    opened = json.loads(json.dumps(PREREG))
+    opened["corpora"]["registered_looks_open"] = True
+    monkeypatch.setattr(fidelity_gate, "load_preregistration", lambda *a, **k: (opened, "x"))
+    yield ref
+    sys.modules.pop("score_financial_reference", None)
+
+
+class _FakeAf:
+    def __init__(self, seed, groups):
+        self.seed, self.groups = seed, groups
+
+    def corpus_seed_check(self, _manifest, g):
+        return {"matched_share": 1.0 if g == self.seed else 0.0}
+
+    def manifest_stamp_groups(self, _manifest, keys):
+        assert tuple(keys) == ds.MANIFEST_KEYS
+        return self.groups
+
+
+def _groups(stamped):
+    if stamped:
+        return [({ds.MANIFEST_STAMP_KEY: "true", **{k: v[0] for k, v in MULT.items()}}, 7)]
+    return [(dict.fromkeys(ds.MANIFEST_KEYS), 7)]
+
+
+def test_scorer_refuses_a_robustness_look_on_an_unstamped_corpus(scorer, monkeypatch):
+    # What an old image (lb-datagen:14c4eee) produces for seed 90000042: the
+    # right instance seeds, no stamp. The config still declares the
+    # perturbation, so only the corpus can tell.
+    monkeypatch.setenv("LB_DATAGEN_SEED", str(ROBUST))
+    monkeypatch.setenv("LB_DATAGEN_CORPUS_ROLE", "robustness")
+    monkeypatch.setenv("LB_DATAGEN_ROBUSTNESS_PERTURBATION", "true")
+    with pytest.raises(SystemExit, match="no robustness stamp"):
+        scorer._refuse_guarded_corpus(_FakeAf(ROBUST, _groups(False)), None, counts_only=False)
+    stamp = scorer._refuse_guarded_corpus(_FakeAf(ROBUST, _groups(True)), None, counts_only=False)
+    assert stamp["n_stamped"] == stamp["n_instances"] == 7
+
+
+def test_scorer_refuses_a_stamp_the_config_did_not_declare(scorer, monkeypatch):
+    monkeypatch.setenv("LB_DATAGEN_SEED", "7777")
+    monkeypatch.delenv("LB_DATAGEN_CORPUS_ROLE", raising=False)
+    monkeypatch.delenv("LB_DATAGEN_ROBUSTNESS_PERTURBATION", raising=False)
+    with pytest.raises(SystemExit, match="declares"):
+        scorer._refuse_guarded_corpus(_FakeAf(7777, _groups(True)), None, counts_only=False)
+    assert scorer._refuse_guarded_corpus(_FakeAf(7777, _groups(False)), None, counts_only=False)
+
+
+def test_scorer_provenance_comes_from_the_manifest():
+    src = (REPO / "src/lakebench/spark/scripts/score_financial_reference.py").read_text()
+    prov = src[src.index("provenance = {") :]
+    prov = prov[: prov.index("}\n")]
+    assert '"robustness_perturbation": stamp[' in prov
+    assert "LB_DATAGEN_ROBUSTNESS_PERTURBATION" not in prov
+
+
+def test_local_gate_checks_the_stamp_before_scoring():
+    src = (REPO / "scripts/aml_gate.py").read_text()
+    main = src[src.index("def main(") :]
+    i = main.index("perturbation_stamp_error(")
+    assert "args.registered" in main[i : i + 120]
+    assert i < main.index("af.corpus_scale(") < main.index("af.build_gate_inputs(")
+
+
+def test_entrypoint_does_not_accept_abbreviations(monkeypatch):
+    for abbrev in ("--rob", "--robust", "--robustness"):
+        _, cmd = _entry_cmd(
+            ["--schema", "financial", "--bucket", "b", "--seed", "7777", abbrev], monkeypatch
+        )
+        assert "--robustness-perturbation" not in cmd, abbrev

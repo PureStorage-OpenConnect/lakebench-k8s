@@ -293,3 +293,126 @@ fn registered_seeds_get_the_right_corpus_only() {
         Ok(Perturbation::REGISTERED)
     );
 }
+
+#[test]
+fn flag_is_parsed_as_a_flag_not_a_value() {
+    use datagen_rs::robustness::flag_in_argv;
+    let v = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let f = "--robustness-perturbation";
+    assert_eq!(flag_in_argv(&v(&["gen"])), Ok(false));
+    assert_eq!(flag_in_argv(&v(&["gen", f])), Ok(true));
+    assert_eq!(flag_in_argv(&v(&["gen", "--seed", "7777", f])), Ok(true));
+    assert_eq!(flag_in_argv(&v(&["gen", f, "--seed", "7777"])), Ok(true));
+    assert_eq!(flag_in_argv(&v(&["gen", "--prefix=x", f])), Ok(true));
+    // A flag's value is never the flag.
+    assert_eq!(flag_in_argv(&v(&["gen", "--prefix", f])), Ok(false));
+    assert_eq!(
+        flag_in_argv(&v(&["gen", "--bucket", f, "--seed", "7777"])),
+        Ok(false)
+    );
+    assert!(flag_in_argv(&v(&["gen", "--robustness-perturbation=1"])).is_err());
+}
+
+fn manifest_params(b: &arrow::record_batch::RecordBatch) -> Vec<Vec<(String, String)>> {
+    use arrow::array::{Array, MapArray, StringArray};
+    let m = b
+        .column_by_name("injection_parameters")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<MapArray>()
+        .unwrap();
+    (0..m.len())
+        .map(|r| {
+            let e = m.value(r);
+            let k = e.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let v = e.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+            (0..k.len())
+                .map(|j| (k.value(j).to_string(), v.value(j).to_string()))
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn manifest_carries_the_stamp_only_when_perturbed() {
+    use datagen_rs::party::{build_manifest, build_manifest_p};
+    let w = build_world_ex(SCALE, DEV_SEED, 60, false);
+    let (s, e) = corpus();
+    let insts = schedule(
+        DEV_SEED,
+        w.dims.total_txns(),
+        w.population,
+        s,
+        e,
+        &w.country,
+    );
+    let uids = std::collections::HashMap::new();
+    let plain = build_manifest(&insts, DEV_SEED, &uids);
+    let none = build_manifest_p(&insts, DEV_SEED, &uids, &Perturbation::NONE);
+    assert_eq!(plain, none);
+    for row in manifest_params(&none) {
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].0, "rows_per_instance");
+    }
+    let stamped = build_manifest_p(&insts, DEV_SEED, &uids, &Perturbation::REGISTERED);
+    let rows = manifest_params(&stamped);
+    assert_eq!(rows.len(), insts.len());
+    for (row, inst) in rows.iter().zip(&insts) {
+        let want: Vec<(String, String)> = [
+            ("rows_per_instance", inst.rows_per_instance.to_string()),
+            ("robustness_perturbation", "true".to_string()),
+            ("robustness_median_amount_multiplier", "1.2".to_string()),
+            ("robustness_persona_sd_multiplier", "1.2".to_string()),
+            ("robustness_dormancy_range_multiplier", "1.2".to_string()),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        assert_eq!(row, &want);
+    }
+}
+
+#[test]
+fn perturbed_world_keeps_structuring_band_baseline_density() {
+    // The band-density leakage guards in regression.rs
+    // (persona_preserves_structuring_band_baseline_density,
+    // every_currency_has_baseline_mass_in_its_structuring_band), rerun on the
+    // registered perturbation: a starved band would make a structuring row a
+    // label on the robustness corpus. Compared against the unperturbed world
+    // on the same draws, because the USD guard's absolute 1.0% floor sits
+    // inside its own seed-to-seed noise (1.007% on 0xB0BA, 0.967% on 0xB0BB,
+    // unperturbed; perturbed 0.994% and 0.995%).
+    use datagen_rs::amounts::{native_amount, structuring_band};
+    use datagen_rs::world::amount_log_shift_p;
+    let n = 400_000u64;
+    let density = |p: &Perturbation, ccy: &str, lo: f64, hi: f64| -> f64 {
+        let mut rng = Rng::new(0xB0BB);
+        let mut k = 0u64;
+        for id in 1..=n {
+            let shift = amount_log_shift_p(id, 42, p.persona_sd, p.amount_log_mu_shift());
+            if (lo..=hi).contains(&native_amount(&mut rng, shift, ccy)) {
+                k += 1;
+            }
+        }
+        k as f64 / n as f64
+    };
+    for ccy in [
+        "USD", "GBP", "EUR", "CHF", "JPY", "AED", "SGD", "CAD", "MXN", "CNY", "INR", "AUD", "HKD",
+        "KRW", "BRL",
+    ] {
+        // USD: the regression test's [9500, 9999] band.
+        let (lo, hi) = if ccy == "USD" {
+            (9500.0, 9999.0)
+        } else {
+            structuring_band(ccy)
+        };
+        let base = density(&Perturbation::NONE, ccy, lo, hi);
+        let pert = density(&Perturbation::REGISTERED, ccy, lo, hi);
+        assert!(
+            pert >= 0.001 && pert >= 0.9 * base,
+            "{ccy}: structuring-band baseline density {:.4}% perturbed vs {:.4}% unperturbed",
+            pert * 100.0,
+            base * 100.0
+        );
+    }
+}
