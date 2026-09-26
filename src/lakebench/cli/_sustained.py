@@ -2006,6 +2006,9 @@ def _run_sustained(
                             "bound set by corpus size. Use a longer corpus or a shorter window "
                             "for a throughput figure (LB-145)."
                         )
+                    _trickle = pb.trickle_note()
+                    if _trickle:
+                        print_info(_trickle)
                 elif pb.time_to_value_seconds > 0:
                     print_info(
                         f"Pipeline Score: {pb.time_to_value_seconds:.1f}s time-to-value"
