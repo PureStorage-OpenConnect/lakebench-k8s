@@ -30,6 +30,8 @@ spec:
           args:
             - "--schema"
             - "financial"
+            - "--seed"
+            - "43"
             - "--scale"
             - "1"
             - "--total-nodes"

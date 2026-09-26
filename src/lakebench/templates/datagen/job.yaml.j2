@@ -61,7 +61,7 @@ spec:
             - "--prefix"
             - "{{ datagen_path_prefix | default('customer/interactions/') }}"
             - "--seed"
-            - "{{ datagen_seed | default(42) }}"
+            - "{{ datagen_seed }}"
             - "--dirty-ratio"
             - "{{ datagen_dirty_ratio | default(0.08) }}"
             - "--total-nodes"
