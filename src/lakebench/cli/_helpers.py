@@ -160,3 +160,22 @@ def _journal_safe(fn, *args, **kwargs) -> None:
         if not _journal_warned:
             logger.debug("Journal write failed (further warnings suppressed)", exc_info=True)
             _journal_warned = True
+
+
+def write_run_report(metrics_storage, run_id: str) -> Path | None:
+    """Write report.html next to a run's saved metrics.json (P1.4).
+
+    Every run writes its report, failed ones included: a run that exits 1
+    still saved metrics for diagnosis, and the report is how they are read.
+    Report rendering never changes the run's outcome; a failure here is
+    printed as a warning and returns None.
+    """
+    try:
+        from lakebench.reports import ReportGenerator
+
+        path = ReportGenerator(metrics_storage.metrics_dir).generate_report(run_id)
+    except Exception as e:  # noqa: BLE001 -- the report must not fail the run
+        print_warning(f"Could not write report.html for run {run_id}: {e}")
+        return None
+    print_info(f"Report written to {path}")
+    return path

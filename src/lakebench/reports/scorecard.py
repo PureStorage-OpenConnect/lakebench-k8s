@@ -57,7 +57,8 @@ class Customer360ScorecardBlock:
 class FinancialScorecardBlock:
     """Scorecard block for the Financial (FinServ-Crime, AML) workload.
 
-    Renders a per-rule detection table for a batch run: alert count, the
+    Renders a per-rule detection table (batch, or continuous from the
+    gold-refresh time-to-detect counts): alert count, the
     planted typology each rule targets, recall (from the folded-in
     ``financial score``, LB-123), and a status that reads "not run" for a
     rule the gold-finalize step skipped (e.g. W1 above its vertex cap,
@@ -112,6 +113,23 @@ class FinancialScorecardBlock:
         if not source_jobs:
             rule_errors = {}
 
+        # Continuous AML has no gold-finalize job: the per-rule counts come
+        # from gold-refresh's time-to-detect histogram (P1.4). They are new
+        # alert versions summed over ticks, not gold.alerts rows: an alert
+        # whose evidence changes is counted again, and alerts with no
+        # silver-matched transaction or in a tick without a TTD line are not
+        # counted. The column header and footnote say so.
+        continuous_alerts = False
+        if not source_jobs:
+            for sm in getattr(metrics, "streaming", None) or []:
+                if getattr(sm, "job_type", "") != "gold-refresh":
+                    continue
+                for rule, row in (getattr(sm, "ttd_by_rule", None) or {}).items():
+                    n = row.get("alerts") if isinstance(row, dict) else None
+                    if isinstance(n, (int, float)):
+                        alerts_by_rule[rule] = alerts_by_rule.get(rule, 0) + int(n)
+                        continuous_alerts = True
+
         # Nothing AML-specific to show (e.g. a c360 run mislabelled, or a
         # financial run before detection wired) -- stay silent.
         if not alerts_by_rule and not rules_skipped and not scoring:
@@ -147,6 +165,9 @@ class FinancialScorecardBlock:
         extra = sorted((set(alerts_by_rule) | set(rules_skipped) | set(rule_errors)) - set(known))
         rules = known + extra
 
+        # A batch rule with no count ran and emitted nothing; a continuous
+        # rule missing from the histogram is unknown, not zero.
+        missing_alerts = "-" if continuous_alerts else "0"
         body_rows: list[str] = []
         for rule in rules:
             typ = RULE_TARGETS.get(rule)
@@ -172,11 +193,11 @@ class FinancialScorecardBlock:
             elif typ is None:
                 # Attribute rule (W5 sanctions / W6 PEP): matches a party flag,
                 # no planted typology to score recall against.
-                status = "ran"
+                status = "ran" if alerts is not None or not continuous_alerts else "no data"
                 recall_cell = "n/a (attribute)"
-                alerts_cell = f"{alerts:,}" if alerts is not None else "0"
+                alerts_cell = f"{alerts:,}" if alerts is not None else missing_alerts
             else:
-                alerts_cell = f"{alerts:,}" if alerts is not None else "0"
+                alerts_cell = f"{alerts:,}" if alerts is not None else missing_alerts
                 trow = recall_by_typology.get(typ)
                 if trow and trow.get("incidental_recall") is not None:
                     incidental_cell = f"{float(trow['incidental_recall']) * 100:.1f}%"
@@ -211,9 +232,25 @@ class FinancialScorecardBlock:
         # "Chance" is that rule's hit rate on the random control, the floor
         # its recall must beat. "Incidental" is recall credited by any rule.
         footer = ""
+        if continuous_alerts:
+            footer += (
+                '<div style="margin-top: 0.5rem; color: var(--text-muted); '
+                'font-size: 0.8125rem;">'
+                "Continuous run: counts are new alert versions measured by time to "
+                "detect, summed over gold-refresh ticks (an alert is counted again when "
+                "its evidence changes; alerts without a matched silver transaction are "
+                "not counted), not gold.alerts rows."
+                + (
+                    ""
+                    if scoring
+                    else " Recall is not scored in continuous mode: stopping the streams "
+                    "can interrupt a detection pass, and scoring refuses a partial one."
+                )
+                + "</div>"
+            )
         if total_alerts is not None:
             fp_str = f"{fp_rate * 100:.1f}%" if fp_rate is not None else "n/a"
-            footer = (
+            footer += (
                 '<div style="margin-top: 0.5rem; color: var(--text-muted); '
                 'font-size: 0.8125rem;">'
                 f"Total alerts: <strong>{total_alerts:,}</strong> | "
@@ -221,6 +258,12 @@ class FinancialScorecardBlock:
                 + "</div>"
             )
 
+        alerts_th = (
+            '<th title="New alert versions measured by time to detect, summed over '
+            'gold-refresh ticks">New alert versions</th>'
+            if continuous_alerts
+            else '<th title="Alerts emitted by this rule">Alerts</th>'
+        )
         tm_html = _safe_tm_section(metrics, gold_jobs)
         return (
             tm_html
@@ -232,7 +275,7 @@ class FinancialScorecardBlock:
                     <tr>
                         <th>Rule</th>
                         <th>Target typology</th>
-                        <th title="Alerts emitted by this rule">Alerts</th>
+                        {alerts_th}
                         <th title="Fraction of planted instances detected by this rule">Recall</th>
                         <th title="Share of random-control instances this rule's alerts touch; recall at or below it is chance">Chance</th>
                         <th title="Fraction detected by any rule (includes chance overlap)">Incidental</th>

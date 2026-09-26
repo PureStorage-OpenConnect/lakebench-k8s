@@ -25,6 +25,7 @@ from ._helpers import (
     print_error,
     print_info,
     print_success,
+    print_warning,
     resolve_config_path,
 )
 
@@ -122,7 +123,9 @@ def generate(
     except Exception as e:
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
-    resolve_auto_sizing(cfg, cluster_cap)
+    # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
+    for cut in resolve_auto_sizing(cfg, cluster_cap) or []:
+        print_warning(f"Auto-sizing: {cut}")
 
     workload = cfg.architecture.workload
     datagen_cfg = workload.datagen

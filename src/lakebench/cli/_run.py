@@ -20,6 +20,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
     resolve_config_path,
+    write_run_report,
 )
 from lakebench.config import (
     ConfigError,
@@ -142,7 +143,7 @@ def _print_pipeline_scorecard(
     if scores:
         body += "\n\n[bold]Scores[/bold]\n" + "\n".join(scores)
 
-    body += f"\n\nTotal: {total_time:.0f}s\n\nFull report: [bold]lakebench report[/bold]"
+    body += f"\n\nTotal: {total_time:.0f}s\n\nReport: report.html in the run directory"
 
     console.print()
     console.print(Panel(body, title="Pipeline Complete", expand=False))
@@ -1022,6 +1023,7 @@ def _run_local_mode(
     )
     if metrics_path:
         print_info(f"Metrics saved to {metrics_path}")
+        write_run_report(metrics_storage, run_id)
         print_info(f"Run ID: {run_id}")
         _journal_safe(
             j.record,
@@ -1258,7 +1260,9 @@ def run(
     except Exception as e:
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
-    resolve_auto_sizing(cfg, cluster_cap)
+    # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
+    for cut in resolve_auto_sizing(cfg, cluster_cap) or []:
+        print_warning(f"Auto-sizing: {cut}")
 
     # Auto-scale timeout if not explicitly set
     if timeout is None:
@@ -1318,7 +1322,19 @@ def run(
     if not skip_deploy:
         from lakebench.cli._prerequisites import run_prerequisites
 
-        prereq_report = run_prerequisites(cfg)
+        # The --sustained flag does not write back to the config, so the
+        # capacity check is told the mode the run will use (LB-155). Datagen
+        # is left out only where the run itself releases its cores: under
+        # --skip-generate with a finished lakebench-datagen Job (LB-158).
+        _use_sustained = bool(
+            sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
+        )
+        _datagen_runs = True
+        if _use_sustained and skip_generate:
+            from lakebench.cli._sustained import _datagen_job_state
+
+            _datagen_runs = _datagen_job_state(cfg.get_namespace())[0] != "finished"
+        prereq_report = run_prerequisites(cfg, sustained=_use_sustained, datagen_runs=_datagen_runs)
         for check in prereq_report.checks:
             icon = "[green]+[/green]" if check.passed else "[red]x[/red]"
             console.print(f"  {icon} {check.name}: {check.message}")
@@ -2323,7 +2339,7 @@ def run(
                             "[green]Pipeline complete[/green]\n\n"
                             + "\n".join(f"  {n}: {el:.0f}s" for n, _, el in results)
                             + f"\n\nTotal: {_total:.0f}s{_qph}"
-                            + "\n\nFull report: [bold]lakebench report[/bold]",
+                            + "\n\nReport: report.html in the run directory",
                             title="Pipeline Complete",
                             expand=False,
                         )
@@ -2332,6 +2348,7 @@ def run(
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
+            write_run_report(metrics_storage, run_id)
 
             _journal_safe(
                 j.record,
