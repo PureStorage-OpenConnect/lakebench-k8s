@@ -132,8 +132,14 @@ def test_registered_looks_are_closed_until_the_freeze():
         _cfg_role(EVAL, "evaluation")
 
 
+@pytest.fixture
+def perturbation_on(monkeypatch):
+    """Datagen applies corpora.robustness_perturbation (lane T2)."""
+    monkeypatch.setattr(ds, "ROBUSTNESS_PERTURBATION_IMPLEMENTED", True)
+
+
 @pytest.mark.parametrize(("seed", "role"), [(EVAL, "evaluation"), (ROBUST, "robustness")])
-def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
+def test_protected_seed_allowed_with_its_role(seed, role, looks_open, perturbation_on):
     assert ds.config_seed(_cfg_role(seed, role)) == seed
     # The role alone selects its registered seed.
     assert ds.config_seed(_cfg_role(None, role)) == seed
@@ -191,7 +197,7 @@ def _gate():
     return mod
 
 
-def test_gate_guard_refuses_unregistered_looks(looks_open):
+def test_gate_guard_refuses_unregistered_looks(looks_open, perturbation_on):
     g = _gate()
     # Calibration and unregistered seeds score freely.
     assert g.seed_guard_error(43, None, []) is None
@@ -289,3 +295,81 @@ def test_cluster_refusal_runs_before_anything_is_written():
     ).read_text()
     main = src[src.index("def main()") :]
     assert main.index("_refuse_guarded_corpus(") < main.index("compute_leakage_gate(")
+
+
+def test_robustness_look_refused_until_the_perturbation_exists(looks_open):
+    assert ds.ROBUSTNESS_PERTURBATION_IMPLEMENTED is False
+    err = ds.aml_seed_error(ds._corpora(), ROBUST, "robustness", [ROBUST], claim_verified=True)
+    assert err is not None and "perturbation" in err
+    # Evaluation is unaffected.
+    assert ds.aml_seed_error(ds._corpora(), EVAL, "evaluation", [EVAL], claim_verified=True) is None
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [{k: v for k, v in _CORPORA.items() if k != "spent_seeds"}, {**_CORPORA, "spent_seeds": "42"}],
+)
+def test_damaged_spent_seeds_fail_closed(bad):
+    with pytest.raises((KeyError, ValueError)):
+        ds.aml_seed_error(bad, 42)
+    with pytest.raises((KeyError, ValueError)):
+        ds.aml_seed_error(bad, 43)
+
+
+@pytest.mark.parametrize("flag", ["false", "true", 1, None])
+def test_looks_open_only_when_literally_true(flag):
+    corpora = {**_CORPORA, "registered_looks_open": flag}
+    err = ds.aml_seed_error(corpora, EVAL, "evaluation", [EVAL], claim_verified=True)
+    assert err is not None and "closed" in err
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--diagnostic"],
+        ["--label-role", "participant"],
+        ["--allow-version-mismatch"],
+        ["--prereg", "/x.json"],
+        [],  # no --out
+    ],
+)
+def test_registered_look_runs_only_as_registered(extra, looks_open):
+    g = _gate()
+    out = [] if extra == [] else ["--out", "/nonexistent/r.json"]
+    argv = ["/nonexistent", "--seed", str(EVAL), "--registered", "evaluation", *out, *extra]
+    assert g.main(argv) == 1
+
+
+def test_registered_look_gets_no_operator_retry(looks_open):
+    from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
+
+    def policy(cfg):
+        mgr = SparkJobManager(cfg, MagicMock())
+        m = mgr._build_manifest(JobType.SCORE_FINANCIAL_REFERENCE)
+        return m["spec"]["restartPolicy"]
+
+    assert policy(_cfg_role(None, "evaluation")) == {"type": "Never"}
+    assert policy(_cfg("financial", 7777))["type"] == "OnFailure"
+
+
+def test_binary_spent_list_is_a_subset_of_the_preregistration():
+    import re
+
+    src = (Path(__file__).resolve().parents[1] / "datagen_rs/src/bin/generate.rs").read_text()
+    m = re.search(r"const SPENT_SEEDS: &\[i64\] = &\[([^\]]*)\];", src)
+    assert m, "SPENT_SEEDS not found in generate.rs"
+    rust = {int(x.replace("_", "")) for x in m.group(1).split(",") if x.strip()}
+    assert rust and rust <= set(_CORPORA["spent_seeds"])
+
+
+def test_entrypoint_requires_a_financial_seed():
+    import subprocess
+    import sys
+
+    ep = Path(__file__).resolve().parents[1] / "datagen_rs/entrypoint.py"
+    r = subprocess.run(
+        [sys.executable, str(ep), "--schema", "financial", "--bucket", "b"],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 2 and "--seed is required" in r.stderr

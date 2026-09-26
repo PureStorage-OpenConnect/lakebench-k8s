@@ -57,9 +57,34 @@ def _corpora() -> dict:
         return json.load(f)["corpora"]
 
 
+# The robustness look scores seed 90000042 with corpora.robustness_perturbation
+# applied by datagen. Until datagen implements it (programme step 2b, lane T2)
+# a registered robustness run is refused: it would spend the seed on an
+# unperturbed corpus. T2 sets this True in the same change as the flag.
+ROBUSTNESS_PERTURBATION_IMPLEMENTED = False
+
+
+def spent_from(corpora: dict) -> frozenset[int]:
+    """``corpora.spent_seeds``, strictly: a missing key or anything but a list
+    of integers raises, so a damaged pre-registration fails closed instead of
+    reading as "nothing is spent"."""
+    raw = corpora["spent_seeds"]
+    if not isinstance(raw, list) or not all(
+        isinstance(x, int) and not isinstance(x, bool) for x in raw
+    ):
+        raise ValueError(f"corpora.spent_seeds must be a list of integers, got {raw!r}")
+    return frozenset(raw)
+
+
+def looks_open(corpora: dict) -> bool:
+    """``corpora.registered_looks_open`` is open only when it is literally
+    true; a string such as "false" or a missing key keeps looks closed."""
+    return corpora.get("registered_looks_open") is True
+
+
 def spent_seeds() -> frozenset[int]:
     """Seeds the AML pre-registration has retired (looked at, or voided)."""
-    return frozenset(int(s) for s in _corpora().get("spent_seeds", []))
+    return spent_from(_corpora())
 
 
 def calibration_seed() -> int:
@@ -102,7 +127,7 @@ def aml_seed_error(
         if seed is not None and int(actual) != int(seed):
             return f"the corpus was generated with seed {actual}, not the claimed {seed}"
     eff = int(matched[0]) if matched else seed
-    spent = {int(s) for s in corpora.get("spent_seeds", [])}
+    spent = spent_from(corpora)
     if eff is not None and eff in spent:
         return (
             f"seed {eff} is listed as spent in the AML pre-registration "
@@ -123,11 +148,17 @@ def aml_seed_error(
                 "wholly come from that seed, so the registered look would be spent on "
                 "another corpus"
             )
-        if corpus_role in PROTECTED_ROLES and not corpora.get("registered_looks_open", False):
+        if corpus_role in PROTECTED_ROLES and not looks_open(corpora):
             return (
                 f"registered {corpus_role} runs are closed: the pre-registration's "
                 "corpora.registered_looks_open is false. It is set true with the datagen "
                 "freeze, and the seed is appended to corpora.spent_seeds after its look."
+            )
+        if corpus_role == "robustness" and not ROBUSTNESS_PERTURBATION_IMPLEMENTED:
+            return (
+                "registered robustness runs are refused until datagen applies "
+                "corpora.robustness_perturbation (programme step 2b): scoring seed "
+                f"{want} unperturbed would spend it on the wrong corpus"
             )
         return None
     role = protected.get(eff) if eff is not None else None

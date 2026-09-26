@@ -128,6 +128,41 @@ fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
     }
 }
 
+/// Seeds the AML pre-registration has spent (corpora.spent_seeds). Defence in
+/// depth for manual Jobs and direct runs: lakebench refuses the full,
+/// current list from the pre-registration before it ever launches datagen;
+/// tests/test_datagen_seed.py checks this list stays a subset of it.
+const SPENT_SEEDS: &[i64] = &[42, 50_000_042];
+
+/// --seed for the financial schema: required, strictly parsed, never a spent
+/// seed. The lenient `arg()` would turn a typo into the old default 42.
+fn financial_seed() -> i64 {
+    let args: Vec<String> = std::env::args().collect();
+    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
+        if a == "--seed" {
+            Some(args.get(i + 1).cloned().unwrap_or_default())
+        } else {
+            a.strip_prefix("--seed=").map(str::to_string)
+        }
+    });
+    let Some(raw) = raw else {
+        eprintln!("--seed is required for the financial schema (AML seeds are pre-registered)");
+        std::process::exit(2);
+    };
+    let Ok(seed) = raw.parse::<i64>() else {
+        eprintln!("--seed must be an integer; got {raw:?}");
+        std::process::exit(2);
+    };
+    if SPENT_SEEDS.contains(&seed) {
+        eprintln!(
+            "--seed {seed} is spent in the AML pre-registration (corpora.spent_seeds); \
+             use the calibration seed or another unregistered seed"
+        );
+        std::process::exit(2);
+    }
+    seed
+}
+
 struct TypRow {
     orig: u64,
     bene: u64,
@@ -190,7 +225,7 @@ fn pacs008_main() {
         eprintln!("--bucket is required (destination S3 bucket)");
         std::process::exit(2);
     }
-    let seed: i64 = arg("--seed", 42);
+    let seed = financial_seed();
     // Multi-cycle runs (datagen_rs::cycle): cycle n of --cycles N emits the
     // one-shot corpus rows whose calendar mass lies in [n/N, (n+1)/N), so the
     // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a

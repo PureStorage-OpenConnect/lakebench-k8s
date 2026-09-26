@@ -19,7 +19,7 @@ fn run(dir: &Path, extra: &[&str]) {
             "--bucket",
             "b",
             "--seed",
-            "42",
+            "7777",
             "--scale",
             SCALE,
             "--threads",
@@ -187,10 +187,35 @@ fn cycle_arguments_are_strict() {
     ] {
         let st = Command::new(env!("CARGO_BIN_EXE_generate"))
             .env("DG_LOCAL_DIR", std::env::temp_dir().join("lb-cycles-bad"))
+            .args(["--bucket", "b", "--seed", "7777", "--scale", SCALE])
+            .args(&bad)
+            .output()
+            .unwrap();
+        assert_eq!(st.status.code(), Some(2), "{bad:?} was accepted");
+    }
+}
+
+#[test]
+fn financial_seed_is_required_strict_and_never_spent() {
+    for bad in [
+        vec![],
+        vec!["--seed", "42"],
+        vec!["--seed", "50000042"],
+        vec!["--seed=42"],
+        vec!["--seed", "43x"],
+        vec!["--seed", "9223372036854775808"],
+        vec!["--seed"],
+    ] {
+        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+            .env("DG_LOCAL_DIR", std::env::temp_dir().join("lb-seed-bad"))
             .args(["--bucket", "b", "--scale", SCALE])
             .args(&bad)
             .output()
             .unwrap();
         assert_eq!(st.status.code(), Some(2), "{bad:?} was accepted");
+        assert!(
+            String::from_utf8_lossy(&st.stderr).contains("--seed"),
+            "{bad:?} failed for another reason"
+        );
     }
 }
