@@ -113,7 +113,15 @@ events_ref: dict = {}
 
 
 def _drive_sustained(
-    monkeypatch, tmp_path, cfg, *, reset_ok=True, owned=True, existing=(), force_reset=False
+    monkeypatch,
+    tmp_path,
+    cfg,
+    *,
+    reset_ok=True,
+    owned=True,
+    existing=(),
+    force_reset=False,
+    raw_problem=None,
 ):
     """Run _run_sustained with every cluster and S3 edge mocked; return the
     ordered list of side effects it performed."""
@@ -166,6 +174,7 @@ def _drive_sustained(
         lambda c, clear_raw: events.append(f"reset-s3:clear_raw={clear_raw}"),
     )
     monkeypatch.setattr(_sustained, "_c360_existing_state", lambda c, clear_raw: list(existing))
+    monkeypatch.setattr(_sustained, "_c360_raw_replace_problem", lambda c: raw_problem)
     monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: MagicMock())
     monkeypatch.setattr(_sustained, "_collect_platform_metrics", lambda *a, **kw: None)
     events_ref["mon"] = mon
@@ -281,3 +290,99 @@ def test_run_command_passes_force_reset(monkeypatch, tmp_path):
     assert seen.get("force_reset") is True, res.output
     res = CliRunner().invoke(app, ["run", str(cfg_file), "--sustained", "--skip-deploy"])
     assert seen.get("force_reset") is False, res.output
+
+
+def test_fresh_generate_on_never_run_deployment_proceeds(monkeypatch, tmp_path, capsys):
+    """LB-154: deploy -> generate -> run --sustained left only the raw corpus
+    and the guard refused. Raw alone (no tables, no checkpoints) proceeds."""
+    events = _drive_sustained(
+        monkeypatch, tmp_path, _c360_cfg(), existing=["c-b/customer/interactions/"]
+    )
+    assert events[:4] == ["ownership", "stop-streams", "reset-s3:clear_raw=True", "datagen"]
+    assert any(e.startswith("submit:bronze-ingest") for e in events)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Refusing" not in out and "a separate generate is not needed" in out
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        ["c-b/customer/interactions/", "c-s/"],
+        ["c-b/customer/interactions/", "c-b/checkpoints/bronze-ingest/"],
+        ["c-b/customer/interactions/ (could not list: AccessDenied)"],
+    ],
+)
+def test_raw_plus_other_state_still_refuses(monkeypatch, tmp_path, existing):
+    events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), existing=existing)
+    assert events == ["ownership"]
+
+
+def test_raw_only_but_unsafe_to_replace_still_refuses(monkeypatch, tmp_path, capsys):
+    events = _drive_sustained(
+        monkeypatch,
+        tmp_path,
+        _c360_cfg(),
+        existing=["c-b/customer/interactions/"],
+        raw_problem="a lakebench-datagen Job is still running",
+    )
+    assert events == ["ownership"]
+    out = " ".join(capsys.readouterr().out.split())
+    assert "still running" in out and "--force-reset" in out
+
+
+class _Job:
+    def __init__(self, active, condition=None):
+        conds = [MagicMock(type=condition, status="True")] if condition else []
+        self.status = MagicMock(active=active, conditions=conds)
+
+
+def _replace_problem(monkeypatch, *, job=None, job_exc=None, size_gb=5.0, s3_exc=None):
+    batch = MagicMock()
+    if job_exc is not None:
+        batch.read_namespaced_job.side_effect = job_exc
+    else:
+        batch.read_namespaced_job.return_value = job
+    monkeypatch.setattr("kubernetes.client.BatchV1Api", lambda: batch)
+    s3 = MagicMock()
+    if s3_exc is not None:
+        s3.get_bucket_size.side_effect = s3_exc
+    else:
+        s3.get_bucket_size.return_value = MagicMock(size_bytes=int(size_gb * 1024**3))
+    monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: s3)
+    return _sustained._c360_raw_replace_problem(_c360_cfg()), s3
+
+
+def test_raw_replace_allowed_for_a_finished_small_generate(monkeypatch):
+    from kubernetes.client.rest import ApiException
+
+    problem, s3 = _replace_problem(monkeypatch, job_exc=ApiException(status=404), size_gb=11)
+    assert problem is None
+    assert s3.get_bucket_size.call_args.kwargs["prefix"] == "customer/interactions/"
+    problem, _ = _replace_problem(monkeypatch, job=_Job(0, "Complete"), size_gb=11)
+    assert problem is None
+
+
+@pytest.mark.parametrize("job", [_Job(3), _Job(0), _Job(None)])
+def test_raw_replace_refused_while_datagen_unfinished(monkeypatch, job):
+    """Active pods, a Job not yet started, or one backing off between
+    retries all still write into the prefix."""
+    problem, _ = _replace_problem(monkeypatch, job=job)
+    assert "has not finished" in problem
+
+
+def test_raw_replace_refused_when_job_check_fails(monkeypatch):
+    from kubernetes.client.rest import ApiException
+
+    problem, _ = _replace_problem(monkeypatch, job_exc=ApiException(status=403, reason="Forbidden"))
+    assert problem and "could not check" in problem
+
+
+def test_raw_replace_refused_for_a_larger_corpus(monkeypatch):
+    """Scale 10 regenerates ~100 GB; a 400 GB corpus is an earlier, larger generate."""
+    problem, _ = _replace_problem(monkeypatch, job=_Job(0, "Failed"), size_gb=400)
+    assert problem and "400 GB" in problem
+
+
+def test_raw_replace_refused_when_sizing_fails(monkeypatch):
+    problem, _ = _replace_problem(monkeypatch, job=_Job(0, "Complete"), s3_exc=RuntimeError("boom"))
+    assert problem and "could not size" in problem
