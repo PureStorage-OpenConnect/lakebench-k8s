@@ -407,7 +407,9 @@ def main(argv=None) -> int:
         # failure must not lose the gated report.
         try:
             sec = evaluate_gate(
-                inputs["secondary_lifetime"], lifetime_prereg(prereg), score=not args.counts_only
+                inputs["secondary_lifetime"],
+                lifetime_prereg(prereg, secondary=True),
+                score=not args.counts_only,
             )
         except Exception as e:  # noqa: BLE001
             sec = {"verdict": "error", "note": str(e)}

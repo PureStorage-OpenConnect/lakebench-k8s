@@ -420,7 +420,9 @@ def run_fidelity_gate(
         # Ungated: the lifetime unit kept for comparison, never in passes. Its
         # failure must not void the gated result.
         try:
-            sec = evaluate_gate(inputs["secondary_lifetime"], lifetime_prereg(prereg), score=score)
+            sec = evaluate_gate(
+                inputs["secondary_lifetime"], lifetime_prereg(prereg, secondary=True), score=score
+            )
             keys = ("unit", "verdict", "n_scored_customers", "n_scored_units", "typologies")
             report["secondary_lifetime"] = {"gated": False, **{k: sec.get(k) for k in keys}}
         except Exception as e:  # noqa: BLE001

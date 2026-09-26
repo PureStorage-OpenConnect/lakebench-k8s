@@ -465,7 +465,14 @@ def test_relative_cap_as_lift_over_prevalence():
     that edges above prevalence; a real shortcut still fails."""
     df = _frame(n=4000, prev=0.08, separable=False)
     p = _prereg()
-    p["leakage"] = {**p["leakage"], "relative_cap_formula": "ratio"}
+    # The legacy ratio formula predates the nuisance ablation, which needs a
+    # lift formula (_leakage_sets refuses the pairing).
+    p["leakage"] = {
+        **p["leakage"],
+        "relative_cap_formula": "ratio",
+        "shortcut_models": ["single_feature", "feature_pair"],
+    }
+    del p["leakage"]["ablation"]
     ratio = fg.evaluate_gate(df, p)["typologies"]["beh"]
     p = _prereg()
     p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence"}
@@ -851,3 +858,88 @@ def test_clean_nuisance_passes_ablation():
     assert nab["drop_cap"] == pytest.approx(rel * (max(ap, _prereg()["band"]["ap_min"]) - prev))
     planted = next(g for g in r["ablation"]["groups"] if g["group"] == "g_planted")
     assert planted["drop"] > nab["drop"]  # reported, not gated
+
+
+def test_nuisance_ablation_verdict_caps_and_band_floor():
+    """The drop is capped like a shortcut (lift share, never above the
+    absolute cap), and an in-band AP must stay above the band floor without
+    the nuisance features."""
+    p = _prereg()
+    lk, band = p["leakage"], p["band"]
+    prev = 1e-4
+    ref = 0.45
+    rel_cap = prev + lk["shortcut_ap_rel_max"] * (ref - prev)
+    # In band, drop 0.17 is under both caps, but the model without the
+    # nuisance features falls below the floor: fail.
+    v = fg._nuisance_ablation_verdict(ref, ref - 0.17, rel_cap, prev, p)
+    assert v["pass_drop"] is True and v["pass_band_floor_without"] is False and v["pass"] is False
+    # Same drop from a stronger model that stays in band without them: pass.
+    ap = 0.7
+    rel_cap = prev + lk["shortcut_ap_rel_max"] * (ap - prev)
+    v = fg._nuisance_ablation_verdict(ap, ap - 0.17, rel_cap, prev, p)
+    assert v["pass"] is True
+    # The absolute cap bounds the drop even when the lift share is larger.
+    v = fg._nuisance_ablation_verdict(ap, ap - (lk["shortcut_ap_abs_max"] + 0.01), rel_cap, prev, p)
+    assert v["drop_cap"] == lk["shortcut_ap_abs_max"] and v["pass"] is False
+    # Below band the floor rule does not apply (the typology is a miss anyway).
+    low = band["ap_min"] / 2
+    rel_cap = prev + lk["shortcut_ap_rel_max"] * (band["ap_min"] - prev)
+    assert fg._nuisance_ablation_verdict(low, low - 0.01, rel_cap, prev, p)["pass"] is True
+
+
+def test_leakage_block_fails_closed():
+    p = _prereg()
+    del p["leakage"]["ablation"]
+    with pytest.raises(ValueError, match="ablation is missing"):
+        fg.evaluate_gate(_frame(), p)
+    q = _prereg()
+    q["leakage"] = {**q["leakage"], "relative_cap_formula": "ratio"}
+    with pytest.raises(ValueError, match="lift"):
+        fg._leakage_sets(q)
+    r = _prereg()
+    r["leakage"]["ablation"] = {**r["leakage"]["ablation"], "gated": "clock"}
+    with pytest.raises(ValueError, match="unsupported"):
+        fg._leakage_sets(r)
+
+
+def test_secondary_lifetime_skips_the_new_fits():
+    p = _prereg()
+    life = fg.lifetime_prereg(p, secondary=True)
+    assert life["shortcut_model"]["also_reference_model"] is False
+    assert "ablation" not in life["leakage"]
+    rep = fg.evaluate_gate(_frame(), life)
+    r = rep["typologies"]["beh"]
+    assert "ablation" not in r and set(r["shortcuts"]) == set(p["leakage"]["shortcut_models"])
+    assert r["shortcuts"]["feature_pair"]["best"]["ref_ap"] is None
+    # The primary lifetime conversion keeps every check.
+    assert fg.lifetime_prereg(p)["shortcut_model"]["also_reference_model"] is True
+
+
+def test_definitional_check_keeps_the_352_statistic():
+    rep = fg.evaluate_gate(_band_frame(), _prereg())
+    d = rep["typologies"]["defn"]
+    row = next(r for r in d["single_feature_table"] if r["feature"] == "planted")
+    assert d["definitional_check"]["single_ap"] == max(row["tree_ap"], row["rank_ap"])
+
+
+def test_oof_many_one_class_fold_and_batches(monkeypatch):
+    """Every positive in one customer: that fold trains on one class and
+    falls back to the training prevalence, as _oof_scores does; batching
+    (one set per batch) does not change any AP."""
+    rng = np.random.default_rng(4)
+    n = 600
+    groups = rng.integers(0, 60, n)
+    y = (groups == 7).astype(int)
+    X = rng.normal(0, 1, (n, 3))
+    w = np.ones(n)
+    p = _prereg()
+    folds = fg._folds(y, groups, p)
+    assert any(len(np.unique(y[tr])) < 2 for tr, _ in folds)
+    sets = [[0], [1], [0, 2]]
+    got = fg._oof_many(lambda: fg._reference_model(p), X, sets, y, w, folds)
+    for cols, g in zip(sets, got, strict=True):
+        want = fg._oof_scores(lambda: fg._reference_model(p), X[:, cols], y, w, folds)
+        np.testing.assert_array_equal(g, want)
+    wide = fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds)
+    monkeypatch.setenv("LB_AML_GATE_JOBS", "1")
+    assert fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds) == wide

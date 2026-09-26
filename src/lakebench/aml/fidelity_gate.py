@@ -101,12 +101,23 @@ def unit_window(prereg: dict) -> str:
     return (prereg.get("unit_of_scoring") or {}).get("window", "lifetime")
 
 
-def lifetime_prereg(prereg: dict) -> dict:
+def lifetime_prereg(prereg: dict, secondary: bool = False) -> dict:
     """The pre-registration as the lifetime unit sees it: the monthly history
-    features dropped. Used for the ungated secondary lifetime block."""
+    features dropped. ``secondary=True`` is the ungated secondary lifetime
+    block, which also skips what leakage.secondary_lifetime_skips lists (the
+    reference-model shortcut and ablation fits, hours of compute for a block
+    that gates nothing)."""
     import copy
 
     p = copy.deepcopy(prereg)
+    if secondary:
+        skips = set((p.get("leakage") or {}).get("secondary_lifetime_skips") or [])
+        if "also_reference_model" in skips:
+            p["shortcut_model"]["also_reference_model"] = False
+        if "ablation" in skips:
+            p["leakage"].pop("ablation", None)
+            # Tells _leakage_sets the ablation was dropped on purpose.
+            p["leakage"]["secondary_lifetime_skips_applied"] = True
     hist = set((p.get("unit_of_scoring") or {}).get("history_features", []))
     p["features"] = [f for f in p["features"] if f not in hist]
     p.setdefault("unit_of_scoring", {})["window"] = "lifetime"
@@ -128,7 +139,33 @@ def _leakage_sets(prereg: dict) -> tuple[list[str], dict[str, list[str]]]:
     missing = [f for f in nuis if f not in features]
     if missing:
         raise ValueError(f"leakage.nuisance_features not in features: {missing}")
-    groups = dict((lk.get("ablation") or {}).get("feature_groups") or {})
+    abl = lk.get("ablation")
+    if (
+        abl is None
+        and nuis
+        and "nuisance_only" in lk.get("shortcut_models", [])
+        and not lk.get("secondary_lifetime_skips_applied")
+    ):
+        # Fail closed: a 3.6.0 leakage block without its ablation would
+        # silently skip the gated nuisance drop.
+        raise ValueError("leakage.ablation is missing while nuisance_only is registered")
+    if abl is not None:
+        want = {"method": "leave_one_group_out", "model": "reference_model"}
+        bad = {k: abl.get(k) for k, v in want.items() if abl.get(k) != v}
+        if abl.get("gated") != "nuisance_features":
+            bad["gated"] = abl.get("gated")
+        if bad:
+            raise ValueError(f"unsupported leakage.ablation settings {bad}")
+        if lk.get("relative_cap_formula") not in (
+            "lift_over_prevalence",
+            "lift_over_prevalence_band_floor",
+        ):
+            raise ValueError("leakage.ablation needs a lift relative_cap_formula")
+        if not nuis:
+            raise ValueError("leakage.ablation gates nuisance_features, which is empty")
+        if not abl.get("feature_groups"):
+            raise ValueError("leakage.ablation.feature_groups is empty")
+    groups = dict((abl or {}).get("feature_groups") or {})
     if groups:
         members = [f for fs in groups.values() for f in fs]
         if sorted(members) != sorted(features):
@@ -294,7 +331,7 @@ def _oof_many(make_model, X, col_sets, y, w, folds, wide=False):
                     make_model, X, cols, y, w, folds[f][0], folds[f][1], per_fit, controller
                 ),
                 range(len(folds)),
-                jobs=len(folds),
+                jobs=min(len(folds), jobs),
             )
     else:
         outs = _parallel(
@@ -514,7 +551,7 @@ def _evaluate_typology(
     use_rank = sm.get("single_feature_also_scores_raw_rank")
     use_ref = bool(sm.get("also_reference_model"))
     lk = prereg["leakage"]
-    nuis, groups = _leakage_sets(prereg)
+    nuis, feat_groups = _leakage_sets(prereg)
     nf = len(features)
 
     def ref_model():
@@ -561,7 +598,7 @@ def _evaluate_typology(
     formula = lk.get("relative_cap_formula", "ratio")
     if formula == "ratio":
         rel_cap = lk["shortcut_ap_rel_max"] * ap
-        lift_base = 0.0
+        lift_base = 0.0  # ablation refuses this formula (_leakage_sets)
     elif formula == "lift_over_prevalence":
         # (shortcut_ap - prevalence) <= rel_max * (ap - prevalence): the cap
         # applies to what each model gains over a random ranking, so a full
@@ -608,11 +645,11 @@ def _evaluate_typology(
 
     # Leave-one-feature-group-out: the reference model refit without each
     # group, and without every nuisance feature at once, on the same folds.
-    # Every drop is reported; only the nuisance drop is gated, capped at the
-    # share of the lift the relative cap lets a shortcut carry.
+    # Every drop is reported; only the nuisance drop is gated
+    # (_nuisance_ablation_verdict).
     ablation_ok = True
-    if groups:
-        drop_sets = [(g, fs) for g, fs in groups.items()]
+    if feat_groups:
+        drop_sets = [(g, fs) for g, fs in feat_groups.items()]
         if nuis:
             drop_sets.append(("nuisance_features", nuis))
         col_sets = [[j for j, f in enumerate(features) if f not in set(fs)] for _, fs in drop_sets]
@@ -624,8 +661,10 @@ def _evaluate_typology(
         abl: dict[str, Any] = {"groups": rows}
         if nuis:
             nrow = rows[-1]
-            drop_cap = rel_cap - lift_base
-            abl["nuisance"] = {**nrow, "drop_cap": drop_cap, "pass": nrow["drop"] <= drop_cap}
+            abl["nuisance"] = {
+                **nrow,
+                **_nuisance_ablation_verdict(ap, nrow["ap_without"], rel_cap, lift_base, prereg),
+            }
             ablation_ok = bool(abl["nuisance"]["pass"])
         out["ablation"] = abl
     out["leakage_pass"] = (
@@ -645,7 +684,11 @@ def _evaluate_typology(
     if kind == "definitional":
         cls = prereg["classification"]
         dfeat = cls["defining_feature"].get(name)
-        d_ap = next((r["ap"] for r in single if r["feature"] == dfeat), None)
+        # The 3.5.2 statistic (tree or raw rank), not the reference-model
+        # shortcut: the definitional rule must not get easier to pass.
+        d_ap = next(
+            (max(r["tree_ap"], r["rank_ap"]) for r in single if r["feature"] == dfeat), None
+        )
         out["definitional_check"] = {
             "defining_feature": dfeat,
             "single_ap": d_ap,
@@ -653,6 +696,24 @@ def _evaluate_typology(
             "pass": d_ap is not None and d_ap >= cls["definitional_min_single_ap"],
         }
     return out
+
+
+def _nuisance_ablation_verdict(ap, ap_without, rel_cap, lift_base, prereg) -> dict:
+    """The gated nuisance ablation (leakage.ablation.drop_cap_definition):
+    the drop from removing every nuisance feature is capped like a shortcut
+    (the lift share the relative cap allows, never more than the absolute
+    cap), and an in-band verdict must hold without them."""
+    lk, band = prereg["leakage"], prereg["band"]
+    drop = ap - ap_without
+    drop_cap = min(rel_cap - lift_base, lk["shortcut_ap_abs_max"])
+    full_in_band = band["ap_min"] <= ap <= band["ap_max"]
+    floor_ok = (not full_in_band) or ap_without >= band["ap_min"]
+    return {
+        "drop_cap": drop_cap,
+        "pass_drop": drop <= drop_cap,
+        "pass_band_floor_without": floor_ok,
+        "pass": drop <= drop_cap and floor_ok,
+    }
 
 
 def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
@@ -791,6 +852,9 @@ def evaluate_gate(
         prereg = lifetime_prereg(prereg)
     features = list(prereg["features"])
     typologies = in_scope_typologies(prereg)
+    # Before any model: a malformed leakage block must not surface only after
+    # AP exists (a registered look would be spent on a crash).
+    _leakage_sets(prereg)
     report: dict[str, Any] = {
         "gate": "aml-fidelity",
         "prereg_version": prereg.get("version"),
