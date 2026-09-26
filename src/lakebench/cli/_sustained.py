@@ -35,6 +35,9 @@ from lakebench.k8s import K8sConnectionError, get_k8s_client
 
 logger = logging.getLogger(__name__)
 
+# Seconds a statement may run past the pre-benchmark budget before it is cut.
+_BUDGET_GRACE_SECONDS = 30
+
 # Delta's default VACUUM retention (hours).
 _DELTA_DEFAULT_RETENTION_HOURS = 168.0
 
@@ -678,6 +681,13 @@ class MaintenanceBudget:
         self.deadline = self._clock() + seconds
         self.stopped = ""
 
+    def remaining(self) -> float:
+        return self.deadline - self._clock()
+
+    def statement_timeout(self, per_statement: int) -> int:
+        """Per-statement timeout clipped to what is left of the budget."""
+        return max(1, min(per_statement, int(self.remaining()) + _BUDGET_GRACE_SECONDS))
+
     def exhausted(self) -> bool:
         if not self.stopped and self._clock() > self.deadline:
             self.stopped = f"pre-benchmark maintenance exceeded its {int(self.seconds)}s cap"
@@ -720,16 +730,20 @@ def _run_statements(
             out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n:]]
             break
         # exec_sql raises on a real failure (non-zero exit) and on a
-        # kubectl-exec timeout; neither is fatal to the run.
+        # kubectl-exec timeout; neither is fatal to the run. Under a budget
+        # the statement gets at most what is left of it (plus a small grace),
+        # so the budget bounds the total; a statement cut short by it counts
+        # as timed out.
+        stmt_timeout = budget.statement_timeout(timeout) if budget is not None else timeout
         try:
-            exec_sql(engine, k8s, pod_name, namespace, sql, timeout=timeout)
+            exec_sql(engine, k8s, pod_name, namespace, sql, timeout=stmt_timeout)
             out["succeeded"] += 1
         except ExecSqlTimeout as e:
             # Not a failure: the engine may still be running it.
             out["timed_out"].append(f"{_operative(sql)} {table}: {e}")
             logger.warning("%s timed out for %s (may still be running)", what, table)
             if budget is not None:
-                budget.stopped = f"{_operative(sql)} {table} timed out after {timeout}s"
+                budget.stopped = f"{_operative(sql)} {table} timed out after {stmt_timeout}s"
                 out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n + 1 :]]
                 break
         except Exception as e:

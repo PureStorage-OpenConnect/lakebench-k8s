@@ -454,7 +454,13 @@ def _data_file_total(health: dict[str, int]) -> int:
 
 
 def _maintenance_value(
-    pre, post, pre_files: int, post_files: int, maint_elapsed: float, settle=None
+    pre,
+    post,
+    pre_files: int,
+    post_files: int,
+    maint_elapsed: float,
+    settle=None,
+    stopped_reason: str = "",
 ) -> tuple[float | None, int, str]:
     """(value %, paired queries, reason) for the pre/post maintenance rounds.
 
@@ -468,9 +474,15 @@ def _maintenance_value(
     None when the wait was disabled. A wait that did not settle leaves the
     value None: the post round measured storage still working off the
     maintenance burst (LB-150).
+
+    *stopped_reason* is set when pre-benchmark maintenance was stopped (a
+    statement timed out or the overall cap hit). A timed-out statement may
+    still be running server-side, so the post round is not measurable.
     """
     if maint_elapsed <= 0:
         return None, 0, "maintenance did not run"
+    if stopped_reason:
+        return None, 0, f"maintenance stopped before completion ({stopped_reason})"
     if pre_files <= 0 or post_files <= 0:
         return None, 0, "data file counts unavailable"
     if post_files >= pre_files:
@@ -1958,6 +1970,10 @@ def run(
         _pre_record = None
         _pre_result = None
         _maint_value = None
+        # Set when pre-benchmark maintenance was stopped (timeout or cap): a
+        # statement may still be running, so the post-maintenance QpH is not
+        # a clean measurement.
+        maint_stop_reason = ""
         _maint_end = None
         _settle = None
         pre_file_count = 0
@@ -2068,6 +2084,7 @@ def run(
                     timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
                     budget=maint_budget,
                 )
+                maint_stop_reason = maint_budget.stopped
                 if maint_budget.stopped:
                     console.print(
                         f"  [yellow]Pre-benchmark maintenance stopped: {maint_budget.stopped}; "
@@ -2207,6 +2224,7 @@ def run(
                         post_file_count,
                         maint_elapsed,
                         _settle,
+                        stopped_reason=maint_stop_reason,
                     )
                     if _maint_value[0] is not None:
                         console.print(
@@ -2332,6 +2350,9 @@ def run(
 
                 # Populate maintenance cost metrics (v1.3)
                 try:
+                    if maint_stop_reason:
+                        pb.maintenance_stopped = True
+                        pb.maintenance_stop_reason = maint_stop_reason
                     if maint_elapsed > 0:
                         pb.maintenance_elapsed_seconds = maint_elapsed
                         if pb.total_elapsed_seconds > 0:

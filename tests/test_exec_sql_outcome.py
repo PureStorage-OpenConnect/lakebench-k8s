@@ -412,3 +412,32 @@ def test_continuous_loop_passes_live_streams_to_maintenance():
 
     src = inspect.getsource(sus)
     assert "retention_threshold, live_streams=True" in src
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_statement_timeout_is_clipped_to_the_budget():
+    """Together maintenance and compaction cannot exceed the cap plus grace."""
+    from lakebench.cli._sustained import (
+        _BUDGET_GRACE_SECONDS,
+        MaintenanceBudget,
+        _run_iceberg_maintenance,
+    )
+
+    clock = {"t": 0.0}
+    budget = MaintenanceBudget(1800)
+    budget._clock = lambda: clock["t"]
+    budget.deadline = 1800
+    k8s = MagicMock()
+    timeouts: list[int] = []
+
+    def run(*_a, **kw):
+        timeouts.append(kw["timeout"])
+        clock["t"] += 1500  # the first statement uses most of the budget
+        return (0, "", "")
+
+    k8s.exec_in_pod.side_effect = run
+    _run_iceberg_maintenance(
+        _cfg(), k8s, Console(quiet=True), MagicMock(), "30m", timeout=1800, budget=budget
+    )
+    assert timeouts[0] == 1800
+    assert timeouts[1] == 300 + _BUDGET_GRACE_SECONDS
