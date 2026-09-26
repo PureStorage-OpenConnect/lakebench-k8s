@@ -516,7 +516,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.sustained.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
 | `architecture.pipeline.sustained.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
 | `architecture.pipeline.sustained.run_duration` | int | `1800` | Streaming run duration in seconds. Minimum 60. |
-| `architecture.pipeline.sustained.max_files_per_trigger` | int | `50` | Max Parquet files per micro-batch. Primary throughput cap. |
+| `architecture.pipeline.sustained.max_files_per_trigger` | int | `50` | Max Parquet files bronze reads per trigger. With `bronze_trigger_interval` it sets the offered load, the same at every scale (50 files per 30 s is about 107 MB/s). |
 | `architecture.pipeline.sustained.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
 | `architecture.pipeline.sustained.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
 | `architecture.pipeline.sustained.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |

@@ -590,11 +590,12 @@ class PipelineBenchmark:
         "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
         # Sustained
         "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
-        "sustained_throughput_rps": "Rows entering bronze per second (higher is better)",
-        "ingest_ratio": "Bronze rows ingested / datagen rows produced (1.0 = all data consumed)",
+        "sustained_throughput_rps": "Rows entering bronze per second (higher is better). When intake_limit is trickle_rate this is the configured offered load, not a capacity",
+        "ingest_ratio": "Bronze rows ingested / datagen rows produced: the share of the corpus the window consumed (1.0 = all data consumed). The offered load is the trickle (max_files_per_trigger per bronze trigger), so a corpus larger than trickle rate x window reads below 1 without saturation; intake_limit says which",
         "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
-        "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input; intake_limit says whether bronze processing was the limit",
-        "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), below_bronze_capacity (bronze had idle time: the trigger rate, a late start or a stall; the throughput is not bronze's capacity), none (kept up)",
+        "pipeline_saturated": "True when ingest_ratio < 0.95 and the pipeline did not keep pace with the offered load. False when intake_limit is trickle_rate: the configured trickle, not the pipeline, bounded intake",
+        "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up)",
+        "corpus_drain_seconds": "When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
         "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
         "time_to_detect_seconds": "AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the end of the detection pass that first raised it (lower is better)",
         "time_to_detect_p95_seconds": "AML continuous. 95th percentile of time_to_detect (histogram bin upper edge, 10 s bins)",
@@ -677,15 +678,21 @@ class PipelineBenchmark:
     # What bounded intake when ingest_ratio < 0.95. "bronze_capacity": bronze
     # micro-batches ran back to back for most of the window, so its processing
     # rate is the limit and sustained_throughput_rps is its capacity.
-    # "below_bronze_capacity": bronze had idle time in the window, so the
-    # limit was elsewhere (the trigger rate, a late start or a stall; the
-    # driver log says which) and the throughput is not bronze's capacity.
-    # "none" when intake kept up; None when unknown. Diagnostic only:
-    # pipeline_saturated stays the ratio verdict.
+    # "trickle_rate": bronze had idle time, yet ran a micro-batch on nearly
+    # every trigger, each inside the trigger, with corpus left: the configured
+    # max_files_per_trigger per trigger was the offered load and the pipeline
+    # kept pace with it, so pipeline_saturated is False and rows/s is that
+    # offered rate, not a capacity. "below_bronze_capacity": bronze had idle
+    # time without that pattern (a late start or a stall; the driver log says
+    # which) and the ratio verdict stands. "none" when intake kept up; None
+    # when unknown.
     intake_limit: str | None = None
     # Share of the window bronze spent inside micro-batches (batches x mean
     # batch time / window). None when bronze logged no batch times.
     bronze_busy_fraction: float | None = None
+    # When intake_limit is "trickle_rate": seconds the trickle needs to
+    # ingest the whole corpus at the rate it held (datagen rows / rows/s).
+    corpus_drain_seconds: float | None = None
     # AML continuous time to detect: from the newest bronze ingest_ts of an
     # alert's related transactions to the end of the detection pass that
     # first raised it. Median (the score), p95 and max over newly raised
@@ -891,11 +898,32 @@ class PipelineBenchmark:
             if self.ingest_ratio >= 0.95:
                 self.intake_limit = "none"
             elif self.bronze_busy_fraction is not None:
-                self.intake_limit = (
-                    "bronze_capacity"
-                    if self.bronze_busy_fraction >= _BRONZE_BUSY_BOUND
-                    else "below_bronze_capacity"
-                )
+                # Trigger evidence first: a bronze that finishes each batch
+                # inside its trigger is held by the trigger even when busy
+                # for most of it.
+                if bronze is not None and self._bronze_kept_to_trigger(bronze):
+                    self.intake_limit = "trickle_rate"
+                elif self.bronze_busy_fraction >= _BRONZE_BUSY_BOUND:
+                    self.intake_limit = "bronze_capacity"
+                else:
+                    self.intake_limit = "below_bronze_capacity"
+        silver = [s for s in streaming if s.stage_name == "silver"]
+        committed = [s.committed_rows for s in silver if s.committed_rows is not None]
+        silver_committed = sum(committed) if silver and len(committed) == len(silver) else None
+        # The offered load is the configured trickle (max_files_per_trigger
+        # per bronze trigger), not the corpus. A corpus larger than trickle
+        # rate x window reads short on ingest_ratio while every stage keeps
+        # pace (LB-156, c360 scale 100: 19% of the corpus in 1800 s, bronze
+        # idle 32% of the window), so that is not saturation, provided silver
+        # kept up with what bronze took. The ratio verdict stands for every
+        # other short run: a stall, a late start or a bronze at capacity did
+        # not keep pace.
+        if self.intake_limit == "trickle_rate":
+            if self.sustained_throughput_rps > 0:
+                self.corpus_drain_seconds = datagen_rows / self.sustained_throughput_rps
+            self.pipeline_saturated = not self._silver_kept_pace(
+                silver, silver_committed, total_bronze_rows
+            )
 
         # Time to detect (AML continuous): the gold stage's merged histogram.
         gold = next((s for s in streaming if s.stage_name == "gold"), None)
@@ -913,9 +941,6 @@ class PipelineBenchmark:
         # of it, so the trailing idle gold cycles measured an empty feed, not a
         # slow pipeline (LB-145). A stall (rows missing, silver behind or its
         # last commit unlogged) is not drained and keeps its full staleness.
-        silver = [s for s in streaming if s.stage_name == "silver"]
-        committed = [s.committed_rows for s in silver if s.committed_rows is not None]
-        silver_committed = sum(committed) if silver and len(committed) == len(silver) else None
         if self.ingest_ratio is None:
             self.corpus_drained = None
         else:
@@ -978,6 +1003,73 @@ class PipelineBenchmark:
         if total_core_hours > 0:
             self.compute_efficiency_gb_per_core_hour = total_input_gb / total_core_hours
 
+    def trickle_note(self) -> str | None:
+        """One plain sentence for a run whose intake the trickle rate
+        bounded (intake_limit "trickle_rate"), for the CLI and the report;
+        None otherwise."""
+        if (
+            self.intake_limit != "trickle_rate"
+            or self.pipeline_saturated is not False
+            or self.ingest_ratio is None
+        ):
+            return None
+        sustained = self.config_snapshot.get("sustained") or {}
+        files = sustained.get("max_files_per_trigger")
+        trigger = sustained.get("bronze_trigger_interval")
+        rate = f" ({files} files per {trigger} bronze trigger)" if files and trigger else ""
+        drain = (
+            f" Draining the whole corpus at this rate takes about "
+            f"{self.corpus_drain_seconds:,.0f} s: run a longer window, or raise "
+            f"max_files_per_trigger and size the streams for the higher load."
+            if self.corpus_drain_seconds
+            else ""
+        )
+        return (
+            f"Intake was held to the configured trickle rate{rate}, not limited by the "
+            f"pipeline: the window took {self.ingest_ratio:.0%} of the corpus, bronze and "
+            f"silver kept pace, so the run is not saturated and rows/s is the offered load."
+            f"{drain}"
+        )
+
+    def _bronze_kept_to_trigger(self, bronze: StageMetrics) -> bool:
+        """True when bronze ran a micro-batch on nearly every trigger of the
+        window and each finished inside its trigger.
+
+        With files left in the corpus, that is the pattern of a stream held
+        to max_files_per_trigger per trigger: a late start or a stall drops
+        batches (Spark runs no batch on a trigger with no new files), and a
+        bronze that overruns its trigger runs fewer, longer batches. Unknown
+        trigger config proves nothing and returns False.
+        """
+        sustained = self.config_snapshot.get("sustained") or {}
+        trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
+        if not trigger_s or not bronze.latency_ms or not bronze.total_batches:
+            return False
+        if bronze.latency_ms / 1000.0 >= trigger_s:
+            return False
+        triggers = bronze.elapsed_seconds / trigger_s
+        return bronze.total_batches >= _TRIGGER_COVERAGE * triggers
+
+    def _silver_kept_pace(
+        self, silver: list[StageMetrics], silver_committed: int | None, bronze_rows: int
+    ) -> bool:
+        """True when silver committed all but the rows bronze could add in
+        one silver trigger, one silver batch and one bronze trigger: the lag
+        of a silver stream that keeps up and was stopped mid-cycle. Unknown
+        commits or trigger config prove nothing and return False."""
+        if not silver or silver_committed is None:
+            return False
+        sustained = self.config_snapshot.get("sustained") or {}
+        silver_trigger_s = _interval_seconds(sustained.get("silver_trigger_interval"))
+        bronze_trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
+        if not silver_trigger_s or not bronze_trigger_s:
+            return False
+        silver_batch_s = max((s.latency_ms or 0.0) for s in silver) / 1000.0
+        allowed_lag = self.sustained_throughput_rps * (
+            silver_trigger_s + silver_batch_s + bronze_trigger_s
+        )
+        return bronze_rows - silver_committed <= allowed_lag
+
     def _scores_dict(self) -> dict[str, Any]:
         """Build the mode-appropriate scores sub-dict for JSON output."""
         qph = round(self.query_benchmark.qph, 1) if self.query_benchmark else 0.0
@@ -1029,6 +1121,11 @@ class PipelineBenchmark:
                 "pipeline_saturated": self.pipeline_saturated,
                 "corpus_drained": self.corpus_drained,
                 "intake_limit": self.intake_limit,
+                "corpus_drain_seconds": (
+                    round(self.corpus_drain_seconds)
+                    if self.corpus_drain_seconds is not None
+                    else None
+                ),
                 "bronze_busy_fraction": (
                     round(self.bronze_busy_fraction, 3)
                     if self.bronze_busy_fraction is not None
@@ -1688,6 +1785,33 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
 # A bronze that cannot keep up starts each micro-batch as the last ends and
 # sits near 1.0; startup and idle triggers only pull the share down.
 _BRONZE_BUSY_BOUND = 0.8
+
+# Share of the window's bronze triggers that must have run a micro-batch for
+# intake to count as held to the trickle rate. The shortfall allowed covers
+# stream startup (60 of 60 triggers ran on the LB-156 scale-100 run; 0.9
+# leaves 180 s of an 1800 s window at a 30 s trigger).
+_TRIGGER_COVERAGE = 0.9
+
+_INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
+
+
+def _interval_seconds(interval: Any) -> float | None:
+    """Seconds in a Spark interval string ("30 seconds", "5 minutes");
+    None when it does not parse, never a guessed default."""
+    if not isinstance(interval, str):
+        return None
+    parts = interval.strip().lower().split()
+    if len(parts) != 2:
+        return None
+    try:
+        value = float(parts[0])
+    except ValueError:
+        return None
+    unit = _INTERVAL_UNITS.get(parts[1].rstrip("s"))
+    if unit is None or value <= 0:
+        return None
+    return value * unit
+
 
 # gold_refresh_financial's per-cycle time-to-detect line (common.ttd_line).
 _TTD_LINE = re.compile(

@@ -47,10 +47,12 @@ Sustained scoring answers: "How fresh is gold, and how fast are we sustaining it
 | Score | Formula | Meaning |
 |---|---|---|
 | `data_freshness_seconds` | `max(stage.freshness_seconds)` | Worst-case gold staleness. The primary sustained score. Lower is better. |
-| `sustained_throughput_rps` | `bronze_input_rows / run_duration` | Aggregate sustained rows/sec the pipeline can maintain. Higher is better. |
+| `sustained_throughput_rps` | `bronze_input_rows / run_duration` | Rows/sec entering bronze. Higher is better. When `intake_limit` is `trickle_rate` it is the configured offered load, not a capacity; when `corpus_drained` is true it is a lower bound. |
 | `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency. Lower is better. |
-| `ingest_ratio` | `bronze_rows / datagen_rows` | Fraction of generated data that made it through bronze. Below 0.95 flags saturation. Above 1.0 means re-reads inflate the count. |
-| `pipeline_saturated` | `ingest_ratio < 0.95` | Boolean flag. True when the pipeline cannot keep pace with incoming data. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
+| `ingest_ratio` | `bronze_rows / datagen_rows` | Share of the corpus the window consumed. Below 0.95 is saturation only when the pipeline did not keep pace with the trickle (see `intake_limit`). Above 1.0 means re-reads inflate the count. |
+| `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag. True when the pipeline could not keep pace with the load offered to it. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
+| `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up). |
+| `corpus_drain_seconds` | `datagen_rows / sustained_throughput_rps` | Set when `intake_limit` is `trickle_rate`: the window that would drain the corpus at the rate held. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
 | `total_rows_processed` | `sum(stage.input_rows)` | Total volume processed during the monitoring window. |
 | `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
@@ -454,14 +456,38 @@ are excluded.
 gold_ms]` showing per-stage micro-batch processing latency. If one stage has
 significantly higher latency, it is the bottleneck.
 
-**Ingestion Completeness** shows what fraction of generated data was actually
-consumed. Below 0.95 means the pipeline is saturated -- it cannot keep up with
-the data generation rate. When this happens, `pipeline_saturated` is set to
-`true`.
+**Offered load.** Continuous mode trickles a finite corpus. Datagen writes
+the whole scale's corpus at full speed (about 2 minutes for 1 TB at scale 100)
+and bronze reads it at a fixed rate: `max_files_per_trigger` files per
+`bronze_trigger_interval`. At the defaults that is 50 files of about 64 MB per
+30 s, about 107 MB/s, for every scale and both workloads: 25,818 rows/s for
+c360 (15,491 rows per file), about 324,000 rows/s for AML. The scale factor sets
+the corpus and table sizes, and with them the work per gold refresh; it does
+not set the rate. A run measures sustained throughput and freshness at that
+offered load. It does not try to drain the corpus: at the defaults a 30-minute
+window drains the scale-10 corpus (c360 in about 960 s) and takes 19% of the
+scale-100 corpus.
 
-**Pipeline Saturated** is a boolean flag derived from completeness. When true,
-increase executor count or reduce datagen parallelism to bring the pipeline
-back below capacity.
+**Ingestion Completeness** (`ingest_ratio`) is the share of the corpus the
+window consumed. A short ratio says only that the corpus outlasted the window;
+`intake_limit` says why:
+
+- `trickle_rate`: bronze ran a micro-batch on at least 90% of its triggers,
+  each inside the trigger, with corpus left. The trickle, not the pipeline,
+  bounded intake. If silver also kept up (it committed all but one silver
+  trigger, one silver batch and one bronze trigger of what bronze took), the
+  run is not saturated, the report shows a warning rather than a failure, and
+  `corpus_drain_seconds` gives the window that would drain the corpus.
+- `bronze_capacity`: bronze ran back to back. Its processing is the limit and
+  rows/s is its capacity.
+- `below_bronze_capacity`: bronze was idle for part of the window but did not
+  keep to its trigger: a late start or a stall. The driver log says which.
+
+**Pipeline Saturated** is true when `ingest_ratio < 0.95` and the pipeline did
+not keep pace with the load offered to it. When true, add executors to the
+stage that fell behind. To offer more load, raise `max_files_per_trigger` (or
+shorten `bronze_trigger_interval`) and size bronze-ingest and silver-stream for
+it; to drain a larger corpus at the same load, lengthen the window.
 
 ---
 
@@ -590,7 +616,8 @@ rounds for trend analysis.
 
 | Symptom | Likely Cause | Fix |
 |---|---|---|
-| `pipeline_saturated: true` | Bronze can't keep up with datagen | Add bronze executors or reduce datagen `parallelism` |
+| `pipeline_saturated: true` | A stage could not keep pace with the trickle (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
+| `intake_limit: trickle_rate`, `ingest_ratio` < 0.95 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
 | `ingest_ratio > 1.3` | Datagen estimate conservative | Not a real problem -- pipeline is keeping up |
 | `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
 | Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
