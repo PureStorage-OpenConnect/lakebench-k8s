@@ -806,3 +806,23 @@ class TestDestroyAllBuckets:
         assert 0 < len(ran) < 6
         assert tables.status is DeploymentStatus.FAILED
         assert "cap" in tables.message
+
+    def test_combined_statement_is_labelled_by_vacuum_and_skips_are_not_listed(self):
+        from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+
+        assert destroy_mod._operative_sql("SET SESSION x = '0s'; CALL c.system.vacuum()") == "CALL"
+        assert destroy_mod._operative_sql("SET a=b; VACUUM t RETAIN 0 HOURS") == "VACUUM"
+
+        def run(sql):
+            if "silver" in sql:
+                raise RuntimeError(
+                    "exec_sql failed (rc=1): Query 1 failed: Table 'lakehouse.silver.t' "
+                    "does not exist"
+                )
+            raise ExecSqlTimeout("timed out")
+
+        tables = self._run_tables(run)
+        # silver maintenance skipped (missing), gold EXPIRE timed out; the
+        # remaining are gold ORPHANS and the two drops, not silver's ORPHANS.
+        assert "3 statement(s) not attempted" in tables.message
+        assert "ORPHANS lakehouse.silver.t" not in tables.message.split("not attempted")[1]

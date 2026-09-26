@@ -308,3 +308,107 @@ def test_maintenance_passes_its_timeout_and_journals_elapsed():
     assert {c.kwargs["timeout"] for c in k8s.exec_in_pod.call_args_list} == {1800}
     d = _journal_details(j, "Iceberg maintenance")
     assert "elapsed_seconds" in d and d["statement_timeout_seconds"] == 1800
+
+
+# -- brief review of 9a940b7+59d7e40 ------------------------------------------
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_pre_benchmark_budget_stops_at_first_timeout_across_both_steps():
+    """Financial: 51 statements x 1800 s must not become a 25 h wait."""
+    from lakebench.cli._sustained import (
+        MaintenanceBudget,
+        _run_iceberg_compaction,
+        _run_iceberg_maintenance,
+    )
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (1, "", "Command timed out")
+    j = MagicMock()
+    budget = MaintenanceBudget(1800)
+    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m", budget=budget)
+    _run_iceberg_compaction(_cfg(), k8s, Console(quiet=True), j, budget=budget)
+    assert k8s.exec_in_pod.call_count == 1, "the first timeout stops everything"
+    assert "timed out" in budget.stopped
+    m = _journal_details(j, "Iceberg maintenance")
+    c = _journal_details(j, "Iceberg compaction")
+    assert m["operations_timed_out"] == 1
+    assert m["operations_not_attempted"] == m["operations_total"] - 1
+    assert c["operations_not_attempted"] == c["operations_total"] == 2
+    assert c["not_attempted"] and c["stopped"]
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_pre_benchmark_budget_has_an_overall_cap(monkeypatch):
+    from lakebench.cli._sustained import MaintenanceBudget, _run_iceberg_maintenance
+
+    clock = {"t": 0.0}
+    budget = MaintenanceBudget(1800)
+    budget._clock = lambda: clock["t"]
+    budget.deadline = 1800
+
+    k8s = MagicMock()
+
+    def slow(*_a, **_kw):
+        clock["t"] += 1000  # each statement takes 1000 s
+        return (0, "", "")
+
+    k8s.exec_in_pod.side_effect = slow
+    j = MagicMock()
+    _run_iceberg_maintenance(_cfg(), k8s, Console(quiet=True), j, "30m", budget=budget)
+    d = _journal_details(j, "Iceberg maintenance")
+    assert k8s.exec_in_pod.call_count == 2
+    assert d["operations_not_attempted"] == d["operations_total"] - 2
+    assert "cap" in budget.stopped
+
+
+def test_run_shares_one_budget_between_maintenance_and_compaction():
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod)
+    assert "maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)" in src
+    assert src.count("budget=maint_budget") == 2
+    assert run_mod.PRE_BENCHMARK_MAINTENANCE_CAP <= 1800
+
+
+def _delta_cfg():
+    cfg = _cfg()
+    cfg.architecture.table_format.type.value = "delta"
+    return cfg
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_continuous_delta_vacuum_keeps_default_retention():
+    """Policy: no retention override while streams are live."""
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (0, "", "")
+    j = MagicMock()
+    _run_iceberg_maintenance(_delta_cfg(), k8s, Console(quiet=True), j, "30m", live_streams=True)
+    sent = [c.args[1][2] for c in k8s.exec_in_pod.call_args_list]
+    assert sent and all("vacuum_min_retention" not in q for q in sent)
+    assert all("168.0h" in q for q in sent)
+    _journal_details(j, "Delta VACUUM at default 7d retention (live streams)")
+
+
+@pytest.mark.usefixtures("_engine_pod")
+def test_batch_delta_vacuum_still_honours_short_retention():
+    from lakebench.cli._sustained import _run_iceberg_maintenance
+
+    k8s = MagicMock()
+    k8s.exec_in_pod.return_value = (0, "", "")
+    _run_iceberg_maintenance(_delta_cfg(), k8s, Console(quiet=True), MagicMock(), "30m")
+    sent = [c.args[1][2] for c in k8s.exec_in_pod.call_args_list]
+    assert sent and all("vacuum_min_retention" in q for q in sent)
+
+
+def test_continuous_loop_passes_live_streams_to_maintenance():
+    import inspect
+
+    import lakebench.cli._sustained as sus
+
+    src = inspect.getsource(sus)
+    assert "retention_threshold, live_streams=True" in src

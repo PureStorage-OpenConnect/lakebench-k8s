@@ -39,6 +39,8 @@ logger = logging.getLogger(__name__)
 PRE_BENCHMARK_COMPACTION_TIMEOUT = 1800
 # Same bound for pre-benchmark expire_snapshots / remove_orphan_files.
 PRE_BENCHMARK_MAINTENANCE_TIMEOUT = 1800
+# Overall cap for pre-benchmark maintenance and compaction together (seconds).
+PRE_BENCHMARK_MAINTENANCE_CAP = 1800
 
 
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
@@ -1198,6 +1200,7 @@ def run(
     import uuid
 
     from lakebench.cli._sustained import (
+        MaintenanceBudget,
         _collect_platform_metrics,
         _probe_table_health,
         _run_iceberg_compaction,
@@ -2042,8 +2045,12 @@ def run(
                 console.print()
                 console.print("[bold]Running maintenance[/bold]")
                 _maint_start = datetime.now()
-                # Same as compaction below: wait for expire_snapshots and
-                # orphan removal to finish before the benchmark starts.
+                # The benchmark must not start while a maintenance statement
+                # still runs (a kubectl-exec timeout does not stop it), so each
+                # statement may take up to 30 min; one budget caps expire,
+                # orphan removal and compaction together, and the first
+                # timeout stops the rest.
+                maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)
                 _run_iceberg_maintenance(
                     cfg,
                     k8s,
@@ -2051,13 +2058,28 @@ def run(
                     j,
                     retention_threshold=resolve_maintenance_retention(cfg),
                     timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
+                    budget=maint_budget,
                 )
-                # A kubectl-exec timeout does not stop rewrite_data_files, and
-                # the benchmark must not start while it still runs: wait for
-                # completion (up to 30 min per statement).
                 _run_iceberg_compaction(
-                    cfg, k8s, console, j, timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT
+                    cfg,
+                    k8s,
+                    console,
+                    j,
+                    timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
+                    budget=maint_budget,
                 )
+                if maint_budget.stopped:
+                    console.print(
+                        f"  [yellow]Pre-benchmark maintenance stopped: {maint_budget.stopped}; "
+                        "the remaining statements were not attempted. The benchmark runs "
+                        "anyway; a timed-out statement may still be running.[/yellow]"
+                    )
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Pre-benchmark maintenance stopped",
+                        details={"outcome": "timed_out", "reason": maint_budget.stopped},
+                    )
                 _wait_for_query_engine_ready(cfg, k8s, console, timeout=120)
                 maint_elapsed = (datetime.now() - _maint_start).total_seconds()
                 _maint_end = time.monotonic()
