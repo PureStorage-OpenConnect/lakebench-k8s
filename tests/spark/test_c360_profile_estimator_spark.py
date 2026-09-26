@@ -62,8 +62,10 @@ def test_estimate_close_to_truth_where_linear_extrapolation_is_far(spark, zipf):
     # Seeded, the result is fixed. For the record, over 1,000 random sample
     # seeds on the uniform key the estimate ran +3.3% mean, 3.0% sd, 1.1% of
     # draws beyond 10%, so the tolerance is only safe because the seed now
-    # holds. The heavy-tailed key lands 27% low at this seed (Chao1 is a lower bound
-    # there). Linear extrapolation is more than 5x high on both.
+    # holds. The heavy-tailed key lands 27% low at this seed; over 60 seeds
+    # it ran -22% mean, 2.5% sd, worst -28.5%, so a change to the sampler or
+    # slice count can push it past 0.3 without any estimator regression.
+    # Linear extrapolation is more than 5x high on both.
     tol = 0.3 if zipf else 0.1
     assert abs(est - truth) / truth < tol, (est, truth)
     assert skew >= 1.0
