@@ -631,12 +631,19 @@ def compute_peak_requirements(
 def _streaming_concurrent_budget(
     config: LakebenchConfig,
     cluster_cpu_millicores: int | None,
+    *,
+    datagen_running: bool = True,
 ) -> dict[JobType, int]:
     """Compute max executor count per streaming job for concurrent execution.
 
     In sustained mode, datagen + 3 streaming jobs share the cluster.
     Divides the available CPU (after Trino + infra + datagen) among
     streaming jobs proportionally to their uncapped demand.
+
+    ``datagen_running=False`` drops the datagen reservation: the continuous
+    corpus is finite and usually written before the streams start, and a
+    finished Job holds no cores (LB-158). The default stays conservative
+    for callers that cannot know whether datagen is still running.
 
     Returns:
         Dict mapping each streaming JobType to its capped executor count.
@@ -662,9 +669,9 @@ def _streaming_concurrent_budget(
         + 1000  # Hive + Postgres
     )
 
-    # Datagen runs concurrently with streaming
+    # Datagen runs concurrently with streaming while its Job is unfinished
     datagen = config.architecture.workload.datagen
-    datagen_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
+    datagen_m = datagen.parallelism * _parse_cpu_millicores(datagen.cpu) if datagen_running else 0
 
     # Budget for all streaming jobs combined (90% of remaining after co-resident + datagen)
     remaining_m = max(0, cluster_cpu_millicores - co_resident_m - datagen_m)
@@ -748,7 +755,7 @@ class BudgetedStreamingRequest:
 
 
 def streaming_request_under_budget(
-    config: LakebenchConfig, cluster_cpu_millicores: int
+    config: LakebenchConfig, cluster_cpu_millicores: int, *, datagen_running: bool = True
 ) -> BudgetedStreamingRequest:
     """Continuous-mode request after ``_streaming_concurrent_budget`` caps it.
 
@@ -764,7 +771,9 @@ def streaming_request_under_budget(
 
     scale = config.architecture.workload.datagen.scale
     schema = getattr(getattr(config.architecture.workload, "schema_type", None), "value", None)
-    budget = _streaming_concurrent_budget(config, cluster_cpu_millicores)
+    budget = _streaming_concurrent_budget(
+        config, cluster_cpu_millicores, datagen_running=datagen_running
+    )
     spark_cfg = config.platform.compute.spark
     explicit = {
         JobType.BRONZE_INGEST: spark_cfg.bronze_ingest_executors,
@@ -795,16 +804,17 @@ def streaming_request_under_budget(
 
     trino = config.architecture.query_engine.trino
     datagen = config.architecture.workload.datagen
+    dg_pods = datagen.parallelism if datagen_running else 0
     cores_m += (
         _parse_cpu_millicores(trino.coordinator.cpu)
         + trino.worker.replicas * _parse_cpu_millicores(trino.worker.cpu)
         + 1000  # Hive + Postgres, as the budget counts them
-        + datagen.parallelism * _parse_cpu_millicores(datagen.cpu)
+        + dg_pods * _parse_cpu_millicores(datagen.cpu)
     )
     co_gi = (
         _parse_memory_gi(trino.coordinator.memory)
         + trino.worker.replicas * _parse_memory_gi(trino.worker.memory)
-        + datagen.parallelism * _parse_memory_gi(datagen.memory)
+        + dg_pods * _parse_memory_gi(datagen.memory)
     )
     return BudgetedStreamingRequest(
         cpu_cores=-(-cores_m // 1000),
@@ -1398,6 +1408,9 @@ class SparkJobManager:
         self.namespace = config.get_namespace()
         # Streaming jobs the concurrent budget capped, for the CLI to show.
         self.budget_warnings: list[str] = []
+        # Whether the streaming budget reserves datagen's cores. The
+        # continuous CLI clears it once the datagen Job has finished (LB-158).
+        self.datagen_running: bool = True
 
         # Cache cluster capacity for streaming concurrent budget calculation
         try:
@@ -1630,7 +1643,9 @@ class SparkJobManager:
         # Streaming: cap to concurrent budget (all 3 jobs + datagen share cluster)
         capped_from = executor_count
         if job_type in _STREAMING_JOB_TYPES and self._cluster_cpu_m is not None:
-            budget = _streaming_concurrent_budget(cfg, self._cluster_cpu_m)
+            budget = _streaming_concurrent_budget(
+                cfg, self._cluster_cpu_m, datagen_running=self.datagen_running
+            )
             if job_type in budget and budget[job_type] < executor_count:
                 logger.warning(
                     "Concurrent budget: %s capped from %d to %d executors",

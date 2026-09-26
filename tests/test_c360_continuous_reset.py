@@ -122,6 +122,7 @@ def _drive_sustained(
     existing=(),
     force_reset=False,
     raw_problem=None,
+    dg_state="unfinished",
 ):
     """Run _run_sustained with every cluster and S3 edge mocked; return the
     ordered list of side effects it performed."""
@@ -140,6 +141,7 @@ def _drive_sustained(
     def submit(job_type, **kw):
         events.append(f"submit:{job_type.value}:{kw.get('cycle_env')}")
         if job_type == JobType.BRONZE_INGEST:
+            events.append(f"dg_running={jm.datagen_running}")
             raise _StopAfterFirstStream
         return MagicMock(state=JobState.RUNNING)
 
@@ -175,6 +177,8 @@ def _drive_sustained(
     )
     monkeypatch.setattr(_sustained, "_c360_existing_state", lambda c, clear_raw: list(existing))
     monkeypatch.setattr(_sustained, "_c360_raw_replace_problem", lambda c: raw_problem)
+    monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: (dg_state, ""))
+    monkeypatch.setattr(_sustained, "_DATAGEN_RELEASE_WAIT_S", 0)
     monkeypatch.setattr("lakebench.s3.S3Client", lambda **kw: MagicMock())
     monkeypatch.setattr(_sustained, "_collect_platform_metrics", lambda *a, **kw: None)
     events_ref["mon"] = mon
@@ -386,3 +390,67 @@ def test_raw_replace_refused_for_a_larger_corpus(monkeypatch):
 def test_raw_replace_refused_when_sizing_fails(monkeypatch):
     problem, _ = _replace_problem(monkeypatch, job=_Job(0, "Complete"), s3_exc=RuntimeError("boom"))
     assert problem and "could not size" in problem
+
+
+@pytest.mark.parametrize(
+    ("dg_state", "running"),
+    [("finished", False), ("absent", False), ("unfinished", True), ("unknown", True)],
+)
+def test_streaming_budget_releases_datagen_only_once_finished(
+    monkeypatch, tmp_path, dg_state, running
+):
+    """LB-158: a finished (or absent) datagen Job holds no cores, so the
+    streams are budgeted without them; unfinished or unknown keeps them."""
+    events = _drive_sustained(monkeypatch, tmp_path, _c360_cfg(), dg_state=dg_state)
+    assert f"dg_running={running}" in events
+
+
+def test_datagen_job_state(monkeypatch):
+    from kubernetes.client.rest import ApiException
+
+    def run(job=None, exc=None):
+        batch = MagicMock()
+        if exc is not None:
+            batch.read_namespaced_job.side_effect = exc
+        else:
+            batch.read_namespaced_job.return_value = job
+        monkeypatch.setattr("kubernetes.client.BatchV1Api", lambda: batch)
+        return _sustained._datagen_job_state("ns")[0]
+
+    assert run(exc=ApiException(status=404)) == "absent"
+    assert run(exc=ApiException(status=500)) == "unknown"
+    assert run(exc=RuntimeError("x")) == "unknown"
+    assert run(job=_Job(0, "Complete")) == "finished"
+    assert run(job=_Job(0, "Failed")) == "finished"
+    assert run(job=_Job(4)) == "unfinished"
+    assert run(job=_Job(None)) == "unfinished"
+
+
+def test_datagen_release_waits_for_a_finishing_job(monkeypatch):
+    """LB-158 review: one API read raced the Job this run just created, so
+    identical runs got different executor counts. Poll a bounded time."""
+    states = iter(["unfinished", "unfinished", "finished"])
+    monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: (next(states), ""))
+    monkeypatch.setattr(_sustained.time, "sleep", lambda s: None)
+    assert _sustained._datagen_released("ns", deployed_here=True) is True
+
+
+def test_datagen_release_gives_up_after_the_wait(monkeypatch):
+    monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: ("unfinished", ""))
+    monkeypatch.setattr(_sustained, "_DATAGEN_RELEASE_WAIT_S", 0)
+    assert _sustained._datagen_released("ns", deployed_here=True) is False
+
+
+def test_skip_generate_with_no_datagen_job_keeps_the_reservation(monkeypatch):
+    """Another writer may populate bronze under another Job name."""
+    monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: ("absent", ""))
+    assert _sustained._datagen_released("ns", deployed_here=False) is False
+    assert _sustained._datagen_released("ns", deployed_here=True) is True
+
+
+def test_datagen_release_retries_an_unknown_state(monkeypatch):
+    """One API blip must not keep the reservation for the whole run."""
+    states = iter(["unknown", "finished"])
+    monkeypatch.setattr(_sustained, "_datagen_job_state", lambda ns: (next(states), "blip"))
+    monkeypatch.setattr(_sustained.time, "sleep", lambda s: None)
+    assert _sustained._datagen_released("ns", deployed_here=True) is True
