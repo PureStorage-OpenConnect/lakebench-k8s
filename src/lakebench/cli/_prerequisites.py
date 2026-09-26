@@ -38,11 +38,17 @@ class PrereqReport:
         return [c for c in self.checks if not c.passed]
 
 
-def run_prerequisites(cfg) -> PrereqReport:
+def run_prerequisites(
+    cfg, *, sustained: bool | None = None, datagen_runs: bool = True
+) -> PrereqReport:
     """Run all 9 prerequisite checks.
 
     Returns a PrereqReport with results for each check. Does not exit
     on failure -- the caller decides how to handle failures.
+
+    ``sustained`` overrides ``pipeline.mode`` for the capacity check (the
+    ``run --sustained`` flag does not write back to the config), and
+    ``datagen_runs=False`` (``--skip-generate``) leaves datagen out of it.
     """
     report = PrereqReport()
 
@@ -72,7 +78,9 @@ def run_prerequisites(cfg) -> PrereqReport:
     report.checks.append(_check_namespace(cfg))
 
     # 9. Cluster has capacity to schedule the pipeline
-    report.checks.append(_check_cluster_capacity(cfg))
+    report.checks.append(
+        _check_cluster_capacity(cfg, sustained=sustained, datagen_runs=datagen_runs)
+    )
 
     return report
 
@@ -338,7 +346,48 @@ def _check_namespace(cfg) -> PrereqResult:
         )
 
 
-def _check_cluster_capacity(cfg) -> PrereqResult:
+def _co_resident_request(
+    cfg, sustained: bool, *, datagen_runs: bool = True
+) -> tuple[int, int, str]:
+    """(cores, GB, label) held by pods that run beside the Spark jobs (LB-155).
+
+    The query engine, catalog and Postgres are always on. Datagen runs
+    concurrently with the streams in continuous mode unless the run skips
+    generation; in batch it finishes before the Spark jobs start, so it is
+    not counted there.
+    """
+    from lakebench.config.autosizer import (
+        _co_resident_cpu_m,
+        _parse_cpu_millicores,
+        _parse_memory_gi,
+    )
+
+    qe = cfg.architecture.query_engine
+    engine = qe.type.value
+    cpu_m = _co_resident_cpu_m(cfg)
+    mem_gi = 0.0
+    parts = ["catalog/Postgres"]
+    if engine == "trino":
+        mem_gi += _parse_memory_gi(qe.trino.coordinator.memory)
+        mem_gi += qe.trino.worker.replicas * _parse_memory_gi(qe.trino.worker.memory)
+        parts.insert(0, "Trino")
+    elif engine == "spark-thrift":
+        mem_gi += _parse_memory_gi(qe.spark_thrift.memory)
+        parts.insert(0, "Spark Thrift")
+    elif engine == "duckdb":
+        mem_gi += _parse_memory_gi(qe.duckdb.memory)
+        parts.insert(0, "DuckDB")
+    if sustained and datagen_runs:
+        dg = cfg.architecture.workload.datagen
+        cpu_m += dg.parallelism * _parse_cpu_millicores(dg.cpu)
+        mem_gi += dg.parallelism * _parse_memory_gi(dg.memory)
+        parts.append("datagen")
+    return -(-cpu_m // 1000), int(-(-mem_gi // 1)), ", ".join(parts)
+
+
+def _check_cluster_capacity(
+    cfg, *, sustained: bool | None = None, datagen_runs: bool = True
+) -> PrereqResult:
     """Check that the cluster can schedule the pipeline's peak request.
 
     Without this, an undersized cluster produces Pending pods and a job
@@ -359,6 +408,8 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
         scale = cfg.architecture.workload.datagen.scale
         raw_mode = cfg.architecture.pipeline.mode
         mode = getattr(raw_mode, "value", raw_mode)
+        if sustained is not None:
+            mode = "sustained" if sustained else "batch"
         raw_schema = getattr(cfg.architecture.workload, "schema_type", None)
         schema = getattr(raw_schema, "value", raw_schema)
         peak = compute_peak_requirements(scale, mode, schema)
@@ -382,14 +433,26 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
         node_cores = capacity.largest_node_cpu_millicores / 1000.0
         node_gb = capacity.largest_node_memory_bytes / gib
 
+        # The pipeline peak alone understates the request: the query engine,
+        # catalog/Postgres and (continuous) datagen hold their cores for the
+        # whole run (LB-155).
+        is_sustained = str(mode).lower() == "sustained"
+        co_cores, co_gb, co_label = _co_resident_request(
+            cfg, is_sustained, datagen_runs=datagen_runs
+        )
+        need_cores = peak.cpu_cores + co_cores
+        need_gb = peak.memory_gb + co_gb
+
         shortfalls = []
-        if peak.cpu_cores > avail_cores:
+        if need_cores > avail_cores:
             shortfalls.append(
-                f"CPU: need {peak.cpu_cores} cores, cluster has {avail_cores:.1f} allocatable"
+                f"CPU: need {need_cores} cores ({peak.cpu_cores} cores pipeline + "
+                f"{co_cores} {co_label}), cluster has {avail_cores:.1f} allocatable"
             )
-        if peak.memory_gb > avail_gb:
+        if need_gb > avail_gb:
             shortfalls.append(
-                f"Memory: need {peak.memory_gb} GB, cluster has {avail_gb:.1f} GB allocatable"
+                f"Memory: need {need_gb} GB ({peak.memory_gb} GB pipeline + "
+                f"{co_gb} GB {co_label}), cluster has {avail_gb:.1f} GB allocatable"
             )
         if peak.max_pod_cpu_cores > node_cores:
             shortfalls.append(
@@ -402,8 +465,8 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
             )
 
         summary = (
-            f"scale {scale} ({mode}) needs ~{peak.cpu_cores} cores / "
-            f"{peak.memory_gb} GB, driven by {peak.driving_job}"
+            f"scale {scale} ({mode}) needs ~{need_cores} cores / "
+            f"{need_gb} GB, driven by {peak.driving_job} plus {co_label}"
         )
 
         # Continuous mode: the run caps the streams to the cluster's concurrent
@@ -411,13 +474,15 @@ def _check_cluster_capacity(cfg) -> PrereqResult:
         # is fatal only if even the capped request does not fit. A pod that
         # fits no node stays fatal: capping counts does not shrink a pod.
         pod_fits = peak.max_pod_cpu_cores <= node_cores and peak.max_pod_memory_gb <= node_gb
-        if shortfalls and pod_fits and str(mode).lower() == "sustained":
+        if shortfalls and pod_fits and is_sustained:
             from lakebench.modules.pipeline_engines.spark.job import (
                 streaming_request_under_budget,
             )
 
             try:
-                capped = streaming_request_under_budget(cfg, capacity.total_cpu_millicores)
+                capped = streaming_request_under_budget(
+                    cfg, capacity.total_cpu_millicores, datagen_running=datagen_runs
+                )
             except Exception as e:  # fall through to the hard failure below
                 logger.debug("Capped continuous request unavailable: %s", e, exc_info=True)
                 capped = None

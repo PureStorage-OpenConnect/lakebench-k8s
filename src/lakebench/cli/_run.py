@@ -1318,7 +1318,19 @@ def run(
     if not skip_deploy:
         from lakebench.cli._prerequisites import run_prerequisites
 
-        prereq_report = run_prerequisites(cfg)
+        # The --sustained flag does not write back to the config, so the
+        # capacity check is told the mode the run will use (LB-155). Datagen
+        # is left out only where the run itself releases its cores: under
+        # --skip-generate with a finished lakebench-datagen Job (LB-158).
+        _use_sustained = bool(
+            sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
+        )
+        _datagen_runs = True
+        if _use_sustained and skip_generate:
+            from lakebench.cli._sustained import _datagen_job_state
+
+            _datagen_runs = _datagen_job_state(cfg.get_namespace())[0] != "finished"
+        prereq_report = run_prerequisites(cfg, sustained=_use_sustained, datagen_runs=_datagen_runs)
         for check in prereq_report.checks:
             icon = "[green]+[/green]" if check.passed else "[red]x[/red]"
             console.print(f"  {icon} {check.name}: {check.message}")
