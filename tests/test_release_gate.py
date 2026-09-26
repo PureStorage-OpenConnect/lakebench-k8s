@@ -152,6 +152,7 @@ def test_uat_results_check(tmp_path, monkeypatch):
     (run_dir / "metrics.json").write_text(json.dumps({"run_id": rid}))
     res = rg.check_uat_results()
     assert res.status == rg.PASS and "1 result rows, 1 run ids resolved" in res.detail
+    assert "1 resolved only outside uat/" in res.detail  # CI cannot see it
 
 
 def test_uat_results_run_ids_resolve_in_checked_in_or_named_paths(tmp_path, monkeypatch):
@@ -177,6 +178,7 @@ def test_uat_results_run_ids_resolve_in_checked_in_or_named_paths(tmp_path, monk
     path.write_text(f"# UAT results {version}\n\n{rows}")
     res = rg.check_uat_results()
     assert res.status == rg.PASS, res.detail
+    assert "outside uat/" not in res.detail  # all checked in or named in-repo
     path.write_text(f"# UAT results {version}\n\n{rows}| w | PASS | 20260926-101500-dddddd |\n")
     res = rg.check_uat_results()
     assert res.status == rg.FAIL and "1 of 4" in res.detail and "dddddd" in res.detail
@@ -184,7 +186,12 @@ def test_uat_results_run_ids_resolve_in_checked_in_or_named_paths(tmp_path, monk
     path.write_text(f"# UAT results {version}\n\nSuperseded 20260926-101500-dddddd.\n\n{rows}")
     assert rg.check_uat_results().status == rg.PASS
     # Typos are not skipped.
-    for bad in ("20260926-101500-ABC999", "20260926_101500_def456", "20260926-101500-abc1234"):
+    for bad in (
+        "20260926-101500-ABC999",
+        "20260926_101500_def456",
+        "20260926-101500-abc1234",
+        "120260926-101500-abc123",
+    ):
         path.write_text(f"# UAT results {version}\n\n{rows}| v | PASS | {bad} |\n")
         res = rg.check_uat_results()
         assert res.status == rg.FAIL and "malformed" in res.detail, bad
