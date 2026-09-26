@@ -7,6 +7,7 @@ Called by DeploymentEngine.destroy_all() -- not used directly.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from collections.abc import Callable
 from functools import partial
@@ -43,6 +44,30 @@ _IN_LEASE_DELETE_BACKOFF = (0.0, 2.0, 5.0)
 # Indirection so tests can drive the wait with a fake clock.
 _monotonic = time.monotonic
 _sleep = time.sleep
+
+
+# Engine errors meaning "this table (or its schema) is not there": a pipeline
+# that never wrote a table (deploy-only, generate-only, failed before gold, or
+# a re-run after the drop) is a clean teardown, not a failed one.
+_TABLE_MISSING_RE = re.compile(
+    r"TABLE_NOT_FOUND|TABLE_OR_VIEW_NOT_FOUND|SCHEMA_NOT_FOUND|NoSuchTableException"
+    r"|NoSuchNamespaceException|Table or view not found"
+    r"|\b(table|schema|namespace)\b[^\n]{0,200}?\bdoes not exist",
+    re.IGNORECASE,
+)
+_SCHEMA_MISSING_RE = re.compile(
+    r"SCHEMA_NOT_FOUND|NoSuchNamespaceException"
+    r"|\b(schema|namespace)\b[^\n]{0,200}?\bdoes not exist",
+    re.IGNORECASE,
+)
+
+
+def _is_table_missing(e: Exception) -> bool:
+    return bool(_TABLE_MISSING_RE.search(str(e)))
+
+
+def _is_schema_missing(e: Exception) -> bool:
+    return bool(_SCHEMA_MISSING_RE.search(str(e)))
 
 
 class _NamespaceReplaced(Exception):
@@ -1280,6 +1305,10 @@ def destroy_all(
                         try:
                             exec_sql(maint_engine, engine.k8s, pod_name, namespace, sql)
                         except Exception as e:
+                            if _is_table_missing(e):
+                                # Nothing to maintain; skip the rest for it.
+                                logger.info("%s not present, maintenance skipped", table)
+                                break
                             failed_sql.append(f"{sql.split()[0]} {table}: {e}")
                             logger.warning(
                                 "%s maintenance failed (table may not exist): %s",
@@ -1294,6 +1323,11 @@ def destroy_all(
                         try:
                             exec_sql(maint_engine, engine.k8s, pod_name, namespace, drop_sql)
                         except Exception as e:
+                            if _is_schema_missing(e):
+                                # DROP ... IF EXISTS still errors on some
+                                # engines when the schema itself is absent.
+                                logger.info("%s: schema not present, nothing to drop", table)
+                                continue
                             failed_sql.append(f"DROP {table}: {e}")
                             logger.warning("DROP TABLE failed for %s: %s", table, e)
                 if failed_sql:
@@ -1664,9 +1698,32 @@ def destroy_all(
                         )
                         # A re-run after a failed record update finds the
                         # buckets already gone; they still come off the record.
-                        to_forget = deleted_now + [
-                            b for b in gone_now if b in created_set and b not in deleted_now
-                        ]
+                        # A "gone" verdict can be stale (the ownership read
+                        # raced a listing lag): forget only on a confirmed 404
+                        # from head_bucket. A bucket that is really there stays
+                        # on the record and the namespace is kept, so a re-run
+                        # empties and deletes it.
+                        confirmed_gone: list[str] = []
+                        still_there: list[str] = []
+                        for b in gone_now:
+                            if b not in created_set or b in deleted_now:
+                                continue
+                            try:
+                                exists = s3.bucket_exists(b)
+                            except Exception as e:  # noqa: BLE001
+                                still_there.append(f"{b} (could not confirm: {e})")
+                                continue
+                            if exists:
+                                still_there.append(b)
+                            else:
+                                confirmed_gone.append(b)
+                        if still_there:
+                            bucket_notes.append(
+                                "reported absent but not confirmed gone, kept on the "
+                                "created record: " + ", ".join(still_there) + "; re-run destroy"
+                            )
+                            delete_failed = True
+                        to_forget = deleted_now + confirmed_gone
                         if to_forget and namespace_present:
                             # A namespace that outlives this destroy (kept,
                             # or create_namespace=false) must not keep
