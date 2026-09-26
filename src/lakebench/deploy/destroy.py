@@ -1394,6 +1394,9 @@ def destroy_all(
                 if not namespace_uid_at_start:
                     return
                 for attempt in (1, 2):
+                    # Only the last attempt's outcome counts: a first attempt
+                    # whose reply was lost can make the second see Terminating.
+                    in_lease.pop("error", None)
                     try:
                         in_lease["issued"] = bool(
                             engine.k8s.delete_namespace(namespace, uid=namespace_uid_at_start)

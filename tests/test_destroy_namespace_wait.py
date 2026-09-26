@@ -376,6 +376,23 @@ class TestDestroyAllWiring:
         assert ns.status is DeploymentStatus.FAILED
         assert "re-run destroy" in ns.message
 
+    def test_lost_reply_then_terminating_is_not_reported_as_kept(self):
+        cluster = FakeCluster(drain_polls=1)
+        real_delete = cluster.delete_namespace
+        n = {"i": 0}
+
+        def lost_reply(ns, uid=None):
+            n["i"] += 1
+            real_delete(ns, uid=uid)  # accepted by the API server...
+            if n["i"] == 1:
+                raise K8sResourceError("timeout")  # ...but the reply is lost
+
+        cluster.delete_namespace = lost_reply
+        results, _, _, _ = self._run_destroy(cluster)
+        ns = [r for r in results if r.component == "namespace"][-1]
+        assert ns.status is DeploymentStatus.SUCCESS
+        assert "NOT deleted" not in ns.message
+
     def test_in_lease_delete_finding_terminating_waits(self):
         cluster = FakeCluster(phase="Terminating", drain_polls=1)
         results, _, calls, _ = self._run_destroy(cluster)
