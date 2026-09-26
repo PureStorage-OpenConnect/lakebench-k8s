@@ -1381,4 +1381,6 @@ def test_live_streams_run_cannot_be_a_baseline(env, capsys):
     cli = _load_script("perf_gate")
     base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
     assert cli.main([*base, "seed", "--write"]) == 0
-    assert "skipping 20260924-100000-aaaaaa (streams were live" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "skipping 20260924-100000-aaaaaa (streams were live" in out
+    assert "not usable" not in out, "skipped, never attempted"
