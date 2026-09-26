@@ -37,6 +37,36 @@ def one_line(text, limit=200):
     return " ".join(str(text).split())[:limit]
 
 
+# Iceberg metadata retention, set at creation on every Iceberg table lakebench
+# creates. Each commit writes a new metadata.json; expire_snapshots prunes
+# snapshots but never deletes old metadata.json files, and Iceberg keeps them
+# all unless delete-after-commit is on. A continuous run commits every
+# micro-batch on several tables, so without this the metadata objects grow
+# linearly for the whole run. With it, each commit deletes metadata files
+# beyond the newest ICEBERG_PREVIOUS_VERSIONS_MAX (Iceberg's default is 100);
+# 50 keeps about 25 min of history at a 30 s trigger, which only the
+# metadata_log_entries diagnostic table reads. Snapshots, time travel,
+# streaming offsets and replay dedup live in the current metadata.json and
+# are unaffected; data files are never touched by this setting.
+# Tables that already exist keep their properties (CREATE TABLE IF NOT EXISTS
+# is a no-op), so this applies to fresh deployments and to tables a run
+# recreates (createOrReplace, continuous reset).
+ICEBERG_PREVIOUS_VERSIONS_MAX = 50
+METADATA_DELETE_AFTER_COMMIT = ("write.metadata.delete-after-commit.enabled", "true")
+METADATA_PREVIOUS_VERSIONS_MAX = (
+    "write.metadata.previous-versions-max",
+    str(ICEBERG_PREVIOUS_VERSIONS_MAX),
+)
+ICEBERG_METADATA_PROPS_SQL = ", ".join(
+    f"'{k}' = '{v}'" for k, v in (METADATA_DELETE_AFTER_COMMIT, METADATA_PREVIOUS_VERSIONS_MAX)
+)
+# The TBLPROPERTIES body shared by the financial DDL (v2, snappy, retention).
+ICEBERG_V2_SNAPPY_PROPS_SQL = (
+    "'format-version' = '2', 'write.parquet.compression-codec' = 'snappy', "
+    + ICEBERG_METADATA_PROPS_SQL
+)
+
+
 def table_exists(spark, table_name):
     """True if a catalog table exists, False only if it definitely does not.
 

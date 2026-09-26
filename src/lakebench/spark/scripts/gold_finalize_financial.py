@@ -32,6 +32,7 @@ import time
 import uuid
 
 from common import (
+    ICEBERG_V2_SNAPPY_PROPS_SQL,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
     env,
@@ -120,7 +121,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_ALERTS} (
     evidence           MAP<STRING, STRING>,
     detected_ts        TIMESTAMP
 ) USING iceberg PARTITIONED BY (months(alert_ts))
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_RISK = f"""
@@ -134,7 +135,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_RISK} (
     computed_ts            TIMESTAMP NOT NULL,
     run_id                 STRING NOT NULL
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_CLUSTERS = f"""
@@ -149,7 +150,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_CLUSTERS} (
     suspicion_score       DOUBLE,
     cluster_type          STRING
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_STATUS = f"""
@@ -162,7 +163,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_STATUS} (
     run_id           STRING NOT NULL,
     computed_ts      TIMESTAMP NOT NULL
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 # LB-119: durable, data-plane record of what each detection rule did this
 # run -- 'ran' (with alert_count), 'skipped' (with reason, e.g. vertex-cap),
@@ -189,7 +190,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{GOLD_DASH} (
     computed_ts           TIMESTAMP NOT NULL,
     run_id                STRING NOT NULL
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 

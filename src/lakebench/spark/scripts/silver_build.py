@@ -16,6 +16,8 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from common import (
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
     apply_silver_transformations_anchored,
     env,
     log,
@@ -319,6 +321,8 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
             silver_df.writeTo(silver_tbl)
             .tableProperty("write.format.default", "parquet")
             .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
             .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
             .tableProperty("write.distribution-mode", "hash")
             .partitionedBy("interaction_date")
@@ -373,6 +377,8 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
             silver_df.writeTo(silver_tbl)
             .tableProperty("write.format.default", "parquet")
             .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
             .tableProperty("write.target-file-size-bytes", "134217728")  # 128MB target
             .tableProperty("write.distribution-mode", dist_mode)
             .partitionedBy("interaction_date")

@@ -46,6 +46,8 @@ from __future__ import annotations
 import time
 
 from common import (
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
     apply_silver_transformations_anchored,
     await_stream,
     configured_data_clock,
@@ -110,6 +112,8 @@ def write_silver_batch(
                 .partitionedBy("interaction_date")
                 .tableProperty("write.format.default", "parquet")
                 .tableProperty("write.parquet.compression-codec", "snappy")
+                .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+                .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
                 .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
                 .create()
             )

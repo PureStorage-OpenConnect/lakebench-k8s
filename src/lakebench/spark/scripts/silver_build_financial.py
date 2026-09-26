@@ -23,6 +23,7 @@ from __future__ import annotations
 import time
 
 from common import (
+    ICEBERG_V2_SNAPPY_PROPS_SQL,
     ensure_column,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
@@ -186,7 +187,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
     _batch_id               BIGINT,
     ingest_ts               TIMESTAMP
 ) USING iceberg PARTITIONED BY (months(txn_timestamp))
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 # `_batch_id` supports the silver_stream two-phase batchId idempotency
 # protocol (LB-109). Batch-mode writes leave it NULL; streaming writes
@@ -219,7 +220,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_ENTITIES} (
     crr_tier            STRING,
     crr_factors         STRING
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_ACCOUNTS = f"""
@@ -235,7 +236,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_ACCOUNTS} (
     home_fi            STRING,
     is_customer        BOOLEAN
 ) USING iceberg
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 # current_balance is DECIMAL(38, 2) (not 18, 2) to match bal_after in
 # silver.account_statements. Storing the running-balance roll-up in a narrower
@@ -259,7 +260,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_STATEMENTS} (
     uetr           STRING NOT NULL,
     bk_tx_cd       STRING NOT NULL      -- ISO 20022 bank txn code, e.g. PMNT-ICDT
 ) USING iceberg PARTITIONED BY (months(book_ts))
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 DDL_EDGES = f"""
@@ -272,7 +273,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_EDGES} (
     txn_count              BIGINT NOT NULL,
     _batch_id              BIGINT
 ) USING iceberg PARTITIONED BY (bucket(64, source_entity_id))
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 # C-PROFILES (LB-130): per-entity behavioural baseline. Kept in lock-step with
@@ -297,7 +298,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_PROFILES} (
     profile_updated_ts          TIMESTAMP,
     _batch_id                   BIGINT
 ) USING iceberg PARTITIONED BY (bucket(64, entity_id))
-TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 # `_batch_id` is reserved for the continuous profile-maintenance path (not yet
 # built -- silver_stream does not refresh profiles today; C-PROFILES continuous
