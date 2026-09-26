@@ -102,16 +102,27 @@ def _parse_threshold_seconds(retention_threshold: str) -> int:
 
     Supports ``s`` (seconds), ``m`` (minutes), ``h`` (hours), ``d`` (days).
     """
-    threshold = retention_threshold.strip()
-    unit = threshold[-1]
-    value = int(threshold[:-1])
+    import re
+
+    m = re.fullmatch(r"\s*(\d+)\s*([smhdSMHD])\s*", retention_threshold or "")
+    if not m:
+        # Never guess: an unknown unit used to read as minutes ("7D" -> 7 min).
+        raise ValueError(
+            f"retention threshold {retention_threshold!r} is not a whole number and one "
+            "unit (s, m, h, d)"
+        )
     multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    return value * multipliers.get(unit, 60)
+    return int(m.group(1)) * multipliers[m.group(2).lower()]
 
 
-# Iceberg (Spark) refuses remove_orphan_files with an interval under 24 h:
-# orphan removal racing a writer can delete files a commit is about to use.
-ORPHAN_MIN_RETENTION_SECONDS = 24 * 3600
+# Orphan removal never runs below 24 h plus a 10 min margin, on any engine or
+# path: racing a writer it deletes files a commit is about to use (Iceberg's
+# Spark procedure refuses under 24 h for that reason), and stream apps with
+# restartPolicy Always can be writing even when a run believes none are.
+ORPHAN_MIN_RETENTION_SECONDS = 24 * 3600 + 600
+# Floor for expire_snapshots while streams are live, so a stream's reader is
+# never left without the snapshot it is positioned on.
+LIVE_EXPIRE_MIN_RETENTION_SECONDS = 3600
 
 
 def _format_duration(seconds: int) -> str:
@@ -140,9 +151,8 @@ def build_maintenance_sql(
 ) -> list[str]:
     """Build expire_snapshots + remove_orphan_files SQL for the given engine.
 
-    ``orphan_retention`` defaults to ``retention_threshold``; callers raise
-    it to 24 h where Iceberg or concurrency requires (see
-    ``ORPHAN_MIN_RETENTION_SECONDS``).
+    ``orphan_retention`` defaults to ``retention_threshold`` and is never
+    below ``ORPHAN_MIN_RETENTION_SECONDS`` (24 h + 10 min).
 
     Trino: ``ALTER TABLE ... EXECUTE`` with a duration, prefixed in the same
     submission by ``SET SESSION <catalog>.<proc>_min_retention`` equal to the
@@ -158,7 +168,11 @@ def build_maintenance_sql(
     after binding" (live, 2026-09-26).
     """
     expire_s = _parse_threshold_seconds(retention_threshold)
-    orphan_s = _parse_threshold_seconds(orphan_retention or retention_threshold)
+    # The orphan floor is enforced here, whatever the caller passes.
+    orphan_s = max(
+        _parse_threshold_seconds(orphan_retention or retention_threshold),
+        ORPHAN_MIN_RETENTION_SECONDS,
+    )
     if engine == "trino":
         expire_d = _format_duration(expire_s)
         orphan_d = _format_duration(orphan_s)

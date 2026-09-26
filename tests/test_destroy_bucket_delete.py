@@ -237,6 +237,7 @@ class TestDestroyAllBuckets:
         maint=None,
         forget_error=None,
         table_format=None,
+        delete_buckets=True,
     ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
@@ -321,7 +322,12 @@ class TestDestroyAllBuckets:
                 "items": [{"metadata": {"name": "spark-job"}}]
             }
             self.custom = custom
-            results = destroy_mod.destroy_all(engine, clean_buckets=True, force_legacy=force_legacy)
+            results = destroy_mod.destroy_all(
+                engine,
+                clean_buckets=True,
+                force_legacy=force_legacy,
+                delete_buckets=delete_buckets,
+            )
             self.forget = forget
         self._results = results
         buckets_results = [r for r in results if r.component == "s3-buckets"]
@@ -842,3 +848,23 @@ class TestDestroyAllBuckets:
         assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
         assert tables.status is DeploymentStatus.SUCCESS
         assert "maintenance skipped" in tables.message
+
+    def test_table_message_says_what_happens_to_the_buckets(self):
+        """--keep-buckets empties and keeps them; default empties and deletes."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            maint=("trino", "trino-coordinator-0", "lakehouse"),
+        )
+        msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
+        assert "emptied and deleted next" in msg
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            maint=("trino", "trino-coordinator-0", "lakehouse"),
+            delete_buckets=False,
+        )
+        msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
+        assert "emptied next and kept" in msg

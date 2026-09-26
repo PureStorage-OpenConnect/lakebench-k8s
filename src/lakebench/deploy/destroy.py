@@ -1387,9 +1387,15 @@ def destroy_all(
                     )
                 else:
                     table_status = DeploymentStatus.SUCCESS
+                    if not clean_buckets:
+                        after = "bucket cleanup is off, so the tables' files remain in the buckets"
+                    elif delete_buckets and engine.config.platform.storage.s3.create_buckets:
+                        after = "buckets are emptied and deleted next"
+                    else:
+                        after = "buckets are emptied next and kept"
                     table_msg = (
                         f"{table_format.title()} tables dropped (via {maint_engine}); table "
-                        "maintenance skipped (buckets are emptied next)"
+                        f"maintenance skipped ({after})"
                     )
                 results.append(
                     DeploymentResult(

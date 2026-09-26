@@ -1027,18 +1027,23 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
     for metric in sorted(set(actual) - set(baseline.metrics) - set(excluded)):
         _band, direction = _classify_direction(metric)
         result.rows.append(Row(metric, None, actual[metric], None, direction, "-", "new"))
+    stopped = run.scores.get("maintenance_stopped") is True
+    if stopped:
+        # Always said, whatever the verdict: post-maintenance QpH was left out.
+        result.reasons.append(
+            "pre-benchmark maintenance stopped before completion ("
+            + (run.scores.get("maintenance_stop_reason") or "unknown")
+            + "); post-maintenance QpH is not a measurement and was not gated"
+        )
     if regressed:
         result.verdict = REGRESSION
-    elif run.scores.get("maintenance_stopped") is True and not any(
+    elif stopped and not any(
         _is_qph_metric(r.metric) and not r.status.startswith("excluded") and r.status != "new"
         for r in result.rows
     ):
         result.verdict = NOT_COMPARABLE
         result.reasons.append(
-            "pre-benchmark maintenance stopped before completion ("
-            + (run.scores.get("maintenance_stop_reason") or "unknown")
-            + "), so post-maintenance QpH is not a measurement and no QpH metric was left "
-            "to gate; the cause of the stop may itself be a regression"
+            "no QpH metric was left to gate; the cause of the stop may itself be a regression"
         )
     return result
 
