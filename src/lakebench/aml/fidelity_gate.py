@@ -632,6 +632,9 @@ def evaluate_gate(
         "gate": "aml-fidelity",
         "prereg_version": prereg.get("version"),
         "prereg_sha256": prereg_sha256,
+        # This module's bytes: D8 refuses to compare runs scored by different
+        # gate code (a reference-model change would read as scale variance).
+        "gate_code_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "metric": prereg["metric"],
         "unit": unit_window(prereg),
         "provenance": dict(provenance or {}),
