@@ -4,13 +4,16 @@ Provides engine-aware ``expire_snapshots`` and ``remove_orphan_files``
 operations that work with Trino or Spark Thrift Server.  DuckDB is
 read-only and cannot run Iceberg maintenance.
 
-Used by both the sustained-mode monitoring loop (cli.py) and the
-destroy path (engine.py).
+Used by the continuous monitoring loop and the pre-benchmark batch
+maintenance (cli/_sustained.py). Destroy only drops the tables: its buckets
+are emptied and deleted right after, so snapshot and orphan maintenance
+there would only cost time.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -99,11 +102,43 @@ def _parse_threshold_seconds(retention_threshold: str) -> int:
 
     Supports ``s`` (seconds), ``m`` (minutes), ``h`` (hours), ``d`` (days).
     """
-    threshold = retention_threshold.strip()
-    unit = threshold[-1]
-    value = int(threshold[:-1])
+    import re
+
+    m = re.fullmatch(r"\s*(\d+)\s*([smhdSMHD])\s*", retention_threshold or "")
+    if not m:
+        # Never guess: an unknown unit used to read as minutes ("7D" -> 7 min).
+        raise ValueError(
+            f"retention threshold {retention_threshold!r} is not a whole number and one "
+            "unit (s, m, h, d)"
+        )
     multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    return value * multipliers.get(unit, 60)
+    return int(m.group(1)) * multipliers[m.group(2).lower()]
+
+
+# Orphan removal never runs below 24 h plus a 10 min margin, on any engine or
+# path: racing a writer it deletes files a commit is about to use (Iceberg's
+# Spark procedure refuses under 24 h for that reason), and stream apps with
+# restartPolicy Always can be writing even when a run believes none are.
+ORPHAN_MIN_RETENTION_SECONDS = 24 * 3600 + 600
+# Floor for expire_snapshots while streams are live, so a stream's reader is
+# never left without the snapshot it is positioned on.
+LIVE_EXPIRE_MIN_RETENTION_SECONDS = 3600
+
+
+def _format_duration(seconds: int) -> str:
+    """Seconds as a whole Trino duration in hours, minutes or seconds ("0s", "30m", "24h")."""
+    for unit, size in (("h", 3600), ("m", 60)):
+        if seconds and seconds % size == 0:
+            return f"{seconds // size}{unit}"
+    return f"{seconds}s"
+
+
+def _spark_timestamp(seconds_ago: int, now: datetime | None = None) -> str:
+    """A Spark TIMESTAMP literal *seconds_ago* before now, with an explicit
+    +00:00 offset so it does not depend on the Thrift session time zone."""
+    now = now or datetime.now(timezone.utc)
+    ts = (now - timedelta(seconds=seconds_ago)).astimezone(timezone.utc)
+    return f"TIMESTAMP '{ts.strftime('%Y-%m-%d %H:%M:%S')}+00:00'"
 
 
 def build_maintenance_sql(
@@ -111,34 +146,57 @@ def build_maintenance_sql(
     catalog: str,
     table: str,
     retention_threshold: str,
+    orphan_retention: str | None = None,
+    now: datetime | None = None,
 ) -> list[str]:
     """Build expire_snapshots + remove_orphan_files SQL for the given engine.
 
-    Trino uses ``ALTER TABLE ... EXECUTE`` with a duration string.
-    Spark uses ``CALL catalog.system.procedure()`` with a timestamp.
+    ``orphan_retention`` defaults to ``retention_threshold`` and is never
+    below ``ORPHAN_MIN_RETENTION_SECONDS`` (24 h + 10 min).
+
+    Trino: ``ALTER TABLE ... EXECUTE`` with a duration, prefixed in the same
+    submission by ``SET SESSION <catalog>.<proc>_min_retention`` equal to the
+    requested threshold. Without it Trino refuses anything under its 7-day
+    system minimum ("Retention specified (30.00m) is shorter than the
+    minimum retention configured in the system (7.00d)"), verified live
+    2026-09-26; the SET only lasts for its own CLI process, hence one
+    submission (a single ``trino --execute "SET SESSION ...; ALTER TABLE
+    ..."`` succeeded live for both procedures, 2026-09-26). Spark:
+    ``CALL <catalog>.system.<proc>`` with a TIMESTAMP literal computed here
+    in UTC with an explicit ``+00:00`` offset; the old ``CAST((UNIX_TIMESTAMP() - N) *
+    1000 AS BIGINT)`` always failed "number of args and params must match
+    after binding" (live, 2026-09-26).
     """
+    expire_s = _parse_threshold_seconds(retention_threshold)
+    # The orphan floor is enforced here, whatever the caller passes.
+    orphan_s = max(
+        _parse_threshold_seconds(orphan_retention or retention_threshold),
+        ORPHAN_MIN_RETENTION_SECONDS,
+    )
     if engine == "trino":
+        expire_d = _format_duration(expire_s)
+        orphan_d = _format_duration(orphan_s)
         return [
             (
+                f"SET SESSION {catalog}.expire_snapshots_min_retention = '{expire_d}'; "
                 f"ALTER TABLE {table} EXECUTE "
-                f"expire_snapshots(retention_threshold => '{retention_threshold}')"
+                f"expire_snapshots(retention_threshold => '{expire_d}')"
             ),
             (
+                f"SET SESSION {catalog}.remove_orphan_files_min_retention = '{orphan_d}'; "
                 f"ALTER TABLE {table} EXECUTE "
-                f"remove_orphan_files(retention_threshold => '{retention_threshold}')"
+                f"remove_orphan_files(retention_threshold => '{orphan_d}')"
             ),
         ]
     if engine == "spark-thrift":
-        seconds = _parse_threshold_seconds(retention_threshold)
-        ts_expr = f"CAST((UNIX_TIMESTAMP() - {seconds}) * 1000 AS BIGINT)"
         return [
             (
                 f"CALL {catalog}.system.expire_snapshots"
-                f"(table => '{table}', older_than => {ts_expr})"
+                f"(table => '{table}', older_than => {_spark_timestamp(expire_s, now)})"
             ),
             (
                 f"CALL {catalog}.system.remove_orphan_files"
-                f"(table => '{table}', older_than => {ts_expr})"
+                f"(table => '{table}', older_than => {_spark_timestamp(orphan_s, now)})"
             ),
         ]
     return []

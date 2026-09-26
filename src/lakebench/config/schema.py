@@ -796,9 +796,24 @@ class SustainedConfig(ConfigModel):
         default="30m",
         description=(
             "Iceberg snapshot retention threshold passed to Trino "
-            "(e.g. '30m', '1h', '7d'). Snapshots older than this are expired."
+            "(e.g. '30m', '1h', '7d'). Snapshots older than this are expired. "
+            "A whole number and one unit: s, m, h or d."
         ),
     )
+
+    @field_validator("retention_threshold")
+    @classmethod
+    def _validate_retention_threshold(cls, v: str) -> str:
+        # The maintenance parser used to guess: an unknown unit read as
+        # minutes ("7D" -> 7 min) and "1.5h" / "30min" raised mid-run.
+        import re as _re
+
+        if not isinstance(v, str) or not _re.fullmatch(r"\s*\d+\s*[smhdSMHD]\s*", v):
+            raise ValueError(
+                f"retention_threshold {v!r} is not a duration: use a whole number and one "
+                "unit, s, m, h or d (for example '30m', '1h', '7d')"
+            )
+        return "".join(v.split()).lower()
 
     # Iceberg compaction -- periodic rewrite_data_files / optimize to
     # merge small files produced by streaming micro-batches.  Heavier

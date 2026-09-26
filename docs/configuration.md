@@ -521,7 +521,7 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.sustained.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
 | `architecture.pipeline.sustained.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |
 | `architecture.pipeline.sustained.retention_interval` | int | `1800` | Seconds between Iceberg maintenance rounds (`expire_snapshots` + `remove_orphan_files`). Range: 300--7200. |
-| `architecture.pipeline.sustained.retention_threshold` | string | `30m` | Iceberg snapshot retention threshold. Snapshots older than this are expired. Uses Trino duration format (e.g., `30m`, `1h`, `7d`). |
+| `architecture.pipeline.sustained.retention_threshold` | string | `30m` | Iceberg snapshot retention threshold. Snapshots older than this are expired. A whole number and one unit, `s`, `m`, `h` or `d` (e.g., `30m`, `1h`, `7d`); anything else is rejected at load. While streams are live, expiry is floored at `1h`. Orphan-file removal never uses less than 24 h 10 min, on any engine. |
 | `architecture.pipeline.sustained.compaction_enabled` | bool | `true` | Run periodic Iceberg compaction (`rewrite_data_files` / `optimize`) during sustained runs. |
 | `architecture.pipeline.sustained.compaction_interval` | int | `0` | Seconds between compaction rounds. `0` = 2x `retention_interval` (default: 3600s). Range: 0--14400. |
 

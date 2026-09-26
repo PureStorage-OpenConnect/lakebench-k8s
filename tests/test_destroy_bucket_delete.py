@@ -236,6 +236,8 @@ class TestDestroyAllBuckets:
         nonce=None,
         maint=None,
         forget_error=None,
+        table_format=None,
+        delete_buckets=True,
     ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
@@ -259,6 +261,8 @@ class TestDestroyAllBuckets:
         engine.k8s.get_namespace_uid.side_effect = uid or (lambda _ns: "uid-1")
         engine.k8s.get_namespace_annotation.side_effect = nonce or (lambda _ns, _k: "n-1")
         cfg.architecture.tables.workload_tables.return_value = ["silver.t", "gold.t"]
+        if table_format:
+            cfg.architecture.table_format.type.value = table_format
         self.engine = engine
         # Default: deploy recorded all three as created (LB-159 marker).
         created_record = set(verdicts) if created is None else set(created)
@@ -318,7 +322,12 @@ class TestDestroyAllBuckets:
                 "items": [{"metadata": {"name": "spark-job"}}]
             }
             self.custom = custom
-            results = destroy_mod.destroy_all(engine, clean_buckets=True, force_legacy=force_legacy)
+            results = destroy_mod.destroy_all(
+                engine,
+                clean_buckets=True,
+                force_legacy=force_legacy,
+                delete_buckets=delete_buckets,
+            )
             self.forget = forget
         self._results = results
         buckets_results = [r for r in results if r.component == "s3-buckets"]
@@ -585,8 +594,8 @@ class TestDestroyAllBuckets:
         assert r.status is DeploymentStatus.FAILED
         assert "NOT completed" in r.message
 
-    def test_redeploy_during_table_maintenance_stops_before_the_next_statement(self):
-        """Maintenance at 0s retention and DROP TABLE must not run against R."""
+    def test_redeploy_during_table_cleanup_stops_before_the_next_drop(self):
+        """DROP TABLE must not run against R."""
         boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
         state = {"uid": "uid-1"}
         ran: list[str] = []
@@ -605,7 +614,7 @@ class TestDestroyAllBuckets:
             )
         finally:
             self._on_sql = None
-        assert ran == ["EXPIRE lakehouse.silver.t"]
+        assert ran == ["DROP lakehouse.silver.t"]
         assert boto.buckets["a-bronze"] == ["r/new"]
         assert r.status is DeploymentStatus.FAILED
 
@@ -766,7 +775,7 @@ class TestDestroyAllBuckets:
 
     # -- full review of f9dfda6: bound the table step ------------------------
 
-    def _run_tables(self, on_sql, boto=None):
+    def _run_tables(self, on_sql, boto=None, table_format=None):
         boto = boto or FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
         self._on_sql = on_sql
         try:
@@ -774,6 +783,7 @@ class TestDestroyAllBuckets:
                 boto,
                 dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
                 maint=("trino", "trino-coordinator-0", "lakehouse"),
+                table_format=table_format,
             )
         finally:
             self._on_sql = None
@@ -789,40 +799,72 @@ class TestDestroyAllBuckets:
             raise ExecSqlTimeout("exec_sql timed out after 600s (may still be running)")
 
         tables = self._run_tables(hang)
-        assert ran == ["EXPIRE lakehouse.silver.t"]
+        assert ran == ["DROP lakehouse.silver.t"]
         assert tables.status is DeploymentStatus.FAILED
-        assert "not attempted" in tables.message and "5 statement(s)" in tables.message
+        assert "not attempted" in tables.message and "1 statement(s)" in tables.message
 
     def test_table_step_has_an_overall_cap(self, monkeypatch):
         clock = {"t": 0.0}
 
         def tick():
-            clock["t"] += 700.0  # each statement "takes" 700 s
+            clock["t"] += 1000.0  # each statement "takes" 1000 s
             return clock["t"]
 
         monkeypatch.setattr(destroy_mod, "_monotonic", tick)
         ran: list[str] = []
         tables = self._run_tables(ran.append)
-        assert 0 < len(ran) < 6
+        assert ran == ["DROP lakehouse.silver.t"]
         assert tables.status is DeploymentStatus.FAILED
         assert "cap" in tables.message
 
-    def test_combined_statement_is_labelled_by_vacuum_and_skips_are_not_listed(self):
-        from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
-
+    def test_combined_statement_is_labelled_by_its_operative_statement(self):
         assert destroy_mod._operative_sql("SET SESSION x = '0s'; CALL c.system.vacuum()") == "CALL"
         assert destroy_mod._operative_sql("SET a=b; VACUUM t RETAIN 0 HOURS") == "VACUUM"
+        assert destroy_mod._operative_sql("DROP TABLE IF EXISTS t") == "DROP"
 
-        def run(sql):
-            if "silver" in sql:
+    def test_iceberg_destroy_skips_snapshot_and_orphan_maintenance(self):
+        """The buckets are emptied and deleted right after; only DROP runs."""
+        ran: list[str] = []
+        tables = self._run_tables(ran.append, table_format="iceberg")
+        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert tables.status is DeploymentStatus.SUCCESS
+        assert "maintenance skipped" in tables.message
+
+    def test_delta_destroy_missing_table_is_a_clean_teardown(self):
+        def missing(sql):
+            if "'gold'" in sql:
                 raise RuntimeError(
-                    "exec_sql failed (rc=1): Query 1 failed: Table 'lakehouse.silver.t' "
-                    "does not exist"
+                    "exec_sql failed (rc=1): Query 20260926_101010_00001_abcde failed: "
+                    "line 1:7: Table 'lakehouse.gold.t' does not exist"
                 )
-            raise ExecSqlTimeout("timed out")
 
-        tables = self._run_tables(run)
-        # silver maintenance skipped (missing), gold EXPIRE timed out; the
-        # remaining are gold ORPHANS and the two drops, not silver's ORPHANS.
-        assert "3 statement(s) not attempted" in tables.message
-        assert "ORPHANS lakehouse.silver.t" not in tables.message.split("not attempted")[1]
+        tables = self._run_tables(missing, table_format="delta")
+        assert tables.status is DeploymentStatus.SUCCESS, tables.message
+
+    def test_delta_destroy_skips_vacuum_and_only_drops(self):
+        """Policy 2026-09-26: the buckets are emptied and deleted right after."""
+        ran: list[str] = []
+        tables = self._run_tables(ran.append, table_format="delta")
+        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert tables.status is DeploymentStatus.SUCCESS
+        assert "maintenance skipped" in tables.message
+
+    def test_table_message_says_what_happens_to_the_buckets(self):
+        """--keep-buckets empties and keeps them; default empties and deletes."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            maint=("trino", "trino-coordinator-0", "lakehouse"),
+        )
+        msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
+        assert "emptied and deleted next" in msg
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            maint=("trino", "trino-coordinator-0", "lakehouse"),
+            delete_buckets=False,
+        )
+        msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
+        assert "emptied next and kept" in msg

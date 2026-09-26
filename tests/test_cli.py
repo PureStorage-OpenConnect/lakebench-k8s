@@ -552,11 +552,14 @@ class TestRunIcebergMaintenance:
 
         # 3 tables * 2 operations = 6 exec_in_pod calls
         assert k8s.exec_in_pod.call_count == 6
-        # Verify Trino SQL contains retention_threshold
+        # Expire at the threshold; orphan removal never below 24 h + 10 min.
         for call in k8s.exec_in_pod.call_args_list:
             cmd = call[0][1]
             assert cmd[0] == "trino"
-            assert "30m" in cmd[2]
+            if "expire_snapshots" in cmd[2]:
+                assert "retention_threshold => '30m'" in cmd[2]
+            else:
+                assert "retention_threshold => '1450m'" in cmd[2]
 
     def test_runs_maintenance_on_all_tables_spark_thrift(self):
         """Runs expire_snapshots + remove_orphan_files via Spark Thrift beeline."""
