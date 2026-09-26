@@ -674,7 +674,7 @@ class TestDestroyAllBuckets:
 
         def fail_drop(sql):
             if sql.startswith("DROP"):
-                raise RuntimeError("TABLE_NOT_FOUND")
+                raise RuntimeError("Query failed: coordinator connection reset")
 
         self._on_sql = fail_drop
         try:
@@ -689,3 +689,43 @@ class TestDestroyAllBuckets:
         assert tables.status is DeploymentStatus.FAILED
         assert "2 failed statement" in tables.message
         assert boto.buckets == {}, "later steps still run"
+
+    # -- final review -------------------------------------------------------
+
+    def test_partial_deployment_with_missing_tables_is_a_clean_teardown(self):
+        """Deploy-only or failed-before-gold: the tables were never written."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+
+        def missing(sql):
+            if "gold" in sql and sql.startswith("DROP"):
+                raise RuntimeError("Query failed: Schema 'gold' does not exist")
+            if "gold" in sql:
+                raise RuntimeError("Query failed: TABLE_NOT_FOUND: Table 'gold.t' does not exist")
+
+        self._on_sql = missing
+        try:
+            self._run(
+                boto,
+                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+                maint=("trino", "trino-coordinator-0", "lakehouse"),
+            )
+        finally:
+            self._on_sql = None
+        tables = [x for x in self._results if x.component == "table-cleanup"][-1]
+        assert tables.status is DeploymentStatus.SUCCESS, tables.message
+
+    def test_stale_absent_verdict_is_not_forgotten(self):
+        """The tag read said NoSuchBucket but the bucket is there: keep it on
+        the record (and the namespace) so a re-run deletes it."""
+        boto = FakeBoto({"a-bronze": ["x"], "a-gold": []})
+        r = self._run(
+            boto,
+            {"a-bronze": "NOT_FOUND", "a-silver": "NOT_FOUND", "a-gold": "MATCH"},
+            created={"a-bronze", "a-silver", "a-gold"},
+            create_namespace=True,
+        )
+        assert sorted(self.forget.call_args.args[2]) == ["a-gold", "a-silver"]
+        assert "a-bronze" in boto.buckets
+        assert r.status is DeploymentStatus.FAILED
+        assert "not confirmed gone" in r.message
+        self.engine.k8s.delete_namespace.assert_not_called()
