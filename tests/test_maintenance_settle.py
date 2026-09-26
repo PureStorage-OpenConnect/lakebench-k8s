@@ -483,3 +483,24 @@ def test_headline_qph_is_flagged_when_maintenance_stopped():
     for html in (rg._generate_batch_summary(pm), rg._generate_qph_card(pm)):
         assert "qph-stop-warning" in html
         assert "maintenance stopped before completion" in html
+
+
+def test_live_streams_are_persisted_and_flagged_in_the_report(tmp_path):
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.reports.generator import ReportGenerator
+
+    pm, pb = _pb_with_settle(None)
+    pb.maintenance_live_streams = True
+    pb.maintenance_live_streams_reason = (
+        "stream apps present or unreadable: lakebench-silver-stream"
+    )
+    path = MetricsStorage(tmp_path).save_run(pm)
+    scores = json.loads(path.read_text())["pipeline_benchmark"]["scores"]
+    assert scores["maintenance_live_streams"] is True
+    loaded = MetricsStorage(tmp_path).load_run(pm.run_id)
+    assert loaded.pipeline_benchmark.maintenance_live_streams is True
+    rg = ReportGenerator(metrics_dir="/tmp/unused-rg")
+    section = rg._generate_maintenance_section(loaded)
+    assert "Streams during maintenance" in section and "writers active" in section
+    for html in (rg._generate_batch_summary(loaded), rg._generate_qph_card(loaded)):
+        assert "qph-stop-warning" in html and "streams were live" in html

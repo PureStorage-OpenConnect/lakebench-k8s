@@ -640,7 +640,10 @@ def test_live_stream_apps_detects_present_apps_and_fails_safe():
 
     from lakebench.cli._sustained import _STREAM_APPS, _live_stream_apps
 
-    def get(_g, _v, _ns, _p, name):
+    timeouts = []
+
+    def get(_g, _v, _ns, _p, name, _request_timeout=None):
+        timeouts.append(_request_timeout)
         if name == "lakebench-silver-stream":
             return {"metadata": {"name": name}}
         if name == "lakebench-gold-refresh":
@@ -649,9 +652,26 @@ def test_live_stream_apps_detects_present_apps_and_fails_safe():
 
     with patch("kubernetes.client.CustomObjectsApi") as api:
         api.return_value.get_namespaced_custom_object.side_effect = get
-        live = _live_stream_apps("ns")
+        live, errors = _live_stream_apps("ns")
     assert live == ["lakebench-silver-stream", "lakebench-gold-refresh"]
+    assert errors == ["lakebench-gold-refresh: HTTP 503"]
     assert set(live) <= set(_STREAM_APPS)
+    assert timeouts and all(t == 10 for t in timeouts), "every read is bounded"
+
+
+def test_live_stream_probe_timeout_counts_as_live():
+    from urllib3.exceptions import ReadTimeoutError
+
+    from lakebench.cli._sustained import _STREAM_APPS, _live_stream_apps
+
+    def slow(*_a, **_kw):
+        raise ReadTimeoutError(None, "/apis", "Read timed out. (read timeout=10)")
+
+    with patch("kubernetes.client.CustomObjectsApi") as api:
+        api.return_value.get_namespaced_custom_object.side_effect = slow
+        live, errors = _live_stream_apps("ns")
+    assert live == list(_STREAM_APPS)
+    assert all("ReadTimeoutError" in e for e in errors)
 
 
 def test_pre_benchmark_maintenance_uses_live_settings_when_streams_exist():
@@ -660,7 +680,8 @@ def test_pre_benchmark_maintenance_uses_live_settings_when_streams_exist():
     import lakebench.cli._run as run_mod
 
     src = inspect.getsource(run_mod)
-    assert "live_apps = _live_stream_apps(cfg.get_namespace())" in src
+    assert "live_apps, live_errors = _live_stream_apps(cfg.get_namespace())" in src
+    assert '"read_errors": live_errors' in src
     assert src.count("live_streams=bool(live_apps)") == 2
     assert "Pre-benchmark maintenance with live streams" in src
 
@@ -674,3 +695,22 @@ def test_continuous_loop_survives_a_maintenance_error():
     i = src.index("_run_iceberg_maintenance(")
     block = src[src.rfind("try:", 0, i) : i + 400]
     assert "except Exception" in block and "Maintenance round failed" in block
+
+
+def test_run_records_live_streams_for_the_scorecard():
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod)
+    assert "live_streams_reason=maint_live_reason" in src
+    assert "pb.maintenance_live_streams = True" in src
+
+
+def test_live_streams_nulls_the_maintenance_value():
+    from lakebench.cli._run import _maintenance_value
+
+    value, n, reason = _maintenance_value(
+        [], [], 66, 61, 180.0, None, live_streams_reason="stream apps present: x"
+    )
+    assert value is None and "streams were live" in reason

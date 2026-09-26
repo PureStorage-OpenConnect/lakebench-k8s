@@ -89,10 +89,10 @@ def cmd_seed(store: pg.BaselineStore, args: argparse.Namespace) -> int:
         good, near = pg.find_runs_for(pinned, args.runs_dir)
         # A run whose pre-benchmark maintenance stopped early has no clean
         # post-maintenance QpH; it can never be a baseline.
-        stopped = [r for r in good if r.scores.get("maintenance_stopped") is True]
-        good = [r for r in good if r.scores.get("maintenance_stopped") is not True]
+        stopped = [r for r in good if pg.post_qph_unmeasured(r.scores)]
+        good = [r for r in good if not pg.post_qph_unmeasured(r.scores)]
         for r in stopped:
-            print(f"{name}: skipping {r.run_id} (pre-benchmark maintenance stopped)")
+            print(f"{name}: skipping {r.run_id} ({pg.post_qph_unmeasured(r.scores)})")
         if good:
             print(f"{name}: {len(good)} matching run(s), newest {good[0].run_id}")
             if args.write:

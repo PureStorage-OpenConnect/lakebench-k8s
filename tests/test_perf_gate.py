@@ -1338,3 +1338,47 @@ def test_stop_reason_is_named_even_on_a_pass(env):
     c = _compare(env, "c360-batch-s10", _stopped(_batch_run(snap, "20260924-110000-bbbbbb"), 300.0))
     assert c.verdict == pg.PASS
     assert any("maintenance stopped before completion" in r for r in c.reasons)
+
+
+def _live(data: dict, pre_qph: float | None = None) -> dict:
+    sc = data["pipeline_benchmark"]["scorecard"]
+    sc["maintenance_live_streams"] = True
+    sc["maintenance_live_streams_reason"] = (
+        "stream apps present or unreadable: lakebench-silver-stream"
+    )
+    if pre_qph is not None:
+        sc["pre_compaction_qph"] = pre_qph
+    return data
+
+
+def test_live_streams_are_treated_like_a_stopped_maintenance(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    c = _compare(
+        env,
+        "c360-batch-s10",
+        _live(_batch_run(snap, "20260924-110000-bbbbbb", qph=100.0, query_scale=4.0), 300.0),
+    )
+    assert c.verdict == pg.PASS, pg.format_comparison(c)
+    assert _row(c, "composite_qph").status.startswith("excluded")
+    assert any("streams were live" in r for r in c.reasons)
+
+
+def test_live_streams_with_nothing_gated_is_not_comparable(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    c = _compare(env, "c360-batch-s10", _live(_batch_run(snap, "20260924-110000-bbbbbb")))
+    assert c.verdict == pg.NOT_COMPARABLE
+
+
+def test_live_streams_run_cannot_be_a_baseline(env, capsys):
+    snap = env.snaps["c360-batch-s10"]
+    run = pg.load_run(env.write_run(_live(_batch_run(snap, "20260924-100000-aaaaaa"))))
+    with pytest.raises(pg.PerfGateError, match="streams were live"):
+        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
+    cli = _load_script("perf_gate")
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    assert cli.main([*base, "seed", "--write"]) == 0
+    assert "skipping 20260924-100000-aaaaaa (streams were live" in capsys.readouterr().out
