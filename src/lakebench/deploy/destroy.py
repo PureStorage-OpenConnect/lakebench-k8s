@@ -91,6 +91,12 @@ _TABLE_MISSING_RE = re.compile(
 _SCHEMA_MISSING_RE = re.compile("|".join(_SCHEMA_MISSING_PATTERNS))
 
 
+def _operative_sql(sql: str) -> str:
+    """Label a submission by its operative statement ("SET ...; VACUUM" -> VACUUM)."""
+    last = sql.strip().rstrip(";").split(";")[-1].split()
+    return last[0] if last else sql
+
+
 def _is_table_missing(e: Exception) -> bool:
     return bool(_TABLE_MISSING_RE.search(str(e)))
 
@@ -1341,6 +1347,16 @@ def destroy_all(
 
                 step_start = _monotonic()
                 skip_maint: set[str] = set()
+
+                def _remaining(rest: list[tuple[str, str, str]]) -> list[str]:
+                    # Maintenance already skipped for a missing table would
+                    # not have run anyway; do not list it as not attempted.
+                    return [
+                        f"{_operative_sql(q)} {t}"
+                        for k, t, q in rest
+                        if not (k == "m" and t in skip_maint)
+                    ]
+
                 not_attempted: list[str] = []
                 stop_reason = ""
                 for n, (kind, table, sql) in enumerate(plan):
@@ -1348,7 +1364,7 @@ def destroy_all(
                         continue
                     if _monotonic() - step_start > _TABLE_STEP_CAP:
                         stop_reason = f"table step exceeded its {_TABLE_STEP_CAP}s cap"
-                        not_attempted = [f"{t}: {q}" for _, t, q in plan[n:]]
+                        not_attempted = _remaining(plan[n:])
                         break
                     # Maintenance at 0s retention, orphan removal and DROP are
                     # destructive; re-check the incarnation before each one.
@@ -1366,9 +1382,9 @@ def destroy_all(
                         # The engine may still be running it; queueing more
                         # statements behind a stuck coordinator only adds
                         # hours. Stop the step here.
-                        failed_sql.append(f"{sql.split()[0]} {table}: {e}")
+                        failed_sql.append(f"{_operative_sql(sql)} {table}: {e}")
                         stop_reason = f"statement timed out after {_TABLE_SQL_TIMEOUT}s"
-                        not_attempted = [f"{t}: {q}" for _, t, q in plan[n + 1 :]]
+                        not_attempted = _remaining(plan[n + 1 :])
                         break
                     except Exception as e:
                         if kind == "m" and _is_table_missing(e):
@@ -1382,7 +1398,7 @@ def destroy_all(
                             # when the schema itself is absent.
                             logger.info("%s: schema not present, nothing to drop", table)
                             continue
-                        failed_sql.append(f"{sql.split()[0]} {table}: {e}")
+                        failed_sql.append(f"{_operative_sql(sql)} {table}: {e}")
                         logger.warning("%s cleanup statement failed for %s: %s", kind, table, e)
                 if stop_reason:
                     failed_sql.append(
