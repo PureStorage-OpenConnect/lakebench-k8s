@@ -232,6 +232,20 @@ class K8sClient:
                 return ""
             raise K8sResourceError(f"Error reading namespace phase: {e}")  # noqa: B904
 
+    def get_namespace_uid(self, name: str) -> str:
+        """Return the namespace's UID, or ``""`` when it does not exist.
+
+        A UID identifies one incarnation of a name: a namespace deleted and
+        re-created by a later deploy has the same name and a new UID.
+        """
+        try:
+            ns = self._core_v1.read_namespace(name)
+        except ApiException as e:
+            if e.status == 404:
+                return ""
+            raise K8sResourceError(f"Error reading namespace: {e}")  # noqa: B904
+        return str(ns.metadata.uid or "")
+
     def get_namespace_termination_status(self, name: str) -> tuple[str, list[str]]:
         """Return a namespace's phase and what is blocking its deletion.
 

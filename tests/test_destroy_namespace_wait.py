@@ -163,6 +163,19 @@ class TestConcurrentDestroys:
         assert "deletion started by another run" in result.message
         assert any("already being deleted" in m for _, _, m in reports)
 
+    def test_namespace_recreated_by_concurrent_deploy_is_not_waited_on(self):
+        """S-P3: a deploy recreates the name while this destroy waits."""
+        cluster = FakeCluster()
+        cluster.get_namespace_termination_status = MagicMock(
+            side_effect=[("Active", []), ("Terminating", [PVC_BLOCKER]), ("Active", [])]
+        )
+        before = destroy_mod._monotonic()
+        result, _ = _run(cluster)
+        assert result.status is DeploymentStatus.SUCCESS
+        assert "new namespace with the same name" in result.message
+        assert destroy_mod._monotonic() - before < 60, "must not wait out the timeout"
+        assert cluster.deletes == 1
+
     def test_second_destroy_after_namespace_gone(self):
         cluster = FakeCluster(drain_polls=0)
         _run(cluster)
@@ -172,7 +185,7 @@ class TestConcurrentDestroys:
 
 
 class TestDestroyAllWiring:
-    def _run_destroy(self, cluster, timeout=600):
+    def _run_destroy(self, cluster, timeout=600, uids=None):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
         engine = MagicMock()
@@ -186,6 +199,7 @@ class TestDestroyAllWiring:
             cluster.get_namespace_termination_status
         )
         engine.k8s.delete_namespace.side_effect = cluster.delete_namespace
+        engine.k8s.get_namespace_uid.side_effect = uids or ["uid-1", "uid-1"]
         calls: list[str] = []
         manager = MagicMock()
         manager.remove_namespace_from_watch.side_effect = lambda ns, **_kw: calls.append(
@@ -222,6 +236,17 @@ class TestDestroyAllWiring:
         assert "still terminating" in ns[-1].message
         final = [r for r in reports if r[0] == "namespace"][-1]
         assert final[1] is DeploymentStatus.SKIPPED
+
+    @pytest.mark.parametrize("uid_at_start", ["uid-1", ""])
+    def test_newer_incarnation_is_neither_unwatched_nor_deleted(self, uid_at_start):
+        """A concurrent destroy finished and a redeploy re-created the name
+        (or, S-P3, a deploy created it after this destroy found it absent)."""
+        cluster = FakeCluster(drain_polls=1)
+        results, _, calls, engine = self._run_destroy(cluster, uids=[uid_at_start, "uid-2"])
+        assert calls == [], "the new deployment's namespace must stay watched"
+        engine.k8s.delete_namespace.assert_not_called()
+        ns = [r for r in results if r.component == "namespace"]
+        assert "newer deployment" in ns[-1].message
 
     def test_gone_reports_success(self):
         cluster = FakeCluster(drain_polls=1)
