@@ -19,7 +19,7 @@ fn run(dir: &Path, extra: &[&str]) {
             "--bucket",
             "b",
             "--seed",
-            "42",
+            "7777",
             "--scale",
             SCALE,
             "--threads",
@@ -128,7 +128,8 @@ fn gaps(paths: &[PathBuf]) -> BTreeMap<String, Vec<i64>> {
 
 #[test]
 fn union_of_cycles_is_the_one_shot_corpus() {
-    let tmp = std::env::temp_dir().join(format!("lb-cycles-{}", std::process::id()));
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-cycles-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let one = tmp.join("one");
     let multi = tmp.join("multi");
@@ -186,11 +187,179 @@ fn cycle_arguments_are_strict() {
         vec!["--cycle=x"],
     ] {
         let st = Command::new(env!("CARGO_BIN_EXE_generate"))
-            .env("DG_LOCAL_DIR", std::env::temp_dir().join("lb-cycles-bad"))
-            .args(["--bucket", "b", "--scale", SCALE])
+            .env(
+                "DG_LOCAL_DIR",
+                std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-cycles-bad"),
+            )
+            .args(["--bucket", "b", "--seed", "7777", "--scale", SCALE])
             .args(&bad)
             .output()
             .unwrap();
         assert_eq!(st.status.code(), Some(2), "{bad:?} was accepted");
     }
+}
+
+#[test]
+fn financial_seed_is_required_strict_and_never_spent() {
+    for bad in [
+        vec![],
+        vec!["--seed", "42"],
+        vec!["--seed", "50000042"],
+        vec!["--seed=42"],
+        vec!["--seed", "43x"],
+        vec!["--seed", "9223372036854775808"],
+        vec!["--seed"],
+    ] {
+        let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+            .env(
+                "DG_LOCAL_DIR",
+                std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-seed-bad"),
+            )
+            .args(["--bucket", "b", "--scale", SCALE])
+            .args(&bad)
+            .output()
+            .unwrap();
+        assert_eq!(st.status.code(), Some(2), "{bad:?} was accepted");
+        assert!(
+            String::from_utf8_lossy(&st.stderr).contains("--seed"),
+            "{bad:?} failed for another reason"
+        );
+    }
+}
+
+fn total_txns(dir: &Path, extra: &[&str]) -> u64 {
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", dir)
+        // Large enough that 1 MB files outnumber the 64-file floor.
+        .args([
+            "--bucket", "b", "--seed", "7777", "--scale", "0.02", "--mode", "all",
+        ])
+        .args(extra)
+        .output()
+        .expect("run generate");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    let v = text
+        .split("total_txns=")
+        .nth(1)
+        .expect("total_txns in output");
+    v.split_whitespace().next().unwrap().parse().unwrap()
+}
+
+#[test]
+fn rows_are_independent_of_threads_file_size_and_nodes() {
+    // Every row, scheduled (D2) ones included, lands in exactly one file
+    // whatever the layout: same multiset of rows, and exactly total_txns.
+    let tmp = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-layout-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let a = tmp.join("a");
+    let b = tmp.join("b2");
+    let want = total_txns(&a, &["--threads", "2"]);
+    for node in ["0", "1"] {
+        total_txns(
+            &b,
+            &[
+                "--threads",
+                "3",
+                "--file-size-mb",
+                "1",
+                "--total-nodes",
+                "2",
+                "--node-id",
+                node,
+            ],
+        );
+    }
+    let ra = rows(&files(&a, "bronze/pacs008", "part-"));
+    let fb = files(&b, "bronze/pacs008", "part-");
+    let na = files(&a, "bronze/pacs008", "part-").len();
+    assert!(
+        fb.len() > na,
+        "layouts not distinct: {} vs {} files",
+        fb.len(),
+        na
+    );
+    let rb = rows(&fb);
+    assert_eq!(ra.len() as u64, want, "rows != total_txns");
+    assert!(ra == rb, "rows depend on threads, file size or nodes");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// FNV-1a over every file the customer360 driver writes, in path order.
+fn c360_driver_digest(threads: &str) -> (u64, usize) {
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-c360-{}-{threads}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", &dir)
+        .args([
+            "--schema",
+            "customer360",
+            "--bucket",
+            "b",
+            "--seed",
+            "43",
+            "--target-tb",
+            "0.00002",
+            "--file-size-mb",
+            "4",
+            "--threads",
+            threads,
+        ])
+        .output()
+        .expect("run generate");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut paths = Vec::new();
+    let mut stack = vec![dir.clone()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else {
+                paths.push(p);
+            }
+        }
+    }
+    paths.sort();
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for p in &paths {
+        let rel = p.strip_prefix(&dir).unwrap().to_string_lossy().to_string();
+        for &x in rel
+            .as_bytes()
+            .iter()
+            .chain(std::fs::read(p).unwrap().iter())
+        {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    (h, paths.len())
+}
+
+#[test]
+fn c360_driver_output_is_pinned() {
+    // The whole c360 driver path (argument defaults, id sizing, rows per
+    // file, file ids), not just build_batch: the programme reuses c360
+    // evidence only while this output is unchanged. Captured at ab585eb.
+    // A change here is a c360 data change: re-run the c360 evidence, then
+    // update the digest deliberately.
+    let a = c360_driver_digest("2");
+    assert_eq!(a, c360_driver_digest("3"), "c360 output depends on threads");
+    assert_eq!(
+        a,
+        (8_993_469_679_856_816_545, 5),
+        "c360 driver output changed"
+    );
 }

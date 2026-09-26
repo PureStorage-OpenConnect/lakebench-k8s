@@ -843,6 +843,44 @@ class TestOwnershipHooksFire:
         assert kwargs["deployment_name"] == "test-deploy"
 
     @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
+    @patch("lakebench.deploy.ownership.write_deploy_nonce")
+    @patch("lakebench.deploy.ownership.stamp_namespace")
+    def test_every_deploy_stamps_a_fresh_nonce(self, mock_stamp, mock_nonce, _mock_ocp):
+        """A destroy already running on this namespace compares the nonce; a
+        redeploy into the same (still Active, or kept) namespace must change it."""
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        k8s = _mock_k8s()
+        k8s.namespace_exists.return_value = True
+        engine = DeploymentEngine(config, k8s_client=k8s)
+        mock_stamp.return_value = IdentityReport(
+            verdict=IdentityVerdict.MATCH,
+            resource_name="test-deploy",
+            expected_deployment="test-deploy",
+        )
+        with patch("kubernetes.client.CoreV1Api"):
+            result = engine._deploy_namespace()
+        assert result.status != DeploymentStatus.FAILED
+        mock_nonce.assert_called_once()
+
+        mock_nonce.side_effect = RuntimeError("apiserver 503")
+        with patch("kubernetes.client.CoreV1Api"):
+            result = engine._deploy_namespace()
+        assert result.status == DeploymentStatus.FAILED
+        assert "nonce" in result.message
+
+    def test_write_deploy_nonce_is_fresh_each_time(self):
+        from lakebench.deploy.ownership import ANNOTATION_DEPLOY_NONCE, write_deploy_nonce
+
+        core = MagicMock()
+        a = write_deploy_nonce(core, "ns")
+        b = write_deploy_nonce(core, "ns")
+        assert a != b
+        body = core.patch_namespace.call_args.args[1]
+        assert body["metadata"]["annotations"][ANNOTATION_DEPLOY_NONCE] == b
+
+    @patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False)
     @patch("lakebench.deploy.ownership.stamp_namespace")
     def test_deploy_namespace_refuses_on_mismatch(self, mock_stamp, _mock_ocp):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
@@ -1315,3 +1353,89 @@ class TestOwnershipHooksFire:
             metrics_dir=Path("/tmp/nonexistent-metrics"),
         )
         assert s3.empty_bucket.call_count == 3
+
+
+class TestBucketCreationRecord:
+    """LB-159: deploy records which buckets it created; destroy deletes only those."""
+
+    def _deploy(self, ensure_result, prior_tags=None, mismatch=()):
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config()
+        engine = DeploymentEngine(config, k8s_client=_mock_k8s())
+        client = MagicMock()
+        client._init_error = None
+        client.ensure_buckets.return_value = ensure_result
+        with (
+            patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False),
+            patch("lakebench.s3.S3Client", return_value=client),
+            patch(
+                "lakebench.deploy.ownership.verify_bucket_ownership",
+                side_effect=lambda _b, name, _id: IdentityReport(
+                    verdict=(
+                        IdentityVerdict.MISMATCH if name in mismatch else IdentityVerdict.MATCH
+                    ),
+                    resource_name=name,
+                    expected_deployment=config.name,
+                    hint="owned by someone else",
+                ),
+            ),
+            patch(
+                "lakebench.deploy.ownership.read_bucket_ownership_tag",
+                side_effect=lambda _b, name: (prior_tags or {}).get(name),
+            ),
+            patch("lakebench.deploy.ownership.write_bucket_ownership_tag") as write,
+            patch("lakebench.deploy.ownership.record_created_buckets") as record,
+            patch("lakebench.k8s.get_k8s_client"),
+            patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
+        ):
+            result = engine._deploy_buckets()
+        created_flags = {c.args[1]: c.kwargs["created"] for c in write.call_args_list}
+        return result, created_flags, record, config
+
+    def test_created_buckets_are_tagged_and_recorded(self):
+        result, flags, record, config = self._deploy(
+            {"lakebench-bronze": True, "lakebench-silver": False, "lakebench-gold": True}
+        )
+        assert result.status == DeploymentStatus.SUCCESS
+        assert flags == {
+            "lakebench-bronze": True,
+            "lakebench-silver": False,
+            "lakebench-gold": True,
+        }
+        record.assert_called_once()
+        assert record.call_args.args[2] == ["lakebench-bronze", "lakebench-gold"]
+
+    def test_redeploy_keeps_the_created_marker(self):
+        from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH, TAG_DEPLOYMENT_NAME
+
+        config_name = _make_config().name
+        prior = {
+            "lakebench-bronze": {
+                TAG_DEPLOYMENT_NAME: config_name,
+                TAG_CREATED_BY_LAKEBENCH: "true",
+            },
+            "lakebench-silver": {TAG_DEPLOYMENT_NAME: config_name},
+        }
+        _, flags, record, _ = self._deploy(
+            {"lakebench-bronze": False, "lakebench-silver": False, "lakebench-gold": False},
+            prior_tags=prior,
+        )
+        assert flags == {
+            "lakebench-bronze": True,
+            "lakebench-silver": False,
+            "lakebench-gold": False,
+        }
+        record.assert_not_called()
+
+    def test_failure_on_a_later_bucket_still_records_the_created_ones(self):
+        """Review finding: the record used to be written after the ownership
+        loop, so a deploy failing on silver left bronze unrecorded and every
+        later destroy kept it for good on FlashBlade."""
+        result, _, record, _ = self._deploy(
+            {"lakebench-bronze": True, "lakebench-silver": False, "lakebench-gold": False},
+            mismatch={"lakebench-silver"},
+        )
+        assert result.status == DeploymentStatus.FAILED
+        record.assert_called_once()
+        assert record.call_args.args[2] == ["lakebench-bronze"]

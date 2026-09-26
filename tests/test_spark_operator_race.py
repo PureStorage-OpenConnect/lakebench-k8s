@@ -25,8 +25,12 @@ def _bypass_cluster_lock_in_race_tests():
     Kubernetes API for a fixture that has no bearing on what they
     exercise."""
     SparkOperatorManager._bypass_cluster_lock = True
+    # The add refuses a namespace it cannot prove is live (a destroy-race
+    # guard covered in test_watch_list_strict.py); these tests exercise the
+    # read-modify-write, so treat every namespace as live.
     try:
-        yield
+        with patch.object(SparkOperatorManager, "_namespace_is_terminating", return_value=False):
+            yield
     finally:
         del SparkOperatorManager._bypass_cluster_lock
 

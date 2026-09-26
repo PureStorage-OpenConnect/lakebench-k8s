@@ -224,8 +224,19 @@ python scripts/perf_gate.py gate
 python scripts/release_gate.py --only perf-baselines
 ```
 
-`compare` exits 0 on pass, 1 on a regression, 2 when refused or when there is
-no baseline. `gate` and the release check pick, for each pinned config, the
+`compare` exits 0 on pass, 1 on a regression, 2 when refused, when there is
+no baseline, or when the verdict is `NOT_COMPARABLE`.
+
+A run whose pre-benchmark maintenance stopped early (a statement timed out or
+the 30 min cap was hit, `maintenance_stopped` in the scores) has no clean
+post-maintenance QpH: a rewrite may still have been running during the
+benchmark. The gate then leaves `composite_qph` and every `query_qph_*` out
+(status `excluded`, with the stop reason) and always names the stop in the
+comparison's reasons; `pre_compaction_qph` stays gated. If no QpH metric is
+left to gate (always at scale 50 and above, where no pre-maintenance round
+runs), the verdict is `NOT_COMPARABLE`: never a pass, exit 2, and the release
+check does not report it as ok. Such a run can never be recorded as a
+baseline. `gate` and the release check pick, for each pinned config, the
 newest successful run whose fingerprint matches, searching
 `lakebench-output/runs` (or `$LAKEBENCH_PERF_RUNS_DIR`) and `uat/perf/`. Name
 a run explicitly with `--perf-run NAME=RUN` on `release_gate.py` or
@@ -270,6 +281,9 @@ use the real 24-hour bound.
 
 `python scripts/perf_gate.py seed` scans the runs directory for runs that
 match a pending config exactly and, with `--write`, records the newest one.
+Runs whose pre-benchmark maintenance stopped are skipped (and listed); if the
+newest remaining run is refused as a baseline, seed tries the next-newest, and
+one config's failure does not stop the others.
 Against the 98 runs on the reference workstation on 2026-09-24 nothing
 matched, so all three configs are "pending first run":
 

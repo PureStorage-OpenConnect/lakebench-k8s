@@ -163,7 +163,7 @@ def _resolve_datagen_mode(config: LakebenchConfig) -> str:
 def resolve_auto_sizing(
     config: LakebenchConfig,
     cluster_capacity: ClusterCapacity | None = None,
-) -> None:
+) -> list[str]:
     """Resolve auto-sized resource fields on *config* in place.
 
     For each component (Spark executor/driver, Trino worker/coordinator,
@@ -181,6 +181,10 @@ def resolve_auto_sizing(
     Args:
         config: The Lakebench configuration -- **mutated in place**.
         cluster_capacity: Optional snapshot of cluster node resources.
+
+    Returns:
+        The cuts made to fit the cluster, each with its reason, so callers
+        can show them. Every cut is also logged at WARNING (LB-160).
     """
 
     scale = config.architecture.workload.datagen.scale
@@ -284,6 +288,10 @@ def resolve_auto_sizing(
             effective_mode,
             ", ".join(changes),
         )
+    cuts = [c for c in changes if " capped " in c]
+    for cut in cuts:
+        log.warning("Auto-sizing cut to fit the cluster: %s", cut)
+    return cuts
 
 
 # LB-148: Spark Thrift default for Delta tables. The Thrift server is Spark
@@ -425,6 +433,23 @@ def _round_down_even(n: int) -> int:
     return max(2, n - (n % 2))
 
 
+def _co_resident_label(config: LakebenchConfig) -> str:
+    """Human-readable list of the pods ``_co_resident_cpu_m`` counts."""
+    engine_type = config.architecture.query_engine.type.value
+    if engine_type == "trino":
+        t = config.architecture.query_engine.trino
+        engine = (
+            f"Trino coordinator {t.coordinator.cpu} + {t.worker.replicas} workers x {t.worker.cpu}"
+        )
+    elif engine_type == "spark-thrift":
+        engine = f"Spark Thrift {config.architecture.query_engine.spark_thrift.cores}"
+    elif engine_type == "duckdb":
+        engine = f"DuckDB {config.architecture.query_engine.duckdb.cores}"
+    else:
+        return "catalog/Postgres 1"
+    return f"{engine}, catalog/Postgres 1"
+
+
 def _co_resident_cpu_m(config: LakebenchConfig) -> int:
     """Compute total CPU (millicores) committed to always-on co-resident pods.
 
@@ -564,6 +589,26 @@ def _apply_cluster_scaling(
     if datagen.parallelism > 0:
         datagen_cpu_m = _parse_cpu_millicores(datagen.cpu)
         cluster_max_datagen = _round_down_even(datagen_budget_m // datagen_cpu_m)
+        # A cut must say why (LB-160): at scale 250 and 500 the Trino tier's
+        # workers held 85 and 165 of 434 cores and 43 pods silently became
+        # 38 and 30.
+        share = f"{int(_STREAMING_DATAGEN_SHARE * 100)}% of " if is_streaming else ""
+        fits = datagen_budget_m // datagen_cpu_m
+        if cluster_max_datagen > fits:
+            rounding = f", raised to the minimum of {cluster_max_datagen}"
+        elif cluster_max_datagen < fits:
+            rounding = f", rounded down to an even {cluster_max_datagen}"
+        else:
+            rounding = ""
+        datagen_cap_reason = (
+            f"cluster has {cap.total_cpu_millicores / 1000:g} allocatable cores, "
+            f"always-on pods ({_co_resident_label(config)}) hold "
+            f"{co_resident_m / 1000:g}, datagen gets {share}"
+            f"{int(_PHASE_CPU_BUDGET * 100)}% of the remaining "
+            f"{max(0, cap.total_cpu_millicores - co_resident_m) / 1000:g} = "
+            f"{datagen_budget_m / 1000:g} cores = {fits} pods of "
+            f"{datagen_cpu_m / 1000:g} cores{rounding}"
+        )
 
         if "parallelism" not in datagen.model_fields_set:
             if scale > 50 and cluster_max_datagen > datagen.parallelism:
@@ -571,9 +616,15 @@ def _apply_cluster_scaling(
                 object.__setattr__(datagen, "parallelism", cluster_max_datagen)
                 changes.append(f"datagen.parallelism scaled to {cluster_max_datagen} (cluster CPU)")
             elif datagen.parallelism > cluster_max_datagen:
+                changes.append(
+                    f"datagen.parallelism capped {datagen.parallelism} -> "
+                    f"{cluster_max_datagen}: {datagen_cap_reason}"
+                )
                 object.__setattr__(datagen, "parallelism", cluster_max_datagen)
-                changes.append(f"datagen.parallelism capped to {cluster_max_datagen} (cluster CPU)")
         elif datagen.parallelism > cluster_max_datagen:
             # User-set value still gets capped to fit
+            changes.append(
+                f"datagen.parallelism capped {datagen.parallelism} -> "
+                f"{cluster_max_datagen} (set in config): {datagen_cap_reason}"
+            )
             object.__setattr__(datagen, "parallelism", cluster_max_datagen)
-            changes.append(f"datagen.parallelism capped to {cluster_max_datagen} (cluster CPU)")

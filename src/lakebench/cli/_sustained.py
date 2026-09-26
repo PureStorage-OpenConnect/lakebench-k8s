@@ -27,12 +27,19 @@ from lakebench.cli._helpers import (
     print_info,
     print_success,
     print_warning,
+    write_run_report,
 )
 from lakebench.config.schema import PipelineMode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
 
 logger = logging.getLogger(__name__)
+
+# Seconds a statement may run past the pre-benchmark budget before it is cut.
+_BUDGET_GRACE_SECONDS = 30
+
+# Delta's default VACUUM retention (hours).
+_DELTA_DEFAULT_RETENTION_HOURS = 168.0
 
 
 _C360_REQUIRED_STREAM_JOBS = ("bronze-ingest", "silver-stream")
@@ -150,6 +157,64 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
 
 
 _STREAM_APPS = ("lakebench-bronze-ingest", "lakebench-silver-stream", "lakebench-gold-refresh")
+
+
+# Per-read bound when looking for stream apps; a timeout counts as live.
+_STREAM_PROBE_TIMEOUT_S = 10
+# Spark Operator states after which an app no longer runs (retries exhausted
+# or finished). Anything else, including no status yet, counts as live.
+_TERMINAL_APP_STATES = frozenset({"COMPLETED", "FAILED"})
+
+
+def _live_stream_apps(namespace: str) -> tuple[list[str], list[str]]:
+    """Stream SparkApplications present in *namespace* (any schema).
+
+    Returns ``(live, read_errors)``. Stream apps run with restartPolicy
+    Always, so one that exists is writing or about to. A read error other
+    than 404, including a timeout, counts the app as live (maintenance then
+    takes the safe, live-stream settings) and is listed in ``read_errors``.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    live: list[str] = []
+    errors: list[str] = []
+    try:
+        api = k8s_client.CustomObjectsApi()
+    except Exception as e:  # noqa: BLE001
+        return list(_STREAM_APPS), [f"no Kubernetes client: {e}"]
+    for app in _STREAM_APPS:
+        try:
+            obj = api.get_namespaced_custom_object(
+                "sparkoperator.k8s.io",
+                "v1beta2",
+                namespace,
+                "sparkapplications",
+                app,
+                _request_timeout=_STREAM_PROBE_TIMEOUT_S,
+            )
+        except ApiException as e:
+            if e.status == 404:
+                continue
+            live.append(app)
+            errors.append(f"{app}: HTTP {e.status}")
+            continue
+        except Exception as e:  # noqa: BLE001
+            # Timeouts (urllib3 ReadTimeoutError) and transport errors.
+            live.append(app)
+            errors.append(f"{app}: {type(e).__name__}: {e}")
+            continue
+        state = ""
+        if isinstance(obj, dict):
+            state = str(
+                ((obj.get("status") or {}).get("applicationState") or {}).get("state") or ""
+            )
+        if state.upper() in _TERMINAL_APP_STATES:
+            # A leftover app that has finished writes nothing; counting it
+            # would turn QpH gating off for every later run here.
+            continue
+        live.append(app)
+    return live, errors
 
 
 def _stop_leftover_streams(job_manager, namespace: str, timeout_s: int = 120) -> None:
@@ -287,6 +352,135 @@ def _c360_existing_state(cfg, *, clear_raw: bool) -> list[str]:
         if resp.get("KeyCount", len(resp.get("Contents", []))):
             found.append(f"{bucket}/{prefix}")
     return found
+
+
+def _c360_only_fresh_generate(cfg, existing: list[str]) -> bool:
+    """True when the only state found is the raw landing zone (LB-154).
+
+    That is the documented deploy -> generate -> run flow on a deployment
+    that has never run: no tables, no stream checkpoints, just a raw corpus.
+    Any other entry, including a prefix that could not be listed, is not a
+    fresh generate and keeps the refusal. Whether replacing the corpus is
+    safe is a separate question, see ``_c360_raw_replace_problem``.
+    """
+    raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+    raw_entry = f"{cfg.platform.storage.s3.buckets.bronze}/{raw}/"
+    return bool(existing) and all(e == raw_entry for e in existing)
+
+
+# A raw corpus up to this multiple of the run's own approx_bronze_gb is
+# replaced without --force-reset: regenerating it costs no more than the
+# datagen this run does anyway. Measured c360 corpora land at about 1.2x.
+_RAW_REPLACE_SIZE_FACTOR = 1.5
+
+
+def _datagen_job_state(namespace: str) -> tuple[str, str]:
+    """State of the lakebench-datagen Job: absent, finished, unfinished or
+    unknown, plus a detail for unknown.
+
+    Unfinished unless a terminal condition (Complete or Failed) says
+    otherwise: a Job just created, or backing off between pod retries, has
+    no active pods yet but will still write and still hold cores.
+    """
+    from kubernetes import client as k8s_client
+    from kubernetes.client.rest import ApiException
+
+    try:
+        job = k8s_client.BatchV1Api().read_namespaced_job("lakebench-datagen", namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return "absent", ""
+        return "unknown", str(e.reason)
+    except Exception as e:  # noqa: BLE001
+        return "unknown", str(e)
+    conditions = getattr(job.status, "conditions", None) or []
+    finished = any(
+        getattr(c, "type", None) in ("Complete", "Failed")
+        and str(getattr(c, "status", "")) == "True"
+        for c in conditions
+    )
+    return ("finished" if finished else "unfinished"), ""
+
+
+# How long a continuous run waits for its datagen Job to finish before it
+# budgets the streams with datagen's cores still reserved (LB-158).
+_DATAGEN_RELEASE_WAIT_S = 300
+
+
+def _datagen_released(namespace: str, *, deployed_here: bool, poll_s: float = 10.0) -> bool:
+    """True when the streaming budget may drop datagen's reservation.
+
+    Finished (Complete or Failed) releases. No lakebench-datagen Job releases
+    only when this run deployed datagen itself: with --skip-generate another
+    writer may be populating bronze under a different name, and the budget
+    keeps its old reservation then. An unfinished Job is polled for up to
+    ``_DATAGEN_RELEASE_WAIT_S``; unknown never releases.
+    """
+    deadline = time.time() + _DATAGEN_RELEASE_WAIT_S
+    announced = False
+    while True:
+        state, detail = _datagen_job_state(namespace)
+        if state == "finished" or (state == "absent" and deployed_here):
+            print_info("Datagen has finished; the streaming budget does not reserve its cores")
+            return True
+        # Unfinished and unknown are polled until the deadline: one API blip
+        # must not keep the reservation when datagen finished long ago.
+        if state not in ("unfinished", "unknown") or time.time() >= deadline:
+            break
+        if not announced:
+            print_info(
+                f"Waiting up to {_DATAGEN_RELEASE_WAIT_S}s for datagen to finish before "
+                "sizing the streams..."
+            )
+            announced = True
+        time.sleep(poll_s)
+    reason = {
+        "unfinished": f"datagen still running after {_DATAGEN_RELEASE_WAIT_S}s",
+        "absent": "--skip-generate and no lakebench-datagen Job (another writer may be active)",
+        "unknown": f"datagen state unknown ({detail})",
+    }.get(state, state)
+    print_warning(f"Streams are budgeted with datagen's cores reserved: {reason}")
+    return False
+
+
+def _c360_raw_replace_problem(cfg) -> str | None:
+    """Why a raw-only corpus must not be replaced silently, or None.
+
+    Refuses (fails closed) when a datagen Job is still active, since its
+    pods would keep writing into the cleared prefix, and when the corpus is
+    larger than this run regenerates (an earlier generate at a larger
+    scale is hours of work the continuous run would not rebuild).
+    """
+    from lakebench.s3 import S3Client
+
+    state, detail = _datagen_job_state(cfg.get_namespace())
+    if state == "unfinished":
+        return "a lakebench-datagen Job has not finished; wait for it to complete"
+    if state == "unknown":
+        return f"could not check for a running datagen Job: {detail}"
+
+    s3_cfg = cfg.platform.storage.s3
+    raw = cfg.architecture.pipeline.medallion.bronze.path_template.strip("/")
+    try:
+        info = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=s3_cfg.ca_cert,
+            verify_ssl=s3_cfg.verify_ssl,
+        ).get_bucket_size(s3_cfg.buckets.bronze, prefix=f"{raw}/")
+    except Exception as e:  # noqa: BLE001
+        return f"could not size the raw corpus: {e}"
+    size_gb = (info.size_bytes or 0) / 1024**3
+    limit_gb = cfg.get_scale_dimensions().approx_bronze_gb * _RAW_REPLACE_SIZE_FACTOR
+    if size_gb > limit_gb:
+        return (
+            f"the raw corpus is {size_gb:,.0f} GB, more than this run regenerates "
+            f"(limit {limit_gb:,.0f} GB at this scale)"
+        )
+    return None
 
 
 def _refuse_c360_reset(cfg, existing: list[str]) -> None:
@@ -527,12 +721,131 @@ def resolve_maintenance_retention(cfg) -> str:
     return f"{days}d"
 
 
+class MaintenanceBudget:
+    """One bound shared by the pre-benchmark maintenance and compaction.
+
+    The benchmark must not start while a statement still runs, so those
+    callers use long per-statement timeouts; this caps the total. The first
+    statement timeout (the engine may be stuck, and the statement may still
+    be running) or the deadline stops every remaining statement, which is
+    then reported as not attempted.
+    """
+
+    def __init__(self, seconds: float) -> None:
+        import time as _time
+
+        self._clock = _time.monotonic
+        self.seconds = seconds
+        self.deadline = self._clock() + seconds
+        self.stopped = ""
+
+    def remaining(self) -> float:
+        return self.deadline - self._clock()
+
+    def statement_timeout(self, per_statement: int) -> int:
+        """Per-statement timeout clipped to what is left of the budget."""
+        return max(1, min(per_statement, int(self.remaining()) + _BUDGET_GRACE_SECONDS))
+
+    def exhausted(self) -> bool:
+        if not self.stopped and self._clock() > self.deadline:
+            self.stopped = f"pre-benchmark maintenance exceeded its {int(self.seconds)}s cap"
+        return bool(self.stopped)
+
+
+def _operative(sql: str) -> str:
+    """The statement that matters in a combined submission ("SET ...; VACUUM")."""
+    last = sql.strip().rstrip(";").split(";")[-1].split()
+    return last[0] if last else sql
+
+
+def _run_statements(
+    plan: list[tuple[str, str]],
+    *,
+    engine: str,
+    k8s,
+    pod_name: str,
+    namespace: str,
+    timeout: int,
+    what: str,
+    budget: MaintenanceBudget | None = None,
+) -> dict:
+    """Run ``(table, sql)`` statements; never raises for a statement.
+
+    Returns counts plus failures, timeouts and statements not attempted.
+    With ``budget`` the first timeout or the deadline stops the rest.
+    """
+    from lakebench.deploy.iceberg import exec_sql
+    from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
+
+    out: dict = {
+        "succeeded": 0,
+        "failures": [],
+        "timed_out": [],
+        "not_attempted": [],
+    }
+    for n, (table, sql) in enumerate(plan):
+        if budget is not None and budget.exhausted():
+            out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n:]]
+            break
+        # exec_sql raises on a real failure (non-zero exit) and on a
+        # kubectl-exec timeout; neither is fatal to the run. Under a budget
+        # the statement gets at most what is left of it (plus a small grace),
+        # so the budget bounds the total; a statement cut short by it counts
+        # as timed out.
+        stmt_timeout = budget.statement_timeout(timeout) if budget is not None else timeout
+        try:
+            exec_sql(engine, k8s, pod_name, namespace, sql, timeout=stmt_timeout)
+            out["succeeded"] += 1
+        except ExecSqlTimeout as e:
+            # Not a failure: the engine may still be running it.
+            out["timed_out"].append(f"{_operative(sql)} {table}: {e}")
+            logger.warning("%s timed out for %s (may still be running)", what, table)
+            if budget is not None:
+                budget.stopped = f"{_operative(sql)} {table} timed out after {stmt_timeout}s"
+                out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n + 1 :]]
+                break
+        except Exception as e:
+            out["failures"].append(f"{_operative(sql)} {table}: {e}")
+            logger.warning("%s failed for %s: %s", what, table, e)
+    return out
+
+
+def _print_outcome(console, label: str, out: dict, total: int, tail: str) -> None:
+    bad = out["failures"] or out["timed_out"] or out["not_attempted"]
+    colour = "yellow" if bad else "green"
+    extra = ""
+    if out["timed_out"]:
+        extra += f", {len(out['timed_out'])} timed out (may still be running)"
+    if out["not_attempted"]:
+        extra += f", {len(out['not_attempted'])} not attempted"
+    console.print(
+        f"  [{colour}]{label}: {out['succeeded']}/{total} operations{extra}[/{colour}] {tail}"
+    )
+
+
+def _outcome_details(out: dict, total: int, budget: MaintenanceBudget | None) -> dict:
+    return {
+        "operations_succeeded": out["succeeded"],
+        "operations_total": total,
+        "operations_failed": len(out["failures"]),
+        "operations_timed_out": len(out["timed_out"]),
+        "operations_not_attempted": len(out["not_attempted"]),
+        "failures": out["failures"][:5],
+        "timed_out": out["timed_out"][:5],
+        "not_attempted": out["not_attempted"][:20],
+        "stopped": budget.stopped if budget is not None else "",
+    }
+
+
 def _run_iceberg_maintenance(
     cfg,
     k8s,
     console: Console,
     j,
     retention_threshold: str,
+    timeout: int = 30,
+    live_streams: bool = False,
+    budget: MaintenanceBudget | None = None,
 ) -> None:
     """Run table maintenance (format-aware).
 
@@ -542,11 +855,14 @@ def _run_iceberg_maintenance(
     Engine-aware: uses Trino (preferred) or Spark Thrift Server.
     DuckDB cannot run maintenance -- skipped with a warning.
     Failures on individual tables are logged but do not abort.
+
+    ``timeout`` bounds each statement's kubectl exec. A timeout does not stop
+    the statement server-side, so the pre-benchmark caller passes a long one
+    and a ``budget``. ``live_streams``: continuous streams are reading; Delta
+    VACUUM then keeps Delta's default 7-day retention (a lagging stream
+    would otherwise hit FileNotFound on a vacuumed file).
     """
-    from lakebench.deploy.iceberg import (
-        exec_sql,
-        find_maintenance_engine,
-    )
+    from lakebench.deploy.iceberg import find_maintenance_engine
 
     namespace = cfg.get_namespace()
     engine_type = cfg.architecture.query_engine.type.value
@@ -573,7 +889,8 @@ def _run_iceberg_maintenance(
     schema = cfg.architecture.workload.schema_type.value
     table_names = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
 
-    # Build SQL based on table format
+    # Build SQL based on table format. Delta VACUUM has one retention.
+    orphan_retention = retention_threshold
     if table_format == "delta":
         from lakebench.deploy.delta_maintenance import (
             build_delta_maintenance_sql,
@@ -581,30 +898,69 @@ def _run_iceberg_maintenance(
         )
 
         retention_hours = parse_retention_to_hours(retention_threshold)
+        if live_streams and retention_hours < _DELTA_DEFAULT_RETENTION_HOURS:
+            # Policy: never VACUUM below Delta's default while streams are
+            # live; no retention override is sent.
+            console.print("  [dim]Delta VACUUM at default 7d retention (live streams)[/dim]")
+            _journal_safe(
+                j.record,
+                EventType.STREAMING_HEALTH,
+                message="Delta VACUUM at default 7d retention (live streams)",
+                details={"requested_retention": retention_threshold},
+            )
+            retention_hours = _DELTA_DEFAULT_RETENTION_HOURS
+            retention_threshold = "168h"
+        orphan_retention = retention_threshold
 
         def build_sql(tbl):
             return build_delta_maintenance_sql(engine, catalog, tbl, retention_hours)
     else:
         from lakebench.deploy.iceberg import build_maintenance_sql
+        from lakebench.modules.table_formats.iceberg.maintenance import (
+            LIVE_EXPIRE_MIN_RETENTION_SECONDS,
+            ORPHAN_MIN_RETENTION_SECONDS,
+            _format_duration,
+            _parse_threshold_seconds,
+        )
+
+        # Policy: orphan removal never below 24 h + 10 min, on any engine
+        # or path (build_maintenance_sql enforces it too). Expire at the
+        # threshold, floored at 1 h while streams are live.
+        orphan_retention = _format_duration(
+            max(_parse_threshold_seconds(retention_threshold), ORPHAN_MIN_RETENTION_SECONDS)
+        )
+        if live_streams:
+            expire_s = max(
+                _parse_threshold_seconds(retention_threshold), LIVE_EXPIRE_MIN_RETENTION_SECONDS
+            )
+            retention_threshold = _format_duration(expire_s)
 
         def build_sql(tbl):
-            return build_maintenance_sql(engine, catalog, tbl, retention_threshold)
+            return build_maintenance_sql(
+                engine, catalog, tbl, retention_threshold, orphan_retention=orphan_retention
+            )
 
-    maintained = 0
-    expected_ops = 0
-    for table in table_names:
-        ops = build_sql(table)
-        expected_ops += len(ops)
-        for sql in ops:
-            try:
-                exec_sql(engine, k8s, pod_name, namespace, sql)
-                maintained += 1
-            except Exception as e:
-                logger.warning("%s maintenance failed for %s: %s", table_format.title(), table, e)
+    import time as _time
 
-    console.print(
-        f"  {table_format.title()} maintenance ({engine}): {maintained}/{expected_ops} "
-        f"operations (threshold: {retention_threshold})"
+    plan = [(table, sql) for table in table_names for sql in build_sql(table)]
+    started = _time.monotonic()
+    out = _run_statements(
+        plan,
+        engine=engine,
+        k8s=k8s,
+        pod_name=pod_name,
+        namespace=namespace,
+        timeout=timeout,
+        what=f"{table_format.title()} maintenance",
+        budget=budget,
+    )
+    elapsed = _time.monotonic() - started
+    _print_outcome(
+        console,
+        f"{table_format.title()} maintenance ({engine})",
+        out,
+        len(plan),
+        f"(threshold: {retention_threshold}, {elapsed:.0f}s)",
     )
     _journal_safe(
         j.record,
@@ -614,8 +970,11 @@ def _run_iceberg_maintenance(
             "engine": engine,
             "table_format": table_format,
             "retention_threshold": retention_threshold,
-            "operations_succeeded": maintained,
-            "operations_total": expected_ops,
+            "expire_retention": retention_threshold,
+            "orphan_retention": orphan_retention,
+            **_outcome_details(out, len(plan), budget),
+            "elapsed_seconds": round(elapsed, 1),
+            "statement_timeout_seconds": timeout,
         },
     )
 
@@ -627,6 +986,8 @@ def _run_iceberg_compaction(
     j,
     file_size_threshold: str = "128MB",
     live_streams: bool = False,
+    timeout: int = 30,
+    budget: MaintenanceBudget | None = None,
 ) -> None:
     """Run table compaction (format-aware).
 
@@ -639,9 +1000,12 @@ def _run_iceberg_compaction(
 
     Merges small files produced by streaming micro-batches or repeated
     incremental writes.  DuckDB cannot run compaction -- skipped.
+
+    ``timeout`` bounds each statement's kubectl exec. A timeout does not stop
+    the rewrite server-side, so the pre-benchmark caller passes a long one:
+    the benchmark must not start while rewrite_data_files still runs.
     """
     from lakebench.deploy.iceberg import (
-        exec_sql,
         find_maintenance_engine,
     )
 
@@ -693,18 +1057,40 @@ def _run_iceberg_compaction(
         def build_sql(tbl):
             return build_compaction_sql(engine, catalog, tbl, file_size_threshold)
 
-    compacted = 0
-    for table in table_names:
-        for sql in build_sql(table):
-            try:
-                exec_sql(engine, k8s, pod_name, namespace, sql)
-                compacted += 1
-            except Exception as e:
-                logger.warning("%s compaction failed for %s: %s", table_format.title(), table, e)
+    import time as _time
 
-    console.print(
-        f"  {table_format.title()} compaction ({engine}): {compacted}/{len(table_names)} "
-        f"tables (threshold: {file_size_threshold})"
+    plan = [(table, sql) for table in table_names for sql in build_sql(table)]
+    started = _time.monotonic()
+    out = _run_statements(
+        plan,
+        engine=engine,
+        k8s=k8s,
+        pod_name=pod_name,
+        namespace=namespace,
+        timeout=timeout,
+        what=f"{table_format.title()} compaction",
+        budget=budget,
+    )
+    elapsed = _time.monotonic() - started
+    _print_outcome(
+        console,
+        f"{table_format.title()} compaction ({engine}) on {len(table_names)} tables",
+        out,
+        len(plan),
+        f"(threshold: {file_size_threshold}, {elapsed:.0f}s)",
+    )
+    _journal_safe(
+        j.record,
+        EventType.STREAMING_HEALTH,
+        message=f"{table_format.title()} compaction",
+        details={
+            "engine": engine,
+            "table_format": table_format,
+            "file_size_threshold": file_size_threshold,
+            **_outcome_details(out, len(plan), budget),
+            "elapsed_seconds": round(elapsed, 1),
+            "statement_timeout_seconds": timeout,
+        },
     )
 
 
@@ -1294,10 +1680,23 @@ def _run_sustained(
         _require_reset_ownership(cfg)
         if cfg.architecture.workload.schema_type.value != "financial" and not force_reset:
             # c360 keeps existing state unless the operator asks to drop it:
-            # a scale-100 corpus from `lakebench generate` or a batch run's
-            # tables took hours to build.
+            # a large raw corpus or a batch run's tables took hours to build.
+            # A raw-only corpus no larger than this run regenerates, with no
+            # datagen still writing, is the plain deploy -> generate -> run
+            # flow and is replaced (LB-154).
             _existing = _c360_existing_state(cfg, clear_raw=not skip_generate)
-            if _existing:
+            _raw_only = _c360_only_fresh_generate(cfg, _existing)
+            _raw_problem = _c360_raw_replace_problem(cfg) if _raw_only else None
+            if _raw_only and _raw_problem is None:
+                print_info(
+                    f"Found only raw data in {_existing[0]} (no tables, no stream "
+                    "checkpoints). A continuous run generates its own data, so it "
+                    "will be replaced; a separate generate is not needed before "
+                    "`run --sustained`."
+                )
+            elif _existing:
+                if _raw_problem:
+                    print_info(f"Raw data is not replaced automatically: {_raw_problem}.")
                 _refuse_c360_reset(cfg, _existing)
                 pipeline_success = False
                 raise typer.Exit(1)
@@ -1406,6 +1805,15 @@ def _run_sustained(
                 pipeline_success = False
                 raise typer.Exit(1)
 
+        # The corpus is finite and usually written within minutes; a finished
+        # datagen Job holds no cores, so the streaming budget stops reserving
+        # them (LB-158). Wait a bounded time for it so the executor counts do
+        # not depend on a race with one API read. Unfinished or unknown keeps
+        # the reservation, so the streams never over-commit the cluster.
+        job_manager.datagen_running = not _datagen_released(
+            cfg.get_namespace(), deployed_here=not skip_generate
+        )
+
         # Launch all streaming jobs concurrently
         console.print()
         console.print("[bold]Launching continuous jobs...[/bold]")
@@ -1414,7 +1822,12 @@ def _run_sustained(
             j.record,
             EventType.STREAMING_START,
             message="Starting streaming pipeline",
-            details={"jobs": [name for _, name in streaming_jobs]},
+            details={
+                "jobs": [name for _, name in streaming_jobs],
+                # LB-158: whether the budget reserved datagen's cores, so
+                # runs with different executor counts can be told apart.
+                "datagen_cores_reserved": job_manager.datagen_running,
+            },
         )
 
         submitted = []
@@ -1587,7 +2000,21 @@ def _run_sustained(
 
             # Iceberg retention maintenance
             if elapsed >= next_maintenance_at:
-                _run_iceberg_maintenance(cfg, k8s, console, j, retention_threshold)
+                # A plan-building error (a bad retention string, an engine
+                # lookup failure) must not end the continuous run.
+                try:
+                    _run_iceberg_maintenance(
+                        cfg, k8s, console, j, retention_threshold, live_streams=True
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("maintenance round failed: %s", e)
+                    console.print(f"  [yellow]Maintenance round failed: {e}[/yellow]")
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Maintenance round failed",
+                        details={"error": str(e)},
+                    )
                 next_maintenance_at = (time.time() - start) + retention_interval
 
             # Iceberg compaction (v1.1.0)
@@ -1913,7 +2340,7 @@ def _run_sustained(
                     f"  Duration: {run_duration}s ({run_duration / 60:.0f} min)\n"
                     f"  Streaming jobs: {len(submitted)}\n\n"
                     f"Query results: lakebench query --example count\n"
-                    f"Generate report: lakebench report",
+                    f"Report: report.html in the run directory",
                     title="Sustained Pipeline Complete",
                     expand=False,
                 )
@@ -2020,5 +2447,6 @@ def _run_sustained(
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
+            write_run_report(metrics_storage, run_id)
 
         _journal_safe(j.end_command, success=pipeline_success)

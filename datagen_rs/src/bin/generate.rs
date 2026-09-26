@@ -18,8 +18,9 @@ use datagen_rs::cycle;
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
 use datagen_rs::metrics::PodMetrics;
-use datagen_rs::model::build_world_ex;
-use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
+use datagen_rs::model::build_world_p;
+use datagen_rs::party::{build_manifest_p, write_account_to, write_party_to};
+use datagen_rs::robustness::{perturbation_for_seed, Perturbation};
 use datagen_rs::s3sink::S3Sink;
 use datagen_rs::timing::{sample_ts_on_day, DayCal};
 use datagen_rs::world::ring_member;
@@ -128,6 +129,76 @@ fn strict_u64_arg(flag: &str, default: u64, max: u64) -> u64 {
     }
 }
 
+/// Seeds the AML pre-registration has spent (corpora.spent_seeds). Defence in
+/// depth for manual Jobs and direct runs: lakebench refuses the full,
+/// current list from the pre-registration before it ever launches datagen;
+/// tests/test_datagen_seed.py checks this list stays a subset of it.
+const SPENT_SEEDS: &[i64] = &[42, 50_000_042];
+
+/// --seed for the financial schema: required, strictly parsed, never a spent
+/// seed. The lenient `arg()` would turn a typo into the old default 42.
+fn financial_seed() -> i64 {
+    let args: Vec<String> = std::env::args().collect();
+    let raw: Option<String> = args.iter().enumerate().find_map(|(i, a)| {
+        if a == "--seed" {
+            Some(args.get(i + 1).cloned().unwrap_or_default())
+        } else {
+            a.strip_prefix("--seed=").map(str::to_string)
+        }
+    });
+    let Some(raw) = raw else {
+        eprintln!("--seed is required for the financial schema (AML seeds are pre-registered)");
+        std::process::exit(2);
+    };
+    let Ok(seed) = raw.parse::<i64>() else {
+        eprintln!("--seed must be an integer; got {raw:?}");
+        std::process::exit(2);
+    };
+    if SPENT_SEEDS.contains(&seed) {
+        eprintln!(
+            "--seed {seed} is spent in the AML pre-registration (corpora.spent_seeds); \
+             use the calibration seed or another unregistered seed"
+        );
+        std::process::exit(2);
+    }
+    seed
+}
+
+use datagen_rs::robustness::FLAG as ROBUSTNESS_FLAG;
+
+/// True when `--robustness-perturbation` is given as a flag (see
+/// robustness::flag_in_argv: a flag's value is never read as the flag).
+fn robustness_flag() -> bool {
+    let args: Vec<String> = std::env::args().collect();
+    match datagen_rs::robustness::flag_in_argv(&args) {
+        Ok(on) => on,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// The perturbation for the financial driver (see
+/// robustness::perturbation_for_seed for the seed rules).
+fn financial_perturbation(seed: i64) -> Perturbation {
+    match perturbation_for_seed(seed, robustness_flag()) {
+        Ok(p) => {
+            if p != Perturbation::NONE {
+                eprintln!(
+                    "robustness perturbation on: median amount x{}, persona sd x{}, dormancy x{}",
+                    p.median_amount, p.persona_sd, p.dormancy
+                );
+            }
+            p
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
 struct TypRow {
     orig: u64,
     bene: u64,
@@ -190,7 +261,8 @@ fn pacs008_main() {
         eprintln!("--bucket is required (destination S3 bucket)");
         std::process::exit(2);
     }
-    let seed: i64 = arg("--seed", 42);
+    let seed = financial_seed();
+    let perturb = financial_perturbation(seed);
     // Multi-cycle runs (datagen_rs::cycle): cycle n of --cycles N emits the
     // one-shot corpus rows whose calendar mass lies in [n/N, (n+1)/N), so the
     // union of all cycles is the one-shot corpus. The defaults (0 of 1) are a
@@ -323,7 +395,7 @@ fn pacs008_main() {
     // A dedicated-bronze pod (writes no reference zones) can skip the
     // reference-only world columns entirely.
     let bronze_only = do_bronze && !do_reference;
-    let w = build_world_ex(scale, seed, corpus_months, bronze_only);
+    let w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
     let t_world = t0.elapsed().as_secs_f64();
     let dims = &w.dims;
     let total_txns = dims.total_txns();
@@ -349,8 +421,9 @@ fn pacs008_main() {
 
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
-    let mut instances =
-        datagen_rs::typology::schedule(seed, total_txns, pop, start_us, end_us, &w.country);
+    let mut instances = datagen_rs::typology::schedule_p(
+        seed, seed, total_txns, pop, start_us, end_us, &w.country, &perturb,
+    );
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
     let mut typ_by_file: Vec<Vec<TypRow>> = (0..total_files).map(|_| Vec::new()).collect();
@@ -404,13 +477,32 @@ fn pacs008_main() {
         // legs forward the previous leg less a skim (amounts::instance_amounts).
         // Amounts are assigned before the suppression drop below, so a dropped
         // leg still carries the chain forward.
-        let amounts = instance_amounts(
-            inst.typ,
-            &rows,
-            |o| w.ccy[o as usize],
-            |o| w.amount_logshift[o as usize],
-            &mut trng,
-        );
+        // corridor_high_risk, dormant_reactivation and micro_structuring draw
+        // from an instance-keyed stream; the shared stream replays the draws
+        // their old layout took, so every other typology's amounts are
+        // byte-identical (amounts::own_amount_stream).
+        let amounts = match datagen_rs::amounts::own_amount_stream(inst.typ) {
+            Some(per_row) => {
+                for _ in 0..per_row * rows.len() {
+                    trng.next_u64();
+                }
+                let mut arng = Rng::new(splitmix64((inst.seed as u64) ^ 0xA307_0000_0000_0001));
+                instance_amounts(
+                    inst.typ,
+                    &rows,
+                    |o| w.ccy[o as usize],
+                    |o| w.amount_logshift[o as usize],
+                    &mut arng,
+                )
+            }
+            None => instance_amounts(
+                inst.typ,
+                &rows,
+                |o| w.ccy[o as usize],
+                |o| w.amount_logshift[o as usize],
+                &mut trng,
+            ),
+        };
         for (row_idx, (r, amount)) in rows.into_iter().zip(amounts).enumerate() {
             // A NON-dormant typology row whose originator is a dormant
             // participant inside its suppression window would fill the dormancy
@@ -453,7 +545,12 @@ fn pacs008_main() {
     // (i + jitter) / n_base_total; file fid holds the contiguous rows whose
     // mass falls in [fid/F, (fid+1)/F).
     let n_typ_total: i64 = typ_by_file.iter().map(|v| v.len() as i64).sum();
-    let n_base_total: u64 = (total_txns - n_typ_total).max(0) as u64;
+    let n_base_all: u64 = (total_txns - n_typ_total).max(0) as u64;
+    // D2: part of the baseline is scheduled (steady per-account cadences,
+    // regular.rs); the random rows below are the rest. n_base_total is the
+    // random rows only; scheduled rows carry uids n_base_total.. n_base_all.
+    let regular = datagen_rs::regular::Regular::build(&w.activity, n_base_all, seed);
+    let n_base_total: u64 = regular.n_rand;
     let base_seed = splitmix64((seed as u64) ^ 0xBA5E_0000_0000_0001);
     let base_mass = move |i: u64| -> f64 {
         (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
@@ -487,13 +584,31 @@ fn pacs008_main() {
     };
     // The cycle's slice of the base rows.
     let (slice_i0, slice_i1) = (first_at_mass(slice_lo), first_at_mass(slice_hi));
-    let rows_per_file = (n_base_total as i64 / total_files).max(1);
+    let rows_per_file = (n_base_all as i64 / total_files).max(1);
 
-    // Activity-weighted originator sampling: prefix sums.
+    // Activity-weighted originator sampling: prefix sums. A scheduled
+    // account's weight is only its unscheduled share, so its expected total
+    // sends are unchanged.
     let mut cum = vec![0.0f64; pop + 1];
     for i in 1..=pop {
-        cum[i] = cum[i - 1] + w.activity[i];
+        cum[i] = cum[i - 1] + regular.residual_weight[i];
     }
+    // First instant whose calendar mass is >= m (mass_at is monotone).
+    let time_at_mass = |m: f64| -> i64 {
+        let (mut lo, mut hi) = (start_us, end_us);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if gcal.mass_at(mid) < m {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+    let file_of = |ts: i64| -> i64 {
+        ((gcal.mass_at(ts) * total_files as f64) as i64).clamp(0, total_files - 1)
+    };
     let total_w = cum[pop];
     fn sample_orig(cum: &[f64], total_w: f64, pop: usize, rng: &mut Rng) -> u64 {
         let u = rng.unit() * total_w;
@@ -560,7 +675,10 @@ fn pacs008_main() {
             })
             .cloned()
             .collect();
-        let man_bytes = encode_parquet(&build_manifest(&mine, seed, &inst_uids), 8 * 1024 * 1024);
+        let man_bytes = encode_parquet(
+            &build_manifest_p(&mine, seed, &inst_uids, &perturb),
+            8 * 1024 * 1024,
+        );
         ref_bytes += man_bytes.len() as u64;
         ref_files += 1;
         sink.put(
@@ -614,6 +732,8 @@ fn pacs008_main() {
             .filter(|&fid| {
                 cycles == 1
                     || base_start(fid).max(slice_i0) < base_start(fid + 1).min(slice_i1)
+                    || ((fid as f64) / (total_files as f64) < slice_hi
+                        && ((fid + 1) as f64) / (total_files as f64) > slice_lo)
                     || typ_by_file[fid as usize]
                         .iter()
                         .any(|r| in_slice(gcal.mass_at(r.ts_us)))
@@ -631,11 +751,12 @@ fn pacs008_main() {
         let i0 = base_start(fid).max(slice_i0);
         let i1 = base_start(fid + 1).min(slice_i1).max(i0);
         let n_base = (i1 - i0) as usize;
-        if cycles > 1 && n_base + n_typ == 0 {
-            return;
-        }
 
-        let cap = n_base + n_typ;
+        // Scheduled rows (D2) arrive in proportion to the random ones; size
+        // for them too so the six row vectors do not reallocate to 2x.
+        let n_sched_est =
+            (n_base as u128 * regular.n_sched as u128 / regular.n_rand.max(1) as u128) as usize;
+        let cap = n_base + n_typ + n_sched_est + n_sched_est / 10;
         let mut orig = Vec::with_capacity(cap);
         let mut bene = Vec::with_capacity(cap);
         let mut ts_us = Vec::with_capacity(cap);
@@ -699,6 +820,74 @@ fn pacs008_main() {
             ccy.push(cc);
             uid_pre.push(gi);
         }
+        // Scheduled rows (D2, regular.rs) whose shaped time falls in this
+        // file. A row's content is a pure function of (seed, its uid). The
+        // candidate window covers the business-day roll (at most 5 days); a
+        // candidate whose rolled day is outside the file's days is skipped
+        // before any RNG draw.
+        let f_lo = fid as f64 / total_files as f64;
+        let f_hi = (fid + 1) as f64 / total_files as f64;
+        // Lookback: the longest business-day roll plus two days of margin
+        // (a row's nominal instant can sit late in its day).
+        let lookback_days = datagen_rs::timing::MAX_ROLL_DAYS as i64 + 2;
+        let m_lo = gcal.mass_at(time_at_mass(f_lo) - lookback_days * US_PER_DAY);
+        // A row's intraday time can sit earlier in its day than the event's
+        // nominal mass, so candidates run to the end of the file's last day.
+        let m_hi = if fid + 1 >= total_files {
+            1.0 + 1e-9
+        } else {
+            gcal.mass_at(time_at_mass(f_hi) + US_PER_DAY)
+        };
+        let (d_lo, d_hi) = (
+            gcal.day_for_mass(f_lo),
+            gcal.day_for_mass(f_hi.min(0.999_999_999)),
+        );
+        for class in &regular.classes {
+            let (j0, j1) = class.events_between(m_lo, m_hi);
+            for j in j0..j1 {
+                let a = class.account(j);
+                let day = gcal.day_for_mass(class.nominal_mass(j));
+                let rd = gcal.rolled_day(day, w.country[a as usize]);
+                if rd < d_lo || rd > d_hi {
+                    continue;
+                }
+                let uid = class.uid_base + j;
+                let mut rng = Rng::new(splitmix64(uid ^ base_seed ^ 0xD2D2_0000_0000_0001));
+                let t = sample_ts_on_day(&mut rng, &gcal, day, w.country[a as usize]);
+                if file_of(t) != fid || !in_slice(gcal.mass_at(t)) {
+                    continue;
+                }
+                // A dormant account's cadence stops during its dormancy: the
+                // slot goes to a random unscheduled sender instead.
+                let mut o = a;
+                let mut tries = 0;
+                while tries < 8 && in_suppress_window(&is_suppressed, &suppress_windows, o, t) {
+                    o = sample_orig(&cum, total_w, pop, &mut rng);
+                    tries += 1;
+                }
+                // Only the timing is scheduled. The counterparty is drawn
+                // exactly as for a random base row (ring core or extended
+                // band), so counterparty counts and repeat-edge shares are
+                // unchanged by D2 and no typology's counterparty signal moves.
+                const CORE: u64 = 40;
+                let rs = w.ring_sz[o as usize].max(1) as u64;
+                let core = rs.min(CORE);
+                let b = if rng.unit() < w.ring_hit[o as usize] {
+                    ring_member(o, rng.below(core), pop, seed)
+                } else {
+                    let ext = (rs.min(4 * CORE)).max(core + 1);
+                    ring_member(o, core + rng.below(ext), pop, seed)
+                };
+                let b = if b == o { (b % pop as u64) + 1 } else { b };
+                let cc = w.ccy[o as usize];
+                orig.push(o);
+                bene.push(b);
+                ts_us.push(t);
+                amount.push(native_amount(&mut rng, w.amount_logshift[o as usize], cc));
+                ccy.push(cc);
+                uid_pre.push(uid);
+            }
+        }
         for r in typ {
             orig.push(r.orig);
             bene.push(r.bene);
@@ -707,6 +896,10 @@ fn pacs008_main() {
             amount.push(r.amount);
             ccy.push(r.ccy);
             uid_pre.push(r.uid);
+        }
+        // A multi-cycle file with nothing in this cycle's slice is not written.
+        if cycles > 1 && orig.is_empty() {
+            return;
         }
 
         // sort by ts
@@ -847,6 +1040,10 @@ fn read_cpu_request_millicores() -> Option<u64> {
 // same fid produce identical bytes.
 // ---------------------------------------------------------------------------
 fn customer360_main() {
+    if robustness_flag() {
+        eprintln!("{ROBUSTNESS_FLAG} applies to the financial schema only");
+        std::process::exit(2);
+    }
     let bucket: String = arg("--bucket", String::new());
     let prefix: String = arg("--prefix", "customer/interactions/".to_string());
     if bucket.is_empty() {

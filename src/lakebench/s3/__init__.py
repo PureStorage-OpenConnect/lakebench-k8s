@@ -4,6 +4,7 @@ from .client import (
     BucketInfo,
     S3AuthError,
     S3BucketError,
+    S3BucketVanished,
     S3Client,
     S3ConnectionError,
     S3ConnectionInfo,
@@ -37,5 +38,6 @@ __all__ = [
     "S3ConnectionError",
     "S3AuthError",
     "S3BucketError",
+    "S3BucketVanished",
     "test_s3_connectivity",
 ]

@@ -55,6 +55,58 @@ list is the difference between "we plant this but no detector scores
 it" and "we forgot to hook this up." Recall for an unmapped typology is
 untestable rather than zero.
 
+### How three behavioural typologies are planted (v1.5 realism rework)
+
+D0 v2 (AML-GOALS section 9 #39) found `micro_structuring` and
+`dormant_reactivation` too easy for the reference model and
+`corridor_high_risk` just under the band floor. Each was planted in a
+shape real cases do not have. The planting changed; the features did
+not. Every parameter below is self-chosen unless a source is named, and
+none is set from a detection rule's threshold (AML-GOALS R2). Rule recall
+moves as a consequence and is reported, not targeted.
+
+| Typology | Before | Now | Why |
+|---|---|---|---|
+| `micro_structuring` | 8 distinct senders each paid the collector once within 3 days, every amount in `[0.95, 0.9999]` of the reporting threshold | A crew of 3 to 8 depositors (some deposit more than once) pays the collector 8 times over 3 to 21 days. 3 to 8 of the payments are structured; the rest are the depositors' own ordinary amounts. Structured amounts sit `threshold x 0.4 x (1 - sqrt(u))` below the threshold: a triangular density highest at the threshold and finite there, always under it, with no step at W2's 90% band floor, and about 44% inside W2's band | Structurers reuse a few people ("smurfing") and run campaigns over weeks so no single day shows the pattern; the FFIEC BSA/AML manual describes both "just under" amounts and varied amounts meant to avoid an obvious pattern. The old shape made the band fraction plus the counterparty count a two-feature label (D0 v2 pair AP 0.641) |
+| `dormant_reactivation` | Dormancy log-uniform 60 to 365 days, then 4 sends within 2 days | Dormancy log-uniform 45 to 365 days; two thirds of the reactivations are sudden (2 days), one third is the account coming back into use over 4 to 10 days (kept short so few reactivations straddle a month boundary, where the monthly unit would see the burst without its gap). Amounts stay the account's own draws (LB-138) | A 60-day floor put every episode beyond almost any natural quiet spell; an account sending about once a month goes 45 days without a send about one time in five, so the short end now overlaps normal gaps. Not every reactivation is a single burst |
+| `corridor_high_risk` | One payment between two residents of the higher-risk pool | A run of 2 to 4 payments from the subject to one counterparty in the pool over 2 to 5 weeks, amounts from the sender's own distribution | W7's "corridors to high-risk jurisdictions" is about where an account's money goes; one payment among dozens cannot show that. The typology spends the same total rows as before, so density (D11) is unchanged. A run over weeks often crosses a month boundary (about 38% of runs split their payments across two months); the monthly unit labels the last month and excludes the earlier one, so a split run shows fewer corridor payments in its labelled month. That is the unit seeing a real flow, not a planting choice |
+
+The three typologies draw their amounts from an instance-keyed stream,
+and the shared amount stream replays the draws their old rows took
+(`amounts::own_amount_stream`), so the other typologies keep their
+amounts, times and participants. The moved dormancy windows are the one
+coupling left: they change which of a dormant account's own base and
+other-typology sends are suppressed, and the resulting one-row changes
+in the planted total shift base rows' calendar positions very slightly.
+Measured against the old generator at seed 7777, scale 0.05: 301 of 302
+other-typology instances identical (the other gained a row a dormancy
+window used to drop) and 99.94% of baseline rows identical.
+
+### Baseline timing: scheduled and bursty senders (D2)
+
+Every baseline send used to be an independent activity-weighted draw of its
+originator, so each account sent as a memoryless process on the calendar and
+its gap CV sat near 1 (D0 v2: 0.004% of the cohort below 0.5, 58% above
+1.0; the pre-registered D2 target is at least 15% on each side). Real
+payment behaviour is a mixture: some accounts pay mostly on a steady cadence
+(standing orders, bills, payroll and supplier runs) and others are bursty.
+
+`datagen_rs/src/regular.rs` makes 30% of accounts "scheduled": 75 to 95% of
+the account's expected sends follow a steady cadence (one payment every 1/K
+of calendar mass, rolled to the next business day), and the rest stay random
+draws. Spacing the cadence in calendar mass rather than wall-clock time
+keeps scheduled rows on the corpus's day-of-week, salary-day and
+quarter-end shape, which typology rows share; evenly spaced wall-clock
+times put fewer rows on salary days and more on Mondays, and planted rows
+would then stand out by date.
+Only timing changes. The account's expected total sends, its amounts
+(persona draws) and its counterparty draws (the same ring and extended-band
+draw as a random row) are unchanged, as are every typology's rows and the
+corpus row count. A dormant account's cadence stops during its dormancy.
+Scheduled events are computed per file from (seed, uid), so memory stays
+O(accounts) at any scale and files still depend only on (seed, file).
+Parameters are self-chosen; the D2 anchor is still pending a citation.
+
 ## Why benchmark precision is not the FP rate ops teams care about
 
 The precision numbers in this benchmark answer a narrow question:
@@ -208,7 +260,7 @@ mode, and the shipped AML example is batch mode.
   because `alert_ts` carries the last contributing transaction's event
   time, not the wall-clock at which the alert was produced. The value is
   therefore a property of the datagen's typology window arithmetic in
-  `datagen_rs/src/typology.rs` (roughly 3 days for `micro_structuring`,
+  `datagen_rs/src/typology.rs` (3 to 21 days for `micro_structuring`,
   one civil day for `rapid_layering`), invariant to how fast or slow the
   stack under test runs -- median pattern-span at scale 10000 on a fast
   cluster equals median pattern-span at scale 1 on a slow one. A true

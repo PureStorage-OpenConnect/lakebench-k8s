@@ -279,6 +279,7 @@ def release_lock(
     certain the prior holder crashed.
     """
     from lakebench.deploy.cluster_lock import (
+        ClusterLockError,
         ClusterLockHeld,
         force_release_cluster_lock,
     )
@@ -292,6 +293,9 @@ def release_lock(
             f"lease is held by {e.holder!r} and still within TTL "
             f"(expires {e.expires_at}). Pass --force to release anyway."
         )
+        raise typer.Exit(1) from e
+    except ClusterLockError as e:
+        print_error(f"cannot release lease: {e}")
         raise typer.Exit(1) from e
 
     if state is None:

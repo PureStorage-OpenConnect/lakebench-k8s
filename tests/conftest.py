@@ -74,6 +74,24 @@ def _journal_in_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(helpers, "_journal", Journal(tmp_path / "lakebench-journal"))
 
 
+@pytest.fixture(autouse=True)
+def _fake_destroy_namespace_clock(monkeypatch):
+    """Destroy waits (bounded) for the namespace to be NotFound (LB-157).
+
+    Unit tests drive destroy with mocked clients, so run that wait on a fake
+    clock: sleeping advances time instantly instead of blocking the suite.
+    """
+    import lakebench.deploy.destroy as destroy_mod
+
+    now = [0.0]
+
+    def _sleep(seconds: float) -> None:
+        now[0] += max(float(seconds), 0.001)
+
+    monkeypatch.setattr(destroy_mod, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(destroy_mod, "_sleep", _sleep)
+
+
 def make_config(**overrides) -> LakebenchConfig:
     """Create a LakebenchConfig with sensible defaults for testing.
 

@@ -1226,3 +1226,164 @@ def test_other_sample_count_is_refused(env, samples):
     assert any("sample(s) per query" in r for r in c.reasons), c.reasons
     if samples <= 1:
         assert any("predates" in r for r in c.reasons)
+
+
+# -- stopped pre-benchmark maintenance (lane Y follow-up) ---------------------
+
+
+def _stopped(data: dict, pre_qph: float | None = None) -> dict:
+    sc = data["pipeline_benchmark"]["scorecard"]
+    sc["maintenance_stopped"] = True
+    sc["maintenance_stop_reason"] = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
+    if pre_qph is not None:
+        sc["pre_compaction_qph"] = pre_qph
+    return data
+
+
+def test_stopped_maintenance_excludes_post_maintenance_qph(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    # A rewrite still running halves QpH; that is not a regression.
+    slow = _stopped(
+        _batch_run(snap, "20260924-110000-bbbbbb", qph=200.0, query_scale=2.0), pre_qph=300.0
+    )
+    c = _compare(env, "c360-batch-s10", slow)
+    assert c.verdict != pg.REGRESSION, pg.format_comparison(c)
+    for metric in ("composite_qph", "query_qph_Q1_scan"):
+        row = _row(c, metric)
+        assert row.status.startswith("excluded"), row
+        assert "maintenance stopped" in row.status
+    assert _row(c, "pre_compaction_qph").status == "ok"
+
+
+def test_stopped_maintenance_keeps_pre_maintenance_qph_gated(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    c = _compare(env, "c360-batch-s10", _stopped(_batch_run(snap, "20260924-110000-bbbbbb"), 150.0))
+    assert c.verdict == pg.REGRESSION
+    assert _row(c, "pre_compaction_qph").status == "regression"
+
+
+def test_stopped_maintenance_cannot_be_a_baseline(env):
+    snap = env.snaps["c360-batch-s10"]
+    run = pg.load_run(env.write_run(_stopped(_batch_run(snap, "20260924-100000-aaaaaa"))))
+    with pytest.raises(pg.PerfGateError, match="maintenance"):
+        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
+
+
+def test_stopped_maintenance_with_no_qph_left_is_not_comparable(env, capsys):
+    """Scale >= 50 has no pre-maintenance round: with post QpH excluded nothing
+    QpH-shaped is gated, so the run must not read as a pass."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    stopped = _stopped(_batch_run(snap, "20260924-110000-bbbbbb", qph=100.0, query_scale=4.0))
+    c = _compare(env, "c360-batch-s10", stopped)
+    assert c.verdict == pg.NOT_COMPARABLE
+    assert not c.ok
+    assert any("OPTIMIZE lakehouse.gold.t timed out" in r for r in c.reasons)
+
+    cli = _load_script("perf_gate")
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    rc = cli.main([*base, "compare", "c360-batch-s10", "--run", "20260924-110000-bbbbbb"])
+    assert rc != 0
+    assert "NOT_COMPARABLE" in capsys.readouterr().out
+
+    passed, lines = pg.release_check(env.store(), env.runs)
+    line = next(ln for ln in lines if "c360-batch-s10" in ln)
+    assert not line.startswith("ok")
+    assert "maintenance stopped" in line
+
+
+def test_seed_skips_stopped_runs_and_uses_the_next_newest(env, capsys):
+    cli = _load_script("perf_gate")
+    snap = env.snaps["c360-batch-s10"]
+    env.write_run(_batch_run(snap, "20260924-100000-aaaaaa"))
+    env.write_run(_stopped(_batch_run(snap, "20260924-110000-bbbbbb")))
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    assert cli.main([*base, "seed", "--write"]) == 0
+    out = capsys.readouterr().out
+    assert "skipping 20260924-110000-bbbbbb" in out
+    assert "20260924-110000-bbbbbb not usable" not in out, "skipped, never attempted"
+    assert env.store().baselines["c360-batch-s10"].run_id == "20260924-100000-aaaaaa"
+
+
+def test_seed_falls_back_when_the_newest_run_is_refused(env, capsys):
+    """A refused candidate (no datagen stage) must not abort the seed loop."""
+    cli = _load_script("perf_gate")
+    snap = env.snaps["c360-batch-s10"]
+    env.write_run(_batch_run(snap, "20260924-100000-aaaaaa"))
+    env.write_run(
+        _batch_run(
+            snap,
+            "20260924-110000-bbbbbb",
+            stage_s={"bronze": 100.0, "silver": 200.0, "gold": 150.0},
+        )
+    )
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    assert cli.main([*base, "seed", "--write"]) == 0
+    out = capsys.readouterr().out
+    assert "20260924-110000-bbbbbb not usable" in out
+    assert env.store().baselines["c360-batch-s10"].run_id == "20260924-100000-aaaaaa"
+
+
+def test_stop_reason_is_named_even_on_a_pass(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    c = _compare(env, "c360-batch-s10", _stopped(_batch_run(snap, "20260924-110000-bbbbbb"), 300.0))
+    assert c.verdict == pg.PASS
+    assert any("maintenance stopped before completion" in r for r in c.reasons)
+
+
+def _live(data: dict, pre_qph: float | None = None) -> dict:
+    sc = data["pipeline_benchmark"]["scorecard"]
+    sc["maintenance_live_streams"] = True
+    sc["maintenance_live_streams_reason"] = (
+        "stream apps present or unreadable: lakebench-silver-stream"
+    )
+    if pre_qph is not None:
+        sc["pre_compaction_qph"] = pre_qph
+    return data
+
+
+def test_live_streams_are_treated_like_a_stopped_maintenance(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    c = _compare(
+        env,
+        "c360-batch-s10",
+        _live(_batch_run(snap, "20260924-110000-bbbbbb", qph=100.0, query_scale=4.0), 300.0),
+    )
+    # The pre round ran with the same writers live, so nothing QpH-shaped
+    # is gated: never a pass.
+    assert c.verdict == pg.NOT_COMPARABLE, pg.format_comparison(c)
+    assert _row(c, "composite_qph").status.startswith("excluded")
+    assert _row(c, "pre_compaction_qph").status.startswith("excluded")
+    assert any("streams were live" in r for r in c.reasons)
+
+
+def test_live_streams_with_nothing_gated_is_not_comparable(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    c = _compare(env, "c360-batch-s10", _live(_batch_run(snap, "20260924-110000-bbbbbb")))
+    assert c.verdict == pg.NOT_COMPARABLE
+
+
+def test_live_streams_run_cannot_be_a_baseline(env, capsys):
+    snap = env.snaps["c360-batch-s10"]
+    run = pg.load_run(env.write_run(_live(_batch_run(snap, "20260924-100000-aaaaaa"))))
+    with pytest.raises(pg.PerfGateError, match="streams were live"):
+        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")
+    cli = _load_script("perf_gate")
+    base = ["--store", str(env.store_path), "--runs-dir", str(env.runs)]
+    assert cli.main([*base, "seed", "--write"]) == 0
+    out = capsys.readouterr().out
+    assert "skipping 20260924-100000-aaaaaa (streams were live" in out
+    assert "not usable" not in out, "skipped, never attempted"
