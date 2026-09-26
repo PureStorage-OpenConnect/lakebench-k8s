@@ -23,7 +23,8 @@ What passes, all of it required (the verdict is the conjunction):
   loosen a tolerance), on the same verified calibration seed, the small run
   at corpora.gate_scale and the large run at the top of density.scales (see
   LARGE_SCALE_SOURCE), on the same unit, registered label role, feature list,
-  feature code (aml_features sha256), generator model version and numerical
+  feature code (aml_features sha256), gate code (fidelity_gate sha256),
+  generator model version and numerical
   libraries, each with its own corpus_fully_keyed / seed / label-role passes
   true, and the two reports are different files.
 - Integrity: each scores table agrees with its report on n_scored and
@@ -331,6 +332,7 @@ def _provenance(run: dict, prereg: dict, sha: str) -> tuple[dict, list[str]]:
         passes=rep.get("passes"),
         label_role=prov.get("label_role"),
         aml_features_sha256=prov.get("aml_features_sha256"),
+        gate_code_sha256=rep.get("gate_code_sha256"),
         model_versions=prov.get("model_versions"),
         sampling=prov.get("sampling"),
     )
@@ -492,6 +494,8 @@ def _evaluate(small_report, large_report, prereg_path, endpoint) -> dict[str, An
         "same_unit": s["unit"] is not None and s["unit"] == lg["unit"],
         "same_feature_code": bool(s["aml_features_sha256"])
         and s["aml_features_sha256"] == lg["aml_features_sha256"],
+        "same_gate_code": bool(s["gate_code_sha256"])
+        and s["gate_code_sha256"] == lg["gate_code_sha256"],
         "same_generator": bool(s["model_versions"]) and s["model_versions"] == lg["model_versions"],
         "distinct_reports": s["report_sha256"] != lg["report_sha256"],
         "same_libraries": all(

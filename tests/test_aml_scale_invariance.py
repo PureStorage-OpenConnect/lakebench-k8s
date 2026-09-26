@@ -447,6 +447,18 @@ def test_provenance_and_stale_outputs_fail(tmp_path, prereg_path, mutate, expect
         assert v["features"]["noise_b"]["fingerprint_match"] is False
 
 
+def test_different_gate_code_fails(tmp_path, prereg_path):
+    def other_code(rep, paths):
+        rep["gate_code_sha256"] = "d" * 64
+
+    a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale())
+    b = _run(
+        tmp_path, "large", _frame(15000, 2), prereg_path, scale=_large_scale(), mutate=other_code
+    )
+    v = si.evaluate_d8(str(a), str(b), prereg_path=str(prereg_path))
+    assert v["pass"] is False and v["checks"]["same_gate_code"] is False
+
+
 def test_non_calibration_seed_fails(tmp_path, prereg_path):
     other = SEED + 1  # role "other"
     a = _run(tmp_path, "small", _frame(6000, 1), prereg_path, scale=_gate_scale(), seed=other)
