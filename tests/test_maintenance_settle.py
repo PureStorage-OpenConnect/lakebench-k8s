@@ -469,3 +469,17 @@ def test_run_passes_the_stop_reason_and_records_it():
     src = inspect.getsource(run_mod)
     assert "stopped_reason=maint_stop_reason" in src
     assert "pb.maintenance_stopped = True" in src
+
+
+def test_headline_qph_is_flagged_when_maintenance_stopped():
+    from lakebench.reports.generator import ReportGenerator
+
+    rg = ReportGenerator(metrics_dir="/tmp/unused-rg")
+    pm, pb = _pb_with_settle(None)
+    assert "qph-stop-warning" not in rg._generate_batch_summary(pm)
+    assert "qph-stop-warning" not in rg._generate_qph_card(pm)
+    pb.maintenance_stopped = True
+    pb.maintenance_stop_reason = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
+    for html in (rg._generate_batch_summary(pm), rg._generate_qph_card(pm)):
+        assert "qph-stop-warning" in html
+        assert "maintenance stopped before completion" in html

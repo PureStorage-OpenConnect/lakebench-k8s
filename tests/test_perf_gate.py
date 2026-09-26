@@ -1226,3 +1226,50 @@ def test_other_sample_count_is_refused(env, samples):
     assert any("sample(s) per query" in r for r in c.reasons), c.reasons
     if samples <= 1:
         assert any("predates" in r for r in c.reasons)
+
+
+# -- stopped pre-benchmark maintenance (lane Y follow-up) ---------------------
+
+
+def _stopped(data: dict, pre_qph: float | None = None) -> dict:
+    sc = data["pipeline_benchmark"]["scorecard"]
+    sc["maintenance_stopped"] = True
+    sc["maintenance_stop_reason"] = "OPTIMIZE lakehouse.gold.t timed out after 1800s"
+    if pre_qph is not None:
+        sc["pre_compaction_qph"] = pre_qph
+    return data
+
+
+def test_stopped_maintenance_excludes_post_maintenance_qph(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    # A rewrite still running halves QpH; that is not a regression.
+    slow = _stopped(
+        _batch_run(snap, "20260924-110000-bbbbbb", qph=200.0, query_scale=2.0), pre_qph=300.0
+    )
+    c = _compare(env, "c360-batch-s10", slow)
+    assert c.verdict != pg.REGRESSION, pg.format_comparison(c)
+    for metric in ("composite_qph", "query_qph_Q1_scan"):
+        row = _row(c, metric)
+        assert row.status.startswith("excluded"), row
+        assert "maintenance stopped" in row.status
+    assert _row(c, "pre_compaction_qph").status == "ok"
+
+
+def test_stopped_maintenance_keeps_pre_maintenance_qph_gated(env):
+    snap = env.snaps["c360-batch-s10"]
+    base = _batch_run(snap, "20260924-100000-aaaaaa")
+    base["pipeline_benchmark"]["scorecard"]["pre_compaction_qph"] = 300.0
+    _record(env, "c360-batch-s10", base)
+    c = _compare(env, "c360-batch-s10", _stopped(_batch_run(snap, "20260924-110000-bbbbbb"), 150.0))
+    assert c.verdict == pg.REGRESSION
+    assert _row(c, "pre_compaction_qph").status == "regression"
+
+
+def test_stopped_maintenance_cannot_be_a_baseline(env):
+    snap = env.snaps["c360-batch-s10"]
+    run = pg.load_run(env.write_run(_stopped(_batch_run(snap, "20260924-100000-aaaaaa"))))
+    with pytest.raises(pg.PerfGateError, match="maintenance"):
+        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc")

@@ -36,6 +36,22 @@ def _format_duration_ms(ms: float | None) -> str:
     return "-"
 
 
+def _qph_stop_warning(metrics) -> str:
+    """Warning on a headline QpH measured after a stopped maintenance."""
+    pb = getattr(metrics, "pipeline_benchmark", None)
+    if not pb or not getattr(pb, "maintenance_stopped", False):
+        return ""
+    from html import escape
+
+    reason = escape(getattr(pb, "maintenance_stop_reason", "") or "unknown")
+    return (
+        ' <span class="qph-stop-warning" style="color: var(--danger); font-size: 0.5em;" '
+        f'title="pre-benchmark maintenance stopped before completion: {reason}">'
+        "WARNING: maintenance stopped before completion; a statement may still have "
+        "been running, so this is not a clean measurement</span>"
+    )
+
+
 class ReportGenerator:
     """Generates HTML benchmark reports."""
 
@@ -1518,7 +1534,7 @@ class ReportGenerator:
             </div>
             <div class="card">
                 <div class="card-label">QpH</div>
-                <div class="card-value">{qph:,.1f}</div>
+                <div class="card-value">{qph:,.1f}{_qph_stop_warning(metrics)}</div>
                 <div class="card-hint">queries per hour -- higher is better</div>
                 <div class="card-hint2">{qph_hint2}</div>
             </div>
@@ -1786,7 +1802,7 @@ class ReportGenerator:
         return f"""
             <div class="card">
                 <div class="card-label">QpH ({b.cache})</div>
-                <div class="card-value">{b.qph:.1f}</div>
+                <div class="card-value">{b.qph:.1f}{_qph_stop_warning(metrics)}</div>
                 <div class="card-delta" style="color: var(--text-muted);">
                     {mode_label}, scale {b.scale}
                 </div>
