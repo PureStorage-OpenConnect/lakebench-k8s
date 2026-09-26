@@ -66,6 +66,8 @@ platform:
 architecture:
   pipeline:
     mode: batch
+    # Maintenance settings are part of the gate fingerprint; pinned here.
+    pre_benchmark_maintenance: true
 
   workload:
     schema: customer360

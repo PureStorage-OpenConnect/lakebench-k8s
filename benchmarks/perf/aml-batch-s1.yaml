@@ -75,6 +75,8 @@ architecture:
 
   pipeline:
     mode: batch
+    # Maintenance settings are part of the gate fingerprint; pinned here.
+    pre_benchmark_maintenance: true
     medallion:
       bronze:
         format: parquet

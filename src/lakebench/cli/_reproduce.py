@@ -249,6 +249,29 @@ def _run_query_set(metrics: Any) -> str | None:
     return None
 
 
+def _run_maintenance_policy(metrics: Any) -> str:
+    """The maintenance policy id the run was measured under (legacy if unrecorded)."""
+    from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
+
+    return getattr(metrics, "maintenance_policy_id", None) or LEGACY_MAINTENANCE_POLICY_ID
+
+
+def _policy_refusal(meta: dict[str, Any], actual: str | None) -> str | None:
+    """Why a run under *actual* policy cannot verify the package, or None.
+
+    Refused, not warned: maintenance changes post-maintenance QpH,
+    continuous freshness and throughput and the object count, so a drift
+    across policies is not a regression or an improvement of the code.
+    A package without the field was recorded under the legacy policy.
+    """
+    from lakebench.metrics.maintenance_policy import policy_mismatch, recorded_policy
+
+    problem = policy_mismatch(recorded_policy(meta), actual)
+    if problem is None:
+        return None
+    return problem + "; make a new run with this version and record the package from it"
+
+
 def _benchmark_samples(metrics: Any) -> int | None:
     """Timed samples per query behind the run's QpH; 1 for pre-LB-150 records."""
     from lakebench.benchmark.spread import samples_per_query
@@ -307,6 +330,13 @@ def _build_package(
     # gate entirely on every future reproduce -- a broken source run
     # could silently publish a package that will always exit 0. Require
     # the mode-appropriate signal.
+    from lakebench.metrics.maintenance_policy import not_current
+
+    stale_policy = not_current(_run_maintenance_policy(metrics))
+    if stale_policy:
+        # Such a package could never verify on this version.
+        raise ReproduceError(f"The source run cannot be packaged: {stale_policy}.")
+
     required = "scale_ratio" if pipeline_mode == "batch" else "ingest_ratio"
     if required not in numbers:
         raise ReproduceError(
@@ -327,6 +357,8 @@ def _build_package(
             "expected_numbers": numbers,
             # QpH is only reproducible over the same query set.
             "query_set_id": _run_query_set(metrics),
+            # ...and under the same table-maintenance policy.
+            "maintenance_policy_id": _run_maintenance_policy(metrics),
             "benchmark_samples_per_query": _benchmark_samples(metrics) or 1,
             "tolerance_pct": dict(DEFAULT_TOLERANCES),
             "config_snapshot": snapshot,
@@ -860,6 +892,12 @@ def _verify(
     if _mismatch:
         print_error(_mismatch)
         raise typer.Exit(2)
+    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+
+    _mismatch = _policy_refusal(meta, MAINTENANCE_POLICY_ID)
+    if _mismatch:
+        print_error(_mismatch)
+        raise typer.Exit(2)
 
     if dry_run:
         print_warning("--dry-run set: package validation only, no pipeline run")
@@ -873,7 +911,9 @@ def _verify(
         print_error(str(e))
         raise typer.Exit(2) from None
 
-    _mismatch = _sample_mismatch(meta, _benchmark_samples(metrics))
+    _mismatch = _sample_mismatch(meta, _benchmark_samples(metrics)) or _policy_refusal(
+        meta, _run_maintenance_policy(metrics)
+    )
     if _mismatch:
         print_error(_mismatch)
         raise typer.Exit(2)

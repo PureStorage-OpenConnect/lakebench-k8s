@@ -435,12 +435,9 @@ def test_batch_delta_vacuum_still_honours_short_retention():
 
 
 def test_continuous_loop_passes_live_streams_to_maintenance():
-    import inspect
+    from tests.test_continuous_maintenance_timeout import loop_call_keywords
 
-    import lakebench.cli._sustained as sus
-
-    src = inspect.getsource(sus)
-    assert "retention_threshold, live_streams=True" in src
+    assert loop_call_keywords("_run_iceberg_maintenance")["live_streams"] == "True"
 
 
 @pytest.mark.usefixtures("_engine_pod")
@@ -585,11 +582,9 @@ def test_batch_spark_orphans_never_below_24h10m():
 
 
 def test_continuous_loop_passes_live_streams():
-    import inspect
+    from tests.test_continuous_maintenance_timeout import loop_call_keywords
 
-    import lakebench.cli._sustained as sus
-
-    assert "retention_threshold, live_streams=True" in inspect.getsource(sus)
+    assert loop_call_keywords("_run_iceberg_compaction")["live_streams"] == "True"
 
 
 def test_spark_timestamp_is_utc_whatever_the_input_zone():
@@ -687,14 +682,28 @@ def test_pre_benchmark_maintenance_uses_live_settings_when_streams_exist():
 
 
 def test_continuous_loop_survives_a_maintenance_error():
+    import ast
     import inspect
 
     import lakebench.cli._sustained as sus
 
     src = inspect.getsource(sus._run_sustained)
-    i = src.index("_run_iceberg_maintenance(")
-    block = src[src.rfind("try:", 0, i) : i + 400]
-    assert "except Exception" in block and "Maintenance round failed" in block
+    guarded = [
+        t
+        for t in ast.walk(ast.parse(src))
+        if isinstance(t, ast.Try)
+        and any(
+            isinstance(n, ast.Call) and getattr(n.func, "id", "") == "_run_iceberg_maintenance"
+            for stmt in t.body
+            for n in ast.walk(stmt)
+        )
+    ]
+    assert any(
+        ast.unparse(h.type) == "Exception" and "Maintenance round failed" in ast.unparse(h)
+        for t in guarded
+        for h in t.handlers
+        if h.type is not None
+    )
 
 
 def test_run_records_live_streams_for_the_scorecard():

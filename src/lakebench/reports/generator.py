@@ -18,6 +18,7 @@ from html import escape as _html_escape
 from pathlib import Path
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
+from lakebench.metrics.maintenance_policy import LEGACY_MAINTENANCE_POLICY_ID
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,12 @@ def _format_duration_ms(ms: float | None) -> str:
     elif ms > 0:
         return f"{ms:.0f}ms"
     return "-"
+
+
+# Owner decision D-6 (AML-GOALS #46): continuous Delta ships with no effective
+# table maintenance in v1.6 (VACUUM keeps the 7 d default while streams are
+# live and OPTIMIZE is skipped), and the report says so.
+DELTA_CONTINUOUS_NO_MAINTENANCE = "no effective table maintenance in continuous mode (v1.6)"
 
 
 def _post_qph_caveat(pb) -> str:
@@ -501,10 +508,31 @@ class ReportGenerator:
         """
 
     def _generate_maintenance_section(self, metrics: PipelineMetrics) -> str:
-        """Generate table maintenance scoring section."""
+        """Generate table maintenance scoring section.
+
+        Always states the maintenance policy the run was measured under, and
+        for a continuous Delta run that it had no effective maintenance.
+        """
+        from html import escape as _pol_esc
+
         pb = metrics.pipeline_benchmark
+        policy_rows = [
+            "<tr><td>Maintenance policy</td>"
+            f'<td><code class="mono">{_pol_esc(metrics.maintenance_policy_id)}</code></td></tr>'
+        ]
+        cs = metrics.config_snapshot or {}
+        # The statement describes this policy; earlier continuous Delta runs
+        # vacuumed at the requested retention (m1-legacy).
+        if (
+            self._is_sustained(metrics)
+            and cs.get("table_format") == "delta"
+            and metrics.maintenance_policy_id != LEGACY_MAINTENANCE_POLICY_ID
+        ):
+            policy_rows.append(
+                f"<tr><td>Continuous maintenance</td><td>{DELTA_CONTINUOUS_NO_MAINTENANCE}</td></tr>"
+            )
         if not pb:
-            return ""
+            return self._maintenance_table(policy_rows)
 
         maint_elapsed = pb.maintenance_elapsed_seconds
         pre_files = pb.pre_compaction_file_count
@@ -513,11 +541,11 @@ class ReportGenerator:
         post_qph = pb.post_compaction_qph
         value_pct = pb.maintenance_value_pct
 
-        # Nothing to show if maintenance didn't run
+        # Only the policy to show if maintenance didn't run
         if maint_elapsed == 0 and pre_files == 0:
-            return ""
+            return self._maintenance_table(policy_rows)
 
-        rows = []
+        rows = list(policy_rows)
         if pre_files > 0:
             rows.append(f"<tr><td>Files before</td><td>{pre_files:,}</td></tr>")
         if post_files > 0:
@@ -604,9 +632,12 @@ class ReportGenerator:
                     f"<td>{_esc(times)}</td></tr>"
                 )
 
+        return self._maintenance_table(rows)
+
+    @staticmethod
+    def _maintenance_table(rows: list[str]) -> str:
         if not rows:
             return ""
-
         table_rows = "\n                    ".join(rows)
         return f"""
         <section>

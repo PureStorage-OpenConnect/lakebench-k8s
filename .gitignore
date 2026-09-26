@@ -82,3 +82,6 @@ test-config*.yaml
 
 # Rust build output
 target/
+
+# Auto-name state written by load_config next to a config file
+.lakebench/

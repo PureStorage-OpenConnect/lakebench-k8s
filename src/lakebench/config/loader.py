@@ -251,7 +251,7 @@ def load_config(path: str | Path, *, allow_long_names: bool = False) -> Lakebenc
         data["name"] = _resolve_auto_name(path.parent)
 
     try:
-        return LakebenchConfig.model_validate(data, context={"allow_long_names": allow_long_names})
+        cfg = LakebenchConfig.model_validate(data, context={"allow_long_names": allow_long_names})
     except ValidationError as e:
         errors = e.errors()
         error_messages = []
@@ -264,6 +264,76 @@ def load_config(path: str | Path, *, allow_long_names: bool = False) -> Lakebenc
             "Configuration validation failed:\n" + "\n".join(error_messages),
             errors=[dict(e) for e in errors],  # type: ignore[call-overload]
         )
+    _print_load_advisories(cfg)
+    return cfg
+
+
+# Iceberg snapshot-expiry floor while continuous streams are live. Mirrors
+# LIVE_EXPIRE_MIN_RETENTION_SECONDS in
+# modules/table_formats/iceberg/maintenance.py; a test holds them in step.
+# Delta is not checked: continuous Delta has no effective table maintenance
+# in v1.6 (VACUUM keeps the 7 d default while streams are live, OPTIMIZE is
+# skipped), and the report says so.
+_ICEBERG_LIVE_EXPIRE_FLOOR_SECONDS = 3600
+_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+# Engines that run continuous Iceberg maintenance (DuckDB and none skip it).
+_MAINTENANCE_ENGINES = ("trino", "spark-thrift")
+_printed_advisories: set[str] = set()
+
+
+def retention_floor_advisory(cfg: LakebenchConfig) -> str | None:
+    """Warning text when the continuous retention_threshold is below the live floor.
+
+    A continuous run floors Iceberg snapshot expiry at 1 h while streams are
+    live, so a lower retention_threshold is silently raised. The maintenance
+    journal records the effective value, but nothing told the user. Only
+    Iceberg recipes whose query engine runs maintenance (Trino, Spark
+    Thrift) are checked. Ignores the pipeline mode; callers decide.
+    """
+    if cfg.architecture.table_format.type.value != "iceberg":
+        return None
+    if cfg.architecture.query_engine.type.value not in _MAINTENANCE_ENGINES:
+        return None
+    threshold = cfg.architecture.pipeline.sustained.retention_threshold
+    m = re.fullmatch(r"(\d+)([smhd])", threshold)
+    if m is None:
+        return None
+    if int(m.group(1)) * _UNIT_SECONDS[m.group(2)] >= _ICEBERG_LIVE_EXPIRE_FLOOR_SECONDS:
+        return None
+    return (
+        f"architecture.pipeline.sustained.retention_threshold is {threshold}, below the "
+        "1h floor for Iceberg snapshot expiry while continuous streams are live; "
+        "continuous maintenance expires at 1h. Set 1h or more to make the config say "
+        "what runs."
+    )
+
+
+def load_advisories(cfg: LakebenchConfig) -> list[str]:
+    """Settings that are valid but will not do what they say (continuous configs).
+
+    A batch config run with ``run --sustained`` gets the same retention
+    warning from the continuous loop instead: saved configs carry every
+    field, so an explicit threshold does not mean the user chose it.
+    """
+    if cfg.architecture.pipeline.mode.value != "sustained":
+        return []
+    msg = retention_floor_advisory(cfg)
+    return [msg] if msg else []
+
+
+def _print_load_advisories(cfg: LakebenchConfig) -> None:
+    advisories = load_advisories(cfg)
+    if not advisories:
+        return
+    from rich.console import Console
+
+    console = Console(stderr=True)
+    for msg in advisories:
+        # Once per process: some commands load the config several times.
+        if msg in _printed_advisories:
+            continue
+        _printed_advisories.add(msg)
+        console.print(f"[yellow]WARN[/yellow] {msg}")
 
 
 def save_config(config: LakebenchConfig, path: str | Path) -> None:

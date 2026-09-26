@@ -4,6 +4,7 @@ is non-zero whenever any check fails (GOALS P9.6)."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -138,7 +139,71 @@ def test_uat_results_check(tmp_path, monkeypatch):
     assert res.status == rg.FAIL and "no results table rows" in res.detail
     path.write_text(f"# UAT results {version}\n\n{table}{row}")
     res = rg.check_uat_results()
-    assert res.status == rg.PASS and "1 result rows" in res.detail
+    assert res.status == rg.FAIL and "cites no run ids" in res.detail
+    rid = "20260926-101500-abc123"
+    good = f"| hive-iceberg-spark-trino | batch | PASS | run-{rid} |\n"
+    path.write_text(f"# UAT results {version}\n\n{table}{good}")
+    res = rg.check_uat_results()
+    assert res.status == rg.FAIL and rid in res.detail  # no metrics.json yet
+    run_dir = tmp_path / "lakebench-output" / "runs" / f"run-{rid}"
+    run_dir.mkdir(parents=True)
+    (run_dir / "metrics.json").write_text(json.dumps({"run_id": "20260926-101500-ffffff"}))
+    assert rg.check_uat_results().status == rg.FAIL  # a metrics.json for another run
+    (run_dir / "metrics.json").write_text(json.dumps({"run_id": rid}))
+    res = rg.check_uat_results()
+    assert res.status == rg.PASS and "1 result rows, 1 run ids resolved" in res.detail
+    assert "1 resolved only outside uat/" in res.detail  # CI cannot see it
+
+
+def test_uat_results_run_ids_resolve_in_checked_in_or_named_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(rg, "ROOT", tmp_path)
+    monkeypatch.delenv(rg.PERF_RUNS_ENV, raising=False)
+    version = "9.9.9"
+    fake = type("M", (), {"package_version": staticmethod(lambda: version)})
+    monkeypatch.setattr(rg, "_load_script", lambda name: fake)
+    a, b, c = "20260926-101500-aaaaaa", "20260926-101500-bbbbbb", "20260926-101500-cccccc"
+    for d, rid in (("uat/runs", a), ("uat/perf", b)):
+        run_dir = tmp_path / d / f"run-{rid}"
+        run_dir.mkdir(parents=True)
+        (run_dir / "metrics.json").write_text(json.dumps({"run_id": rid}))
+    named = tmp_path / "evidence" / "r9.json.d" / "metrics.json"
+    named.parent.mkdir(parents=True)
+    named.write_text(json.dumps({"run_id": c}))
+    path = tmp_path / "uat" / f"results-{version}.md"
+    rows = (
+        "| recipe | result | run |\n|---|---|---|\n"
+        f"| x | PASS | {a} |\n| y | PASS | {b} |\n"
+        f"| z | PASS | {c} (evidence/r9.json.d/metrics.json) |\n"
+    )
+    path.write_text(f"# UAT results {version}\n\n{rows}")
+    res = rg.check_uat_results()
+    assert res.status == rg.PASS, res.detail
+    assert "outside uat/" not in res.detail  # all checked in or named in-repo
+    path.write_text(f"# UAT results {version}\n\n{rows}| w | PASS | 20260926-101500-dddddd |\n")
+    res = rg.check_uat_results()
+    assert res.status == rg.FAIL and "1 of 4" in res.detail and "dddddd" in res.detail
+    # An id in prose outside the table needs no evidence.
+    path.write_text(f"# UAT results {version}\n\nSuperseded 20260926-101500-dddddd.\n\n{rows}")
+    assert rg.check_uat_results().status == rg.PASS
+    # Typos are not skipped.
+    for bad in (
+        "20260926-101500-ABC999",
+        "20260926_101500_def456",
+        "20260926-101500-abc1234",
+        "120260926-101500-abc123",
+    ):
+        path.write_text(f"# UAT results {version}\n\n{rows}| v | PASS | {bad} |\n")
+        res = rg.check_uat_results()
+        assert res.status == rg.FAIL and "malformed" in res.detail, bad
+    # Evidence outside the repository does not count.
+    outside = tmp_path.parent / f"outside-{tmp_path.name}" / "metrics.json"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    d = "20260926-101500-eeeeee"
+    outside.write_text(json.dumps({"run_id": d}))
+    rel_out = f"../{outside.parent.name}/metrics.json"
+    for ref in (str(outside), rel_out):
+        path.write_text(f"# UAT results {version}\n\n{rows}| u | PASS | {d} ({ref}) |\n")
+        assert rg.check_uat_results().status == rg.FAIL, ref
 
 
 def test_em_dash_scope_covers_changelog_github_examples_and_cli():
@@ -157,3 +222,21 @@ def test_check_examples_restores_sys_path():
     before = list(sys.path)
     rg.check_examples()
     assert sys.path == before
+
+
+def test_releasing_doc_matches_release_workflow_only_list():
+    """docs/releasing.md must say what release.yml's gate --only runs."""
+    import re
+
+    wf = (ROOT / ".github" / "workflows" / "release.yml").read_text()
+    m = re.search(r"release_gate\.py[^\n]*\n?[^\n]*--only ([\w,-]+)", wf)
+    assert m, "release.yml no longer passes --only to release_gate.py"
+    only = set(m.group(1).split(","))
+    doc = (ROOT / "docs" / "releasing.md").read_text()
+    in_wf = "perf-baselines" in only
+    says_not_in = "not in the release workflow's `--only` list" in doc
+    assert in_wf != says_not_in, (sorted(only), says_not_in)
+    listed = re.search(r"\(`release\.yml` runs ([^)]*)\)", doc)
+    assert listed, "docs/releasing.md no longer lists what release.yml runs"
+    doc_names = set(re.split(r",\s*|\s+and\s+", " ".join(listed.group(1).split())))
+    assert doc_names == only, (sorted(doc_names), sorted(only))

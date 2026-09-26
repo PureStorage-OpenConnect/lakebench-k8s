@@ -9,6 +9,9 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar
 
+from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+from lakebench.metrics.provenance import run_provenance
+
 logger = logging.getLogger(__name__)
 
 
@@ -296,6 +299,16 @@ class PipelineMetrics:
     # is where its TM section comes from.
     tm_operations: dict[str, Any] | None = None
 
+    # Table-maintenance policy the run was measured under
+    # (metrics/maintenance_policy.py). A run gets the current id; a record
+    # loaded without one is the legacy policy (set by the storage loader).
+    maintenance_policy_id: str = MAINTENANCE_POLICY_ID
+
+    # Which lakebench produced the run (metrics/provenance.py, GOALS P9.1):
+    # {lakebench_version, git_sha, git_dirty}. None on records from before
+    # the field existed.
+    provenance: dict[str, Any] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = {
@@ -312,7 +325,10 @@ class PipelineMetrics:
             "queries": [q.to_dict() for q in self.queries],
             "streaming": [s.to_dict() for s in self.streaming],
             "config_snapshot": self.config_snapshot,
+            "maintenance_policy_id": self.maintenance_policy_id,
         }
+        if self.provenance is not None:
+            d["provenance"] = self.provenance
         if self.benchmark is not None:
             d["benchmark"] = self.benchmark.to_dict()
         if self.benchmark_rounds:
@@ -1832,6 +1848,16 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
             "cache": cfg.architecture.benchmark.cache,
             "iterations": cfg.architecture.benchmark.iterations,
         },
+        # What table maintenance the config asks for. Part of the perf-gate
+        # fingerprint: a run with maintenance turned down or off measures
+        # something else than one under the full policy.
+        "maintenance": {
+            "pre_benchmark_maintenance": pipeline.pre_benchmark_maintenance,
+            "retention_interval": pipeline.sustained.retention_interval,
+            "retention_threshold": pipeline.sustained.retention_threshold,
+            "compaction_enabled": pipeline.sustained.compaction_enabled,
+            "compaction_interval": pipeline.sustained.compaction_interval,
+        },
     }
 
     return snapshot
@@ -2031,6 +2057,7 @@ class MetricsCollector:
             deployment_name=deployment_name,
             start_time=datetime.now(),
             config_snapshot=config,
+            provenance=dict(run_provenance()),
         )
         return self.current_run
 

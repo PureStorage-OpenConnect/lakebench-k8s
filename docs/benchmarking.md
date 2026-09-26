@@ -635,7 +635,7 @@ rounds for trend analysis.
 | Gold latency >> refresh interval | Silver table too large for gold executors | Increase `gold_refresh_executors` |
 | QpH dropping across rounds | Table growth degrading queries | Add Trino workers or memory |
 | Q9 contention > 20% | Benchmark rounds colliding with gold rewrites | Increase `gold_refresh_interval` or `benchmark_interval` |
-| `total_s3_objects` growing unbounded | Retention not keeping pace with snapshot growth, or a Delta run (live-stream VACUUM keeps 7 days, so it removes nothing in a shorter run) | Iceberg: decrease `retention_threshold` or `retention_interval` (expiry is floored at 1 h and orphan removal at 24 h 10 min). Delta: expected for runs under 7 days |
+| `total_s3_objects` growing unbounded | Maintenance not keeping pace, or failing | Iceberg: check the journal's Iceberg maintenance events for timed-out or failed statements, then decrease `retention_interval`. Lowering `retention_threshold` below `1h` does nothing while streams are live (expiry is floored at 1 h, orphan removal at 24 h 10 min). Tables created before metadata retention was added keep every `metadata.json`; recreate them with a fresh deployment. Delta: continuous mode has no effective table maintenance in v1.6 |
 
 ---
 
@@ -654,6 +654,12 @@ The JSON structure includes:
 ```json
 {
   "run_id": "20260201-143052-a1b2c3",
+  "maintenance_policy_id": "m2-2026-09-26",
+  "provenance": {
+    "lakebench_version": "1.6.0",
+    "git_sha": "<40-char commit, or null outside a git checkout>",
+    "git_dirty": false
+  },
   "pipeline_benchmark": {
     "pipeline_mode": "batch",
     "scorecard": {
@@ -671,6 +677,12 @@ The JSON structure includes:
   }
 }
 ```
+
+`maintenance_policy_id` names the table-maintenance policy the run was
+measured under (see `docs/perf-regression-gate.md`); `provenance` records
+the lakebench version and, from a git checkout, the commit and whether
+tracked files had uncommitted changes. Container image versions are in
+`config_snapshot.images`.
 
 ### HTML Reports
 

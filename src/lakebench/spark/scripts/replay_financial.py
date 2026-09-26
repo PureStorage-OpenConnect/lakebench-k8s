@@ -19,7 +19,11 @@ import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from common import env, log
+from common import (
+    ICEBERG_V2_SNAPPY_PROPS_SQL,
+    env,
+    log,
+)
 from pyspark.sql import SparkSession
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
@@ -207,7 +211,7 @@ def main() -> None:
             evidence           MAP<STRING, STRING>,
             detected_ts        TIMESTAMP
         ) USING iceberg PARTITIONED BY (months(alert_ts))
-        TBLPROPERTIES ('format-version' = '2', 'write.parquet.compression-codec' = 'snappy')
+        TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
     """)
     # LB-125 upgrade guard: rules now emit detected_ts, so a pre-existing
     # target table (reused catalog, or gold.alerts created before detected_ts)

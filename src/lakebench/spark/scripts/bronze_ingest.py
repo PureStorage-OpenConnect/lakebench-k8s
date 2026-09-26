@@ -40,6 +40,8 @@ import os
 import time
 
 from common import (
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
     _s3_table_path,
     await_stream,
     env,
@@ -122,6 +124,8 @@ def write_bronze_batch(
         writer = (
             writer.tableProperty("write.format.default", "parquet")
             .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
             .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
         )
         if table_location:
