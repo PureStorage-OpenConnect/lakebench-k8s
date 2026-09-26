@@ -26,8 +26,10 @@ Guard (financial schema, and the local gate ``scripts/aml_gate.py``):
   attached to another seed to make a tuning run look registered;
 - a registered evaluation or robustness run is refused until the
   pre-registration sets ``corpora.registered_looks_open`` (done with the
-  datagen freeze); after the look the seed is appended to
-  ``corpora.spent_seeds``, which refuses any second look.
+  datagen freeze). The look records itself in ``aml_registered_looks.json``
+  (next to the pre-registration): its seed when it starts, its report's
+  sha256 before any verdict is printed. Every recorded seed is spent, so a
+  second look is refused without editing the pre-registration.
 
 Only the standard library is imported, so config validation stays cheap.
 """
@@ -35,6 +37,8 @@ Only the standard library is imported, so config validation stays cheap.
 from __future__ import annotations
 
 import json
+import os
+import time
 from functools import lru_cache
 from pathlib import Path
 
@@ -51,10 +55,157 @@ _PREREG_PATH = (
 )
 
 
+#: The tracked record of registered looks (AML-GOALS R3), next to the
+#: pre-registration in the package and flat next to this module on the
+#: Spark driver (every AML data JSON is mounted there).
+LOOKS_FILENAME = "aml_registered_looks.json"
+
+
+def looks_path() -> Path:
+    """The look record; raises FileNotFoundError when it is missing, so a
+    lost record fails closed instead of reading as "nothing looked at"."""
+    here = Path(__file__).resolve().parent
+    # The packaged path first; the flat path only on the Spark driver, where
+    # the package is absent (a stray copy next to this module never shadows).
+    for p in (_PREREG_PATH.parent / LOOKS_FILENAME, here / LOOKS_FILENAME):
+        if p.is_file():
+            return p
+    raise FileNotFoundError(f"{LOOKS_FILENAME} not found next to {__file__} or {_PREREG_PATH}")
+
+
+def load_looks(path: str | os.PathLike | None = None) -> list[dict]:
+    """The recorded looks, strictly: anything but {"looks": [entries with an
+    integer seed and a role]} raises."""
+    p = Path(path) if path is not None else looks_path()
+    with open(p, encoding="utf-8") as f:
+        doc = json.load(f)
+    looks = doc.get("looks") if isinstance(doc, dict) else None
+    if not isinstance(looks, list):
+        raise ValueError(f"{p}: 'looks' must be a list")
+    for e in looks:
+        seed = e.get("seed") if isinstance(e, dict) else None
+        if not isinstance(seed, int) or isinstance(seed, bool) or e.get("role") not in ROLES:
+            raise ValueError(f"{p}: malformed look entry {e!r}")
+    return looks
+
+
+def recorded_seeds(path: str | os.PathLike | None = None) -> frozenset[int]:
+    """Seeds with any recorded look (started or complete): all spent."""
+    return frozenset(int(e["seed"]) for e in load_looks(path))
+
+
+def with_recorded_looks(corpora: dict, path: str | os.PathLike | None = None) -> dict:
+    """``corpora`` with every recorded look's seed added to spent_seeds."""
+    out = dict(corpora)
+    out["spent_seeds"] = sorted(spent_from(corpora) | recorded_seeds(path))
+    return out
+
+
 @lru_cache(maxsize=1)
 def _corpora() -> dict:
     with open(_PREREG_PATH, encoding="utf-8") as f:
-        return json.load(f)["corpora"]
+        return with_recorded_looks(json.load(f)["corpora"])
+
+
+def _write_atomic(path: Path, doc: dict) -> None:
+    """Write ``doc`` to ``path`` so a crash leaves the old file or the new
+    one, and the new one is on disk (file and directory fsynced) on return."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(doc, indent=2) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _locked_update(path: str | os.PathLike | None, update) -> dict:
+    """Apply ``update(doc) -> entry`` to the record under an exclusive lock,
+    write it atomically, re-read it and return the entry. Raises on any
+    failure (the caller must not print a verdict then)."""
+    import fcntl
+
+    p = Path(path) if path is not None else looks_path()
+    with open(p.with_name(f".{p.name}.lock"), "a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        load_looks(p)
+        with open(p, encoding="utf-8") as f:
+            doc = json.load(f)
+        entry = update(doc)
+        _write_atomic(p, doc)
+        if entry not in load_looks(p):
+            raise OSError(f"{p}: the look entry did not read back")
+    _corpora.cache_clear()
+    return entry
+
+
+def _utc() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def claim_look(
+    role: str, seed: int, meta: dict | None = None, path: str | os.PathLike | None = None
+) -> dict:
+    """Record that a registered ``role`` look on ``seed`` has started, before
+    any model is fitted: from here the seed is spent whatever happens next.
+    Raises when the seed already has a look."""
+    if role not in PROTECTED_ROLES:
+        raise ValueError(f"only {PROTECTED_ROLES} looks are recorded, not {role!r}")
+
+    def update(doc):
+        if any(int(e["seed"]) == int(seed) for e in doc["looks"]):
+            raise ValueError(f"seed {seed} already has a recorded look")
+        entry = {
+            "role": role,
+            "seed": int(seed),
+            "state": "started",
+            "started_utc": _utc(),
+            **(meta or {}),
+        }
+        doc["looks"].append(entry)
+        return entry
+
+    return _locked_update(path, update)
+
+
+def complete_look(
+    role: str,
+    seed: int,
+    report_sha256: str,
+    report_path: str,
+    meta: dict | None = None,
+    path: str | os.PathLike | None = None,
+) -> dict:
+    """Record the finished look's report sha256 (the report must already be
+    written) on the started entry for ``seed``. A seed with no started entry,
+    or whose look is already complete, is refused: the record never changes a
+    recorded hash."""
+    if role not in PROTECTED_ROLES:
+        raise ValueError(f"only {PROTECTED_ROLES} looks are recorded, not {role!r}")
+
+    def update(doc):
+        mine = [e for e in doc["looks"] if int(e["seed"]) == int(seed)]
+        if len(mine) > 1 or (mine and mine[0].get("state") != "started"):
+            raise ValueError(f"seed {seed}: the look is already complete or recorded twice")
+        if mine and mine[0]["role"] != role:
+            raise ValueError(f"seed {seed} was claimed as {mine[0]['role']!r}, not {role!r}")
+        if not mine:
+            raise ValueError(f"seed {seed} has no started look to complete")
+        entry = mine[0]
+        entry.update(
+            state="complete",
+            completed_utc=_utc(),
+            report_sha256=report_sha256,
+            report_path=str(report_path),
+            **(meta or {}),
+        )
+        return entry
+
+    return _locked_update(path, update)
 
 
 # The robustness look scores seed 90000042 with corpora.robustness_perturbation
@@ -329,3 +480,74 @@ def config_seed(cfg) -> int:
     workload = cfg.architecture.workload
     dg = workload.datagen
     return resolve_seed(dg.seed, workload.schema_type.value, getattr(dg, "corpus_role", None))
+
+
+# ---------------------------------------------------------------------------
+# Level-2 predictions (AML-GOALS section 9 #46, D-8)
+# ---------------------------------------------------------------------------
+
+#: Tracked record of the per-typology predicted evaluation AP and prediction
+#: interval, committed from the calibration runs before any registered look
+#: (scripts/aml_level2_predict.py). A registered look refuses to start
+#: without it and hashes it into its report and look record.
+PREDICTIONS_FILENAME = "aml_level2_predictions.json"
+
+
+def predictions_path() -> Path:
+    here = Path(__file__).resolve().parent
+    for p in (_PREREG_PATH.parent / PREDICTIONS_FILENAME, here / PREDICTIONS_FILENAME):
+        if p.is_file():
+            return p
+    raise FileNotFoundError(
+        f"{PREDICTIONS_FILENAME} not found next to {__file__} or {_PREREG_PATH}"
+    )
+
+
+def load_predictions(path: str | os.PathLike | None = None, typologies=None) -> tuple[dict, str]:
+    """(predictions block, sha256 of the file bytes). Raises unless the file
+    holds committed predictions: a prereg sha256, a generator image and, per
+    typology (every one of ``typologies`` when given), a predicted AP in (0, 1)
+    inside its prediction interval."""
+    import hashlib
+
+    p = Path(path) if path is not None else predictions_path()
+    raw = p.read_bytes()
+    doc = json.loads(raw)
+    pred = doc.get("predictions") if isinstance(doc, dict) else None
+    if not isinstance(pred, dict):
+        raise ValueError(f"{p}: no committed predictions (run scripts/aml_level2_predict.py)")
+    for key in ("prereg_sha256", "generator_image"):
+        if not isinstance(pred.get(key), str) or not pred[key]:
+            raise ValueError(f"{p}: predictions.{key} missing")
+    per = pred.get("typologies")
+    if not isinstance(per, dict) or not per:
+        raise ValueError(f"{p}: predictions.typologies missing")
+    for t in typologies or []:
+        if t not in per:
+            raise ValueError(f"{p}: no prediction for typology {t!r}")
+    for t, r in per.items():
+        try:
+            ap, (lo, hi) = float(r["predicted_ap"]), r["pi"]
+            ok = 0 < float(lo) <= ap <= float(hi) < 1
+        except (KeyError, TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise ValueError(f"{p}: malformed prediction for {t!r}: {r!r}")
+    return pred, hashlib.sha256(raw).hexdigest()
+
+
+def replication(typology_reports: dict, pred: dict) -> dict:
+    """Observed AP against each committed prediction interval (reported
+    beside the verdict; the Level-2 framing is "calibrated difficulty
+    replicates out of sample")."""
+    out = {}
+    for t, r in pred["typologies"].items():
+        obs = (typology_reports.get(t) or {}).get("ap")
+        lo, hi = r["pi"]
+        out[t] = {
+            "predicted_ap": r["predicted_ap"],
+            "pi": [lo, hi],
+            "observed_ap": obs,
+            "inside_pi": None if obs is None else bool(lo <= obs <= hi),
+        }
+    return {"gated": False, "pi_level": pred.get("pi_level"), "typologies": out}

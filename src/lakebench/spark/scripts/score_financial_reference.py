@@ -208,33 +208,60 @@ def _write_text(spark, uri: str, text: str) -> None:
         out.close()
 
 
+def _write_pandas_parquet(spark, pdf, path: str, types: dict, default: str) -> None:
+    """Write a pandas frame to ``path`` as snappy parquet through Spark. The
+    driver has pandas but no pyarrow, so rows go to Spark in chunks."""
+    cols = list(pdf.columns)
+    schema = ", ".join(f"`{c}` {types.get(c, default)}" for c in cols)
+    chunk = 200_000
+    df = None
+    for lo in range(0, len(pdf), chunk):
+        part = pdf.iloc[lo : lo + chunk]
+        rows = [
+            tuple(v.item() if hasattr(v, "item") else v for v in r)
+            for r in part.itertuples(index=False, name=None)
+        ]
+        piece = spark.createDataFrame(rows, schema)
+        df = piece if df is None else df.unionByName(piece)
+    df.write.mode("overwrite").option("compression", "snappy").parquet(path)
+
+
 def _write_model_outputs(spark, prefix: str, outputs: dict) -> dict:
-    """oof_scores.parquet, feature_importance.parquet and model_card.json
-    under ``prefix``. The driver has pandas but no pyarrow, so the scores go
-    to Spark as row chunks; the pull is already capped at --driver-sample-cap
-    units, which bounds the table at that many units per typology."""
+    """oof_scores.parquet, unit_features.parquet, feature_importance.parquet
+    and model_card.json under ``prefix``. The pull is already capped at
+    --driver-sample-cap units, which bounds the scores table at that many
+    units per typology and the unit table at that many units."""
     import json as _json
 
+    from fidelity_gate import output_fingerprints
+
     out = {}
+    # Content hashes of the tables as scored, which D8 checks the written
+    # files against; a failure here leaves them absent (D8 then fails closed).
+    try:
+        fps = output_fingerprints(outputs)
+    except Exception as e:  # noqa: BLE001 -- an output, never the gate numbers
+        log(f"WARN: output fingerprints not computed: {e}")
+        fps = {}
+    keys = {"group": "long", "month": "int"}
     scores = outputs["scores"]
     if len(scores):
-        cols = list(scores.columns)
-        types = {"group": "long", "month": "int", "typology": "string"}
-        types |= {"label": "tinyint", "score": "float", "fold": "tinyint"}
-        schema = ", ".join(f"`{c}` {types.get(c, 'string')}" for c in cols)
-        chunk = 200_000
-        df = None
-        for lo in range(0, len(scores), chunk):
-            part = scores.iloc[lo : lo + chunk]
-            rows = [
-                tuple(v.item() if hasattr(v, "item") else v for v in r)
-                for r in part.astype({"typology": str}).itertuples(index=False, name=None)
-            ]
-            piece = spark.createDataFrame(rows, schema)
-            df = piece if df is None else df.unionByName(piece)
+        types = keys | {"typology": "string", "label": "tinyint", "score": "float"}
+        types |= {"fold": "tinyint", "weight": "double"}
         path = f"{prefix}/oof_scores.parquet"
-        df.write.mode("overwrite").option("compression", "snappy").parquet(path)
+        _write_pandas_parquet(spark, scores.astype({"typology": str}), path, types, "string")
         out["oof_scores"] = {"path": path, "rows": int(len(scores))}
+        if fps.get("oof_scores"):
+            out["oof_scores"]["fingerprint"] = fps["oof_scores"]
+    units = outputs.get("unit_features")
+    if units is not None and len(units):
+        # Features and weight are doubles (the gate casts every feature to
+        # float); D8 compares their distributions across scales.
+        path = f"{prefix}/unit_features.parquet"
+        _write_pandas_parquet(spark, units, path, keys, "double")
+        out["unit_features"] = {"path": path, "rows": int(len(units))}
+        if fps.get("unit_features"):
+            out["unit_features"]["fingerprint"] = fps["unit_features"]
     imp = outputs["importance"]
     if len(imp):
         path = f"{prefix}/feature_importance.parquet"
@@ -451,6 +478,7 @@ def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> dict:
             perturbation_stamp_error,
             spent_from,
             summarise_stamp,
+            with_recorded_looks,
         )
     except ImportError:  # flat on the driver
         from datagen_seed import (
@@ -460,10 +488,13 @@ def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> dict:
             perturbation_stamp_error,
             spent_from,
             summarise_stamp,
+            with_recorded_looks,
         )
     from fidelity_gate import load_preregistration
 
-    corpora = load_preregistration()[0]["corpora"]
+    # Seeds in aml_registered_looks.json (mounted next to this script) are
+    # spent too: a recorded look refuses any second look.
+    corpora = with_recorded_looks(load_preregistration()[0]["corpora"])
     guarded = sorted(spent_from(corpora) | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES})
     matched = [g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0]
     raw = os.environ.get("LB_DATAGEN_SEED")
@@ -553,6 +584,20 @@ def main() -> None:
     manifest = af.read_manifest(spark, args.manifest)
     af.check_manifest(manifest)
     stamp = _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
+    if os.environ.get("LB_DATAGEN_CORPUS_ROLE") in ("evaluation", "robustness") and not (
+        args.counts_only
+    ):
+        # AML-GOALS R3 / #46: a registered look must record its seed before
+        # any model exists and its report hash before any verdict is seen, in
+        # the tracked aml_registered_looks.json, and must hash the committed
+        # Level-2 predictions. The driver can do none of that (and its outputs
+        # land on S3 unrecorded), so registered looks run only through
+        # scripts/aml_gate.py --registered on the corpus generated here.
+        raise SystemExit(
+            "refusing: registered evaluation and robustness looks are scored only by "
+            "scripts/aml_gate.py --registered (it records the look); download the corpus "
+            "and run it there"
+        )
     manifest_n = manifest.count()
     if manifest_n == 0:
         raise SystemExit(

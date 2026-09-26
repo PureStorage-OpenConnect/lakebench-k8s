@@ -492,6 +492,21 @@ def _evaluate_typology(
     return out
 
 
+def _l2_sensitivity(X, y, w, groups, prereg: dict, values) -> dict[str, float | None]:
+    """{str(l2): out-of-fold AP} with the reference model refitted at each
+    l2_regularization on the registered folds (ungated D8 secondary)."""
+    import copy
+
+    folds = _folds(y, groups, prereg)
+    out: dict[str, float | None] = {}
+    for v in values:
+        p = copy.deepcopy(prereg)
+        p["reference_model"]["l2_regularization"] = float(v)
+        oof = _oof_scores(lambda p=p: _reference_model(p), X, y, w, folds)
+        out[str(float(v))] = _ap(y, oof, w)
+    return out
+
+
 def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
     l2 = prereg["level2"]
     beh = list(prereg["behavioural_subset"])
@@ -505,7 +520,7 @@ def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
     k = sum(c["counts_in_band"] for c in counted)
     all_ap = all(per[t].get("status") == "ok" for t in beh)
     all_leak = all(per[t].get("leakage_pass") for t in beh)
-    return {
+    out = {
         "k_in_band": k,
         "k_required": l2["k_in_band"],
         "n": l2["n"],
@@ -516,6 +531,28 @@ def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
         "note": "Level 2 also requires the evaluation and robustness corpora "
         f"({', '.join(l2['require_on_corpora'])}); this is one corpus.",
     }
+    of = l2.get("original_four")
+    if of:
+        four = list(of["typologies"])
+        if all(t in beh for t in four):
+            k4 = sum(c["counts_in_band"] for c in counted if c["typology"] in four)
+            ok4 = all(per[t].get("status") == "ok" and per[t].get("leakage_pass") for t in four)
+            out["original_four"] = {
+                "gated": False,
+                "typologies": four,
+                "k_in_band": k4,
+                "k_required": of["k_in_band"],
+                "n": len(four),
+                "holds_on_this_corpus": bool(k4 >= of["k_in_band"] and ok4),
+                "source": of.get("source"),
+            }
+        else:
+            out["original_four"] = {
+                "gated": False,
+                "available": False,
+                "reason": "level2.original_four names typologies outside behavioural_subset",
+            }
+    return out
 
 
 def _timing_mixture(counts: dict | None, prereg: dict) -> dict | None:
@@ -564,6 +601,10 @@ def corpus_role(seed, prereg: dict) -> str:
     for role in ("calibration", "evaluation", "robustness"):
         if str(prereg["corpora"].get(f"{role}_seed")) == str(seed):
             return role
+    # D8's scale-2 replicates of the calibration corpus (v3.6.0) are
+    # calibration corpora: tuning may look at them.
+    if str(seed) in {str(s) for s in prereg["corpora"].get("calibration_replicate_seeds") or []}:
+        return "calibration"
     return "other"
 
 
@@ -610,8 +651,14 @@ def evaluate_gate(
     provenance: dict | None = None,
     score: bool = True,
     collect_outputs: bool = False,
+    l2_values: list | None = None,
 ) -> dict[str, Any]:
     """Run every gate on ``frame`` and return one JSON-serialisable report.
+
+    ``l2_values`` (scale_invariance.l2_sensitivity.values) also refits the
+    reference model per typology at each l2_regularization and records the
+    out-of-fold AP under report["l2_sensitivity"]: an ungated secondary that
+    never enters passes.
 
     ``score=False`` stops before any model: per typology only n_scored,
     n_positives, prevalence and n_excluded (a smoke test that must not look at
@@ -632,6 +679,9 @@ def evaluate_gate(
         "gate": "aml-fidelity",
         "prereg_version": prereg.get("version"),
         "prereg_sha256": prereg_sha256,
+        # This module's bytes: D8 refuses to compare runs scored by different
+        # gate code (a reference-model change would read as scale variance).
+        "gate_code_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "metric": prereg["metric"],
         "unit": unit_window(prereg),
         "provenance": dict(provenance or {}),
@@ -687,6 +737,7 @@ def evaluate_gate(
     report["n_groups"] = int(len(np.unique(groups)))
     per = {}
     sinks: dict[str, dict] = {}
+    sens: dict[str, dict] = {}
     for t in typologies:
         y = frame[LABEL_PREFIX + t].to_numpy(dtype=int)
         keep = np.ones(len(y), dtype=bool)
@@ -709,7 +760,15 @@ def evaluate_gate(
         if sink is not None and "scores" in sink:
             sinks[t] = sink
         per[t]["n_excluded"] = int((~keep).sum())
+        if l2_values and score and per[t].get("status") == "ok":
+            sens[t] = _l2_sensitivity(X[keep], y[keep], w[keep], groups[keep], prereg, l2_values)
     report["typologies"] = per
+    if l2_values and score:
+        report["l2_sensitivity"] = {
+            "gated": False,
+            "values": [float(v) for v in l2_values],
+            "typologies": sens,
+        }
     if not score:
         report.update(verdict="counts_only", level2=None)
         return report
@@ -737,6 +796,11 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
 
     parts, imp = [], []
     keys = [c for c in UNIT_KEY_COLUMNS if c in frame.columns]
+    weight = (
+        frame["weight"].to_numpy(dtype=float)
+        if "weight" in frame.columns
+        else np.ones(len(frame), dtype=float)
+    )
     for t, sink in sinks.items():
         rows = sink["rows"]
         df = frame.iloc[rows][keys].reset_index(drop=True)
@@ -744,11 +808,20 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
         df["label"] = sink["scores"]["label"]
         df["score"] = sink["scores"]["score"].astype(np.float32)
         df["fold"] = sink["scores"]["fold"]
+        # The unit's weight in fitting and AP (1 unless the cluster sampled
+        # negatives), so AP can be recomputed from this table alone (D8).
+        df["weight"] = weight[rows]
         parts.append(df)
         imp += [{"typology": t, **r} for r in sink["importance"]]
     scores = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
     if len(scores):
         scores["typology"] = scores["typology"].astype("category")
+    # Every scored unit's features and weight: the D8 per-feature
+    # distribution comparison reads this (scale_invariance.py).
+    unit_features = frame[keys].reset_index(drop=True)
+    for f in features:
+        unit_features[f] = frame[f].to_numpy(dtype=float)
+    unit_features["weight"] = weight
     card = {
         "prereg_version": report.get("prereg_version"),
         "prereg_sha256": report.get("prereg_sha256"),
@@ -768,18 +841,79 @@ def _model_outputs(frame, sinks: dict, features: list, prereg: dict, report: dic
         "score_note": "out-of-fold probability from the fold model that did not train on the "
         "unit; excluded units are not scored",
     }
-    return {"scores": scores, "importance": pd.DataFrame(imp), "card": card}
+    return {
+        "scores": scores,
+        "importance": pd.DataFrame(imp),
+        "card": card,
+        "unit_features": unit_features,
+    }
+
+
+#: Columns of oof_scores covered by its per-typology fingerprint: what D8
+#: reads back to recompute AP.
+SCORES_FINGERPRINT_COLUMNS = ("group", "label", "score", "weight")
+
+
+def _canonical(series):
+    """A column as int64 codes (integers, bools, float bit patterns with one
+    NaN and no negative zero) or str objects, so the same values hash the same
+    whichever writer (pandas here, Spark on the cluster) and reader produced
+    the dtype."""
+    import numpy as np
+    import pandas as pd
+
+    if pd.api.types.is_bool_dtype(series) or pd.api.types.is_integer_dtype(series):
+        return pd.Series(series.to_numpy(dtype=np.int64))
+    if pd.api.types.is_float_dtype(series):
+        a = series.to_numpy(dtype=np.float64) + 0.0
+        a[np.isnan(a)] = np.nan
+        return pd.Series(a.view(np.int64))
+    return pd.Series(series.astype(str).to_numpy(dtype=object))
+
+
+def fingerprint(frame, columns) -> str:
+    """Order-independent content hash of ``columns`` of ``frame``: the
+    wrapping uint64 sum of per-row hashes. Lets D8 prove a persisted table is
+    the one this report scored (a stale file from another run on the same
+    corpus has the same row counts)."""
+    import numpy as np
+    import pandas as pd
+
+    canon = pd.DataFrame({c: _canonical(frame[c].reset_index(drop=True)) for c in columns})
+    rows = pd.util.hash_pandas_object(canon, index=False).to_numpy(dtype=np.uint64)
+    return format(int(np.sum(rows, dtype=np.uint64)), "016x")
+
+
+def output_fingerprints(outputs: dict) -> dict:
+    """{"oof_scores": {typology: fp}, "unit_features": {column: fp}}: scores
+    row-wise per typology over SCORES_FINGERPRINT_COLUMNS, the unit table per
+    column (D8 reads it one column at a time)."""
+    out: dict[str, dict] = {"oof_scores": {}, "unit_features": {}}
+    scores = outputs.get("scores")
+    if scores is not None and len(scores):
+        typ = scores["typology"].astype(str)
+        for t in sorted(typ.unique()):
+            out["oof_scores"][t] = fingerprint(scores[typ == t], SCORES_FINGERPRINT_COLUMNS)
+    units = outputs.get("unit_features")
+    if units is not None:
+        out["unit_features"] = {c: fingerprint(units, [c]) for c in units.columns}
+    return out
 
 
 def write_model_outputs(outputs: dict, base: str) -> dict:
-    """Write ``base``_oof_scores.parquet, ``base``_feature_importance.parquet
-    and ``base``_model_card.json locally (snappy parquet). Returns
-    {name: path}."""
+    """Write ``base``_oof_scores.parquet, ``base``_feature_importance.parquet,
+    ``base``_model_card.json and (when present) ``base``_unit_features.parquet
+    locally (snappy parquet). Returns {name: path}."""
     paths = {
         "oof_scores": f"{base}_oof_scores.parquet",
         "feature_importance": f"{base}_feature_importance.parquet",
         "model_card": f"{base}_model_card.json",
     }
+    if outputs.get("unit_features") is not None:
+        paths["unit_features"] = f"{base}_unit_features.parquet"
+        outputs["unit_features"].to_parquet(
+            paths["unit_features"], compression="snappy", index=False
+        )
     outputs["scores"].to_parquet(paths["oof_scores"], compression="snappy", index=False)
     outputs["importance"].to_parquet(paths["feature_importance"], compression="snappy", index=False)
     with open(paths["model_card"], "w") as fh:
@@ -818,6 +952,20 @@ def summary_lines(report: dict) -> list[str]:
             f"(need {l2['k_required']}), leakage all pass={l2['all_pass_leakage']}, "
             f"holds={l2['holds_on_this_corpus']}"
         )
+        of = l2.get("original_four") or {}
+        if "k_in_band" in of:
+            lines.append(
+                f"  Original four behavioural (ungated, {of.get('source')}): "
+                f"{of['k_in_band']}/{of['n']} in band (need {of['k_required']}), "
+                f"holds={of['holds_on_this_corpus']}"
+            )
+    rep_ = report.get("level2_replication")
+    if rep_:
+        for t, r in (rep_.get("typologies") or {}).items():
+            lines.append(
+                f"  replication {t}: predicted {r.get('predicted_ap')} PI {r.get('pi')} "
+                f"observed {r.get('observed_ap')} inside={r.get('inside_pi')}"
+            )
     tm = report.get("timing_mixture")
     if tm:
         lines.append(

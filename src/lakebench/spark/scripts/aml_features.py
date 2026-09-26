@@ -1188,3 +1188,115 @@ def unresolved_subjects(unit: dict) -> int:
     (0 for the lifetime unit, which does not resolve subjects per month)."""
     per = ((unit.get("labels") or {}).get("per_typology")) or {}
     return int(sum(v.get("instances_subject_unresolved", 0) for v in per.values()))
+
+
+# ---------------------------------------------------------------------------
+# D8 shards (pre-registration scale_invariance.shard_rule)
+# ---------------------------------------------------------------------------
+
+
+def instance_party_keys(
+    manifest: DataFrame, id_map: DataFrame, txns: DataFrame, typologies=None
+) -> DataFrame:
+    """(typology_id, key) for every party of every manifest instance of
+    ``typologies`` (all when None): the participant list through ``id_map``
+    and both parties of every planted payment, so a counterparty that is not a
+    listed participant still links the instance."""
+    if typologies is not None:
+        manifest = manifest.filter(col("typology_type").isin(*list(typologies)))
+    by_id = (
+        manifest.select("typology_id", explode(col("participant_entity_ids")).alias("dg_id"))
+        .join(id_map, "dg_id", "inner")
+        .select("typology_id", "key")
+    )
+    planted = manifest.select("typology_id", explode(col("participant_uetrs")).alias("uetr"))
+    hit = txns.select("uetr", "orig_key", "bene_key").join(planted, "uetr", "inner")
+    by_uetr = hit.select("typology_id", col("orig_key").alias("key")).unionByName(
+        hit.select("typology_id", col("bene_key").alias("key"))
+    )
+    return by_id.unionByName(by_uetr).filter(col("key").isNotNull()).distinct()
+
+
+def d8_shard_plan(
+    spark,
+    *,
+    manifest: DataFrame,
+    id_map: DataFrame,
+    txns: DataFrame,
+    customers: DataFrame,
+    n_shards: int,
+    salt: str,
+    typologies,
+):
+    """(plan, info). ``plan`` has one row per customer key: key and shard.
+
+    Every party key of every planted instance of an in-scope typology
+    (``typologies``) is a node; an instance joins
+    all its parties, and a connected component (lakebench.aml.d8_shards) goes
+    to shard pmod(xxhash64(salt, smallest key), n_shards) whole. A customer in
+    no instance is its own component. Raises when any instance's customers
+    span shards (the check is independent of how the plan was built).
+    ``info`` records the plan for the report, including a fingerprint that is
+    equal across the shard runs of one corpus."""
+    from pyspark.sql.functions import pmod, xxhash64
+    from pyspark.sql.types import DecimalType, StructField, StructType
+
+    try:
+        from lakebench.aml.d8_shards import check_plan, component_sizes, components
+    except ImportError:  # flat on the driver
+        from d8_shards import check_plan, component_sizes, components
+
+    instances: dict = {}
+    # Only the scored typologies link customers. The other planted typologies
+    # (random, bipartite, fan_in, ...) share parties so widely that their
+    # graph percolates (one component held 68% of party keys at scales 2 and
+    # 10), which would put most of every behavioural typology in one shard.
+    # They carry no label D8 scores; their rows stay in every feature.
+    for r in instance_party_keys(manifest, id_map, txns, typologies).collect():
+        instances.setdefault(r["typology_id"], []).append(r["key"])
+    reps = components(instances.values())
+    key_type = customers.schema["key"].dataType
+    schema = StructType([StructField("key", key_type, False), StructField("_rep", key_type, False)])
+    rep_df = spark.createDataFrame(sorted(reps.items()), schema)
+    plan = (
+        customers.select("key")
+        .distinct()
+        .join(rep_df, "key", "left")
+        .withColumn("_rep", coalesce(col("_rep"), col("key")))
+        .withColumn("shard", pmod(xxhash64(lit(salt), col("_rep")), lit(n_shards)).cast("int"))
+        .select("key", "shard")
+        .cache()
+    )
+    planted = plan.join(rep_df.select("key"), "key", "left_semi").collect()
+    check_plan(instances, {r["key"]: int(r["shard"]) for r in planted})
+    counts = {int(r["shard"]): int(r["count"]) for r in plan.groupBy("shard").count().collect()}
+    fp = plan.select(
+        sum_(xxhash64(col("key"), col("shard")).cast(DecimalType(38, 0))).alias("fp")
+    ).collect()[0]["fp"]
+    sizes = component_sizes(reps)
+    info = {
+        "n_shards": int(n_shards),
+        "salt": salt,
+        "n_customers": int(sum(counts.values())),
+        "customers_per_shard": [counts.get(i, 0) for i in range(n_shards)],
+        "n_instances": len(instances),
+        "n_party_keys": len(reps),
+        "n_components": len(sizes),
+        "largest_component": max(sizes.values()) if sizes else 0,
+        "typologies": sorted(typologies),
+        "spanning_instances": 0,
+        "plan_fingerprint": str(fp),
+    }
+    return plan, info
+
+
+def shard_pull(pull, plan: DataFrame, shard: int):
+    """A gate-frame builder that keeps only ``shard``'s customers before
+    handing the frame to ``pull``: features and labels stay those of the full
+    corpus, only the scored units are cut."""
+    keys = plan.filter(col("shard") == lit(int(shard))).select("key")
+
+    def inner(features, labels, typologies, monthly):
+        return pull(features.join(keys, "key", "left_semi"), labels, typologies, monthly)
+
+    return inner
