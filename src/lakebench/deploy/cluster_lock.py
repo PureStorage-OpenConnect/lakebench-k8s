@@ -93,9 +93,10 @@ class LeaseHandle:
 
     ``holder`` is the ``<hostname>@<user>@<git-sha>`` string written at
     acquire time. ``resource_version`` is the ConfigMap resourceVersion
-    at acquire time; release does an optimistic delete keyed on holder
-    match rather than resourceVersion so a benign TTL-driven CAS retry
-    on the holder side does not invalidate the handle.
+    at acquire time. Release matches on holder and acquired-at, then
+    deletes with a resourceVersion precondition taken from that same
+    read, so a steal landing between the read and the delete makes the
+    delete fail instead of removing the new holder's lease.
     """
 
     holder: str
@@ -113,6 +114,7 @@ class LeaseState:
     ttl_seconds: int
     expires_at_epoch: float
     resource_version: str
+    uid: str | None = None
 
     def is_expired(self, now_epoch: float | None = None) -> bool:
         return (now_epoch if now_epoch is not None else time.time()) >= self.expires_at_epoch
@@ -234,7 +236,28 @@ def read_cluster_lock(core_v1: Any) -> LeaseState | None:
         ttl_seconds=ttl,
         expires_at_epoch=_parse_iso8601(acquired_at) + ttl,
         resource_version=cm.metadata.resource_version,
+        uid=getattr(cm.metadata, "uid", None),
     )
+
+
+def _delete_if_unchanged(core_v1: Any, resource_version: str | None, uid: str | None) -> None:
+    """Delete the lease ConfigMap only if it is still the object we read.
+
+    The API server rejects the delete with 409 when the preconditions no
+    longer match, which is how a steal (replace bumps resourceVersion) or
+    a delete-and-recreate (new uid) between our read and our delete is
+    detected. Callers handle the ApiException.
+    """
+    from kubernetes.client.models import V1DeleteOptions, V1Preconditions
+
+    if not resource_version:
+        # Without a resourceVersion there is nothing to make the delete
+        # conditional on; refusing is safer than deleting blind.
+        raise ClusterLockError("lease read carried no resourceVersion; refusing blind delete")
+    body = V1DeleteOptions(
+        preconditions=V1Preconditions(resource_version=resource_version, uid=uid)
+    )
+    core_v1.delete_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE, body=body)
 
 
 def _now_iso() -> str:
@@ -430,9 +453,20 @@ def release_cluster_lock(core_v1: Any, handle: LeaseHandle) -> None:
         return
 
     try:
-        core_v1.delete_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
+        _delete_if_unchanged(
+            core_v1, cm.metadata.resource_version, getattr(cm.metadata, "uid", None)
+        )
     except ApiException as e:
         if e.status == 404:
+            return
+        if e.status == 409:
+            # Stolen (or re-created) between our read and our delete: the
+            # lease is someone else's now, so leave it.
+            logger.warning(
+                "cluster_lock: release skipped; lease changed after it was read "
+                "(read resourceVersion %s)",
+                cm.metadata.resource_version,
+            )
             return
         raise ClusterLockError(f"cannot delete lease: {e}") from e
 
@@ -460,10 +494,27 @@ def force_release_cluster_lock(core_v1: Any, *, expired_only: bool) -> LeaseStat
             ),
         )
     try:
-        core_v1.delete_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
+        if expired_only:
+            # Delete only the lease we judged expired. A holder that stole
+            # it in the meantime has a fresh TTL and must keep it.
+            _delete_if_unchanged(core_v1, state.resource_version, state.uid)
+        else:
+            core_v1.delete_namespaced_config_map(LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
     except ApiException as e:
         if e.status == 404:
             return state
+        if e.status == 409 and expired_only:
+            current = read_cluster_lock(core_v1)
+            if current is None:
+                return state
+            raise ClusterLockHeld(
+                holder=current.holder,
+                acquired_at=current.acquired_at,
+                ttl_seconds=current.ttl_seconds,
+                expires_at=datetime.fromtimestamp(
+                    current.expires_at_epoch, tz=timezone.utc
+                ).isoformat(timespec="seconds"),
+            ) from e
         raise ClusterLockError(f"cannot force-delete lease: {e}") from e
     return state
 

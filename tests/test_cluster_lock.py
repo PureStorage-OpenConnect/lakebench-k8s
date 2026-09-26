@@ -139,9 +139,10 @@ class TestReleaseClusterLock:
             resource_version="1",
         )
         release_cluster_lock(core, handle)
-        core.delete_namespaced_config_map.assert_called_once_with(
-            LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE
-        )
+        core.delete_namespaced_config_map.assert_called_once()
+        args, kwargs = core.delete_namespaced_config_map.call_args
+        assert args == (LOCK_CONFIGMAP_NAME, LOCK_NAMESPACE)
+        assert kwargs["body"].preconditions.resource_version == "1"
 
     def test_release_skipped_when_stolen(self):
         """A lease admin-released mid-run must not error at release time."""
@@ -168,6 +169,134 @@ class TestReleaseClusterLock:
             resource_version="1",
         )
         release_cluster_lock(core, handle)  # no exception
+
+
+class _FakeLockApi:
+    """The lock ConfigMap as the API server keeps it: resourceVersion bumps
+    on every write and a delete whose preconditions no longer match is
+    refused with 409. ``after_read`` runs once, right after the next read
+    returns, to land a competing write inside the read-then-delete window.
+    """
+
+    def __init__(self) -> None:
+        self.cm: V1ConfigMap | None = None
+        self._rv = 0
+        self.after_read = None
+
+    def _stamp(self, body: V1ConfigMap, uid: str) -> V1ConfigMap:
+        self._rv += 1
+        body.metadata.resource_version = str(self._rv)
+        body.metadata.uid = uid
+        self.cm = body
+        return body
+
+    def put(self, holder: str, acquired_at: str, ttl: int, uid: str = "uid-1") -> V1ConfigMap:
+        return self._stamp(_cm(holder, acquired_at, ttl), uid)
+
+    def steal(self, holder: str) -> None:
+        assert self.cm is not None
+        self._stamp(_cm(holder, _now_iso(), 3600), self.cm.metadata.uid)
+
+    def read_namespace(self, name):
+        return MagicMock()
+
+    def create_namespaced_config_map(self, namespace, body):
+        if self.cm is not None:
+            raise _api_exc(409)
+        return self._stamp(body, "uid-1")
+
+    def read_namespaced_config_map(self, name, namespace):
+        if self.cm is None:
+            raise _api_exc(404)
+        snap = _cm(
+            self.cm.data["holder"],
+            self.cm.data["acquired-at"],
+            int(self.cm.data["ttl-seconds"]),
+            rv=self.cm.metadata.resource_version,
+        )
+        snap.metadata.uid = self.cm.metadata.uid
+        hook, self.after_read = self.after_read, None
+        if hook:
+            hook()
+        return snap
+
+    def delete_namespaced_config_map(self, name, namespace, body=None):
+        if self.cm is None:
+            raise _api_exc(404)
+        pre = getattr(body, "preconditions", None)
+        if pre is not None:
+            if pre.resource_version and pre.resource_version != self.cm.metadata.resource_version:
+                raise _api_exc(409)
+            if pre.uid and pre.uid != self.cm.metadata.uid:
+                raise _api_exc(409)
+        self.cm = None
+
+
+class TestStealBetweenReadAndDelete:
+    """A steal landing after the releaser's read must survive the delete."""
+
+    def test_release_leaves_the_new_holders_lease(self):
+        api = _FakeLockApi()
+        cm = api.put("me@here@abc", "2026-09-21T12:00:00+00:00", 60)
+        handle = LeaseHandle(
+            holder="me@here@abc",
+            acquired_at="2026-09-21T12:00:00+00:00",
+            ttl_seconds=60,
+            resource_version=cm.metadata.resource_version,
+        )
+        api.after_read = lambda: api.steal("thief@host@xyz")
+        release_cluster_lock(api, handle)  # no exception
+        assert api.cm is not None and api.cm.data["holder"] == "thief@host@xyz"
+
+    def test_release_leaves_a_recreated_lease(self):
+        api = _FakeLockApi()
+        api.put("me@here@abc", "2026-09-21T12:00:00+00:00", 60)
+        handle = LeaseHandle("me@here@abc", "2026-09-21T12:00:00+00:00", 60, "1")
+
+        def _recreate():
+            api.cm = None
+            api.put("other@host@q", _now_iso(), 3600, uid="uid-2")
+
+        api.after_read = _recreate
+        release_cluster_lock(api, handle)
+        assert api.cm is not None and api.cm.data["holder"] == "other@host@q"
+
+    def test_context_manager_does_not_raise_when_stolen_before_delete(self):
+        api = _FakeLockApi()
+        with cluster_lock(api, ttl_seconds=60, timeout=1, holder="me@here@abc"):
+            api.after_read = lambda: api.steal("thief@host@xyz")
+        assert api.cm is not None and api.cm.data["holder"] == "thief@host@xyz"
+
+    def test_release_still_deletes_when_unchanged(self):
+        api = _FakeLockApi()
+        api.put("me@here@abc", "2026-09-21T12:00:00+00:00", 60)
+        release_cluster_lock(api, LeaseHandle("me@here@abc", "2026-09-21T12:00:00+00:00", 60, "1"))
+        assert api.cm is None
+
+    def test_expired_only_keeps_a_lease_stolen_after_the_expiry_check(self):
+        api = _FakeLockApi()
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        api.put("ghost@host@x", past, 60)
+        api.after_read = lambda: api.steal("fresh@host@y")
+        with pytest.raises(ClusterLockHeld) as ei:
+            force_release_cluster_lock(api, expired_only=True)
+        assert ei.value.holder == "fresh@host@y"
+        assert api.cm is not None and api.cm.data["holder"] == "fresh@host@y"
+
+    def test_expired_only_deletes_when_unchanged(self):
+        api = _FakeLockApi()
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        api.put("ghost@host@x", past, 60)
+        state = force_release_cluster_lock(api, expired_only=True)
+        assert state is not None and state.holder == "ghost@host@x"
+        assert api.cm is None
+
+    def test_force_is_unconditional(self):
+        api = _FakeLockApi()
+        api.put("live@host@a", _now_iso(), 3600)
+        api.after_read = lambda: api.steal("thief@host@xyz")
+        force_release_cluster_lock(api, expired_only=False)
+        assert api.cm is None
 
 
 class TestForceRelease:
