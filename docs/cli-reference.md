@@ -402,7 +402,7 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--local` | | `false` | Tear down the local stack instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
-| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait |
+| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 3 unless the namespace is already gone |
 | `--keep-buckets` | | `false` | Empty the S3 buckets but do not delete them |
 
 Removes everything in the correct order: Spark jobs, orphaned pods, datagen

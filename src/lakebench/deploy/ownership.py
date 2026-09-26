@@ -713,6 +713,32 @@ def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> 
     core_v1.patch_namespace(namespace, body)
 
 
+def forget_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
+    """Drop ``buckets`` from the created-buckets annotation after deleting them.
+
+    A namespace that outlives destroy (create_namespace=false, or kept after a
+    failure) would otherwise keep claiming the names, and a bucket later
+    pre-provisioned or adopted under one of them would be deleted by the next
+    destroy. A namespace that is already gone has nothing to forget.
+    """
+    from kubernetes.client.rest import ApiException
+
+    if not buckets:
+        return
+    recorded = read_created_buckets(core_v1, namespace)
+    remaining = recorded - set(buckets)
+    if remaining == recorded:
+        return
+    # A JSON merge patch with null removes the key.
+    value = ",".join(sorted(remaining)) if remaining else None
+    body = {"metadata": {"annotations": {ANNOTATION_CREATED_BUCKETS: value}}}
+    try:
+        core_v1.patch_namespace(namespace, body)
+    except ApiException as e:
+        if e.status != 404:
+            raise
+
+
 def verify_bucket_ownership(
     boto_client: Any,
     bucket: str,

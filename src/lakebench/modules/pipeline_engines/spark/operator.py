@@ -495,6 +495,23 @@ class SparkOperatorManager:
         except Exception as e:
             raise _WatchListReadError(f"error reading Helm values: {e}") from e
 
+    def _namespace_is_terminating(self, namespace: str) -> bool:
+        """True if the namespace carries a deletionTimestamp. Read errors: False."""
+        try:
+            from kubernetes import client as k8s_client
+
+            ns = k8s_client.CoreV1Api().read_namespace(namespace)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Could not read namespace %s: %s", namespace, e)
+            return False
+        meta = getattr(ns, "metadata", None)
+        ts = getattr(meta, "deletion_timestamp", None)
+        # The client deserialises it as a datetime; anything else (absent,
+        # or a test double) is not proof of deletion.
+        import datetime as _dt
+
+        return isinstance(ts, (_dt.datetime, str)) and bool(ts)
+
     def _filter_existing_namespaces(self, namespaces: list[str]) -> list[str]:
         """Return only namespaces that exist on the cluster.
 
@@ -596,6 +613,7 @@ class SparkOperatorManager:
         *,
         strict: bool = False,
         precondition: Callable[[], None] | None = None,
+        then: Callable[[], None] | None = None,
     ) -> bool:
         """Drop a namespace from the operator's watch list before deleting it.
 
@@ -625,14 +643,25 @@ class SparkOperatorManager:
                 re-check the namespace UID inside the lease, so a same-named
                 redeploy (whose watch-list add takes the same lease) can never
                 have its entry removed by a slow destroy of the old one.
+            then: Called after a successful removal, still under the lease
+                with ``strict``. Destroy issues the namespace delete here, so
+                a concurrent deploy's add (same lease) sees the namespace
+                Terminating and refuses instead of re-adding it.
 
         Returns:
             True if the watch list no longer contains the namespace.
         """
         if strict:
-            return self._remove_namespace_from_watch_locked(namespace, precondition)
+            return self._remove_namespace_from_watch_locked(namespace, precondition, then)
         if precondition is not None:
             precondition()
+        ok = self._remove_namespace_from_watch_unlocked(namespace)
+        if ok and then is not None:
+            then()
+        return ok
+
+    def _remove_namespace_from_watch_unlocked(self, namespace: str) -> bool:
+        """Historical non-strict body: read, drop, helm upgrade, retry."""
         for attempt in range(self._HELM_CONFLICT_RETRIES):
             try:
                 watched = self._get_watched_namespaces()
@@ -710,7 +739,10 @@ class SparkOperatorManager:
         return False
 
     def _remove_namespace_from_watch_locked(
-        self, namespace: str, precondition: Callable[[], None] | None = None
+        self,
+        namespace: str,
+        precondition: Callable[[], None] | None = None,
+        then: Callable[[], None] | None = None,
     ) -> bool:
         """Strict variant of ``remove_namespace_from_watch``.
 
@@ -743,6 +775,8 @@ class SparkOperatorManager:
                 if precondition is not None:
                     precondition()
                 ok = self._remove_namespace_from_watch_impl(namespace)
+                if ok and then is not None:
+                    then()
         except ClusterLockHeld as e:
             raise WatchListMutationError(
                 f"another lakebench process holds the cluster lock ({e.holder}); "
@@ -781,9 +815,7 @@ class SparkOperatorManager:
         failure so the ``_locked`` wrapper can raise with a specific
         error message.
         """
-        # Call self.remove_namespace_from_watch with strict=False. Guard
-        # against infinite recursion by passing strict=False explicitly.
-        return self.remove_namespace_from_watch(namespace, strict=False)
+        return self._remove_namespace_from_watch_unlocked(namespace)
 
     @classmethod
     def _is_helm_conflict(cls, stderr: str) -> bool:
@@ -959,6 +991,16 @@ class SparkOperatorManager:
                 return True
             if namespace in watched:
                 return True
+            if self._namespace_is_terminating(namespace):
+                # A destroy dropped it from the list and deleted it (both
+                # under this lease). Re-adding it would leave the operator
+                # watching a namespace about to vanish, which crash-loops it
+                # for every deployment on the cluster.
+                logger.error(
+                    "Refusing to add %s to the watch list: the namespace is being deleted",
+                    namespace,
+                )
+                return False
 
             # Filter out stale namespaces that no longer exist on the cluster
             live_namespaces = self._filter_existing_namespaces(watched)

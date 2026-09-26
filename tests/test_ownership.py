@@ -845,6 +845,22 @@ class TestCreatedBucketsRecord:
         )
         assert read_created_buckets(core, "a") == {"a-bronze", "a-gold"}
 
+    def test_forget_drops_deleted_names_and_clears_when_empty(self):
+        from lakebench.deploy.ownership import (
+            ANNOTATION_CREATED_BUCKETS,
+            forget_created_buckets,
+        )
+
+        core = mock.MagicMock()
+        core.read_namespace.return_value = self._ns({ANNOTATION_CREATED_BUCKETS: "a-bronze,a-gold"})
+        forget_created_buckets(core, "a", ["a-gold"])
+        body = core.patch_namespace.call_args.args[1]
+        assert body["metadata"]["annotations"][ANNOTATION_CREATED_BUCKETS] == "a-bronze"
+        core.read_namespace.return_value = self._ns({ANNOTATION_CREATED_BUCKETS: "a-bronze"})
+        forget_created_buckets(core, "a", ["a-bronze"])
+        body = core.patch_namespace.call_args.args[1]
+        assert body["metadata"]["annotations"][ANNOTATION_CREATED_BUCKETS] is None
+
     def test_created_tag_written_only_when_asked(self):
         from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH
 
