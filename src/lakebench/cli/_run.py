@@ -112,6 +112,15 @@ def _print_pipeline_scorecard(
             scores.append("  [yellow]Pipeline saturated (completeness < 95%)[/yellow]")
             if pb.intake_limit == "bronze_capacity":
                 scores.append("  [dim]Bronze ran back to back: its processing is the limit[/dim]")
+            elif pb.intake_limit == "trickle_rate":
+                scores.append(
+                    "  [dim]Intake held to the trickle rate; silver did not keep pace with it[/dim]"
+                )
+        elif pb.intake_limit == "trickle_rate":
+            scores.append(
+                "  [dim]Intake held to the trickle rate, not saturated: "
+                "rows/s is the offered load[/dim]"
+            )
         if pb.time_to_detect_seconds is not None:
             scores.append(
                 f"  Time to detect: {pb.time_to_detect_seconds:>8.1f}s p50, "

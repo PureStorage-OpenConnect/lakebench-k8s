@@ -569,6 +569,7 @@ class MetricsStorage:
                 corpus_drained=scores.get("corpus_drained"),
                 intake_limit=scores.get("intake_limit"),
                 bronze_busy_fraction=scores.get("bronze_busy_fraction"),
+                corpus_drain_seconds=scores.get("corpus_drain_seconds"),
                 time_to_detect_seconds=scores.get("time_to_detect_seconds"),
                 time_to_detect_p95_seconds=scores.get("time_to_detect_p95_seconds"),
                 time_to_detect_max_seconds=scores.get("time_to_detect_max_seconds"),

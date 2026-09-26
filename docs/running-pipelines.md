@@ -188,9 +188,19 @@ bronze-ingest + silver-stream + gold-refresh  (concurrent)
 - **gold-refresh** -- Periodically refreshes the gold aggregation table from
   the silver table.
 
-Datagen runs concurrently with the streaming jobs, continuously producing
-new data for the pipeline to ingest. This is automatic -- no `--generate`
-flag is needed. That flag only applies to batch mode.
+Datagen starts with the streaming jobs and writes the scale's whole corpus
+at full speed (about 2 minutes for 1 TB at scale 100). This is automatic -- no
+`--generate` flag is needed. That flag only applies to batch mode.
+
+Bronze reads that corpus as a trickle: at most `max_files_per_trigger` files
+per `bronze_trigger_interval`. That rate is the offered load, and it does not
+change with scale: at the defaults it is 50 files per 30 s (about 107 MB/s;
+25,818 rows/s for c360). A 30-minute window drains the scale-10 corpus and
+takes about 19% of the scale-100 corpus. The larger corpus is not a failure:
+the scorecard reports `intake_limit: trickle_rate` and
+`pipeline_saturated: false` when the pipeline kept pace with the trickle, and
+`corpus_drain_seconds` for the window that would drain the corpus. See
+[Scoring and Benchmarking](benchmarking.md#sustained-mode).
 
 The pipeline runs for the configured duration (default: 1800 seconds / 30
 minutes). During this window, Lakebench runs periodic Trino benchmark rounds
@@ -249,7 +259,7 @@ lakebench run my-config.yaml --sustained --duration 3600
 | `bronze_trigger_interval` | 30s | How often bronze checks for new files. Lower = fresher data, higher CPU. | Reduce to 10-15s if freshness is critical. Increase to 60s+ for large scales where each batch is already large. |
 | `silver_trigger_interval` | 60s | How often silver reads new bronze rows. Lower = fresher silver, more micro-batches. | Keep at 2x bronze interval. Reducing below bronze interval wastes cycles on empty batches. |
 | `gold_refresh_interval` | 5 min | How often gold re-aggregates from silver. Sets the floor for gold freshness. | Reduce for fresher dashboards, but each cycle reads all of silver -- at large scales a refresh can take 30s+, so don't set the interval below the refresh duration. |
-| `max_files_per_trigger` | 50 | Files bronze processes per micro-batch (~122K rows/file, so 50 files = ~6.1M rows). Primary throughput cap. | Increase if `ingest_ratio < 0.95` (pipeline saturated). Decrease if bronze micro-batches are too large for executor memory. |
+| `max_files_per_trigger` | 50 | Files bronze reads per trigger (c360: 15,491 rows per 64 MB file, so 50 files = ~775K rows). With `bronze_trigger_interval` it is the offered load, the same at every scale. | Increase to offer more load, and size bronze-ingest and silver-stream for it. A short `ingest_ratio` with `intake_limit: trickle_rate` is not saturation. Decrease if bronze micro-batches are too large for executor memory. |
 | `run_duration` | 1800 | Total streaming window in seconds. Minimum useful duration is `gold_refresh_interval + benchmark_interval + round_time` (~7 min at defaults). For 5 rounds: `gold_refresh_interval + 5 * (benchmark_interval + round_time)`. | See [Scoring and Benchmarking](benchmarking.md) for a planning table. |
 | `benchmark_warmup` | 300s | Delay before first benchmark round. **Clamped to `gold_refresh_interval`** at runtime -- gold must complete at least one full refresh before benchmark rounds produce valid QpH. | Reduce only if you also reduce `gold_refresh_interval`. |
 | `benchmark_interval` | 300s | Time between benchmark rounds (measured from completion of previous round). **Clamped to `gold_refresh_interval`** at runtime -- intervals shorter than the gold cycle cause Q9 contention as rounds overlap with gold rewrites. | To get more rounds, increase `run_duration` instead of lowering the interval. |

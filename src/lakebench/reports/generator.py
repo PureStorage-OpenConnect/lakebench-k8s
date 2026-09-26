@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from html import escape as _html_escape
 from pathlib import Path
 
 from lakebench.metrics import MetricsStorage, PipelineMetrics
@@ -124,8 +125,23 @@ class ReportGenerator:
         if pb:
             if is_sustained and pb.ingest_ratio is None:
                 warnings.append("Ingest ratio unmeasurable (datagen row count unknown)")
+            elif (
+                is_sustained
+                and pb.ingest_ratio is not None
+                and pb.ingest_ratio < 0.95
+                and pb.intake_limit == "trickle_rate"
+                and pb.pipeline_saturated is False
+            ):
+                # The configured trickle bounded intake and the pipeline kept
+                # pace with it (LB-156): a caveat on the ratio, not a failure.
+                warnings.append(pb.trickle_note() or "Intake held to the trickle rate")
             elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio < 0.95:
-                reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 (pipeline saturated)")
+                cause = (
+                    "intake held to the trickle rate, silver did not keep pace"
+                    if pb.intake_limit == "trickle_rate"
+                    else "pipeline saturated"
+                )
+                reasons.append(f"Ingest ratio {pb.ingest_ratio:.2f} < 0.95 ({cause})")
             elif is_sustained and pb.ingest_ratio is not None and pb.ingest_ratio > 1.05:
                 warnings.append(
                     f"Ingest ratio {pb.ingest_ratio:.2f} > 1.05 (gold re-reads exceed input)"
@@ -219,6 +235,17 @@ class ReportGenerator:
         if pb.ingest_ratio is None:
             ratio_badge = '<span style="color: var(--text-muted);">N/A</span>'
             ratio_value = "N/A"
+        elif (
+            pb.ingest_ratio < 0.95
+            and pb.intake_limit == "trickle_rate"
+            and pb.pipeline_saturated is False
+        ):
+            note = _html_escape(pb.trickle_note() or "", quote=True)
+            ratio_badge = (
+                f'<span style="color: var(--warning);" title="{note}">'
+                "Held to trickle rate (not saturated)</span>"
+            )
+            ratio_value = f"{pb.ingest_ratio:.2f}"
         elif pb.ingest_ratio < 0.95:
             ratio_badge = '<span style="color: var(--danger);">SATURATED</span>'
             ratio_value = f"{pb.ingest_ratio:.2f}"
@@ -525,6 +552,14 @@ class ReportGenerator:
             ratio = pb.ingest_ratio
             if ratio is None:
                 indicators.append(("Ingest Ratio", "status-warning", "N/A unmeasured"))
+            elif (
+                ratio < 0.95
+                and pb.intake_limit == "trickle_rate"
+                and pb.pipeline_saturated is False
+            ):
+                indicators.append(
+                    ("Ingest Ratio", "status-warning", f"{ratio:.2f} held to trickle rate")
+                )
             elif ratio < 0.95:
                 indicators.append(("Ingest Ratio", "status-failed", f"{ratio:.2f} SATURATED"))
             elif ratio > 1.05:
