@@ -23,7 +23,11 @@ Guard (financial schema, and the local gate ``scripts/aml_gate.py``):
   registered gate run for its role; anything else would be a look that burns
   the seed (R3);
 - a declared role must match its registered seed, so a role cannot be
-  attached to another seed to make a tuning run look registered.
+  attached to another seed to make a tuning run look registered;
+- a registered evaluation or robustness run is refused until the
+  pre-registration sets ``corpora.registered_looks_open`` (done with the
+  datagen freeze); after the look the seed is appended to
+  ``corpora.spent_seeds``, which refuses any second look.
 
 Only the standard library is imported, so config validation stays cheap.
 """
@@ -71,32 +75,66 @@ def protected_seeds() -> dict[int, str]:
     return {role_seed(r): r for r in PROTECTED_ROLES}
 
 
-def check_aml_seed(seed: int | None, corpus_role: str | None = None) -> None:
-    """Raise ValueError unless ``seed`` may be used with ``corpus_role``."""
+def aml_seed_error(
+    corpora: dict,
+    seed: int | None,
+    corpus_role: str | None = None,
+    matched: list[int] | tuple[int, ...] = (),
+    counts_only: bool = False,
+) -> str | None:
+    """Why ``seed`` may not be generated or scored, or None.
+
+    ``corpora`` is the pre-registration's ``corpora`` block (passed in so the
+    flat copy on the Spark driver can use it). ``matched`` lists guarded seeds
+    whose instance seeds a corpus's manifest reproduces: the corpus's real seed
+    whatever ``seed`` claims. ``counts_only`` is a units-and-labels smoke run
+    that computes no AP; it is not a look, so it may touch a protected corpus
+    but never a spent one.
+    """
     if corpus_role is not None and corpus_role not in ROLES:
-        raise ValueError(f"corpus_role must be one of {ROLES}, got {corpus_role!r}")
-    if seed is not None and seed in spent_seeds():
-        raise ValueError(
-            f"seed {seed} is listed as spent in the AML pre-registration "
+        return f"corpus_role must be one of {ROLES}, got {corpus_role!r}"
+    for actual in matched:
+        if seed is not None and int(actual) != int(seed):
+            return f"the corpus was generated with seed {actual}, not the claimed {seed}"
+    eff = int(matched[0]) if matched else seed
+    spent = {int(s) for s in corpora.get("spent_seeds", [])}
+    if eff is not None and eff in spent:
+        return (
+            f"seed {eff} is listed as spent in the AML pre-registration "
             "(corpora.spent_seeds): a corpus from it has already been looked at or "
             "voided and must not be regenerated or scored. Use the calibration seed "
-            f"({calibration_seed()}) or another unregistered seed."
+            f"({corpora['calibration_seed']}) or another unregistered seed."
         )
+    protected = {int(corpora[f"{r}_seed"]): r for r in PROTECTED_ROLES}
     if corpus_role is not None:
-        want = role_seed(corpus_role)
-        if seed != want:
-            raise ValueError(
-                f"corpus_role {corpus_role!r} is registered for seed {want}, not {seed}"
+        if counts_only and corpus_role in PROTECTED_ROLES:
+            return "a counts-only run is not a look: do not declare a registered role for it"
+        want = int(corpora[f"{corpus_role}_seed"])
+        if eff != want:
+            return f"corpus_role {corpus_role!r} is registered for seed {want}, not {eff}"
+        if corpus_role in PROTECTED_ROLES and not corpora.get("registered_looks_open", False):
+            return (
+                f"registered {corpus_role} runs are closed: the pre-registration's "
+                "corpora.registered_looks_open is false. It is set true with the datagen "
+                "freeze, and the seed is appended to corpora.spent_seeds after its look."
             )
-        return
-    role = protected_seeds().get(seed) if seed is not None else None
-    if role is not None:
-        raise ValueError(
-            f"seed {seed} is the pre-registered {role} seed. It is generated and "
+        return None
+    role = protected.get(eff) if eff is not None else None
+    if role is not None and not counts_only:
+        return (
+            f"seed {eff} is the pre-registered {role} seed. It is generated and "
             f"scored once, as the registered {role} gate run after the datagen "
             f"freeze: declare corpus_role: {role} (config) or --registered {role} "
             "(scripts/aml_gate.py) for that run. Any other use burns the seed."
         )
+    return None
+
+
+def check_aml_seed(seed: int | None, corpus_role: str | None = None) -> None:
+    """Raise ValueError unless ``seed`` may be used with ``corpus_role``."""
+    err = aml_seed_error(_corpora(), seed, corpus_role)
+    if err:
+        raise ValueError(err)
 
 
 def check_seed(seed: int, schema: str, corpus_role: str | None = None) -> None:

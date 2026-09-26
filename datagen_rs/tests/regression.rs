@@ -1802,3 +1802,86 @@ fn only_the_reworked_typologies_have_their_own_amount_stream() {
         1
     );
 }
+
+// ---------------------------------------------------------------------------
+// Scheduled baseline sends (regular.rs, AML-GOALS D2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scheduled_sends_keep_row_count_and_expected_volume() {
+    use datagen_rs::model::build_world;
+    use datagen_rs::regular::{Regular, SCHEDULED_ACCOUNT_SHARE};
+    let w = build_world(0.05, 7777, 60);
+    let n_base = 1_000_000u64;
+    let r = Regular::build(&w.activity, n_base, 7777);
+    assert_eq!(r.n_rand + r.n_sched, n_base);
+    let sched: u64 = r.classes.iter().map(|c| c.len()).sum();
+    assert_eq!(sched, r.n_sched);
+    // uids are contiguous after the random rows and never overlap.
+    let mut next = r.n_rand;
+    for c in &r.classes {
+        assert_eq!(c.uid_base, next);
+        next += c.len();
+    }
+    assert_eq!(next, n_base);
+    // Expected sends per account are unchanged: scheduled events plus the
+    // account's share of the random rows equal its old activity share.
+    let total_w: f64 = w.activity[1..].iter().sum();
+    let resid_w: f64 = r.residual_weight[1..].iter().sum();
+    let mut k_of = vec![0u64; w.population + 1];
+    for c in &r.classes {
+        for &a in &c.members {
+            k_of[a as usize] = c.k;
+        }
+    }
+    let n_members = k_of.iter().filter(|&&k| k > 0).count() as f64;
+    let share = n_members / w.population as f64;
+    assert!(share > 0.5 * SCHEDULED_ACCOUNT_SHARE && share <= SCHEDULED_ACCOUNT_SHARE + 0.02);
+    for (a, &k) in k_of.iter().enumerate().skip(1) {
+        let old = n_base as f64 * w.activity[a] / total_w;
+        let new = k as f64 + r.n_rand as f64 * r.residual_weight[a] / resid_w;
+        assert!(
+            (new - old).abs() <= 0.5 + 1e-6 * old,
+            "account {a}: {old} -> {new}"
+        );
+    }
+}
+
+#[test]
+fn scheduled_events_enumerate_once_and_are_evenly_spaced_in_mass() {
+    use datagen_rs::model::build_world;
+    use datagen_rs::regular::Regular;
+    let w = build_world(0.02, 11, 60);
+    let r = Regular::build(&w.activity, 400_000, 11);
+    for c in r.classes.iter().take(40) {
+        // Mass windows tiling [0, 1] cover every event exactly once.
+        let mut seen = 0u64;
+        let mut last = 0u64;
+        for i in 0..97 {
+            let lo = i as f64 / 97.0;
+            let hi = if i == 96 {
+                1.0 + 1e-9
+            } else {
+                (i + 1) as f64 / 97.0
+            };
+            let (a, b) = c.events_between(lo, hi);
+            assert_eq!(a, last, "gap or overlap in class k={}", c.k);
+            seen += b - a;
+            last = b;
+        }
+        assert_eq!(seen, c.len());
+        // Each account's events are one per 1/k of calendar mass.
+        let a0 = c.account(0);
+        let m: Vec<f64> = (0..c.len())
+            .filter(|&j| c.account(j) == a0)
+            .map(|j| c.nominal_mass(j))
+            .collect();
+        assert_eq!(m.len() as u64, c.k);
+        for p in m.windows(2) {
+            assert!(
+                (p[1] - p[0] - 1.0 / c.k as f64).abs() < 1e-9,
+                "uneven cadence"
+            );
+        }
+    }
+}

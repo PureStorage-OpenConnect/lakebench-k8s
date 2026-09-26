@@ -472,7 +472,12 @@ fn pacs008_main() {
     // (i + jitter) / n_base_total; file fid holds the contiguous rows whose
     // mass falls in [fid/F, (fid+1)/F).
     let n_typ_total: i64 = typ_by_file.iter().map(|v| v.len() as i64).sum();
-    let n_base_total: u64 = (total_txns - n_typ_total).max(0) as u64;
+    let n_base_all: u64 = (total_txns - n_typ_total).max(0) as u64;
+    // D2: part of the baseline is scheduled (steady per-account cadences,
+    // regular.rs); the random rows below are the rest. n_base_total is the
+    // random rows only; scheduled rows carry uids n_base_total.. n_base_all.
+    let regular = datagen_rs::regular::Regular::build(&w.activity, n_base_all, seed);
+    let n_base_total: u64 = regular.n_rand;
     let base_seed = splitmix64((seed as u64) ^ 0xBA5E_0000_0000_0001);
     let base_mass = move |i: u64| -> f64 {
         (i as f64 + hash_frac(i, base_seed as i64)) / n_base_total.max(1) as f64
@@ -506,13 +511,31 @@ fn pacs008_main() {
     };
     // The cycle's slice of the base rows.
     let (slice_i0, slice_i1) = (first_at_mass(slice_lo), first_at_mass(slice_hi));
-    let rows_per_file = (n_base_total as i64 / total_files).max(1);
+    let rows_per_file = (n_base_all as i64 / total_files).max(1);
 
-    // Activity-weighted originator sampling: prefix sums.
+    // Activity-weighted originator sampling: prefix sums. A scheduled
+    // account's weight is only its unscheduled share, so its expected total
+    // sends are unchanged.
     let mut cum = vec![0.0f64; pop + 1];
     for i in 1..=pop {
-        cum[i] = cum[i - 1] + w.activity[i];
+        cum[i] = cum[i - 1] + regular.residual_weight[i];
     }
+    // First instant whose calendar mass is >= m (mass_at is monotone).
+    let time_at_mass = |m: f64| -> i64 {
+        let (mut lo, mut hi) = (start_us, end_us);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if gcal.mass_at(mid) < m {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    };
+    let file_of = |ts: i64| -> i64 {
+        ((gcal.mass_at(ts) * total_files as f64) as i64).clamp(0, total_files - 1)
+    };
     let total_w = cum[pop];
     fn sample_orig(cum: &[f64], total_w: f64, pop: usize, rng: &mut Rng) -> u64 {
         let u = rng.unit() * total_w;
@@ -633,6 +656,8 @@ fn pacs008_main() {
             .filter(|&fid| {
                 cycles == 1
                     || base_start(fid).max(slice_i0) < base_start(fid + 1).min(slice_i1)
+                    || ((fid as f64) / (total_files as f64) < slice_hi
+                        && ((fid + 1) as f64) / (total_files as f64) > slice_lo)
                     || typ_by_file[fid as usize]
                         .iter()
                         .any(|r| in_slice(gcal.mass_at(r.ts_us)))
@@ -650,9 +675,6 @@ fn pacs008_main() {
         let i0 = base_start(fid).max(slice_i0);
         let i1 = base_start(fid + 1).min(slice_i1).max(i0);
         let n_base = (i1 - i0) as usize;
-        if cycles > 1 && n_base + n_typ == 0 {
-            return;
-        }
 
         let cap = n_base + n_typ;
         let mut orig = Vec::with_capacity(cap);
@@ -718,6 +740,71 @@ fn pacs008_main() {
             ccy.push(cc);
             uid_pre.push(gi);
         }
+        // Scheduled rows (D2, regular.rs) whose shaped time falls in this
+        // file. A row's content is a pure function of (seed, its uid). The
+        // candidate window covers the business-day roll (at most 5 days); a
+        // candidate whose rolled day is outside the file's days is skipped
+        // before any RNG draw.
+        let f_lo = fid as f64 / total_files as f64;
+        let f_hi = (fid + 1) as f64 / total_files as f64;
+        let m_lo = gcal.mass_at(time_at_mass(f_lo) - 7 * US_PER_DAY);
+        // A row's intraday time can sit earlier in its day than the event's
+        // nominal mass, so candidates run to the end of the file's last day.
+        let m_hi = if fid + 1 >= total_files {
+            1.0 + 1e-9
+        } else {
+            gcal.mass_at(time_at_mass(f_hi) + US_PER_DAY)
+        };
+        let (d_lo, d_hi) = (
+            gcal.day_for_mass(f_lo),
+            gcal.day_for_mass(f_hi.min(0.999_999_999)),
+        );
+        for class in &regular.classes {
+            let (j0, j1) = class.events_between(m_lo, m_hi);
+            for j in j0..j1 {
+                let a = class.account(j);
+                let day = gcal.day_for_mass(class.nominal_mass(j));
+                let rd = gcal.rolled_day(day, w.country[a as usize]);
+                if rd < d_lo || rd > d_hi {
+                    continue;
+                }
+                let uid = class.uid_base + j;
+                let mut rng = Rng::new(splitmix64(uid ^ base_seed ^ 0xD2D2_0000_0000_0001));
+                let t = sample_ts_on_day(&mut rng, &gcal, day, w.country[a as usize]);
+                if file_of(t) != fid || !in_slice(gcal.mass_at(t)) {
+                    continue;
+                }
+                // A dormant account's cadence stops during its dormancy: the
+                // slot goes to a random unscheduled sender instead.
+                let mut o = a;
+                let mut tries = 0;
+                while tries < 8 && in_suppress_window(&is_suppressed, &suppress_windows, o, t) {
+                    o = sample_orig(&cum, total_w, pop, &mut rng);
+                    tries += 1;
+                }
+                // Only the timing is scheduled. The counterparty is drawn
+                // exactly as for a random base row (ring core or extended
+                // band), so counterparty counts and repeat-edge shares are
+                // unchanged by D2 and no typology's counterparty signal moves.
+                const CORE: u64 = 40;
+                let rs = w.ring_sz[o as usize].max(1) as u64;
+                let core = rs.min(CORE);
+                let b = if rng.unit() < w.ring_hit[o as usize] {
+                    ring_member(o, rng.below(core), pop, seed)
+                } else {
+                    let ext = (rs.min(4 * CORE)).max(core + 1);
+                    ring_member(o, core + rng.below(ext), pop, seed)
+                };
+                let b = if b == o { (b % pop as u64) + 1 } else { b };
+                let cc = w.ccy[o as usize];
+                orig.push(o);
+                bene.push(b);
+                ts_us.push(t);
+                amount.push(native_amount(&mut rng, w.amount_logshift[o as usize], cc));
+                ccy.push(cc);
+                uid_pre.push(uid);
+            }
+        }
         for r in typ {
             orig.push(r.orig);
             bene.push(r.bene);
@@ -726,6 +813,10 @@ fn pacs008_main() {
             amount.push(r.amount);
             ccy.push(r.ccy);
             uid_pre.push(r.uid);
+        }
+        // A multi-cycle file with nothing in this cycle's slice is not written.
+        if cycles > 1 && orig.is_empty() {
+            return;
         }
 
         // sort by ts

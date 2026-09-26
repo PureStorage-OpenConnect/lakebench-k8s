@@ -2503,6 +2503,11 @@ class SparkJobManager:
             if _mod_path.exists():
                 data[_aml_mod] = _mod_path.read_text()
                 logger.info(f"Loaded script: {_aml_mod} (from lakebench.aml)")
+        # The AML seed guard (stdlib only) ships flat too, so the reference
+        # job refuses a corpus from a spent or unregistered protected seed.
+        _seed_mod = _package_dir() / "config" / "datagen_seed.py"
+        if _seed_mod.exists():
+            data["datagen_seed.py"] = _seed_mod.read_text()
 
         # AML reference JSON sidecars (sanctions, PEP, high-risk
         # jurisdictions). Detection rules load these by filename via

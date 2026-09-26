@@ -366,6 +366,23 @@ def run_fidelity_gate(
     scale_info = af.corpus_scale(spark, ACCOUNT_PATH, prereg["corpora"]["entities_per_scale_unit"])
     seed = provenance.get("corpus_seed")
     seed_check = af.corpus_seed_check(manifest, int(seed) if seed not in (None, "") else None)
+    # AML-GOALS R3: refuse a corpus from a spent seed, or from the evaluation
+    # or robustness seed outside its declared registered run, whatever seed the
+    # deployment claims (a bucket can hold a corpus from a manual Job).
+    try:
+        from lakebench.config.datagen_seed import PROTECTED_ROLES, aml_seed_error
+    except ImportError:  # flat on the driver
+        from datagen_seed import PROTECTED_ROLES, aml_seed_error
+    corpora = prereg["corpora"]
+    guarded = sorted(
+        {int(x) for x in corpora.get("spent_seeds", [])}
+        | {int(corpora[f"{r}_seed"]) for r in PROTECTED_ROLES}
+    )
+    matched = [g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0]
+    claimed = int(seed) if seed not in (None, "") else None
+    guard_err = aml_seed_error(corpora, claimed, provenance.get("declared_corpus_role"), matched)
+    if guard_err:
+        raise SystemExit(f"refusing to score this corpus: {guard_err}")
     agreement = af.label_agreement(
         af.labels_from_participants(manifest, id_map).join(
             features.filter(col("is_customer")).select("key"), "key", "left_semi"

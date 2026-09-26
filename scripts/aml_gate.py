@@ -106,25 +106,17 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def seed_guard_error(claimed, registered, matched) -> str | None:
+def seed_guard_error(claimed, registered, matched, counts_only=False) -> str | None:
     """Why the gate must refuse this corpus, or None (AML-GOALS R3).
 
-    ``matched`` lists the guarded seeds (spent, evaluation, robustness) whose
-    instance seeds the manifest reproduces: the corpus's real seed if it is a
+    ``matched`` lists the guarded seeds (spent, evaluation, robustness) the
+    manifest's instance seeds come from: the corpus's real seed if it is a
     guarded one, whatever ``--seed`` claims, so omitting or misstating
     ``--seed`` does not get an evaluation corpus scored.
     """
-    from lakebench.config.datagen_seed import check_aml_seed
+    from lakebench.config.datagen_seed import _corpora, aml_seed_error
 
-    for actual in matched:
-        if claimed is not None and actual != claimed:
-            return f"the manifest was generated with seed {actual}, not the claimed {claimed}"
-    seed = matched[0] if matched else claimed
-    try:
-        check_aml_seed(seed, registered)
-    except ValueError as e:
-        return str(e)
-    return None
+    return aml_seed_error(_corpora(), claimed, registered, matched, counts_only)
 
 
 def main(argv=None) -> int:
@@ -179,7 +171,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     # Cheap refusal before Spark starts; the manifest check below catches a
     # corpus whose real seed is guarded whatever --seed says.
-    err = seed_guard_error(args.seed, args.registered, [])
+    err = seed_guard_error(args.seed, args.registered, [], args.counts_only)
     if err:
         print(f"refusing: {err}", file=sys.stderr)
         return 1
@@ -236,8 +228,12 @@ def main(argv=None) -> int:
         from lakebench.config.datagen_seed import protected_seeds, spent_seeds
 
         guarded = sorted(spent_seeds() | set(protected_seeds()))
-        matched = [g for g in guarded if af.corpus_seed_check(manifest, g)["matched_share"] == 1]
-        err = seed_guard_error(args.seed, args.registered, matched)
+        # Any matching instance seed counts: a corpus that mixes a guarded
+        # seed's instances with others is still that seed's corpus.
+        matched = [
+            g for g in guarded if (af.corpus_seed_check(manifest, g)["matched_share"] or 0) > 0
+        ]
+        err = seed_guard_error(args.seed, args.registered, matched, args.counts_only)
         if err:
             print(f"refusing: {err}", file=sys.stderr)
             return 1
