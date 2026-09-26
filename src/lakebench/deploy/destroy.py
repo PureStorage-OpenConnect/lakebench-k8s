@@ -1321,21 +1321,20 @@ def destroy_all(
                 schema = engine.config.architecture.workload.schema_type.value
                 tables_to_drop = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
                 failed_sql: list[str] = []
-                # The plan: maintenance per table (before the drop, to clean
-                # S3), then the drops. Kind "m" is maintenance, "d" a drop.
+                # The plan: Delta VACUUM per table, then the drops. Iceberg
+                # expire_snapshots / remove_orphan_files are skipped (policy,
+                # 2026-09-26): the buckets are emptied and deleted right after,
+                # so they only cost time and statements. Kind "m" is
+                # maintenance, "d" a drop.
                 plan: list[tuple[str, str, str]] = []
-                for table in tables_to_drop:
-                    if table_format == "delta":
-                        from lakebench.deploy.delta_maintenance import (
-                            build_delta_maintenance_sql,
-                        )
+                if table_format == "delta":
+                    from lakebench.deploy.delta_maintenance import (
+                        build_delta_maintenance_sql,
+                    )
 
+                    for table in tables_to_drop:
                         maint_sqls = build_delta_maintenance_sql(maint_engine, catalog, table, 0.0)
-                    else:
-                        from lakebench.deploy.iceberg import build_maintenance_sql
-
-                        maint_sqls = build_maintenance_sql(maint_engine, catalog, table, "0s")
-                    plan.extend(("m", table, sql) for sql in maint_sqls)
+                        plan.extend(("m", table, sql) for sql in maint_sqls)
                 for table in tables_to_drop:
                     drop_sql = build_drop_table_sql(maint_engine, table)
                     if drop_sql:
@@ -1414,6 +1413,10 @@ def destroy_all(
                 else:
                     table_status = DeploymentStatus.SUCCESS
                     table_msg = f"{table_format.title()} tables dropped (via {maint_engine})"
+                    if table_format != "delta":
+                        table_msg += (
+                            "; snapshot and orphan maintenance skipped (buckets are emptied next)"
+                        )
                 results.append(
                     DeploymentResult(
                         component="table-cleanup", status=table_status, message=table_msg

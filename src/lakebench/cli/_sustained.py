@@ -831,7 +831,8 @@ def _run_iceberg_maintenance(
     schema = cfg.architecture.workload.schema_type.value
     table_names = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
 
-    # Build SQL based on table format
+    # Build SQL based on table format. Delta VACUUM has one retention.
+    orphan_retention = retention_threshold
     if table_format == "delta":
         from lakebench.deploy.delta_maintenance import (
             build_delta_maintenance_sql,
@@ -851,14 +852,34 @@ def _run_iceberg_maintenance(
             )
             retention_hours = _DELTA_DEFAULT_RETENTION_HOURS
             retention_threshold = "168h"
+        orphan_retention = retention_threshold
 
         def build_sql(tbl):
             return build_delta_maintenance_sql(engine, catalog, tbl, retention_hours)
     else:
         from lakebench.deploy.iceberg import build_maintenance_sql
+        from lakebench.modules.table_formats.iceberg.maintenance import (
+            ORPHAN_MIN_RETENTION_SECONDS,
+            _format_duration,
+            _parse_threshold_seconds,
+        )
+
+        # Policy: expire at the threshold on both engines. Orphan removal at
+        # max(threshold, 24 h) while streams are live (it can delete files a
+        # concurrent commit is about to use) and always on Spark (Iceberg
+        # refuses less); at the threshold on Trino in batch, where nothing
+        # writes at that point.
+        orphan_retention = retention_threshold
+        if live_streams or engine == "spark-thrift":
+            orphan_s = max(
+                _parse_threshold_seconds(retention_threshold), ORPHAN_MIN_RETENTION_SECONDS
+            )
+            orphan_retention = _format_duration(orphan_s)
 
         def build_sql(tbl):
-            return build_maintenance_sql(engine, catalog, tbl, retention_threshold)
+            return build_maintenance_sql(
+                engine, catalog, tbl, retention_threshold, orphan_retention=orphan_retention
+            )
 
     import time as _time
 
@@ -890,6 +911,8 @@ def _run_iceberg_maintenance(
             "engine": engine,
             "table_format": table_format,
             "retention_threshold": retention_threshold,
+            "expire_retention": retention_threshold,
+            "orphan_retention": orphan_retention,
             **_outcome_details(out, len(plan), budget),
             "elapsed_seconds": round(elapsed, 1),
             "statement_timeout_seconds": timeout,
