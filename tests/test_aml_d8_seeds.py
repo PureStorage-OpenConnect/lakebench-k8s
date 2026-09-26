@@ -136,14 +136,11 @@ def test_claim_then_complete_spends_the_seed(record):
     assert ds.load_looks(record)[0]["report_sha256"] == "a" * 64
 
 
-def test_complete_without_claim_needs_claim_if_missing(record):
+def test_complete_without_a_started_look_is_refused(record):
     rb = CORPORA["robustness_seed"]
     with pytest.raises(ValueError, match="no started look"):
-        ds.complete_look("robustness", rb, "c" * 64, "s3a://b/r.json", path=record)
-    ds.complete_look(
-        "robustness", rb, "c" * 64, "s3a://b/r.json", path=record, claim_if_missing=True
-    )
-    assert ds.recorded_seeds(record) == {rb}
+        ds.complete_look("robustness", rb, "c" * 64, "/x/r.json", path=record)
+    assert ds.recorded_seeds(record) == frozenset()
 
 
 def test_role_mismatch_and_calibration_are_refused(record):
@@ -323,3 +320,16 @@ def test_level2_reports_the_original_four_beside_k_of_6():
     four = out["original_four"]
     assert four["gated"] is False and four["n"] == 4 and four["k_required"] == 3
     assert four["k_in_band"] == 2 and four["holds_on_this_corpus"] is False
+
+
+def test_registered_look_needs_a_clean_checkout(monkeypatch):
+    mod = _runner()
+
+    class Done:
+        def __init__(self, out):
+            self.stdout = out
+
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: Done(" M src/x.json\n"))
+    assert "clean checkout" in mod.clean_checkout_error()
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: Done(""))
+    assert mod.clean_checkout_error() is None

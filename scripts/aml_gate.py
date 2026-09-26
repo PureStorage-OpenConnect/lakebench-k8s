@@ -138,6 +138,26 @@ def seed_guard_error(
     )
 
 
+def clean_checkout_error() -> str | None:
+    """Why this checkout may not take a registered look, or None: it must be
+    a git work tree with no uncommitted change to a tracked file."""
+    try:
+        dirty = subprocess.run(
+            ["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as e:
+        return f"a registered look runs from a git checkout ({e})"
+    if dirty:
+        return (
+            "a registered look needs a clean checkout (commit the look record, the "
+            f"predictions and the pre-registration first): {dirty.splitlines()[0]} ..."
+        )
+    return None
+
+
 def predictions_error(generator_image) -> str | None:
     """Why a registered look may not start on the committed Level-2
     predictions (AML-GOALS #46 D-8), or None."""
@@ -340,12 +360,22 @@ def main(argv=None) -> int:
         except OSError as e:
             print(f"refusing: the look record is not writable: {e}", file=sys.stderr)
             return 1
+        # The look record, the predictions and the pre-registration are read
+        # from this checkout: they must be the committed ones, or a look in
+        # another worktree (or a reverted record) goes unseen.
+        err = clean_checkout_error()
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
+            return 1
         # #46 D-8: the look needs committed predictions made under this
         # pre-registration from corpora of this generator image.
         err = predictions_error(args.generator_image)
         if err:
             print(f"refusing: {err}", file=sys.stderr)
             return 1
+        from lakebench.config.datagen_seed import load_predictions as _lp
+
+        preflight_pred_sha = _lp()[1]
     # Cheap refusal before Spark starts; the manifest check below catches a
     # corpus whose real seed is guarded whatever --seed says.
     err = seed_guard_error(args.seed, args.registered, [], args.counts_only)
@@ -494,8 +524,15 @@ def main(argv=None) -> int:
                 customers=ents.filter(col("is_customer").cast("boolean")).select("key"),
                 n_shards=si["n_shards"],
                 salt=si["shard_salt"],
+                typologies=typologies,
             )
             shard_info = {"index": args.d8_shard, **shard_info}
+            from lakebench.aml.scale_invariance import shard_plan_errors
+
+            bad = shard_plan_errors(shard_info, prereg)
+            if bad:
+                print(f"refusing the shard plan: {'; '.join(bad)}", file=sys.stderr)
+                return 1
             pull = af.shard_pull(af.default_pull, plan, args.d8_shard)
         if args.registered in ("evaluation", "robustness") and not args.counts_only:
             # The corpus is verified as the registered seed's; record the look
@@ -503,7 +540,14 @@ def main(argv=None) -> int:
             from lakebench.config.datagen_seed import claim_look, load_predictions
 
             try:
+                # Re-checked here: the file must still be the one checked
+                # before Spark started, and still valid for this look.
+                err = predictions_error(args.generator_image)
+                if err:
+                    raise ValueError(err)
                 pred, pred_sha = load_predictions(typologies=typologies)
+                if pred_sha != preflight_pred_sha:
+                    raise ValueError("the Level-2 predictions changed after the look was checked")
                 claim_look(
                     args.registered,
                     args.seed,

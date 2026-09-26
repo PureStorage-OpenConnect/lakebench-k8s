@@ -85,7 +85,7 @@ def compute_predictions(
                 raise ValueError(f"{run['uri']}: oof_scores for {t} do not match the fingerprint")
             if rt.get("status") != "ok":
                 raise ValueError(f"{run['uri']}: {t} status {rt.get('status')!r}")
-            rng = np.random.default_rng(np.random.SeedSequence([prereg["cv"]["seed"], i, ti]))
+            rng = np.random.default_rng(np.random.SeedSequence([prereg["cv"]["seed"], 0, i, ti]))
             st = si.run_logit_stats(si._typology_arrays(sub), iterations, rng)
             if st["boot_sd_logit"] is None:
                 raise ValueError(f"{run['uri']}: {t} bootstrap undefined")

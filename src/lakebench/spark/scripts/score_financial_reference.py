@@ -584,19 +584,20 @@ def main() -> None:
     manifest = af.read_manifest(spark, args.manifest)
     af.check_manifest(manifest)
     stamp = _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
-    predictions_sha = None
-    if os.environ.get("LB_DATAGEN_CORPUS_ROLE") in ("evaluation", "robustness"):
-        # AML-GOALS #46 D-8: a registered look needs the committed Level-2
-        # predictions (mounted next to this script); their sha256 goes into
-        # the report and scripts/aml_record_look.py checks it is unchanged.
-        try:
-            from lakebench.config.datagen_seed import load_predictions
-        except ImportError:  # flat on the driver
-            from datagen_seed import load_predictions
-        try:
-            predictions_sha = load_predictions()[1]
-        except (OSError, ValueError) as e:
-            raise SystemExit(f"refusing the registered look: {e}") from e
+    if os.environ.get("LB_DATAGEN_CORPUS_ROLE") in ("evaluation", "robustness") and not (
+        args.counts_only
+    ):
+        # AML-GOALS R3 / #46: a registered look must record its seed before
+        # any model exists and its report hash before any verdict is seen, in
+        # the tracked aml_registered_looks.json, and must hash the committed
+        # Level-2 predictions. The driver can do none of that (and its outputs
+        # land on S3 unrecorded), so registered looks run only through
+        # scripts/aml_gate.py --registered on the corpus generated here.
+        raise SystemExit(
+            "refusing: registered evaluation and robustness looks are scored only by "
+            "scripts/aml_gate.py --registered (it records the look); download the corpus "
+            "and run it there"
+        )
     manifest_n = manifest.count()
     if manifest_n == 0:
         raise SystemExit(
@@ -633,7 +634,6 @@ def main() -> None:
         "robustness_perturbation": stamp["n_instances"] > 0
         and stamp["n_stamped"] == stamp["n_instances"],
         "robustness_stamp": stamp,
-        "level2_predictions_sha256": predictions_sha,
         "manifest": manifest_src,
         "silver_txns": f"{CATALOG}.{args.silver_txns}",
     }
@@ -651,24 +651,13 @@ def main() -> None:
         report = {"gate": "aml-fidelity", "verdict": "error", "note": str(e)}
     report["band_leakage_overall_pass"] = leakage_report.overall_pass
 
-    registered = os.environ.get("LB_DATAGEN_CORPUS_ROLE") in ("evaluation", "robustness")
-    if registered:
-        # A registered look's verdict is printed only after the look is
-        # recorded in the tracked aml_registered_looks.json, which the driver
-        # cannot write: scripts/aml_record_look.py records the report's sha256
-        # and then prints the verdict (AML-GOALS R3).
-        log(
-            "Registered look: verdict withheld. Record it first: python3.11 "
-            f"scripts/aml_record_look.py {prefix}/aml_gate_report.json"
-        )
-    else:
-        try:
-            from fidelity_gate import summary_lines
+    try:
+        from fidelity_gate import summary_lines
 
-            for line in summary_lines(report):
-                log(line)
-        except Exception:  # noqa: BLE001 -- logging only
-            pass
+        for line in summary_lines(report):
+            log(line)
+    except Exception:  # noqa: BLE001 -- logging only
+        pass
     outputs = report.pop("_model_outputs", None)
     if outputs is not None:
         try:

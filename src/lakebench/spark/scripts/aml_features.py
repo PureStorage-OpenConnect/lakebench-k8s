@@ -1195,11 +1195,15 @@ def unresolved_subjects(unit: dict) -> int:
 # ---------------------------------------------------------------------------
 
 
-def instance_party_keys(manifest: DataFrame, id_map: DataFrame, txns: DataFrame) -> DataFrame:
-    """(typology_id, key) for every party of every manifest instance: the
-    participant list through ``id_map`` and both parties of every planted
-    payment, so a counterparty that is not a listed participant still links
-    the instance."""
+def instance_party_keys(
+    manifest: DataFrame, id_map: DataFrame, txns: DataFrame, typologies=None
+) -> DataFrame:
+    """(typology_id, key) for every party of every manifest instance of
+    ``typologies`` (all when None): the participant list through ``id_map``
+    and both parties of every planted payment, so a counterparty that is not a
+    listed participant still links the instance."""
+    if typologies is not None:
+        manifest = manifest.filter(col("typology_type").isin(*list(typologies)))
     by_id = (
         manifest.select("typology_id", explode(col("participant_entity_ids")).alias("dg_id"))
         .join(id_map, "dg_id", "inner")
@@ -1222,10 +1226,12 @@ def d8_shard_plan(
     customers: DataFrame,
     n_shards: int,
     salt: str,
+    typologies,
 ):
     """(plan, info). ``plan`` has one row per customer key: key and shard.
 
-    Every party key of every planted instance is a node; an instance joins
+    Every party key of every planted instance of an in-scope typology
+    (``typologies``) is a node; an instance joins
     all its parties, and a connected component (lakebench.aml.d8_shards) goes
     to shard pmod(xxhash64(salt, smallest key), n_shards) whole. A customer in
     no instance is its own component. Raises when any instance's customers
@@ -1241,7 +1247,12 @@ def d8_shard_plan(
         from d8_shards import check_plan, component_sizes, components
 
     instances: dict = {}
-    for r in instance_party_keys(manifest, id_map, txns).collect():
+    # Only the scored typologies link customers. The other planted typologies
+    # (random, bipartite, fan_in, ...) share parties so widely that their
+    # graph percolates (one component held 68% of party keys at scales 2 and
+    # 10), which would put most of every behavioural typology in one shard.
+    # They carry no label D8 scores; their rows stay in every feature.
+    for r in instance_party_keys(manifest, id_map, txns, typologies).collect():
         instances.setdefault(r["typology_id"], []).append(r["key"])
     reps = components(instances.values())
     key_type = customers.schema["key"].dataType
@@ -1272,6 +1283,7 @@ def d8_shard_plan(
         "n_party_keys": len(reps),
         "n_components": len(sizes),
         "largest_component": max(sizes.values()) if sizes else 0,
+        "typologies": sorted(typologies),
         "spanning_instances": 0,
         "plan_fingerprint": str(fp),
     }
