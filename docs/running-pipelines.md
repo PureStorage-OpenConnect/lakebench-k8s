@@ -292,6 +292,17 @@ Maintenance uses whichever query engine is deployed:
 | Spark Thrift | Yes | `CALL catalog.system.expire_snapshots(...)` via beeline |
 | DuckDB | No | Read-only -- maintenance is skipped |
 
+Each maintenance or compaction statement may run for min(600 s, half the
+interval) and a whole round is capped at half the interval (and at the time
+left in the run). The first statement that times out stops the rest of that
+round; timeouts are journaled separately from failures, because the engine
+may still be running the statement. The next round starts at the table after
+the one that timed out, so a table that always times out cannot starve the
+others, and compaction waits one statement timeout before it runs. A round
+due with less than a minute of the run left is skipped. The bounds apply to
+lakebench's wait, not to the engine: a statement that timed out near the end
+of the run can still be running after the monitoring window closes.
+
 `expire_snapshots` does not delete old `metadata.json` files; each commit
 leaves one behind. Every Iceberg table lakebench creates therefore sets
 `write.metadata.delete-after-commit.enabled=true` and
