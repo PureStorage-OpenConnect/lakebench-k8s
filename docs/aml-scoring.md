@@ -82,6 +82,31 @@ Measured against the old generator at seed 7777, scale 0.05: 301 of 302
 other-typology instances identical (the other gained a row a dormancy
 window used to drop) and 99.94% of baseline rows identical.
 
+### Baseline timing: scheduled and bursty senders (D2)
+
+Every baseline send used to be an independent activity-weighted draw of its
+originator, so each account sent as a memoryless process on the calendar and
+its gap CV sat near 1 (D0 v2: 0.004% of the cohort below 0.5, 58% above
+1.0; the pre-registered D2 target is at least 15% on each side). Real
+payment behaviour is a mixture: some accounts pay mostly on a steady cadence
+(standing orders, bills, payroll and supplier runs) and others are bursty.
+
+`datagen_rs/src/regular.rs` makes 30% of accounts "scheduled": 75 to 95% of
+the account's expected sends follow a steady cadence (one payment every 1/K
+of calendar mass, rolled to the next business day), and the rest stay random
+draws. Spacing the cadence in calendar mass rather than wall-clock time
+keeps scheduled rows on the corpus's day-of-week, salary-day and
+quarter-end shape, which typology rows share; evenly spaced wall-clock
+times put fewer rows on salary days and more on Mondays, and planted rows
+would then stand out by date.
+Only timing changes. The account's expected total sends, its amounts
+(persona draws) and its counterparty draws (the same ring and extended-band
+draw as a random row) are unchanged, as are every typology's rows and the
+corpus row count. A dormant account's cadence stops during its dormancy.
+Scheduled events are computed per file from (seed, uid), so memory stays
+O(accounts) at any scale and files still depend only on (seed, file).
+Parameters are self-chosen; the D2 anchor is still pending a citation.
+
 ## Why benchmark precision is not the FP rate ops teams care about
 
 The precision numbers in this benchmark answer a narrow question:

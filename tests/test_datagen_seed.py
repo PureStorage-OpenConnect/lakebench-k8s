@@ -119,8 +119,21 @@ def test_protected_seed_refused_without_its_role(seed):
         _cfg("financial", seed)
 
 
+@pytest.fixture
+def looks_open(monkeypatch):
+    """The pre-registration after the freeze: registered looks open."""
+    opened = {**ds._corpora(), "registered_looks_open": True}
+    monkeypatch.setattr(ds, "_corpora", lambda: opened)
+
+
+def test_registered_looks_are_closed_until_the_freeze():
+    assert _CORPORA.get("registered_looks_open") is False
+    with pytest.raises(ValidationError, match="closed"):
+        _cfg_role(EVAL, "evaluation")
+
+
 @pytest.mark.parametrize(("seed", "role"), [(EVAL, "evaluation"), (ROBUST, "robustness")])
-def test_protected_seed_allowed_with_its_role(seed, role):
+def test_protected_seed_allowed_with_its_role(seed, role, looks_open):
     assert ds.config_seed(_cfg_role(seed, role)) == seed
     # The role alone selects its registered seed.
     assert ds.config_seed(_cfg_role(None, role)) == seed
@@ -149,7 +162,7 @@ def test_role_is_financial_only():
         )
 
 
-def test_reference_job_records_the_declared_role(monkeypatch):
+def test_reference_job_records_the_declared_role(monkeypatch, looks_open):
     from lakebench.modules.pipeline_engines.spark import job as jobmod
     from lakebench.modules.pipeline_engines.spark.job import JobType, SparkJobManager
 
@@ -178,7 +191,7 @@ def _gate():
     return mod
 
 
-def test_gate_guard_refuses_unregistered_looks():
+def test_gate_guard_refuses_unregistered_looks(looks_open):
     g = _gate()
     # Calibration and unregistered seeds score freely.
     assert g.seed_guard_error(43, None, []) is None
@@ -196,6 +209,34 @@ def test_gate_guard_refuses_unregistered_looks():
     assert g.seed_guard_error(7777, "evaluation", []) is not None
 
 
+def test_gate_guard_counts_only_is_not_a_look():
+    g = _gate()
+    # A counts-only smoke run may touch a protected corpus (no AP), never a
+    # spent one, and never under a registered role.
+    assert g.seed_guard_error(EVAL, None, [EVAL], counts_only=True) is None
+    assert g.seed_guard_error(42, None, [], counts_only=True) is not None
+    assert g.seed_guard_error(EVAL, "evaluation", [EVAL], counts_only=True) is not None
+
+
+def test_mixed_corpus_counts_as_the_guarded_seed():
+    # A manifest mixing a guarded seed's instances with others is refused:
+    # any matching instance seed puts the guarded seed in `matched`.
+    assert ds.aml_seed_error(_CORPORA, 7777, None, [EVAL]) is not None
+    assert ds.aml_seed_error(_CORPORA, None, None, [42]) is not None
+
+
+def test_guard_ships_flat_to_the_spark_driver():
+    from lakebench.modules.pipeline_engines.spark import job as jobmod
+
+    src = Path(jobmod.__file__).read_text()
+    assert '_package_dir() / "config" / "datagen_seed.py"' in src
+    ref = (
+        Path(__file__).resolve().parents[1]
+        / "src/lakebench/spark/scripts/score_financial_reference.py"
+    ).read_text()
+    assert "from datagen_seed import" in ref and "refusing to score this corpus" in ref
+
+
 def test_gate_guard_uses_the_manifest_seed_not_the_claim():
     g = _gate()
     # An evaluation corpus scored with --seed omitted or misstated is refused.
@@ -209,3 +250,23 @@ def test_gate_refuses_before_spark_starts():
     g = _gate()
     assert g.main(["/nonexistent", "--seed", str(EVAL)]) == 1
     assert g.main(["/nonexistent", "--seed", "42", "--registered", "evaluation"]) == 1
+
+
+def test_flat_copy_imports_without_lakebench(tmp_path):
+    # On the driver the module sits flat next to the scripts with no
+    # lakebench package: it must import and work from the corpora dict alone.
+    import subprocess
+    import sys
+
+    src = Path(ds.__file__).read_text()
+    (tmp_path / "datagen_seed.py").write_text(src)
+    code = (
+        "import json,sys; sys.path.insert(0, '.');"
+        "from datagen_seed import aml_seed_error;"
+        f"c=json.loads({json.dumps(json.dumps(_CORPORA))});"
+        f"assert aml_seed_error(c, {EVAL}) and aml_seed_error(c, 43) is None"
+    )
+    r = subprocess.run(
+        [sys.executable, "-I", "-c", code], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert r.returncode == 0, r.stderr

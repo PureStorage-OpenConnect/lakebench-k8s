@@ -298,9 +298,10 @@ def test_high_risk_countries_match_generator_corridor_pool():
 
 def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
-    assert p["version"] == "3.5.1"
-    assert "#37/#38" in p["_doc"] and p["changelog"][0]["version"] == "3.5.1"
-    assert p["changelog"][1]["version"] == "3.5.0"
+    assert p["version"] == "3.5.2"
+    assert "#37/#38" in p["_doc"] and p["changelog"][0]["version"] == "3.5.2"
+    assert [c["version"] for c in p["changelog"][1:3]] == ["3.5.1", "3.5.0"]
+    assert p["corpora"]["registered_looks_open"] is False
     assert {42, 50000042} <= set(p["corpora"]["spent_seeds"])
     u = p["unit_of_scoring"]
     assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")

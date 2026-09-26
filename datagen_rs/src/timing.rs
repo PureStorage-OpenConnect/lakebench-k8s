@@ -204,6 +204,12 @@ impl DayCal {
         !hol.contains(&md)
     }
 
+    /// The business day `day` rolls forward to for country `cc` (the day
+    /// `sample_ts_on_day` places a row on).
+    pub fn rolled_day(&self, day: usize, cc: &str) -> usize {
+        self.roll(day.min(self.span - 1), cc)
+    }
+
     /// Roll a sampled day forward to the next business day for the country.
     fn roll(&self, mut day: usize, cc: &str) -> usize {
         let hol = holidays(cc);
