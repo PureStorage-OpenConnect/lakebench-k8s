@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+Draft notes for 1.6.0.
+
+### Behaviour changes you must know
+- **Every v1.5 continuous number was measured with no snapshot expiry and
+  no VACUUM (LB-172, LB-173, LB-174).** `exec_sql` discarded the exit code,
+  so failed maintenance statements were reported as successes. Underneath
+  that, Trino refused every Iceberg `expire_snapshots` and
+  `remove_orphan_files` below its 7-day system minimum, the Spark Thrift
+  form always failed a parameter-binding error, and Delta VACUUM sent its
+  retention override in a separate session, so it never applied. Batch
+  pre-benchmark maintenance was therefore compaction only (at the default
+  `0s` retention; a `retention_workload` horizon of hundreds of days was
+  above Trino's minimum). Now Trino sends
+  `SET SESSION <catalog>.<procedure>_min_retention` in the same submission
+  as the procedure, Spark uses a `TIMESTAMP` literal, and a failed or
+  timed-out statement is reported as one. Continuous and maintenance-value
+  numbers from v1.5 are not comparable with v1.6.
+- **Retention floors.** Orphan-file removal never runs below 24 h 10 min on
+  any engine or path. Iceberg snapshot expiry is floored at 1 h while
+  streams are live. Delta VACUUM keeps Delta's 7-day default while streams
+  are live, so a continuous Delta run shorter than 7 days gets no effective
+  VACUUM.
+- **`retention_threshold` is strict.** It must be a whole number and one
+  unit (`s`, `m`, `h` or `d`, for example `30m` or `7d`); anything else,
+  such as `1.5h` or `30min`, is rejected when the config loads instead of
+  being misread or failing mid-run.
+- **Pre-benchmark maintenance has a 30-minute budget.** Expire, orphan
+  removal and compaction share it; the first statement timeout or the
+  deadline stops the rest and the benchmark runs anyway. When maintenance
+  stopped early or ran beside live stream apps, the perf gate excludes
+  post-maintenance QpH, and if no QpH metric is left to gate the verdict is
+  `NOT_COMPARABLE` (exit 2, never a pass, never a baseline).
+- **Destroy semantics.** Destroy runs no table maintenance (no Iceberg
+  expire or orphan removal, no Delta VACUUM), only `DROP TABLE`. It empties
+  the buckets and then deletes only the ones this deployment created (the
+  created-buckets record on the namespace plus the ownership checks);
+  pre-provisioned, adopted and `--keep-buckets` buckets are emptied and
+  kept. If a recorded bucket cannot be deleted, the namespace is kept as
+  the ownership record. Destroy waits until the namespace is NotFound
+  before reporting it deleted (`--namespace-timeout`, default 600 s; exit 3
+  when it is still terminating). The scratch StorageClass is never deleted.
+
 ### Breaking changes (read before upgrading)
 - **Unknown config keys are rejected.** Every config model forbids extra
   keys, and the error names the full path (for example
@@ -259,7 +301,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   counts across runs; replaced with deterministic
   `groupBy + min(country)`.
 
-- **LB-089 (P0): AML pipeline broken end-to-end since the datagen
+- **LB-165 (P0): AML pipeline broken end-to-end since the datagen
   Rust rewrite.** `bronze_verify_financial.py` and
   `bronze_ingest_financial.py` read pacs.008 transactions from
   `LB_BRONZE_URI + LB_FINANCIAL_BRONZE_PREFIX` (default `pacs008/`)
@@ -272,7 +314,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   hits three subdirs with different schemas and refuses with
   `UNABLE_TO_INFER_SCHEMA`. Found live on 2026-09-21 during the
   first end-to-end AML deploy attempt. Same systemic pattern as
-  LB-088: shipped through PR-A/B/C/D/E because no unit test read
+  LB-164: shipped through PR-A/B/C/D/E because no unit test read
   real datagen v2 output and no live pipeline run gated the
   branch. C360 was unaffected -- its datagen writes flat and its
   reader reads flat. Round 1 fix: both bronze readers now honour
@@ -294,14 +336,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Python reader; docstrings stripped so a comment mentioning the
   string cannot satisfy the check while the code path reverts.
   Not live-verified post-fix -- unit-tested only; live re-run
-  pending on `aml-baseline-s1`. LB-090 and LB-091 opened for
+  pending on `aml-baseline-s1`. LB-166 and LB-167 opened for
   sustained-mode-only follow-ups (env-var contract drift on
   streaming, and `bronze_verify` never scheduled by the sustained
   CLI).
 
 ### Changed
 - **`LB_FINANCIAL_BRONZE_PREFIX` semantic on `bronze_ingest_financial`
-  (LB-089).** The env var previously meant the INNER path
+  (LB-165).** The env var previously meant the INNER path
   (default `bronze/pacs008/`) on `bronze_ingest_financial.py`
   while it meant the OUTER root on `bronze_verify_financial.py`
   and in `job.py`. Both scripts now agree: OUTER root, datagen
@@ -313,7 +355,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `LB_FINANCIAL_BRONZE_PREFIX` to the datagen root
   (`pacs008/` at the default) or use `LB_FINANCIAL_PACS_PATH`
   to override the derived sub-path directly.
-- **LB-088 (P0): FlashBlade returns `NotImplemented` on
+- **LB-164 (P0): FlashBlade returns `NotImplemented` on
   `GetBucketTagging` and `PutBucketTagging`.** The primary tested S3
   target does not implement the tagging APIs that PR-1's ownership
   discipline uses as the identity mechanism. Found live on 2026-09-21

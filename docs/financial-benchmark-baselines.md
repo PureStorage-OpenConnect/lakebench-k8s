@@ -5,139 +5,63 @@ at each scale point. Referenced by ENG-2C.4.8 verification (W8 replay
 timeout budget), by release regression detection, and by external
 narratives that need quotable numbers.
 
-**Values below are TBD (empty scaffold in v1).** Populated after each
-release's UAT run per the update procedure at the bottom of this file.
+**Numbers are pending the v1.6 frozen-generator runs.** Earlier
+measurements (scale 1 on 2026-09-22, scale 10 on 2026-09-23) were taken on
+a generator and rule set that have since changed and are void; see
+History. The tables below are filled from the post-freeze runs, each with
+its run id.
 
 ## How to read this table
 
 - **Scale.** Datagen `scale` factor. Scale 1 emits 8.4 GB of pacs.008
   (111,111 entities * 4 txns/month * 60 months = 26.7M transactions,
   measured 2026-09-24 with the default 64 MB files). It scales linearly:
-  scale 100 is about 840 GB, scale 10000 about 84 TB (tier-1 universal
-  bank AML retention target).
+  scale 100 is about 840 GB by this estimate, and measured runs land
+  11-13% above it (about 950 GB of bronze at scale 100 in
+  run-20260925-104703-c02890). AML has been run end to end up to scale
+  100; scale 500 (about 4.2 TB by the estimate) and above are untested.
 - **Wall-clock p50 / p95.** Median and 95th-percentile wall-clock
   seconds across N independent runs at the same scale on the same
-  reference cluster. p95 catches skew / warm-up effects.
+  cluster. p95 catches skew / warm-up effects.
 - **Alert count.** Total detection alerts written to `gold.alerts` at
   end of pipeline. Includes typology and typology-adjacent hits.
 - **Recall.** Fraction of scheduled typology instances the workload
-  detected. Computed by `lakebench financial score`.
-- **Cores used.** Sum of executor cores requested across the pipeline
-  (bronze_verify + silver_build + gold_finalize).
+  detected. Computed by `lakebench financial score`. Not scored in
+  continuous mode in v1.6 (LB-168).
+- **Cores used.** Peak executor cores requested by a single batch job
+  (the batch jobs run sequentially), or the sum across the three
+  concurrent streaming jobs in continuous mode.
 - **Storage read.** Aggregate S3 GET GB across the pipeline. Reference
   the storage-backend note when reading against slower object stores.
 
-## Reference cluster
+## Test cluster
 
-- **Node count:** 10
-- **Cores per node:** 32
-- **Memory per node:** 256 GB
-- **Network:** 100 Gbps
-- **Storage:** S3-compatible with ~10 GB/s aggregate read throughput
+- **Platform:** OpenShift 4.x on bare metal
+- **Allocatable CPU:** 434 cores
+- **Storage:** Pure Storage FlashBlade (S3, path-style, HTTP)
 
 Numbers scale with cluster shape; comparing across clusters requires
-adjustment. Publish only reference-cluster numbers here; extrapolations
-go elsewhere.
+adjustment. Each row cites its run id, whose `metrics.json` records the
+configuration it ran with.
 
 ## Batch pipeline (bronze_verify -> silver_build -> gold_finalize)
 
-Wall-clock covers the batch pipeline only. As of PR-G (LB-112) detection
-rules run inline as the final step of gold_finalize, so `alert count`
-below reflects what one `lakebench run` writes to `gold.alerts` per
-cycle (no separate `lakebench financial replay` needed). Cores used is
-the peak Spark-executor request across the three batch jobs
-(silver_build is the peak in every measured run).
+Wall-clock covers the batch pipeline only. Detection rules run inline as
+the final step of gold_finalize, so `alert count` reflects what one
+`lakebench run` writes to `gold.alerts` per cycle.
 
-| Scale | Wall-clock p50 (s) | Wall-clock p95 (s) | Alert count | Recall | Cores used | Storage read (GB) |
-|------:|-------------------:|-------------------:|------------:|-------:|-----------:|------------------:|
-|     1 |            930.5[1]|          1065.6[2] |         [3] |   [3]  |         32 |             14.4  |
-|    10 |          7971[4]    |                TBD |   1665017[4]| 0.322[4]|        32 |            186.1[4]|
-|   100 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
-|  1000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
-| 10000 |                TBD |                TBD |         TBD |    TBD |        TBD |               TBD |
+| Scale | Wall-clock p50 (s) | Wall-clock p95 (s) | Alert count | Recall | Cores used | Storage read (GB) | Run ids |
+|------:|-------------------:|-------------------:|------------:|-------:|-----------:|------------------:|:--------|
+|     1 | pending | pending | pending | pending | pending | pending | pending |
+|    10 | pending | pending | pending | pending | pending | pending | pending |
+|   100 | pending | pending | pending | pending | pending | pending | pending |
 
-Footnotes on scale 1 (three runs, first three-iter clean baseline on
-the reference cluster after PR-G + PR-H, 2026-09-22):
+## Continuous pipeline (bronze_ingest -> silver_stream -> gold_refresh)
 
-[1] Median of three consecutive `lakebench run` cycles at scale 1 on
-2026-09-22. Wall-clock per iter: 1065.6s, 930.5s, 930.1s. Per-stage
-figures (min/p50/max): bronze_verify 360.3 / 360.3 / 495.4s;
-silver_build 255.2 / 255.2 / 255.2s; gold_finalize 300.2 / 300.2 /
-300.3s. Silver_build and gold_finalize are within-0.1s across runs
--- the wall-clock spread lives entirely in bronze_verify's Ivy jar
-resolution, which took 135s longer on iter 1 than on iter 2/3 (cold
-mirror fetch first time through -- see PR-H Maven mirror fallback).
-Gold_finalize is 300s (up from 75s in the earlier LB-092 run) because
-the six W-rules now run inline as part of gold_finalize -- W1 through
-W4, W7, and W8 all executed; the alert-writing DELETE-then-INSERT is
-per-rule idempotent, so a re-run against the same silver yields the
-same alert set.
-
-[2] With n=3, p95 is effectively the maximum. The 1065.6s upper bound
-was driven by the first run's cold Maven mirror fetch; a warmer cache
-would bring this closer to p50. Repopulate once n >= 10 for a real p95.
-
-[3] Alert count and per-rule recall are not yet reported in this row.
-The three runs each wrote 1.068 GB to `gold.alerts` (identical to
-three significant figures across runs -- consistent evidence detection
-is deterministic), but the driver's per-rule alerts=N log lines were
-not extracted into `metrics.json` at run time and the buckets were
-destroyed between iterations. LB-116 tracks the missing metric
-extraction; the next baseline pass (once the per-rule counts are
-recorded to `metrics.json`) will populate both. LB-094 (silver-build
-role-prefix bug that splits every entity into two silver rows) also
-depresses recall structurally and is not addressed in PR-G; W1-W4
-recall will step up once LB-101 lands.
-
-Not populated in this row: QpH. Post-compaction QpH across the three
-runs was 6.6 / 0.0 / 8.2. The zero was a spark-thrift pod crash
-mid-benchmark on iter 2, not a pipeline failure. The other two runs
-had four of eight AML queries timing out at 300 s (FQ1 full silver
-scan, FQ2 top corridors, FQ4 running balance, FQ5 alert triage, FQ8
-alert-to-entity join). Pre-compaction QpH was 38.8 / 39.1 / 39.0
-(4/8 queries succeeded, cadre stable). LB-113 fixed the 4 Gi OOM;
-LB-117 tracks the remaining query-timeout tune for AML analytical
-queries. QpH will populate here after LB-117 lands.
-
-[4] Single scale-10 batch run (n=1, run-20260923-120258-b71af2,
-2026-09-23), first clean scale-10 run after LB-118 (500Gi bronze-verify
-PVC, executors_per_100_scale:8, max_executors:28). p95 stays TBD until
-n>=3. Per-stage wall-clock: bronze_verify 4278s (dominant -- the
-pacs.008 CTAS fallback rewrites ~186 GB through Iceberg on 7 executors),
-silver_build 1216s, gold_finalize 2477s. Zero OOMKilled and no
-'No space left on device' across the run -- LB-118 verified at scale 10.
-Cores used = peak single-job executor-core request (silver_build and
-gold_finalize each 8x4=32; bronze_verify 7x2=14; jobs run sequentially).
-Storage read = bronze input size (186.1 GB) read by bronze_verify;
-silver measured 99.0 GB. Alert count 1,665,017 across W2=5,173,
-W3=128, W4=1,045,602, W7=0, W8=614,114 (W1 ran, 0 components above
-threshold). fp_rate 98.8% -- W4 (63%) and W8 (37%) dominate the alert
-volume and are the two precision blockers (LB-130). Recall is the
-unweighted mean across 15 scored typologies (min corridor_high_risk
-0.043, max fan_out 0.911); all 15 rendered as 'scored', none faked as
-0%/skipped. scale_ratio reported 0.0 -- the scorecard's expected-bronze
-denominator is not wired for AML (LB-131), cosmetic, does not affect
-the pipeline.
-
-## Sustained pipeline (bronze_ingest -> silver_stream -> gold_refresh)
-
-| Scale | Ingest rate (rows/s) | Silver merge p50 (s) | Gold refresh p50 (s) | Cores used |
-|------:|---------------------:|---------------------:|---------------------:|-----------:|
-|     1 |                  TBD |                  TBD |                  TBD |        TBD |
-|    10 |              n/a[s1] |              n/a[s1] |              n/a[s1] |        ~18 |
-|   100 |                  TBD |                  TBD |                  TBD |        TBD |
-
-[s1] Scale-10 continuous ran end to end and PASSED the honest alert gate on
-2026-09-23 (run-20260923-162712-724805): bronze-verify preflight completed in
-1937s (LB-132 timeout budget + LB-135 20Gi memory), the three streaming stages
-ran concurrently for the 30-min window, and detection wrote 752,422 alerts
-(W2/W3/W4; W1/W7/W8 skipped in continuous). But the per-stage throughput /
-freshness / ingest-rate metrics all read 0/None: the collector's streaming
-parsers do not match AML's gold_refresh logs and ingest_ratio uses the c360
-denominator (LB-136, Phase 4). So the pipeline is proven at scale 10 but these
-sustained rate columns cannot be populated with real numbers until Phase 4
-wires real freshness/TTD + the AML ingest denominator. Cores ~18 = 2+2+2
-streaming executors x ~cores, excluding the one-shot bronze-verify preflight.
+| Scale | Ingest rate (rows/s) | Time to detect p50 (s) | Time to detect p95 (s) | Data freshness (s) | Cores used | Run ids |
+|------:|---------------------:|-----------------------:|-----------------------:|-------------------:|-----------:|:--------|
+|    10 | pending | pending | pending | pending | pending | pending |
+|   100 | pending | pending | pending | pending | pending | pending |
 
 ## Replay (W8, `lakebench financial replay`)
 
@@ -163,7 +87,7 @@ than a scaling metric.
 
 Follow this after each release UAT:
 
-1. On the reference cluster, deploy at scale 10 and scale 100 and run
+1. On the test cluster, deploy at scale 10 and scale 100 and run
    the full Financial pipeline. Capture wall-clock from
    `lakebench-output/runs/<run-id>/metrics.json`.
 2. Run `lakebench financial score --manifest s3://.../manifest.parquet
@@ -179,9 +103,14 @@ Follow this after each release UAT:
 
 ## History
 
-**2026-09-21 (v1.5.0.dev0, run-20260921-220243-fea608)** -- first live end-to-end AML pipeline on the reference cluster. Scale-1 row populated in the batch table. Not a release measurement -- the run surfaced five real defects (LB-088 FlashBlade tagging, LB-089 datagen v2 layout drift, LB-090 sustained-mode env-var drift, LB-091 sustained CLI missing bronze_verify, LB-112 gold_finalize does not invoke detection rules, LB-113 spark-thrift undersized) and the fixes are still in flight. Scale-10 and above will not be measured until the batch pipeline runs three times cleanly.
+The entries below are kept for traceability only. Every number in them is
+void for comparison: they predate the v1.6 frozen generator, the AML rule
+target changes, the 3-sample QpH median, and working table maintenance
+(LB-172 to LB-174). Do not quote them.
 
-**2026-09-22 (v1.5.0.dev0, three consecutive S1 runs)** -- first clean three-iter S1 baseline on the reference cluster after PR-G (LB-112/113/114/115) and PR-H (Google Maven mirror fallback for repo1.maven.org rate-limits) landed. All three pipelines completed rc=0, gold_finalize wrote an identical 1.068 GB to `gold.alerts` in every run, and per-stage timings were within 0.1s except for iter-1's Ivy jar-resolution cold start. Scale-1 row repopulated with p50 = 930.5s and n=3 max = 1065.6s. LB-116 and LB-117 track two remaining follow-ups (missing per-rule alert counts in metrics.json, AML analytical query timeouts); LB-094 (bipartite silver-build entity split) still depresses recall structurally.
+**2026-09-21 (v1.5.0.dev0, run-20260921-220243-fea608)** -- first live end-to-end AML pipeline on the test cluster. Scale-1 row populated in the batch table. Not a release measurement -- the run surfaced five real defects (LB-164 FlashBlade tagging, LB-165 datagen v2 layout drift, LB-166 sustained-mode env-var drift, LB-167 sustained CLI missing bronze_verify, LB-112 gold_finalize does not invoke detection rules, LB-113 spark-thrift undersized) and the fixes are still in flight. Scale-10 and above will not be measured until the batch pipeline runs three times cleanly.
+
+**2026-09-22 (v1.5.0.dev0, three consecutive S1 runs)** -- first clean three-iter S1 baseline on the test cluster after PR-G (LB-112/113/114/115) and PR-H (Google Maven mirror fallback for repo1.maven.org rate-limits) landed. All three pipelines completed rc=0, gold_finalize wrote an identical 1.068 GB to `gold.alerts` in every run, and per-stage timings were within 0.1s except for iter-1's Ivy jar-resolution cold start. Scale-1 row repopulated with p50 = 930.5s and n=3 max = 1065.6s. LB-116 and LB-117 track two remaining follow-ups (missing per-rule alert counts in metrics.json, AML analytical query timeouts); LB-094 (bipartite silver-build entity split) still depresses recall structurally.
 
 **2026-09-22 (v1.5.0.dev0, scale-10 attempt)** -- first live scale-10 AML batch attempt failed at bronze-verify with `java.io.IOException: No space left on device` after 78 minutes (three attempts, same failure). Per-executor scratch PVC (50 Gi) is undersized for the bronze_verify_financial CTAS + DISTINCT ORDER BY on 100 GB of pacs.008 raw. Filed as LB-118; scale 10 row stays TBD pending the fix. All lower-scale rows (scale 1) unaffected -- 50 Gi is comfortable at that volume. This is per-job local disk, unrelated to the LB-113 spark-thrift heap bump.
 

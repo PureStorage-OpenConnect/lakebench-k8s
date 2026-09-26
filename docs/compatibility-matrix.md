@@ -131,15 +131,26 @@ architecture:
   instead of answering MIN/MAX/COUNT from the Delta log. A Q2 failure on Delta + Thrift
   is now treated as a regression, not a known failure.
 
-### Delta + Trino
+### Delta + Trino and Delta + Spark Thrift
 
 - **OPTIMIZE OOM**: `ALTER TABLE ... EXECUTE optimize` rewrites the entire table in one pass
   and has exhausted Trino worker and Spark Thrift memory at scale 1+.
-  Pre-benchmark OPTIMIZE is skipped for Delta. VACUUM still runs.
+  Lakebench never runs Delta OPTIMIZE, neither before the benchmark nor in the
+  continuous loop. VACUUM still runs on Trino.
 
 - **VACUUM requires catalog prefix**: `CALL {catalog}.system.vacuum(...)`, not
-  `CALL system.vacuum(...)`. Also needs `SET SESSION {catalog}.vacuum_min_retention = '0s'`
-  for retention below the 7-day default.
+  `CALL system.vacuum(...)`. Retention below the 7-day default also needs
+  `SET SESSION {catalog}.vacuum_min_retention = '0s'`, and it must travel in the
+  same `trino --execute` submission as the `CALL`: a session property set in a
+  separate submission is gone before the `CALL` runs. Before v1.6 lakebench sent
+  them separately, so no Delta VACUUM ever applied its requested retention
+  (LB-173).
+- **No effective VACUUM in short continuous runs**: while streams are live,
+  VACUUM keeps Delta's 7-day default retention so a lagging stream never reads
+  a vacuumed file. A continuous run shorter than 7 days therefore removes
+  nothing.
+- **Delta + Spark Thrift runs no maintenance**: VACUUM is skipped because it
+  runs Spark Thrift out of memory at 4 GiB.
 
 ### Delta + Hive
 

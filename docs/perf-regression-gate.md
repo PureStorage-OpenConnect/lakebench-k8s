@@ -228,9 +228,10 @@ python scripts/release_gate.py --only perf-baselines
 no baseline, or when the verdict is `NOT_COMPARABLE`.
 
 A run whose pre-benchmark maintenance stopped early (a statement timed out or
-the 30 min cap was hit, `maintenance_stopped` in the scores) has no clean
+the 30 min cap was hit, `maintenance_stopped` in the scores), or ran while
+stream apps were still present (`maintenance_live_streams`), has no clean
 post-maintenance QpH: a rewrite may still have been running during the
-benchmark. The gate then leaves `composite_qph` and every `query_qph_*` out
+benchmark, or the streams kept writing under it. The gate then leaves `composite_qph` and every `query_qph_*` out
 (status `excluded`, with the stop reason) and always names the stop in the
 comparison's reasons; `pre_compaction_qph` stays gated. If no QpH metric is
 left to gate (always at scale 50 and above, where no pre-maintenance round

@@ -404,19 +404,25 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
 | `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 3 unless the namespace is already gone |
 | `--keep-buckets` | | `false` | Empty the S3 buckets but do not delete them |
+| `--force-legacy` | | `false` | Proceed on a namespace or bucket with no lakebench ownership annotation or tag. Foreign-owned namespaces and buckets are refused regardless |
+| `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |
 
-Removes everything in the correct order: Spark jobs, orphaned pods, datagen
-jobs, Iceberg table maintenance, DROP TABLEs, S3 bucket contents, Grafana,
-Prometheus, Trino, Hive/Polaris, PostgreSQL, RBAC, scratch StorageClass,
-and the namespace.
+Removes everything in this order: ownership check, Spark jobs, orphaned
+pods, datagen jobs, DROP TABLEs, S3 bucket contents (then the buckets
+themselves, see below), observability, the query engine, the catalog,
+PostgreSQL, RBAC and secrets, and the namespace. Destroy runs no table
+maintenance: no Iceberg `expire_snapshots` or `remove_orphan_files` and no
+Delta `VACUUM` before the drops. The scratch StorageClass is shared
+cluster-scoped infrastructure and is never deleted.
 
 S3 buckets are emptied, then deleted only if lakebench created them: deploy
 records each bucket it creates (a `lakebench.created` tag where the backend
 supports tagging, and the `lakebench.deployment/created-buckets` namespace
-annotation). Buckets deploy adopted, pre-provisioned buckets
+annotation), and destroy deletes a bucket only when it is in that record and
+its ownership checks out. Buckets deploy adopted, pre-provisioned buckets
 (`create_buckets: false`), and buckets emptied under `--force-legacy` are
-emptied but kept. If a bucket delete fails, the namespace is kept as the
-ownership record so a re-run can finish.
+emptied but kept. If a recorded bucket cannot be emptied or deleted, the
+namespace is kept as the ownership record so a re-run can finish.
 
 Destroy waits for the namespace to be gone before reporting it deleted. If a
 concurrent destroy of the same deployment finished first and a redeploy has

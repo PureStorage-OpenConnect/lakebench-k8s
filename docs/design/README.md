@@ -15,13 +15,13 @@ Current design docs:
 
 ## Not yet in this directory
 
-Working specs that are still evolving live under `docs/` as `lakebench.next-spec*.md` files rather than under `docs/design/`. When a spec's decisions have shipped and stabilised, they get curated into this directory as a design doc; the working spec then becomes historical.
+Working specs that are still evolving live under `docs/internal/` as `lakebench.next-spec*.md` files rather than under `docs/design/`. `docs/internal/` is internal working material: it is excluded from the source distribution and is not user documentation. When a spec's decisions have shipped and stabilised, they get curated into this directory as a design doc; the working spec then becomes historical.
 
 Currently under active spec work:
 
-- `docs/lakebench.next-spec.md` -- AML (financial crime / AML) workload domain, plus Spark 4.2 upgrade path.
-- `docs/lakebench.next-spec-datagen-v2-plan.md`, `-execution.md`, `-memo.md` -- Rust datagen v2 (shipped as of the [Unreleased] CHANGELOG entry).
-- `docs/lakebench.next-spec-eng-2c3-memo.md`, `-addendum.md` -- engineering addenda to the AML spec.
+- `docs/internal/lakebench.next-spec.md` -- AML (financial crime / AML) workload domain, plus Spark 4.2 upgrade path.
+- `docs/internal/lakebench.next-spec-datagen-v2-plan.md`, `-execution.md`, `-memo.md` -- Rust datagen v2 (shipped as of the [Unreleased] CHANGELOG entry).
+- `docs/internal/lakebench.next-spec-eng-2c3-memo.md`, `-addendum.md` -- engineering addenda to the AML spec.
 
 Once AML v1 ships, the AML design will be curated here.
 

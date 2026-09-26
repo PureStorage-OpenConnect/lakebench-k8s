@@ -283,6 +283,9 @@ The deployment engine creates resources in a strict dependency order:
 8. **Prometheus** -- metrics scraping (if observability is enabled)
 9. **Grafana** -- dashboards (if observability is enabled)
 
-Destruction follows the reverse order: Spark jobs and pods first, then Iceberg
-table maintenance (expire snapshots, remove orphan files), DROP TABLEs, S3
-bucket cleanup, infrastructure removal, and finally namespace deletion.
+Destruction follows the reverse order: an ownership check, Spark jobs and pods
+first, then DROP TABLEs (no table maintenance runs first), emptying the S3
+buckets and deleting the ones this deployment created, infrastructure removal,
+and finally namespace deletion. The namespace is kept when a recorded bucket
+could not be deleted, and destroy waits for it to be NotFound before reporting
+it deleted.
