@@ -2410,6 +2410,10 @@ class SparkJobManager:
             from lakebench.config.datagen_seed import config_seed
 
             env.append({"name": "LB_DATAGEN_SEED", "value": str(config_seed(cfg))})
+            role = cfg.architecture.workload.datagen.corpus_role
+            if role is not None:
+                # The declared role of a registered run, recorded in the report.
+                env.append({"name": "LB_DATAGEN_CORPUS_ROLE", "value": role})
             env.append({"name": "LB_GIT_SHA", "value": _lakebench_git_sha()})
 
         # Multi-cycle batch env vars (e.g. LB_SILVER_INCREMENTAL=true)
