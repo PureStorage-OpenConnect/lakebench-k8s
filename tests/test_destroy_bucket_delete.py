@@ -363,12 +363,21 @@ class TestDestroyAllBuckets:
         assert boto.buckets == {"a-silver": ["y"], "a-gold": ["z"]}
         assert boto.delete_bucket_calls == []
 
-    def test_foreign_bucket_refuses_and_nothing_is_deleted(self):
-        boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
-        r = self._run(boto, {"a-bronze": "MATCH", "a-silver": "MISMATCH", "a-gold": "MATCH"})
+    def test_foreign_bucket_is_left_alone_and_the_rest_still_cleaned(self):
+        """LB-177: one refusal no longer stops the deployment's own buckets."""
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["theirs"], "a-gold": []})
+        r = self._run(
+            boto,
+            {"a-bronze": "MATCH", "a-silver": "MISMATCH", "a-gold": "MATCH"},
+            create_namespace=True,
+        )
         assert r.status is DeploymentStatus.FAILED
-        assert boto.delete_bucket_calls == []
-        assert boto.buckets["a-bronze"] == ["x"], "a refused step must not empty anything"
+        assert boto.buckets == {"a-silver": ["theirs"]}, "only the refused bucket survives"
+        assert "a-silver" not in boto.delete_bucket_calls
+        assert "Bucket ownership refused" in r.message
+        # a-silver is in the created record (the harness default), so the
+        # namespace is kept as its record.
+        self.engine.k8s.delete_namespace.assert_not_called()
 
     def test_force_legacy_buckets_are_emptied_but_kept(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
@@ -392,17 +401,16 @@ class TestDestroyAllBuckets:
         assert "create_buckets=false" in r.message
 
     def test_prefix_claim_lost_to_longer_prefix_is_not_deleted(self):
-        """Another deployment 'a-silver...' has a longer claim; refuse, delete nothing."""
-        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        """Another deployment 'a-silver' has the longer claim on a-silver only."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": ["theirs"], "a-gold": []})
         r = self._run(
             boto,
             {"a-bronze": "UNSUPPORTED", "a-silver": "UNSUPPORTED", "a-gold": "UNSUPPORTED"},
             other=["a-silver"],
         )
         assert r.status is DeploymentStatus.FAILED
-        assert boto.delete_bucket_calls == []
-
-    # -- LB-159 owner decision: delete only what lakebench created --------
+        assert "a-silver" not in boto.delete_bucket_calls
+        assert boto.buckets == {"a-silver": ["theirs"]}
 
     def test_adopted_bucket_is_emptied_but_kept(self):
         """MATCH by tag (e.g. adopted with deploy --force-legacy) is not creation."""
@@ -868,3 +876,55 @@ class TestDestroyAllBuckets:
         )
         msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
         assert "emptied next and kept" in msg
+
+    # -- LB-177: config buckets UNION recorded buckets ------------------------
+
+    def test_recorded_bucket_from_an_earlier_config_is_deleted(self):
+        """Live: ov-sp-a-bronze recorded, config bronze was ov-sp-a-shared."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": [], "a-old": ["x"]})
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold", "a-old"], "UNSUPPORTED"),
+            created={"a-bronze", "a-silver", "a-gold", "a-old"},
+        )
+        assert r.status is DeploymentStatus.SUCCESS, r.message
+        assert boto.buckets == {}
+        assert "a-old" in self.forget.call_args.args[2]
+
+    def test_recorded_bucket_not_owned_any_more_is_kept_with_the_namespace(self):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": [], "a-old": ["theirs"]})
+        r = self._run(
+            boto,
+            {"a-bronze": "MATCH", "a-silver": "MATCH", "a-gold": "MATCH", "a-old": "MISMATCH"},
+            created={"a-bronze", "a-silver", "a-gold", "a-old"},
+            create_namespace=True,
+        )
+        assert r.status is DeploymentStatus.FAILED
+        assert boto.buckets == {"a-old": ["theirs"]}
+        assert "left in place: a-old" in r.message
+        self.engine.k8s.delete_namespace.assert_not_called()
+
+    def test_refused_bucket_not_in_the_record_does_not_keep_the_namespace(self):
+        """S-P6: B's bronze is A's shared bucket; B never created it."""
+        boto = FakeBoto({"a-bronze": ["A data"], "a-silver": [], "a-gold": []})
+        r = self._run(
+            boto,
+            {"a-bronze": "MISMATCH", "a-silver": "MATCH", "a-gold": "MATCH"},
+            created={"a-silver", "a-gold"},
+            create_namespace=True,
+        )
+        assert r.status is DeploymentStatus.FAILED
+        assert boto.buckets == {"a-bronze": ["A data"]}
+        assert self.engine.k8s.delete_namespace.called
+
+    def test_recorded_bucket_is_only_considered_when_the_namespace_exists(self):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": [], "a-old": ["x"]})
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold", "a-old"], "MATCH"),
+            created={"a-old"},
+            force_legacy=True,
+            namespace_present=False,
+            uid=lambda _ns: "",
+        )
+        assert boto.buckets["a-old"] == ["x"]
