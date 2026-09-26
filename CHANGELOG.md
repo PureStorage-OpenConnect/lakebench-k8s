@@ -528,6 +528,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   first: bronze, silver up to its keep-up count (7 for AML), gold, then the
   rest of silver.
 
+### Continuous: a corpus larger than the trickle is not saturation (LB-156)
+- **Continuous runs held to the trickle rate are no longer reported as
+  saturated or failed.** The offered load in continuous mode is the configured
+  trickle, `max_files_per_trigger` files per `bronze_trigger_interval` (50 per
+  30 s, about 107 MB/s, at every scale and for both workloads); the scale
+  factor sets the corpus size, not the rate. The c360 scale-100 run
+  run-20260925-191402-bc5b57 took 50 files on each of 60 triggers with bronze
+  idle 32% of the window and silver keeping up, yet read `ingest_ratio` 0.19,
+  `pipeline_saturated: true` and a failed report. Such a run now reports
+  `intake_limit: trickle_rate`, `pipeline_saturated: false`, a report warning
+  instead of a failure, and **`corpus_drain_seconds`** (9,600 s for that run),
+  the window that would drain the corpus at the rate held.
+- `trickle_rate` needs bronze to have run a micro-batch on at least 90% of the
+  window's triggers and all but 5% (at least one) of the triggers between its
+  first and last batch
+  (log timestamps, so a stall is not hidden by batches logged after the
+  window), each inside the trigger. `pipeline_saturated` is then false only if
+  silver's batches also finished inside its trigger and it committed all but
+  two silver triggers and one bronze trigger of bronze's rows; null (unknown,
+  a report warning) when silver logged nothing; a silver that logged batches
+  but never committed is saturated. A late start, a
+  stall, a bronze that overruns its trigger, a silver that falls behind, or
+  unknown trigger config keeps the saturated verdict. Streaming stages carry
+  the new `batch_span_seconds`.
+  `ingest_ratio` is unchanged: the share of the corpus the window consumed.
+
 ## [1.5.0] - 2026-09-16
 
 Hardening release built on mandatory adversarial review: 22 bugs fixed
