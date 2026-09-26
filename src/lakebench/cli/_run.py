@@ -20,6 +20,7 @@ from lakebench.cli._helpers import (
     print_success,
     print_warning,
     resolve_config_path,
+    write_run_report,
 )
 from lakebench.config import (
     ConfigError,
@@ -142,7 +143,7 @@ def _print_pipeline_scorecard(
     if scores:
         body += "\n\n[bold]Scores[/bold]\n" + "\n".join(scores)
 
-    body += f"\n\nTotal: {total_time:.0f}s\n\nFull report: [bold]lakebench report[/bold]"
+    body += f"\n\nTotal: {total_time:.0f}s\n\nReport: report.html in the run directory"
 
     console.print()
     console.print(Panel(body, title="Pipeline Complete", expand=False))
@@ -1022,6 +1023,7 @@ def _run_local_mode(
     )
     if metrics_path:
         print_info(f"Metrics saved to {metrics_path}")
+        write_run_report(metrics_storage, run_id)
         print_info(f"Run ID: {run_id}")
         _journal_safe(
             j.record,
@@ -2337,7 +2339,7 @@ def run(
                             "[green]Pipeline complete[/green]\n\n"
                             + "\n".join(f"  {n}: {el:.0f}s" for n, _, el in results)
                             + f"\n\nTotal: {_total:.0f}s{_qph}"
-                            + "\n\nFull report: [bold]lakebench report[/bold]",
+                            + "\n\nReport: report.html in the run directory",
                             title="Pipeline Complete",
                             expand=False,
                         )
@@ -2346,6 +2348,7 @@ def run(
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
+            write_run_report(metrics_storage, run_id)
 
             _journal_safe(
                 j.record,

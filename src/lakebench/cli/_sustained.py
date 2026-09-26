@@ -27,6 +27,7 @@ from lakebench.cli._helpers import (
     print_info,
     print_success,
     print_warning,
+    write_run_report,
 )
 from lakebench.config.schema import PipelineMode
 from lakebench.journal import CommandName, EventType
@@ -2069,7 +2070,7 @@ def _run_sustained(
                     f"  Duration: {run_duration}s ({run_duration / 60:.0f} min)\n"
                     f"  Streaming jobs: {len(submitted)}\n\n"
                     f"Query results: lakebench query --example count\n"
-                    f"Generate report: lakebench report",
+                    f"Report: report.html in the run directory",
                     title="Sustained Pipeline Complete",
                     expand=False,
                 )
@@ -2176,5 +2177,6 @@ def _run_sustained(
             metrics_path = metrics_storage.save_run(run_metrics)
             print_info(f"Metrics saved to {metrics_path}")
             print_info(f"Run ID: {run_id}")
+            write_run_report(metrics_storage, run_id)
 
         _journal_safe(j.end_command, success=pipeline_success)
