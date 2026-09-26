@@ -197,28 +197,46 @@ class TestForceRelease:
         core.delete_namespaced_config_map.assert_called_once()
 
 
+def _stateful_lock_core() -> MagicMock:
+    """A CoreV1Api mock whose lock ConfigMap is whatever ``create`` stored.
+
+    The release path deletes only when the stored ``acquired-at`` equals
+    the handle's, and both are second-resolution timestamps. Stamping the
+    mocked read with a separate ``_now_iso()`` at setup time made the two
+    differ whenever a second boundary fell between setup and acquire, so
+    release correctly skipped the delete and the test failed (about 1 in
+    1,000 runs under CPU load). Echoing back the created body is what a
+    real API server does and removes the clock from the test.
+    """
+    core = MagicMock()
+    core.read_namespace.return_value = MagicMock()
+    stored: dict[str, V1ConfigMap] = {}
+
+    def _read(name, namespace):
+        if "cm" not in stored:
+            raise _api_exc(404)
+        return stored["cm"]
+
+    def _create(namespace, body):
+        body.metadata.resource_version = "1"
+        stored["cm"] = body
+        return body
+
+    core.read_namespaced_config_map.side_effect = _read
+    core.create_namespaced_config_map.side_effect = _create
+    return core
+
+
 class TestContextManager:
     def test_releases_on_normal_exit(self):
-        core = MagicMock()
-        core.read_namespace.return_value = MagicMock()
-        core.read_namespaced_config_map.side_effect = [
-            _api_exc(404),  # acquire path: create branch
-            _cm("me@here@abc", _now_iso(), 60, rv="1"),  # release path: read to compare holder
-        ]
-        core.create_namespaced_config_map.return_value = _cm("me@here@abc", _now_iso(), 60, rv="1")
+        core = _stateful_lock_core()
 
         with cluster_lock(core, ttl_seconds=60, timeout=1, holder="me@here@abc") as h:
             assert isinstance(h, LeaseHandle)
         core.delete_namespaced_config_map.assert_called_once()
 
     def test_releases_on_exception(self):
-        core = MagicMock()
-        core.read_namespace.return_value = MagicMock()
-        core.read_namespaced_config_map.side_effect = [
-            _api_exc(404),
-            _cm("me@here@abc", _now_iso(), 60, rv="1"),
-        ]
-        core.create_namespaced_config_map.return_value = _cm("me@here@abc", _now_iso(), 60, rv="1")
+        core = _stateful_lock_core()
 
         class Boom(RuntimeError):
             pass
