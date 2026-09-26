@@ -548,7 +548,16 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
         # benchmark) or live streams (writers active during it): post-
         # maintenance QpH is not a measurement. Pre-maintenance QpH was taken
         # before and stays gated.
-        for key in [k for k in numbers if k == "composite_qph" or k.startswith(QUERY_QPH_PREFIX)]:
+        # Stream apps present at maintenance were present during the
+        # pre-maintenance round too, so that number is under load as well.
+        live = scores.get("maintenance_live_streams") is True
+        for key in [
+            k
+            for k in numbers
+            if k == "composite_qph"
+            or k.startswith(QUERY_QPH_PREFIX)
+            or (live and k == "pre_compaction_qph")
+        ]:
             del numbers[key]
             excluded[key] = why
 
