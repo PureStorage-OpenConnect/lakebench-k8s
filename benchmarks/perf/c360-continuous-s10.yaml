@@ -83,8 +83,8 @@ architecture:
       # The baseline must include continuous maintenance: with
       # retention_interval equal to run_duration (1800) no round ever fired.
       # At 450, maintenance runs twice and compaction (900) once inside the
-      # window even when in-stream benchmark rounds take up to about 330 s
-      # and every round uses its whole budget (interval / 2); see
+      # window even when in-stream benchmark rounds take up to 300 s and
+      # every round uses its whole budget (interval / 2) plus the grace; see
       # test_continuous_pinned_config_fires_maintenance_and_compaction. In a
       # 30 min run nothing is old enough to expire (1 h live-stream floor)
       # or to remove as an orphan (24 h 10 min), so the rounds measure the
