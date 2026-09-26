@@ -541,12 +541,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   instead of a failure, and **`corpus_drain_seconds`** (9,600 s for that run),
   the window that would drain the corpus at the rate held.
 - `trickle_rate` needs bronze to have run a micro-batch on at least 90% of the
-  window's triggers and 95% of the triggers between its first and last batch
+  window's triggers and all but 5% (at least one) of the triggers between its
+  first and last batch
   (log timestamps, so a stall is not hidden by batches logged after the
   window), each inside the trigger. `pipeline_saturated` is then false only if
   silver's batches also finished inside its trigger and it committed all but
   two silver triggers and one bronze trigger of bronze's rows; null (unknown,
-  a report warning) when silver's commits were not logged. A late start, a
+  a report warning) when silver logged nothing; a silver that logged batches
+  but never committed is saturated. A late start, a
   stall, a bronze that overruns its trigger, a silver that falls behind, or
   unknown trigger config keeps the saturated verdict. Streaming stages carry
   the new `batch_span_seconds`.

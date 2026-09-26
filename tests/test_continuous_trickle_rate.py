@@ -242,9 +242,40 @@ def test_silver_behind_the_trickle_is_saturated():
     assert pb.trickle_note() is None
 
 
-def test_silver_commits_unlogged_leave_saturation_unknown():
+def test_a_silver_stuck_in_its_first_batch_is_saturated():
+    """Second review finding: silver logged its first batch and never
+    committed. That is the worst silver, not an unmeasured one."""
+    pb = _live_s100(silver_committed=None, silver_ms=None)
+    assert pb.intake_limit == "trickle_rate"
+    assert pb.pipeline_saturated is True
+
+
+def test_one_missed_trigger_passes_a_short_run():
+    """Second review finding: 10 batches over 11 triggers (one skipped)."""
+    pb = _pb(
+        corpus_rows=_CORPUS[100],
+        bronze_rows=10 * 774_550,
+        bronze_batches=10,
+        bronze_ms=20_463.3,
+        silver_committed=10 * 774_550,
+        bronze_span=10 * 30.0,
+        sustained=dict(_SUSTAINED),
+    )
+    # The window is 1800 s here, so shorten it to 330 s for the coverage.
+    for st in pb.stages:
+        st.elapsed_seconds = 330
+    pb.compute_aggregates()
+    assert pb.intake_limit == "trickle_rate"
+
+
+def test_silver_with_no_log_lines_leaves_saturation_unknown():
     """Review finding: unknown is not "silver lagged"."""
     pb = _live_s100(silver_committed=None)
+    for st in pb.stages:
+        if st.stage_name == "silver":
+            st.total_batches = 0
+            st.input_rows = 0
+    pb.compute_aggregates()
     assert pb.intake_limit == "trickle_rate"
     assert pb.pipeline_saturated is None
     assert pb.trickle_note() is None
@@ -342,6 +373,11 @@ def test_report_calls_unmeasured_silver_unknown_not_failed():
 
     gen = ReportGenerator(metrics_dir="/tmp/unused-rg")
     pb = _live_s100(silver_committed=None)
+    for st in pb.stages:
+        if st.stage_name == "silver":
+            st.total_batches = 0
+            st.input_rows = 0
+    pb.compute_aggregates()
     _, reasons, warnings = gen._compute_overall_status(_metrics(pb))
     assert not any("Ingest ratio" in r for r in reasons), reasons
     assert any("saturation is unknown" in w for w in warnings)
