@@ -197,6 +197,18 @@ class _FakeLockApi:
         assert self.cm is not None
         self._stamp(_cm(holder, _now_iso(), 3600), self.cm.metadata.uid)
 
+    def touch(self) -> None:
+        """A write that keeps the lease data (label, annotation, managedFields)."""
+        assert self.cm is not None
+        self._stamp(self.cm, self.cm.metadata.uid)
+
+    def replace_namespaced_config_map(self, name, namespace, body):
+        if self.cm is None:
+            raise _api_exc(404)
+        if body.metadata.resource_version != self.cm.metadata.resource_version:
+            raise _api_exc(409)
+        return self._stamp(body, self.cm.metadata.uid)
+
     def read_namespace(self, name):
         return MagicMock()
 
@@ -287,6 +299,36 @@ class TestStealBetweenReadAndDelete:
         api = _FakeLockApi()
         past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
         api.put("ghost@host@x", past, 60)
+        state = force_release_cluster_lock(api, expired_only=True)
+        assert state is not None and state.holder == "ghost@host@x"
+        assert api.cm is None
+
+    def test_release_retries_after_a_write_that_kept_our_data(self):
+        """A label or annotation bump must not leak our own lease for its TTL."""
+        api = _FakeLockApi()
+        api.put("me@here@abc", "2026-09-21T12:00:00+00:00", 60)
+        api.after_read = api.touch
+        release_cluster_lock(api, LeaseHandle("me@here@abc", "2026-09-21T12:00:00+00:00", 60, "1"))
+        assert api.cm is None
+
+    def test_release_leaves_a_real_acquire_steal(self):
+        """B steals the expired lease through the real acquire CAS mid-release."""
+        from lakebench.deploy.cluster_lock import _try_acquire_once
+
+        api = _FakeLockApi()
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        api.put("a@host@1", past, 60)
+        stolen = []
+        api.after_read = lambda: stolen.append(_try_acquire_once(api, "b@host@2", 3600))
+        release_cluster_lock(api, LeaseHandle("a@host@1", past, 60, "1"))
+        assert isinstance(stolen[0], LeaseHandle)
+        assert api.cm is not None and api.cm.data["holder"] == "b@host@2"
+
+    def test_expired_only_deletes_after_a_write_that_kept_it_expired(self):
+        api = _FakeLockApi()
+        past = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(timespec="seconds")
+        api.put("ghost@host@x", past, 60)
+        api.after_read = api.touch
         state = force_release_cluster_lock(api, expired_only=True)
         assert state is not None and state.holder == "ghost@host@x"
         assert api.cm is None
