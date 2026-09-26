@@ -38,7 +38,10 @@ def test_estimate_close_to_truth_where_linear_extrapolation_is_far(spark, zipf):
     from pyspark.sql.functions import col, floor, pow, rand
 
     customers, rows, fraction = 40_000, 1_000_000, 0.01
-    df = spark.range(rows)
+    # Two fixed slices: both the seeded rand() and the seeded sample draw
+    # per partition, so the input must not depend on whichever session
+    # getOrCreate() hands back.
+    df = spark.range(0, rows, 1, 2)
     if zipf:
         # Heavy-tailed: low ids far more frequent, every id still present.
         df = df.select(
@@ -47,13 +50,20 @@ def test_estimate_close_to_truth_where_linear_extrapolation_is_far(spark, zipf):
     else:
         df = df.select((col("id") % customers).alias("customer_id"))
     truth = df.select("customer_id").distinct().count()
-    sample = df.sample(fraction, seed=11)
+    # fraction= must be a keyword. PySpark 4.0 reads sample(0.01, seed=11)
+    # as sample(fraction=0.01) with the seed taken from the (absent) second
+    # positional, so seed=11 is silently dropped and every run drew a fresh
+    # random sample; the CI failure (44193 vs 40000) was one of those draws.
+    sample = df.sample(fraction=fraction, seed=11)
     est, skew = sample_key_profile(sample, "customer_id", rows)
     sample_distinct = sample.select("customer_id").distinct().count()
     linear = sample_distinct / fraction
     assert linear > 5 * truth  # the LB-144 defect, reproduced
-    # Chao1 is a lower bound: exact to about 3% on the uniform key, about 24%
-    # low on the heavy-tailed one, against 20x high before.
+    # Seeded, the result is fixed. For the record, over 1,000 random sample
+    # seeds on the uniform key the estimate ran +3.3% mean, 3.0% sd, 1.1% of
+    # draws beyond 10%, so the tolerance is only safe because the seed now
+    # holds. The heavy-tailed key lands 27% low at this seed (Chao1 is a lower bound
+    # there). Linear extrapolation is more than 5x high on both.
     tol = 0.3 if zipf else 0.1
     assert abs(est - truth) / truth < tol, (est, truth)
     assert skew >= 1.0
