@@ -17,6 +17,11 @@ Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
     python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 43 --out gate.json
 
 ``--seed`` is checked against the manifest's instance seeds and recorded.
+Spent seeds are refused, and so are the evaluation and robustness seeds unless
+``--registered <role>`` marks this as the registered gate run for that role
+(the report then records the look under ``registered_look``). The manifest is
+checked against every guarded seed, so a corpus from one is refused whatever
+``--seed`` claims.
 
 Library versions must match the cluster's (A6 compares like with like): the
 runner refuses to score when numpy, scipy, pandas, scikit-learn, joblib or
@@ -101,6 +106,27 @@ def _git_sha() -> str:
         return "unknown"
 
 
+def seed_guard_error(claimed, registered, matched) -> str | None:
+    """Why the gate must refuse this corpus, or None (AML-GOALS R3).
+
+    ``matched`` lists the guarded seeds (spent, evaluation, robustness) whose
+    instance seeds the manifest reproduces: the corpus's real seed if it is a
+    guarded one, whatever ``--seed`` claims, so omitting or misstating
+    ``--seed`` does not get an evaluation corpus scored.
+    """
+    from lakebench.config.datagen_seed import check_aml_seed
+
+    for actual in matched:
+        if claimed is not None and actual != claimed:
+            return f"the manifest was generated with seed {actual}, not the claimed {claimed}"
+    seed = matched[0] if matched else claimed
+    try:
+        check_aml_seed(seed, registered)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     if argv is None and "--print-pinned-deps" in sys.argv[1:]:
@@ -138,11 +164,25 @@ def main(argv=None) -> int:
         "on a unit that must not be looked at before its first registered gate run)",
     )
     ap.add_argument(
+        "--registered",
+        choices=["calibration", "evaluation", "robustness"],
+        default=None,
+        help="this is the registered gate run for the role: required to score the "
+        "evaluation or robustness seed (each is looked at once, after the freeze); the "
+        "report records the look. Spent seeds are always refused",
+    )
+    ap.add_argument(
         "--require-pass",
         action="store_true",
         help="exit 2 unless every gate passes (passes.all); default exit 0 when the gate ran",
     )
     args = ap.parse_args(argv)
+    # Cheap refusal before Spark starts; the manifest check below catches a
+    # corpus whose real seed is guarded whatever --seed says.
+    err = seed_guard_error(args.seed, args.registered, [])
+    if err:
+        print(f"refusing: {err}", file=sys.stderr)
+        return 1
 
     os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
     import aml_features as af
@@ -193,6 +233,14 @@ def main(argv=None) -> int:
         manifest = af.read_manifest(spark, manifest_src)
         af.check_manifest(manifest)
         seed_check = af.corpus_seed_check(manifest, args.seed)
+        from lakebench.config.datagen_seed import protected_seeds, spent_seeds
+
+        guarded = sorted(spent_seeds() | set(protected_seeds()))
+        matched = [g for g in guarded if af.corpus_seed_check(manifest, g)["matched_share"] == 1]
+        err = seed_guard_error(args.seed, args.registered, matched)
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
+            return 1
         scale_info = af.corpus_scale(
             spark,
             str(corpus / "bronze/account.parquet"),
@@ -320,6 +368,16 @@ def main(argv=None) -> int:
             },
         }
     report["provenance"]["total_seconds"] = round(time.time() - t0, 1)
+    if args.registered is not None:
+        # The look itself is the record R3 needs: which role, seed and revision
+        # were scored, and when.
+        report["registered_look"] = {
+            "role": args.registered,
+            "seed": args.seed,
+            "utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "git_sha": report["provenance"].get("git_sha"),
+            "prereg_version": report.get("prereg_version"),
+        }
     seed_ok = seed_check["matched_share"] == 1
     if args.seed is not None and not seed_ok:
         report["corpus_role"] = "unverified"

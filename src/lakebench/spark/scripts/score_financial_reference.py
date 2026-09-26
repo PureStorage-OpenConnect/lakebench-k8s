@@ -508,6 +508,9 @@ def main() -> None:
     provenance = {
         "git_sha": os.environ.get("LB_GIT_SHA", "unknown"),
         "corpus_seed": os.environ.get("LB_DATAGEN_SEED"),
+        # Set only when the deployment declared datagen.corpus_role (the
+        # registered evaluation or robustness run); config refused it otherwise.
+        "declared_corpus_role": os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
         "manifest": manifest_src,
         "silver_txns": f"{CATALOG}.{args.silver_txns}",
     }

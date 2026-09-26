@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import warnings
 from enum import Enum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -975,6 +975,11 @@ class DatagenConfig(ConfigModel):
     # seed for the financial schema, 42 otherwise (config/datagen_seed.py). A
     # financial seed the pre-registration lists as spent is refused.
     seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    # AML corpus role (financial only). The evaluation and robustness seeds are
+    # refused unless the run declares its role here: each is generated once,
+    # as the registered gate run for that role. Set without a seed, the role's
+    # registered seed is used.
+    corpus_role: Literal["calibration", "evaluation", "robustness"] | None = None
     parallelism: int = Field(default=4, ge=1)
     # Datagen output file size. Per-thread generator memory scales with it
     # (about 4.8x for financial, 3.0x for c360, measured), so the old 512mb
@@ -1179,13 +1184,14 @@ class WorkloadConfig(ConfigModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     @model_validator(mode="after")
-    def _seed_not_spent(self) -> WorkloadConfig:
+    def _seed_allowed(self) -> WorkloadConfig:
         # Refused at load, before anything is deployed: a spent AML seed would
-        # regenerate a corpus that has already been looked at (AML-GOALS R3).
-        if self.datagen.seed is not None:
-            from lakebench.config.datagen_seed import check_seed
+        # regenerate a corpus that has already been looked at, and an
+        # evaluation or robustness seed without its declared role would burn
+        # it (AML-GOALS R3).
+        from lakebench.config.datagen_seed import resolve_seed
 
-            check_seed(self.datagen.seed, self.schema_type.value)
+        resolve_seed(self.datagen.seed, self.schema_type.value, self.datagen.corpus_role)
         return self
 
 
