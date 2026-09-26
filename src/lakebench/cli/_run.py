@@ -461,6 +461,7 @@ def _maintenance_value(
     maint_elapsed: float,
     settle=None,
     stopped_reason: str = "",
+    live_streams_reason: str = "",
 ) -> tuple[float | None, int, str]:
     """(value %, paired queries, reason) for the pre/post maintenance rounds.
 
@@ -483,6 +484,8 @@ def _maintenance_value(
         return None, 0, "maintenance did not run"
     if stopped_reason:
         return None, 0, f"maintenance stopped before completion ({stopped_reason})"
+    if live_streams_reason:
+        return None, 0, f"streams were live during maintenance ({live_streams_reason})"
     if pre_files <= 0 or post_files <= 0:
         return None, 0, "data file counts unavailable"
     if post_files >= pre_files:
@@ -1214,6 +1217,7 @@ def run(
     from lakebench.cli._sustained import (
         MaintenanceBudget,
         _collect_platform_metrics,
+        _live_stream_apps,
         _probe_table_health,
         _run_iceberg_compaction,
         _run_iceberg_maintenance,
@@ -1974,6 +1978,9 @@ def run(
         # statement may still be running, so the post-maintenance QpH is not
         # a clean measurement.
         maint_stop_reason = ""
+        # Set when streams were (or may have been) writing during pre-benchmark
+        # maintenance: the post-maintenance QpH was then measured under load.
+        maint_live_reason = ""
         _maint_end = None
         _settle = None
         pre_file_count = 0
@@ -2067,6 +2074,24 @@ def run(
                 # orphan removal and compaction together, and the first
                 # timeout stops the rest.
                 maint_budget = MaintenanceBudget(PRE_BENCHMARK_MAINTENANCE_CAP)
+                # Stream apps (restartPolicy Always) can still be writing: a
+                # c360 run never stops leftovers. Any present means live.
+                live_apps, live_errors = _live_stream_apps(cfg.get_namespace())
+                if live_apps:
+                    maint_live_reason = (
+                        f"stream apps present or unreadable: {', '.join(live_apps)}"
+                        + (f" (read errors: {'; '.join(live_errors)})" if live_errors else "")
+                    )
+                    console.print(
+                        "  [yellow]Stream apps present during pre-benchmark maintenance: "
+                        f"{', '.join(live_apps)}; using live-stream retention[/yellow]"
+                    )
+                    _journal_safe(
+                        j.record,
+                        EventType.STREAMING_HEALTH,
+                        message="Pre-benchmark maintenance with live streams",
+                        details={"stream_apps": live_apps, "read_errors": live_errors},
+                    )
                 _run_iceberg_maintenance(
                     cfg,
                     k8s,
@@ -2074,6 +2099,7 @@ def run(
                     j,
                     retention_threshold=resolve_maintenance_retention(cfg),
                     timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
+                    live_streams=bool(live_apps),
                     budget=maint_budget,
                 )
                 _run_iceberg_compaction(
@@ -2081,6 +2107,7 @@ def run(
                     k8s,
                     console,
                     j,
+                    live_streams=bool(live_apps),
                     timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
                     budget=maint_budget,
                 )
@@ -2225,6 +2252,7 @@ def run(
                         maint_elapsed,
                         _settle,
                         stopped_reason=maint_stop_reason,
+                        live_streams_reason=maint_live_reason,
                     )
                     if _maint_value[0] is not None:
                         console.print(
@@ -2353,6 +2381,9 @@ def run(
                     if maint_stop_reason:
                         pb.maintenance_stopped = True
                         pb.maintenance_stop_reason = maint_stop_reason
+                    if maint_live_reason:
+                        pb.maintenance_live_streams = True
+                        pb.maintenance_live_streams_reason = maint_live_reason
                     if maint_elapsed > 0:
                         pb.maintenance_elapsed_seconds = maint_elapsed
                         if pb.total_elapsed_seconds > 0:

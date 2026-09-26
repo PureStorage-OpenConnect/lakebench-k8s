@@ -87,12 +87,25 @@ def cmd_seed(store: pg.BaselineStore, args: argparse.Namespace) -> int:
             continue
         pinned = store.pinned(name)
         good, near = pg.find_runs_for(pinned, args.runs_dir)
+        # A run whose pre-benchmark maintenance stopped early has no clean
+        # post-maintenance QpH; it can never be a baseline.
+        stopped = [r for r in good if pg.post_qph_unmeasured(r.scores)]
+        good = [r for r in good if not pg.post_qph_unmeasured(r.scores)]
+        for r in stopped:
+            print(f"{name}: skipping {r.run_id} ({pg.post_qph_unmeasured(r.scores)})")
         if good:
             print(f"{name}: {len(good)} matching run(s), newest {good[0].run_id}")
             if args.write:
-                pg.record_baseline(store, name, good[0], "unrecorded")
-                changed = True
-                print(f"  recorded {good[0].run_id} (git sha unrecorded: metrics.json has none)")
+                for cand in good:
+                    try:
+                        pg.record_baseline(store, name, cand, "unrecorded")
+                    except pg.PerfGateError as e:
+                        # One config's bad candidate must not stop the seed.
+                        print(f"  {cand.run_id} not usable: {e}")
+                        continue
+                    changed = True
+                    print(f"  recorded {cand.run_id} (git sha unrecorded: metrics.json has none)")
+                    break
             continue
         print(f"{name}: pending first run ({len(near)} run(s) of the same workload/scale/mode)")
         for run, reasons in near[: args.show]:

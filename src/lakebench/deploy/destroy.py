@@ -1321,53 +1321,33 @@ def destroy_all(
                 schema = engine.config.architecture.workload.schema_type.value
                 tables_to_drop = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
                 failed_sql: list[str] = []
-                # The plan: maintenance per table (before the drop, to clean
-                # S3), then the drops. Kind "m" is maintenance, "d" a drop.
-                plan: list[tuple[str, str, str]] = []
-                for table in tables_to_drop:
-                    if table_format == "delta":
-                        from lakebench.deploy.delta_maintenance import (
-                            build_delta_maintenance_sql,
-                        )
-
-                        maint_sqls = build_delta_maintenance_sql(maint_engine, catalog, table, 0.0)
-                    else:
-                        from lakebench.deploy.iceberg import build_maintenance_sql
-
-                        maint_sqls = build_maintenance_sql(maint_engine, catalog, table, "0s")
-                    plan.extend(("m", table, sql) for sql in maint_sqls)
+                # Only the drops. Table maintenance (Iceberg expire_snapshots /
+                # remove_orphan_files, Delta VACUUM) is skipped (policy,
+                # 2026-09-26): the buckets are emptied and deleted right after,
+                # so it would only cost time and statements.
+                plan: list[tuple[str, str]] = []
                 for table in tables_to_drop:
                     drop_sql = build_drop_table_sql(maint_engine, table)
                     if drop_sql:
-                        plan.append(("d", table, drop_sql))
+                        plan.append((table, drop_sql))
 
                 from lakebench.modules.table_formats.iceberg.maintenance import (
                     ExecSqlTimeout,
                 )
 
                 step_start = _monotonic()
-                skip_maint: set[str] = set()
 
-                def _remaining(rest: list[tuple[str, str, str]]) -> list[str]:
-                    # Maintenance already skipped for a missing table would
-                    # not have run anyway; do not list it as not attempted.
-                    return [
-                        f"{_operative_sql(q)} {t}"
-                        for k, t, q in rest
-                        if not (k == "m" and t in skip_maint)
-                    ]
+                def _remaining(rest: list[tuple[str, str]]) -> list[str]:
+                    return [f"{_operative_sql(q)} {t}" for t, q in rest]
 
                 not_attempted: list[str] = []
                 stop_reason = ""
-                for n, (kind, table, sql) in enumerate(plan):
-                    if kind == "m" and table in skip_maint:
-                        continue
+                for n, (table, sql) in enumerate(plan):
                     if _monotonic() - step_start > _TABLE_STEP_CAP:
                         stop_reason = f"table step exceeded its {_TABLE_STEP_CAP}s cap"
                         not_attempted = _remaining(plan[n:])
                         break
-                    # Maintenance at 0s retention, orphan removal and DROP are
-                    # destructive; re-check the incarnation before each one.
+                    # DROP is destructive; re-check the incarnation before each.
                     _check_same_namespace(engine, namespace, namespace_token_at_start)
                     try:
                         exec_sql(
@@ -1387,19 +1367,13 @@ def destroy_all(
                         not_attempted = _remaining(plan[n + 1 :])
                         break
                     except Exception as e:
-                        if kind == "m" and _is_table_missing(e):
-                            # Never written (partial deployment): nothing to
-                            # maintain, skip the rest of its maintenance.
-                            logger.info("%s not present, maintenance skipped", table)
-                            skip_maint.add(table)
-                            continue
-                        if kind == "d" and _is_schema_missing(e):
-                            # DROP ... IF EXISTS still errors on some engines
-                            # when the schema itself is absent.
-                            logger.info("%s: schema not present, nothing to drop", table)
+                        if _is_table_missing(e):
+                            # Never written (partial deployment), or DROP ...
+                            # IF EXISTS erroring because the schema is absent.
+                            logger.info("%s not present, nothing to drop", table)
                             continue
                         failed_sql.append(f"{_operative_sql(sql)} {table}: {e}")
-                        logger.warning("%s cleanup statement failed for %s: %s", kind, table, e)
+                        logger.warning("DROP TABLE failed for %s: %s", table, e)
                 if stop_reason:
                     failed_sql.append(
                         f"stopped ({stop_reason}); {len(not_attempted)} statement(s) not "
@@ -1413,7 +1387,16 @@ def destroy_all(
                     )
                 else:
                     table_status = DeploymentStatus.SUCCESS
-                    table_msg = f"{table_format.title()} tables dropped (via {maint_engine})"
+                    if not clean_buckets:
+                        after = "bucket cleanup is off, so the tables' files remain in the buckets"
+                    elif delete_buckets and engine.config.platform.storage.s3.create_buckets:
+                        after = "buckets are emptied and deleted next"
+                    else:
+                        after = "buckets are emptied next and kept"
+                    table_msg = (
+                        f"{table_format.title()} tables dropped (via {maint_engine}); table "
+                        f"maintenance skipped ({after})"
+                    )
                 results.append(
                     DeploymentResult(
                         component="table-cleanup", status=table_status, message=table_msg

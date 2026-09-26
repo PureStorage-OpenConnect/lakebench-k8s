@@ -591,6 +591,8 @@ class MetricsStorage:
                 maintenance_elapsed_seconds=scores.get("maintenance_elapsed_seconds", 0.0),
                 maintenance_stopped=bool(scores.get("maintenance_stopped", False)),
                 maintenance_stop_reason=scores.get("maintenance_stop_reason", ""),
+                maintenance_live_streams=bool(scores.get("maintenance_live_streams", False)),
+                maintenance_live_streams_reason=scores.get("maintenance_live_streams_reason", ""),
                 maintenance_pct_of_pipeline=scores.get("maintenance_pct_of_pipeline", 0.0),
                 pre_compaction_file_count=scores.get("pre_compaction_file_count", 0),
                 post_compaction_file_count=scores.get("post_compaction_file_count", 0),
