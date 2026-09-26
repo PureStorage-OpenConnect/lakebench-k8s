@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, ClassVar
 
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+from lakebench.metrics.provenance import run_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,11 @@ class PipelineMetrics:
     # loaded without one is the legacy policy (set by the storage loader).
     maintenance_policy_id: str = MAINTENANCE_POLICY_ID
 
+    # Which lakebench produced the run (metrics/provenance.py, GOALS P9.1):
+    # {lakebench_version, git_sha, git_dirty}. None on records from before
+    # the field existed.
+    provenance: dict[str, Any] | None = None
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d = {
@@ -321,6 +327,8 @@ class PipelineMetrics:
             "config_snapshot": self.config_snapshot,
             "maintenance_policy_id": self.maintenance_policy_id,
         }
+        if self.provenance is not None:
+            d["provenance"] = self.provenance
         if self.benchmark is not None:
             d["benchmark"] = self.benchmark.to_dict()
         if self.benchmark_rounds:
@@ -2049,6 +2057,7 @@ class MetricsCollector:
             deployment_name=deployment_name,
             start_time=datetime.now(),
             config_snapshot=config,
+            provenance=dict(run_provenance()),
         )
         return self.current_run
 

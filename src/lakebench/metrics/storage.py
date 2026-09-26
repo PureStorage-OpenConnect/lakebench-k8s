@@ -450,6 +450,7 @@ class MetricsStorage:
             financial_scoring=data.get("financial_scoring"),
             tm_operations=data.get("tm_operations"),
             maintenance_policy_id=recorded_policy(data),
+            provenance=data.get("provenance"),
         )
 
         if data.get("end_time"):
