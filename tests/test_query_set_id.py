@@ -14,6 +14,7 @@ from lakebench.benchmark.queries import (
 )
 from lakebench.config.schema import WorkloadSchema
 from lakebench.metrics import BenchmarkMetrics, MetricsStorage, PipelineMetrics
+from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
 FIN = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
 FIN8 = [n for n in FIN if n not in {q.name for q in INVESTIGATOR_QUERIES}]
@@ -131,7 +132,13 @@ def test_reproduce_refuses_qph_across_query_sets():
         stages=[],
     )
     pkg = _build_package(
-        SimpleNamespace(pipeline_benchmark=pb, config_snapshot={}, run_id="r", benchmark=None),
+        SimpleNamespace(
+            pipeline_benchmark=pb,
+            config_snapshot={},
+            run_id="r",
+            benchmark=None,
+            maintenance_policy_id=MAINTENANCE_POLICY_ID,
+        ),
         config_reference=None,
         commit_sha="abc",
     )

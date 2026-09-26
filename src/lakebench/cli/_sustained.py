@@ -731,11 +731,12 @@ class MaintenanceBudget:
     then reported as not attempted.
     """
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(self, seconds: float, label: str = "pre-benchmark maintenance") -> None:
         import time as _time
 
         self._clock = _time.monotonic
         self.seconds = seconds
+        self.label = label
         self.deadline = self._clock() + seconds
         self.stopped = ""
 
@@ -748,8 +749,97 @@ class MaintenanceBudget:
 
     def exhausted(self) -> bool:
         if not self.stopped and self._clock() > self.deadline:
-            self.stopped = f"pre-benchmark maintenance exceeded its {int(self.seconds)}s cap"
+            self.stopped = f"{self.label} exceeded its {int(self.seconds)}s cap"
         return bool(self.stopped)
+
+
+# Continuous maintenance: a statement may run for at most this long, and never
+# more than half the interval between rounds.
+CONTINUOUS_STATEMENT_TIMEOUT_CAP = 600
+_CONTINUOUS_MIN_SECONDS = 30
+
+
+def continuous_round_bounds(
+    interval_seconds: int, remaining_seconds: float
+) -> tuple[int, float] | None:
+    """(per-statement timeout, round budget) for a continuous round, or None.
+
+    The default 30 s exec timeout reported most expire_snapshots and
+    rewrite_data_files statements on real tables as timed out while the
+    engine kept running them, and the next statement then overlapped it.
+    Each statement now gets min(600 s, interval / 2). The round is capped at
+    interval / 2, so it finishes before the next one is due, and at the time
+    left in the run minus the budget grace, so it cannot hold the loop past
+    run_duration. None when too little of the run is left for a round.
+    As with the pre-benchmark budget, the first timeout stops the rest of
+    the round (reported as not attempted) rather than piling statements onto
+    an engine that may still be busy; the next round starts at the table
+    after the one that timed out, so one slow table cannot starve the others.
+    """
+    half = max(_CONTINUOUS_MIN_SECONDS, int(interval_seconds) // 2)
+    usable = remaining_seconds - _BUDGET_GRACE_SECONDS
+    if usable < _CONTINUOUS_MIN_SECONDS:
+        return None
+    per_statement = min(CONTINUOUS_STATEMENT_TIMEOUT_CAP, half)
+    return per_statement, min(float(half), usable)
+
+
+def _rotated(items: list, start: int) -> list:
+    """items starting at index start (mod len)."""
+    if not items or not start:
+        return items
+    k = start % len(items)
+    return items[k:] + items[:k]
+
+
+def _next_start(all_tables: list[str], out: dict) -> int:
+    """Index in all_tables where the next continuous round should begin.
+
+    After a timeout, the table after the one that timed out (so a table that
+    always times out costs one statement per round, not the whole round);
+    after the deadline, the first table not attempted; otherwise 0.
+    """
+    if not all_tables:
+        return 0
+    if out.get("timed_out_table") in all_tables:
+        return (all_tables.index(out["timed_out_table"]) + 1) % len(all_tables)
+    if out.get("resume_table") in all_tables:
+        return all_tables.index(out["resume_table"])
+    return 0
+
+
+def late_benchmark_round_skip(
+    can_run_rounds: bool,
+    elapsed: float,
+    next_round_at: float,
+    remaining: float,
+    min_remaining: float,
+) -> str | None:
+    """Message when a due in-stream benchmark round cannot fit in the run, else None.
+
+    The caller journals it once and moves next_round_at past the run end.
+    """
+    if not can_run_rounds or elapsed < next_round_at or remaining >= min_remaining:
+        return None
+    return f"benchmark round skipped: {remaining:.0f} s left, need {min_remaining:.0f} s"
+
+
+# Shortest sleep between monitoring passes. An event already due (a round
+# that could not run, a maintenance time just rescheduled) must not turn the
+# loop into a busy spin that journals a health line every pass.
+_MIN_LOOP_SLEEP_SECONDS = 1.0
+
+
+def loop_sleep_seconds(now: float, *event_times: float) -> float:
+    """Seconds to sleep until the earliest event, at least a second.
+
+    The last event time passed is the run end; the sleep never goes past it.
+    """
+    run_end = event_times[-1]
+    wake = min(event_times)
+    if now >= run_end:
+        return 0.0
+    return min(max(wake - now, _MIN_LOOP_SLEEP_SECONDS), run_end - now)
 
 
 def _operative(sql: str) -> str:
@@ -786,6 +876,7 @@ def _run_statements(
     for n, (table, sql) in enumerate(plan):
         if budget is not None and budget.exhausted():
             out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n:]]
+            out["resume_table"] = table
             break
         # exec_sql raises on a real failure (non-zero exit) and on a
         # kubectl-exec timeout; neither is fatal to the run. Under a budget
@@ -802,6 +893,7 @@ def _run_statements(
             logger.warning("%s timed out for %s (may still be running)", what, table)
             if budget is not None:
                 budget.stopped = f"{_operative(sql)} {table} timed out after {stmt_timeout}s"
+                out["timed_out_table"] = table
                 out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n + 1 :]]
                 break
         except Exception as e:
@@ -846,7 +938,8 @@ def _run_iceberg_maintenance(
     timeout: int = 30,
     live_streams: bool = False,
     budget: MaintenanceBudget | None = None,
-) -> None:
+    start_at: int = 0,
+) -> int | None:
     """Run table maintenance (format-aware).
 
     - Iceberg: expire_snapshots + remove_orphan_files
@@ -872,22 +965,23 @@ def _run_iceberg_maintenance(
         console.print(
             f"  [dim]{table_format.title()} maintenance skipped (DuckDB cannot run maintenance)[/dim]"
         )
-        return
+        return None
 
     if table_format == "delta" and engine_type == "spark-thrift":
         console.print("  [dim]Delta maintenance skipped (VACUUM OOMs Spark Thrift at 4Gi)[/dim]")
-        return
+        return None
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
     if engine is None or pod_name is None or catalog is None:
         console.print(
             f"  [dim]{table_format.title()} maintenance skipped (no capable engine pod found)[/dim]"
         )
-        return
+        return None
 
     tables = cfg.architecture.tables
     schema = cfg.architecture.workload.schema_type.value
-    table_names = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
+    all_tables = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
+    table_names = _rotated(all_tables, start_at)
 
     # Build SQL based on table format. Delta VACUUM has one retention.
     orphan_retention = retention_threshold
@@ -977,6 +1071,7 @@ def _run_iceberg_maintenance(
             "statement_timeout_seconds": timeout,
         },
     )
+    return _next_start(all_tables, out)
 
 
 def _run_iceberg_compaction(
@@ -988,7 +1083,8 @@ def _run_iceberg_compaction(
     live_streams: bool = False,
     timeout: int = 30,
     budget: MaintenanceBudget | None = None,
-) -> None:
+    start_at: int = 0,
+) -> int | None:
     """Run table compaction (format-aware).
 
     ``live_streams``: continuous jobs are writing. For AML the gold tables
@@ -1015,7 +1111,7 @@ def _run_iceberg_compaction(
 
     if engine_type == "duckdb":
         console.print(f"  [dim]{table_format.title()} compaction skipped (DuckDB read-only)[/dim]")
-        return
+        return None
 
     # Delta OPTIMIZE rewrites the entire table in a single pass.  Both Trino
     # workers (~8GiB) and Spark Thrift Server (~4GiB) can OOM and restart,
@@ -1026,14 +1122,14 @@ def _run_iceberg_compaction(
     # Delta OPTIMIZE never runs in either path.
     if table_format == "delta" and engine_type in ("trino", "spark-thrift"):
         console.print("  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]")
-        return
+        return None
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
     if engine is None or pod_name is None or catalog is None:
         console.print(
             f"  [dim]{table_format.title()} compaction skipped (no capable engine pod found)[/dim]"
         )
-        return
+        return None
 
     tables = cfg.architecture.tables
     schema = cfg.architecture.workload.schema_type.value
@@ -1043,7 +1139,8 @@ def _run_iceberg_compaction(
     layers: tuple[str, ...] = ("silver", "gold")
     if live_streams and schema == "financial":
         layers = ("silver",)
-    table_names = [f"{catalog}.{t}" for t in tables.workload_tables(schema, layers=layers)]
+    all_tables = [f"{catalog}.{t}" for t in tables.workload_tables(schema, layers=layers)]
+    table_names = _rotated(all_tables, start_at)
 
     # Build SQL based on table format
     if table_format == "delta":
@@ -1092,6 +1189,7 @@ def _run_iceberg_compaction(
             "statement_timeout_seconds": timeout,
         },
     )
+    return _next_start(all_tables, out)
 
 
 def _wait_for_query_engine_ready(cfg, k8s, console, timeout: int = 180) -> None:
@@ -1613,6 +1711,11 @@ def _run_sustained(
 
     config_snapshot = build_config_snapshot(cfg)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    if skip_maintenance and collector.current_run is not None:
+        # No table maintenance: not comparable with runs under the policy.
+        from lakebench.metrics.maintenance_policy import skipped_policy_id
+
+        collector.current_run.maintenance_policy_id = skipped_policy_id()
 
     pipeline_success = True
     _datagen_output_gb = 0.0
@@ -1935,6 +2038,12 @@ def _run_sustained(
             print_info(
                 f"Iceberg retention: every {retention_interval}s (threshold: {retention_threshold})"
             )
+            from lakebench.config.loader import retention_floor_advisory
+
+            floor_msg = retention_floor_advisory(cfg)
+            if floor_msg and cfg.architecture.pipeline.mode.value != "sustained":
+                # Continuous configs already warned at load.
+                print_warning(floor_msg)
 
         # Iceberg compaction scheduling (v1.1.0)
         compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
@@ -1947,6 +2056,13 @@ def _run_sustained(
 
         start = time.time()
         check_interval = 30
+        # Where the next round starts in the table list: after a timeout,
+        # the table after the one that timed out (see _next_start).
+        maintenance_start = 0
+        compaction_start = 0
+        # A timed-out maintenance statement may still be running; compaction
+        # waits this long (seconds into the run) before touching the tables.
+        compaction_hold_until = 0.0
         # First round fires after warmup (no offset -- Q9 contention
         # is handled by the retry logic inside _run_benchmark_round).
         next_round_at = bench_warmup if can_run_rounds else float("inf")
@@ -1997,15 +2113,51 @@ def _run_sustained(
                 # Next round at interval from round completion
                 next_round_at = (time.time() - start) + bench_interval
                 continue
+            skip_msg = late_benchmark_round_skip(
+                can_run_rounds, elapsed, next_round_at, remaining, min_remaining
+            )
+            if skip_msg:
+                # Too little run left for the round. Without this the round
+                # stayed due, next_round_at stayed in the past, and the loop
+                # slept 0 s and journaled a health line on every pass.
+                console.print(f"  [dim]{skip_msg}[/dim]")
+                _journal_safe(
+                    j.record,
+                    EventType.STREAMING_HEALTH,
+                    message=skip_msg,
+                    details={"remaining_seconds": remaining, "needed_seconds": min_remaining},
+                )
+                next_round_at = float("inf")
 
             # Iceberg retention maintenance
             if elapsed >= next_maintenance_at:
                 # A plan-building error (a bad retention string, an engine
                 # lookup failure) must not end the continuous run.
+                bounds = continuous_round_bounds(
+                    retention_interval, run_duration - (time.time() - start)
+                )
                 try:
-                    _run_iceberg_maintenance(
-                        cfg, k8s, console, j, retention_threshold, live_streams=True
-                    )
+                    if bounds is None:
+                        console.print("  [dim]Maintenance round skipped (run window ending)[/dim]")
+                    else:
+                        maint_budget = MaintenanceBudget(
+                            bounds[1], label="continuous maintenance round"
+                        )
+                        resume = _run_iceberg_maintenance(
+                            cfg,
+                            k8s,
+                            console,
+                            j,
+                            retention_threshold,
+                            timeout=bounds[0],
+                            live_streams=True,
+                            budget=maint_budget,
+                            start_at=maintenance_start,
+                        )
+                        if resume is not None:
+                            maintenance_start = resume
+                        if "timed out" in maint_budget.stopped:
+                            compaction_hold_until = (time.time() - start) + bounds[0]
                 except Exception as e:  # noqa: BLE001
                     logger.warning("maintenance round failed: %s", e)
                     console.print(f"  [yellow]Maintenance round failed: {e}[/yellow]")
@@ -2017,20 +2169,46 @@ def _run_sustained(
                     )
                 next_maintenance_at = (time.time() - start) + retention_interval
 
-            # Iceberg compaction (v1.1.0)
+            # Iceberg compaction (v1.1.0). Bounds use the time now, after any
+            # maintenance round above, so the two cannot overrun the window.
             if compaction_enabled and elapsed >= next_compaction_at:
-                _run_iceberg_compaction(cfg, k8s, console, j, live_streams=True)
-                next_compaction_at = (time.time() - start) + compaction_interval
+                now = time.time() - start
+                bounds = continuous_round_bounds(compaction_interval, run_duration - now)
+                if now < compaction_hold_until:
+                    console.print(
+                        "  [dim]Compaction deferred: a maintenance statement timed out "
+                        "and may still be running[/dim]"
+                    )
+                    next_compaction_at = compaction_hold_until
+                else:
+                    if bounds is None:
+                        console.print("  [dim]Compaction round skipped (run window ending)[/dim]")
+                    else:
+                        resume = _run_iceberg_compaction(
+                            cfg,
+                            k8s,
+                            console,
+                            j,
+                            live_streams=True,
+                            timeout=bounds[0],
+                            budget=MaintenanceBudget(
+                                bounds[1], label="continuous compaction round"
+                            ),
+                            start_at=compaction_start,
+                        )
+                        if resume is not None:
+                            compaction_start = resume
+                    next_compaction_at = (time.time() - start) + compaction_interval
 
             # Sleep until next event (health check, benchmark round, maintenance, or compaction)
-            sleep_until = min(
+            sleep_time = loop_sleep_seconds(
+                time.time() - start,
                 elapsed + check_interval,
                 next_round_at if can_run_rounds else float("inf"),
                 next_maintenance_at,
                 next_compaction_at,
                 run_duration,
             )
-            sleep_time = max(0, sleep_until - (time.time() - start))
             if sleep_time > 0:
                 time.sleep(sleep_time)
 

@@ -13,7 +13,17 @@ from __future__ import annotations
 import os
 import time
 
-from common import ensure_namespaces, env, log, log_job_metrics, one_line, path_size_gb
+from common import (
+    ICEBERG_METADATA_PROPS_SQL,
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
+    ensure_namespaces,
+    env,
+    log,
+    log_job_metrics,
+    one_line,
+    path_size_gb,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, current_timestamp
 
@@ -186,7 +196,7 @@ def register_manifest(spark) -> bool:
         spark.sql(f"""
             CREATE OR REPLACE TABLE {CATALOG}.{MANIFEST_TABLE}
             USING iceberg
-            TBLPROPERTIES ('format-version' = '2')
+            TBLPROPERTIES ('format-version' = '2', {ICEBERG_METADATA_PROPS_SQL})
             AS SELECT * FROM parquet.`{BRONZE_URI}{MANIFEST_PATH}`
         """)
         log(f"Registered manifest Iceberg table: {CATALOG}.{MANIFEST_TABLE}")
@@ -228,6 +238,8 @@ def _continuous_reset(spark, df):
         .using("iceberg")
         .tableProperty("format-version", "2")
         .tableProperty("write.parquet.compression-codec", "snappy")
+        .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+        .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
     ).create()
     log(
         f"Continuous reset: empty {CATALOG}.{BRONZE_TABLE} created; "
@@ -413,7 +425,7 @@ def main() -> None:
                 CREATE TABLE {CATALOG}.{BRONZE_TABLE}
                 USING iceberg
                 {_location_clause()}
-                TBLPROPERTIES ('format-version' = '2')
+                TBLPROPERTIES ('format-version' = '2', {ICEBERG_METADATA_PROPS_SQL})
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
             log(f"Registered via CTAS (preflight): {CATALOG}.{BRONZE_TABLE}")
@@ -459,6 +471,8 @@ def main() -> None:
                 .using("iceberg")
                 .tableProperty("format-version", "2")
                 .tableProperty("write.parquet.compression-codec", "snappy")
+                .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+                .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
             ).create()
             spark.sql(
                 f"CALL {CATALOG}.system.add_files("
@@ -476,7 +490,7 @@ def main() -> None:
                 CREATE OR REPLACE TABLE {CATALOG}.{BRONZE_TABLE}
                 USING iceberg
                 {_location_clause()}
-                TBLPROPERTIES ('format-version' = '2')
+                TBLPROPERTIES ('format-version' = '2', {ICEBERG_METADATA_PROPS_SQL})
                 AS SELECT * FROM parquet.`{BRONZE_URI}{PACS_PREFIX}`
             """)
             log(f"Registered via CTAS fallback: {CATALOG}.{BRONZE_TABLE}")

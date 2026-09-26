@@ -7,7 +7,9 @@ Databricks Financial Crimes accelerator pattern (open source, cited in
 spec §2C.4 NB1) extended with fields the workloads reference and
 regulator-facing metadata for FinCEN SAR / EBA STR mapping.
 
-All tables are Iceberg format-version=2, snappy-compressed. Partitioning
+All tables are Iceberg format-version=2, snappy-compressed, with old
+metadata.json files deleted after commit beyond the newest 50 (see
+``ICEBERG_PREVIOUS_VERSIONS_MAX`` in spark/scripts/common.py). Partitioning
 choices follow the query patterns in ENG-2C.4:
 
 - Bronze pacs.008: unpartitioned. bronze-verify registers the datagen files
@@ -112,7 +114,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -150,7 +154,9 @@ USING iceberg
 PARTITIONED BY (months(txn_timestamp))
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -190,7 +196,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -211,7 +219,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -236,7 +246,9 @@ USING iceberg
 PARTITIONED BY (months(book_ts))
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 # bal_before / bal_after are DECIMAL(38,2), not (18,2). Spark widens
@@ -263,7 +275,9 @@ USING iceberg
 PARTITIONED BY (bucket(64, source_entity_id))
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 # LB-109: `_batch_id` mirrors silver_build_financial's DDL so
@@ -306,7 +320,9 @@ USING iceberg
 PARTITIONED BY (bucket(64, entity_id))
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 # Sizing notes:
@@ -360,7 +376,9 @@ USING iceberg
 PARTITIONED BY (months(alert_ts))
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -383,7 +401,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -406,7 +426,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -433,7 +455,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -465,7 +489,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -489,7 +515,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -543,7 +571,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 
@@ -598,7 +628,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
 USING iceberg
 TBLPROPERTIES (
     'format-version' = '2',
-    'write.parquet.compression-codec' = 'snappy'
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
 

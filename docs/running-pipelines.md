@@ -311,6 +311,26 @@ Maintenance uses whichever query engine is deployed:
 | Spark Thrift | Iceberg only | `CALL catalog.system.expire_snapshots(table => ..., older_than => TIMESTAMP '...')` via beeline. Delta VACUUM is skipped (it runs Spark Thrift out of memory) |
 | DuckDB | No | Read-only -- maintenance is skipped |
 
+Each maintenance or compaction statement may run for min(600 s, half the
+interval) and a whole round is capped at half the interval (and at the time
+left in the run). The first statement that times out stops the rest of that
+round; timeouts are journaled separately from failures, because the engine
+may still be running the statement. The next round starts at the table after
+the one that timed out, so a table that always times out cannot starve the
+others, and compaction waits one statement timeout before it runs. A round
+due with less than a minute of the run left is skipped. The bounds apply to
+lakebench's wait, not to the engine: a statement that timed out near the end
+of the run can still be running after the monitoring window closes.
+
+`expire_snapshots` does not delete old `metadata.json` files; each commit
+leaves one behind. Every Iceberg table lakebench creates therefore sets
+`write.metadata.delete-after-commit.enabled=true` and
+`write.metadata.previous-versions-max=50`, so each commit deletes metadata
+files beyond the newest 50. This applies to tables created by the current
+version. A table that already exists in a reused catalog keeps its old
+properties until it is recreated (a fresh deployment, or a run that replaces
+the table).
+
 When `query_engine.type` is `duckdb` or `none`, maintenance is skipped with
 a log message. Failures on individual tables (e.g., a table that doesn't exist
 yet early in the run) are logged but do not abort the pipeline.

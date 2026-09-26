@@ -19,6 +19,8 @@ Environment variables (set by job.py):
 import time
 
 from common import (
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
     await_stream,
     env,
     get_daily_kpi_aggregations,
@@ -171,6 +173,8 @@ def refresh_gold(trigger_df, batch_id):
                 .writeTo(gold_tbl)
                 .tableProperty("write.format.default", "parquet")
                 .tableProperty("write.parquet.compression-codec", "snappy")
+                .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+                .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
                 .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
                 .createOrReplace()
             )
@@ -180,6 +184,8 @@ def refresh_gold(trigger_df, batch_id):
                 daily_kpis_consolidated.writeTo(gold_tbl)
                 .tableProperty("write.format.default", "parquet")
                 .tableProperty("write.parquet.compression-codec", "snappy")
+                .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+                .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
                 .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
                 .createOrReplace()
             )
@@ -189,6 +195,8 @@ def refresh_gold(trigger_df, batch_id):
             daily_kpis_consolidated.writeTo(gold_tbl)
             .tableProperty("write.format.default", "parquet")
             .tableProperty("write.parquet.compression-codec", "snappy")
+            .tableProperty(*METADATA_DELETE_AFTER_COMMIT)
+            .tableProperty(*METADATA_PREVIOUS_VERSIONS_MAX)
             .tableProperty("write.target-file-size-bytes", target_file_size_bytes)
             .createOrReplace()
         )

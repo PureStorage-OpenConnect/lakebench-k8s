@@ -236,6 +236,85 @@ def _table_data_rows(text: str) -> list[str]:
     return data
 
 
+# A lakebench run id, as in lakebench-output/runs/run-<id>/ (run_id in
+# metrics.json): YYYYMMDD-HHMMSS-<6 hex>.
+_RUN_ID = re.compile(r"\b(\d{8}-\d{6}-[0-9a-f]{6})\b")
+# Anything shaped like a run id; a token that matches this but not _RUN_ID
+# (wrong case, separator or length) is a typo the check must not skip.
+# Leading word characters are part of the token, so "120260926-..." is
+# malformed rather than read as the id inside it.
+_RUN_ID_LIKE = re.compile(r"[0-9A-Za-z_]*\d{8}[-_]\d{6}[-_][0-9A-Za-z]+")
+# An explicit path to a metrics.json named in the results file.
+_METRICS_PATH = re.compile(r"[\w./-]*metrics\.json")
+# Where cited runs are looked up, relative to the repository root: the local
+# runs directory and the checked-in evidence directories CI can see.
+# $LAKEBENCH_PERF_RUNS_DIR, when set, is searched first.
+UAT_RUN_DIRS = ("lakebench-output/runs", "uat/runs", "uat/perf")
+
+
+def _metrics_run_id(path: Path) -> str | None:
+    import json
+
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    run_id = data.get("run_id") if isinstance(data, dict) else None
+    return str(run_id) if run_id else None
+
+
+def _unresolved_run_ids(rows: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """(cited run ids, ids with no matching metrics.json, malformed ids).
+
+    Only the results table rows are read, so an id mentioned in prose (a
+    superseded run) needs no evidence. A named metrics.json path counts only
+    inside the repository, where the release workflow can see it.
+    """
+    text = "\n".join(rows)
+    cited = sorted(set(_RUN_ID.findall(text)))
+    malformed = sorted({t for t in _RUN_ID_LIKE.findall(text) if not _RUN_ID.fullmatch(t)})
+    dirs = [ROOT / d for d in UAT_RUN_DIRS]
+    env_dir = os.environ.get(PERF_RUNS_ENV)
+    if env_dir:
+        env_path = Path(env_dir)
+        dirs.insert(0, env_path if env_path.is_absolute() else ROOT / env_path)
+    root = ROOT.resolve()
+    named: set[str] = set()
+    for token in _METRICS_PATH.findall(text):
+        path = (ROOT / token).resolve()
+        if path.is_relative_to(root) and path.is_file():
+            rid = _metrics_run_id(path)
+            if rid:
+                named.add(rid)
+    missing = [
+        rid
+        for rid in cited
+        if rid not in named
+        and not any(_metrics_run_id(d / f"run-{rid}" / "metrics.json") == rid for d in dirs)
+    ]
+    return cited, missing, malformed
+
+
+def _local_only_run_ids(rows: list[str], cited: list[str]) -> list[str]:
+    """Cited ids whose evidence is only in directories the workflow cannot see."""
+    text = "\n".join(rows)
+    root = ROOT.resolve()
+    named = set()
+    for token in _METRICS_PATH.findall(text):
+        path = (ROOT / token).resolve()
+        if path.is_relative_to(root) and path.is_file():
+            rid = _metrics_run_id(path)
+            if rid:
+                named.add(rid)
+    checked_in = [ROOT / d for d in UAT_RUN_DIRS if d.startswith("uat/")]
+    return [
+        rid
+        for rid in cited
+        if rid not in named
+        and not any(_metrics_run_id(d / f"run-{rid}" / "metrics.json") == rid for d in checked_in)
+    ]
+
+
 def check_uat_results() -> Result:
     cv = _load_script("check_version")
     version = cv.package_version()
@@ -250,7 +329,37 @@ def check_uat_results() -> Result:
     rows = _table_data_rows(text)
     if not rows:
         return Result("uat-results", FAIL, f"{rel} has no results table rows")
-    return Result("uat-results", PASS, f"{rel}: {len(rows)} result rows")
+    cited, missing, malformed = _unresolved_run_ids(rows)
+    if malformed:
+        return Result(
+            "uat-results",
+            FAIL,
+            f"{rel}: malformed run id(s) (want YYYYMMDD-HHMMSS-<6 lowercase hex>): "
+            + ", ".join(malformed),
+        )
+    if not cited:
+        return Result("uat-results", FAIL, f"{rel} cites no run ids (YYYYMMDD-HHMMSS-xxxxxx)")
+    if missing:
+        where = ", ".join(f"{d}/run-<id>/metrics.json" for d in UAT_RUN_DIRS)
+        return Result(
+            "uat-results",
+            FAIL,
+            f"{rel}: {len(missing)} of {len(cited)} cited run id(s) have no metrics.json "
+            f"({where}, or a metrics.json path named in the file): " + ", ".join(missing),
+        )
+    local_only = _local_only_run_ids(rows, cited)
+    note = (
+        f"; {len(local_only)} resolved only outside uat/ (lakebench-output/ is not "
+        "committed), so the release workflow will fail until their metrics.json is "
+        "checked in under uat/runs/"
+        if local_only
+        else ""
+    )
+    return Result(
+        "uat-results",
+        PASS,
+        f"{rel}: {len(rows)} result rows, {len(cited)} run ids resolved{note}",
+    )
 
 
 def check_gitleaks() -> Result:

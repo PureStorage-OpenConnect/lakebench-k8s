@@ -67,6 +67,8 @@ architecture:
   pipeline:
     # "sustained" is the config spelling of continuous mode.
     mode: sustained
+    # Maintenance settings are part of the gate fingerprint; pinned here.
+    pre_benchmark_maintenance: true
     sustained:
       bronze_trigger_interval: 30 seconds
       silver_trigger_interval: 60 seconds
@@ -78,6 +80,22 @@ architecture:
       gold_target_file_size_mb: 128
       benchmark_interval: 300
       benchmark_warmup: 300
+      # The baseline must include continuous maintenance: with
+      # retention_interval equal to run_duration (1800) no round ever fired.
+      # At 450, maintenance runs twice and compaction (900) once inside the
+      # window even when in-stream benchmark rounds take up to 300 s and
+      # every round uses its whole budget (interval / 2) plus the grace; see
+      # test_continuous_pinned_config_fires_maintenance_and_compaction. In a
+      # 30 min run nothing is old enough to expire (1 h live-stream floor)
+      # or to remove as an orphan (24 h 10 min), so the rounds measure the
+      # cost of running maintenance and compaction beside the streams, not
+      # their cleanup. The threshold is pinned at the 1 h floor so the config
+      # says what runs. These changes change config_hash; the baseline is
+      # re-recorded after the freeze.
+      retention_interval: 450
+      retention_threshold: 1h
+      compaction_enabled: true
+      compaction_interval: 900
 
   workload:
     schema: customer360
