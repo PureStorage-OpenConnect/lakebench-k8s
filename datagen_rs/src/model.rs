@@ -245,7 +245,9 @@ pub fn build_world_p(
             }
         })
         .collect();
-    // Per-entity persona amount shift (recentred, mean-preserving).
+    // Per-entity persona amount shift. Unperturbed: recentred, mean-preserving.
+    // Robustness perturbation: recentred at the base sd, so the median (x the
+    // median multiplier) is held and the mean rises with the sd.
     let amount_logshift: Vec<f64> = (0..=n)
         .into_par_iter()
         .map(|i| {

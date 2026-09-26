@@ -904,6 +904,19 @@ def corpus_seed_check(manifest: DataFrame, seed) -> dict:
     return {"claimed_seed": seed, "matched_share": hit / len(rows) if rows else None}
 
 
+def manifest_stamp_groups(manifest: DataFrame, keys) -> list:
+    """(values, count) per distinct combination of the injection_parameters
+    entries named in ``keys`` (the robustness stamp,
+    datagen_seed.MANIFEST_KEYS), for datagen_seed.summarise_stamp. A manifest
+    without injection_parameters reads as unstamped."""
+    if "injection_parameters" not in manifest.columns:
+        return [(dict.fromkeys(keys), manifest.count())]
+    params = col("injection_parameters")
+    cols = [params.getItem(k).alias(f"k{i}") for i, k in enumerate(keys)]
+    rows = manifest.select(*cols).groupBy(*[f"k{i}" for i in range(len(keys))]).count().collect()
+    return [({k: r[f"k{i}"] for i, k in enumerate(keys)}, r["count"]) for r in rows]
+
+
 def source_sha256() -> str:
     """sha256 of this file: the feature definitions are not in the
     pre-registration, so the report pins them by content."""

@@ -437,16 +437,30 @@ def run_fidelity_gate(
     return report
 
 
-def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> None:
+def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> dict:
     """AML-GOALS R3: refuse, before anything is computed or written, a corpus
     from a spent seed, or from the evaluation or robustness seed outside its
     declared registered run, whatever seed the deployment claims (a bucket can
     hold a corpus from a manual Job). A registered run must also be verified:
     the manifest has to come from the claimed seed."""
     try:
-        from lakebench.config.datagen_seed import PROTECTED_ROLES, aml_seed_error, spent_from
+        from lakebench.config.datagen_seed import (
+            MANIFEST_KEYS,
+            PROTECTED_ROLES,
+            aml_seed_error,
+            perturbation_stamp_error,
+            spent_from,
+            summarise_stamp,
+        )
     except ImportError:  # flat on the driver
-        from datagen_seed import PROTECTED_ROLES, aml_seed_error, spent_from
+        from datagen_seed import (
+            MANIFEST_KEYS,
+            PROTECTED_ROLES,
+            aml_seed_error,
+            perturbation_stamp_error,
+            spent_from,
+            summarise_stamp,
+        )
     from fidelity_gate import load_preregistration
 
     corpora = load_preregistration()[0]["corpora"]
@@ -469,6 +483,19 @@ def _refuse_guarded_corpus(af, manifest, *, counts_only: bool) -> None:
     )
     if err:
         raise SystemExit(f"refusing to score this corpus: {err}")
+    # The robustness perturbation is read from the corpus, never from config:
+    # an image without it writes no stamp, so the registered robustness look
+    # fails closed on an unperturbed corpus.
+    stamp = summarise_stamp(af.manifest_stamp_groups(manifest, MANIFEST_KEYS))
+    err = perturbation_stamp_error(
+        corpora,
+        os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
+        stamp,
+        declared=os.environ.get("LB_DATAGEN_ROBUSTNESS_PERTURBATION") == "true",
+    )
+    if err:
+        raise SystemExit(f"refusing to score this corpus: {err}")
+    return stamp
 
 
 def main() -> None:
@@ -525,7 +552,7 @@ def main() -> None:
     manifest_src = af.manifest_glob(args.manifest)
     manifest = af.read_manifest(spark, args.manifest)
     af.check_manifest(manifest)
-    _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
+    stamp = _refuse_guarded_corpus(af, manifest, counts_only=args.counts_only)
     manifest_n = manifest.count()
     if manifest_n == 0:
         raise SystemExit(
@@ -557,8 +584,11 @@ def main() -> None:
         # Set only when the deployment declared datagen.corpus_role (the
         # registered evaluation or robustness run); config refused it otherwise.
         "declared_corpus_role": os.environ.get("LB_DATAGEN_CORPUS_ROLE"),
-        # True when the deployment generated with datagen.robustness_perturbation.
-        "robustness_perturbation": os.environ.get("LB_DATAGEN_ROBUSTNESS_PERTURBATION") == "true",
+        # From the corpus manifest's stamp (checked against the deployment's
+        # datagen.robustness_perturbation above), not from config.
+        "robustness_perturbation": stamp["n_instances"] > 0
+        and stamp["n_stamped"] == stamp["n_instances"],
+        "robustness_stamp": stamp,
         "manifest": manifest_src,
         "silver_txns": f"{CATALOG}.{args.silver_txns}",
     }

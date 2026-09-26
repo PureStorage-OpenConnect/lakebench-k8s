@@ -17,7 +17,9 @@ Usage (needs pyspark, a JDK, numpy, pandas and scikit-learn):
     python scripts/aml_gate.py /scratch/c/bronze/pacs008 --seed 43 --out gate.json
 
 The robustness corpus is generated with ``--robustness-perturbation`` (the
-driver refuses the robustness seed without it).
+driver refuses the robustness seed without it). The generator stamps it into
+the manifest; ``--registered robustness`` requires the stamp and every other
+role refuses it.
 
 ``--seed`` is checked against the manifest's instance seeds and recorded.
 Spent seeds are refused, and so are the evaluation and robustness seeds unless
@@ -272,6 +274,20 @@ def main(argv=None) -> int:
         if err:
             print(f"refusing: {err}", file=sys.stderr)
             return 1
+        # The robustness perturbation comes from the manifest stamp, never
+        # from the seed alone: a registered robustness look on a corpus
+        # without it (an older generator) is refused.
+        from lakebench.config.datagen_seed import (
+            MANIFEST_KEYS,
+            perturbation_stamp_error,
+            summarise_stamp,
+        )
+
+        stamp = summarise_stamp(af.manifest_stamp_groups(manifest, MANIFEST_KEYS))
+        err = perturbation_stamp_error(prereg["corpora"], args.registered, stamp)
+        if err:
+            print(f"refusing: {err}", file=sys.stderr)
+            return 1
         scale_info = af.corpus_scale(
             spark,
             str(corpus / "bronze/account.parquet"),
@@ -330,6 +346,7 @@ def main(argv=None) -> int:
             "unkeyed_rows": unkeyed,
             "duplicate_ibans": dup_ibans,
             "corpus_seed_check": seed_check,
+            "robustness_stamp": stamp,
             "corpus_scale": scale_info,
             "diagnostic": bool(args.diagnostic),
             "aml_features_sha256": af.source_sha256(),

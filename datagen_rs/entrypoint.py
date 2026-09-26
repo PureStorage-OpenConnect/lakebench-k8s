@@ -99,7 +99,9 @@ def max_threads_for_memory(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    # No prefix matching: an abbreviation such as --rob must not turn on
+    # --robustness-perturbation (or any other flag).
+    ap = argparse.ArgumentParser(allow_abbrev=False)
     ap.add_argument("--schema", default="financial", choices=SUPPORTED_SCHEMAS)
     # Shared args -- both schemas consume these.
     # No default for financial: AML seeds are pre-registered and 42 is spent

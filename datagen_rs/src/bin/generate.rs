@@ -19,7 +19,7 @@ use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
 use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_p;
-use datagen_rs::party::{build_manifest, write_account_to, write_party_to};
+use datagen_rs::party::{build_manifest_p, write_account_to, write_party_to};
 use datagen_rs::robustness::{perturbation_for_seed, Perturbation};
 use datagen_rs::s3sink::S3Sink;
 use datagen_rs::timing::{sample_ts_on_day, DayCal};
@@ -164,20 +164,19 @@ fn financial_seed() -> i64 {
     seed
 }
 
-const ROBUSTNESS_FLAG: &str = "--robustness-perturbation";
+use datagen_rs::robustness::FLAG as ROBUSTNESS_FLAG;
 
-/// True when the bare `--robustness-perturbation` flag is present. A value
-/// attached with `=` is refused rather than guessed at.
+/// True when `--robustness-perturbation` is given as a flag (see
+/// robustness::flag_in_argv: a flag's value is never read as the flag).
 fn robustness_flag() -> bool {
     let args: Vec<String> = std::env::args().collect();
-    if let Some(a) = args
-        .iter()
-        .find(|a| a.starts_with(&format!("{ROBUSTNESS_FLAG}=")))
-    {
-        eprintln!("{ROBUSTNESS_FLAG} takes no value; got {a:?}");
-        std::process::exit(2);
+    match datagen_rs::robustness::flag_in_argv(&args) {
+        Ok(on) => on,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
     }
-    args.iter().any(|a| a == ROBUSTNESS_FLAG)
 }
 
 /// The perturbation for the financial driver (see
@@ -676,7 +675,10 @@ fn pacs008_main() {
             })
             .cloned()
             .collect();
-        let man_bytes = encode_parquet(&build_manifest(&mine, seed, &inst_uids), 8 * 1024 * 1024);
+        let man_bytes = encode_parquet(
+            &build_manifest_p(&mine, seed, &inst_uids, &perturb),
+            8 * 1024 * 1024,
+        );
         ref_bytes += man_bytes.len() as u64;
         ref_files += 1;
         sink.put(

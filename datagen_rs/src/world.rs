@@ -90,6 +90,12 @@ pub fn rate_mult_sd(id: u64, seed: i64, sd_mult: f64) -> f64 {
 /// rules (W8 $5000, W2 structuring bands) are recalibrated at P5, and the
 /// baseline density inside the structuring band is guarded by a regression test
 /// so a larger sd cannot silently starve the band past the leakage gate.
+///
+/// Under the robustness perturbation (`amount_log_shift_p`) the recentring
+/// stays at the base sd, so the mean is NOT preserved there: the median moves
+/// only with the median multiplier (x1.2 exactly) and the population mean
+/// rises with the wider sd (about 8% at sd x1.2, on top of the median's 1.2).
+/// tests/robustness.rs checks the structuring-band densities on that world.
 #[inline]
 pub fn amount_log_shift(id: u64, seed: i64) -> f64 {
     amount_log_shift_p(id, seed, 1.0, 0.0)
