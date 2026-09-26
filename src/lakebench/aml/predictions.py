@@ -48,7 +48,7 @@ def compute_predictions(
         raise ValueError("predictions are computed under the packaged pre-registration only")
     corpora = prereg["corpora"]
     method = prereg["level2"]["predictions"]
-    runs = [si.load_run(r, endpoint) for r in s2_reports]
+    runs = sorted((si.load_run(r, endpoint) for r in s2_reports), key=si._seed_key)
     facts = []
     for run in runs:
         f, why = si._provenance(run, prereg, sha)
@@ -64,6 +64,8 @@ def compute_predictions(
             raise ValueError(f"the calibration runs differ in {name}")
     if facts[0]["n_entities"] != round(eps * corpora["gate_scale"]):
         raise ValueError("the calibration runs are not at corpora.gate_scale")
+    if any(f["gate_code_sha256"] != si._gate_code_sha() for f in facts):
+        raise ValueError("a calibration run was scored by other fidelity_gate code")
     if len({f["report_sha256"] for f in facts}) != len(facts):
         raise ValueError("a calibration report is given twice")
 
