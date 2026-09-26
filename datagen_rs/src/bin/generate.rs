@@ -786,7 +786,10 @@ fn pacs008_main() {
         // before any RNG draw.
         let f_lo = fid as f64 / total_files as f64;
         let f_hi = (fid + 1) as f64 / total_files as f64;
-        let m_lo = gcal.mass_at(time_at_mass(f_lo) - 7 * US_PER_DAY);
+        // Lookback: the longest business-day roll plus two days of margin
+        // (a row's nominal instant can sit late in its day).
+        let lookback_days = datagen_rs::timing::MAX_ROLL_DAYS as i64 + 2;
+        let m_lo = gcal.mass_at(time_at_mass(f_lo) - lookback_days * US_PER_DAY);
         // A row's intraday time can sit earlier in its day than the event's
         // nominal mass, so candidates run to the end of the file's last day.
         let m_hi = if fid + 1 >= total_files {
