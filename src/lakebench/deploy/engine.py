@@ -1035,6 +1035,24 @@ class DeploymentEngine:
                 elapsed_seconds=time.time() - start,
             )
 
+        # Every deploy stamps a new nonce, so a destroy already running on
+        # this namespace sees the redeploy and stops before it touches the
+        # new deployment's jobs, tables or buckets.
+        from lakebench.deploy.ownership import write_deploy_nonce
+
+        try:
+            write_deploy_nonce(core_v1, namespace)
+        except Exception as e:  # noqa: BLE001
+            return DeploymentResult(
+                component="namespace",
+                status=DeploymentStatus.FAILED,
+                message=(
+                    f"Could not stamp the deploy nonce on namespace {namespace!r} ({e}); "
+                    "a concurrent destroy could not tell this deploy apart. Re-run deploy."
+                ),
+                elapsed_seconds=time.time() - start,
+            )
+
         msg = (
             f"Created namespace: {namespace}"
             if created

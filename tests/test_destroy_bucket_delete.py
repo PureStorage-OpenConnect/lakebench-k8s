@@ -154,7 +154,7 @@ class TestDeleteOwnedBuckets:
         text = " | ".join(notes)
         assert "deleted buckets: a-bronze, a-silver" in text
         assert "already gone: a-gone" in text
-        assert "kept (not created by lakebench" in text and "legacy-gold" in text
+        assert "provenance unknown" in text and "legacy-gold" in text
 
     def test_absent_bucket_reported_as_gone_not_kept(self):
         notes, _ = destroy_mod._delete_owned_buckets(
@@ -199,6 +199,16 @@ class TestDeleteOwnedBuckets:
 class TestDestroyAllBuckets:
     """End to end through destroy_all's bucket step with verdicts per bucket."""
 
+    _on_sql = None
+
+    def _exec(self, _engine, _k8s, _pod, _ns, sql):
+        if self._on_sql:
+            self._on_sql(sql)
+
+    # Incarnation reads before the bucket step: start, then the guards before
+    # step 1 (Spark jobs), step 2 (pods), step 2b (datagen), step 3 (tables).
+    PRE = 5
+
     def _run_layers(self, boto, bronze, silver, gold):
         self._layers = (bronze, silver, gold)
         try:
@@ -221,6 +231,9 @@ class TestDestroyAllBuckets:
         namespace_present=True,
         create_namespace=False,
         created_error=None,
+        nonce=None,
+        maint=None,
+        forget_error=None,
     ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
@@ -241,6 +254,8 @@ class TestDestroyAllBuckets:
         s3_cfg.create_buckets = create_buckets
         engine.k8s.namespace_exists.return_value = namespace_present
         engine.k8s.get_namespace_uid.side_effect = uid or (lambda _ns: "uid-1")
+        engine.k8s.get_namespace_annotation.side_effect = nonce or (lambda _ns, _k: "n-1")
+        cfg.architecture.tables.workload_tables.return_value = ["silver.t", "gold.t"]
         self.engine = engine
         # Default: deploy recorded all three as created (LB-159 marker).
         created_record = set(verdicts) if created is None else set(created)
@@ -265,7 +280,7 @@ class TestDestroyAllBuckets:
             ),
             patch("lakebench.k8s.get_k8s_client"),
             patch("kubernetes.client.CoreV1Api") as core,
-            patch("kubernetes.client.CustomObjectsApi"),
+            patch("kubernetes.client.CustomObjectsApi") as custom,
             patch("lakebench.deploy.destroy.logger"),
             patch("lakebench.s3.S3Client", return_value=_s3(boto)),
             patch(
@@ -276,14 +291,35 @@ class TestDestroyAllBuckets:
                     else {"return_value": created_record}
                 ),
             ),
-            patch("lakebench.deploy.ownership.forget_created_buckets") as forget,
+            patch(
+                "lakebench.deploy.ownership.forget_created_buckets", side_effect=forget_error
+            ) as forget,
             patch("lakebench.spark.SparkOperatorManager"),
+            patch(
+                "lakebench.deploy.iceberg.find_maintenance_engine",
+                return_value=(maint or (None, None, None)),
+            ),
+            patch(
+                "lakebench.deploy.iceberg.build_maintenance_sql",
+                side_effect=lambda _e, _c, t, _r: [f"EXPIRE {t}", f"ORPHANS {t}"],
+            ),
+            patch(
+                "lakebench.deploy.iceberg.build_drop_table_sql",
+                side_effect=lambda _e, t: f"DROP {t}",
+            ),
+            patch("lakebench.deploy.iceberg.exec_sql", side_effect=self._exec) as exec_sql,
         ):
+            self.exec_sql = exec_sql
             core.return_value.list_namespace.return_value.items = []
+            custom.return_value.list_namespaced_custom_object.return_value = {
+                "items": [{"metadata": {"name": "spark-job"}}]
+            }
+            self.custom = custom
             results = destroy_mod.destroy_all(engine, clean_buckets=True, force_legacy=force_legacy)
             self.forget = forget
         self._results = results
-        return [r for r in results if r.component == "s3-buckets"][-1]
+        buckets_results = [r for r in results if r.component == "s3-buckets"]
+        return buckets_results[-1] if buckets_results else results[-1]
 
     def test_owned_by_tag_and_prefix_are_deleted(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
@@ -331,7 +367,7 @@ class TestDestroyAllBuckets:
         )
         assert r.status is DeploymentStatus.SUCCESS
         assert set(boto.buckets) == {"a-bronze"} and boto.buckets["a-bronze"] == []
-        assert "kept (not created by lakebench" in r.message
+        assert "provenance unknown" in r.message
 
     def test_pre_provisioned_buckets_are_emptied_but_kept(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
@@ -367,7 +403,7 @@ class TestDestroyAllBuckets:
         assert r.status is DeploymentStatus.SUCCESS
         assert set(boto.buckets) == {"a-bronze", "a-gold"}
         assert boto.buckets["a-bronze"] == [], "adopted buckets are still emptied"
-        assert "kept (not created by lakebench" in r.message
+        assert "provenance unknown" in r.message
 
     def test_created_tag_marks_a_bucket_for_deletion(self):
         from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH, TAG_DEPLOYMENT_NAME
@@ -385,7 +421,7 @@ class TestDestroyAllBuckets:
     def test_redeploy_before_emptying_leaves_its_buckets_alone(self):
         """D1 finished, R redeployed and wrote bronze; slow D2 must not empty it."""
         boto = FakeBoto({"a-bronze": ["r/bronze-0"], "a-silver": [], "a-gold": []})
-        uids = iter(["uid-1"])
+        uids = iter(["uid-1"] * self.PRE)
         r = self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
@@ -398,8 +434,8 @@ class TestDestroyAllBuckets:
 
     def test_redeploy_between_buckets_stops_mid_step(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["r/new"], "a-gold": ["r/new"]})
-        # start, before-loop, before bronze, bronze delete batch; then R lands.
-        uids = iter(["uid-1"] * 4)
+        # pre-bucket reads, before-loop, before bronze, bronze batch; then R.
+        uids = iter(["uid-1"] * (self.PRE + 3))
         self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
@@ -412,8 +448,8 @@ class TestDestroyAllBuckets:
     def test_redeploy_while_a_bucket_is_being_emptied_stops_before_the_next_batch(self):
         """A large bucket empties over many batches; R can land mid-bucket."""
         boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
-        # start, before-loop, before bronze; R lands before bronze's first batch.
-        uids = iter(["uid-1"] * 3)
+        # pre-bucket reads, before-loop, before bronze; R before the first batch.
+        uids = iter(["uid-1"] * (self.PRE + 2))
         self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
@@ -424,8 +460,8 @@ class TestDestroyAllBuckets:
 
     def test_redeploy_before_bucket_delete_stops_deletes(self):
         boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
-        # start, before-loop, three empties; the redeploy lands before deletes.
-        uids = iter(["uid-1"] * 5)
+        # pre-bucket reads, before-loop, three empties; R lands before deletes.
+        uids = iter(["uid-1"] * (self.PRE + 4))
         self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
@@ -452,7 +488,7 @@ class TestDestroyAllBuckets:
 
         def uid(_ns):
             calls["n"] += 1
-            if calls["n"] >= 2:
+            if calls["n"] >= self.PRE + 1:
                 raise RuntimeError("apiserver 503")
             return "uid-1"
 
@@ -503,8 +539,8 @@ class TestDestroyAllBuckets:
         """Nothing proves another destroy finished the rest (kubectl delete ns
         looks the same) and the ownership record is gone."""
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": ["y"], "a-gold": ["z"]})
-        # start, before-loop, before bronze, bronze batch; then the ns is gone.
-        uids = iter(["uid-1"] * 4)
+        # pre-bucket reads, before-loop, before bronze, bronze batch; then gone.
+        uids = iter(["uid-1"] * (self.PRE + 3))
         r = self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
@@ -522,7 +558,7 @@ class TestDestroyAllBuckets:
         boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
         # start, before-loop, three empties, three deletes; R lands before
         # the record update.
-        uids = iter(["uid-1"] * 8)
+        uids = iter(["uid-1"] * (self.PRE + 7))
         self._run(
             boto,
             dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
@@ -530,3 +566,73 @@ class TestDestroyAllBuckets:
         )
         assert boto.buckets == {}
         self.forget.assert_not_called()
+
+    # -- third review: guards before steps 1-3 and the deploy nonce --------
+
+    def test_redeploy_before_step_1_keeps_its_spark_jobs(self):
+        boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
+        uids = iter(["uid-1"])  # start; R lands before step 1
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            uid=lambda _ns: next(uids, "uid-2"),
+        )
+        assert not self.custom.return_value.delete_namespaced_custom_object.called
+        assert boto.buckets["a-bronze"] == ["r/new"]
+        assert r.status is DeploymentStatus.FAILED
+        assert "NOT completed" in r.message
+
+    def test_redeploy_during_table_maintenance_stops_before_the_next_statement(self):
+        """Maintenance at 0s retention and DROP TABLE must not run against R."""
+        boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
+        state = {"uid": "uid-1"}
+        ran: list[str] = []
+
+        def on_sql(sql):
+            ran.append(sql)
+            state["uid"] = "uid-2"  # R lands while the first statement runs
+
+        self._on_sql = on_sql
+        try:
+            r = self._run(
+                boto,
+                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+                uid=lambda _ns: state["uid"],
+                maint=("trino", "trino-coordinator-0", "lakehouse"),
+            )
+        finally:
+            self._on_sql = None
+        assert ran == ["EXPIRE lakehouse.silver.t"]
+        assert boto.buckets["a-bronze"] == ["r/new"]
+        assert r.status is DeploymentStatus.FAILED
+
+    def test_redeploy_into_the_same_namespace_is_seen_by_the_nonce(self):
+        """create_namespace=false (or a still-Active namespace): the UID never
+        changes, only the deploy nonce does. R's buckets must survive."""
+        boto = FakeBoto({"a-bronze": ["r/new"], "a-silver": [], "a-gold": []})
+        reads = {"n": 0}
+
+        def nonce(_ns, _key):
+            reads["n"] += 1
+            return "n-1" if reads["n"] <= self.PRE else "n-2"
+
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            nonce=nonce,
+        )
+        assert boto.buckets["a-bronze"] == ["r/new"]
+        assert boto.delete_bucket_calls == []
+
+    def test_failed_record_cleanup_is_reported_failed(self):
+        """A stale created-buckets record outlives destroy when the namespace
+        is kept (create_namespace=false); that must not read as success."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+            forget_error=RuntimeError("apiserver 503"),
+        )
+        assert boto.buckets == {}
+        assert r.status is DeploymentStatus.FAILED
+        assert "still listed as created" in r.message

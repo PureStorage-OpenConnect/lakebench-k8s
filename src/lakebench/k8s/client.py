@@ -256,6 +256,18 @@ class K8sClient:
             raise K8sResourceError(f"Error reading namespace: {e}")  # noqa: B904
         return str(ns.metadata.uid or "")
 
+    def get_namespace_annotation(self, name: str, key: str) -> str:
+        """Return one annotation of a namespace, ``""`` if unset or absent."""
+        try:
+            ns = self._core_v1.read_namespace(name)
+        except ApiException as e:
+            if e.status == 404:
+                return ""
+            raise K8sResourceError(f"Error reading namespace: {e}")  # noqa: B904
+        anns = (ns.metadata.annotations if ns.metadata else None) or {}
+        value = anns.get(key, "")
+        return value if isinstance(value, str) else ""
+
     def get_namespace_termination_status(self, name: str) -> tuple[str, list[str]]:
         """Return a namespace's phase and what is blocking its deletion.
 

@@ -234,3 +234,30 @@ class TestAddRefusesTerminatingNamespace:
             core.return_value.read_namespace.side_effect = ApiException(status=404)
             assert mgr._add_namespace_to_watch_impl("my-ns") is False
         run.assert_not_called()
+
+    @pytest.mark.parametrize("status", [429, 500, 503])
+    def test_unreadable_namespace_is_not_added(self, status):
+        """Third review: under API throttling a failed read must refuse the
+        add, not treat the namespace as live (crash-loop route)."""
+        from kubernetes.client.rest import ApiException
+
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch("kubernetes.client.CoreV1Api") as core,
+            patch.object(mgr, "_run") as run,
+        ):
+            core.return_value.read_namespace.side_effect = ApiException(status=status)
+            assert mgr._add_namespace_to_watch_impl("my-ns") is False
+        run.assert_not_called()
+
+    def test_transport_error_is_not_added(self):
+        mgr = _mgr()
+        with (
+            patch.object(mgr, "_get_watched_namespaces", return_value=["other"]),
+            patch("kubernetes.client.CoreV1Api") as core,
+            patch.object(mgr, "_run") as run,
+        ):
+            core.return_value.read_namespace.side_effect = ConnectionError("reset")
+            assert mgr._add_namespace_to_watch_impl("my-ns") is False
+        run.assert_not_called()

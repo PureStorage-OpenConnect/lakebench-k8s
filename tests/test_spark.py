@@ -1442,11 +1442,15 @@ class TestSparkOperatorNamespaceWatching:
         assert "lakebench,lakebench-test" in status.message
 
     @patch(
+        "lakebench.spark.operator.SparkOperatorManager._namespace_is_terminating",
+        return_value=False,
+    )
+    @patch(
         "lakebench.spark.operator.SparkOperatorManager._filter_existing_namespaces",
         side_effect=lambda ns: ns,
     )
     @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
-    def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter):
+    def test_ensure_namespace_watched_self_heals(self, mock_run, _mock_filter, _mock_live):
         """When can_heal=True, adds namespace via helm upgrade + restart + verify."""
         from lakebench.spark.operator import SparkOperatorManager
 
