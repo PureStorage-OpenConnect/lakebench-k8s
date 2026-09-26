@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 from lakebench.metrics import perf_gate as pg
+from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
 ROOT = Path(__file__).resolve().parents[1]
 PERF = ROOT / "benchmarks" / "perf"
@@ -114,6 +115,7 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
         "start_time": "2026-09-24T10:00:00",
         "success": over.get("success", True),
         "config_snapshot": snapshot,
+        "maintenance_policy_id": over.get("policy", MAINTENANCE_POLICY_ID),
         "pipeline_benchmark": {
             "run_id": run_id,
             "pipeline_mode": "batch",
@@ -168,6 +170,7 @@ def _cont_run(
         "start_time": "2026-09-24T10:00:00",
         "success": True,
         "config_snapshot": snapshot,
+        "maintenance_policy_id": MAINTENANCE_POLICY_ID,
         "pipeline_benchmark": {
             "run_id": run_id,
             "pipeline_mode": "sustained",

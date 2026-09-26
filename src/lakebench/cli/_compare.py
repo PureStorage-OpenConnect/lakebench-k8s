@@ -345,6 +345,15 @@ def _build_comparison(
             "architecture.benchmark.iterations in both configs)"
         )
 
+    if "error" not in metrics_a and "error" not in metrics_b:
+        from lakebench.metrics.maintenance_policy import policy_mismatch, recorded_policy
+
+        # Warn, not refuse, for the same reason as the sample count; the perf
+        # gate and reproduce refuse.
+        policy_problem = policy_mismatch(recorded_policy(metrics_a), recorded_policy(metrics_b))
+        if policy_problem:
+            warnings.append(policy_problem)
+
     return {
         "timestamp": datetime.now().isoformat(),
         "warnings": warnings,

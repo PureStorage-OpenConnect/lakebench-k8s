@@ -44,3 +44,10 @@ credentials the referenced config resolves at run time.
 | `c360-scale-0-1.yaml` | polaris-iceberg-spark-trino | 0.1 | batch | Baseline c360 sanity run |
 
 Add rows to this table when you land a new package.
+
+A package records the `maintenance_policy_id` of its source run, and
+`lakebench reproduce` refuses (exit 2, before running anything) when it
+differs from the policy of the running version. A package without the field
+is the legacy policy, so `c360-scale-0-1.yaml` has to be re-recorded, from a
+new run made with the current version, before it can verify again.
+`reproduce --record` refuses a source run from another policy.

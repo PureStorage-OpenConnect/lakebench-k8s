@@ -32,6 +32,7 @@ from lakebench.cli._reproduce import (
     _resolve_config_path,
     reproduce,
 )
+from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -75,6 +76,8 @@ def _metrics(**overrides):
         "deployment_name": "c360-scale-0-1",
         "pipeline_benchmark": _pb(),
         "config_snapshot": {"name": "c360-scale-0-1", "scale": 0.1},
+        # A run from this code carries the current policy (PipelineMetrics default).
+        "maintenance_policy_id": MAINTENANCE_POLICY_ID,
         "datagen_fleet": {
             "pods_reported": 2,
             "aggregate_mbps": 154.4,

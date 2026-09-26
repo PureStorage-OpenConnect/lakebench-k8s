@@ -38,7 +38,9 @@ Two hashes, both recorded with the baseline:
   `config_snapshot` a run records in `metrics.json`: scale, recipe, Spark
   driver, executor and per-job executor counts, datagen scale, mode,
   parallelism and file size, images, Trino coordinator and workers,
-  continuous-mode trigger intervals, benchmark mode, and scratch storage.
+  continuous-mode trigger intervals, benchmark mode, scratch storage, and the
+  maintenance settings (`pre_benchmark_maintenance`, `retention_interval`,
+  `retention_threshold`, `compaction_enabled`, `compaction_interval`).
   The snapshot is taken after autosizing and any cluster capping, so it is
   what actually ran. A run whose fingerprint differs from the pinned
   config's is refused, and the refusal names each differing field (for
@@ -50,6 +52,18 @@ default. A batch run also has to match on what it realised: each batch
 stage's executor count (the peak the run observed) and the number of datagen
 pods must equal the pinned values. Continuous stages have no realised count;
 see "Known gaps".
+
+The table-maintenance policy is matched too. Every `metrics.json` records
+`maintenance_policy_id` (the constant in
+`src/lakebench/metrics/maintenance_policy.py`, which lists what each policy
+does), and each baseline stores the id of the run it was recorded from. Only
+runs under the current policy are compared or recorded, and a run whose
+policy differs from its baseline's is refused. A run or baseline without the
+field is the legacy policy `m1-legacy` (which covers runs before and after
+the LB-174 fix, so it cannot be compared at all), and a run made with
+`--skip-maintenance` is stamped `<id>+skipped`. Every baseline recorded
+before the id existed therefore refuses current runs until it is
+re-recorded.
 
 Baselines are specific to the reference cluster. The storage classes are
 pinned, but a different cluster behind the same names produces different

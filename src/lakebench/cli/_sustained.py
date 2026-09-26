@@ -1677,6 +1677,11 @@ def _run_sustained(
 
     config_snapshot = build_config_snapshot(cfg)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    if skip_maintenance and collector.current_run is not None:
+        # No table maintenance: not comparable with runs under the policy.
+        from lakebench.metrics.maintenance_policy import skipped_policy_id
+
+        collector.current_run.maintenance_policy_id = skipped_policy_id()
 
     pipeline_success = True
     _datagen_output_gb = 0.0

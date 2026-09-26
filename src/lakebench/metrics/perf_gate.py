@@ -47,6 +47,7 @@ from lakebench.cli._reproduce import (
     _extract_expected_numbers,
     _is_stage_seconds,
 )
+from lakebench.metrics.maintenance_policy import not_current, policy_mismatch, recorded_policy
 
 STORE_SCHEMA_VERSION = 1
 
@@ -200,6 +201,7 @@ def snapshot_fingerprint(snapshot: Mapping[str, Any], mode: str) -> dict[str, An
         "datagen",
         "images",
         "benchmark",
+        "maintenance",
     ):
         fp[key] = snapshot.get(key)
     scratch = snapshot.get("scratch") or {}
@@ -631,6 +633,12 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
     reasons: list[str] = []
     if not run.raw.get("success"):
         reasons.append("run did not succeed")
+    # Only runs under this version's maintenance policy are compared or
+    # recorded: m1-legacy covers two different real policies, and a baseline
+    # recorded from a legacy run would refuse every current run.
+    stale_policy = not_current(recorded_policy(run.raw))
+    if stale_policy:
+        reasons.append(stale_policy)
     # `lakebench run --local` records every stage ending at the same moment
     # and runs on a workstation; the fingerprint does not include the flag.
     if run.snapshot.get("local"):
@@ -791,6 +799,9 @@ class Baseline:
     corpus_drained: bool | None = None
     # Batch runs only: TTV_FROM_STAGES or TTV_FROM_SCORECARD.
     ttv_basis: str | None = None
+    # Table-maintenance policy of the baseline run (metrics/maintenance_policy).
+    # None (a baseline recorded before the field) is the legacy policy.
+    maintenance_policy_id: str | None = None
 
     @property
     def accepted(self) -> bool:
@@ -810,6 +821,7 @@ class Baseline:
             "recorded_at",
             "corpus_drained",
             "ttv_basis",
+            "maintenance_policy_id",
         ):
             value = getattr(self, key)
             if value is not None:
@@ -906,6 +918,7 @@ def load_store(path: Path) -> BaselineStore:
             notes=entry.get("notes"),
             corpus_drained=entry.get("corpus_drained"),
             ttv_basis=entry.get("ttv_basis"),
+            maintenance_policy_id=entry.get("maintenance_policy_id"),
         )
     return BaselineStore(path=path, baselines=baselines)
 
@@ -983,6 +996,11 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
             "recorded (a schema default or autosizer change); record a new baseline"
         )
     result.reasons.extend(run_refusals(run, pinned))
+    policy_problem = policy_mismatch(baseline.maintenance_policy_id, recorded_policy(run.raw))
+    if policy_problem:
+        result.reasons.append(
+            policy_problem + "; record a new baseline (scripts/perf_gate.py record --replace)"
+        )
     if run.mode == "sustained":
         drained = run.scores.get("corpus_drained")
         if drained != baseline.corpus_drained:
@@ -1161,6 +1179,7 @@ def record_baseline(
         notes=current.notes,
         corpus_drained=(run.scores.get("corpus_drained") if run.mode == "sustained" else None),
         ttv_basis=basis,
+        maintenance_policy_id=recorded_policy(run.raw),
     )
     store.baselines[name] = new
     return new
@@ -1195,7 +1214,8 @@ def find_runs_for(
 
 
 def latest_candidate(pinned: PinnedConfig, runs_dir: Path) -> RunRecord | None:
-    """Newest successful run in *runs_dir* whose fingerprint matches *pinned*.
+    """Newest successful run in *runs_dir* whose fingerprint matches *pinned*,
+    measured under the current maintenance policy.
 
     Guards (scale_ratio, datagen pods) are not applied here, so a matching
     run that fails them is still returned and then refused by compare.
@@ -1205,6 +1225,9 @@ def latest_candidate(pinned: PinnedConfig, runs_dir: Path) -> RunRecord | None:
             run.raw.get("success")
             and run.mode == pinned.mode
             and fingerprint_hash(run.fingerprint) == pinned.fingerprint_hash
+            # A later --skip-maintenance or --local run must not displace the
+            # gating run.
+            and not not_current(recorded_policy(run.raw))
         ):
             return run
     return None
