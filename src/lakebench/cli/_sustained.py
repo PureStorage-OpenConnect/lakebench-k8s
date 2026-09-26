@@ -808,6 +808,40 @@ def _next_start(all_tables: list[str], out: dict) -> int:
     return 0
 
 
+def late_benchmark_round_skip(
+    can_run_rounds: bool,
+    elapsed: float,
+    next_round_at: float,
+    remaining: float,
+    min_remaining: float,
+) -> str | None:
+    """Message when a due in-stream benchmark round cannot fit in the run, else None.
+
+    The caller journals it once and moves next_round_at past the run end.
+    """
+    if not can_run_rounds or elapsed < next_round_at or remaining >= min_remaining:
+        return None
+    return f"benchmark round skipped: {remaining:.0f} s left, need {min_remaining:.0f} s"
+
+
+# Shortest sleep between monitoring passes. An event already due (a round
+# that could not run, a maintenance time just rescheduled) must not turn the
+# loop into a busy spin that journals a health line every pass.
+_MIN_LOOP_SLEEP_SECONDS = 1.0
+
+
+def loop_sleep_seconds(now: float, *event_times: float) -> float:
+    """Seconds to sleep until the earliest event, at least a second.
+
+    The last event time passed is the run end; the sleep never goes past it.
+    """
+    run_end = event_times[-1]
+    wake = min(event_times)
+    if now >= run_end:
+        return 0.0
+    return min(max(wake - now, _MIN_LOOP_SLEEP_SECONDS), run_end - now)
+
+
 def _operative(sql: str) -> str:
     """The statement that matters in a combined submission ("SET ...; VACUUM")."""
     last = sql.strip().rstrip(";").split(";")[-1].split()
@@ -2079,6 +2113,21 @@ def _run_sustained(
                 # Next round at interval from round completion
                 next_round_at = (time.time() - start) + bench_interval
                 continue
+            skip_msg = late_benchmark_round_skip(
+                can_run_rounds, elapsed, next_round_at, remaining, min_remaining
+            )
+            if skip_msg:
+                # Too little run left for the round. Without this the round
+                # stayed due, next_round_at stayed in the past, and the loop
+                # slept 0 s and journaled a health line on every pass.
+                console.print(f"  [dim]{skip_msg}[/dim]")
+                _journal_safe(
+                    j.record,
+                    EventType.STREAMING_HEALTH,
+                    message=skip_msg,
+                    details={"remaining_seconds": remaining, "needed_seconds": min_remaining},
+                )
+                next_round_at = float("inf")
 
             # Iceberg retention maintenance
             if elapsed >= next_maintenance_at:
@@ -2152,14 +2201,14 @@ def _run_sustained(
                     next_compaction_at = (time.time() - start) + compaction_interval
 
             # Sleep until next event (health check, benchmark round, maintenance, or compaction)
-            sleep_until = min(
+            sleep_time = loop_sleep_seconds(
+                time.time() - start,
                 elapsed + check_interval,
                 next_round_at if can_run_rounds else float("inf"),
                 next_maintenance_at,
                 next_compaction_at,
                 run_duration,
             )
-            sleep_time = max(0, sleep_until - (time.time() - start))
             if sleep_time > 0:
                 time.sleep(sleep_time)
 
