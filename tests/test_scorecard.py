@@ -254,12 +254,13 @@ class TestFinancialDetailScorecard:
         assert "not run" in w1_row
         assert "%" not in w1_row
 
-    def test_attribute_rule_shows_na(self):
+    def test_screening_rules_have_planted_targets(self):
         block = FinancialScorecardBlock()
         job = self._job(alerts_by_rule={"W5_sanctions_match": 3})
         html = block.render_detail_html(self._metrics(jobs=[job]))
-        assert "W5_sanctions_match" in html
-        assert "attribute" in html
+        assert "W5_sanctions_match" in html and "sanctions_match" in html
+        assert "pep_match" in html
+        assert "attribute" not in html
 
 
 if __name__ == "__main__":

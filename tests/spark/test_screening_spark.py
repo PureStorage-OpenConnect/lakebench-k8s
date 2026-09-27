@@ -201,7 +201,7 @@ def test_w5_transaction_screen_and_rescreen(spark, tmp_path, monkeypatch):
     assert list(rows[0].asDict()) == [f.name for f in dr._empty_alerts_df(spark, "r").schema.fields]
 
 
-def test_w6_pep_floor_and_missing_watchlist(spark, tmp_path, monkeypatch):
+def test_w6_priority_split_and_missing_watchlist(spark, tmp_path, monkeypatch):
     import detection_rules as dr
 
     path = str(tmp_path / "watchlist.parquet")
@@ -219,11 +219,12 @@ def test_w6_pep_floor_and_missing_watchlist(spark, tmp_path, monkeypatch):
             ("p3", 5, 103, t(2023, 2, 5, 9), 30_000.0, "Elena Fatima Rodriguez"),
         ],
     )
-    got = [
-        (r["entity_id"], r["related_txn_ids"])
+    got = sorted(
+        (r["entity_id"], r["related_txn_ids"], r["priority"])
         for r in dr.w6_pep_counterparty(txns, silver_entities=entities, run_id="r").collect()
-    ]
-    assert got == [(4, ["p1"])]
+    )
+    # Every PEP payment alerts; the $10,000 line only sets priority.
+    assert got == [(4, ["p1"], "MED"), (4, ["p2"], "LOW")]
     monkeypatch.setenv("LB_FINANCIAL_WATCHLIST_PATH", str(tmp_path / "missing.parquet"))
     with pytest.raises(dr.RuleSkipped) as e:
         dr.w6_pep_counterparty(txns, silver_entities=entities, run_id="r")

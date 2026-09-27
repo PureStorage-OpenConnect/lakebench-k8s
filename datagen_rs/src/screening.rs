@@ -12,26 +12,34 @@
 //!   planted rows are added on top of the corpus row budget (the base row
 //!   count is computed before they exist). Every behavioural row, typology
 //!   instance and manifest row is therefore the same at the same seed as a
-//!   generator without this module.
+//!   generator without this module. The converse does not hold: payers are
+//!   drawn by the baseline activity weights, outside dormancy windows and
+//!   typology participants, so a change to the behavioural generator can
+//!   move the screening rows.
 //! - **Listed parties are never customers** and are not in the party master.
 //!   They are external entities with ids above the population (the
 //!   counterparty accounts of another bank). `World::attach_external` gives
 //!   the pacs.008 emit their name, address and country.
 //! - **No answer key in bronze.** The watchlist is an input a bank has; which
 //!   listed party was paid, and by whom, is only in the manifest.
-//! - **A real fuzzy screen is needed.** A planted payment names the listed
-//!   party as the payer typed it: the list spelling, an alias, a typo, a
-//!   token-order swap or a different transliteration. An exact join on the
-//!   list name misses the variants.
-//! - **Precision means something.** Namesake decoys (a different person or
-//!   company whose name is close to a listed one, or the same name in another
-//!   country) receive ordinary payments that are not hits. They are not in the
-//!   manifest.
-//!
-//! Listed names use the world's name pools (no vocabulary a detector could key
-//! on), but with a full middle name for persons and two heads for companies,
-//! so a listed name is not a world entity's name. That structure is shared by
-//! the positives and the decoys, so it does not separate them.
+//! - **A real fuzzy screen is needed.** Each payer relationship with a listed
+//!   party pays one external account whose creditor name is the list
+//!   spelling, an alias, a typo, a token-order swap, a different
+//!   romanisation or a dropped suffix, fixed for that account (every
+//!   external account, like every world entity, carries one name). About a
+//!   fifth of those accounts sit in another country than the list entry, so
+//!   a country gate costs recall.
+//! - **Precision means something.** Namesake decoys (another middle name or
+//!   line of business, a one-letter-different name in the same country, or
+//!   the same name in another country) receive ordinary payments that are
+//!   not hits. They are not in the manifest.
+//! - **Planted rows do not stand out from the rest of the corpus.** A
+//!   background population of external counterparties, twenty per list
+//!   entry, receives one to three payments each from customers. It shares
+//!   the listed accounts' degree, name shapes (a full middle name for
+//!   persons, two heads for companies, drawn from the world's pools) and
+//!   absence from the party and account masters, so "an occasional external
+//!   payee" separates nothing: only the list does.
 
 use crate::hash::{splitmix64, Rng};
 use crate::realism as R;
@@ -59,6 +67,13 @@ const PEP_MIN: usize = 24;
 /// namesake decoy.
 const PAID_RATE: f64 = 0.7;
 const DECOY_RATE: f64 = 0.5;
+/// Share of relationship accounts outside the list entry's country.
+const FOREIGN_ACCOUNT_RATE: f64 = 0.2;
+/// Background external counterparties per list entry.
+const BACKGROUND_PER_PARTY: usize = 20;
+/// Relationship accounts reserved per list entry (a party is paid by one or
+/// two customers).
+const MAX_REL: usize = 2;
 /// Where in the corpus list version 2 is published (share of the span).
 const V2_AT: f64 = 0.75;
 
@@ -121,8 +136,6 @@ const RESPELL: [(&str, &str); 8] = [
 
 #[derive(Clone, Debug)]
 pub struct Party {
-    /// Entity id, above the population: an external counterparty.
-    pub ext_id: u64,
     pub list_id: String,
     /// "sanctions" or "pep".
     pub list_type: &'static str,
@@ -142,10 +155,16 @@ pub struct Party {
     pub position: Option<&'static str>,
 }
 
+/// An external counterparty account (id above the population): a listed
+/// party's account for one payer relationship, a namesake decoy, or a
+/// background payee.
 #[derive(Clone, Debug)]
-pub struct Decoy {
+pub struct Account {
     pub ext_id: u64,
     pub name: String,
+    /// How `name` relates to the list entry ("exact", "alias", "typo", ...;
+    /// "decoy" or "background" for the others).
+    pub variant: &'static str,
     pub street: String,
     pub town: String,
     pub country: &'static str,
@@ -153,12 +172,15 @@ pub struct Decoy {
 
 pub struct Screening {
     pub parties: Vec<Party>,
-    pub decoys: Vec<Decoy>,
+    /// MAX_REL relationship accounts per party, party-major.
+    pub rel_accounts: Vec<Account>,
+    pub decoys: Vec<Account>,
+    pub background: Vec<Account>,
     /// List publication instants (version 1 at corpus start).
     pub v1_published_us: i64,
     pub v2_published_us: i64,
-    /// First external id (population + 1); ids run contiguously over parties
-    /// then decoys.
+    /// First external id (population + 1); ids run contiguously over the
+    /// relationship accounts, the decoys, then the background.
     pub first_ext_id: u64,
 }
 
@@ -166,17 +188,41 @@ impl Screening {
     /// (name, street, town, country) of every external entity, indexed by
     /// `ext_id - first_ext_id`.
     pub fn external_entities(&self) -> Vec<(String, String, String, &'static str)> {
-        let mut v: Vec<(String, String, String, &'static str)> = self
-            .parties
+        self.rel_accounts
             .iter()
-            .map(|p| (p.name.clone(), p.street.clone(), p.town.clone(), p.country))
-            .collect();
-        v.extend(
-            self.decoys
-                .iter()
-                .map(|d| (d.name.clone(), d.street.clone(), d.town.clone(), d.country)),
-        );
-        v
+            .chain(&self.decoys)
+            .chain(&self.background)
+            .map(|a| (a.name.clone(), a.street.clone(), a.town.clone(), a.country))
+            .collect()
+    }
+}
+
+fn other_country(rng: &mut Rng, not: &'static str) -> &'static str {
+    let mut c = not;
+    for _ in 0..16 {
+        c = W::HOME_CODES[rng.below(W::HOME_CODES.len() as u64) as usize];
+        if c != not {
+            break;
+        }
+    }
+    c
+}
+
+fn account(
+    ext_id: u64,
+    name: String,
+    variant: &'static str,
+    country: &'static str,
+    seed: i64,
+) -> Account {
+    let salted = seed ^ 0x5C4E;
+    Account {
+        ext_id,
+        name,
+        variant,
+        street: R::street(ext_id, country, salted),
+        town: R::city(ext_id, country, salted),
+        country,
     }
 }
 
@@ -298,8 +344,8 @@ pub fn transliterate(name: &str, rng: &mut Rng) -> Option<String> {
     None
 }
 
-/// Build the watchlist and its decoys. Pure function of (population, seed,
-/// corpus bounds).
+/// Build the watchlist, its relationship accounts, decoys and background
+/// payees. Pure function of (population, seed, corpus bounds).
 pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screening {
     let span = (end_us - start_us).max(1);
     let day = 86_400_000_000i64;
@@ -314,9 +360,8 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
         .chain(std::iter::repeat_n(("pep", 1), n_p));
     let (mut s_no, mut p_no) = (0usize, 0usize);
     for (k, (list_type, version)) in specs.enumerate() {
-        let ext_id = first + k as u64;
         let mut rng = stream(seed, 1, k as u64);
-        let country = W::HOME_CODES[W::home_country_idx(ext_id, seed ^ 0x5C4E)];
+        let country = W::HOME_CODES[W::home_country_idx(k as u64 + 1, seed ^ 0x5C4E)];
         let is_person = list_type == "pep" || rng.unit() < 0.7;
         let (name, aliases) = if is_person {
             let (f, m, l) = person_name(&mut rng);
@@ -329,7 +374,7 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
             }
             (name, aliases)
         } else {
-            let (h1, h2, d, sfx) = company_name(&mut rng, country, ext_id);
+            let (h1, h2, d, sfx) = company_name(&mut rng, country, first + k as u64);
             let name = format!("{h1} {h2} {d} {sfx}");
             let mut aliases = Vec::new();
             if rng.unit() < 0.3 {
@@ -346,7 +391,6 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
         };
         let salted = seed ^ 0x5C4E;
         parties.push(Party {
-            ext_id,
             list_id,
             list_type,
             list_version: version,
@@ -354,32 +398,54 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
             entity_type: if is_person { "person" } else { "company" },
             name,
             aliases,
-            street: R::street(ext_id, country, salted),
-            town: R::city(ext_id, country, salted),
+            street: R::street(k as u64 + 1, country, salted),
+            town: R::city(k as u64 + 1, country, salted),
             country,
             program: (list_type == "sanctions").then(|| pick(&mut rng, &PROGRAMS)),
             position: (list_type == "pep").then(|| pick(&mut rng, &POSITIONS)),
         });
     }
-    // Namesake decoys, after every party so party ids do not depend on them.
+    let mut next = first;
+    // Relationship accounts: MAX_REL per party whether or not it is paid, so
+    // ids never depend on the payment draw. One creditor name per account.
+    let mut rel_accounts = Vec::with_capacity(parties.len() * MAX_REL);
+    for (k, p) in parties.iter().enumerate() {
+        for r in 0..MAX_REL {
+            let mut rng = stream(seed, 5, (k * MAX_REL + r) as u64);
+            let (name, variant) = reported_name(p, &mut rng);
+            let country = if rng.unit() < FOREIGN_ACCOUNT_RATE {
+                other_country(&mut rng, p.country)
+            } else {
+                p.country
+            };
+            let mut a = account(next, name, variant, country, seed);
+            if country == p.country {
+                // The listed address: the entry's own town.
+                a.town = p.town.clone();
+                a.street = p.street.clone();
+            }
+            rel_accounts.push(a);
+            next += 1;
+        }
+    }
+    // Namesake decoys.
     let mut decoys = Vec::new();
     for (k, p) in parties.iter().enumerate() {
         let mut rng = stream(seed, 2, k as u64);
         if rng.unit() >= DECOY_RATE {
             continue;
         }
-        let ext_id = first + parties.len() as u64 + decoys.len() as u64;
         let toks: Vec<&str> = p.name.split(' ').collect();
-        let (name, country) = if rng.unit() < 0.5 {
+        let u = rng.unit();
+        let (name, country) = if u < 1.0 / 3.0 {
             // Same name, another country.
-            let mut c = p.country;
-            for _ in 0..16 {
-                c = W::HOME_CODES[rng.below(W::HOME_CODES.len() as u64) as usize];
-                if c != p.country {
-                    break;
-                }
+            (p.name.clone(), other_country(&mut rng, p.country))
+        } else if u < 2.0 / 3.0 {
+            // A different party one letter away, same country.
+            match typo(&p.name, &mut rng) {
+                Some(n) => (n, p.country),
+                None => continue,
             }
-            (p.name.clone(), c)
         } else if p.entity_type == "person" {
             // A different person: same given and family name, another middle.
             let mut m = pick(&mut rng, R::FIRST);
@@ -405,33 +471,43 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
         if name == p.name && country == p.country {
             continue;
         }
-        let salted = seed ^ 0x5C4E;
-        decoys.push(Decoy {
-            ext_id,
-            name,
-            street: R::street(ext_id, country, salted),
-            town: R::city(ext_id, country, salted),
-            country,
-        });
+        decoys.push(account(next, name, "decoy", country, seed));
+        next += 1;
+    }
+    // Background payees: the same shapes and pools, no list relation.
+    let n_bg = parties.len() * BACKGROUND_PER_PARTY;
+    let mut background = Vec::with_capacity(n_bg);
+    for k in 0..n_bg {
+        let mut rng = stream(seed, 6, k as u64);
+        let country = W::HOME_CODES[W::home_country_idx(next, seed ^ 0x5C4E)];
+        let name = if rng.unit() < 0.7 {
+            let (f, m, l) = person_name(&mut rng);
+            format!("{f} {m} {l}")
+        } else {
+            let (h1, h2, d, sfx) = company_name(&mut rng, country, next);
+            format!("{h1} {h2} {d} {sfx}")
+        };
+        background.push(account(next, name, "background", country, seed));
+        next += 1;
     }
     Screening {
         parties,
+        rel_accounts,
         decoys,
+        background,
         v1_published_us: start_us,
         v2_published_us: v2_us,
         first_ext_id: first,
     }
 }
 
-/// One planted screening payment. `bene_name` is the creditor name as the
-/// payer typed it.
+/// One planted screening payment (to an external account, whose name,
+/// address and country the emit reads from the world).
 #[derive(Clone, Debug)]
 pub struct ScreenRow {
     pub orig: u64,
     pub bene: u64,
     pub ts_us: i64,
-    pub bene_name: String,
-    pub variant: &'static str,
 }
 
 /// A planted instance (one customer's payments to one listed party) with its
@@ -442,8 +518,8 @@ pub struct Planted {
     pub extra: Vec<(&'static str, String)>,
 }
 
-/// The creditor name on one planted payment: the list spelling, an alias, or
-/// a variant of the list spelling.
+/// The creditor name of one relationship account: the list spelling, an
+/// alias, or a variant of the list spelling.
 fn reported_name(p: &Party, rng: &mut Rng) -> (String, &'static str) {
     let u = rng.unit();
     let v = if u < 0.30 {
@@ -487,13 +563,14 @@ fn draw_ts(rng: &mut Rng, cal: &DayCal, lo_us: i64, hi_us: i64, cc: &str) -> Opt
     None
 }
 
-/// Plant payments to listed parties and decoys. `draw_customer(rng, ts)`
-/// returns a customer originator eligible to pay at `ts` (activity-weighted,
-/// outside any dormancy window), or None; `country_of(id)` is the
-/// originator's home country, which fixes the business calendar.
+/// Plant payments to listed parties' relationship accounts, decoys and
+/// background payees. `draw_customer(rng)` returns an activity-weighted
+/// customer originator, or None; `country_of(id)` is the originator's home
+/// country (its business calendar); `eligible(o, ts)` is false inside a
+/// dormancy suppression window.
 ///
-/// Returns (planted instances, decoy rows). Decoy rows are ordinary
-/// negatives and never reach the manifest.
+/// Returns (planted instances, negative rows). Negative rows (decoys and
+/// background) never reach the manifest.
 #[allow(clippy::too_many_arguments)]
 pub fn plant(
     scr: &Screening,
@@ -508,12 +585,7 @@ pub fn plant(
     let mut planted = Vec::new();
     let mut j_s = 0usize;
     let mut j_p = 0usize;
-    let mut payments = |rng: &mut Rng,
-                        lo: i64,
-                        hi: i64,
-                        bene: u64,
-                        name: &dyn Fn(&mut Rng) -> (String, &'static str)|
-     -> Vec<ScreenRow> {
+    let mut payments = |rng: &mut Rng, lo: i64, hi: i64, bene: u64| -> Vec<ScreenRow> {
         let mut out = Vec::new();
         let Some(mut o) = draw_customer(rng) else {
             return out;
@@ -536,13 +608,10 @@ pub fn plant(
             if !eligible(o, t) {
                 continue;
             }
-            let (nm, v) = name(rng);
             out.push(ScreenRow {
                 orig: o,
                 bene,
                 ts_us: t,
-                bene_name: nm,
-                variant: v,
             });
         }
         out.sort_by_key(|r| r.ts_us);
@@ -564,13 +633,12 @@ pub fn plant(
         };
         let n_rel = if rng.unit() < 0.3 { 2 } else { 1 };
         for r in 0..n_rel {
+            let acct = &scr.rel_accounts[k * MAX_REL + r];
             let iseed = splitmix64(
-                (seed as u64) ^ SCREEN_SALT ^ splitmix64(0x51_0000 + (k as u64) * 4 + r),
+                (seed as u64) ^ SCREEN_SALT ^ splitmix64(0x51_0000 + (k as u64) * 4 + r as u64),
             ) as i64;
             let mut irng = Rng::new(iseed as u64);
-            let rows = payments(&mut irng, lo, hi, p.ext_id, &|g: &mut Rng| {
-                reported_name(p, g)
-            });
+            let rows = payments(&mut irng, lo, hi, acct.ext_id);
             if rows.is_empty() {
                 continue;
             }
@@ -591,13 +659,20 @@ pub fn plant(
                     "operational",
                 )
             };
-            let variants: Vec<&str> = rows.iter().map(|r| r.variant).collect();
             let mut inst = Instance {
                 id,
                 typ,
-                participants: vec![rows[0].orig, p.ext_id],
+                participants: vec![rows[0].orig, acct.ext_id],
                 start_us: rows[0].ts_us,
-                end_us: rows[rows.len() - 1].ts_us,
+                // A rescreen instance is complete when the listing that makes
+                // it detectable is published, so its window runs to the
+                // version's publication (the Trino recall/precision
+                // templates match alerts inside the instance window).
+                end_us: if p.list_version == 1 {
+                    rows[rows.len() - 1].ts_us
+                } else {
+                    p.listed_us.max(rows[rows.len() - 1].ts_us)
+                },
                 workload,
                 severity,
                 seed: iseed,
@@ -609,7 +684,7 @@ pub fn plant(
             };
             // A replacement originator (eligibility retry) can differ from the
             // first row's; participants name every distinct payer, subject
-            // first.
+            // first, the account last.
             for row in &rows {
                 if !inst.participants[..inst.participants.len() - 1].contains(&row.orig) {
                     let at = inst.participants.len() - 1;
@@ -623,20 +698,25 @@ pub fn plant(
                     ("list_id", p.list_id.clone()),
                     ("list_version", p.list_version.to_string()),
                     ("detectable_by", detectable_by.to_string()),
-                    ("name_variants", variants.join(",")),
+                    ("name_variant", acct.variant.to_string()),
+                    (
+                        "account_country",
+                        if acct.country == p.country {
+                            "listed".to_string()
+                        } else {
+                            "other".to_string()
+                        },
+                    ),
                 ],
             });
         }
     }
-    let mut decoy_rows = Vec::new();
-    for (k, d) in scr.decoys.iter().enumerate() {
+    let mut negatives = Vec::new();
+    for (k, d) in scr.decoys.iter().chain(&scr.background).enumerate() {
         let mut rng = stream(seed, 4, k as u64);
-        let rows = payments(&mut rng, start_us, end_us, d.ext_id, &|_g: &mut Rng| {
-            (d.name.clone(), "decoy")
-        });
-        decoy_rows.extend(rows);
+        negatives.extend(payments(&mut rng, start_us, end_us, d.ext_id));
     }
-    (planted, decoy_rows)
+    (planted, negatives)
 }
 
 /// Stable uid of a planted screening row (same shape as a typology row's uid:
@@ -658,22 +738,32 @@ mod tests {
         let b = build(10_000, 43, 0, 1_000 * 86_400_000_000);
         assert_eq!(a.parties.len(), b.parties.len());
         for (x, y) in a.parties.iter().zip(&b.parties) {
-            assert_eq!(
-                (x.ext_id, &x.name, x.country),
-                (y.ext_id, &y.name, y.country)
-            );
+            assert_eq!((&x.name, x.country), (&y.name, y.country));
         }
         let ids: Vec<u64> = a
-            .parties
+            .rel_accounts
             .iter()
-            .map(|p| p.ext_id)
-            .chain(a.decoys.iter().map(|d| d.ext_id))
+            .chain(&a.decoys)
+            .chain(&a.background)
+            .map(|d| d.ext_id)
             .collect();
         for (i, id) in ids.iter().enumerate() {
             assert_eq!(*id, 10_001 + i as u64);
         }
         assert!(a.parties.iter().any(|p| p.list_version == 2));
         assert!(!a.decoys.is_empty());
+        assert_eq!(a.rel_accounts.len(), a.parties.len() * MAX_REL);
+        assert_eq!(a.background.len(), a.parties.len() * BACKGROUND_PER_PARTY);
+        assert!(a.rel_accounts.iter().any(|x| x.variant != "exact"));
+        assert!(a
+            .rel_accounts
+            .iter()
+            .zip(
+                a.parties
+                    .iter()
+                    .flat_map(|p| std::iter::repeat_n(p, MAX_REL))
+            )
+            .any(|(x, p)| x.country != p.country));
     }
 
     #[test]

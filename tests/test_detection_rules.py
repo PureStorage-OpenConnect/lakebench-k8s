@@ -1070,3 +1070,30 @@ def test_w5_w6_screen_the_corpus_watchlist_fuzzily():
     screen = fns["screen_counterparties"]
     assert "levenshtein" in screen and "SCREEN_SIMILARITY_MIN" in screen
     assert "wl_country" in screen and "bene_country" in screen
+
+
+def test_every_targeted_rule_is_scheduled_or_declared_skipped():
+    """A rule with a planted target must run in batch, and in continuous
+    either run or be recorded as skipped, or its typology reads 0 alerts
+    (review finding: W5/W6 were targeted but never invoked)."""
+    import re as _re
+
+    scripts = DETECTION_RULES_PATH.parent
+
+    def _tuple(path, name):
+        tree = ast.parse(Path(path).read_text())
+        for n in tree.body:
+            if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == name:
+                return set(ast.literal_eval(n.value))
+        raise AssertionError(name)
+
+    src = DETECTION_RULES_PATH.read_text()
+    block = _re.search(r"RULE_TARGET_TYPOLOGY = \{(.*?)\n\}", src, _re.S).group(1)
+    targeted = set(_re.findall(r'"(W\d+_\w+)": "', block))
+    batch = _tuple(scripts / "gold_finalize_financial.py", "DEFAULT_DETECTION_RULES")
+    cont = _tuple(scripts / "gold_refresh_financial.py", "CONTINUOUS_RULES") | _tuple(
+        scripts / "gold_refresh_financial.py", "CONTINUOUS_SKIPPED_RULES"
+    )
+    assert {"W5_sanctions_match", "W6_pep_counterparty"} <= targeted
+    assert targeted <= batch, targeted - batch
+    assert targeted <= cont, targeted - cont

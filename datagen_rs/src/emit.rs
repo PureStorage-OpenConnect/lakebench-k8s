@@ -77,10 +77,6 @@ pub struct Batch<'a> {
     /// Seeds the UETR and msg_id so they cannot collide even when two rows share
     /// (originator, timestamp).
     pub uid: Vec<u64>,
-    /// Creditor name as the payer typed it, for planted screening rows
-    /// (crate::screening); None for every other row. The whole vector is None
-    /// for a batch with no such row.
-    pub bene_name: Option<Vec<Option<String>>>,
 }
 
 fn agent(bicfi: ArrayRef, lei: ArrayRef, nm: ArrayRef, nulls: Option<NullBuffer>) -> ArrayRef {
@@ -246,10 +242,7 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         // always population entities.
         let c_country = w.cp_country(c);
         b_no.append_value(w.name.get(o));
-        match b.bene_name.as_ref().and_then(|v| v[i].as_deref()) {
-            Some(nm) => b_nc.append_value(nm),
-            None => b_nc.append_value(w.cp_name(c)),
-        }
+        b_nc.append_value(w.cp_name(c));
         b_sto.append_value(w.street.get(o));
         b_stc.append_value(w.cp_street(c));
         b_two.append_value(w.town.get(o));

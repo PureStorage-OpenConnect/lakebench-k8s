@@ -83,13 +83,12 @@ except ValueError:
 
 # Which W-rules to invoke as part of gold_finalize. Ordering is
 # intentional (cheapest first) so a failure in an expensive rule does
-# not prevent the cheap ones from writing their alerts. W5 and W6 are
-# excluded from the batch path: they depend on rptd_beneficiary_name
-# fuzzy joins against packaged reference lists, which the silver schema
-# and the driver-pod ConfigMap only partially wire up today; a future
-# PR that adds the reference-list mount and completes the silver
-# rptd_beneficiary_name column will move them into this list.
+# not prevent the cheap ones from writing their alerts. W5 and W6 screen
+# payment beneficiaries against the corpus watchlist
+# (bronze/watchlist.parquet); a corpus without one records them as skipped.
 DEFAULT_DETECTION_RULES = (
+    "W5_sanctions_match",
+    "W6_pep_counterparty",
     "W2_structuring",
     "W3_round_tripping",
     "W17_layering_chain",

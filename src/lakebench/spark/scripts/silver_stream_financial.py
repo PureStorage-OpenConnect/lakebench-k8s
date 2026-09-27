@@ -66,8 +66,9 @@ the stream fails unless the manifest proves a pre-KYC corpus.
 Known differences from batch mode: an entity's name, type and (for
 LEI-keyed entities) country, and an account's holder and opened_date, come
 from the first micro-batch that sees them rather than from the whole
-corpus. The datagen gives each entity one name and country, so the
-difference is limited to opened_date (first date the stream saw).
+corpus. The datagen gives each entity (world entities and the screening
+track's external accounts alike) one name and country, so the difference is
+limited to opened_date (first date the stream saw).
 """
 
 from __future__ import annotations

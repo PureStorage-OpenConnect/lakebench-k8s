@@ -211,8 +211,6 @@ struct TypRow {
     // per-file sort so the row's bronze UETR can be reproduced in the
     // manifest without needing the sorted position.
     uid: u64,
-    // Creditor name as typed, for a planted screening row (None otherwise).
-    bene_name: Option<String>,
 }
 
 fn encode_parquet(batch: &arrow::record_batch::RecordBatch, cap_hint: usize) -> Vec<u8> {
@@ -533,7 +531,6 @@ fn pacs008_main() {
                 amount,
                 ccy,
                 uid,
-                bene_name: None,
             });
             inst_uids.entry(inst.id.clone()).or_default().push(uid);
         }
@@ -640,7 +637,17 @@ fn pacs008_main() {
     // and uid. Originators are activity-weighted customers outside any
     // dormancy window; amounts come from a per-row stream keyed by the row's
     // uid, drawn the way a base row's amount is.
-    let (planted, decoy_rows) = datagen_rs::screening::plant(
+    // Screening payers are kept apart from behavioural typology participants,
+    // so no planted typology account gains an extra send.
+    let mut in_typology = vec![false; pop + 1];
+    for inst in &instances {
+        for &p in &inst.participants {
+            if (p as usize) <= pop {
+                in_typology[p as usize] = true;
+            }
+        }
+    }
+    let (planted, negative_rows) = datagen_rs::screening::plant(
         &screening,
         seed,
         &gcal,
@@ -649,7 +656,7 @@ fn pacs008_main() {
         |rng: &mut Rng| {
             for _ in 0..64 {
                 let o = sample_orig(&cum, total_w, pop, rng);
-                if is_customer(o, seed) {
+                if is_customer(o, seed) && !in_typology[o as usize] {
                     return Some(o);
                 }
             }
@@ -680,7 +687,6 @@ fn pacs008_main() {
                 amount: screen_amount(uid, r.orig),
                 ccy: w.ccy[r.orig as usize],
                 uid,
-                bene_name: Some(r.bene_name.clone()),
             });
             inst_uids.entry(pl.inst.id.clone()).or_default().push(uid);
             n_screen_rows += 1;
@@ -688,11 +694,12 @@ fn pacs008_main() {
         screen_instances.push(pl.inst.clone());
         screen_extra.insert(pl.inst.id.clone(), pl.extra.clone());
     }
-    // Decoys: ordinary negatives, never in the manifest. The decoy's external
-    // id seeds its uids, so they differ from every planted row's.
-    let mut decoy_idx: HashMap<u64, usize> = HashMap::new();
-    for r in &decoy_rows {
-        let k = decoy_idx.entry(r.bene).or_insert(0);
+    // Decoy and background rows: ordinary negatives, never in the manifest.
+    // The account's external id seeds its uids, so they differ from every
+    // planted row's.
+    let mut neg_idx: HashMap<u64, usize> = HashMap::new();
+    for r in &negative_rows {
+        let k = neg_idx.entry(r.bene).or_insert(0);
         let uid = datagen_rs::screening::screen_uid(!(r.bene as i64), *k);
         *k += 1;
         typ_by_file[file_of(r.ts_us) as usize].push(TypRow {
@@ -702,15 +709,15 @@ fn pacs008_main() {
             amount: screen_amount(uid, r.orig),
             ccy: w.ccy[r.orig as usize],
             uid,
-            bene_name: None,
         });
         n_screen_rows += 1;
     }
     // screen_rows is on top of total_txns (tests/cycles.rs parses it).
     eprintln!(
-        "screening: listed_parties={} decoys={} planted_instances={} screen_rows={}",
+        "screening: listed_parties={} decoys={} background_payees={} planted_instances={} screen_rows={}",
         screening.parties.len(),
         screening.decoys.len(),
+        screening.background.len(),
         screen_instances.len(),
         n_screen_rows
     );
@@ -988,13 +995,7 @@ fn pacs008_main() {
                 uid_pre.push(uid);
             }
         }
-        // Planted screening rows carry the creditor name as typed, by
-        // pre-sort position; a file without one builds no name column.
-        let mut named: Vec<(usize, &str)> = Vec::new();
         for r in typ {
-            if let Some(nm) = r.bene_name.as_deref() {
-                named.push((orig.len(), nm));
-            }
             orig.push(r.orig);
             bene.push(r.bene);
             // Already shaped (business day + intraday) at scheduling time.
@@ -1020,20 +1021,6 @@ fn pacs008_main() {
         // Permute the pre-assigned uid[] with the same sort so each row's
         // UETR derivation lines up with its position in the batch.
         let uid: Vec<u64> = idx.iter().map(|&i| uid_pre[i]).collect();
-        let bene_name = if named.is_empty() {
-            None
-        } else {
-            let mut pre: Vec<Option<&str>> = vec![None; orig.len()];
-            for &(i, nm) in &named {
-                pre[i] = Some(nm);
-            }
-            Some(
-                idx.iter()
-                    .map(|&i| pre[i].map(str::to_string))
-                    .collect::<Vec<_>>(),
-            )
-        };
-
         let tb = std::time::Instant::now();
         let batch = build_batch(
             &w,
@@ -1044,7 +1031,6 @@ fn pacs008_main() {
                 amount: amt2,
                 ccy: ccy2,
                 uid,
-                bene_name,
             },
         );
         build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);

@@ -186,7 +186,12 @@ CONTINUOUS_RULES = (
 )
 # Rules deliberately not run in continuous mode, recorded as 'skipped' so
 # their typologies render "not run" rather than a false 0% recall.
+# W5/W6 (watchlist screening) are not yet verified per tick: the rescreen
+# is dated at list publication, and continuous per-rule recall ships as
+# "not scored" in v1.6 anyway.
 CONTINUOUS_SKIPPED_RULES = (
+    "W5_sanctions_match",
+    "W6_pep_counterparty",
     "W1_connected_components",
     "W7_cross_border_high_risk",
     "W8_dormant_reactivation",

@@ -1313,8 +1313,12 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         "coalesce(related_txn_ids, cast(array() as array<string>)), x -> xxhash64(x)))), "
         f"1, {TXN_SKETCH_K})"
     )
+    # Screening exposures (sanctions_match, pep_match) are list hits, not
+    # suspicious behaviour: a W1 or W7 alert that happens to cite a PEP
+    # payment must not become a true hit that escalates. W5/W6 are scored
+    # against them in score_financial instead.
     planted = (
-        manifest.where(col("typology_type") != lit("random"))
+        manifest.where(~col("typology_type").isin("random", "sanctions_match", "pep_match"))
         .select(explode(col("participant_uetrs")).alias("uetr"))
         .distinct()
     )

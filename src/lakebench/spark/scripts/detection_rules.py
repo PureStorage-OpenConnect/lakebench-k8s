@@ -2272,7 +2272,7 @@ def _screen_alerts(hits: DataFrame, rule_id: str, alert_type: str, run_id: str, 
         expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
         col("txn_timestamp").alias("alert_ts"),
         score.cast("double").alias("alert_score"),
-        lit(priority).alias("priority"),
+        (lit(priority) if isinstance(priority, str) else priority).alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
         lit(alert_type).alias("alert_type"),
@@ -2391,10 +2391,12 @@ def w5_sanctions_match(
     return _customers_only(txn_alerts.unionByName(rescreen), customers)
 
 
-#: W6 alerts only on PEP payments at or above this USD equivalent: small PEP
-#: payments are administrative, and PEP exposure feeds enhanced due
-#: diligence rather than blocking. A rule parameter, not a label: every
-#: payment to a listed PEP is a planted target, so the floor costs recall.
+#: W6 screens every payment; this USD equivalent splits triage priority
+#: (MED at or above, LOW below). Small PEP payments are mostly
+#: administrative, and PEP exposure feeds enhanced due diligence rather than
+#: blocking, so the line orders the queue instead of dropping hits: an
+#: amount floor would make W6 recall a property of the amount distribution
+#: rather than of the screen.
 PEP_MIN_USD = 10_000.0
 
 
@@ -2403,22 +2405,19 @@ def w6_pep_counterparty(
     silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
 ) -> DataFrame:
-    """PEP screen: payments of PEP_MIN_USD or more to a party on the corpus
-    PEP list, by the same fuzzy screen as W5 (transaction screen only).
+    """PEP screen: payments to a party on the corpus PEP list, by the same
+    fuzzy screen as W5 (transaction screen only).
 
     Customer-scoped: the subject is the originator, and only a customer
-    originator alerts. Priority MED: PEP counterparties are not intrinsically
-    suspicious. The USD amount falls back to txn_amount when the FX
-    enrichment is missing, so a foreign-currency PEP payment is not dropped
-    by a NULL comparison.
+    originator alerts. PEP counterparties are not intrinsically suspicious,
+    so priority is MED at PEP_MIN_USD or more and LOW below. The USD amount
+    falls back to txn_amount when the FX enrichment is missing.
     """
     spark = silver_txns.sparkSession
     silver_entities = _entities_frame(spark, silver_entities, "W6")
     customers = _customer_ids(spark, silver_entities, "W6")
     wl = _load_watchlist(spark, "pep", "W6")
-    txns = _screen_txns(silver_txns, silver_entities).filter(
-        expr(f"coalesce(txn_amount_usd, txn_amount) >= {PEP_MIN_USD}")
-    )
+    txns = _screen_txns(silver_txns, silver_entities)
     matches = screen_counterparties(txns, wl)
     from pyspark.sql.functions import broadcast
 
@@ -2431,7 +2430,9 @@ def w6_pep_counterparty(
         "pep_counterparty",
         run_id,
         lit(0.3) + lit(0.4) * col("similarity"),
-        "MED",
+        when(expr(f"coalesce(txn_amount_usd, txn_amount) >= {PEP_MIN_USD}"), lit("MED")).otherwise(
+            lit("LOW")
+        ),
     )
     return _customers_only(alerts, customers)
 
@@ -2552,8 +2553,10 @@ def w7_cross_border_high_risk(
         lit("cross_border_high_risk").alias("alert_type"),
         lit(run_id).alias("run_id"),
         expr(
-            "concat('Cross-border transaction to ', bene_country, ' (FATF ', risk_tier, ' list) "
-            "for ', cast(amount as string), ' on ', cast(txn_timestamp as string))"
+            "concat('Cross-border transaction to ', bene_country, ' (', "
+            "case when risk_tier = 'synthetic_corridor' then 'synthetic high-risk corridor' "
+            "else concat('FATF ', risk_tier, ' list') end, ') for ', cast(amount as string), "
+            "' on ', cast(txn_timestamp as string))"
         ).alias("narrative"),
         map_from_arrays(
             array(lit("rule"), lit("country"), lit("risk_tier")),

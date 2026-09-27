@@ -42,7 +42,7 @@ The rule set:
 | W7_cross_border_high_risk | corridor_high_risk | cross-border payments into a FATF black / grey list country or one of the generator's synthetic high-risk corridor countries |
 | W8_dormant_reactivation | dormant_reactivation | inactive account, sudden large flow |
 | W5_sanctions_match | sanctions_match | fuzzy screen of payment beneficiaries against the corpus's dated sanctions list, at transaction time and as a rescreen when a list version is published |
-| W6_pep_counterparty | pep_match | the same fuzzy screen against the corpus's PEP list, payments of $10,000 or more |
+| W6_pep_counterparty | pep_match | the same fuzzy screen against the corpus's PEP list; MED priority at $10,000 or more, LOW below |
 
 ### Sanctions and PEP screening track
 
@@ -55,30 +55,48 @@ external counterparties, never the bank's customers and never in the party
 master.
 
 About 70% of listed parties are paid by one or two customers, one to three
-payments each. The creditor name on a planted payment is the list spelling,
-an alias, a token-order swap, a one-letter typo, a different romanisation or
-(companies) the legal suffix dropped, so an exact join on the list name
-misses most of them. Version-2 parties are paid only before their listing,
-so only the rescreen finds them. Namesake decoys (the same given and family
-name with another middle name, another line of business, or the same name in
-another country) are paid too and are not in the manifest, so a screen that
-ignores the country or matches too loosely pays for it in precision.
+payments each. Each payer relationship pays one external account whose
+creditor name is fixed: the list spelling, an alias, a token-order swap, a
+one-letter typo, a different romanisation or (companies) the legal suffix
+dropped, so an exact join on the list name misses most of them. About a
+fifth of those accounts are in another country than the list entry, so a
+screen that requires the country to match pays for it in recall.
+Version-2 parties are paid only before their listing, so only the rescreen
+finds them. Namesake decoys (another middle name or line of business, a
+one-letter-different name in the same country, or the same name in another
+country) are paid too and are not in the manifest, so a loose screen pays
+for it in precision. A background of ordinary external payees, twenty per
+list entry, with the same name shapes, one to three payments each and no
+party or account master record, keeps the planted payments from standing
+out as "rare external payees": on a seed-43 calibration corpus that
+heuristic reaches 3% precision.
 
 Ground truth is the manifest: one `sanctions_match` or `pep_match` instance
 per (customer, listed party), its UETRs the customer's payments to that
 party, with `list_id`, `list_version`, `detectable_by` (`transaction_screen`
-or `rescreen`) and the per-payment name variants in `injection_parameters`.
-Recall and precision are computed exactly as for the behavioural rules.
+or `rescreen`), `name_variant` and `account_country` (`listed` or `other`)
+in `injection_parameters`. Recall and precision are computed exactly as for
+the behavioural rules. Transaction-level precision is weighted by payments,
+so one heavily paid world entity whose name happens to sit near a list
+entry (world persons carry a middle initial, list entries a full middle
+name) can dominate it; read it beside the alert count.
 
 The screen is bounded on purpose: Soundex token-pair blocking, Levenshtein
 similarity of at least 0.85 over normalized, token-sorted names
 (`SCREEN_SIMILARITY_MIN`, self-chosen), and the entry's country as the only
 secondary identifier. No phonetic keys, no date of birth, no identifier
-matching; this is a benchmark workload, not a screening product. W6's
-$10,000 floor is a rule parameter: every PEP payment is a planted target,
-so the floor shows up as missed recall. The high-risk corridor list W7 uses
-alongside the FATF list (`synthetic_corridors.json`) is synthetic: no
-generator home country is on the June 2026 FATF lists.
+matching; this is a benchmark workload, not a screening product. W6 screens
+every payment and uses $10,000 only to order the queue, so its recall
+measures the screen, not the amount distribution. W5/W6 run in batch;
+continuous mode records them as skipped ("not run").
+
+The high-risk corridor list W7 uses alongside the FATF list
+(`synthetic_corridors.json`) is synthetic and is the same country pool the
+generator draws `corridor_high_risk` participants from: no generator home
+country is on the June 2026 FATF lists. W7's recall on that typology is
+therefore partly by construction (the rule uses the generator's corridor
+list, as a bank uses its own corridor list), and neither its recall nor its
+alert volume is comparable with 1.5.
 
 W9-W16 are workload ids the spec reserves (writeback, reproduce, ingest, the
 ML workloads), which is why the layering-chain rule is W17. W3 and W17 skip
