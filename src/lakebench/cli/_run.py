@@ -2021,6 +2021,11 @@ def run(
         pre_file_count = 0
         post_file_count = 0
         maint_elapsed = 0.0
+        # What each maintenance and compaction call actually did, for the
+        # experiment block's effective maintenance. [] when none ran.
+        maint_outcomes: list = []
+        if collector.current_run is not None:
+            collector.current_run.maintenance_outcomes = maint_outcomes
 
         do_maintenance = (
             not skip_benchmark
@@ -2138,6 +2143,7 @@ def run(
                     timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
                     live_streams=bool(live_apps),
                     budget=maint_budget,
+                    outcomes=maint_outcomes,
                 )
                 _run_iceberg_compaction(
                     cfg,
@@ -2147,6 +2153,7 @@ def run(
                     live_streams=bool(live_apps),
                     timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
                     budget=maint_budget,
+                    outcomes=maint_outcomes,
                 )
                 maint_stop_reason = maint_budget.stopped
                 if maint_budget.stopped:
@@ -2173,6 +2180,7 @@ def run(
                     pass
 
             except Exception as e:
+                maint_outcomes.append({"kind": "maintenance", "error": str(e)})
                 print_warning(f"Maintenance failed (non-fatal): {e}")
 
             # 5. Wait for storage to settle before the post round (LB-150).

@@ -929,6 +929,24 @@ def _outcome_details(out: dict, total: int, budget: MaintenanceBudget | None) ->
     }
 
 
+def _note_outcome(outcomes: list | None, kind: str, **details) -> None:
+    """Record what a maintenance or compaction call actually did, for the
+    experiment block's effective maintenance (metrics/maintenance_policy)."""
+    if outcomes is not None:
+        outcomes.append({"kind": kind, **details})
+
+
+def _statement_outcome(out: dict, total: int, engine: str) -> dict:
+    return {
+        "engine": engine,
+        "total": total,
+        "succeeded": out["succeeded"],
+        "failed": len(out["failures"]),
+        "timed_out": len(out["timed_out"]),
+        "not_attempted": len(out["not_attempted"]),
+    }
+
+
 def _run_iceberg_maintenance(
     cfg,
     k8s,
@@ -939,6 +957,7 @@ def _run_iceberg_maintenance(
     live_streams: bool = False,
     budget: MaintenanceBudget | None = None,
     start_at: int = 0,
+    outcomes: list | None = None,
 ) -> int | None:
     """Run table maintenance (format-aware).
 
@@ -965,10 +984,12 @@ def _run_iceberg_maintenance(
         console.print(
             f"  [dim]{table_format.title()} maintenance skipped (DuckDB cannot run maintenance)[/dim]"
         )
+        _note_outcome(outcomes, "expire", skipped="DuckDB cannot run maintenance")
         return None
 
     if table_format == "delta" and engine_type == "spark-thrift":
         console.print("  [dim]Delta maintenance skipped (VACUUM OOMs Spark Thrift at 4Gi)[/dim]")
+        _note_outcome(outcomes, "expire", skipped="Delta VACUUM is skipped on Spark Thrift")
         return None
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
@@ -976,6 +997,7 @@ def _run_iceberg_maintenance(
         console.print(
             f"  [dim]{table_format.title()} maintenance skipped (no capable engine pod found)[/dim]"
         )
+        _note_outcome(outcomes, "expire", skipped="no capable engine pod found")
         return None
 
     tables = cfg.architecture.tables
@@ -1049,6 +1071,12 @@ def _run_iceberg_maintenance(
         budget=budget,
     )
     elapsed = _time.monotonic() - started
+    _note_outcome(
+        outcomes,
+        "expire",
+        retention=retention_threshold,
+        **_statement_outcome(out, len(plan), engine),
+    )
     _print_outcome(
         console,
         f"{table_format.title()} maintenance ({engine})",
@@ -1084,6 +1112,7 @@ def _run_iceberg_compaction(
     timeout: int = 30,
     budget: MaintenanceBudget | None = None,
     start_at: int = 0,
+    outcomes: list | None = None,
 ) -> int | None:
     """Run table compaction (format-aware).
 
@@ -1111,6 +1140,7 @@ def _run_iceberg_compaction(
 
     if engine_type == "duckdb":
         console.print(f"  [dim]{table_format.title()} compaction skipped (DuckDB read-only)[/dim]")
+        _note_outcome(outcomes, "compaction", skipped="DuckDB cannot run compaction")
         return None
 
     # Delta OPTIMIZE rewrites the entire table in a single pass.  Both Trino
@@ -1122,6 +1152,7 @@ def _run_iceberg_compaction(
     # Delta OPTIMIZE never runs in either path.
     if table_format == "delta" and engine_type in ("trino", "spark-thrift"):
         console.print("  [dim]Delta compaction skipped (OPTIMIZE not run pre-benchmark)[/dim]")
+        _note_outcome(outcomes, "compaction", skipped="Delta OPTIMIZE is never run")
         return None
 
     engine, pod_name, catalog = find_maintenance_engine(cfg, namespace)
@@ -1129,6 +1160,7 @@ def _run_iceberg_compaction(
         console.print(
             f"  [dim]{table_format.title()} compaction skipped (no capable engine pod found)[/dim]"
         )
+        _note_outcome(outcomes, "compaction", skipped="no capable engine pod found")
         return None
 
     tables = cfg.architecture.tables
@@ -1169,6 +1201,7 @@ def _run_iceberg_compaction(
         budget=budget,
     )
     elapsed = _time.monotonic() - started
+    _note_outcome(outcomes, "compaction", **_statement_outcome(out, len(plan), engine))
     _print_outcome(
         console,
         f"{table_format.title()} compaction ({engine}) on {len(table_names)} tables",
@@ -2064,6 +2097,11 @@ def _run_sustained(
         # the table after the one that timed out (see _next_start).
         maintenance_start = 0
         compaction_start = 0
+        # What each maintenance and compaction round actually did (the
+        # experiment block's effective maintenance). [] = the loop ran none.
+        maintenance_outcomes: list = []
+        if collector.current_run is not None:
+            collector.current_run.maintenance_outcomes = maintenance_outcomes
         # A timed-out maintenance statement may still be running; compaction
         # waits this long (seconds into the run) before touching the tables.
         compaction_hold_until = 0.0
@@ -2157,12 +2195,14 @@ def _run_sustained(
                             live_streams=True,
                             budget=maint_budget,
                             start_at=maintenance_start,
+                            outcomes=maintenance_outcomes,
                         )
                         if resume is not None:
                             maintenance_start = resume
                         if "timed out" in maint_budget.stopped:
                             compaction_hold_until = (time.time() - start) + bounds[0]
                 except Exception as e:  # noqa: BLE001
+                    _note_outcome(maintenance_outcomes, "expire", error=str(e))
                     logger.warning("maintenance round failed: %s", e)
                     console.print(f"  [yellow]Maintenance round failed: {e}[/yellow]")
                     _journal_safe(
@@ -2199,6 +2239,7 @@ def _run_sustained(
                                 bounds[1], label="continuous compaction round"
                             ),
                             start_at=compaction_start,
+                            outcomes=maintenance_outcomes,
                         )
                         if resume is not None:
                             compaction_start = resume

@@ -432,6 +432,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         pre_benchmark_maintenance=mcfg.get("pre_benchmark_maintenance"),
         compaction_enabled=mcfg.get("compaction_enabled"),
         stopped=getattr(pb, "maintenance_stopped", False) if mode == "batch" else False,
+        outcomes=getattr(metrics, "maintenance_outcomes", None),
     )
     return {
         "schema": EXPERIMENT_SCHEMA,

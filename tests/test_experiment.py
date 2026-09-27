@@ -316,7 +316,42 @@ class TestEffectiveMaintenance:
         e = effective_maintenance(
             MAINTENANCE_POLICY_ID, table_format=fmt, query_engine=engine, mode=mode
         )
-        assert (e["expire"], e["compaction"]) == (expire, compaction)
+        on = {True: "on", False: "off"}
+        assert (e["expire"], e["compaction"]) == (on[expire], on[compaction])
+
+    def test_recorded_outcomes_decide_what_ran(self):
+        """Effective means what ran: a policy that asked for maintenance whose
+        statements failed is not stamped as having had it."""
+
+        def eff(outcomes, **kw):
+            return effective_maintenance(
+                MAINTENANCE_POLICY_ID,
+                table_format=kw.get("fmt", "iceberg"),
+                query_engine="trino",
+                mode="batch",
+                outcomes=outcomes,
+            )
+
+        ok = {"kind": "expire", "total": 4, "succeeded": 4}
+        comp = {"kind": "compaction", "total": 2, "succeeded": 2}
+        assert eff([ok, comp])["id"].endswith("expire=on,compaction=on")
+        failed = eff([{**ok, "succeeded": 0}, comp])
+        assert "expire=off" in failed["id"] and "0 of 4" in " ".join(failed["reasons"])
+        assert "expire=partial" in eff([{**ok, "succeeded": 3}, comp])["id"]
+        # Nothing ran at all (pre_benchmark_maintenance off, --skip-benchmark).
+        assert eff([])["id"].endswith("expire=off,compaction=off")
+        # A crash in the maintenance phase is recorded, not assumed away.
+        crashed = eff([{"kind": "maintenance", "error": "boom"}])
+        assert "expire=off" in crashed["id"] and any("boom" in r for r in crashed["reasons"])
+        # Outcomes never turn a kind up past the rules (Delta OPTIMIZE).
+        assert "compaction=off" in eff([ok, comp], fmt="delta")["id"]
+        assert eff(None)["basis"].startswith("policy rules")
+
+    def test_run_outcomes_reach_the_experiment_block(self):
+        run = _metrics(_cfg())
+        run.maintenance_outcomes = [{"kind": "expire", "total": 2, "succeeded": 0}]
+        e = run.to_dict()["experiment"]["effective_maintenance"]
+        assert "expire=off" in e["id"] and e["basis"] == "recorded outcomes"
 
     def test_skip_flag_and_stop_show_in_the_id(self):
         skipped = effective_maintenance(

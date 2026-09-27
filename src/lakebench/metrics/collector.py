@@ -314,6 +314,12 @@ class PipelineMetrics:
     # words printed at run start. None: not recorded.
     autosize_cuts: list[str] | None = None
 
+    # What the run's table-maintenance calls actually did (cli/_sustained
+    # _note_outcome): one dict per call with kind (expire, compaction),
+    # statement counts or a skip/error reason. None: not recorded (a record
+    # from before the field, or a path that never reached maintenance).
+    maintenance_outcomes: list[dict[str, Any]] | None = None
+
     # The experiment block (metrics/experiment.py). None on a live run: built
     # when the record is written. A loaded record keeps what it was written
     # with; a record from before the block has none and never gets one.
@@ -349,6 +355,8 @@ class PipelineMetrics:
             d["provenance"] = self.provenance
         if self.autosize_cuts is not None:
             d["autosize_cuts"] = list(self.autosize_cuts)
+        if self.maintenance_outcomes is not None:
+            d["maintenance_outcomes"] = list(self.maintenance_outcomes)
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment

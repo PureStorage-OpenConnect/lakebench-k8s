@@ -91,15 +91,26 @@ def effective_maintenance(
     pre_benchmark_maintenance: bool | None = True,
     compaction_enabled: bool | None = True,
     stopped: bool | None = False,
+    outcomes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """The maintenance a run actually got under *policy_id*, which is not
     always what the policy asks for: DuckDB runs none, Delta skips OPTIMIZE
     everywhere and VACUUM on Spark Thrift, continuous Delta has none in
     effect, and a stopped round did not finish.
 
+    *outcomes* is what the run's maintenance calls recorded (one dict per
+    call: ``kind`` expire or compaction, statement counts, or a ``skipped``
+    or ``error`` reason). When given it decides: a kind whose statements all
+    failed, or that never ran, is off, and one where only some succeeded is
+    ``partial``. It can only turn a kind down from what the rules above
+    allow, never up (a continuous Delta VACUUM at 7 d succeeds and still
+    expires nothing inside the window). None (a record without outcomes, or
+    a planned run) falls back to the rules alone.
+
     Returns ``{"id", "expire", "compaction", "reasons"}``; ``id`` is
-    ``<policy>:expire=<on|off>,compaction=<on|off>[,stopped]``. Two runs with
-    different effective ids measured under different execution conditions.
+    ``<policy>:expire=<on|partial|off>,compaction=<on|partial|off>[,stopped]``.
+    Two runs with different effective ids measured under different execution
+    conditions.
     """
     policy = policy_id or LEGACY_MAINTENANCE_POLICY_ID
     fmt = (table_format or "").lower()
@@ -128,13 +139,40 @@ def effective_maintenance(
     elif continuous and compaction_enabled is False:
         compaction = False
         reasons.append("continuous compaction is disabled")
-    parts = [f"expire={'on' if expire else 'off'}", f"compaction={'on' if compaction else 'off'}"]
+    states = {"expire": "on" if expire else "off", "compaction": "on" if compaction else "off"}
+    if outcomes is not None:
+        for o in outcomes:
+            if o.get("error"):
+                reasons.append(f"{o.get('kind', 'maintenance')} call failed: {o['error']}")
+        for kind in ("expire", "compaction"):
+            if states[kind] == "off":
+                continue
+            ran = [o for o in outcomes if o.get("kind") == kind and o.get("total")]
+            total = sum(int(o.get("total") or 0) for o in ran)
+            ok = sum(int(o.get("succeeded") or 0) for o in ran)
+            for o in outcomes:
+                if o.get("kind") == kind and o.get("skipped"):
+                    reasons.append(f"{kind} skipped: {o['skipped']}")
+            if total == 0 or ok == 0:
+                states[kind] = "off"
+                reasons.append(
+                    f"{kind}: no statement ran" if total == 0 else f"{kind}: 0 of {total} succeeded"
+                )
+            elif ok < total:
+                states[kind] = "partial"
+                reasons.append(f"{kind}: {ok} of {total} statements succeeded")
+    expire = states["expire"] != "off"
+    compaction = states["compaction"] != "off"
+    parts = [f"expire={states['expire']}", f"compaction={states['compaction']}"]
     if stopped and (expire or compaction):
         parts.append("stopped")
         reasons.append("pre-benchmark maintenance stopped on its budget")
     return {
         "id": f"{policy}:" + ",".join(parts),
-        "expire": expire,
-        "compaction": compaction,
+        "expire": states["expire"],
+        "compaction": states["compaction"],
+        "basis": "recorded outcomes"
+        if outcomes is not None
+        else "policy rules (no outcomes recorded)",
         "reasons": reasons,
     }
