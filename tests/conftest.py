@@ -213,3 +213,17 @@ def stub_experiment(
         },
         "results": results,
     }
+
+
+@pytest.fixture(autouse=True)
+def _continuous_short_window_check_off(request, monkeypatch):
+    """Tests that drive _run_sustained with short windows exercise other
+    paths; the short-window refusal (cli/_sustained.short_window_problem)
+    is tested in tests/test_continuous_window.py, where it stays on."""
+    if request.module.__name__.endswith("test_continuous_window"):
+        return
+    try:
+        from lakebench.cli import _sustained
+    except Exception:  # noqa: BLE001
+        return
+    monkeypatch.setattr(_sustained, "short_window_problem", lambda cfg, run_duration: None)
