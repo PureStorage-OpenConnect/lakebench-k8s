@@ -1330,6 +1330,33 @@ def destroy_all(
                     drop_sql = build_drop_table_sql(maint_engine, table)
                     if drop_sql:
                         plan.append((table, drop_sql))
+                # Polaris via Trino: skip the drops. Trino's Iceberg REST
+                # connector sends every DROP TABLE with purgeRequested=true,
+                # and Polaris refuses purge (403, DROP_WITH_PURGE_ENABLED is
+                # off), which Trino reports only as "Failed to drop table".
+                # Enabling purge is not the fix: it would have Polaris delete
+                # every file the table references, and FAML bronze is
+                # registered by add_files over the raw datagen corpus, which
+                # may sit in a bucket the bucket step keeps (adopted,
+                # foreign, --keep-buckets or bucket cleanup off). The drop
+                # is also unnecessary: the catalog's only state is its
+                # database in this deployment's PostgreSQL, and the bucket
+                # step handles the files under its own ownership checks.
+                # Only when destroy deletes the namespace: that is what
+                # removes the PostgreSQL PVC (the postgres step's label
+                # selector does not match the StatefulSet's claim labels).
+                # With create_namespace=false the PVC, and so the catalog
+                # entries, would survive into the next deploy, so the drops
+                # are still attempted and a refusal still fails the step.
+                polaris_skip = (
+                    engine.config.architecture.catalog.type.value == "polaris"
+                    and maint_engine == "trino"
+                    and engine.config.platform.kubernetes.create_namespace is True
+                    and bool(plan)
+                )
+                if polaris_skip:
+                    logger.info("Polaris via Trino: skipping %d DROP TABLE statement(s)", len(plan))
+                    plan = []
 
                 from lakebench.modules.table_formats.iceberg.maintenance import (
                     ExecSqlTimeout,
@@ -1384,6 +1411,14 @@ def destroy_all(
                     table_msg = (
                         f"{table_format.title()} table cleanup had {len(failed_sql)} failed "
                         f"statement(s) (via {maint_engine}): " + "; ".join(failed_sql[:5])
+                    )
+                elif polaris_skip:
+                    table_status = DeploymentStatus.SUCCESS
+                    table_msg = (
+                        f"{table_format.title()} tables not dropped: Trino can only drop "
+                        "with purge, which Polaris refuses; the Polaris catalog database "
+                        "goes with the namespace, deleted below, and the bucket step "
+                        "handles the files"
                     )
                 else:
                     table_status = DeploymentStatus.SUCCESS
