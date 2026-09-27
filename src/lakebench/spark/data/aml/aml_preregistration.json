@@ -410,7 +410,7 @@
       "version": "3.6.0",
       "date": "2026-09-26",
       "part": "D5",
-      "approved": "PROPOSED, pending an AML-GOALS section 9 entry (lane D5, after the adversarial review of D5 power). OPEN DECISION for that entry: the _doc and corpora.seed_rule say a gated-value change after a gate run moves the evaluation seed; gate runs have been taken on calibration seed 43 (#39, #44). Either move the evaluation seed to the next seed_guard-valid value (it has never been generated) or record an explicit owner waiver.",
+      "approved": "AML-GOALS #52 (owner decision 2026-09-27): approved as drafted. Owner waiver: the evaluation seed 50000043 and robustness seed 90000042 stay; the D5 checks were drafted before any 3.6.0 result was read and neither seed has been generated or looked at",
       "changes": [
         "shortcut_model.also_reference_model: single and pair shortcuts also fit with reference_model; shortcut AP is the larger AP (the gated leakage shortcuts are never looser than 3.5.2)",
         "leakage.shortcut_models: feature_pair_depth2 renamed feature_pair (tree or reference_model), nuisance_only added",
