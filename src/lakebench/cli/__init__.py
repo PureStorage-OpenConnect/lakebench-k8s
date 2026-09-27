@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 import typer
 from rich.panel import Panel
@@ -47,6 +47,10 @@ from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
 from lakebench.k8s import K8sConnectionError, PlatformType, SecurityVerifier, get_k8s_client
 from lakebench.s3 import test_s3_connectivity
+
+if TYPE_CHECKING:
+    from lakebench.config.schema import LakebenchConfig
+    from lakebench.modules.pipeline_engines.spark.job import PeakRequirement
 
 logger = logging.getLogger(__name__)
 
@@ -511,6 +515,86 @@ def _write_local_config(output: Path, name: str, scale: float) -> None:
     console.print(f"    [bold]lakebench run {output} --local[/bold]")
 
 
+def can_edit_operator_release(operator_namespace: str) -> bool | None:
+    """Whether these credentials can run the watch-list ``helm upgrade``.
+
+    Helm keeps the release in Secrets and the upgrade patches the operator
+    Deployment, both in the operator namespace. Returns None when the
+    access review itself cannot be made.
+    """
+    try:
+        from kubernetes import client as _kc
+
+        api = _kc.AuthorizationV1Api()
+        for group, resource, verb in (
+            ("", "secrets", "list"),
+            ("", "secrets", "create"),
+            ("", "secrets", "update"),
+            ("apps", "deployments", "patch"),
+        ):
+            review = _kc.V1SelfSubjectAccessReview(
+                spec=_kc.V1SelfSubjectAccessReviewSpec(
+                    resource_attributes=_kc.V1ResourceAttributes(
+                        namespace=operator_namespace, group=group, resource=resource, verb=verb
+                    )
+                )
+            )
+            if not api.create_self_subject_access_review(review).status.allowed:
+                return False
+        return True
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def operator_watch_verdict(
+    namespace: str,
+    watched: list[str],
+    *,
+    namespace_exists: bool | None,
+    can_edit_release: bool | None = None,
+    operator_namespace: str = "spark-operator",
+) -> tuple[str, str, str]:
+    """Validate's verdict for a namespace missing from ``spark.jobNamespaces``.
+
+    Returns ``(level, message, hint)``. ``deploy`` adds the namespace under
+    the ``lakebench-cluster-lock`` lease whatever ``operator.install`` says,
+    and ``run`` re-adds it before submitting jobs, so a missing entry is not
+    itself a blocker: before a deploy (namespace absent) it is expected, on
+    an existing deployment it is drift worth a warning. It fails only when
+    these credentials cannot make that add (``can_edit_release`` False), in
+    which case deploy would build the stack and then stop at the operator
+    step. The hint never suggests a raw ``helm upgrade``: that bypasses the
+    lease.
+    """
+    from lakebench.modules.pipeline_engines.spark.operator import watch_list_fix_hint
+
+    if can_edit_release is False:
+        return (
+            "fail",
+            f"Cannot add namespace '{namespace}' to the Spark Operator watch list",
+            f"Currently watching: {watched}. deploy and run add it by upgrading "
+            f"the operator's Helm release in '{operator_namespace}', which "
+            "needs list/create/update on secrets and patch on deployments there; these "
+            "credentials lack that, so deploy would stop at the spark-operator "
+            "step after creating the namespace. Ask a cluster admin for that "
+            "access, or to run the deploy.",
+        )
+    if namespace_exists is False:
+        return (
+            "ok",
+            f"Namespace '{namespace}' not yet watched; deploy adds it",
+            f"Currently watching: {watched}. 'lakebench deploy' adds the "
+            "namespace under the lakebench-cluster-lock lease.",
+        )
+    return (
+        "warn",
+        f"Does not watch namespace '{namespace}'",
+        f"Currently watching: {watched}\n"
+        "'lakebench deploy' and 'lakebench run' add it under the cluster "
+        "lease before submitting jobs.\n" + watch_list_fix_hint(),
+    )
+
+
 @app.command(
     help="Validate configuration and test cluster + S3 connectivity. "
     "Equivalent to `lakebench config validate`."
@@ -890,28 +974,32 @@ def validate(
             version_info = f" v{status.version}" if status.version else ""
             _check_ok(f"Ready in '{status.namespace}'{version_info}")
 
-            # Check namespace watching
+            # Check namespace watching. Never a failure: deploy and run
+            # both add the namespace under the cluster lease.
             if status.watching_namespace is False:
-                existing = status.watched_namespaces or []
-                new_list = ",".join(existing + [cfg.get_namespace()])
-                fix_cmd = (
-                    f"helm upgrade {operator.HELM_RELEASE_NAME} "
-                    f"{operator.HELM_CHART_NAME} "
-                    f"-n {spark_op_cfg.namespace} --reuse-values "
-                    f"--set 'spark.jobNamespaces={{{new_list}}}'"
+                ns_now = cfg.get_namespace()
+                try:
+                    from lakebench.k8s import get_k8s_client as _gkc
+
+                    ns_exists: bool | None = _gkc(
+                        context=cfg.platform.kubernetes.context, namespace=ns_now
+                    ).namespace_exists(ns_now)
+                except Exception:
+                    ns_exists = None
+                op_ns = status.namespace or spark_op_cfg.namespace
+                level, msg, hint = operator_watch_verdict(
+                    ns_now,
+                    status.watched_namespaces or [],
+                    namespace_exists=ns_exists,
+                    can_edit_release=can_edit_operator_release(op_ns),
+                    operator_namespace=op_ns,
                 )
-                if spark_op_cfg.install:
-                    _check_warn(
-                        f"Does not watch namespace '{cfg.get_namespace()}'",
-                        hint=f"Currently watching: {existing}\n"
-                        f"Will be added automatically during deploy (install: true)",
-                    )
+                if level == "ok":
+                    _check_ok(msg, hint=hint)
+                elif level == "fail":
+                    _check_fail(msg, hint=hint)
                 else:
-                    _check_fail(
-                        f"Does not watch namespace '{cfg.get_namespace()}'",
-                        hint=f"Currently watching: {existing}\n"
-                        f"SparkApplications will hang. Fix with:\n  {fix_cmd}",
-                    )
+                    _check_warn(msg, hint=hint)
             elif status.watching_namespace is None:
                 _check_ok(
                     "Namespace watching unverified (helm values unavailable)",
@@ -931,16 +1019,11 @@ def validate(
                     hint="Will be auto-installed during deploy (install: true)",
                 )
             else:
-                ns = cfg.get_namespace()
                 _check_fail(
                     "Not installed",
-                    hint="Option 1: Set platform.compute.spark.operator.install: true\n"
-                    "Option 2: Install manually:\n"
-                    f"  helm repo add spark-operator https://kubeflow.github.io/spark-operator\n"
-                    f"  helm install spark-operator spark-operator/spark-operator \\\n"
-                    f"    --namespace spark-operator --create-namespace \\\n"
-                    f"    --set 'spark.jobNamespaces={{{ns}}}' \\\n"
-                    f"    --set webhook.enable=true",
+                    hint="Install it once per cluster (takes the cluster lock):\n"
+                    "  lakebench admin install-spark-operator\n"
+                    "or set platform.compute.spark.operator.install: true",
                 )
     except Exception as e:
         _check_warn(f"Could not check status: {e}")
@@ -1303,6 +1386,30 @@ def stop(
     _journal_safe(j.end_command, success=True)
 
 
+def info_peak_request(
+    cfg: LakebenchConfig, scale: float, sustained: bool
+) -> tuple[PeakRequirement, int, int, str]:
+    """Peak requested resources for ``info``: ``(peak, co_cores, co_gb, label)``.
+
+    ``peak`` comes from ``compute_peak_requirements()``, the single source
+    of truth ``run``'s capacity preflight also uses; the co-resident
+    request (query engine, catalog, Postgres, continuous datagen) comes
+    from the same preflight helper, so ``info`` and ``run`` cannot
+    disagree about how big a cluster the config needs. The caller applies
+    ``resolve_auto_sizing`` first, as ``run`` does. These are requested
+    resources, not measured utilisation.
+    """
+    from lakebench.cli._prerequisites import _co_resident_request
+    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+    mode = "sustained" if sustained else "batch"
+    raw_schema = getattr(cfg.architecture.workload, "schema_type", None)
+    schema = getattr(raw_schema, "value", raw_schema)
+    peak = compute_peak_requirements(scale, mode, schema)
+    co_cores, co_gb, co_label = _co_resident_request(cfg, sustained)
+    return peak, co_cores, co_gb, co_label
+
+
 @app.command(hidden=True, deprecated=True)
 def info(
     config_file: Annotated[
@@ -1417,10 +1524,9 @@ def info(
         ),
         ("Query engine", f"{arch.query_engine.type.value}"),
         ("Parallelism", str(workload.datagen.parallelism)),
-        (
-            "Compute tier",
-            f"{guidance.tier_name} (rec: {guidance.recommended_executors} executors, {guidance.recommended_memory})",
-        ),
+        # compute_guidance() is advisory; its executor/memory "rec" disagreed
+        # with what the jobs request, so only the tier name is shown.
+        ("Compute tier", guidance.tier_name),
     ]
 
     if is_sustained:
@@ -1437,6 +1543,26 @@ def info(
         lines += [
             ("Executors", ", ".join(executor_parts)),
         ]
+
+    # Peak requested resources: the single source of truth is
+    # compute_peak_requirements() (the same figure run's capacity
+    # preflight uses), plus the co-resident query engine / catalog pods.
+    peak, co_cores, co_gb, co_label = info_peak_request(cfg, scale, is_sustained)
+    lines += [
+        (
+            "Peak requested",
+            f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory / "
+            f"{peak.scratch_gb} GB scratch",
+        ),
+        (
+            "  of which",
+            f"{peak.cpu_cores} cores / {peak.memory_gb} GB pipeline ({peak.driving_job}), "
+            f"{co_cores} cores / {co_gb} GB {co_label}",
+        ),
+    ]
+    _overrides = (streaming_override_map if is_sustained else override_map).values()
+    if any(v is not None for v in _overrides):
+        lines.append(("", "peak uses profile executor counts; per-job overrides are not included"))
 
     lines += [
         ("S3 endpoint", s3.endpoint or "(not set)"),
@@ -1474,46 +1600,23 @@ def info(
         if cap is None:
             raise ValueError("Could not detect cluster capacity")
         cluster_cores = cap.total_cpu_millicores // 1000
+        cluster_gb = cap.total_memory_bytes // (1024**3)
+        needed_cores = peak.cpu_cores + co_cores
+        needed_gb = peak.memory_gb + co_gb
 
-        # Quick feasibility check using the recommend logic
-        from lakebench.config.scale import full_compute_guidance as _full_guidance
-
-        full_g = _full_guidance(scale)
-
-        # Calculate requirements (simplified version of recommend's logic).
-        # _parse_cpu_millicores tolerates K8s-idiomatic CPU strings so a
-        # future guidance tier expressed in millicores does not crash here.
-        from lakebench.config.autosizer import _parse_cpu_millicores
-
-        spark_cores = full_g.spark.recommended_executors * full_g.spark.recommended_cores
-        datagen_cores = (
-            full_g.datagen.parallelism * _parse_cpu_millicores(full_g.datagen.cpu) // 1000
-        )
-        trino_cores = (
-            _parse_cpu_millicores(full_g.trino.coordinator_cpu) // 1000
-            + full_g.trino.worker_replicas * _parse_cpu_millicores(full_g.trino.worker_cpu) // 1000
-        )
-        if is_sustained:
-            # Sustained: datagen + streaming spark + trino all run concurrently
-            streaming_cores = sum(
-                _scale_executor_count(_profiles[j], scale) * _profiles[j]["executor_cores"]
-                for j in ("bronze-ingest", "silver-stream", "gold-refresh")
-            )
-            peak_cores = datagen_cores + streaming_cores + trino_cores + 4
-        else:
-            # Batch: datagen and spark are sequential (never overlap)
-            peak_cores = max(spark_cores, datagen_cores) + trino_cores + 4
-        needed_cores = int(peak_cores * 1.15)
-
-        if cluster_cores >= needed_cores:
+        if cluster_cores >= needed_cores and cluster_gb >= needed_gb:
             console.print(
-                f"  [green]Cluster OK:[/green] {cluster_cores} cores available, {needed_cores} needed"
+                f"  [green]Cluster OK:[/green] {cluster_cores} cores / {cluster_gb} GB "
+                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
             )
         else:
             console.print(
-                f"  [red]Cluster undersized:[/red] {cluster_cores} cores available, {needed_cores} needed"
+                f"  [red]Cluster undersized:[/red] {cluster_cores} cores / {cluster_gb} GB "
+                f"allocatable; peak request {needed_cores} cores / {needed_gb} GB"
             )
-            console.print("  [dim]Run 'lakebench recommend' to find max feasible scale[/dim]")
+            console.print(
+                "  [dim]Run 'lakebench config recommend' to find max feasible scale[/dim]"
+            )
     except Exception as e:
         logger.debug("Could not check cluster feasibility: %s", e)
 
@@ -2074,6 +2177,13 @@ def recommend(
             help="Pipeline mode: batch (sequential phases) or sustained (continuous: datagen and pipeline run concurrently). Default: batch.",
         ),
     ] = None,
+    schema_type: Annotated[
+        str | None,
+        typer.Option(
+            "--schema",
+            help="Workload schema (customer360 or financial). Default: customer360.",
+        ),
+    ] = None,
 ) -> None:
     """Show cluster sizing guidance for lakebench workloads.
 
@@ -2096,6 +2206,7 @@ def recommend(
         lakebench recommend --scale 100000      # what do I need for 1 PB?
     """
     from lakebench.config.scale import customer360_dimensions, full_compute_guidance
+    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
     from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
 
     # Resolve --extended -> --slow-datagen
@@ -2118,18 +2229,35 @@ def recommend(
         return f"{gb:.0f} GB"
 
     def _streaming_resources(scale: int) -> tuple[int, int]:
-        """Compute total streaming cores and memory for sustained mode."""
-        streaming_jobs = ("bronze-ingest", "silver-stream", "gold-refresh")
-        cores = sum(
-            _scale_executor_count(_JOB_PROFILES[j], scale) * _JOB_PROFILES[j]["executor_cores"]
-            for j in streaming_jobs
+        """Streaming cores and memory requested in sustained mode.
+
+        From compute_peak_requirements(), the single source of truth, so
+        executor memory overhead and drivers are counted (heap alone
+        under-reported the request).
+        """
+        peak = compute_peak_requirements(scale, "sustained", schema_type)
+        return peak.cpu_cores, peak.memory_gb
+
+    def _batch_spark_resources(scale: int, guidance) -> tuple[int, int]:
+        """Batch Spark cores and memory used for sizing: never below the peak request.
+
+        compute_guidance() is advisory and under-reported the request (8
+        cores at scale 1 against 36 requested by silver-build). The floor is
+        compute_peak_requirements(); above the executor cap the jobs request
+        no more, but guidance keeps growing, and it is kept as sizing
+        headroom so the max-scale search stays bounded. The output labels
+        the two figures separately.
+        """
+        peak = compute_peak_requirements(scale, "batch", schema_type)
+        g_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
+        g_mem = guidance.spark.recommended_executors * int(
+            guidance.spark.recommended_memory.rstrip("g")
         )
-        mem_gi = sum(
-            _scale_executor_count(_JOB_PROFILES[j], scale)
-            * int(_JOB_PROFILES[j]["executor_memory"].rstrip("g"))
-            for j in streaming_jobs
-        )
-        return cores, mem_gi
+        return max(peak.cpu_cores, g_cores), max(peak.memory_gb, g_mem)
+
+    def _batch_spark_request(scale: int) -> tuple[int, int]:
+        peak = compute_peak_requirements(scale, "batch", schema_type)
+        return peak.cpu_cores, peak.memory_gb
 
     def compute_cluster_requirements(scale: int) -> dict:
         """Compute minimum cluster requirements for a given scale."""
@@ -2166,10 +2294,7 @@ def recommend(
             peak_cores = datagen_cores + streaming_cores + trino_cores + infra_cores
             peak_mem = datagen_mem_gi + streaming_mem + trino_mem_gi + infra_mem_gi
         else:
-            spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-            spark_mem_gi = guidance.spark.recommended_executors * int(
-                guidance.spark.recommended_memory.rstrip("g")
-            )
+            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
             peak_cores = max(spark_cores, datagen_cores) + trino_cores + infra_cores
             peak_mem = max(spark_mem_gi, datagen_mem_gi) + trino_mem_gi + infra_mem_gi
 
@@ -2195,9 +2320,9 @@ def recommend(
             )
             result["streaming_cores"] = streaming_cores
         else:
-            result["spark_executors"] = guidance.spark.recommended_executors
-            result["spark_cores_per_exec"] = guidance.spark.recommended_cores
-            result["spark_mem_per_exec"] = guidance.spark.recommended_memory
+            result["spark_cores"] = spark_cores
+            result["spark_mem_gi"] = spark_mem_gi
+            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
 
         return result
 
@@ -2224,10 +2349,7 @@ def recommend(
             total_cores = streaming_cores + trino_cores + infra_cores
             total_mem_gi = streaming_mem + trino_mem_gi + infra_mem_gi
         else:
-            spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-            spark_mem_gi = guidance.spark.recommended_executors * int(
-                guidance.spark.recommended_memory.rstrip("g")
-            )
+            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
             total_cores = spark_cores + trino_cores + infra_cores
             total_mem_gi = spark_mem_gi + trino_mem_gi + infra_mem_gi
 
@@ -2252,9 +2374,9 @@ def recommend(
             )
             result["streaming_cores"] = streaming_cores
         else:
-            result["spark_executors"] = guidance.spark.recommended_executors
-            result["spark_cores_per_exec"] = guidance.spark.recommended_cores
-            result["spark_mem_per_exec"] = guidance.spark.recommended_memory
+            result["spark_cores"] = spark_cores
+            result["spark_mem_gi"] = spark_mem_gi
+            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
 
         return result
 
@@ -2289,10 +2411,17 @@ def recommend(
             )
         else:
             workload_line = (
-                f"  Spark:           {reqs['spark_executors']} x "
-                f"{reqs['spark_cores_per_exec']} cores x "
-                f"{reqs['spark_mem_per_exec']}"
+                f"  Spark:           {reqs['spark_req_cores']} cores, "
+                f"{reqs['spark_req_mem_gi']} GB requested at peak"
             )
+            if (reqs["spark_cores"], reqs["spark_mem_gi"]) != (
+                reqs["spark_req_cores"],
+                reqs["spark_req_mem_gi"],
+            ):
+                workload_line += (
+                    f"\n                   sized for {reqs['spark_cores']} cores, "
+                    f"{reqs['spark_mem_gi']} GB (headroom above the executor cap)"
+                )
 
         console.print(
             Panel(

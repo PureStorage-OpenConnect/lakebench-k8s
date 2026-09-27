@@ -136,26 +136,21 @@ helm get values spark-operator -n spark-operator --all -o json | \
 kubectl logs -n spark-operator -l app.kubernetes.io/component=controller --tail=20
 ```
 
-**Fix:** `lakebench validate` detects this automatically. If
-`spark.operator.install: true`, the deploy/run commands auto-add the
-namespace and restart the operator. If `install: false` (the default),
-validate prints the exact fix command:
+**Fix:** re-run `lakebench deploy <config>`. Deploy adds the namespace to
+`spark.jobNamespaces` whatever `spark.operator.install` says, and `lakebench
+run` re-adds it before submitting jobs. Both take the
+`lakebench-cluster-lock` lease first, so a concurrent deploy or destroy of
+another deployment cannot lose its entry. `lakebench validate` reports a
+missing entry as a warning, or as expected before the first deploy.
 
-```bash
-helm upgrade spark-operator spark-operator/spark-operator \
-  -n spark-operator --reuse-values \
-  --set 'spark.jobNamespaces={default,your-namespace}'
-```
+If the lease is held, `lakebench admin status` shows who holds it. If the
+watch list still names namespaces that no longer exist, run
+`lakebench admin repair-operator` (use `--dry-run` first) and then deploy
+again.
 
-After updating, restart the operator controller (it reads jobNamespaces at
-startup only):
-
-```bash
-kubectl rollout restart deployment/spark-operator-controller -n spark-operator
-```
-
-On OpenShift, you may also need to re-patch the deployment to remove
-`fsGroup` and `seccompProfile` after any `helm upgrade`.
+Do not edit `spark.jobNamespaces` with `helm upgrade --reuse-values` by hand.
+That skips the lease, and a list copied from an earlier read silently drops
+any namespace another deployment added in the meantime.
 
 ---
 

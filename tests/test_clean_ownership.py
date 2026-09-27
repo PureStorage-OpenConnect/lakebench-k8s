@@ -139,18 +139,41 @@ def test_unsupported_refuses_when_other_deployment_has_prefix_claim(
     assert s3.empty_bucket.call_count == 0
 
 
+@patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=True)
 @patch("lakebench.k8s.get_k8s_client")
 @patch("kubernetes.client.CustomObjectsApi")
 @patch("kubernetes.client.BatchV1Api")
 @patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[])
 @patch("lakebench.deploy.ownership.verify_bucket_ownership")
 @patch("lakebench.s3.S3Client")
-def test_unsupported_cleans_on_prefix_match(s3_cls, verify, _names, _batch, _crd, _k8s, tmp_path):
+def test_unsupported_cleans_on_prefix_match(
+    s3_cls, verify, _names, _batch, _crd, _k8s, _recorded, tmp_path
+):
     s3 = _s3()
     s3_cls.return_value = s3
     verify.side_effect = lambda _c, b, _n: _unsupported(b)
     _clean(_cfg(tmp_path))
     assert s3.empty_bucket.call_count == 3
+
+
+@patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=False)
+@patch("lakebench.k8s.get_k8s_client")
+@patch("kubernetes.client.CustomObjectsApi")
+@patch("kubernetes.client.BatchV1Api")
+@patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[])
+@patch("lakebench.deploy.ownership.verify_bucket_ownership")
+@patch("lakebench.s3.S3Client")
+def test_unsupported_prefix_match_without_record_is_not_cleaned(
+    s3_cls, verify, _names, _batch, _crd, _k8s, _recorded, tmp_path
+):
+    """Review: clean still wiped a user's pre-existing, name-matching bucket
+    on FlashBlade after destroy had stopped doing so."""
+    s3 = _s3()
+    s3_cls.return_value = s3
+    verify.side_effect = lambda _c, b, _n: _unsupported(b)
+    with pytest.raises(typer.Exit):
+        _clean(_cfg(tmp_path))
+    assert s3.empty_bucket.call_count == 0
 
 
 @patch("lakebench.k8s.get_k8s_client")

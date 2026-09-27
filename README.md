@@ -88,8 +88,15 @@ for the full list.
 Compare two configurations side-by-side:
 
 ```bash
-lakebench compare config-hive.yaml config-polaris.yaml
+lakebench deploy config-hive.yaml && lakebench deploy config-polaris.yaml
+lakebench compare config-hive.yaml config-polaris.yaml --generate
 ```
+
+`compare` runs each config through the pipeline and benchmark in turn, then
+destroys that deployment unless you pass `--keep`. Deploy both configs
+first; `--generate` fills each bronze bucket before its run. The two configs
+need different names and bucket names, or the first destroy empties the
+second run's data.
 
 For all recipes, see [`examples/`](examples/) or run `lakebench init --advanced`
 for the full interactive wizard.
@@ -155,12 +162,14 @@ pod).
   350 cores (44 pods x 8 cores, measured in run-20260925-104703-c02890).
   The request figures come from `compute_peak_requirements()`. See
   [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
-  for the full table. Lakebench fails fast if the cluster is too small.
+  for the full table. `lakebench run` fails fast if the cluster is too small.
 - S3-compatible object storage. FlashBlade and Garage are validated; others are
   expected to work. Run `lakebench config storage` to check yours. See
   [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md).
-- [Kubeflow Spark Operator 2.5.1+](https://github.com/kubeflow/spark-operator)
-  (or set `spark.operator.install: true`)
+- [Kubeflow Spark Operator 2.5.1+](https://github.com/kubeflow/spark-operator),
+  installed once per cluster with `lakebench admin install-spark-operator`.
+  `deploy` adds its namespace to the operator's watch list itself, under the
+  cluster lock; do not edit `spark.jobNamespaces` by hand.
 - [Stackable Hive Operator](https://docs.stackable.tech/home/stable/hive/) for
   Hive recipes (not needed for Polaris)
 
@@ -171,15 +180,18 @@ pod).
 | `init` | Generate a starter config file |
 | `config validate` | Check config and cluster connectivity |
 | `config storage` | Check the S3 backend supports what lakebench needs |
-| `info` | Show deployment configuration summary |
+| `config show` | Show the resolved configuration and its peak requested resources |
 | `deploy` | Deploy all infrastructure components |
 | `generate` | Generate synthetic data at the configured scale |
 | `run` | Execute the medallion pipeline and benchmark |
 | `benchmark` | Run the 8-query benchmark standalone |
 | `query` | Execute ad-hoc SQL against the active engine |
 | `status` | Show deployment status |
+| `results` | Show the latest run's scorecard in the terminal |
 | `report` | Generate HTML scorecard report |
-| `recommend` | Recommend cluster sizing for a scale factor |
+| `compare` | Run two configs in turn and compare their results |
+| `config recommend` | Recommend a scale factor for the connected cluster |
+| `admin` | Cluster-admin setup: `install-spark-operator`, `doctor`, `status`, `repair-operator` |
 | `financial` | AML operator actions (`score`, `replay`, `reproduce`) |
 | `destroy` | Tear down all deployed resources |
 

@@ -60,6 +60,23 @@ class OperatorStatus:
     watched_namespaces: list[str] | None = None  # None = watches all
 
 
+def watch_list_fix_hint() -> str:
+    """User-facing remedy for a namespace missing from ``spark.jobNamespaces``.
+
+    Never suggests a raw ``helm upgrade --reuse-values``: that bypasses the
+    ``lakebench-cluster-lock`` lease (category 4 shared state) and a user
+    who copies it with a stale list overwrites other deployments' entries.
+    ``lakebench deploy`` adds the namespace under the lease.
+    """
+    return (
+        "Fix: re-run 'lakebench deploy <config>'; it adds the namespace to "
+        "the watch list under the lakebench-cluster-lock lease. If the lease "
+        "is held, check 'lakebench admin status'. If the watch list carries "
+        "entries for deleted namespaces, run 'lakebench admin repair-operator' "
+        "first. Do not edit spark.jobNamespaces with helm directly."
+    )
+
+
 class SparkOperatorManager:
     """Manages Spark Operator installation and status."""
 
@@ -139,6 +156,26 @@ class SparkOperatorManager:
             f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
         ]
 
+    def _watch_list_pin(self) -> list[str]:
+        """``--version``/backfill args for a watch-list-only ``helm upgrade``.
+
+        Adding or removing a namespace must not change the shared operator's
+        chart. Without ``--version`` Helm resolves whatever the local repo
+        serves (a silent upgrade for every deployment on the cluster); with
+        the config's version a developer's older pin would downgrade an
+        admin's newer install. So pin the installed release's chart when
+        check_status() has read it, and fall back to the configured version.
+        """
+        pin = self._installed_version or self.target_version
+        if not pin:
+            return []
+        return [
+            "--version",
+            pin,
+            "--set",
+            f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+        ]
+
     def __init__(
         self,
         namespace: str | None = None,
@@ -157,6 +194,10 @@ class SparkOperatorManager:
         """
         self.namespace = namespace or self.DEFAULT_NAMESPACE
         self.target_version = version  # Version to install if not present
+        # Chart version of the running release, cached by check_status().
+        # Watch-list edits pin it so adding or removing a namespace never
+        # moves the shared operator to another chart (see _watch_list_pin).
+        self._installed_version: str | None = None
         self.job_namespace = job_namespace
         # The config's kubeconfig context. helm and kubectl otherwise use the
         # ambient current context, so a stale or different current context
@@ -260,6 +301,8 @@ class SparkOperatorManager:
 
             # Get version from Helm release if possible
             version = self._get_helm_version()
+            if version:
+                self._installed_version = version
 
             # Check namespace watching -- use the deployment spec args as
             # ground truth, NOT Helm values (which can be out of sync after
@@ -316,32 +359,39 @@ class SparkOperatorManager:
             )
 
     def _get_helm_version(self) -> str | None:
-        """Get Spark Operator version from Helm release.
+        """Chart version of this manager's Spark Operator release, or None.
 
-        Returns:
-            Version string or None if not found
+        Looks only in ``self.namespace`` and matches the release name
+        exactly: the watch-list edits pin ``--version`` to this value, so a
+        look-alike release elsewhere (``my-spark-operator``) must never be
+        read. A chart string that does not end in a version yields None,
+        and callers fall back to the configured version.
         """
+        import json
+        import re
+
         try:
             result = self._run(
                 [
                     "helm",
                     "list",
-                    "-A",
+                    "-n",
+                    self.namespace,
                     "-f",
-                    "spark-operator",
+                    f"^{self.HELM_RELEASE_NAME}$",
                     "-o",
                     "json",
                 ],
                 capture_output=True,
                 text=True,
             )
-
-            if result.returncode == 0:
-                import json
-
-                releases = json.loads(result.stdout)
-                if releases:
-                    return releases[0].get("chart", "").replace("spark-operator-", "")
+            if result.returncode != 0:
+                return None
+            for rel in json.loads(result.stdout) or []:
+                if rel.get("name") != self.HELM_RELEASE_NAME:
+                    continue
+                m = re.search(r"-(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)$", rel.get("chart", ""))
+                return m.group(1) if m else None
             return None
         except Exception:
             return None
@@ -587,6 +637,29 @@ class SparkOperatorManager:
         Returns:
             True if the RBAC was successfully recreated.
         """
+        # The remove-then-re-add is a read-modify-write of the shared
+        # watch list, so the whole sequence runs under one lease: an
+        # unlocked step 1 writing a list read before a concurrent add
+        # would drop that deployment's namespace.
+        lease_cm, mode = self._acquire_watch_lease()
+        try:
+            if mode == "refuse":
+                logger.error(
+                    "spark-operator watch-list: refusing to recreate RBAC for %r -- "
+                    "cluster lease is held or lease RBAC denied",
+                    namespace,
+                )
+                return False
+            return self._recreate_namespace_rbac_impl(namespace)
+        finally:
+            if lease_cm is not None:
+                try:
+                    lease_cm.__exit__(None, None, None)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("spark-operator watch-list: lease release failed: %s", e)
+
+    def _recreate_namespace_rbac_impl(self, namespace: str) -> bool:
+        """Body of ``recreate_namespace_rbac``; caller holds the lease."""
         try:
             watched = self._get_watched_namespaces()
         except _WatchListReadError as e:
@@ -596,7 +669,7 @@ class SparkOperatorManager:
             return True
         if namespace not in watched:
             # Not in the watch list -- delegate to normal add flow
-            return self._add_namespace_to_watch(namespace)
+            return self._add_namespace_to_watch_impl(namespace)
 
         # Step 1: Remove the namespace so Helm deletes the Role/RoleBinding
         without_ns = [ns for ns in watched if ns != namespace]
@@ -612,13 +685,13 @@ class SparkOperatorManager:
             "--set",
             f"spark.jobNamespaces={{{ns_set_without}}}",
         ]
-        # No --version here, so Helm resolves whatever chart the repo now
-        # serves while --reuse-values still only carries forward the
-        # release's *stored* values -- the same gap _reuse_values_backfill()
-        # exists for, just without a target_version to gate on. Always
-        # backfill here since there is no unversioned-and-safe case.
+        # Pin the installed chart (see _watch_list_pin). With no version
+        # known, Helm resolves whatever the repo serves while --reuse-values
+        # carries forward only the stored values, so backfill regardless.
+        pin = self._watch_list_pin()
         cmd.extend(
-            [
+            pin
+            or [
                 "--set",
                 f"prometheus.metrics.jobSubmitLatencyBuckets="
                 f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
@@ -638,7 +711,7 @@ class SparkOperatorManager:
         )
 
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
-        return self._add_namespace_to_watch(namespace)
+        return self._add_namespace_to_watch_impl(namespace)
 
     def remove_namespace_from_watch(
         self,
@@ -727,9 +800,7 @@ class SparkOperatorManager:
                 "--set",
                 f"spark.jobNamespaces={{{ns_set}}}",
             ]
-            if self.target_version:
-                cmd.extend(["--version", self.target_version])
-                cmd.extend(self._reuse_values_backfill())
+            cmd.extend(self._watch_list_pin())
 
             try:
                 result = self._run(cmd, capture_output=True, text=True)
@@ -1056,9 +1127,7 @@ class SparkOperatorManager:
             # so omitting this lets Helm re-resolve to whatever the repo now
             # serves.  A namespace add would then silently upgrade the
             # operator out from under a pinned config.
-            if self.target_version:
-                cmd.extend(["--version", self.target_version])
-                cmd.extend(self._reuse_values_backfill())
+            cmd.extend(self._watch_list_pin())
 
             try:
                 result = self._run(cmd, capture_output=True, text=True)
@@ -1480,12 +1549,12 @@ class SparkOperatorManager:
         """Ensure the Spark Operator watches the target namespace.
 
         When ``can_heal`` is True and the operator is not watching the target
-        namespace, attempts to add it via ``helm upgrade --reuse-values``.
-        When False, returns status with the exact fix command for the user.
+        namespace, adds it under the cluster lease (``_add_namespace_to_watch``).
+        When False, or when the add fails, returns status with a remedy that
+        routes through ``lakebench deploy`` (see ``watch_list_fix_hint``).
 
         Args:
-            can_heal: If True, attempt to fix via helm upgrade.
-                Should be True when ``install=True`` in config.
+            can_heal: If True, attempt to add the namespace under the lease.
 
         Returns:
             OperatorStatus reflecting the namespace watching state.
@@ -1510,21 +1579,13 @@ class SparkOperatorManager:
             )
             if self._add_namespace_to_watch(self.job_namespace):
                 return self.check_status()
-            # Heal failed -- fall through to provide fix command
+            # Heal failed -- fall through to provide the remedy
 
         existing = status.watched_namespaces or []
-        new_list = ",".join(existing + [self.job_namespace])
-        fix_cmd = (
-            f"helm upgrade {self.HELM_RELEASE_NAME} {self.HELM_CHART_NAME} "
-            f"-n {self.namespace} --reuse-values "
-            f"--set 'spark.jobNamespaces={{{new_list}}}' "
-            f"--set 'prometheus.metrics.jobSubmitLatencyBuckets="
-            f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}'"
-        )
         status.message = (
             f"Spark Operator does not watch namespace '{self.job_namespace}'. "
             f"Currently watching: {existing}. "
             f"SparkApplications will not be reconciled.\n"
-            f"Fix with:\n  {fix_cmd}"
+            f"{watch_list_fix_hint()}"
         )
         return status
