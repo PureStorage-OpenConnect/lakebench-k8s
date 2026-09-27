@@ -1439,10 +1439,12 @@ def refuse_orphan_delta_log(spark, fq_table):
     fs, path = _hadoop_fs(spark, log_dir)
     if fs.exists(path):
         raise RuntimeError(
-            f"{fq_table} is not in the catalog but {log_dir} already holds a Delta log "
-            "(most likely left by a destroy that could not prove it owned the bucket). "
-            "Refusing to append to or adopt it: delete that directory if its data may "
-            "go, or point this deployment at other buckets."
+            f"{fq_table} is not in the catalog but {log_dir} already holds a Delta log. "
+            "It is left by a destroy that kept the files (--keep-buckets, or a bucket "
+            "it could not prove it owned), by a continuous reset interrupted between "
+            "its DROP and its directory delete, or by a write that committed but never "
+            "registered. Refusing to append to or adopt it: delete that table "
+            "directory if its data may go, or point this deployment at other buckets."
         )
 
 

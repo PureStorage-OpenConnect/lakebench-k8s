@@ -431,7 +431,10 @@ Thrift an Iceberg `DROP TABLE` (no `PURGE`) removes only the catalog entry. A
 Spark Thrift `DROP TABLE` of a Delta table deletes its directory, so it runs
 only when destroy is emptying every bucket of the deployment; otherwise the
 tables are left registered and reported. Files are removed only by the bucket
-step, from buckets destroy proves it owns. The scratch StorageClass is shared
+step, from buckets destroy proves it owns. A later run refuses to create a
+Delta table over a `_delta_log` that is not in the catalog (for example after
+`--keep-buckets` with the namespace deleted): delete that table directory, or
+use other buckets. The scratch StorageClass is shared
 cluster-scoped infrastructure and is never deleted.
 
 S3 buckets are emptied, then deleted only if lakebench created them: deploy

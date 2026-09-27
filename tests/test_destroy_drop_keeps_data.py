@@ -224,6 +224,22 @@ class TestSparkThriftDelta:
         assert h.drops() == []
         assert tables.status is DeploymentStatus.SUCCESS, tables.message
 
+    def test_registered_table_whose_directory_is_gone_is_dropped(self, h):
+        """A re-run after the bucket step emptied the buckets: DESCRIBE DETAIL
+        says the path is gone, a DROP deletes nothing, so it must not fail
+        forever."""
+
+        def describe(sql):
+            raise RuntimeError(
+                "query_sql failed (rc=1): Error: [DELTA_PATH_DOES_NOT_EXIST] "
+                "s3a://a-silver/warehouse/silver.db/t doesn't exist"
+            )
+
+        verdicts = dict.fromkeys(["b-bronze", "a-silver", "a-gold"], "MATCH")
+        _boto, tables, _b = h.run(verdicts, THRIFT_DELTA, table_format="delta", describe=describe)
+        assert len(h.drops()) == 3
+        assert tables.status is DeploymentStatus.SUCCESS, tables.message
+
     def test_refused_bucket_with_the_namespace_deleted_is_not_a_failure(self, h):
         _boto, tables, _b = h.run(
             {"b-bronze": "ABSENT", **OWNED},

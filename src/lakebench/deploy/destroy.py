@@ -783,6 +783,9 @@ def _one_line(e: Exception, limit: int = 160) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
+# Delta's error for a registered table whose directory no longer exists.
+_DELTA_PATH_GONE_RE = re.compile(r"\[DELTA_PATH_DOES_NOT_EXIST\]|\bPath does not exist:")
+
 _S3_URI_RE = re.compile(r"\bs3[an]?://([^/\s|'\"]+)")
 
 
@@ -800,6 +803,10 @@ def _table_location_bucket(
     except Exception as e:  # noqa: BLE001
         if _is_table_missing(e):
             return None, "missing"
+        if _DELTA_PATH_GONE_RE.search(str(e)):
+            # Registered, but its directory is already gone (an earlier run's
+            # bucket step emptied it): a DROP deletes nothing now.
+            return None, "gone"
         return None, f"location unreadable: {_one_line(e)}"
     buckets = set(_S3_URI_RE.findall(out or ""))
     if len(buckets) != 1:
@@ -1851,6 +1858,9 @@ def destroy_all(
                         )
                         if err == "missing":
                             logger.info("%s not present, nothing to drop", table)
+                            continue
+                        if err == "gone":
+                            plan.append((table, drop_sql))
                             continue
                         if bucket is None:
                             kept_unresolved.append((table, err))
