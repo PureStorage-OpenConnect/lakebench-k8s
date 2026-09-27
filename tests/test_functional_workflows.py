@@ -483,7 +483,20 @@ class TestObservabilityDeployerWorkflow:
         )
         assert values["grafana.enabled"] == "false"
 
-    def test_deploy_calls_helm_upgrade_install(self):
+    @staticmethod
+    def _lease():
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(patch("kubernetes.client.CoreV1Api"))
+        lock = stack.enter_context(patch("lakebench.deploy.cluster_lock.cluster_lock"))
+        lock.return_value.__exit__.return_value = False
+        stack.enter_context(
+            patch("lakebench.deploy.observability._wait_for_prometheus", return_value="")
+        )
+        return stack
+
+    def test_deploy_installs_shared_release_when_absent(self):
         from lakebench.deploy.observability import ObservabilityDeployer
 
         cfg = make_config(observability={"enabled": True})
@@ -494,18 +507,22 @@ class TestObservabilityDeployerWorkflow:
         deployer = ObservabilityDeployer(engine)
 
         with (
+            self._lease(),
             patch("subprocess.run") as mock_run,
             patch(
                 "lakebench.deploy.observability._find_helm_service",
                 return_value="mock-svc",
             ),
         ):
-            mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+            mock_run.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
             result = deployer.deploy()
 
         assert result.status == DeploymentStatus.SUCCESS
-        # Should have called helm repo add, helm repo update, helm upgrade --install
-        assert mock_run.call_count == 3
+        cmds = [c.args[0] for c in mock_run.call_args_list]
+        # helm list (absent), repo add, repo update, helm install -- never an upgrade
+        assert [c[:2] for c in cmds if c[0] == "helm"][0] == ["helm", "list"]
+        assert sum(1 for c in cmds if c[:2] == ["helm", "install"]) == 1
+        assert not any(c[:2] == ["helm", "upgrade"] for c in cmds)
 
     def test_deploy_helm_failure(self):
         from lakebench.deploy.observability import ObservabilityDeployer
@@ -517,9 +534,9 @@ class TestObservabilityDeployerWorkflow:
 
         deployer = ObservabilityDeployer(engine)
 
-        with patch("subprocess.run") as mock_run:
-            # repo add/update succeed, install fails
+        with self._lease(), patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="[]", stderr=""),  # helm list: absent
                 MagicMock(returncode=0),  # repo add
                 MagicMock(returncode=0),  # repo update
                 MagicMock(returncode=1, stderr="chart not found", stdout=""),  # install
@@ -529,7 +546,7 @@ class TestObservabilityDeployerWorkflow:
         assert result.status == DeploymentStatus.FAILED
         assert "chart not found" in result.message
 
-    def test_destroy_calls_helm_uninstall(self):
+    def test_destroy_does_not_uninstall_the_shared_release(self):
         from lakebench.deploy.observability import ObservabilityDeployer
 
         cfg = make_config(observability={"enabled": True})
@@ -543,13 +560,11 @@ class TestObservabilityDeployerWorkflow:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = deployer.destroy()
 
-        assert result.status == DeploymentStatus.SUCCESS
-        cmd = mock_run.call_args[0][0]
-        assert "helm" in cmd
-        assert "uninstall" in cmd
+        assert result.status == DeploymentStatus.SKIPPED
+        assert not any("uninstall" in c.args[0] for c in mock_run.call_args_list)
 
-    def test_destroy_release_not_found_is_success(self):
-        from lakebench.deploy.observability import ObservabilityDeployer
+    def test_destroy_uninstalls_a_legacy_release_in_its_own_namespace(self):
+        from lakebench.deploy.observability import HELM_RELEASE_NAME, ObservabilityDeployer
 
         cfg = make_config(observability={"enabled": True})
         engine = MagicMock()
@@ -559,15 +574,15 @@ class TestObservabilityDeployerWorkflow:
         deployer = ObservabilityDeployer(engine)
 
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(
-                returncode=1,
-                stdout="",
-                stderr="Error: release not found",
-            )
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=HELM_RELEASE_NAME, stderr=""),  # list
+                MagicMock(returncode=1, stdout="", stderr="Error: release not found"),
+            ]
             result = deployer.destroy()
 
-        # "not found" should be treated as success (already cleaned up)
+        # "not found" on the uninstall is treated as already cleaned up
         assert result.status == DeploymentStatus.SUCCESS
+        assert mock_run.call_args_list[1].args[0][:2] == ["helm", "uninstall"]
 
 
 # ===========================================================================
