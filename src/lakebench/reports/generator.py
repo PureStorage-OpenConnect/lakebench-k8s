@@ -2189,12 +2189,22 @@ class ReportGenerator:
             else:
                 cpu_hrs = "-"
 
+            elapsed = f"{stage.elapsed_seconds:.1f}s"
+            n_fail = len(stage.submission_failures)
+            if is_sustained and n_fail:
+                # The stream waited on operator submission retries before
+                # the window could open.
+                elapsed += (
+                    f"<br><small>{n_fail} failed submission{'s' if n_fail != 1 else ''}, "
+                    f"{stage.submission_retry_seconds:.0f}s before it ran</small>"
+                )
+
             if is_sustained:
                 rows.append(f"""
                 <tr>
                     <td><strong>{stage.stage_name}</strong></td>
                     <td>{stage.engine}</td>
-                    <td>{stage.elapsed_seconds:.1f}s</td>
+                    <td>{elapsed}</td>
                     <td>{in_rows}</td>
                     <td>{rows_s}</td>
                     <td>{latency}</td>

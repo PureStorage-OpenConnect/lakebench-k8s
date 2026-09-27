@@ -420,7 +420,8 @@ class PipelineMetrics:
 
     # Continuous runs (cli/_sustained.py): the measurement window
     # {"start", "end", "seconds"} in UTC, each stream's start
-    # {"streams": {job: {"running_at", "submission_failures"}}}, the gate's
+    # {"streams": {job: {"running_at", "submission_failures",
+    # "submission_retry_seconds"}}}, the gate's
     # problems, and the result check {"settle": {...}, "result_check":
     # {"query_set_id", "fingerprints"} or {"not_checked": reason}}: gold and
     # the query set read once the whole corpus has passed through, so two
@@ -1945,6 +1946,12 @@ def build_pipeline_benchmark(
             stage_type="streaming",
             engine="spark",
             elapsed_seconds=sj.elapsed_seconds,
+            # Failed submissions before the driver ran: the window opens only
+            # when every stream runs, so their time delays it.
+            submission_failures=list(sj.submission_failures),
+            submission_retry_seconds=round(
+                sum(f.get("lost_seconds") or 0.0 for f in sj.submission_failures), 1
+            ),
             success=sj.success,
             error_message=sj.error_message,
             input_rows=sj.total_rows_processed,
