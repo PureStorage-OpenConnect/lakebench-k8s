@@ -1262,7 +1262,7 @@ _SUPPORTED_COMBINATIONS = [
 # A rejection that only prints the valid list makes the user diff their request
 # against it to work out what they did wrong, and teaches them nothing. Every
 # entry here is a real limitation that cost someone a debugging session; the
-# gotcha numbers refer to the list in CLAUDE.md.
+# gotcha numbers refer to the maintainers' internal list.
 #
 # Keys are checked most-specific first: a full 4-tuple, then (table_format,
 # query_engine), then (catalog, table_format).

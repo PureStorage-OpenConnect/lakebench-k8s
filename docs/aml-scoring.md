@@ -94,12 +94,12 @@ untestable rather than zero.
 
 ### How three behavioural typologies are planted (v1.5 realism rework)
 
-D0 v2 (AML-GOALS section 9 #39) found `micro_structuring` and
+The D0 v2 reference-model check found `micro_structuring` and
 `dormant_reactivation` too easy for the reference model and
 `corridor_high_risk` just under the band floor. Each was planted in a
 shape real cases do not have. The planting changed; the features did
 not. Every parameter below is self-chosen unless a source is named, and
-none is set from a detection rule's threshold (AML-GOALS R2). Rule recall
+none is set from a detection rule's threshold. Rule recall
 moves as a consequence and is reported, not targeted.
 
 | Typology | Before | Now | Why |

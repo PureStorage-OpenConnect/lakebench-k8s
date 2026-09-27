@@ -142,6 +142,3 @@ plumbing is in `src/lakebench/templates/datagen/job.yaml.j2`
 CPU-request preference and the empty-fleet gate are in
 `tests/test_datagen_aggregator.py` and
 `tests/test_metrics.py::TestBuildPipelineBenchmark`.
-
-The design doc is
-`dev-artifacts/METRICS-DESIGN.md`.

@@ -3,7 +3,8 @@
 Ships four SQL templates (detect / precision / recall / pattern_span)
 that are
 instantiated once per W-rule, plus four aggregate queries that run
-as-is. This lands 40 executable queries with 8 source files.
+as-is. This lands 40 executable queries with 8 source files. What the
+scores mean, and their caveats, is in `docs/aml-scoring.md`.
 
 Precision, recall, and pattern-span all need to know which planted
 typology TYPE a rule targets. That mapping lives here as the single

@@ -2,7 +2,7 @@
 
 The lease guards Category 4 (shared mutable state) mutations under
 concurrent lakebench invocations. See
-``dev-artifacts/DESIGN-namespace-isolation.md``.
+``docs/design/namespace-isolation.md``.
 """
 
 from __future__ import annotations

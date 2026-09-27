@@ -465,8 +465,7 @@ Draft notes for 1.6.0.
   regardless of the flag.
 - **Root `--version` / `-V` flag.** Both `lakebench --version` and
   the existing `lakebench version` subcommand now work.
-- **AML product-surface docs.** Marcus's roleplay-persona pass in
-  `dev-artifacts/roleplay/COLLATED.md` flagged that AML was invisible
+- **AML product-surface docs.** A roleplay-persona review flagged that AML was invisible
   from the front door: no mention in `README.md`, no getting-started
   section, and `docs/financial-benchmark-baselines.md` reads as
   "not run yet." New `docs/aml-scoring.md` explains what benchmark

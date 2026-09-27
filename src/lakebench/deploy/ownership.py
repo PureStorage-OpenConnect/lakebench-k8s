@@ -8,7 +8,7 @@ deployment, we refuse rather than warn.
 
 This is the machinery behind the invariant "destroying deployment A does
 not affect deployment B running in parallel." See
-``dev-artifacts/DESIGN-namespace-isolation.md`` for the design rationale
+``docs/design/namespace-isolation.md`` for the design rationale
 and category taxonomy this module enforces.
 
 The pieces:
