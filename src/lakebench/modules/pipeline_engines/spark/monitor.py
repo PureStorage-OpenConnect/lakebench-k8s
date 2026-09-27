@@ -37,6 +37,24 @@ logger = logging.getLogger(__name__)
 # slow Ivy resolve.
 _SUBMISSION_FAILED_GRACE_S = 1800
 
+# A status read slower than this is logged: it separates a stalled poll on
+# this host from an operator that is slow to report the end.
+_SLOW_POLL_S = 45.0
+# A job that was RUNNING and then sits in a non-terminal, non-running state
+# (SUBMITTED, PENDING_RERUN, UNKNOWN, ...) this long is logged once per state.
+# A 2026-09-27 sweep lost ~10 min per stage this way with nothing on screen.
+_STALL_WARN_S = 60.0
+
+
+def _is_transient_status_error(exc: BaseException) -> bool:
+    """A status read failure worth retrying: timeout, reset, 429 or 5xx."""
+    from kubernetes.client.rest import ApiException
+    from urllib3.exceptions import HTTPError as Urllib3HTTPError
+
+    if isinstance(exc, ApiException):
+        return exc.status == 429 or (exc.status or 0) >= 500
+    return isinstance(exc, (Urllib3HTTPError, ConnectionError, TimeoutError))
+
 
 @dataclass
 class JobResult:
@@ -199,6 +217,10 @@ class SparkJobMonitor:
         last_state = None
         sub_failed_since: float | None = None
         last_running: float | None = None
+        seen_running = False
+        state_since = start
+        stall_warned: JobState | None = None
+        failed_reads = 0
 
         while True:
             elapsed = time.time() - start
@@ -220,13 +242,58 @@ class SparkJobMonitor:
                     driver_logs=self._get_driver_logs(job_name),
                 )
 
-            status = self.job_manager.get_job_status(job_name)
+            read_started = time.time()
+            try:
+                status = self.job_manager.get_job_status(job_name)
+            except Exception as e:
+                if not _is_transient_status_error(e):
+                    raise
+                failed_reads += 1
+                logger.warning(
+                    "status read for %s failed (%s: %s), %d in a row; polling on",
+                    job_name,
+                    type(e).__name__,
+                    e,
+                    failed_reads,
+                )
+                time.sleep(poll_interval)
+                continue
+            failed_reads = 0
+            read_seconds = time.time() - read_started
+            if read_seconds > _SLOW_POLL_S:
+                logger.warning(
+                    "status read for %s took %.0fs (poll interval %ss)",
+                    job_name,
+                    read_seconds,
+                    poll_interval,
+                )
 
             # Call progress callback on state change or while RUNNING
             if status.state != last_state or status.state == JobState.RUNNING:
+                if status.state != last_state:
+                    state_since = time.time()
                 if progress_callback:
                     progress_callback(status)
                 last_state = status.state
+
+            if status.state == JobState.RUNNING:
+                seen_running = True
+                stall_warned = None
+            elif (
+                seen_running
+                and status.state != stall_warned
+                and status.state not in SUCCESS_STATES
+                and status.state not in FAILURE_STATES
+                and time.time() - state_since >= _STALL_WARN_S
+            ):
+                stall_warned = status.state
+                logger.warning(
+                    "%s was RUNNING and the operator has reported %s for %.0fs since; "
+                    "the stage clock runs until the operator reports an end",
+                    job_name,
+                    status.state.value or "NEW",
+                    time.time() - state_since,
+                )
 
             # Check terminal states. SUCCEEDING and FAILING are terminal for
             # our purposes: the operator sets them as soon as the driver
