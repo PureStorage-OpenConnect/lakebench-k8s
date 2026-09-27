@@ -615,7 +615,8 @@ def benchmark(
 ) -> None:
     """Run query benchmark and compute QpH.
 
-    Executes 8 analytical queries against the Customer 360 pipeline
+    Executes the workload's analytical query set (8 queries for
+    Customer 360, 12 for AML) against the silver and gold tables
     and reports Queries per Hour (QpH) throughput.
 
     Modes:

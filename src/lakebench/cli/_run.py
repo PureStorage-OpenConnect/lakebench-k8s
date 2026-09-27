@@ -1470,8 +1470,9 @@ def run(
 
     With --continuous, runs the continuous pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
-    and gold-refresh as concurrent streaming jobs. Monitors for
-    the configured duration, then stops streaming and runs benchmark.
+    and gold-refresh as concurrent Spark jobs. Runs in-stream benchmark
+    rounds during the configured duration, then lets the corpus settle,
+    stops the jobs and fingerprints the query set over the settled tables.
     """
     import uuid
 

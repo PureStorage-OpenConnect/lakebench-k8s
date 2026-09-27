@@ -1325,8 +1325,8 @@ def stop(
 ) -> None:
     """Stop running continuous-mode jobs.
 
-    Deletes all streaming SparkApplications (bronze-ingest, silver-stream,
-    gold-refresh) from the cluster.
+    Deletes the continuous-mode SparkApplications (bronze-ingest,
+    silver-stream, gold-refresh) from the cluster.
     """
 
     config_file = resolve_config_path(config_file, file_option)

@@ -26,6 +26,7 @@ kubectl get storageclass -o wide
 
 # Check the PVC status
 kubectl get pvc -n <namespace> -l app=lakebench-postgres
+# (the claim is named data-lakebench-postgres-0)
 ```
 
 **Fix:** Either create a default StorageClass for your cluster, or set the
@@ -53,7 +54,7 @@ silver-build shuffle and spill data. Silver-build is the most storage-intensive
 stage in the pipeline because it performs heavy joins and aggregations across
 the enriched customer interactions dataset.
 
-**Fix:** Use at least 150Gi per silver executor PVC. This sizing is proven at
+**Fix:** Silver-build requests 300Gi per executor PVC. This sizing is proven at
 1TB+ scale and should not be reduced. The per-executor PVC size does not need
 to scale with data volume because adding more executors (driven by the scale
 factor) keeps data-per-executor constant.
@@ -66,8 +67,8 @@ Reference resource profiles:
 
 | Job | Cores | Memory | Overhead | PVC |
 |---|---|---|---|---|
-| bronze-verify | 2 | 4g | 2g | 50Gi (c360) / 500Gi (financial, LB-118) |
-| silver-build | 4 | 48g | 12g | 150Gi |
+| bronze-verify | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial, LB-118) |
+| silver-build | 4 | 48g | 12g | 300Gi |
 | gold-finalize | 4 | 32g | 8g | 100Gi |
 
 ---
@@ -210,10 +211,11 @@ oc adm policy add-scc-to-user anyuid \
   -n <namespace>
 ```
 
-Verify the binding:
+Verify the binding. On OpenShift 4.10 and later the grant is a namespaced
+RoleBinding, not an entry in the SCC's `.users` list (which stays empty):
 
 ```bash
-oc get scc anyuid -o json | jq '.users'
+oc get rolebinding system:openshift:scc:anyuid -n <namespace> -o yaml
 ```
 
 ---
@@ -248,12 +250,11 @@ vending errors. Polaris server logs show failures in `TaskFileIOSupplier`
 related to credential subscoping.
 
 **Cause:** Upstream bug
-[apache/polaris#379](https://github.com/apache/polaris/issues/379). In Polaris
-1.1.0 and 1.2.0, the `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION` configuration
-is silently ignored by `TaskFileIOSupplier`, causing the server to attempt
-STS credential vending. FlashBlade has no STS endpoint, so this always fails.
+[apache/polaris#379](https://github.com/apache/polaris/issues/379) in Polaris
+1.1.0 and 1.2.0 makes the server attempt STS credential vending even when it
+is configured not to. FlashBlade has no STS endpoint, so this always fails.
 
-**Fix:** Use Polaris 1.3.0-incubating or later. Lakebench now defaults to
+**Fix:** Use Polaris 1.3.0-incubating or later. Lakebench defaults to
 1.6.0, which is well past this floor and needs no action. The 1.3.0 tag
 specifically includes the `-incubating` suffix:
 
@@ -262,18 +263,18 @@ apache/polaris:1.3.0-incubating
 apache/polaris-admin-tool:1.3.0-incubating
 ```
 
-Note: `apache/polaris:1.3.0` (without the suffix) does not exist -- that
+`apache/polaris:1.3.0` (without the suffix) does not exist -- that
 release was only ever published with `-incubating`. Polaris graduated from
 the Apache incubator at 1.4.0, so 1.4.0 and later (including the 1.6.0
-default) drop the suffix entirely; there is no `1.6.0-incubating` tag. The
-Quarkus/SmallRye Config environment variable also requires a double underscore:
+default) drop the suffix entirely; there is no `1.6.0-incubating` tag.
 
-```
-POLARIS_FEATURES__SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true
-```
-
-The pre-Quarkus name `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION` (single
-underscore prefix) is silently ignored.
+The STS skip itself is per catalog: the bootstrap Job creates the catalog
+with `stsUnavailable: true` and `pathStyleAccess: true` in its storage
+config, so no server-wide setting is needed. Do not set
+`POLARIS_FEATURES__SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true` (or the
+older `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION`). It drops the endpoint and
+path-style settings from the storage access config, and Polaris's
+server-side S3FileIO then falls back to `s3.amazonaws.com`.
 
 ---
 
@@ -304,8 +305,11 @@ prior to 454 do not support it and cannot work with Polaris. Upgrade to Trino
 reference DNS resolution failure or connection refused on port 9083.
 
 **Cause:** The Hive Metastore pod is not running, or the DNS name is wrong.
-The Stackable Hive Operator names the service after the HiveCluster custom
-resource plus the role name.
+`lakebench-hive-metastore` is a ClusterIP Service that lakebench creates
+itself (not one the Stackable operator generates). It selects the metastore
+pods of the `lakebench-hive` HiveCluster (`app.kubernetes.io/instance=lakebench-hive`,
+`app.kubernetes.io/component=metastore`), so it has no endpoints until those
+pods are ready.
 
 **Expected DNS name:**
 
@@ -358,10 +362,13 @@ kubectl get sparkapplications -n <namespace>
 All three (`bronze-verify`, `silver-build`, `gold-finalize`) should show
 status `COMPLETED`.
 
-2. Verify that the Iceberg tables exist and have data. The expected table
-names are:
+2. Verify that the Iceberg tables exist and have data. The default table
+names for Customer 360 are:
    - Silver: `customer_interactions_enriched`
    - Gold: `customer_executive_dashboard`
+
+   For AML (financial) the main tables are `silver.transactions` and
+   `gold.alerts`.
 
 3. If tables are missing or empty, run a fresh pipeline:
 

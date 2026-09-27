@@ -72,7 +72,10 @@ def generate(
         bool,
         typer.Option(
             "--resume",
-            help="Resume from checkpoint if previous generation was interrupted",
+            help=(
+                "Not implemented for the Rust generator: accepted, but it has "
+                "no effect and generation starts from the beginning"
+            ),
         ),
     ] = False,
     yes: Annotated[
@@ -89,7 +92,8 @@ def generate(
     Runs the datagen job to populate the bronze bucket with synthetic data.
     Uses parallel Kubernetes Jobs for efficient generation.
 
-    Use --resume to continue from a previous interrupted generation.
+    --resume is not implemented for the Rust generator: the flag is
+    accepted but has no effect.
     """
     from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 

@@ -2,18 +2,20 @@
 
 ## Overview
 
-Trino is the default query engine in a Lakebench recipe. It executes the benchmark query suite against Iceberg tables in the gold layer and serves as the ad-hoc SQL interface for exploring data across all medallion layers. Lakebench connects Trino to whichever catalog the recipe specifies -- Hive Metastore or Apache Polaris REST catalog -- so that every Iceberg table registered during the pipeline run is immediately queryable.
+Trino is the default query engine in a Lakebench recipe. It executes the benchmark query suite against Iceberg or Delta tables in the gold layer and serves as the ad-hoc SQL interface for exploring data across all medallion layers. Lakebench connects Trino to whichever catalog the recipe specifies -- Hive Metastore or Apache Polaris REST catalog -- so that every table registered during the pipeline run is immediately queryable. Delta runs with Hive only.
 
 When `architecture.query_engine.type` is set to `trino` (the default), Lakebench deploys Trino automatically during `lakebench deploy` and tears it down during `lakebench destroy`.
+
+Before removing Trino, destroy clears the pipeline tables from the catalog with `CALL <catalog>.system.unregister_table(...)`, not `DROP TABLE`, for Iceberg and Delta. (On Polaris, when the namespace is deleted with it, no statement is run: the catalog's only state is its PostgreSQL database, which goes with the namespace.) Unregistering removes only the catalog entry; a Trino `DROP TABLE` would also delete data files, including datagen files registered in place. Table files are removed only by the bucket step, and only from buckets the deployment owns.
 
 ## Architecture
 
 Lakebench deploys Trino as two Kubernetes workloads:
 
 - **Coordinator** -- a single-replica `Deployment` (`lakebench-trino-coordinator`). Handles query planning, scheduling, and the HTTP endpoint on port 8080.
-- **Workers** -- a `StatefulSet` (`lakebench-trino-worker`) with configurable replica count. Each worker gets a PVC for spill-to-disk storage, allowing large queries to exceed available memory.
+- **Workers** -- a `StatefulSet` (`lakebench-trino-worker`) with configurable replica count. Spill-to-disk goes to an `emptyDir` volume by default; when `trino.worker.storage_class` is set, each worker gets a PVC from that class instead.
 
-A `Service` named `lakebench-trino` exposes the coordinator at `lakebench-trino.<namespace>.svc.cluster.local:8080`.
+A `Service` named `lakebench-trino` exposes the coordinator at `lakebench-trino.<namespace>.svc.cluster.local:8080`; a headless `Service`, `lakebench-trino-worker`, gives the worker StatefulSet stable pod DNS.
 
 ### Init containers
 
@@ -152,10 +154,10 @@ The benchmark gives each query a client timeout (300 s, or 900 s for the financi
 General principles:
 
 - **Scale out before scaling up.** Adding worker replicas distributes query fragments across more nodes and raises `query.max-memory` with them.
-- **Spill does not cover every query.** With `spill_enabled: true` (the default), joins, `ORDER BY`, window functions and plain aggregations can spill to disk. Spilled state is revocable memory, which does not count toward `query.max-memory`. An aggregate that is still `DISTINCT` (or has an `ORDER BY` inside it) in the final plan, and the `MarkDistinct` operator, cannot spill in Trino 483, so their hash tables stay in user memory and hit the limits above. Whether a query keeps that shape depends on the plan: the optimizer can rewrite a `DISTINCT` aggregate into a spillable `GROUP BY` (the `pre_aggregate` distinct-aggregation strategy, chosen from statistics under the default `automatic`). AML FQ3 (`COUNT(DISTINCT target_entity_id)` alongside `SUM`s, grouped by entity) is a candidate for the non-spillable shape; check with `EXPLAIN`. Keep `spill_max_per_node` at or below the PVC `storage` size.
+- **Spill does not cover every query.** With `spill_enabled: true` (the default), joins, `ORDER BY`, window functions and plain aggregations can spill to disk. Spilled state is revocable memory, which does not count toward `query.max-memory`. An aggregate that is still `DISTINCT` (or has an `ORDER BY` inside it) in the final plan, and the `MarkDistinct` operator, cannot spill in Trino 483, so their hash tables stay in user memory and hit the limits above. Whether a query keeps that shape depends on the plan: the optimizer can rewrite a `DISTINCT` aggregate into a spillable `GROUP BY` (the `pre_aggregate` distinct-aggregation strategy, chosen from statistics under the default `automatic`). AML FQ3 (`COUNT(DISTINCT target_entity_id)` alongside `SUM`s, grouped by entity) is a candidate for the non-spillable shape; check with `EXPLAIN`. Keep `spill_max_per_node` at or below the worker's spill volume size (the PVC `storage` size when a storage class is set).
 - **Coordinator sizing is modest.** The coordinator does not process data. The defaults of 2 CPU / 8Gi are sufficient for most workloads.
 
-**Recipes using Trino:** Standard, Polaris.
+**Recipes using Trino:** `hive-iceberg-spark-trino` (the default), `polaris-iceberg-spark-trino`, `hive-delta-spark-trino`.
 See the [Recipes Guide](recipes.md) for all combinations.
 
 ## See Also

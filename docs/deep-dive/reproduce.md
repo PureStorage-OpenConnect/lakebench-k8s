@@ -31,51 +31,78 @@ A reproduce that reports "close enough" without checking each layer
 is not reproducible. A reproduce that fails on the first version drift
 is not usable.
 
+What the command checks today is narrower than this list. It records
+and checks the software layer (commit SHA), the config (a redacted
+snapshot plus a reference to the YAML to run) and the experiment
+(workload, corpus, seed, scale, mode, query set, maintenance policy,
+per-query result fingerprints). It does not pull images or compare
+image digests, and it does not inspect cluster topology or storage
+classes.
+
 ## The contract
 
-A reproduction package is one YAML file per published benchmark run.
-It carries:
+A reproduction package is one YAML file per published benchmark run,
+written by `lakebench reproduce --record`. It carries
+(`_build_package` in `src/lakebench/cli/_reproduce.py`):
 
 ```yaml
+schema_version: 1
 reproduction_metadata:
-  commit_sha: "ead6722"
-  image_digest:
-    lb_datagen: "sha256:a57c2ce729ff..."
-    apache_spark: "sha256:..."
-    trinodb_trino: "sha256:..."
-  cluster_topology:
-    openshift_version: "4.19"
-    node_count: 14
-    node_cpu_cores: 32
-    node_memory_gb: 128
-  expected_numbers:
-    datagen_aggregate_mbps: 154.4
-    datagen_cpu_hr_per_tb: 14.36
-    time_to_value_seconds: 405
-    silver_build_seconds: 90
-    qph: 1305
+  commit_sha: "<7-character HEAD at record time>"
+  recorded_at: "<UTC timestamp>"
+  source_run_id: "<run id>"
+  deployment_name: "<config name>"
+  pipeline_mode: batch            # or continuous
+  config_reference: "<path, relative to the package file>"
+  expected_numbers: {}            # every populated metric of the source run
+  query_set_id: "<QpH query-set id>"
+  maintenance_policy_id: "<table-maintenance policy id>"
+  benchmark_samples_per_query: 3
+  experiment_identity: {}         # workload, corpus, seed, scale, mode
+  result_fingerprints: {}         # what each benchmark query returned
   tolerance_pct:
-    performance: 20   # allow up to 20% wall-time / throughput drift
-    correctness: 0    # zero tolerance for row-count / semantic drift
+    performance: 20.0             # DEFAULT_TOLERANCES
+    correctness: 0.0
+  config_snapshot: {}             # redacted
+  datagen_fleet_summary: {}       # pods_reported, data_quality
 ```
+
+Recording refuses a source run with no numbers, one measured under a
+maintenance policy other than the current one, one without an
+experiment block, one whose benchmark results are not established or
+lack usable result fingerprints, and one with no `scale_ratio` (batch)
+or `ingest_ratio` (continuous).
 
 `lakebench reproduce <package.yaml>` then:
 
-1. Loads the reproduction package.
-2. Fetches the current commit SHA (`git rev-parse HEAD`) and warns
-   if it does not match `commit_sha` in the package.
-3. Pulls the images and reports their digest; warns on mismatch.
-4. Runs `kubectl get nodes` and warns on cluster-topology drift.
-5. Deploys, generates, runs the pipeline, destroys -- the standard
-   four-step flow.
-6. Extracts the actual numbers from `metrics.json`.
-7. Compares actual vs expected under the tolerance bands.
-8. Exits 0 (pass), 1 (drift exceeded), or 2 (correctness violation).
-
-Correctness violations (row count off, missing stages, wrong scale)
-fail with exit 2 regardless of tolerance. Performance drift under the
-band exits 0. Performance drift over the band exits 1 with a
-per-metric breakdown of what drifted and by how much.
+1. Loads and validates the package (schema version 1, finite numbers,
+   a correctness tolerance of exactly 0).
+2. Compares the current commit (`git rev-parse --short=7 HEAD`) with
+   `commit_sha`. On a mismatch it exits 2 unless
+   `--allow-commit-drift` is passed, which turns it into a warning.
+3. Resolves the config: `--config PATH` if given, otherwise
+   `config_reference` resolved relative to the package file's
+   directory. A missing file exits 2.
+4. Before running anything, exits 2 if the config's
+   `architecture.benchmark.iterations` differs from
+   `benchmark_samples_per_query` (batch packages with QpH), if the
+   package's maintenance policy differs from the running version's,
+   or if the package has no `experiment_identity`. `--dry-run` stops
+   here.
+5. Destroys any existing deployment, then deploys, generates and runs
+   the pipeline, and destroys again unless `--keep` is set.
+6. Exits 2 if the run took a different number of samples per query,
+   ran under a different maintenance policy, or is not the package's
+   experiment or returned different benchmark results.
+7. Compares actual against expected per metric. Correctness metrics
+   (`scale_ratio`, `ingest_ratio`) have zero tolerance in either
+   direction; performance metrics use the performance band in the
+   metric's bad direction. QpH across different query sets is
+   reported as incomparable and counts as performance drift (a
+   package recorded before query-set ids is not compared on QpH).
+8. Exits 0 (pass), 1 (performance drift or a missing performance
+   metric) or 2 (correctness violation, a missing correctness metric,
+   or any refusal above).
 
 ## What the tolerance is for
 
@@ -86,8 +113,10 @@ absorb this without lying about drift; it is tight enough that a
 factor-of-two regression fails.
 
 Correctness has no tolerance because there is no legitimate reason
-for `bronze_rows != datagen_rows`. Any correctness drift means the
-pipeline has a bug or the config is different.
+for the pipeline to process a different share of the data than the
+recorded run (`scale_ratio` in batch; `ingest_ratio`, bronze rows over
+the rows the trickle had released, in continuous). Any correctness
+drift means the pipeline has a bug or the config is different.
 
 ## What breaks reproducibility
 
@@ -96,7 +125,9 @@ Some things we cannot control:
 - Snappy compression ratio varies by ~0.5% run-to-run based on the
   order Rust hands rows to the parquet writer. That is deterministic
   in seed, but is a different determinism across a rayon pool size
-  change. So a package must pin `rayon_pool_size`.
+  change. The package does not record the pool size, so keep
+  `datagen.cpu` and `datagen.generators` as the source run's config
+  snapshot has them.
 - FlashBlade S3 latency has a bimodal distribution; a full flash tray
   vs a mixed workload can add 5-10% wall time.
 - OpenShift's control plane latency changes with etcd size; a heavily
@@ -118,9 +149,9 @@ to widen the tolerance rather than declare a regression.
   scheduler decisions; memory usage varies with JVM garbage-
   collection timing.
 
-What IS reproducible: distribution shape of the data, precision and
-recall of detection rules against planted typologies, per-stage row
-counts, output size within a compression-noise band.
+What IS reproducible: distribution shape of the data, per-stage row
+counts, what each benchmark query returns (the package's result
+fingerprints), and output size within a compression-noise band.
 
 ## Wiring
 
@@ -132,8 +163,9 @@ generated from an actual `metrics.json` by
 The reproduce command lives in
 `src/lakebench/cli/_reproduce.py`. It shares the deploy / generate /
 run / destroy plumbing with the main CLI; it does not reimplement
-any of it. Comparison thresholds are documented in
-`_reproduce.py::_TOLERANCES` as a single source of truth.
+any of it. The default bands are `DEFAULT_TOLERANCES` in
+`_reproduce.py`, and each metric's band and direction come from
+`_METRIC_TABLE` there, not from the package.
 
 ## For contributors
 

@@ -83,9 +83,13 @@ A run is refused, never compared, when:
   baseline run's. A missing query stage is not a refusal: the QpH metrics
   report it as missing, a regression;
 - it is a continuous run in which no data flowed (`ingest_ratio` or rows/s
-  zero or missing), whose `ingest_ratio` is above 1.05 (bronze ingested more
-  rows than datagen produced, which inflates rows/s; below 1 is a corpus
-  larger than the trickle rate x window, or saturation, and stays comparable), or whose freshness was not measured;
+  zero or missing), whose `ingest_ratio` is above 1.05, or whose freshness
+  was not measured. Since 1.6 `ingest_ratio` is bronze rows over the rows
+  the trickle had released by the window's end (`released_rows`), not over
+  the whole corpus (that is `corpus_ingest_ratio`). Above 1.05, bronze took
+  more rows than were released, for example data left from an earlier run,
+  which inflates rows/s. Below 1 is saturation, a real performance signal,
+  and stays comparable;
 - it is a continuous run whose window (stage seconds) differs from the pinned
   `run_duration` by more than 10%. A `--duration` override is not recorded in
   the snapshot, so this is how it is caught;
@@ -233,8 +237,9 @@ Per-config overrides go in the store entry:
    lakebench destroy  benchmarks/perf/c360-batch-s10.yaml --force
    ```
 
-2. Record the run. `metrics.json` does not store the commit it came from, so
-   `--git-sha` is required:
+2. Record the run. `scripts/perf_gate.py record` still requires `--git-sha`
+   (it does not read the commit that newer `metrics.json` files record under
+   `provenance.git_sha`):
 
    ```bash
    python scripts/perf_gate.py record c360-batch-s10 \

@@ -4,7 +4,7 @@ A **recipe** (also called a **quick-recipe**) is the validated combination of ca
 
 ## Quick-Recipes
 
-Instead of setting `catalog`, `table_format`, `engine`, and `query_engine` individually, use the `recipe:` field for one-line setup:
+Instead of setting `catalog`, `table_format`, `pipeline_engine`, and `query_engine` individually, use the `recipe:` field for one-line setup:
 
 ```yaml
 name: my-lakehouse
@@ -15,19 +15,26 @@ Recipe defaults are merged without overwriting -- any explicit values you set in
 
 ## Quick Reference
 
-| Recipe Name | Catalog | Table Format | Query Engine | Best For | Prerequisites |
-|---|---|---|---|---|---|
-| **Standard** | hive | iceberg | trino | Ad-hoc SQL analytics | Stackable Hive Operator |
-| **Standard Headless** | hive | iceberg | none | ETL-only workloads | Stackable Hive Operator |
-| **Spark SQL** | hive | iceberg | spark-thrift | Spark-native analytics | Stackable Hive Operator |
-| **DuckDB** | hive | iceberg | duckdb | Lightweight single-node analytics | Stackable Hive Operator |
-| **Polaris** | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | None (Lakebench deploys Polaris) |
-| **Polaris Headless** | polaris | iceberg | none | REST catalog ETL | None (Lakebench deploys Polaris) |
-| **Polaris Spark SQL** | polaris | iceberg | spark-thrift | Spark-native with REST catalog | None (Lakebench deploys Polaris) |
-| **Polaris DuckDB** | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | None (Lakebench deploys Polaris) |
-| **Hive Delta Trino** | hive | delta | trino | Databricks-comparable analytics | Stackable Hive Operator |
-| **Hive Delta Spark SQL** | hive | delta | spark-thrift | Delta + Spark-native analytics | Stackable Hive Operator |
-| **Hive Delta Headless** | hive | delta | none | Delta ETL-only workloads | Stackable Hive Operator |
+The short names in the first column are the section headings below; the
+`recipe:` value is the second column.
+
+| Name | `recipe:` | Catalog | Table Format | Query Engine | Best For | Prerequisites |
+|---|---|---|---|---|---|---|
+| **Standard** | `hive-iceberg-spark-trino` (`default`) | hive | iceberg | trino | Ad-hoc SQL analytics | Stackable Hive Operator |
+| **Standard Headless** | `hive-iceberg-spark-none` | hive | iceberg | none | ETL-only workloads | Stackable Hive Operator |
+| **Spark SQL** | `hive-iceberg-spark-thrift` | hive | iceberg | spark-thrift | Spark-native analytics | Stackable Hive Operator |
+| **DuckDB** | `hive-iceberg-spark-duckdb` | hive | iceberg | duckdb | Lightweight single-node analytics | Stackable Hive Operator |
+| **Polaris** | `polaris-iceberg-spark-trino` | polaris | iceberg | trino | Multi-engine catalog sharing, fine-grained access control | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris Headless** | `polaris-iceberg-spark-none` | polaris | iceberg | none | REST catalog ETL | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris Spark SQL** | `polaris-iceberg-spark-thrift` | polaris | iceberg | spark-thrift | Spark-native with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Polaris DuckDB** | `polaris-iceberg-spark-duckdb` | polaris | iceberg | duckdb | Lightweight analytics with REST catalog | `polaris.client_secret` (Lakebench deploys Polaris) |
+| **Hive Delta Trino** | `hive-delta-spark-trino` | hive | delta | trino | Databricks-comparable analytics | Stackable Hive Operator |
+| **Hive Delta Spark SQL** | `hive-delta-spark-thrift` | hive | delta | spark-thrift | Delta + Spark-native analytics | Stackable Hive Operator |
+| **Hive Delta Headless** | `hive-delta-spark-none` | hive | delta | none | Delta ETL-only workloads | Stackable Hive Operator |
+
+Every recipe uses Spark as the pipeline engine. There is no DuckDB + Delta
+recipe (DuckDB cannot read Delta on non-AWS S3) and no Polaris + Delta recipe
+(Polaris is Iceberg-only).
 
 ## Choosing a Recipe
 
@@ -59,11 +66,13 @@ architecture:
 
 **Does not deploy:** Polaris.
 
-**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) to be installed on the cluster. Install it with:
+**Caveats:** Requires the Stackable Hive Operator CRD (`hiveclusters.hive.stackable.tech`) and the commons, listener and secret operators it depends on. Either set `architecture.catalog.hive.operator.install: true` or install them with:
 
 ```bash
-helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
-  --version 25.7.0 --namespace stackable
+for op in commons-operator listener-operator secret-operator hive-operator; do
+  helm install $op oci://oci.stackable.tech/sdp-charts/$op \
+    --version 25.7.0 --namespace stackable --create-namespace
+done
 ```
 
 ---
@@ -152,9 +161,9 @@ architecture:
 
 **Does not deploy:** Hive Metastore.
 
-**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0), Trino 454+.
+**Requirements:** Polaris 1.3.0-incubating+ (lakebench defaults to 1.6.0), Trino 454+, and `architecture.catalog.polaris.client_secret` set in the config (every Polaris recipe; `deploy` and `run` refuse a Polaris config without it).
 
-**Caveats:** On FlashBlade, Polaris runs with `stsUnavailable=true` and `pathStyleAccess=true`. Each client (Spark, Trino) maintains its own static S3 credentials rather than using credential vending.
+**Caveats:** The bootstrap Job always creates the catalog with `stsUnavailable=true` and `pathStyleAccess=true` (needed on FlashBlade and other non-AWS S3). Each client (Spark, Trino) maintains its own static S3 credentials rather than using credential vending.
 
 ---
 
@@ -273,25 +282,18 @@ This table is generated from the code:
 
 <!-- END GENERATED: support-states -->
 
-## Using `lakebench recommend`
+## Using `lakebench config recommend`
 
-The `recommend` command helps you choose the right scale factor for your cluster, or determine the cluster size needed for a target scale. It does not select a recipe, but it helps size the deployment.
+The `config recommend` command shows sizing guidance for your cluster: the scale factor it can hold, or what a larger scale needs. It does not select a recipe, but it helps size the deployment. It takes an optional config file, used to detect the pipeline mode (default `lakebench.yaml`):
 
 ```bash
-# Auto-detect cluster capacity and show max feasible scale
-lakebench recommend
-
-# Specify cluster resources manually
-lakebench recommend --cores 64 --memory 256
-
-# Check requirements for a specific scale
-lakebench recommend --scale 100
-
-# Check requirements for petabyte scale
-lakebench recommend --scale 100000
+lakebench config recommend
+lakebench config recommend my-config.yaml
 ```
 
-Combine the output of `recommend` with the recipe table above to configure your deployment. The recipe controls what gets deployed; the scale factor (informed by `recommend`) controls how large the deployment is.
+The older top-level `lakebench recommend` is deprecated and hidden from help; use `lakebench config recommend`.
+
+Combine the output of `config recommend` with the recipe table above to configure your deployment. The recipe controls what gets deployed; the scale factor (informed by `config recommend`) controls how large the deployment is.
 
 ## Advanced Configuration
 
@@ -317,7 +319,7 @@ architecture:
         memory: 32Gi
 
   pipeline:
-    mode: continuous                    # streaming instead of batch
+    mode: continuous                    # continuous instead of batch
 
 workload:
   datagen:

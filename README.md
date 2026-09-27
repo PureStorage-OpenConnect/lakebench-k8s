@@ -1,20 +1,25 @@
 # Lakebench
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%20|%203.11%20|%203.12%20|%203.13-blue)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-green)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green)](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/LICENSE)
 
-**A/B testing for lakehouse architectures on Kubernetes.**
+**Run a real data workload through a composable lakehouse architecture on
+Kubernetes, and get evidence of how it behaved.**
 
-Deploy a complete lakehouse stack from a single YAML, run a medallion pipeline
-at any scale, and get a scorecard you can compare across configurations.
+Deploy a complete lakehouse stack from a single YAML, generate a workload
+corpus, run its pipeline and queries at any scale, and get a scorecard that
+records exactly what produced it. Two runs are compared only when they
+returned the same workload results.
 
 <!-- TODO: Add terminal recording / screenshot of `lakebench run` output here -->
 
 ## Why Lakebench?
 
 - **Compare stacks.** Swap catalogs (Hive, Polaris), query engines (Trino,
-  Spark Thrift, DuckDB), and table formats -- same data, same queries,
-  different architecture. Side-by-side scorecard comparison.
+  Spark Thrift, DuckDB), and table formats (Iceberg, Delta) -- same data,
+  same queries, different architecture. `lakebench compare` checks that both
+  sides returned the same results before it shows any performance
+  difference, and says NOT COMPARABLE when they did not.
 - **Test at scale.** Run the same workload at 10 GB, 100 GB, and 1 TB to find
   where throughput plateaus or resources saturate on your hardware.
 - **Measure freshness.** Continuous mode keeps data arriving through the
@@ -28,14 +33,14 @@ schema flag routes datagen and the pipeline scripts.
 - **Customer 360** (default). Retail interactions from ~8 channels flow
   through bronze / silver / gold into an executive dashboard and the
   8-query analytical benchmark. `workload.schema: customer360`.
-- **Financial crime (AML).** pacs.008 wire messages flow through
-  bronze / silver / gold. Six W-rule detectors score against planted
-  typologies (structuring, gather-scatter, rapid-layering, dormant
-  reactivation, corridor risk, high-velocity chains). Per-rule recall,
-  precision, and pattern-span are joined against a scikit-learn
-  reference detector and a distribution-leakage gate, so a rule cannot
-  read high recall from a label proxy without being caught.
-  `workload.schema: financial`. See
+- **Financial crime (AML).** pacs.008 wire messages from a frozen
+  generator (`datagen-v2-rs-0.3`) flow through bronze / silver / gold.
+  Nine detection rules, including a fuzzy sanctions and PEP screen against
+  a synthetic, dated watchlist, are scored for recall and precision against
+  planted typologies (structuring, round-tripping, layering, dormant
+  reactivation, high-risk corridors and others). A pre-registered reference
+  model and a leakage check guard against a rule reading high recall from a
+  label proxy. Iceberg recipes only. `workload.schema: financial`. See
   [AML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/aml-scoring.md)
   for what precision and recall measure here vs what an AML ops team
   cares about.
@@ -134,12 +139,13 @@ first; `--generate` fills each bronze bucket before its run. The two configs
 need different names and bucket names, or the first destroy empties the
 second run's data.
 
-For all recipes, see [`examples/`](examples/) or run `lakebench init --advanced`
+For all recipes, see [`examples/`](https://github.com/PureStorage-OpenConnect/lakebench-k8s/tree/main/examples) or run `lakebench init --advanced`
 for the full interactive wizard.
 
 ## What You Get
 
-After `lakebench run` completes, the terminal prints a scorecard:
+After `lakebench run` completes, the terminal prints a scorecard (the
+numbers below are illustrative, not a measurement):
 
 ```
  ─ Pipeline Complete ──────────────────────────────
@@ -161,7 +167,15 @@ After `lakebench run` completes, the terminal prints a scorecard:
 
 `lakebench report` generates an HTML report with per-query latencies,
 bottleneck analysis, and optional platform metrics (CPU, memory, S3 I/O per
-pod).
+pod). Every run's `metrics.json` carries an `experiment` block: workload and
+generator version, seed, recipe and component versions, scale, mode, the
+maintenance that actually ran, the Lakebench-imposed limits that applied
+and whether they bound, the support state, and a fingerprint of each
+query's result.
+
+Upgrading from 1.5: most earlier numbers are not comparable with 1.6 (for
+example, no Iceberg snapshot expiry or Delta VACUUM ever ran before 1.6.0).
+See the [CHANGELOG](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/CHANGELOG.md).
 
 ## How It Works
 
@@ -193,7 +207,7 @@ pod).
   AML batch at scale 1 requests a peak of **36 cores and 512 GB RAM**
   (driven by `silver-build`), and a single executor pod needs 60 GB on one
   node. AML continuous at scale 1-10 requests **118 cores and 980 GB**,
-  because its three streaming jobs run at once; AML batch at scale 100
+  because its three stream jobs run at once; AML batch at scale 100
   peaks at 76 cores for the pipeline, but its data generation ran about
   350 cores (44 pods x 8 cores, measured in run-20260925-104703-c02890).
   The request figures come from `compute_peak_requirements()`. See
@@ -220,16 +234,18 @@ pod).
 | `deploy` | Deploy all infrastructure components |
 | `generate` | Generate synthetic data at the configured scale |
 | `run` | Execute the medallion pipeline and benchmark |
-| `benchmark` | Run the 8-query benchmark standalone |
+| `benchmark` | Run the workload's query benchmark standalone |
 | `query` | Execute ad-hoc SQL against the active engine |
 | `status` | Show deployment status |
 | `results` | Show the latest run's scorecard in the terminal |
 | `report` | Generate HTML scorecard report |
-| `compare` | Run two configs in turn and compare their results |
+| `compare` | Run two configs in turn; compare performance only when their results match |
 | `config recommend` | Recommend a scale factor for the connected cluster |
-| `admin` | Cluster-admin setup: `install-spark-operator`, `doctor`, `status`, `repair-operator` |
-| `financial` | AML operator actions (`score`, `replay`, `reproduce`) |
-| `destroy` | Tear down all deployed resources |
+| `config recipes` | List recipes and their support state per workload and mode |
+| `admin` | Cluster-admin setup and repair: `install-spark-operator`, `install-scratch-storage-class`, `doctor`, `status`, `repair-operator`, `release-lock`, `migrate-deployment`, `reclaim-bucket` |
+| `financial` | AML operator actions (`score`, `reference-score`, `replay`, `reproduce`) |
+| `reproduce` | Record or verify a reproduction package from a run |
+| `destroy` | Tear down the resources this deployment owns |
 
 See [CLI Reference](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/cli-reference.md)
 for flags and options.
@@ -238,14 +254,14 @@ for flags and options.
 
 | Component | Version |
 |-----------|---------|
-| Apache Spark | 3.5.4, 4.0.2, 4.1.1 |
+| Apache Spark | 3.5.x, 4.0.x (default 4.0.2), 4.1.x (4.2 not supported) |
 | Spark Operator | 2.5.1 (Kubeflow) |
-| Apache Iceberg | 1.11.0 |
+| Apache Iceberg | 1.11.0 (1.10.1 with Spark 3.5.4 on its Java 11 image, and in local mode) |
 | Delta Lake | 4.0.0 / 4.1.0 (auto, by Spark version) |
 | Hive Metastore | 3.1.3 (Stackable 25.7.0) |
 | Apache Polaris | 1.6.0 |
 | Trino | 483 |
-| DuckDB | bundled (Python 3.11) |
+| DuckDB | 1.5.5 (Python 3.11 image) |
 | PostgreSQL | 16, 17, 18 |
 
 All versions are overridable in the YAML config. See

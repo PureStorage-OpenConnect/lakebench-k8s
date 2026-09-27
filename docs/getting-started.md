@@ -76,7 +76,7 @@ at once (measured, not derived from `compute_peak_requirements`). The pod
 count is `workload.datagen.parallelism`; set it lower on a
 smaller cluster and generation takes longer.
 
-Continuous mode runs its three streaming jobs at the same time, so the
+Continuous mode runs its three stream jobs at the same time, so the
 minimum is their sum, and it differs by workload. AML (`schema: financial`)
 sizes all three from a measured scale-10 run: bronze-ingest 5 executors x 4
 cores so the corpus drains inside a 30-minute window, silver-stream 10 x 4 so
@@ -99,7 +99,7 @@ The AML scale-10 continuous run run-20260925-180003-bb3df4 ran at exactly
 this split (bronze-ingest 5, silver-stream 10, gold-refresh 12 executors at 4
 cores each).
 
-On a smaller cluster the run caps the streaming jobs to what fits and warns
+On a smaller cluster the run caps the stream jobs to what fits and warns
 naming each capped job. Each AML stage keeps at least the cores the
 Customer360 split would give it, and the room above that goes upstream first
 (bronze-ingest, then silver-stream up to the count that keeps pace with
@@ -176,7 +176,7 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; a developer's `deploy` will not install or upgrade it. `deploy` does add its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; with the default `platform.compute.spark.operator.install: false`, `deploy` does not install it and fails if it is missing (with `install: true` it installs a missing operator). Whatever `install` says, `deploy` always checks the operator and adds its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
 
 The supported installation path is:
 
@@ -588,11 +588,16 @@ in the `images` section of your YAML.
 |-----------|----------------|-------|
 | Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` |
 | Spark Operator | 2.5.1 | Kubeflow Helm chart |
-| Apache Iceberg | 1.11.0 | Spark runtime JAR |
+| Apache Iceberg | 1.11.0 (1.10.1 on `3.5.4-python3`) | Spark runtime JAR |
 | Hive Metastore | 3.1.3 | Stackable Hive Operator 25.7.0 |
 | Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` |
 | Trino | 483 | `trinodb/trino:483` |
 | PostgreSQL | 17 | `postgres:17` |
+
+Iceberg 1.11.0 needs Java 17, and the `3.5.4-python3` image ships Java 11.
+With that image and no explicit `table_format.iceberg.version`, config load
+logs a warning and uses Iceberg 1.10.1. An explicit 1.11.0 on a Java 11 image
+is refused; use a `java17` Spark 3.5 image tag to run 1.11.0 on Spark 3.5.
 
 ---
 
@@ -645,7 +650,7 @@ workload:
 
 ### Financial crime (AML)
 
-pacs.008 wire-message pipeline with six W-rule detectors scoring against
+pacs.008 wire-message pipeline with nine detection rules (W1-W8 and W17) scoring against
 planted AML typologies. The scorecard reports per-rule recall, precision,
 and pattern-span (a datagen window-width property, not detection latency),
 joined against a scikit-learn reference detector so a

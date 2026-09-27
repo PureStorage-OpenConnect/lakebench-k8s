@@ -1,17 +1,6 @@
 # Lakebench Operators and Catalogs
 
-**Last Updated:** 2026-01-29
-
 This document tracks tested operators, catalog implementations, and migration plans.
-
-## Status: All Tests Passing
-
-Pipeline successfully tested with 1GB data:
-- bronze-verify: 53s
-- silver-build: 1m 47s (500K records to Iceberg)
-- gold-finalize: 58s (table: customer_executive_dashboard)
-
----
 
 ## Spark Operator
 
@@ -20,7 +9,7 @@ Pipeline successfully tested with 1GB data:
 | Version | Status | Notes |
 |---------|--------|-------|
 | v1.1.27 | Broken | Does NOT inject volumes from `spec.volumes` into pods. Webhook mutation doesn't work. |
-| 2.4.0 | Working with workaround | Webhook mutation works for pod labels, but ConfigMap volumes are not injected through Spark's `spark.kubernetes.*.volumes.*` conf-property path (`KubernetesVolumeUtils` has no `configMap` case). Lakebench routes ConfigMap volumes through `driver.template`/`executor.template` pod templates instead. Requires privileged SCC on OpenShift. |
+| 2.4.0 | Working with workaround | Webhook mutation works for pod labels, but ConfigMap volumes are not injected through Spark's `spark.kubernetes.*.volumes.*` conf-property path (`KubernetesVolumeUtils` has no `configMap` case). Lakebench routes ConfigMap volumes through `driver.template`/`executor.template` pod templates instead. On OpenShift needs the `anyuid` SCC and the fsGroup/seccompProfile patch, which lakebench applies. |
 | 2.5.1 | Working with workaround | Current default. Verified against the operator's own source: the volume-injection code paths relevant to this gap are unchanged from 2.4.0, so the same pod-template workaround is still required. See [component-spark.md](component-spark.md#spark-operator) for the mechanism. |
 
 ### Current Default
@@ -29,22 +18,35 @@ Pipeline successfully tested with 1GB data:
 - **Namespace:** `spark-operator`
 
 ### Key Configuration
-```bash
-# Install on OpenShift with all-namespace watching
-helm install spark-operator spark-operator/spark-operator \
-  --version 2.5.1 \
-  --namespace spark-operator \
-  --create-namespace \
-  --set spark.jobNamespaces="" \
-  --set webhook.enable=true
 
-# Required SCCs for OpenShift
-oc adm policy add-scc-to-user privileged -z spark-operator-controller -n spark-operator
-oc adm policy add-scc-to-user privileged -z spark-operator-webhook -n spark-operator
+Install or upgrade the shared operator with lakebench rather than raw Helm:
+
+```bash
+lakebench admin install-spark-operator \
+  --version 2.5.1 \
+  --operator-namespace spark-operator \
+  --controller-tmp-size 8Gi
 ```
 
+`--controller-tmp-size` sets the sizeLimit of the controller's `/tmp`
+emptyDir, which holds spark-submit's Ivy jar cache. The default is 8Gi, the
+floor is 4Gi, and an upgrade without the flag keeps a larger size already
+set. The command runs under the cluster lease, and an upgrade keeps the
+stored Helm values, including the watch list.
+
+On OpenShift, lakebench grants the `anyuid` SCC to the
+`spark-operator-controller` and `spark-operator-webhook` service accounts
+and patches `fsGroup` and `seccompProfile` out of the operator Deployments
+(the chart hardcodes them and Helm values cannot remove them).
+
+Do not edit `spark.jobNamespaces` by hand. `lakebench deploy` adds its
+namespace to the watch list and `lakebench destroy` removes it, both under
+the `lakebench-cluster-lock` lease in `lakebench-system`. Deploy does this
+whatever `platform.compute.spark.operator.install` says; `install: true`
+only adds installing a missing operator.
+
 ### Learnings
-- Spark Operator version (2.5.1) is different from Apache Spark runtime version (3.5.4 / 4.0.0 / 4.1.1)
+- Spark Operator version (2.5.1) is different from Apache Spark runtime version (3.5.x / 4.0.x / 4.1.x)
 - `local://` URIs required for `mainApplicationFile` - scripts must be in container filesystem
 - ConfigMap volumes need the pod-template workaround, not the webhook's local-dir conf-property injection -- see [component-spark.md](component-spark.md#spark-operator)
 
@@ -92,13 +94,13 @@ oc adm policy add-scc-to-user privileged -z spark-operator-webhook -n spark-oper
 ### Catalog Comparison
 
 Lakebench supports Hive Metastore and Apache Polaris. The others are listed
-for ecosystem context only -- they are not implemented.
+for ecosystem context only -- they are not supported.
 
 | Catalog | Format Support | Governance | Lakebench Status |
 |---------|---------------|------------|-----------------|
-| Hive Metastore | Iceberg | Basic | **Supported** (default) |
+| Hive Metastore | Iceberg, Delta | Basic | **Supported** (default) |
 | Apache Polaris | Iceberg only | Access control | **Supported** |
-| Unity Catalog OSS | Iceberg, Delta | Lineage, governance | Not implemented |
+| Unity Catalog OSS | Iceberg, Delta | Lineage, governance | Not supported (no Unity combination is accepted) |
 | Nessie | Iceberg | Git-style versioning | Not implemented |
 
 ### Choosing Between Hive and Polaris
@@ -117,9 +119,17 @@ The `lakebench-spark-runner` service account needs these permissions for Spark 3
 ```yaml
 rules:
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "persistentvolumeclaims"]
+    resources: ["pods"]
     verbs: ["get", "list", "watch", "create", "delete", "deletecollection", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get", "list"]
 ```
+
+The full Role is `templates/rbac/role.yaml.j2`.
 
 **Note:** `deletecollection` is required for Spark driver cleanup on termination.
 
@@ -133,18 +143,20 @@ platform:
   storage:
     scratch:
       enabled: true
-      storage_class: px-csi-replicated  # Not px-spark-scratch
-      size: 50Gi
+      storage_class: px-csi-scratch  # Portworx, repl=1
+      size: 100Gi
 ```
 
 ### Spark Conf Essentials
 
-Example for the Spark 3.5 image. The Iceberg runtime suffix and Hadoop AWS
-version both depend on the Spark minor version -- see the Version Matrix
-below.
+Example for a Java 11 Spark 3.5 image such as `apache/spark:3.5.4-python3`.
+The Iceberg runtime suffix and Hadoop AWS version both depend on the Spark
+minor version -- see the Version Matrix below. Iceberg 1.11 needs Java 17, so
+with the default Iceberg version a Java 11 Spark 3.5 image falls back to
+Iceberg 1.10.1 with a warning; a java17 Spark 3.5 tag gets 1.11.0.
 
 ```yaml
-spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.11.0,org.apache.hadoop:hadoop-aws:3.3.4
+spark.jars.packages: org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.1,org.apache.hadoop:hadoop-aws:3.3.4
 spark.sql.catalog.lakehouse: org.apache.iceberg.spark.SparkCatalog
 spark.sql.catalog.lakehouse.type: hive
 spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
@@ -157,8 +169,10 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Component | Version | Source |
 |-----------|---------|--------|
 | Spark Operator | 2.5.1 | Kubeflow helm chart |
-| Apache Spark | 3.5.4 / 4.0.2 / 4.1.1 | apache/spark image |
-| Iceberg | 1.11.0 | spark.jars.packages |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x (default image 4.0.2; 4.2 unsupported) | apache/spark image |
+| Iceberg | 1.11.0 (1.10.1 on a Java 11 Spark 3.5 image) | spark.jars.packages |
+| Delta Lake | 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 (none on 3.5) | spark.jars.packages |
+| Apache Polaris | 1.6.0 | apache/polaris image |
 | Stackable Hive Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Commons Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
 | Stackable Secret Operator | 25.7.0 | oci://oci.stackable.tech/sdp-charts |
@@ -167,6 +181,7 @@ spark.sql.catalog.lakehouse.uri: thrift://lakebench-hive-metastore:9083
 | Hadoop AWS | 3.3.4 / 3.4.1 / 3.4.2 (by Spark minor) | spark.jars.packages |
 | PostgreSQL | 17 | postgres:17 |
 | Trino | 483 | trinodb/trino image |
+| DuckDB | 1.5.5 | pip package in python:3.11-slim |
 
 ## Stackable Installation
 
@@ -208,8 +223,9 @@ On OpenShift, Spark pods require the `anyuid` SCC because they run as UID 185 (s
 # Grant anyuid SCC to lakebench-spark-runner service account
 oc adm policy add-scc-to-user anyuid -z lakebench-spark-runner -n <namespace>
 
-# Verify SCC assignment
-oc get scc anyuid -o jsonpath='{.users}'
+# Verify SCC assignment. On OpenShift 4.10+ the grant is a namespaced
+# RoleBinding, not an entry in the SCC's .users list (which stays empty).
+oc get rolebinding system:openshift:scc:anyuid -n <namespace> -o yaml
 ```
 
 ### Validation Output
@@ -244,7 +260,7 @@ lakebench validate test-config.yaml --verbose
 
 ### PVC provisioning failed
 - **Cause:** Wrong storage class name
-- **Fix:** Use actual storage class (e.g., `px-csi-replicated`)
+- **Fix:** Use a storage class that exists on the cluster. The scratch default is `px-csi-scratch` (Portworx, repl=1), which a cluster admin installs once with `lakebench admin install-scratch-storage-class`
 
 ### deletecollection forbidden
 - **Cause:** RBAC missing `deletecollection` verb

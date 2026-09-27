@@ -2,8 +2,8 @@
 
 ## Overview
 
-Hive Metastore (HMS) provides the metadata catalog for Iceberg tables in
-Lakebench. It tracks table schemas, partition layouts, and data file locations
+Hive Metastore (HMS) provides the metadata catalog for Iceberg and Delta
+tables in Lakebench. It tracks table schemas, partition layouts, and data file locations
 so that Spark and Trino can discover and query lakehouse tables without
 managing metadata themselves.
 
@@ -51,18 +51,21 @@ helm install hive-operator oci://oci.stackable.tech/sdp-charts/hive-operator \
   --version 25.7.0 --namespace stackable
 ```
 
-Lakebench checks for the `hiveclusters.hive.stackable.tech` CRD at deploy
-time. If the CRD is missing and `install` is false, deployment fails with an
-actionable error message.
+Lakebench checks for the `hiveclusters.hive.stackable.tech` and
+`secretclasses.secrets.stackable.tech` CRDs, and that their operators are
+running, at deploy time. If either is missing and `install` is false,
+deployment fails with an actionable error message that lists the Helm
+install commands.
 
 ### Managed Resources
 
 When `lakebench deploy` runs, the Hive deployer creates three Kubernetes
-resources:
+resources (plus a CA-certificate SecretClass, `lakebench-s3-ca-cert-<namespace>`,
+when `platform.storage.s3.ca_cert` is set):
 
 | Resource | Kind | Purpose |
 |---|---|---|
-| `lakebench-s3-credentials-class` | SecretClass | Stackable secret backend that locates S3 credentials via `k8sSearch` |
+| `lakebench-s3-credentials-<namespace>` | SecretClass (cluster-scoped) | Stackable secret backend that locates S3 credentials via `k8sSearch` |
 | `lakebench-hive` | HiveCluster | Stackable-managed metastore with S3 and PostgreSQL integration |
 | `lakebench-hive-metastore` | Service (ClusterIP) | Stable DNS endpoint for thrift connections |
 
@@ -90,15 +93,22 @@ are the configurable fields with their defaults.
 
 ```yaml
 images:
-  hive: "apache/hive:3.1.3"        # Hive container image (Stackable productVersion)
+  hive: "apache/hive:3.1.3"        # Hive version (Stackable productVersion)
 ```
+
+This is not a container image reference. The metastore runs Stackable's own
+Hive image (`oci.stackable.tech/sdp/hive:3.1.3-stackable<sdp-version>`), and
+the HiveCluster template renders `productVersion: "3.1.3"`. Hive 3.1.3 is
+deliberate: Stackable recommends it because Hive 4 breaks Iceberg
+(`get_table` TApplicationException) and Trino ANALYZE. The tag of
+`images.hive` is what lakebench records as the Hive version in run output.
 
 ### Catalog Selection and Tuning
 
 ```yaml
 architecture:
   catalog:
-    type: hive                       # hive | polaris | none
+    type: hive                       # hive | polaris | unity | none
     hive:
       thrift:
         min_threads: 10              # Min thrift server threads (hive.metastore.server.min.threads)
@@ -110,10 +120,11 @@ architecture:
         memory: "4Gi"               # Memory request and limit
 ```
 
-These values are defined in the configuration schema. The current HiveCluster template uses hardcoded defaults for these settings; custom values will take effect when the template is updated to use the config-driven values. The thrift thread
-pool defaults are tuned for moderate concurrency (up to 50 simultaneous
-catalog operations). For clusters running more than 20 concurrent Spark
-executors plus Trino workers, consider increasing `max_threads`.
+The `resources` fields are applied to the HiveCluster. The `thrift` fields
+are defined in the configuration schema, but the current HiveCluster template
+hardcodes `min.threads=10`, `max.threads=50` and `socket.timeout=300s`, so
+changing them has no effect yet. The thrift thread pool defaults are tuned
+for moderate concurrency (up to 50 simultaneous catalog operations).
 
 ### Operator-Injected Configuration
 
@@ -131,8 +142,9 @@ should not need adjustment for typical workloads.
 ## PostgreSQL Backend
 
 HMS stores its catalog schema (table definitions, partition metadata, column
-statistics) in PostgreSQL. Lakebench deploys a single PostgreSQL instance that
-is shared by HMS and, when enabled, Polaris.
+statistics) in PostgreSQL. Lakebench deploys one PostgreSQL instance per
+deployment; it backs whichever catalog the deployment uses (Hive, Polaris or
+Unity).
 
 PostgreSQL is configured under `platform.compute.postgres`:
 
@@ -159,23 +171,27 @@ The deployment engine enforces this ordering automatically.
 
 | Consideration | Hive | Polaris |
 |---|---|---|
-| Setup complexity | Low -- single operator install | Moderate -- REST catalog + config |
+| Setup complexity | Low -- Stackable operators (commons, secret, listener, hive) | Moderate -- REST catalog + config |
 | Protocol | Thrift (binary, port 9083) | REST/HTTP (JSON, port 8181) |
 | Multi-engine sharing | Spark + Trino (same cluster) | Any engine with Iceberg REST support |
-| Credential vending | No (credentials injected via SecretClass) | Yes (server-side S3 credential vending) |
+| Credential vending | No (credentials injected via SecretClass) | No: lakebench runs Polaris with `stsUnavailable: true`, and each client (Spark, Trino) keeps its own static S3 credentials |
 | Multi-tenancy | Single catalog namespace | Namespace-level isolation |
-| Table format support | Iceberg | Iceberg |
+| Table format support | Iceberg, Delta | Iceberg |
 
 **Choose Hive** when you want the simplest deployment path and your workload
-uses a single compute cluster. Hive is battle-tested at 1TB+ scale and
-is the default for all Lakebench recipes.
+uses a single compute cluster, or when you need Delta. Hive is battle-tested
+at 1TB+ scale and is the catalog of the default recipe.
 
 **Choose Polaris** when you need REST API access to the catalog, plan to share
-tables across multiple compute engines or clusters, or require server-side
-credential vending for S3 access. See [quickstart-polaris.md](quickstart-polaris.md)
+tables across multiple compute engines or clusters. Lakebench does not use
+Polaris credential vending (S3 has no STS on FlashBlade), so vending is not
+a reason to choose it here. See [quickstart-polaris.md](quickstart-polaris.md)
 for migration steps.
 
-**Recipes using Hive:** Standard, Standard Headless, Spark SQL, DuckDB.
+**Recipes using Hive:** `hive-iceberg-spark-trino` (the default),
+`hive-iceberg-spark-thrift`, `hive-iceberg-spark-duckdb`,
+`hive-iceberg-spark-none`, `hive-delta-spark-trino`,
+`hive-delta-spark-thrift`, `hive-delta-spark-none`.
 See the [Recipes Guide](recipes.md) for all combinations.
 
 ## Cross-References

@@ -215,7 +215,10 @@ def destroy(
 ) -> None:
     """Tear down lakehouse infrastructure.
 
-    Removes all Lakebench resources from the cluster.
+    Removes the resources this deployment owns: its namespace and what is
+    in it. It empties the S3 buckets it can prove it owns and deletes only
+    those it created. Shared operators, CRDs and the scratch StorageClass
+    are never removed.
     """
     if force_short_f:
         force = deprecated_short_f_force("--force or -y", force)

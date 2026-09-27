@@ -13,24 +13,26 @@ its run id.
 
 ## How to read this table
 
-- **Scale.** Datagen `scale` factor. Scale 1 emits 8.4 GB of pacs.008
-  (111,111 entities * 4 txns/month * 60 months = 26.7M transactions,
-  measured 2026-09-24 with the default 64 MB files). It scales linearly:
-  scale 100 is about 840 GB by this estimate, and measured runs land
-  11-13% above it (about 950 GB of bronze at scale 100 in
-  run-20260925-104703-c02890). AML has been run end to end up to scale
-  100; scale 500 (about 4.2 TB by the estimate) and above are untested.
+- **Scale.** Datagen `scale` factor. Per scale unit the generator writes
+  111,111 entities * 4 txns/month * 60 months = 26.7M transactions.
+  Lakebench's size estimate (`src/lakebench/config/scale.py`) is about
+  8.4 GB of pacs.008 per scale unit, linear in scale (scale 100 is about
+  840 GB). That figure was measured on the pre-freeze generator and is
+  superseded; sizes on the v1.6 frozen generator are pending. AML has been
+  run end to end up to scale 100 (pre-freeze); scale 500 (about 4.2 TB by
+  the estimate) and above are untested.
 - **Wall-clock p50 / p95.** Median and 95th-percentile wall-clock
   seconds across N independent runs at the same scale on the same
   cluster. p95 catches skew / warm-up effects.
 - **Alert count.** Total detection alerts written to `gold.alerts` at
   end of pipeline. Includes typology and typology-adjacent hits.
 - **Recall.** Fraction of scheduled typology instances the workload
-  detected. Computed by `lakebench financial score`. Not scored in
-  continuous mode in v1.6 (LB-168).
+  detected. Computed inline by a batch `lakebench run` (the
+  `score_financial.py` job after gold-finalize); `lakebench financial score`
+  is an optional re-score. Not scored in continuous mode in v1.6 (LB-168).
 - **Cores used.** Peak executor cores requested by a single batch job
   (the batch jobs run sequentially), or the sum across the three
-  concurrent streaming jobs in continuous mode.
+  concurrent stream jobs in continuous mode.
 - **Storage read.** Aggregate S3 GET GB across the pipeline. Reference
   the storage-backend note when reading against slower object stores.
 
@@ -71,7 +73,7 @@ budget below is what the ENG-2C.4.8 verification asserts against.
 | Scale | Rule           | Depth (months) | Wall-clock p50 (s) | Alert delta vs current | Cores used |
 |------:|:---------------|---------------:|-------------------:|-----------------------:|-----------:|
 |   100 | W2_structuring |             60 |                TBD |                    TBD |        TBD |
-|   100 | W3_round_trip  |             60 |                TBD |                    TBD |        TBD |
+|   100 | W3_round_tripping |          60 |                TBD |                    TBD |        TBD |
 
 ## Reproduce (W10, `lakebench financial reproduce`)
 
@@ -90,8 +92,11 @@ Follow this after each release UAT:
 1. On the test cluster, deploy at scale 10 and scale 100 and run
    the full Financial pipeline. Capture wall-clock from
    `lakebench-output/runs/<run-id>/metrics.json`.
-2. Run `lakebench financial score --manifest s3://.../manifest.parquet
-   --output s3://.../recall.parquet` and record the mean recall.
+2. Record the recall the batch run scored inline (written to
+   `s3a://<gold-bucket>/scoring/<run-id>/recall.parquet`; the manifest it
+   reads is `s3a://<bronze-bucket>/pacs008/manifest/manifest.parquet` with
+   the default path template). `lakebench financial score` re-scores only
+   when needed.
 3. For W8 replay, run `lakebench financial replay --rule W2_structuring
    --depth-months 60` and compare alert count against the current-corpus
    W2 run.

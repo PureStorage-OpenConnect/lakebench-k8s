@@ -38,7 +38,8 @@ must be installed cluster-wide. See [Getting Started](getting-started.md#catalog
 for Helm commands.
 
 **Polaris:** No operator needed -- Lakebench deploys it directly as a
-Kubernetes Deployment with a bootstrap Job.
+Kubernetes Deployment with a bootstrap Job. The config must set
+`architecture.catalog.polaris.client_secret`; it has no default.
 
 See [Hive Reference](component-hive.md) and
 [Operators and Catalogs](operators-and-catalogs.md) for version compatibility
@@ -64,8 +65,8 @@ Customer 360 workload only: the AML workload is Iceberg-only.
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
 | Trino | 483 | `trinodb/trino:483` | Distributed SQL engine for interactive analytics |
-| Spark Thrift Server | 3.5.x / 4.0.x (same as Spark) | `apache/spark:4.0.2-python3` (default) or `3.5.8-python3` | Spark-native SQL via HiveServer2 JDBC |
-| DuckDB | Bundled in Python 3.11 | `python:3.11-slim` | Lightweight single-pod analytics engine |
+| Spark Thrift Server | 3.5.x / 4.0.x / 4.1.x (same as Spark) | Same image as `images.spark` (default `apache/spark:4.0.2-python3`) | Spark-native SQL via HiveServer2 JDBC |
+| DuckDB | 1.5.5 (pinned by `duckdb.version`) | `python:3.11-slim`, DuckDB pip-installed at that version | Lightweight single-pod analytics engine |
 
 Each recipe uses at most one query engine (or `none` for ETL-only
 deployments). The benchmark suite runs against whichever engine is active.
@@ -92,7 +93,7 @@ configuration.
 
 PostgreSQL stores catalog metadata. Deployed as a StatefulSet with a
 persistent volume. See [PostgreSQL Reference](component-postgres.md) for
-storage sizing and backup.
+storage sizing and teardown.
 
 ---
 
@@ -103,8 +104,10 @@ Deployed together via the `kube-prometheus-stack` Helm chart when
 `observability.chart_version` (default `87.19.2`), which bundles Prometheus
 v3.13.1 and Grafana v13.1.x -- Prometheus and Grafana versions are not
 independently configurable; they come from whatever the pinned chart version
-bundles. Includes node-exporter and kube-state-metrics. Three built-in
-Grafana dashboards: Pipeline Overview, Spark Detail, Storage I/O. See
+bundles. Includes kube-state-metrics, and node-exporter except on OpenShift,
+where lakebench disables it (it needs host access the SCCs block). One
+built-in Grafana dashboard, Lakebench Overview, with Trino, Spark and node CPU
+panels. See
 [Observability Reference](component-observability.md) for dashboard
 configuration and metric details.
 
@@ -149,24 +152,25 @@ query engine (none for the `-none` recipes) and runs Spark for the pipeline.
 Which workloads and modes each recipe supports is in
 [Compatibility Matrix](compatibility-matrix.md#support-states).
 
---------|---------|--------|--------|---------------------|
-| `hive-iceberg-spark-trino` | Hive | Iceberg | Trino | Postgres, Hive, Trino, Spark |
-| `hive-iceberg-spark-thrift` | Hive | Iceberg | Spark Thrift | Postgres, Hive, Spark Thrift, Spark |
-| `hive-iceberg-spark-duckdb` | Hive | Iceberg | DuckDB | Postgres, Hive, DuckDB, Spark |
-| `hive-iceberg-spark-none` | Hive | Iceberg | -- | Postgres, Hive, Spark |
-| `polaris-iceberg-spark-trino` | Polaris | Iceberg | Trino | Postgres, Polaris, Trino, Spark |
-| `polaris-iceberg-spark-thrift` | Polaris | Iceberg | Spark Thrift | Postgres, Polaris, Spark Thrift, Spark |
-| `polaris-iceberg-spark-duckdb` | Polaris | Iceberg | DuckDB | Postgres, Polaris, DuckDB, Spark |
-| `polaris-iceberg-spark-none` | Polaris | Iceberg | -- | Postgres, Polaris, Spark |
-
 ---
 
 ## Overriding Versions
 
-Lakebench is not locked to the default versions listed above. Every component
-image and library version can be overridden in your YAML config, so you can
-test newer (or older) releases of any component without waiting for a
-Lakebench update:
+Lakebench is not locked to the default versions listed above. Component
+images and library versions can be overridden in your YAML config, within
+these limits:
+
+- Spark must be a 3.5.x, 4.0.x or 4.1.x `-python3` image; Spark 4.2 and other
+  minors are rejected at config load.
+- An explicit Iceberg or Delta version must be in the compatibility list for
+  the Spark minor, or config load fails. Iceberg 1.11+ needs a Java 17 Spark
+  image.
+- `images.hive` does not change the Hive that runs: the Stackable HiveCluster
+  runs Hive 3.1.3 (see [Hive Reference](component-hive.md)).
+- The Polaris version that runs is the tag of `images.polaris`, not
+  `architecture.catalog.polaris.version`.
+
+For example:
 
 ```yaml
 images:

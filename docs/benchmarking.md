@@ -33,8 +33,6 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 |---|---|---|
 | `time_to_value_seconds` | `max(end_time) - min(start_time)` | Wall-clock seconds from the first stage's submission to the moment gold is queryable (the gold Spark application's end). It includes lakebench's work between stages (noticing a stage ended, reading its driver log and output size, submitting the next). The primary batch score. Lower is better. |
 | `total_elapsed_seconds` | `sum(stage.elapsed_seconds)` | Sum of all stage durations. May exceed time-to-value if stages overlap. |
-
-Batch stage times (v1.6). A Spark stage runs from its SparkApplication's creation to the driver container's finish time (else the SparkApplication's `terminationTime`), mapped to the lakebench host's clock through the API server's clock offset. Each stage records `timing_source` (`driver_container`, `spark_application`, or `poll` when no consistent cluster time could be read) and `timing_resolution_seconds` (2 s from the cluster, the poll interval otherwise). Before v1.6 every stage ended on the 15 s job-monitor poll, so older stage seconds and time to value are rounded up by up to 15 s per stage and include the gold driver-log fetch; the perf gate refuses to compare the two (record a new baseline).
 | `total_data_processed_gb` | `sum(stage.input_size_gb)` | Total input data across all stages. |
 | `pipeline_throughput_gb_per_second` | `total_data_processed_gb / time_to_value_seconds` | Composite throughput across the whole pipeline. Higher is better. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Higher means better resource utilization. |
@@ -42,9 +40,11 @@ Batch stage times (v1.6). A Spark stage runs from its SparkApplication's creatio
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
 | `cycle_progression` | Per-cycle elapsed, QpH, table health | (Multi-cycle only, when `cycles > 1`) Shows pipeline time and Iceberg metadata growth per cycle. |
 
+Batch stage times (v1.6). A Spark stage runs from its SparkApplication's creation to the driver container's finish time (else the SparkApplication's `terminationTime`), mapped to the lakebench host's clock through the API server's clock offset. Each stage records `timing_source` (`driver_container`, `spark_application`, or `poll` when no consistent cluster time could be read) and `timing_resolution_seconds` (2 s from the cluster, the poll interval otherwise). Before v1.6 every stage ended on the 15 s job-monitor poll, so older stage seconds and time to value are rounded up by up to 15 s per stage and include the gold driver-log fetch; the perf gate refuses to compare the two (record a new baseline).
+
 ### Continuous Scores
 
-Sustained scoring answers: "How fresh is gold, and how fast are we sustaining it?"
+Continuous scoring answers: "How fresh is gold, and what ingest rate does the pipeline hold?"
 
 Freshness, throughput and the row counts are measured inside the
 **measurement window**. The window opens when every stream's driver is
@@ -96,7 +96,7 @@ Each pipeline stage (datagen, bronze, silver, gold, query) produces a uniform
 - **Data volume**: input and output size in GB, input and output row counts
 - **Throughput**: `input_size_gb / elapsed_seconds` and `input_rows / elapsed_seconds`
 - **Resources** (allocated): executor count, cores per executor, memory per executor
-- **Streaming** (zero for batch): latency in ms, freshness in seconds, batch count
+- **Continuous stream metrics** (zero for batch): latency in ms, freshness in seconds, batch count
 - **Query** (zero for non-query stages): queries executed, queries per hour
 
 These per-stage metrics feed into the pipeline-level scores and are exported
@@ -119,18 +119,22 @@ This runs data generation first, then the pipeline stages, then the query
 engine benchmark -- all in one invocation.
 
 In **continuous** mode, datagen always runs automatically alongside the
-streaming jobs -- no `--generate` flag needed. The datagen stage is included in the
+stream jobs -- no `--generate` flag needed. The datagen stage is included in the
 pipeline scorecard as a `datagen` stage with `stage_type="datagen"` and
 `engine="datagen"`. It contributes to:
 
-- `time_to_value_seconds` -- wall-clock now starts from datagen begin
-- `total_elapsed_seconds` -- includes datagen duration
+- `total_elapsed_seconds` -- wall-clock of the run, datagen included
 - `total_data_processed_gb` -- includes datagen output size
-- `scale_ratio` -- uses datagen output to verify completeness
+- the denominator of `corpus_ingest_ratio` (datagen output rows)
+
+Continuous scores do not include `time_to_value_seconds` or `scale_ratio`.
 
 The datagen output size is measured from the bronze S3 bucket after generation
-completes. Row count is estimated from the scale factor (approximately 1.5M
-rows per scale unit).
+completes. There is no row estimate from the scale factor. In continuous mode
+the row count is the sum of the rows every datagen pod reports writing, and
+it is left unmeasured (0, with `ingest_ratio` and `pipeline_saturated` null)
+when any pod did not report. In batch mode the datagen stage's row count is
+not measured.
 
 ### Resource Metrics
 
@@ -228,8 +232,8 @@ architecture:
 ```
 
 Continuous mode does not wait. Its maintenance and compaction run on a
-timer during the stream (`sustained.retention_interval`,
-`sustained.compaction_interval`), and an in-stream benchmark round that
+timer during the stream (`architecture.pipeline.continuous.retention_interval`,
+`architecture.pipeline.continuous.compaction_interval`), and an in-stream benchmark round that
 starts soon after one of them can read slow for the same reason. The
 continuous scorecard does not separate those rounds: `in_stream_composite_qph`
 is the median over all rounds and `qph_degradation_pct` compares the first
@@ -254,6 +258,34 @@ To skip maintenance and run only the post-pipeline benchmark:
 ```bash
 lakebench run --skip-maintenance config.yaml
 ```
+
+### Effective Maintenance and Lakebench Limits
+
+The experiment block in `metrics.json` records the maintenance a run
+actually got (`experiment.effective_maintenance`), one label per operation
+(Iceberg `expire_snapshots`, `remove_orphan_files` and `compaction`; Delta
+`vacuum` and `compaction`):
+
+| Label | Meaning |
+|---|---|
+| `ran` | The operation executed. |
+| `ran_no_effect` | It executed at a retention nothing written in the window can meet (continuous Delta `VACUUM` at Delta's 7-day default). |
+| `not_supported` | The composition cannot run it and it was not executed (DuckDB, Delta `OPTIMIZE`, Delta `VACUUM` on Spark Thrift). |
+| `skipped_by_user` | Turned off: `--skip-maintenance`, `pre_benchmark_maintenance: false`, `--skip-benchmark`, or continuous compaction disabled. |
+| `failed` | Attempted, and no statement succeeded. |
+| `not_run` | The run ended before the maintenance phase. |
+
+Two runs whose effective maintenance differs are comparable at best, not
+like-for-like.
+
+`experiment.limits` records the Lakebench-imposed caps a run executed
+under, and `limits.bound` lists the ones that bound it. They include the
+continuous trickle (`max_files_per_trigger`, auto-capped at 50 files per
+trigger), the per-job executor caps (28 at most) and any concurrent
+executor budget, auto-sizing cuts, the pre-benchmark maintenance budget
+when it stopped maintenance early, and the benchmark iterations and
+in-stream rounds. A number measured under a cap that bound is a property of
+the cap, not of the infrastructure.
 
 ---
 
@@ -411,7 +443,7 @@ scale 10 with 3 Trino workers, 60-120s at scale 100 with 10 workers.
 | Duration | Warmup | Interval | Approx round time | Expected rounds |
 |---|---|---|---|---|
 | 30 min | 300s | 300s | 40s | 5 |
-| 45 min | 300s | 300s | 40s | 8 |
+| 45 min | 300s | 300s | 40s | 7 |
 | 60 min | 300s | 300s | 40s | 10 |
 
 For at least 5 rounds (recommended for trend analysis), set
@@ -420,7 +452,7 @@ For at least 5 rounds (recommended for trend analysis), set
 `warmup=300, interval=300, run_duration=1800` (30 min).
 
 **Adaptive end-of-window guard:** Lakebench uses an adaptive guard to decide
-whether to start a final round near the end of the streaming window. Before
+whether to start a final round near the end of the measurement window. Before
 any round has completed, a 60-second floor is used. After the first round
 completes, the guard switches to 1.2x the observed round duration. This
 scales with cluster performance -- fast clusters get more rounds, slow
@@ -480,12 +512,12 @@ worker count, and memory allocation. It is independent of pipeline throughput.
 
 ### Continuous Mode
 
-**Data Freshness** is the primary score. It measures how far behind real-time
-the gold layer is -- the worst-case staleness across all streaming stages.
-Lower is better.
-
-- Under 30s is typical for a well-provisioned pipeline
-- Over 60s suggests a bottleneck in one of the stages
+**Data Freshness** (`data_freshness_seconds`) is the gold staleness headline:
+the maximum of the streams' measured freshness inside the window. Each gold
+refresh measures, after its write, the age of the newest silver row it
+read (`current_timestamp` minus the newest silver processing timestamp), so
+the figure tracks the silver trigger and the gold write time rather than
+`gold_refresh_interval`. Lower is better.
 
 **Sustained Throughput** (rows/sec) measures the steady-state ingestion rate
 through bronze. This is unique rows only -- gold-stage re-reads of silver data
@@ -512,12 +544,13 @@ trigger, 1800 s window):
 |---|---|---|
 | c360 scale 1 (~160 files) | 2 | ~2,400 s |
 | c360 scale 10 (~1,600 files) | 22 | ~2,190 s |
-| c360 scale 100 | 50 (the cap) | ~9,600 s |
+| c360 scale 100 | 50 (the Lakebench-imposed cap) | ~9,600 s |
 | AML scale 1 | 1 | ~4,050 s |
 | AML scale 10 | 18 | ~2,250 s |
 
 So the offered load now grows with scale up to 50 files per 30 s (about
-107 MB/s, 25,818 rows/s for c360), where it stays: at scale 100 the window
+107 MB/s, 25,818 rows/s for c360), where it stays. That ceiling is a
+Lakebench-imposed cap, not an infrastructure limit: at scale 100 the window
 takes about 19% of the corpus, which the scorecard reports as
 `intake_limit: trickle_rate`, not saturation. A config that sets
 `max_files_per_trigger` explicitly to a value that would offer the corpus in
@@ -573,9 +606,12 @@ runs are not result-checked: detection and TM operations passes run on a
 timer, so their tables depend on when the passes ran relative to arrival.
 None of this time is part of the window.
 
-**Ingestion Completeness** (`ingest_ratio`) is the share of the corpus the
-window consumed. A short ratio says only that the corpus outlasted the window;
-`intake_limit` says why:
+**Ingestion Completeness** (`ingest_ratio`) is the share of the rows the
+trickle had released to bronze by the window's end that bronze took
+(`released_rows`, see the table above). Before 1.6 it was the share of the
+whole corpus; that figure is now `corpus_ingest_ratio`, and a short
+`corpus_ingest_ratio` says only that the corpus outlasted the window. When
+`ingest_ratio` is short, `intake_limit` says why:
 
 - `trickle_rate`: bronze ran a micro-batch on at least 90% of the window's
   triggers and all but 5% (at least one) of the triggers between its first
@@ -621,15 +657,14 @@ and freshness degrades. That stage is the bottleneck.
 
 ### Ingest Ratio Above 1.0
 
-An `ingest_ratio` above 1.0 means bronze consumed more rows than the
-datagen estimate predicted. This typically happens because the row estimate
-(`scale * 1.5M`) was calibrated for batch mode. In continuous mode, 16 pods
-running for 30 minutes produce more data than the estimate expects.
-
-An ingest ratio of 1.0--1.4 with `pipeline_saturated: false` means the
-pipeline is keeping up -- the estimate is just conservative. The pipeline
-is only truly saturated when `ingest_ratio < 0.95` (data is being generated
-faster than bronze can ingest it).
+`released_rows` is computed from the corpus's mean rows per file, so a run
+whose early files are larger than the mean can read slightly above 1.0; that
+still means bronze kept up. A value well above 1.0 means bronze ingested more
+rows than the trickle had released (for example, data left in the bronze
+bucket from an earlier run). The HTML report shows a ratio above 1.05 as a
+warning, and the perf gate refuses a run whose `ingest_ratio` is above 1.05. The pipeline is saturated only when
+`ingest_ratio < 0.95` and `intake_limit` does not show the trickle bounding
+intake.
 
 ### Gold Re-Read Amplification
 
@@ -726,8 +761,9 @@ rounds for trend analysis.
 | Symptom | Likely Cause | Fix |
 |---|---|---|
 | `pipeline_saturated: true` | A stage could not keep pace with the trickle (`intake_limit` names bronze; otherwise silver) | Add executors to that stage |
-| `intake_limit: trickle_rate`, `ingest_ratio` < 0.95 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
-| `ingest_ratio > 1.3` | Datagen estimate conservative | Not a real problem -- pipeline is keeping up |
+| `corpus_ingest_ratio` < 1 with `ingest_ratio` near 1.0 | Corpus larger than trickle rate x window | Not saturation. Lengthen the window to `corpus_drain_seconds`, or raise `max_files_per_trigger` and size the streams for it |
+| `ingest_ratio` < 0.95 | Bronze fell behind the rows the trickle released; `intake_limit` says whether bronze capacity or a stall bounded it | Add bronze-ingest executors, or check the driver log for a late start or stall |
+| `ingest_ratio` well above 1.0 | Bronze took more rows than the trickle released (for example, data from an earlier run) | Empty bronze (`lakebench clean bronze`) and rerun; the report warns above 1.05 and the perf gate refuses the run |
 | `data_freshness > 300s` | Gold refresh interval too long | Decrease `gold_refresh_interval` |
 | Bronze latency >> 30s | Too few bronze executors | Increase `bronze_ingest_executors` |
 | Silver latency >> 60s | Too few silver executors | Increase `silver_stream_executors` |
@@ -829,7 +865,7 @@ lakebench report --summary --metrics <dir>        # custom metrics dir
 
 The summary output includes a per-stage table (elapsed time, data volume,
 throughput, executor count) and mode-appropriate scores -- time-to-value and
-throughput for batch, data freshness and sustained throughput for sustained.
+throughput for batch, data freshness and sustained throughput for continuous.
 
 ## HTML Report Layout
 
@@ -849,7 +885,7 @@ The header shows the deployment name, run ID, and an overall status badge:
   threshold.
 
 A one-line context banner below the header shows pipeline mode (Batch /
-Sustained), Customer360 scale factor, the recipe string
+Continuous), Customer360 scale factor, the recipe string
 (`catalog-format-engine-query_engine`), and wall-clock duration.
 
 ### Summary Cards
@@ -859,7 +895,7 @@ Five primary KPI cards. The cards change with pipeline mode:
 **Batch:** Time-to-Value, Data Processed (GB), Pipeline Throughput (GB/s), QpH,
 Job Status (pass/fail count).
 
-**Sustained:** Data Freshness, Sustained Throughput (rows/s), Compute
+**Continuous:** Data Freshness, Sustained Throughput (rows/s), Compute
 Efficiency (GB/core-hour), In-Stream QpH (median across rounds), Total
 CPU-hours.
 
@@ -877,7 +913,7 @@ Green/red status indicators for data quality checks:
 
 - **Scale Ratio** (batch) or **Ingest Ratio** (continuous) -- confirms the run
   processed the expected data volume. Red when below 0.95 or above 1.05.
-- **Job Success** -- counts of passed and failed batch/streaming jobs.
+- **Job Success** -- counts of passed and failed batch and continuous jobs.
 
 If any indicator is red, cross-run comparisons are unreliable.
 
@@ -901,7 +937,7 @@ throughput, executor count, cores, and total CPU seconds.
 
 ### Streaming Pipeline (continuous only)
 
-A table with one row per streaming stage. Columns: job type, status, rows
+A table with one row per stream job. Columns: job type, status, rows
 processed, throughput (rows/s), freshness, executor count, and compute
 resources.
 
@@ -939,8 +975,27 @@ separately from pipeline pods.
 
 ## Comparing Runs
 
-The metrics JSON is designed for diff and comparison across configurations.
-Key fields for comparison:
+`lakebench compare <config_a> <config_b>` runs both configurations one
+after the other, then checks the two runs' experiment blocks before it
+shows any delta. It gives one of three verdicts:
+
+| Verdict | When | Deltas | Exit |
+|---|---|---|---|
+| comparable | Same experiment, and the benchmark results are shown equivalent | Shown | 0 |
+| NOT COMPARABLE | Different experiments (workload, corpus, seed, scale, mode and so on), different benchmark results, a run that failed, or a record without an experiment block | Withheld | 1 |
+| comparability not established | Nothing contradicts the pair, but a side has no checked results: `--skip-benchmark`, a `*-none` recipe, or a continuous run whose result check did not settle | Withheld; raw numbers shown | 0 |
+
+A comparable pair is also like-for-like when the execution conditions
+match: effective maintenance and maintenance settings, query access path,
+system, benchmark iterations and mode, in-stream rounds (continuous), and
+the Lakebench limits that bound. Otherwise the table is titled "comparable,
+not like-for-like" and lists the differences, because a delta may come from
+those conditions rather than the architecture. A config pair that already
+differs in experiment identity or conditions is flagged before either run
+starts.
+
+For ad hoc analysis the metrics JSON can also be diffed directly. Key
+fields:
 
 - `scorecard.time_to_value_seconds` -- primary batch score
 - `scorecard.pipeline_throughput_gb_per_second` -- throughput efficiency
@@ -949,8 +1004,9 @@ Key fields for comparison:
 - `config_snapshot` -- captures scale factor, executor counts, memory,
   and all tuning parameters
 
-To compare two runs, load both `metrics.json` files and diff the `scorecard`
-and `stage_matrix` sections. The `config_snapshot` in each run records the
+To compare two runs by hand, load both `metrics.json` files and diff the
+`scorecard` and `stage_matrix` sections, after checking that their
+`experiment` blocks match and their results are equivalent. The `config_snapshot` in each run records the
 exact configuration used, so you can attribute performance differences to
 specific changes (scale factor, executor count, memory, engine workers, etc.).
 

@@ -1,7 +1,5 @@
 # Namespace isolation and cluster ownership taxonomy
 
-Status: shipping in v1.5.0 (currently `1.5.0.dev0` on `feat/fraud-aml`; commits `30be5ba` PR-1, `9992e6a` PR-2, `8398745` PR-3 docs, plus the destroy-legacy-refuse hardening from the post-roleplay pass).
-
 ## Problem
 
 Lakebench runs on shared Kubernetes clusters. Before v1.5, two parallel deployments could poison each other's runs: they both created `SecretClass/lakebench-s3-credentials-class` (cluster-scoped, fixed name), they both raced the same Spark Operator `spark.jobNamespaces` Helm value, and either destroy could delete resources the other still needed. The failure mode was silent: a destroy that reported SUCCESS while breaking every other deployment on the cluster.
@@ -38,7 +36,7 @@ Rule: `deploy` preflight refuses with an actionable error when any of these is m
 
 Single installation per cluster. Version-asserted at preflight.
 
-Spark Operator, Stackable operators, Prometheus/Grafana Helm release. `deploy` refuses if the operator is absent or at an unsupported version. `lakebench admin install-spark-operator` (and friends) install them; a cluster admin runs `admin` once, a developer runs `deploy` many times without touching the operator install.
+Spark Operator, Stackable operators, Prometheus/Grafana Helm release. `deploy` refuses if the operator is absent or at an unsupported version, unless the config opts in to installing it (`platform.compute.spark.operator.install: true` for the Spark Operator), in which case `deploy` installs a missing operator. `lakebench admin install-spark-operator` (and friends) install them; a cluster admin runs `admin` once, a developer runs `deploy` many times without touching the operator install.
 
 ### Category 4 -- shared mutable state
 
@@ -64,11 +62,18 @@ Every mutating `admin` command acquires the lease. The strict variant of the Spa
 
 ## Deployment identity
 
-On `deploy`, `_deploy_namespace` writes three annotations to the namespace:
+On `deploy`, `_deploy_namespace` writes these identity annotations to the namespace:
 
 - `lakebench.deployment/name: <cfg.name>`
 - `lakebench.deployment/api-server: <sha256(cluster-CA-cert)>` -- workstation and in-cluster paths to the same cluster produce the same fingerprint because they read the same CA
 - `lakebench.deployment/committed-sha: <git rev-parse HEAD>` (best-effort, informational)
+- `lakebench.deployment/stamped-at: <ISO 8601 timestamp>`
+
+Deploy also writes three bookkeeping annotations to the same namespace:
+
+- `lakebench.deployment/deploy-nonce` -- a fresh random value on every deploy. Destroy records it at start and stops if it changes (a redeploy into the same namespace, which the namespace UID cannot show).
+- `lakebench.deployment/created-buckets` -- the buckets this deployment created. Destroy deletes only these.
+- `lakebench.deployment/adopted-empty-buckets` -- pre-existing buckets that were empty when deploy adopted them on a backend without tagging. Destroy may empty them, never delete them.
 
 The write uses an optimistic-concurrency PATCH keyed on the namespace's `resourceVersion`. If the PATCH conflicts, we re-read; if the re-read shows a foreign name, refuse.
 
@@ -88,8 +93,9 @@ Every `ensure_buckets` call unconditionally writes:
 
 - `lakebench.deployment=<cfg.name>`
 - `lakebench.workload=<cfg.workload_schema>`
+- `lakebench.created=true`, only on a bucket this deployment created
 
-Then reads the tags back and verifies the round trip; a bucket that does not accept tags is refused rather than trusted. Destroy and clean read the tag before mutating: a mismatch is a hard refusal (`--force` does not bypass), an absent tag on a legacy bucket requires `--force-legacy`, a missing bucket is a no-op.
+Then reads the tags back and verifies the round trip. A backend that accepts the write but drops it (the read-back returns no tags or a different name) is refused rather than trusted. A backend that does not implement tagging at all (`NotImplemented`, as on FlashBlade) takes the name-prefix and namespace-record fallback described under Category 1. Destroy and clean read the tag before mutating: a mismatch is a hard refusal (`--force` does not bypass), an absent tag on a legacy bucket requires `--force-legacy`, a missing bucket is a no-op.
 
 `lakebench admin reclaim-bucket <name>` rewrites the tag under the cluster lease with an object-count check inside the lease scope; a bucket with objects requires `--force-nonempty` acknowledgement.
 

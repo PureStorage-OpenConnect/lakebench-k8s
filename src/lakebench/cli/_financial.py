@@ -238,9 +238,10 @@ def reference_score(
     amount band. A relative-threshold rule rewrite (e.g. the W4/W8 precision
     work, LB-130) is validated against this envelope before it ships -- a rule
     whose precision/recall diverges sharply from the reference is scoring
-    against label knowledge it should not have. Requires scikit-learn on the
-    Spark driver image for the GBT half; without it the leakage gate still runs
-    and the model verdict is reported as no_sklearn.
+    against label knowledge it should not have. The job installs scikit-learn
+    and its pinned dependencies for the GBT half in an init container on each
+    run; if that is unavailable the leakage gate still runs and the model
+    verdict is reported as no_sklearn.
     """
     from lakebench.modules.pipeline_engines.spark.job import JobType
 

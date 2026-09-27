@@ -78,17 +78,20 @@ datagen. Same formula as the Spark stages; same units.
 Two decisions deserve calling out because they took adversarial
 review to get right.
 
-**Cores used vs cores requested.** Rust's `available_parallelism()`
-does not read the cgroup CPU quota on Linux. A pod requesting 16
-CPU with rayon defaulted to 8 threads produces a datagen that runs
-at 8-thread parallelism but k8s reserves 16 CPU. Cost accounting
-must use the k8s request (what k8s bills), not the rayon pool (what
-the code actually parallelized to). So the emit carries both:
+**Cores used vs cores requested.** The image entrypoint
+(`datagen_rs/entrypoint.py`) sizes the rayon pool from the pod's
+cgroup CPU quota, but the pool can still be smaller than the
+request: an explicit `datagen.generators` value overrides it, and the
+entrypoint lowers the thread count when the memory limit cannot hold
+that many threads. A pod requesting 16 CPU that runs 8 threads is
+still billed for 16. Cost accounting must use the k8s request (what
+k8s bills), not the rayon pool (what the code actually parallelized
+to). So the emit carries both:
 `cores_used` (rayon pool) AND `cpu_request_millicores` (k8s
 request, read from a downward-API env var populated by the Job
 template). The aggregator prefers the request when set. Without
-this the pipeline scorecard silently reports 2x-lower CPU cost
-than the customer pays.
+this, a pod running half its requested threads would make the
+pipeline scorecard report half the CPU cost the customer pays.
 
 **Sidecar collision across namespaces.** UAT runs 4 tests in
 parallel across 4 namespaces. The sidecar file used to be one
@@ -106,18 +109,14 @@ review because the wrong numbers still looked plausible.
 
 ## The scorecard now says
 
-For a scale-0.5 c360 run at 8 pods x 8 CPU snappy compression:
+An illustrative example, not a measurement: 8 datagen pods at 8 CPU
+each, running 200 s, reserve 8 x 8 x 200 = 12,800 CPU-seconds, about
+3.6 CPU-hours. If they write 100 GB, datagen contributes 3.6 / 0.1 =
+36 CPU-hr/TB. If the Spark stages of the same run requested 12
+core-hours, the pipeline total is 12 + 3.6 = 15.6 core-hours.
 
-- Datagen wall time: ~197s
-- Datagen bytes: 125 GB (bronze)
-- Datagen throughput: 4.34 GB/s aggregate, 628 MB/s per pod
-- Datagen CPU-hr: ~3.5
-- Datagen CPU-hr/TB: 4.2
-- Pipeline total wall (including bronze-verify, silver-build, gold-finalize): ~28 min at this scale
-- Pipeline total CPU-hr: 15.6 (of which datagen is ~3.5, Spark stages ~12.1)
-
-That last row is what changed. `total_core_hours` used to report
-~12 because datagen was invisible; it now correctly reports 15.6.
+That total is what changed. `total_core_hours` used to report 12
+because datagen was invisible; it now reports 15.6.
 Any `$/TB` derived from `total_core_hours * $/core-hour / TB` is
 now correct across the whole pipeline.
 

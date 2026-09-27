@@ -103,7 +103,7 @@ with an explicit version -- incompatible combinations are rejected at config loa
 
 | Spark | Delta 4.0.0 | Delta 4.1.0 | Iceberg 1.11.0 | Iceberg 1.10.1 | Iceberg 1.10.0 |
 |-------|-------------|-------------|----------------|----------------|----------------|
-| 3.5.x | -- | -- | **Default** (needs java17 image) | OK | OK |
+| 3.5.x | -- | -- | **Default** (java17 image) | OK (fallback default on a Java 11 image) | -- |
 | 4.0.x (default) | **Default** | -- | **Default** | OK | OK |
 | 4.1.x | -- | **Default** | **Default** | OK | OK |
 
@@ -116,8 +116,11 @@ versions (1.5.x--1.9.x) are compatible with Spark 3.5.x only.
 
 Iceberg 1.11.0 is compiled to Java 17 bytecode; 1.10.x was Java 11. Every
 Spark 4.x image already ships Java 17, so only Spark 3.5 is affected --
-`apache/spark:3.5.4-python3` ships Java 11 and will fail at class load with
-`UnsupportedClassVersionError`.
+`apache/spark:3.5.4-python3` ships Java 11, and Iceberg 1.11.0 on it would
+fail at class load with `UnsupportedClassVersionError`.
+
+When `table_format.iceberg.version` is left at its default, lakebench detects
+a Java 11 Spark 3.5 image and uses Iceberg 1.10.1 instead, with a warning.
 
 On Spark 3.5, either use a java17 image tag:
 
@@ -126,7 +129,7 @@ images:
   spark: apache/spark:3.5.9-java17-python3
 ```
 
-or pin Iceberg to the last Java 11 release:
+or pin Iceberg to the last Java 11 release explicitly:
 
 ```yaml
 architecture:
@@ -135,8 +138,8 @@ architecture:
       version: "1.10.1"
 ```
 
-Lakebench rejects the bad pairing at config load rather than letting it fail
-inside the Spark driver.
+Only an explicitly chosen Iceberg 1.11.x on a Java 11 image is rejected, at
+config load rather than inside the Spark driver.
 
 ### Which runtime jar gets requested
 
@@ -160,7 +163,8 @@ architecture:
   table_format:
     type: delta
     # delta.version auto-resolves to 4.1.0 (matches Spark 4.1)
-    # Or set explicitly: delta: { version: "4.0.0" }  -- backward compat OK
+    # An explicit delta.version must match the Spark minor: only 4.1.0 is
+    # accepted on Spark 4.1 (4.0.0 is for Spark 4.0), anything else is rejected
 ```
 
 ## Known Limitations
@@ -220,7 +224,7 @@ architecture:
 - **S3**: Path-style access required (FlashBlade, MinIO). Virtual-hosted style not tested.
 - **OpenShift**: Requires `anyuid` SCC for Spark pods (UID 185).
 - **Portworx**: `px-csi-scratch` (repl=1) for Spark shuffle, `px-csi-db` (repl=3) for PostgreSQL.
-- **PostgreSQL auth**: v1.2 uses SCRAM-SHA-256 authentication (replacing MD5). PostgreSQL 16+ defaults to SCRAM-SHA-256. Ensure `pg_hba.conf` uses `scram-sha-256` method, not `md5`.
+- **PostgreSQL auth**: the lakebench PostgreSQL container is initialised with SCRAM-SHA-256 (`POSTGRES_HOST_AUTH_METHOD=scram-sha-256`, `--auth-host=scram-sha-256`), replacing MD5 since v1.2. Nothing to configure; the JDBC drivers Hive, Polaris and Unity ship support it.
 
 ## Catalog + Table Format Behavior
 

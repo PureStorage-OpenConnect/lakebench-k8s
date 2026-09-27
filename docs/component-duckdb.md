@@ -9,7 +9,13 @@ and environments where deploying Trino workers is impractical.
 
 When `architecture.query_engine.type` is set to `duckdb`, Lakebench deploys
 a DuckDB pod during `lakebench deploy` and tears it down during
-`lakebench destroy`.
+`lakebench destroy`. DuckDB cannot drop catalog tables, so destroy does not
+drop them on a DuckDB recipe: the catalog database goes with the namespace
+(when lakebench created it) and the table files go with the bucket cleanup of
+buckets the deployment owns.
+
+DuckDB reads Iceberg only. DuckDB with Delta is rejected at config load: its
+delta extension ignores DuckDB's S3 settings and cannot reach non-AWS S3.
 
 ## Architecture
 
@@ -28,6 +34,7 @@ results as JSON.
 ### Extension installation
 
 The DuckDB pod installs the Python `duckdb` module at startup via `pip`,
+pinned to `duckdb.version` (default 1.5.5),
 then runs `INSTALL iceberg` and `INSTALL httpfs` to download the required
 DuckDB extensions. The startup probe verifies both extensions load
 successfully before the pod is marked ready. This means the pod needs
@@ -89,6 +96,7 @@ architecture:
       cores: 2                       # CPU request and limit
       memory: "4g"                   # Memory request and limit
       catalog_name: "lakehouse"      # Iceberg catalog name in queries
+      version: "1.5.5"               # Pinned duckdb Python package version
 ```
 
 ### Field reference
@@ -99,6 +107,7 @@ architecture:
 | `duckdb.cores` | `2` | CPU request and limit for the DuckDB pod. |
 | `duckdb.memory` | `"4g"` | Memory request and limit for the DuckDB pod. |
 | `duckdb.catalog_name` | `"lakehouse"` | The catalog name used in SQL queries (e.g. `SELECT ... FROM lakehouse.silver.table`). Must match the catalog registered in Hive or Polaris. |
+| `duckdb.version` | `"1.5.5"` | Version of the `duckdb` Python package installed in the pod. Pinned so runs weeks apart use the same engine. |
 
 ### What the overrides do
 
@@ -116,8 +125,9 @@ architecture:
 - **No persistent cache.** Each query re-reads Iceberg metadata from S3.
   At large scales this adds latency compared to Trino's cached metadata.
 - **No Iceberg maintenance.** DuckDB is read-only for Iceberg tables.
-  `expire_snapshots`, `remove_orphan_files`, and compaction are skipped
-  when DuckDB is the only query engine. Table health probing still works.
+  `expire_snapshots`, `remove_orphan_files`, and compaction are never run on
+  a DuckDB recipe; the run's maintenance record marks them `not_supported`.
+  Table health probing still works.
 - **kubectl exec overhead.** Each query invocation has ~1-2s overhead from
   the kubectl exec round-trip.
 
