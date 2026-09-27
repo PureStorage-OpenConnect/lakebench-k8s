@@ -345,7 +345,7 @@ additional flags.
 
 Deprecated and hidden; `lakebench config recommend <config>` runs the same
 logic for the config's pipeline mode. The Spark figure is never below
-`compute_peak_requirements()`, the request the deploy preflight checks.
+`compute_peak_requirements()`, the request the `run` capacity preflight checks.
 
 Show cluster sizing guidance for lakebench workloads.
 

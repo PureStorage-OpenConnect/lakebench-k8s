@@ -156,6 +156,26 @@ class SparkOperatorManager:
             f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
         ]
 
+    def _watch_list_pin(self) -> list[str]:
+        """``--version``/backfill args for a watch-list-only ``helm upgrade``.
+
+        Adding or removing a namespace must not change the shared operator's
+        chart. Without ``--version`` Helm resolves whatever the local repo
+        serves (a silent upgrade for every deployment on the cluster); with
+        the config's version a developer's older pin would downgrade an
+        admin's newer install. So pin the installed release's chart when
+        check_status() has read it, and fall back to the configured version.
+        """
+        pin = self._installed_version or self.target_version
+        if not pin:
+            return []
+        return [
+            "--version",
+            pin,
+            "--set",
+            f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+        ]
+
     def __init__(
         self,
         namespace: str | None = None,
@@ -174,6 +194,10 @@ class SparkOperatorManager:
         """
         self.namespace = namespace or self.DEFAULT_NAMESPACE
         self.target_version = version  # Version to install if not present
+        # Chart version of the running release, cached by check_status().
+        # Watch-list edits pin it so adding or removing a namespace never
+        # moves the shared operator to another chart (see _watch_list_pin).
+        self._installed_version: str | None = None
         self.job_namespace = job_namespace
         # The config's kubeconfig context. helm and kubectl otherwise use the
         # ambient current context, so a stale or different current context
@@ -277,6 +301,8 @@ class SparkOperatorManager:
 
             # Get version from Helm release if possible
             version = self._get_helm_version()
+            if version:
+                self._installed_version = version
 
             # Check namespace watching -- use the deployment spec args as
             # ground truth, NOT Helm values (which can be out of sync after
@@ -604,6 +630,29 @@ class SparkOperatorManager:
         Returns:
             True if the RBAC was successfully recreated.
         """
+        # The remove-then-re-add is a read-modify-write of the shared
+        # watch list, so the whole sequence runs under one lease: an
+        # unlocked step 1 writing a list read before a concurrent add
+        # would drop that deployment's namespace.
+        lease_cm, mode = self._acquire_watch_lease()
+        try:
+            if mode == "refuse":
+                logger.error(
+                    "spark-operator watch-list: refusing to recreate RBAC for %r -- "
+                    "cluster lease is held or lease RBAC denied",
+                    namespace,
+                )
+                return False
+            return self._recreate_namespace_rbac_impl(namespace)
+        finally:
+            if lease_cm is not None:
+                try:
+                    lease_cm.__exit__(None, None, None)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("spark-operator watch-list: lease release failed: %s", e)
+
+    def _recreate_namespace_rbac_impl(self, namespace: str) -> bool:
+        """Body of ``recreate_namespace_rbac``; caller holds the lease."""
         try:
             watched = self._get_watched_namespaces()
         except _WatchListReadError as e:
@@ -613,7 +662,7 @@ class SparkOperatorManager:
             return True
         if namespace not in watched:
             # Not in the watch list -- delegate to normal add flow
-            return self._add_namespace_to_watch(namespace)
+            return self._add_namespace_to_watch_impl(namespace)
 
         # Step 1: Remove the namespace so Helm deletes the Role/RoleBinding
         without_ns = [ns for ns in watched if ns != namespace]
@@ -629,13 +678,13 @@ class SparkOperatorManager:
             "--set",
             f"spark.jobNamespaces={{{ns_set_without}}}",
         ]
-        # No --version here, so Helm resolves whatever chart the repo now
-        # serves while --reuse-values still only carries forward the
-        # release's *stored* values -- the same gap _reuse_values_backfill()
-        # exists for, just without a target_version to gate on. Always
-        # backfill here since there is no unversioned-and-safe case.
+        # Pin the installed chart (see _watch_list_pin). With no version
+        # known, Helm resolves whatever the repo serves while --reuse-values
+        # carries forward only the stored values, so backfill regardless.
+        pin = self._watch_list_pin()
         cmd.extend(
-            [
+            pin
+            or [
                 "--set",
                 f"prometheus.metrics.jobSubmitLatencyBuckets="
                 f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
@@ -655,7 +704,7 @@ class SparkOperatorManager:
         )
 
         # Step 2: Re-add the namespace -- Helm will create fresh RBAC
-        return self._add_namespace_to_watch(namespace)
+        return self._add_namespace_to_watch_impl(namespace)
 
     def remove_namespace_from_watch(
         self,
@@ -744,9 +793,7 @@ class SparkOperatorManager:
                 "--set",
                 f"spark.jobNamespaces={{{ns_set}}}",
             ]
-            if self.target_version:
-                cmd.extend(["--version", self.target_version])
-                cmd.extend(self._reuse_values_backfill())
+            cmd.extend(self._watch_list_pin())
 
             try:
                 result = self._run(cmd, capture_output=True, text=True)
@@ -1073,9 +1120,7 @@ class SparkOperatorManager:
             # so omitting this lets Helm re-resolve to whatever the repo now
             # serves.  A namespace add would then silently upgrade the
             # operator out from under a pinned config.
-            if self.target_version:
-                cmd.extend(["--version", self.target_version])
-                cmd.extend(self._reuse_values_backfill())
+            cmd.extend(self._watch_list_pin())
 
             try:
                 result = self._run(cmd, capture_output=True, text=True)

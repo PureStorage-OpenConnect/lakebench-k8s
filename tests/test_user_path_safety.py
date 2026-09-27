@@ -28,10 +28,32 @@ class TestValidateWatchListVerdict:
         assert level == "warn"
         assert "lakebench deploy" in hint
 
+    @pytest.mark.parametrize("can_edit", [True, None])
+    def test_pre_deploy_passes_when_the_add_is_possible_or_unknown(self, can_edit):
+        level, _msg, _hint = operator_watch_verdict(
+            "lb16-base", ["default"], namespace_exists=False, can_edit_release=can_edit
+        )
+        assert level == "ok"
+
     @pytest.mark.parametrize("exists", [True, False, None])
-    def test_never_suggests_raw_helm(self, exists):
+    def test_fails_when_credentials_cannot_make_the_add(self, exists):
+        """Review: a namespace-scoped developer saw validate green, then
+        deploy built half the stack and stopped at the operator step."""
+        level, _msg, hint = operator_watch_verdict(
+            "lb16-base",
+            ["default"],
+            namespace_exists=exists,
+            can_edit_release=False,
+            operator_namespace="spark-operator",
+        )
+        assert level == "fail"
+        assert "spark-operator" in hint
+
+    @pytest.mark.parametrize("can_edit", [True, False, None])
+    @pytest.mark.parametrize("exists", [True, False, None])
+    def test_never_suggests_raw_helm(self, exists, can_edit):
         _level, msg, hint = operator_watch_verdict(
-            "lb16-base", ["default", "other"], namespace_exists=exists
+            "lb16-base", ["default", "other"], namespace_exists=exists, can_edit_release=can_edit
         )
         text = msg + hint
         assert "--reuse-values" not in text
@@ -122,9 +144,12 @@ class TestInfoPeakRequest:
         assert "17 needed" not in out
 
 
-def test_config_show_reports_peak_request(monkeypatch):
+@pytest.mark.parametrize(
+    "example", ["hive-iceberg-spark-trino.yaml", "hive-delta-spark-thrift.yaml"]
+)
+def test_config_show_reports_peak_request(monkeypatch, example):
     """`config show` is the non-deprecated place for sizing; it must carry
-    the same peak figure as info and the deploy preflight."""
+    the same peak figure as info and the run preflight."""
     import pathlib
 
     from typer.testing import CliRunner
@@ -134,10 +159,11 @@ def test_config_show_reports_peak_request(monkeypatch):
 
     for var in ("LAKEBENCH_S3_ACCESS_KEY", "LAKEBENCH_S3_SECRET_KEY"):
         monkeypatch.setenv(var, "placeholder")
-    path = (
-        pathlib.Path(__file__).resolve().parents[1] / "examples" / "hive-iceberg-spark-trino.yaml"
-    )
+    path = pathlib.Path(__file__).resolve().parents[1] / "examples" / example
     cfg = load_config(path)
+    from lakebench.config.autosizer import resolve_auto_sizing
+
+    resolve_auto_sizing(cfg)  # as info and run do
     peak, co_cores, co_gb, _ = info_peak_request(
         cfg, cfg.architecture.workload.datagen.scale, False
     )
@@ -168,3 +194,83 @@ def test_recommend_never_below_compute_peak_requirements(mode):
     mem = int(re.search(r"Memory:\s+([\d,]+) GB", result.output).group(1).replace(",", ""))
     assert cores >= peak.cpu_cores
     assert mem >= peak.memory_gb
+
+
+class TestWatchListEditsKeepTheInstalledChart:
+    """A namespace add/remove is not an operator upgrade. Without --version
+    Helm resolved the repo's latest chart (run path, install=false); with the
+    config's version a developer could downgrade an admin's install."""
+
+    def _mgr(self, target=None, installed=None):
+        from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+
+        m = SparkOperatorManager(version=target, job_namespace="lb16")
+        m._installed_version = installed
+        return m
+
+    def test_installed_chart_wins_over_config_and_latest(self):
+        assert self._mgr(target="2.4.0", installed="2.5.1")._watch_list_pin()[:2] == [
+            "--version",
+            "2.5.1",
+        ]
+        assert self._mgr(target=None, installed="2.5.1")._watch_list_pin()[:2] == [
+            "--version",
+            "2.5.1",
+        ]
+        assert self._mgr(target="2.4.0")._watch_list_pin()[:2] == ["--version", "2.4.0"]
+        assert self._mgr()._watch_list_pin() == []
+
+    def test_add_pins_the_installed_chart(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        m = self._mgr(target=None, installed="2.5.1")
+        calls = []
+
+        def run(cmd, **_kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(m, "_run", run)
+        monkeypatch.setattr(m, "_get_watched_namespaces", lambda: ["default"])
+        monkeypatch.setattr(m, "_namespace_is_terminating", lambda _ns: False)
+        monkeypatch.setattr(m, "_filter_existing_namespaces", lambda ns: ns)
+        monkeypatch.setattr(m, "_restart_operator", lambda: True)
+        monkeypatch.setattr(m, "_verify_namespace_watched", lambda *_a, **_k: True)
+        m._add_namespace_to_watch_impl("lb16", _retry_on_eviction=False)
+        upgrade = next(c for c in calls if c[:2] == ["helm", "upgrade"])
+        assert upgrade[upgrade.index("--version") + 1] == "2.5.1"
+
+    def test_recreate_rbac_refuses_without_the_lease(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        m = self._mgr(installed="2.5.1")
+        run = MagicMock()
+        monkeypatch.setattr(m, "_run", run)
+        monkeypatch.setattr(m, "_acquire_watch_lease", lambda: (None, "refuse"))
+        monkeypatch.setattr(m, "_get_watched_namespaces", lambda: ["default", "lb16"])
+        assert m.recreate_namespace_rbac("lb16") is False
+        run.assert_not_called()
+
+
+def test_recommend_sizes_the_financial_schema():
+    """Review: config recommend passed only the mode, so AML continuous was
+    sized as Customer360 (38 cores against 118 requested at scale 1)."""
+    import re
+
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+    peak = compute_peak_requirements(1, "sustained", "financial")
+    out = (
+        CliRunner()
+        .invoke(
+            app,
+            ["recommend", "--scale", "1", "--mode", "sustained", "--schema", "financial"],
+            env={"COLUMNS": "200"},
+        )
+        .output
+    )
+    cores = int(re.search(r"CPU cores:\s+([\d,]+)", out).group(1).replace(",", ""))
+    assert cores >= peak.cpu_cores

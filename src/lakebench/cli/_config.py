@@ -104,8 +104,12 @@ def config_show(
         ]
 
         # Peak requested resources from compute_peak_requirements(), the
-        # same figure the deploy capacity preflight checks.
+        # same figure run's capacity preflight checks. Auto-sizing first, as
+        # info and run do, so the co-resident request matches theirs.
         from lakebench.cli import info_peak_request
+        from lakebench.config.autosizer import resolve_auto_sizing
+
+        resolve_auto_sizing(cfg)
         from lakebench.config.schema import PipelineMode
 
         sustained = cfg.architecture.pipeline.mode == PipelineMode.SUSTAINED
@@ -348,13 +352,15 @@ def config_recommend(
     from lakebench.config import load_config
 
     # Extract pipeline mode from config to pass to recommend
+    schema: str | None = None
     try:
         cfg = load_config(config_file)
         mode = cfg.architecture.pipeline.mode.value
+        schema = cfg.architecture.workload.schema_type.value
     except Exception:
         mode = None
 
-    _recommend(mode=mode)
+    _recommend(mode=mode, schema_type=schema)
 
 
 @config_app.command("recipes")

@@ -515,24 +515,69 @@ def _write_local_config(output: Path, name: str, scale: float) -> None:
     console.print(f"    [bold]lakebench run {output} --local[/bold]")
 
 
+def can_edit_operator_release(operator_namespace: str) -> bool | None:
+    """Whether these credentials can run the watch-list ``helm upgrade``.
+
+    Helm keeps the release in Secrets and the upgrade patches the operator
+    Deployment, both in the operator namespace. Returns None when the
+    access review itself cannot be made.
+    """
+    try:
+        from kubernetes import client as _kc
+
+        api = _kc.AuthorizationV1Api()
+        for group, resource, verb in (
+            ("", "secrets", "list"),
+            ("", "secrets", "update"),
+            ("apps", "deployments", "patch"),
+        ):
+            review = _kc.V1SelfSubjectAccessReview(
+                spec=_kc.V1SelfSubjectAccessReviewSpec(
+                    resource_attributes=_kc.V1ResourceAttributes(
+                        namespace=operator_namespace, group=group, resource=resource, verb=verb
+                    )
+                )
+            )
+            if not api.create_self_subject_access_review(review).status.allowed:
+                return False
+        return True
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def operator_watch_verdict(
     namespace: str,
     watched: list[str],
     *,
     namespace_exists: bool | None,
+    can_edit_release: bool | None = None,
+    operator_namespace: str = "spark-operator",
 ) -> tuple[str, str, str]:
     """Validate's verdict for a namespace missing from ``spark.jobNamespaces``.
 
-    Returns ``(level, message, hint)`` with level ``"ok"`` or ``"warn"``;
-    never ``"fail"``. ``deploy`` adds the namespace under the
-    ``lakebench-cluster-lock`` lease whatever ``operator.install`` says,
-    and ``run`` re-adds it before submitting jobs, so a missing entry
-    blocks nothing validate can see. Before a deploy (namespace absent)
-    it is expected; on an existing deployment it is drift worth a warning.
-    The hint never suggests a raw ``helm upgrade``: that bypasses the lease.
+    Returns ``(level, message, hint)``. ``deploy`` adds the namespace under
+    the ``lakebench-cluster-lock`` lease whatever ``operator.install`` says,
+    and ``run`` re-adds it before submitting jobs, so a missing entry is not
+    itself a blocker: before a deploy (namespace absent) it is expected, on
+    an existing deployment it is drift worth a warning. It fails only when
+    these credentials cannot make that add (``can_edit_release`` False), in
+    which case deploy would build the stack and then stop at the operator
+    step. The hint never suggests a raw ``helm upgrade``: that bypasses the
+    lease.
     """
     from lakebench.modules.pipeline_engines.spark.operator import watch_list_fix_hint
 
+    if can_edit_release is False:
+        return (
+            "fail",
+            f"Cannot add namespace '{namespace}' to the Spark Operator watch list",
+            f"Currently watching: {watched}. deploy and run add it by upgrading "
+            f"the operator's Helm release in '{operator_namespace}', which "
+            "needs list/update on secrets and patch on deployments there; these "
+            "credentials lack that, so deploy would stop at the spark-operator "
+            "step after creating the namespace. Ask a cluster admin for that "
+            "access, or to run the deploy.",
+        )
     if namespace_exists is False:
         return (
             "ok",
@@ -940,11 +985,18 @@ def validate(
                     ).namespace_exists(ns_now)
                 except Exception:
                     ns_exists = None
+                op_ns = status.namespace or spark_op_cfg.namespace
                 level, msg, hint = operator_watch_verdict(
-                    ns_now, status.watched_namespaces or [], namespace_exists=ns_exists
+                    ns_now,
+                    status.watched_namespaces or [],
+                    namespace_exists=ns_exists,
+                    can_edit_release=can_edit_operator_release(op_ns),
+                    operator_namespace=op_ns,
                 )
                 if level == "ok":
                     _check_ok(msg, hint=hint)
+                elif level == "fail":
+                    _check_fail(msg, hint=hint)
                 else:
                     _check_warn(msg, hint=hint)
             elif status.watching_namespace is None:
@@ -1339,10 +1391,11 @@ def info_peak_request(
     """Peak requested resources for ``info``: ``(peak, co_cores, co_gb, label)``.
 
     ``peak`` comes from ``compute_peak_requirements()``, the single source
-    of truth the deploy capacity preflight also uses; the co-resident
+    of truth ``run``'s capacity preflight also uses; the co-resident
     request (query engine, catalog, Postgres, continuous datagen) comes
-    from the same preflight helper, so ``info`` and ``deploy`` cannot
-    disagree about how big a cluster the config needs. These are requested
+    from the same preflight helper, so ``info`` and ``run`` cannot
+    disagree about how big a cluster the config needs. The caller applies
+    ``resolve_auto_sizing`` first, as ``run`` does. These are requested
     resources, not measured utilisation.
     """
     from lakebench.cli._prerequisites import _co_resident_request
@@ -1491,7 +1544,7 @@ def info(
         ]
 
     # Peak requested resources: the single source of truth is
-    # compute_peak_requirements() (the same figure the deploy capacity
+    # compute_peak_requirements() (the same figure run's capacity
     # preflight uses), plus the co-resident query engine / catalog pods.
     peak, co_cores, co_gb, co_label = info_peak_request(cfg, scale, is_sustained)
     lines += [
@@ -2123,6 +2176,13 @@ def recommend(
             help="Pipeline mode: batch (sequential phases) or sustained (continuous: datagen and pipeline run concurrently). Default: batch.",
         ),
     ] = None,
+    schema_type: Annotated[
+        str | None,
+        typer.Option(
+            "--schema",
+            help="Workload schema (customer360 or financial). Default: customer360.",
+        ),
+    ] = None,
 ) -> None:
     """Show cluster sizing guidance for lakebench workloads.
 
@@ -2174,23 +2234,29 @@ def recommend(
         executor memory overhead and drivers are counted (heap alone
         under-reported the request).
         """
-        peak = compute_peak_requirements(scale, "sustained")
+        peak = compute_peak_requirements(scale, "sustained", schema_type)
         return peak.cpu_cores, peak.memory_gb
 
     def _batch_spark_resources(scale: int, guidance) -> tuple[int, int]:
-        """Batch Spark cores and memory: never below the real peak request.
+        """Batch Spark cores and memory used for sizing: never below the peak request.
 
         compute_guidance() is advisory and under-reported the request (8
         cores at scale 1 against 36 requested by silver-build). The floor is
-        compute_peak_requirements(); guidance only raises it at scales where
-        the executor cap binds and a bigger cluster would still help.
+        compute_peak_requirements(); above the executor cap the jobs request
+        no more, but guidance keeps growing, and it is kept as sizing
+        headroom so the max-scale search stays bounded. The output labels
+        the two figures separately.
         """
-        peak = compute_peak_requirements(scale, "batch")
+        peak = compute_peak_requirements(scale, "batch", schema_type)
         g_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
         g_mem = guidance.spark.recommended_executors * int(
             guidance.spark.recommended_memory.rstrip("g")
         )
         return max(peak.cpu_cores, g_cores), max(peak.memory_gb, g_mem)
+
+    def _batch_spark_request(scale: int) -> tuple[int, int]:
+        peak = compute_peak_requirements(scale, "batch", schema_type)
+        return peak.cpu_cores, peak.memory_gb
 
     def compute_cluster_requirements(scale: int) -> dict:
         """Compute minimum cluster requirements for a given scale."""
@@ -2255,6 +2321,7 @@ def recommend(
         else:
             result["spark_cores"] = spark_cores
             result["spark_mem_gi"] = spark_mem_gi
+            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
 
         return result
 
@@ -2308,6 +2375,7 @@ def recommend(
         else:
             result["spark_cores"] = spark_cores
             result["spark_mem_gi"] = spark_mem_gi
+            result["spark_req_cores"], result["spark_req_mem_gi"] = _batch_spark_request(scale)
 
         return result
 
@@ -2342,9 +2410,17 @@ def recommend(
             )
         else:
             workload_line = (
-                f"  Spark (peak):    {reqs['spark_cores']} cores, "
-                f"{reqs['spark_mem_gi']} GB requested"
+                f"  Spark:           {reqs['spark_req_cores']} cores, "
+                f"{reqs['spark_req_mem_gi']} GB requested at peak"
             )
+            if (reqs["spark_cores"], reqs["spark_mem_gi"]) != (
+                reqs["spark_req_cores"],
+                reqs["spark_req_mem_gi"],
+            ):
+                workload_line += (
+                    f"\n                   sized for {reqs['spark_cores']} cores, "
+                    f"{reqs['spark_mem_gi']} GB (headroom above the executor cap)"
+                )
 
         console.print(
             Panel(
