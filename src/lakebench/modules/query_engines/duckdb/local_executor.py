@@ -13,14 +13,20 @@ container run. Two things genuinely differ:
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import time
 from pathlib import Path
 
+from lakebench.benchmark.fingerprint import last_json_line, unusable
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
-from lakebench.modules.query_engines.duckdb.executor import FETCH_ROWS, DuckDBExecutor
+from lakebench.modules.query_engines.duckdb.executor import (
+    FETCH_ROWS,
+    SESSION_SETTINGS,
+    DuckDBExecutor,
+    fingerprint_from_payload,
+    fingerprint_statement,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,7 +125,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         sql = self._rewrite_cardinality(sql)
         return sql
 
-    def _build_local_script(self, sql: str) -> str:
+    def _build_local_script(self, sql: str, result_statement: str | None = None) -> str:
         """Build the Python program DuckDB runs inside the container.
 
         The SQL is read from a sibling file rather than embedded. Benchmark
@@ -142,17 +148,46 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 f"conn.execute(\"SET s3_access_key_id='{self.access_key}'\")",
                 f"conn.execute(\"SET s3_secret_access_key='{self.secret_key}'\")",
                 "conn.execute('SET unsafe_enable_version_guessing = true')",
+                SESSION_SETTINGS,
                 "rel = conn.sql(sql)",
                 FETCH_ROWS,
                 # Report the engine version alongside every result. The pin is
                 # only a request; this is what proves the container honoured it.
                 "ver = conn.execute('SELECT version()').fetchone()[0]",
-                "print(json.dumps({'rows': len(rows), 'version': ver, "
-                "'data': [str(r) for r in rows[:100]]}))",
+                result_statement
+                or (
+                    "print(json.dumps({'rows': len(rows), 'version': ver, "
+                    "'data': [str(r) for r in rows[:100]]}))"
+                ),
             ]
         )
 
-    def execute_query(self, sql: str, timeout: int = 300) -> QueryExecutorResult:
+    def fingerprint_query(
+        self, sql: str, timeout: int = 300, approx_columns: dict[int, float] | None = None
+    ) -> QueryExecutorResult:
+        """Run *sql* once, untimed, and fingerprint the rows in the container."""
+        start = time.monotonic()
+        result = self.execute_query(
+            sql, timeout=timeout, result_statement=fingerprint_statement(approx_columns)
+        )
+        if result.error:
+            fp = unusable("error", result.error, "duckdb")
+            error: str | None = result.error
+        else:
+            fp, error = fingerprint_from_payload(result.raw_output, sql)
+        return QueryExecutorResult(
+            sql=sql,
+            engine="duckdb",
+            duration_seconds=time.monotonic() - start,
+            rows_returned=int(fp.get("rows") or 0),
+            raw_output="",
+            error=error,
+            fingerprint=fp,
+        )
+
+    def execute_query(
+        self, sql: str, timeout: int = 300, result_statement: str | None = None
+    ) -> QueryExecutorResult:
         if not self.workdir:
             raise ValueError("LocalDuckDBExecutor needs a workdir to stage the query")
 
@@ -161,7 +196,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         stage = Path(self.workdir)
         stage.mkdir(parents=True, exist_ok=True)
         (stage / "query.sql").write_text(sql)
-        (stage / "run.py").write_text(self._build_local_script(sql))
+        (stage / "run.py").write_text(self._build_local_script(sql, result_statement))
 
         cmd = [
             self.cli,
@@ -213,14 +248,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 error=_summarise_duckdb_error(proc.stderr or output),
             )
 
-        payload = None
-        for line in reversed(output.splitlines()):
-            if line.startswith("{"):
-                try:
-                    payload = json.loads(line)
-                    break
-                except json.JSONDecodeError:
-                    continue
+        payload = last_json_line(output)
 
         # A zero exit with no result payload means the query never ran. Treating
         # that as success produces a timing that measures container startup and
@@ -235,7 +263,8 @@ class LocalDuckDBExecutor(DuckDBExecutor):
                 error="Query produced no result (it did not run)",
             )
 
-        self._reported_version = str(payload.get("version", "")).lstrip("v")
+        if payload.get("version"):
+            self._reported_version = str(payload["version"]).lstrip("v")
 
         return QueryExecutorResult(
             sql=sql,

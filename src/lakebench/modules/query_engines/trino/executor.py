@@ -11,6 +11,12 @@ import subprocess
 import time
 import uuid
 
+from lakebench.benchmark.fingerprint import (
+    Unsupported,
+    fingerprint_rows,
+    rows_from_trino_json,
+    unusable,
+)
 from lakebench.benchmark.result import QueryExecutorResult, summarise_engine_error
 
 logger = logging.getLogger(__name__)
@@ -82,6 +88,10 @@ class TrinoExecutor:
             self.namespace,
             "--",
             "trino",
+            # Pin the session zone: timestamptz rendering, date_trunc and
+            # timestamp arithmetic otherwise follow the coordinator's default.
+            "--timezone",
+            "UTC",
             *trino_args,
         ]
 
@@ -185,6 +195,50 @@ class TrinoExecutor:
             raw_output=output,
         )
 
+    def fingerprint_query(
+        self, sql: str, timeout: int = 300, approx_columns: dict[int, float] | None = None
+    ) -> QueryExecutorResult:
+        """Run *sql* once, untimed, as JSON lines and fingerprint the rows
+        (benchmark.fingerprint). The timed path keeps the CLI's CSV output."""
+        pod = self._discover_pod()
+        source = f"lakebench-fp-{uuid.uuid4().hex[:13]}"
+        cmd = self._exec_cmd(
+            pod,
+            "--source",
+            source,
+            "--session",
+            f"query_max_run_time={server_run_time_limit(timeout)}s",
+            "--output-format",
+            "JSON",
+            "--execute",
+            sql,
+        )
+        start = time.monotonic()
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._kill_by_source(pod, source)
+            return _fingerprint_failure(sql, start, f"fingerprint query timed out ({timeout}s)")
+        if result.returncode != 0:
+            return _fingerprint_failure(sql, start, summarise_engine_error(result.stderr or ""))
+        try:
+            fp = fingerprint_rows(
+                rows_from_trino_json(result.stdout or ""),
+                approx_columns,
+                engine="trino",
+                adapted_sql=sql,
+            )
+        except Unsupported as e:
+            fp = unusable("unsupported", str(e), "trino")
+        return QueryExecutorResult(
+            sql=sql,
+            engine="trino",
+            duration_seconds=time.monotonic() - start,
+            rows_returned=int(fp.get("rows") or 0),
+            raw_output="",
+            fingerprint=fp,
+        )
+
     def health_check(self) -> bool:
         try:
             result = self.execute_query("SELECT 1", timeout=15)
@@ -222,3 +276,15 @@ class TrinoExecutor:
     def adapt_query(self, sql: str) -> str:
         """Trino SQL is the canonical dialect; no adaptation needed."""
         return sql
+
+
+def _fingerprint_failure(sql: str, start: float, error: str) -> QueryExecutorResult:
+    return QueryExecutorResult(
+        sql=sql,
+        engine="trino",
+        duration_seconds=time.monotonic() - start,
+        rows_returned=0,
+        raw_output="",
+        error=error,
+        fingerprint=unusable("error", error, "trino"),
+    )

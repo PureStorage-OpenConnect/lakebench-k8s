@@ -20,6 +20,8 @@ class QueryExecutorResult:
     rows_returned: int
     raw_output: str
     error: str | None = None
+    # benchmark.fingerprint dict, set only by an executor's fingerprint_query.
+    fingerprint: dict | None = None
 
     @property
     def success(self) -> bool:

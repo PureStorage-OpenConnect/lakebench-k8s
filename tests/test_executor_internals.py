@@ -255,8 +255,9 @@ class TestDuckDBExecuteQuery:
             assert result.success
             assert result.rows_returned == 5
 
-    def test_json_parse_fallback(self):
-        """When output is not valid JSON, fall back to line counting."""
+    def test_unparseable_output_is_an_error_not_a_line_count(self):
+        """Output without the JSON payload is an error. Counting its lines
+        turned a progress bar into a 2-row result (invariant 3)."""
         from lakebench.benchmark.executor import DuckDBExecutor
 
         executor = DuckDBExecutor(namespace="test", catalog_name="lakehouse")
@@ -265,8 +266,30 @@ class TestDuckDBExecuteQuery:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="line1\nline2\nline3", stderr="")
             result = executor.execute_query("SELECT * FROM t")
+            assert not result.success
+            assert result.rows_returned == 0
+
+    def test_progress_bar_before_payload_reads_the_payload(self):
+        """DuckDB 1.5.5 prints its progress bar to a pipe once a query passes
+        2 s; the payload is the last line and its count is the result."""
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        executor = DuckDBExecutor(namespace="test", catalog_name="lakehouse")
+        executor._pod = "duckdb-pod-0"
+        out = "\r100% \u2595\u2588\u2588\u2588\u258f\n" + '{"rows": 882697, "data": []}\n'
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=out, stderr="")
+            result = executor.execute_query("SELECT * FROM t")
             assert result.success
-            assert result.rows_returned == 3
+            assert result.rows_returned == 882697
+
+    def test_script_disables_the_progress_bar_and_pins_utc(self):
+        from lakebench.benchmark.executor import DuckDBExecutor
+
+        script = DuckDBExecutor(namespace="t", catalog_name="c")._build_python_script("SELECT 1")
+        assert "enable_progress_bar = false" in script
+        assert "TimeZone = 'UTC'" in script
+        assert script.index("enable_progress_bar") < script.index("conn.sql(")
 
     def test_empty_stdout(self):
         from lakebench.benchmark.executor import DuckDBExecutor
@@ -277,7 +300,9 @@ class TestDuckDBExecuteQuery:
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
             result = executor.execute_query("CREATE TABLE t (x INT)")
-            assert result.success
+            # The script always prints a payload (rows=0 for a statement with
+            # no result); none means it did not run.
+            assert not result.success
 
 
 # ===========================================================================
@@ -375,11 +400,8 @@ class TestSparkThriftExecuteQuery:
             assert result.rows_returned == 2  # header excluded
 
     def test_single_header_only(self):
-        """When only the header row is returned, rows_returned should be 1.
-
-        beeline tsv2 with a single line means no data rows to skip,
-        so lines[1:] when len(lines) <= 1 returns lines as-is.
-        """
+        """tsv2 prints the header for an empty result too: header alone is 0
+        rows (it was reported as 1)."""
         from lakebench.benchmark.executor import SparkThriftExecutor
 
         executor = SparkThriftExecutor(namespace="test", catalog_name="lakehouse")
@@ -389,8 +411,26 @@ class TestSparkThriftExecuteQuery:
             mock_run.return_value = MagicMock(returncode=0, stdout="col1\tcol2", stderr="")
             result = executor.execute_query("SELECT * FROM t WHERE 1=0")
             assert result.success
-            # Single line = only header, lines[1:] when len<=1 returns lines as-is
-            assert result.rows_returned == 1
+            assert result.rows_returned == 0
+
+    def test_options_precede_dash_e(self):
+        """beeline's -e takes several values: options after it were read as
+        more statements and dropped, so tsv2 and silent never applied and a
+        250-row result counted 250 + 3 x 3 lines."""
+        from lakebench.benchmark.executor import SparkThriftExecutor
+
+        executor = SparkThriftExecutor(namespace="test", catalog_name="lakehouse")
+        executor._pod = "spark-thrift-0"
+        tsv = "id\n" + "\n".join(str(i) for i in range(250))
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=tsv, stderr="")
+            result = executor.execute_query("SELECT id FROM range(250)")
+            argv = mock_run.call_args[0][0]
+        e = argv.index("-e")
+        assert argv[e + 1] == "SELECT id FROM range(250)" and len(argv) == e + 2
+        for opt in ("--silent=true", "--outputformat=tsv2", "--nullemptystring=false"):
+            assert argv.index(opt) < e
+        assert result.rows_returned == 250
 
 
 # ===========================================================================
