@@ -1682,6 +1682,7 @@ def _run_benchmark_round(
         queries=[q.to_dict() for q in bench_result.queries],
         iterations=bench_result.iterations,
         round_meta=round_meta,
+        engine=bench_result.engine,
     )
 
     # 6. Record the round

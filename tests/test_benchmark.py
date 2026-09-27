@@ -204,6 +204,7 @@ class TestBenchmarkResult:
             total_seconds=16.0,
             qph=1800.0,
             iterations=1,
+            engine="trino",
         )
         d = br.to_dict()
         assert d["benchmark_type"] == "trino_query"
@@ -255,6 +256,7 @@ class TestBenchmarkMetricsIntegration:
                 }
             ],
             iterations=1,
+            engine="trino",
         )
         d = bm.to_dict()
         assert d["benchmark_type"] == "trino_query"
@@ -276,6 +278,7 @@ class TestBenchmarkMetricsIntegration:
                 qph=820.4,
                 total_seconds=43.88,
                 queries=[],
+                engine="trino",
             ),
         )
         d = pm.to_dict()

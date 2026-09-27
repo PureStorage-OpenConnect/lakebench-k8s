@@ -745,6 +745,7 @@ def benchmark(
             iterations=primary_result.iterations,
             streams=primary_result.streams,
             stream_results=[s.to_dict() for s in primary_result.stream_results],
+            engine=primary_result.engine,
         )
         latest_run.benchmark = bench_metrics
         storage.save_run(latest_run)

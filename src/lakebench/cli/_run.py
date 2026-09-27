@@ -313,6 +313,8 @@ def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
         BenchmarkMetrics(
             mode="local",
             cache="cold",
+            # --local always queries through DuckDB.
+            engine="duckdb",
             # This field is int and display-only. A sub-1 local scale would
             # truncate to 0 and read as "no data", so floor at 1; the exact
             # value stays in the config snapshot, which is what compare reads.
@@ -1094,6 +1096,23 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
         return None
 
 
+def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:
+    """(no_query_engine, skip_benchmark) for a batch run of *cfg*.
+
+    A recipe with no query engine has nothing to benchmark and no engine to
+    run table maintenance through. The run skips both and says so, instead
+    of failing a correct pipeline on "Cannot run queries without a query
+    engine" (every ``*-none`` recipe exited 1 without --skip-benchmark).
+    """
+    none = cfg.architecture.query_engine.type.value == "none"
+    if none and not skip_benchmark:
+        print_info(
+            "No query engine in this recipe (query_engine.type=none): "
+            "benchmark and table maintenance skipped"
+        )
+    return none, skip_benchmark or none
+
+
 def _run_local_mode(
     cfg,
     config_file: Path,
@@ -1622,6 +1641,8 @@ def run(
             autosize_cuts=autosize_cuts,
         )
         return
+
+    no_query_engine, skip_benchmark = no_query_engine_skip(cfg, skip_benchmark)
 
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
@@ -2271,7 +2292,9 @@ def run(
 
         if not do_maintenance:
             why = (
-                "--skip-benchmark"
+                "no query engine"
+                if no_query_engine
+                else "--skip-benchmark"
                 if skip_benchmark
                 else "--skip-maintenance"
                 if skip_maintenance
@@ -2611,6 +2634,7 @@ def run(
                     total_seconds=bench_result.total_seconds,
                     queries=[q.to_dict() for q in bench_result.queries],
                     iterations=bench_result.iterations,
+                    engine=bench_result.engine,
                 )
                 collector.record_benchmark(bench_metrics)
 

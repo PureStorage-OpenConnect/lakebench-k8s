@@ -122,6 +122,7 @@ def _deserialize_benchmark_rounds(
                 queries=r.get("queries", []),
                 query_set_id=r.get("query_set_id")
                 or legacy_query_set_id(r.get("queries"), recorded_at),
+                engine=recorded_engine(r),
                 iterations=r.get("iterations", 1),
                 streams=r.get("streams", 1),
                 stream_results=r.get("stream_results", []),
@@ -129,6 +130,20 @@ def _deserialize_benchmark_rounds(
             )
         )
     return rounds
+
+
+def recorded_engine(bench: dict[str, Any]) -> str | None:
+    """The query engine a recorded benchmark ran on. Records from before the
+    ``engine`` field stamped ``benchmark_type`` "trino_query" on every
+    engine, so it is not trusted; the per-query result fingerprints carried
+    the real engine and are used instead."""
+    if bench.get("engine"):
+        return str(bench["engine"])
+    for q in bench.get("queries") or []:
+        fp = q.get("result_fingerprint") if isinstance(q, dict) else None
+        if isinstance(fp, dict) and fp.get("engine"):
+            return str(fp["engine"])
+    return None
 
 
 def _deserialize_cycles(
@@ -164,6 +179,7 @@ def _deserialize_cycles(
                 queries=bd.get("queries", []),
                 query_set_id=bd.get("query_set_id")
                 or legacy_query_set_id(bd.get("queries"), recorded_at),
+                engine=recorded_engine(bd),
                 iterations=bd.get("iterations", 1),
             )
         cycles.append(
@@ -510,6 +526,7 @@ class MetricsStorage:
                 queries=bench_data.get("queries", []),
                 query_set_id=bench_data.get("query_set_id")
                 or legacy_query_set_id(bench_data.get("queries"), recorded_at),
+                engine=recorded_engine(bench_data),
                 iterations=bench_data.get("iterations", 1),
                 streams=bench_data.get("streams", 1),
                 stream_results=bench_data.get("stream_results", []),
@@ -582,6 +599,7 @@ class MetricsStorage:
                     queries=qb_data.get("queries", []),
                     query_set_id=qb_data.get("query_set_id")
                     or legacy_query_set_id(qb_data.get("queries"), recorded_at),
+                    engine=recorded_engine(qb_data),
                     iterations=qb_data.get("iterations", 1),
                     streams=qb_data.get("streams", 1),
                     stream_results=qb_data.get("stream_results", []),
