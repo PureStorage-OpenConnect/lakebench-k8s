@@ -78,6 +78,10 @@ def get_path_size_gb(spark, path: str) -> float:
         fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(uri, hadoop_conf)
         hadoop_path = sc._jvm.org.apache.hadoop.fs.Path(path)
 
+        if any(ch in path for ch in "*?["):
+            # One cycle's files (common.c360_bronze_path): sum the matches.
+            matches = fs.globStatus(hadoop_path) or []
+            return sum(st.getLen() for st in matches if st.isFile()) / (1024**3)
         if fs.exists(hadoop_path):
             status = fs.getContentSummary(hadoop_path)
             return status.getLength() / (1024**3)
@@ -87,7 +91,7 @@ def get_path_size_gb(spark, path: str) -> float:
         return 0.0
 
 
-def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
+def profile_bronze_data(spark, txn_path: str) -> DataProfile:
     """Lightweight profiling - no shuffles, no full scans, uses filesystem metadata.
 
     This replaces the expensive profiling that caused OOM at 1TB+ scale.
@@ -99,8 +103,7 @@ def profile_bronze_data(spark, bronze_path: str) -> DataProfile:
     """
     log("Profiling Bronze data (lightweight)...")
 
-    txn_path = bronze_path + "customer/interactions/"
-
+    # txn_path: the files this build reads (common.c360_bronze_path).
     # 1. Get size from filesystem (no Spark scan)
     txn_size_gb = get_path_size_gb(spark, txn_path)
     log(f"  Size from filesystem: {txn_size_gb:.1f} GB")
@@ -289,12 +292,11 @@ def rows_added_by_last_commit(spark, silver_tbl):
     return spark.table(silver_tbl).count()
 
 
-def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
+def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
 
-    appending = incremental and _table_exists(spark, silver_tbl)
-    df_bronze = spark.read.parquet(c360_bronze_path(bronze_uri, appending))
+    df_bronze = spark.read.parquet(source)
     bronze_count = df_bronze.count()
     log(f"Bronze records: {bronze_count:,}")
     _COUNTED["bronze_rows"] = bronze_count
@@ -326,7 +328,7 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     return silver_count
 
 
-def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incremental=False):
+def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=False):
     """STREAMING strategy: Direct write, no shuffle, single pass. For >= 100GB.
 
     Key insight: Column transformations don't require data redistribution.
@@ -341,8 +343,7 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
         f"Input size: {profile.total_size_gb:.1f} GB (estimated {profile.transaction_count:,} rows)"
     )
 
-    appending = incremental and _table_exists(spark, silver_tbl)
-    df_bronze = spark.read.parquet(c360_bronze_path(bronze_uri, appending))
+    df_bronze = spark.read.parquet(source)
 
     # LB_DATA_CLOCK when set; a one-column pass over bronze only without it.
     anchor = resolve_data_clock(df_bronze)
@@ -410,6 +411,22 @@ import time  # noqa: E402
 
 start_time = time.time()
 
+silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
+log(f"Target table: {silver_tbl}")
+
+# Incremental mode: append to existing table instead of overwriting.
+# Controlled by LB_SILVER_INCREMENTAL env var set by lakebench for
+# batch cycles 2+ in multi-cycle runs.
+incremental_mode = os.environ.get("LB_SILVER_INCREMENTAL", "false").lower() == "true"
+if incremental_mode:
+    log("INCREMENTAL MODE: will append to existing table")
+
+# Cycles 2+ of a multi-cycle run append only their own bronze files; a full
+# build reads every file. Profile, size and read the same path.
+appending = incremental_mode and _table_exists(spark, silver_tbl)
+bronze_source = c360_bronze_path(bronze_uri, appending)
+log(f"Bronze source: {bronze_source}")
+
 # Check for size override first (skip profiling entirely for faster startup)
 size_override = get_size_override(spark)
 if size_override and size_override > 0:
@@ -427,7 +444,7 @@ if size_override and size_override > 0:
         hot_keys=[],
     )
 else:
-    profile = profile_bronze_data(spark, bronze_uri)
+    profile = profile_bronze_data(spark, bronze_source)
 
 if profile.transaction_count == 0:
     log("ERROR: Bronze dataset is empty - run Bronze job first")
@@ -437,33 +454,20 @@ if profile.transaction_count == 0:
 strategy = determine_silver_strategy(spark, profile)
 apply_dynamic_config(spark, profile)
 
-silver_tbl = f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}"
-log(f"Target table: {silver_tbl}")
-
-# Incremental mode: append to existing table instead of overwriting.
-# Controlled by LB_SILVER_INCREMENTAL env var set by lakebench for
-# batch cycles 2+ in multi-cycle runs.
-incremental_mode = os.environ.get("LB_SILVER_INCREMENTAL", "false").lower() == "true"
-if incremental_mode:
-    log("INCREMENTAL MODE: will append to existing table")
 
 # Execute selected strategy
 if strategy == SilverStrategy.SIMPLE:
-    silver_count = silver_simple(
-        spark, bronze_uri, silver_tbl, catalog, incremental=incremental_mode
-    )
+    silver_count = silver_simple(spark, bronze_source, silver_tbl, catalog, appending=appending)
 elif strategy == SilverStrategy.STREAMING:
     silver_count = silver_streaming(
-        spark, bronze_uri, silver_tbl, catalog, profile, incremental=incremental_mode
+        spark, bronze_source, silver_tbl, catalog, profile, appending=appending
     )
 elif strategy == SilverStrategy.SALTED:
     # SALTED is retired, as in silver_build.py: silver-build is row-independent
     # column transforms, so salting did nothing, and it overwrote the table
     # regardless of incremental mode, wiping earlier cycles' silver.
     log("SALTED strategy is a no-op for row transforms; running SIMPLE")
-    silver_count = silver_simple(
-        spark, bronze_uri, silver_tbl, catalog, incremental=incremental_mode
-    )
+    silver_count = silver_simple(spark, bronze_source, silver_tbl, catalog, appending=appending)
 else:
     log(f"ERROR: Unknown strategy {strategy}")
     spark.stop()

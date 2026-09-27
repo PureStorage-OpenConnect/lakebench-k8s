@@ -418,6 +418,30 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.c360_bronze = parsed.c360_bronze
 
 
+def _exclude_c360_check_time(job_metrics) -> float:
+    """Take the c360 expected-result check off a gold-finalize stage's time.
+
+    The check runs inside the gold-finalize pod after the stage's work
+    (common.log_c360_check) and logs its own ``check_seconds``. Left in, it
+    would count lakebench's correctness scan as pipeline time in the
+    stage's elapsed seconds and in time to value. Returns the seconds
+    removed (0 when there is nothing to remove).
+    """
+    from datetime import timedelta
+
+    facts = getattr(job_metrics, "c360_check", None) or {}
+    try:
+        secs = float(facts.get("check_seconds") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    if secs <= 0 or secs >= (job_metrics.elapsed_seconds or 0.0):
+        return 0.0
+    job_metrics.elapsed_seconds -= secs
+    if job_metrics.end_time is not None:
+        job_metrics.end_time -= timedelta(seconds=secs)
+    return secs
+
+
 # Upstream failures a benchmark may carry without failing the run, as
 # (table format, query engine, query name). Each must be a documented bug
 # outside lakebench. Delta + Thrift Q2 (CLAUDE.md gotcha 22 / LB-034) left
@@ -1775,6 +1799,7 @@ def run(
                 if result.driver_logs:
                     parsed = collector.parse_driver_logs(result.driver_logs, stage_name)
                     _apply_parsed_job_metrics(job_metrics, parsed)
+                    _exclude_c360_check_time(job_metrics)
 
                 # Populate resource metrics from job profile. Pass the schema so
                 # AML overrides (e.g. bronze-verify 20Gi, 8-per-100 executors)
@@ -1988,9 +2013,9 @@ def run(
             and not stage
             and collector.current_run is not None
         ):
-            try:
-                from lakebench.metrics import c360_correctness as _c360
+            from lakebench.metrics import c360_correctness as _c360
 
+            try:
                 _jobs = collector.current_run.jobs
                 _c360_rec = _c360.evaluate_run(
                     [jm for jm in _jobs if getattr(jm, "job_type", "") == "gold-finalize"],
@@ -2001,7 +2026,12 @@ def run(
                 for _line in _c360.summary_lines(_c360_rec):
                     (print_warning if _c360_rec["status"] != "pass" else print_info)(_line)
             except Exception as e:  # noqa: BLE001 -- reporting only
+                _c360_rec = None
                 print_warning(f"Customer 360 expected-result check could not run: {e}")
+            # Empty until the owner approves the checks' meaning (D6).
+            for _p in _c360.gating_problems(_c360_rec):
+                print_error(_p)
+                pipeline_success = False
 
         # -- Phase 5/7: Maintenance ------------------------------------------------
         console.print()
@@ -2338,9 +2368,9 @@ def run(
                     collector.current_run is not None
                     and collector.current_run.c360_correctness is not None
                 ):
-                    try:
-                        from lakebench.metrics import c360_correctness as _c360
+                    from lakebench.metrics import c360_correctness as _c360
 
+                    try:
                         _c360_rec = _c360.add_benchmark_checks(
                             collector.current_run.c360_correctness, bench_result.queries
                         )
@@ -2349,6 +2379,12 @@ def run(
                             (print_warning if _c360_rec["status"] != "pass" else print_info)(_line)
                     except Exception as e:  # noqa: BLE001 -- reporting only
                         print_warning(f"Customer 360 benchmark row check could not run: {e}")
+                    # Empty until the owner approves the checks' meaning (D6).
+                    for _p in _c360.gating_problems(
+                        collector.current_run.c360_correctness, only=("benchmark_rows_",)
+                    ):
+                        print_error(_p)
+                        pipeline_success = False
 
                 _journal_safe(
                     j.record,

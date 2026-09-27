@@ -74,6 +74,8 @@ def _ctx():
         "customers": CUSTOMERS,
         "scale": 0.05,
         "cycles": 1,
+        # The model writes exactly ROWS rows (datagen_rows sizing in a run).
+        "bronze_rows_expected": {"snappy": ROWS},
     }
 
 
@@ -182,6 +184,7 @@ def test_correct_corpus_passes_every_check(pipeline):
     assert rec["gating"] is False
     # The checks that matter here actually ran.
     for cid in (
+        "bronze_rows_match_datagen",
         "avg_transaction_value_daily",
         "avg_transaction_value_overall",
         "gold_days_cover_window",
@@ -211,6 +214,26 @@ def test_old_all_rows_average_fails_the_check(pipeline):
     st = _statuses(rec)
     assert st["avg_transaction_value_daily"] == "fail"
     assert st["gold_daily_identities"] == "fail"  # avg != revenue / transactions
+
+
+def test_old_all_rows_ltv_average_fails_the_check(pipeline):
+    from common import c360_check_facts
+    from pyspark.sql.functions import avg
+    from pyspark.sql.functions import round as round_
+
+    from lakebench.metrics.c360_correctness import pipeline_checks, verdict
+
+    bronze, silver, gold = pipeline
+    old = gold.drop("avg_estimated_ltv").join(
+        silver.groupBy("interaction_date").agg(
+            round_(avg("lifetime_value_estimate"), 2).alias("avg_estimated_ltv")
+        ),
+        "interaction_date",
+    )
+    rec = verdict(pipeline_checks(c360_check_facts(silver, old), _bronze_counts(bronze), _ctx()))
+    chk = next(c for c in rec["checks"] if c["id"] == "gold_daily_identities")
+    assert chk["status"] == "fail"
+    assert chk["observed"]["violations"]["avg_estimated_ltv_mismatch"] == DAYS
 
 
 def test_double_counted_cycle_fails_reconciliation(pipeline):
@@ -266,5 +289,10 @@ def test_appending_cycle_reads_only_its_own_files(spark, tmp_path, monkeypatch):
     assert spark.read.parquet(c360_bronze_path(uri, appending=True)).count() == 4
     # A full build, or a first cycle, reads every file.
     assert spark.read.parquet(c360_bronze_path(uri, appending=False)).count() == 14
+    # Cycle 0 of a multi-cycle run reads only cycle-0 names: a part-c001 file
+    # left by an earlier run in the same bucket is not rebuilt into silver.
     monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
-    assert spark.read.parquet(c360_bronze_path(uri, appending=True)).count() == 14
+    assert spark.read.parquet(c360_bronze_path(uri, appending=False)).count() == 10
+    # A single-cycle run reads the whole prefix, as before.
+    monkeypatch.delenv("LB_BRONZE_CYCLE")
+    assert spark.read.parquet(c360_bronze_path(uri, appending=False)).count() == 14

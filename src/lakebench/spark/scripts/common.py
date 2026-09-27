@@ -741,19 +741,30 @@ def resolve_data_clock(df_fallback=None):
 def c360_bronze_path(bronze_uri, appending=False):
     """The bronze files a c360 silver-build reads.
 
-    Every file under ``customer/interactions/`` for a full build. When a
-    multi-cycle run appends to an existing silver table (cycles 2+), only
-    the files this cycle's datagen wrote: datagen_rs names them
-    ``part-c{cycle:03}-{fid:06}.parquet`` (cycle 0 has no ``c`` infix,
-    ``datagen_rs::cycle::c360_key``), and the CLI passes the cycle index as
-    ``LB_BRONZE_CYCLE``. Reading the whole prefix and appending re-added
-    every earlier cycle's rows, so cycle 2 silver held cycle 1 twice and
-    every gold count and revenue KPI was inflated.
+    Single-cycle runs (``LB_BRONZE_CYCLE`` unset) read every file under
+    ``customer/interactions/``. In a multi-cycle run the CLI passes the
+    cycle index as ``LB_BRONZE_CYCLE`` and datagen_rs names the files
+    ``part-{fid:06}.parquet`` for cycle 0 and ``part-c{cycle:03}-{fid:06}``
+    for cycle n (``datagen_rs::cycle::c360_key``):
+
+    - cycle 0 reads only cycle-0 names, so ``part-c*`` files left by an
+      earlier multi-cycle run in the same bucket are not rebuilt into it;
+    - cycles 2+ appending to silver read only their own files. Reading the
+      whole prefix and appending re-added every earlier cycle's rows, so
+      every gold count and revenue KPI was inflated.
+
+    A later cycle that finds no silver table to append to rebuilds from the
+    whole prefix.
     """
     base = bronze_uri + "customer/interactions/"
     cycle = os.environ.get("LB_BRONZE_CYCLE", "").strip()
-    if appending and cycle and int(cycle) > 0:
-        return base + f"part-c{int(cycle):03d}-*.parquet"
+    if not cycle:
+        return base
+    n = int(cycle)
+    if n == 0:
+        return base + "part-[0-9]*.parquet"
+    if appending:
+        return base + f"part-c{n:03d}-*.parquet"
     return base
 
 
@@ -1160,6 +1171,7 @@ def c360_gold_facts(gold_df):
     viol = {
         "avg_transaction_value_mismatch": 0,
         "avg_transaction_value_null_mismatch": 0,
+        "avg_estimated_ltv_mismatch": 0,
         "transactions_ne_conversions": 0,
         "tickets_ne_support": 0,
         "channel_revenue_exceeds_total": 0,
@@ -1193,6 +1205,15 @@ def c360_gold_facts(gold_df):
         # Both sides are rounded to cents: 0.005 each, plus float slack.
         if tx > 0 and atv is not None and abs(float(atv) - rev / tx) > 0.011:
             flag("avg_transaction_value_mismatch", d)
+        # Non-transaction rows carry an LTV estimate of 0, so the per-
+        # transaction average is total / transactions.
+        altv = r.get("avg_estimated_ltv")
+        if (tx == 0) != (altv is None) or (
+            tx > 0
+            and altv is not None
+            and abs(float(altv) - float(r.get("total_estimated_ltv") or 0) / tx) > 0.011
+        ):
+            flag("avg_estimated_ltv_mismatch", d)
         if tx != int(r.get("conversions") or 0):
             flag("transactions_ne_conversions", d)
         support = int(r.get("retention_interactions") or 0)
@@ -1272,10 +1293,11 @@ def log_c360_check(spark, silver_tbl, gold_tbl):
     """Log the ``[c360-check] {json}`` line after gold is written.
 
     Reporting only (owner decision D6): an error here is logged in the line
-    and never fails the stage. Runs after the stage's JOB METRICS timing is
-    taken, so ``elapsed_seconds`` does not include it; the stage wall clock
-    does, and the line records how long it took. ``LB_C360_CHECK=false``
-    skips it.
+    and never fails the stage. It runs inside the gold-finalize pod, so the
+    pod's wall clock includes it; the line records ``check_seconds`` and the
+    CLI takes that off the stage's elapsed time and end time
+    (``cli/_run.py``), so time to value measures the pipeline, not
+    lakebench's own check. ``LB_C360_CHECK=false`` skips it.
     """
     import json
     import time

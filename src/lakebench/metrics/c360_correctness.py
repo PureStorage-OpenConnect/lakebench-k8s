@@ -18,7 +18,9 @@ Three kinds of check:
 REPORTING ONLY (owner decision D6): the verdict is recorded in the run's
 metrics and printed, and never changes the run's success until the owner
 approves what each check means. The definitions for that approval are in
-the lane's expected-results table; ``GATING`` is the switch.
+the lane's expected-results table. ``GATING_CHECKS`` is the switch: the ids
+it names fail the run (``gating_problems``, read by ``cli/_run.py``); it is
+empty until the owner approves.
 """
 
 from __future__ import annotations
@@ -29,8 +31,20 @@ import re
 from datetime import date, timedelta
 from typing import Any
 
-# D6: the owner approves the meaning before any check gates a run.
-GATING = False
+# D6: the owner approves the meaning before any check gates a run. Add a
+# check id here to make its failure fail the run; empty means reporting only.
+GATING_CHECKS: frozenset[str] = frozenset()
+GATING = bool(GATING_CHECKS)
+
+# A verdict is "pass" only when these ran and passed; without them nothing
+# says the corpus reached gold intact.
+CORE_CHECKS = (
+    "bronze_rows_match_datagen",
+    "bronze_to_silver_rows",
+    "silver_to_gold_days",
+    "silver_to_gold_counts",
+    "gold_daily_identities",
+)
 
 CHECK_TAG = "[c360-check]"
 _CHECK_RE = re.compile(r"\[c360-check\]\s+(?P<json>\{.*\})\s*$", re.MULTILINE)
@@ -83,9 +97,15 @@ HOT_ZIPF = 1.2
 DEFAULT_WINDOW_START = "2024-01-01"
 DEFAULT_WINDOW_END = "2025-01-01"
 DEFAULT_MULTI_CYCLE_WINDOW_END = "2025-12-31"
+# writer.rs customer360_bytes_per_row_default per DG_COMPRESSION codec; the
+# lakebench datagen Job sets none, so snappy.
+BYTES_PER_ROW = {"snappy": 4332.0, "zstd": 2233.0, "lz4": 4356.0, "none": 4399.0}
 
 Z = 6.0  # standard errors for a statistical bound
 Z_RIGHT_TAIL = 8.0  # right tail of a mean of lognormal amounts (skewed)
+# Per-day upper bound: one test per day, n as low as MIN_DAY_TRANSACTIONS,
+# where P(z > 8) is about 1e-6 a day; 10 keeps a 730-day run under 1e-6.
+Z_RIGHT_TAIL_DAILY = 10.0
 MIN_DAY_TRANSACTIONS = 200  # per-day transaction-value bound below this is noise
 DENSE_SESSIONS_PER_DAY = 30.0  # every day has data with P(miss) < 1e-13 per day
 
@@ -127,13 +147,44 @@ def expected_context(cfg) -> dict[str, Any]:
     start = dg.timestamp_start or DEFAULT_WINDOW_START
     end = dg.timestamp_end or (DEFAULT_MULTI_CYCLE_WINDOW_END if cycles > 1 else DEFAULT_WINDOW_END)
     dims = cfg.get_scale_dimensions()
+    file_size_mb = _size_bytes(dg.file_size) // (1024 * 1024)
     return {
         "window_start": str(start)[:10],
         "window_end": str(end)[:10],
         "customers": int(dims.customers),
         "scale": float(dg.get_effective_scale()),
         "cycles": cycles,
+        "bronze_rows_expected": {
+            codec: cycles * datagen_rows(dims.approx_bronze_gb / cycles, file_size_mb, bpr)
+            for codec, bpr in BYTES_PER_ROW.items()
+        },
     }
+
+
+def _size_bytes(size: str) -> int:
+    """deploy/datagen.py ``_parse_size_to_bytes``: "64mb" -> bytes."""
+    t = str(size).strip().upper()
+    for suffix, mult in (("TB", 1024**4), ("GB", 1024**3), ("MB", 1024**2), ("KB", 1024)):
+        if t.endswith(suffix):
+            return int(float(t[: -len(suffix)]) * mult)
+    return int(t.rstrip("B") or 0)
+
+
+def datagen_rows(bronze_gb: float, file_size_mb: int, bytes_per_row: float) -> int:
+    """Rows one c360 datagen Job writes (datagen_rs bin/generate.rs sizing).
+
+    ``--target-tb`` is rendered with six decimals (deploy/datagen.py);
+    ``total_files = max(1, target_bytes // file_size)`` and
+    ``rows_per_file = max(1000, file_size / bytes_per_row)``, both truncated.
+    """
+    target_tb = float(f"{bronze_gb / 1024.0:.6f}")
+    file_size = int(file_size_mb) * 1024 * 1024
+    if file_size <= 0:
+        return 0
+    target_bytes = int(target_tb * 1024.0 * 1024.0 * 1024.0 * 1024.0)
+    total_files = max(1, target_bytes // file_size)
+    rows_per_file = int(max(file_size / bytes_per_row, 1000.0))
+    return total_files * rows_per_file
 
 
 # ---------------------------------------------------------------------------
@@ -384,6 +435,34 @@ def pipeline_checks(
         )
     )
 
+    # -- corpus size: bronze holds exactly what datagen was asked to write ---
+    expected_rows = ctx.get("bronze_rows_expected") or {}
+    if bronze and expected_rows:
+        match = [c for c, n in expected_rows.items() if n == bronze["rows"]]
+        out.append(
+            _check(
+                "bronze_rows_match_datagen",
+                "reconcile",
+                bool(match),
+                bronze["rows"],
+                expected_rows.get("snappy"),
+                0,
+                f"codec {match[0]}" if match else "no datagen codec gives this row count",
+            )
+        )
+    else:
+        out.append(
+            _check(
+                "bronze_rows_match_datagen",
+                "reconcile",
+                None,
+                bronze["rows"] if bronze else None,
+                expected_rows.get("snappy"),
+                0,
+                "no [c360-bronze] line or no datagen sizing",
+            )
+        )
+
     # -- bronze -> silver -> gold reconciliation (exact) ---------------------
     if bronze:
         out.append(
@@ -532,7 +611,7 @@ def pipeline_checks(
             continue
         checked += 1
         se = sd_tv / math.sqrt(n_d)
-        if not (mean_tv - Z * se - 0.005 <= atv <= mean_tv + Z_RIGHT_TAIL * se + 0.005):
+        if not (mean_tv - Z * se - 0.005 <= atv <= mean_tv + Z_RIGHT_TAIL_DAILY * se + 0.005):
             bad_days.append([d[0], atv, n_d])
     out.append(
         _check(
@@ -541,7 +620,7 @@ def pipeline_checks(
             None if checked == 0 else not bad_days,
             {"days_checked": checked, "days_out_of_range": len(bad_days), "first": bad_days[:3]},
             round(mean_tv, 2),
-            f"-{Z:g}/+{Z_RIGHT_TAIL:g} standard errors per day",
+            f"-{Z:g}/+{Z_RIGHT_TAIL_DAILY:g} standard errors per day",
             f"days with >= {MIN_DAY_TRANSACTIONS} transactions",
         )
     )
@@ -701,19 +780,29 @@ def benchmark_checks(
 
 
 def verdict(checks: list[dict[str, Any]], reason: str = "") -> dict[str, Any]:
-    """Summarise checks. ``gating`` says whether the run's success may use it."""
+    """Summarise checks.
+
+    ``fail`` when any check failed. ``pass`` only when every core check
+    (``CORE_CHECKS``) ran and passed; otherwise ``unknown``, so a run whose
+    facts are missing cannot pass on the few benchmark shapes that need none.
+    """
+    by_id = {c["id"]: c["status"] for c in checks}
     failed = [c["id"] for c in checks if c["status"] == "fail"]
     passed = [c["id"] for c in checks if c["status"] == "pass"]
+    missing_core = [cid for cid in CORE_CHECKS if by_id.get(cid) != "pass"]
     if failed:
         status = "fail"
-    elif passed:
+    elif not missing_core:
         status = "pass"
     else:
         status = "unknown"
+        if not reason:
+            reason = "core checks not run: " + ", ".join(missing_core)
     return {
         "status": status,
         "gating": GATING,
-        "note": "reporting only: owner approval of meaning pending (D6)" if not GATING else "",
+        "gating_checks": sorted(GATING_CHECKS),
+        "note": "" if GATING else "reporting only: owner approval of meaning pending (D6)",
         "reason": reason,
         "failed": failed,
         "passed": len(passed),
@@ -722,28 +811,52 @@ def verdict(checks: list[dict[str, Any]], reason: str = "") -> dict[str, Any]:
     }
 
 
+def gating_problems(
+    record: dict[str, Any] | None, only: tuple[str, ...] | None = None
+) -> list[str]:
+    """Reasons the run must fail: a failed check named in ``GATING_CHECKS``,
+    or, when any check gates, no record or no facts to judge them by.
+    ``only`` limits the answer to check ids with those prefixes (the
+    benchmark shapes, judged after the benchmark). Empty while
+    ``GATING_CHECKS`` is empty (D6)."""
+    gating = {g for g in GATING_CHECKS if only is None or g.startswith(only)}
+    if not gating:
+        return []
+    if record is None or not record.get("facts_present"):
+        if only is not None:
+            return []  # already reported when the pipeline was judged
+        why = (record or {}).get("reason") or "the check did not run"
+        return [f"Customer 360 correctness gate: no expected-result facts ({why})."]
+    return [
+        f"Customer 360 correctness gate: {c['id']} failed (observed {c['observed']}, "
+        f"expected {c['expected']}, tolerance {c['tolerance']})."
+        for c in record.get("checks") or []
+        if c["id"] in gating and c["status"] == "fail"
+    ]
+
+
 def evaluate_run(
     gold_jobs: list[Any], bronze_jobs: list[Any], ctx: dict[str, Any]
 ) -> dict[str, Any]:
-    """The c360 verdict from the last gold-finalize and bronze-verify jobs."""
-    facts = None
-    for job in reversed(gold_jobs or []):
-        facts = getattr(job, "c360_check", None)
-        if facts:
-            break
-    bronze = None
-    for job in reversed(bronze_jobs or []):
-        bronze = getattr(job, "c360_bronze", None)
-        if bronze:
-            break
+    """The c360 verdict from the last gold-finalize and bronze-verify jobs.
+
+    Only the last job of each: in a multi-cycle run it is the one that saw
+    the whole corpus. An earlier cycle's facts judged against the full
+    window and the last bronze count would report misleading failures.
+    """
+    facts = getattr(gold_jobs[-1], "c360_check", None) if gold_jobs else None
+    bronze = getattr(bronze_jobs[-1], "c360_bronze", None) if bronze_jobs else None
+    ok = False
     if not facts:
-        v = verdict([], "no [c360-check] line in the gold-finalize driver log")
+        v = verdict([], "no [c360-check] line in the last gold-finalize driver log")
     elif facts.get("error"):
         v = verdict([], f"fact collection failed: {facts['error']}")
     elif facts.get("skipped"):
         v = verdict([], f"skipped: {facts['skipped']}")
     else:
+        ok = True
         v = verdict(pipeline_checks(facts, bronze, ctx))
+    v["facts_present"] = ok
     v["context"] = ctx
     v["facts"] = facts
     v["bronze"] = bronze
@@ -755,8 +868,9 @@ def add_benchmark_checks(record: dict[str, Any], queries: list[Any]) -> dict[str
     checks = list(record.get("checks") or []) + benchmark_checks(
         queries, record.get("facts"), record.get("context") or {}
     )
-    v = verdict(checks, record.get("reason", ""))
-    for k in ("context", "facts", "bronze"):
+    reason = record.get("reason", "") if not record.get("facts_present") else ""
+    v = verdict(checks, reason)
+    for k in ("facts_present", "context", "facts", "bronze"):
         v[k] = record.get(k)
     return v
 

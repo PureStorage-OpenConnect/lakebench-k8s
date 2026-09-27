@@ -24,9 +24,80 @@ SCRIPTS = ROOT / "src/lakebench/spark/scripts"
 
 
 def test_reporting_only_until_owner_approves():
-    assert c3.GATING is False
+    assert c3.GATING is False and c3.GATING_CHECKS == frozenset()
     v = c3.verdict([c3._check("x", "invariant", False, 1, 0)])
     assert v["status"] == "fail" and v["gating"] is False and "D6" in v["note"]
+    assert c3.gating_problems(dict(v, facts_present=True)) == []
+    assert c3.gating_problems(None) == []
+
+
+def test_gating_set_fails_the_run_when_approved(monkeypatch):
+    monkeypatch.setattr(c3, "GATING_CHECKS", frozenset({"x", "benchmark_rows_Q1"}))
+    bad = c3.verdict([c3._check("x", "invariant", False, 1, 0)])
+    bad["facts_present"] = True
+    assert len(c3.gating_problems(bad)) == 1
+    ok = c3.verdict([c3._check("x", "invariant", True, 0, 0)])
+    ok["facts_present"] = True
+    assert c3.gating_problems(ok) == []
+    # Fails closed: no record, or no facts, is not a pass.
+    assert c3.gating_problems(None)
+    assert c3.gating_problems({"facts_present": False, "reason": "boom"})
+    # The post-benchmark pass judges only the benchmark shapes.
+    shp = c3.verdict([c3._check("benchmark_rows_Q1", "shape", False, 2, 1)])
+    shp["facts_present"] = True
+    assert len(c3.gating_problems(shp, only=("benchmark_rows_",))) == 1
+    assert c3.gating_problems({"facts_present": False}, only=("benchmark_rows_",)) == []
+
+
+def test_pass_requires_every_core_check():
+    passing = [c3._check(cid, "reconcile", True, 0, 0) for cid in c3.CORE_CHECKS]
+    assert c3.verdict(passing)["status"] == "pass"
+    v = c3.verdict(passing[1:])
+    assert v["status"] == "unknown" and c3.CORE_CHECKS[0] in v["reason"]
+    # Benchmark shapes that need no facts cannot make a fact-less run pass.
+    rec = c3.evaluate_run([], [], {})
+    out = c3.add_benchmark_checks(rec, [_q("Q1_full_aggregation_scan", 1)])
+    assert out["status"] == "unknown" and out["facts_present"] is False
+
+
+def test_datagen_rows_match_generate_rs():
+    # Scale 1: 10 GB -> --target-tb 0.009766 -> 160 files of 64 MiB; snappy
+    # 4332 bytes a row -> 15,491 rows a file.
+    assert c3.datagen_rows(10.0, 64, 4332.0) == 160 * 15_491
+    # Tiny targets still write one file of at least 1,000 rows.
+    assert c3.datagen_rows(0.001, 64, 4332.0) == 15_491
+    assert c3.datagen_rows(0.001, 1, 4332.0) == 1_000
+    ctx = c3.expected_context(make_config())
+    assert ctx["bronze_rows_expected"]["snappy"] == c3.datagen_rows(
+        make_config().get_scale_dimensions().approx_bronze_gb, 64, 4332.0
+    )
+
+
+def test_stage_time_excludes_the_check():
+    from datetime import datetime, timedelta
+
+    from lakebench.cli._run import _exclude_c360_check_time
+
+    end = datetime(2026, 1, 1, 12, 0, 0)
+    jm = JobMetrics(job_name="g", job_type="gold-finalize", end_time=end, elapsed_seconds=100.0)
+    jm.c360_check = {"check_seconds": 12.5}
+    assert _exclude_c360_check_time(jm) == 12.5
+    assert jm.elapsed_seconds == 87.5 and jm.end_time == end - timedelta(seconds=12.5)
+    # Nothing to take off, or an implausible value: unchanged.
+    for facts in (None, {"check_seconds": 0}, {"check_seconds": 500}, {"check_seconds": "x"}):
+        jm2 = JobMetrics(job_name="g", job_type="gold-finalize", end_time=end, elapsed_seconds=100)
+        jm2.c360_check = facts
+        assert _exclude_c360_check_time(jm2) == 0.0 and jm2.elapsed_seconds == 100
+
+
+def test_evaluate_run_uses_the_last_gold_job_only():
+    early = JobMetrics(job_name="g", job_type="gold-finalize")
+    early.c360_check = {"version": 1, "silver": {}, "gold": {}}
+    last = JobMetrics(job_name="g", job_type="gold-finalize")
+    v = c3.evaluate_run(
+        [early, last], [], {"window_start": "2024-01-01", "window_end": "2025-01-01"}
+    )
+    assert v["facts_present"] is False and v["status"] == "unknown"
 
 
 def test_transaction_value_moments_match_generator():
@@ -187,20 +258,23 @@ def test_benchmark_shapes_not_required_on_a_thin_corpus():
 
 def test_add_benchmark_checks_keeps_context():
     rec = c3.verdict([c3._check("a", "invariant", True, 0, 0)])
-    rec.update(context={"x": 1}, facts=_facts(40), bronze=None)
+    rec.update(context={"x": 1}, facts=_facts(40), bronze=None, facts_present=True)
     out = c3.add_benchmark_checks(rec, [_q("Q1_full_aggregation_scan", 2)])
     assert out["status"] == "fail" and out["failed"] == ["benchmark_rows_Q1"]
     assert out["context"] == {"x": 1} and out["gating"] is False
 
 
-def test_run_wiring_never_touches_pipeline_success():
-    """The c360 blocks in the run path only record and print (D6)."""
+def test_run_wiring_changes_success_only_through_the_gating_set():
+    """The c360 blocks record and print; pipeline_success moves only for a
+    gating_problems() entry, which is empty until the owner approves (D6)."""
     src = (ROOT / "src/lakebench/cli/_run.py").read_text()
     for marker in ("_c360.evaluate_run(", "_c360.add_benchmark_checks("):
         i = src.index(marker)
-        block = src[src.rfind("if (", 0, i) : src.index("except Exception", i)]
-        assert "pipeline_success" not in block
+        block = src[src.rfind("if (", 0, i) : src.index("_journal_safe", i)]
         assert "raise" not in block
+        assert block.count("pipeline_success = False") == 1
+        j = block.index("pipeline_success = False")
+        assert "_c360.gating_problems(" in block[block.rfind("for _p in", 0, j) : j]
 
 
 def test_both_gold_adapters_log_the_facts_and_share_the_kpis():
@@ -242,8 +316,9 @@ def test_c360_bronze_path(monkeypatch):
     monkeypatch.setenv("LB_BRONZE_CYCLE", "2")
     assert c360_bronze_path("s3a://b/", appending=True) == base + "part-c002-*.parquet"
     assert c360_bronze_path("s3a://b/", appending=False) == base
+    # Cycle 0 of a multi-cycle run never reads another run's cycle files.
     monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
-    assert c360_bronze_path("s3a://b/", appending=True) == base
+    assert c360_bronze_path("s3a://b/", appending=False) == base + "part-[0-9]*.parquet"
 
 
 def test_cycle_index_is_passed_to_every_multi_cycle_job():
