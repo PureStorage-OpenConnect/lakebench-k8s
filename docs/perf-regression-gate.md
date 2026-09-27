@@ -91,6 +91,11 @@ A run is refused, never compared, when:
   the snapshot, so this is how it is caught;
 - it is a continuous run whose `corpus_drained` differs from the baseline
   run's. A drained run's freshness covers only the cycles that saw data;
+- its results are not established. A continuous run's results come from its
+  end-of-run result check over the settled corpus (see "Continuous Gate" and
+  "Result check" in `benchmarking.md`); a run whose corpus did not settle, or
+  whose result fingerprints differ from the baseline's, is refused like a
+  batch run;
 - its datagen fleet reported `data_quality` other than `complete`;
 - its snapshot records a `config_sha256` that is not the pinned file's. Runs
   do not record this field yet; see "Known gaps";
@@ -110,9 +115,10 @@ A run is refused, never compared, when:
 Within a comparable run, some numbers are left out rather than trusted:
 
 - `sustained_throughput_rps` of a continuous run whose corpus drained before
-  the window ended (`corpus_drained: true`). That figure is corpus rows over
-  the window, a lower bound, not a throughput (LB-145). A drained run is never
-  recorded as the rows/s baseline either.
+  the window ended (`corpus_drained: true`). The figure is taken over the
+  seconds data was arriving, which ends in a partial trigger, so it is not
+  compared with an undrained run's (LB-145). A drained run is never recorded
+  as the rows/s baseline either.
 - continuous stage seconds, which are the window length, not a measurement.
 - the datagen numbers (`datagen_*`) when the datagen metrics were written
   more than 24 hours before the run started (they came from an earlier

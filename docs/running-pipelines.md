@@ -202,10 +202,19 @@ the scorecard reports `intake_limit: trickle_rate` and
 `corpus_drain_seconds` for the window that would drain the corpus. See
 [Scoring and Benchmarking](benchmarking.md#continuous-mode).
 
-The pipeline runs for the configured duration (default: 1800 seconds / 30
-minutes). During this window, Lakebench runs periodic Trino benchmark rounds
-to measure query performance while streaming is active. After the window ends,
-streaming jobs are stopped and the in-stream results are aggregated.
+The measurement window opens when all three streams are running and lasts
+the configured duration (default: 1800 seconds / 30 minutes). A stream whose
+submission fails (for example a truncated Maven download) is reported on each
+attempt while the Spark Operator retries it. During the window, Lakebench
+runs periodic benchmark rounds to measure query performance while streaming
+is active. After the window ends the continuous gate checks that data kept
+arriving and that silver and gold committed continuously inside the window;
+a run that passes lets the rest of the corpus settle, stops the streams, and
+runs a result check over the settled tables so the run can be compared with
+another (see "Continuous gate" and "Result check" in
+[Scoring and Benchmarking](benchmarking.md)). A window longer than the time
+the trickle needs to offer the corpus measures an idle pipeline and fails the
+gate; the run warns about this at start.
 
 ### How Continuous Mode Works
 
@@ -362,11 +371,12 @@ Continuous mode produces a different set of scores than batch:
 |---|---|
 | **data_freshness_seconds** | Worst-case gold table staleness from streaming logs. |
 | **query_time_freshness_seconds** | Median gold staleness at Trino query time (when in-stream rounds ran). |
-| **sustained_throughput_rps** | Aggregate sustained rows/sec across all streaming stages. |
+| **sustained_throughput_rps** | Rows/sec bronze ingested inside the window, over the seconds data was arriving (`arrival_seconds`). |
 | **composite_qph** | In-stream median QpH. |
 | **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |
 | **end_to_end_latency_ms** | Cumulative micro-batch processing latency bronze to gold. |
-| **total_rows_processed** | Total volume processed during the monitoring window. |
+| **total_rows_processed** | Total volume processed during the measurement window. |
+| **pre_window_rows** | Bronze rows taken in before the window opened; not in any score. |
 
 ## Reading Output
 
