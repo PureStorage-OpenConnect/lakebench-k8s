@@ -60,6 +60,23 @@ class OperatorStatus:
     watched_namespaces: list[str] | None = None  # None = watches all
 
 
+def watch_list_fix_hint() -> str:
+    """User-facing remedy for a namespace missing from ``spark.jobNamespaces``.
+
+    Never suggests a raw ``helm upgrade --reuse-values``: that bypasses the
+    ``lakebench-cluster-lock`` lease (category 4 shared state) and a user
+    who copies it with a stale list overwrites other deployments' entries.
+    ``lakebench deploy`` adds the namespace under the lease.
+    """
+    return (
+        "Fix: re-run 'lakebench deploy <config>'; it adds the namespace to "
+        "the watch list under the lakebench-cluster-lock lease. If the lease "
+        "is held, check 'lakebench admin status'. If the watch list carries "
+        "entries for deleted namespaces, run 'lakebench admin repair-operator' "
+        "first. Do not edit spark.jobNamespaces with helm directly."
+    )
+
+
 class SparkOperatorManager:
     """Manages Spark Operator installation and status."""
 
@@ -1480,12 +1497,12 @@ class SparkOperatorManager:
         """Ensure the Spark Operator watches the target namespace.
 
         When ``can_heal`` is True and the operator is not watching the target
-        namespace, attempts to add it via ``helm upgrade --reuse-values``.
-        When False, returns status with the exact fix command for the user.
+        namespace, adds it under the cluster lease (``_add_namespace_to_watch``).
+        When False, or when the add fails, returns status with a remedy that
+        routes through ``lakebench deploy`` (see ``watch_list_fix_hint``).
 
         Args:
-            can_heal: If True, attempt to fix via helm upgrade.
-                Should be True when ``install=True`` in config.
+            can_heal: If True, attempt to add the namespace under the lease.
 
         Returns:
             OperatorStatus reflecting the namespace watching state.
@@ -1510,21 +1527,13 @@ class SparkOperatorManager:
             )
             if self._add_namespace_to_watch(self.job_namespace):
                 return self.check_status()
-            # Heal failed -- fall through to provide fix command
+            # Heal failed -- fall through to provide the remedy
 
         existing = status.watched_namespaces or []
-        new_list = ",".join(existing + [self.job_namespace])
-        fix_cmd = (
-            f"helm upgrade {self.HELM_RELEASE_NAME} {self.HELM_CHART_NAME} "
-            f"-n {self.namespace} --reuse-values "
-            f"--set 'spark.jobNamespaces={{{new_list}}}' "
-            f"--set 'prometheus.metrics.jobSubmitLatencyBuckets="
-            f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}'"
-        )
         status.message = (
             f"Spark Operator does not watch namespace '{self.job_namespace}'. "
             f"Currently watching: {existing}. "
             f"SparkApplications will not be reconciled.\n"
-            f"Fix with:\n  {fix_cmd}"
+            f"{watch_list_fix_hint()}"
         )
         return status

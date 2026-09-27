@@ -1413,7 +1413,11 @@ class TestSparkOperatorNamespaceWatching:
 
     @patch("lakebench.modules.pipeline_engines.spark.operator.subprocess.run")
     def test_ensure_namespace_watched_provides_fix_command(self, mock_run):
-        """When can_heal=False, message contains the exact helm fix command."""
+        """When can_heal=False, the remedy routes through lakebench deploy.
+
+        A raw ``helm upgrade --reuse-values`` bypasses the cluster lease
+        and can overwrite other deployments' watch entries, so it must
+        never be suggested."""
         from lakebench.spark.operator import SparkOperatorManager
 
         # check_status() returns watching_namespace=False
@@ -1437,9 +1441,10 @@ class TestSparkOperatorNamespaceWatching:
         mgr = SparkOperatorManager(job_namespace="lakebench-test")
         status = mgr.ensure_namespace_watched(can_heal=False)
         assert status.watching_namespace is False
-        assert "helm upgrade" in status.message
+        assert "helm upgrade" not in status.message
+        assert "--reuse-values" not in status.message
+        assert "lakebench deploy" in status.message
         assert "lakebench-test" in status.message
-        assert "lakebench,lakebench-test" in status.message
 
     @patch(
         "lakebench.spark.operator.SparkOperatorManager._namespace_is_terminating",

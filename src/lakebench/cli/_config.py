@@ -103,6 +103,24 @@ def config_show(
             ),
         ]
 
+        # Peak requested resources from compute_peak_requirements(), the
+        # same figure the deploy capacity preflight checks.
+        from lakebench.cli import info_peak_request
+        from lakebench.config.schema import PipelineMode
+
+        sustained = cfg.architecture.pipeline.mode == PipelineMode.SUSTAINED
+        peak, co_cores, co_gb, co_label = info_peak_request(
+            cfg, cfg.architecture.workload.datagen.scale, sustained
+        )
+        fields.append(
+            (
+                "peak_requested",
+                f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory / "
+                f"{peak.scratch_gb} GB scratch",
+                f"derived: {peak.driving_job} + {co_label}",
+            )
+        )
+
         table = Table(show_header=True, header_style="bold")
         table.add_column("Field", style="cyan")
         table.add_column("Value", style="white")
