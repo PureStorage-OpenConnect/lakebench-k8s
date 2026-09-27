@@ -74,6 +74,8 @@ _sleep = time.sleep
 _TRINO_FAILED = r"Query \S+ failed: (?:line \d+:\d+: )?"
 _SCHEMA_MISSING_PATTERNS = (
     _TRINO_FAILED + r"Schema '[^'\n]+' does not exist",
+    # SchemaNotFoundException from a table procedure (unregister_table).
+    _TRINO_FAILED + r"Schema [^\s']+ not found",
     r"\[SCHEMA_NOT_FOUND\]",
     r"\bSCHEMA_NOT_FOUND\b",
 )
@@ -750,6 +752,67 @@ def _classify_buckets(
         disowned_recorded=disowned_recorded,
         transient=transient,
     )
+
+
+def _drop_deletes_files(maint_engine: str, table_format: str) -> bool:
+    """Whether this engine's DROP TABLE (no PURGE) deletes the table's files.
+
+    Spark Thrift on Iceberg drops the catalog entry only; every other
+    engine and format lakebench drops with can delete files (LB-186, see
+    the table step for the source references). Unknown pairs count as
+    deleting.
+    """
+    return not (maint_engine == "spark-thrift" and table_format == "iceberg")
+
+
+def _trino_unregister_sql(table: str) -> str:
+    """``CALL <catalog>.system.unregister_table(...)`` for ``catalog.schema.table``.
+
+    Removes the catalog entry and leaves every file in place, for Iceberg
+    (Hive metastore and REST catalogs) and Delta alike.
+    """
+    catalog, schema, name = table.split(".", 2)
+
+    def lit(v: str) -> str:
+        return "'" + v.replace("'", "''") + "'"
+
+    return (
+        f"CALL {catalog}.system.unregister_table("
+        f"schema_name => {lit(schema)}, table_name => {lit(name)})"
+    )
+
+
+def _buckets_destroy_empties(
+    engine, namespace: str, namespace_present: bool, force_legacy: bool, clean_buckets: bool
+) -> tuple[set[str], str]:
+    """The buckets the bucket step will empty, and why the set is short.
+
+    Read-only; the same classification the bucket step runs. Any doubt
+    (bucket cleanup off, S3 unreachable, a classification error) returns
+    an empty set, so the caller keeps its file-deleting statements back.
+    """
+    if not clean_buckets:
+        return set(), "bucket cleanup is off"
+    try:
+        from lakebench.s3 import S3Client
+
+        s3_cfg = engine.config.platform.storage.s3
+        s3 = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=s3_cfg.ca_cert,
+            verify_ssl=s3_cfg.verify_ssl,
+        )
+        if s3._init_error:
+            return set(), f"bucket ownership could not be checked ({s3._init_error})"
+        bplan = _classify_buckets(engine, s3, namespace, namespace_present, force_legacy)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("bucket ownership check before the table step failed: %s", e)
+        return set(), f"bucket ownership could not be checked ({e})"
+    return set(bplan.buckets), ""
 
 
 def _is_last_lakebench_namespace(namespace_names: list[str], current: str) -> bool:
@@ -1675,33 +1738,68 @@ def destroy_all(
                 schema = engine.config.architecture.workload.schema_type.value
                 tables_to_drop = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
                 failed_sql: list[str] = []
-                # Only the drops. Table maintenance (Iceberg expire_snapshots /
-                # remove_orphan_files, Delta VACUUM) is skipped (policy,
-                # 2026-09-26): the buckets are emptied and deleted right after,
-                # so it would only cost time and statements.
+                # Only catalog removal. Table maintenance (Iceberg
+                # expire_snapshots / remove_orphan_files, Delta VACUUM) is
+                # skipped (policy, 2026-09-26): the bucket step empties the
+                # buckets destroy owns, so it would only cost time.
+                #
+                # LB-186: this step must never delete files. Which statements
+                # delete what (Trino 479, Iceberg 1.10, Spark 4.0 sources):
+                # - Trino DROP TABLE, Iceberg on Hive: every file the table
+                #   references (TrinoHiveCatalog.dropTable -> dropTableData),
+                #   add_files-registered datagen files included, then the
+                #   table directory.
+                # - Trino DROP TABLE, Iceberg on REST (Polaris): purgeTable;
+                #   the server deletes the referenced files if it allows purge.
+                # - Trino DROP TABLE, Delta: the table directory when the
+                #   table is managed (all lakebench Delta tables are).
+                # - Trino CALL system.unregister_table (Iceberg and Delta):
+                #   the catalog entry only, on every catalog type.
+                # - Spark Thrift DROP TABLE, Iceberg (no PURGE): the catalog
+                #   entry only (SparkCatalog.dropTable -> purge=false).
+                # - Spark Thrift DROP TABLE, Delta on Hive: the metastore
+                #   deletes a managed table's directory (HiveClientImpl
+                #   drops with deleteData=true).
+                # So Trino always unregisters, and the files go only through
+                # the bucket step's ownership checks. Spark Thrift has no
+                # metadata-only drop for a managed Delta table, so that DROP
+                # runs only when every bucket of the deployment (the only
+                # places a lakebench table lives) is one destroy empties.
                 plan: list[tuple[str, str]] = []
-                for table in tables_to_drop:
-                    drop_sql = build_drop_table_sql(maint_engine, table)
-                    if drop_sql:
-                        plan.append((table, drop_sql))
-                # Polaris via Trino: skip the drops. Trino's Iceberg REST
-                # connector sends every DROP TABLE with purgeRequested=true,
-                # and Polaris refuses purge (403, DROP_WITH_PURGE_ENABLED is
-                # off), which Trino reports only as "Failed to drop table".
-                # Enabling purge is not the fix: it would have Polaris delete
-                # every file the table references, and FAML bronze is
-                # registered by add_files over the raw datagen corpus, which
-                # may sit in a bucket the bucket step keeps (adopted,
-                # foreign, --keep-buckets or bucket cleanup off). The drop
-                # is also unnecessary: the catalog's only state is its
-                # database in this deployment's PostgreSQL, and the bucket
-                # step handles the files under its own ownership checks.
-                # Only when destroy deletes the namespace: that is what
-                # removes the PostgreSQL PVC (the postgres step's label
-                # selector does not match the StatefulSet's claim labels).
-                # With create_namespace=false the PVC, and so the catalog
-                # entries, would survive into the next deploy, so the drops
-                # are still attempted and a refusal still fails the step.
+                kept_registered: list[str] = []
+                keep_why = ""
+                if maint_engine == "trino":
+                    plan = [(t, _trino_unregister_sql(t)) for t in tables_to_drop]
+                elif _drop_deletes_files(maint_engine, table_format):
+                    s3_buckets = engine.config.platform.storage.s3.buckets
+                    homes = {s3_buckets.bronze, s3_buckets.silver, s3_buckets.gold}
+                    emptied, keep_why = _buckets_destroy_empties(
+                        engine, namespace, namespace_present, force_legacy, clean_buckets
+                    )
+                    if homes <= emptied:
+                        for table in tables_to_drop:
+                            drop_sql = build_drop_table_sql(maint_engine, table)
+                            if drop_sql:
+                                plan.append((table, drop_sql))
+                    else:
+                        kept_registered = list(tables_to_drop)
+                        if not keep_why:
+                            keep_why = "destroy does not empty " + ", ".join(
+                                sorted(homes - emptied)
+                            )
+                else:
+                    for table in tables_to_drop:
+                        drop_sql = build_drop_table_sql(maint_engine, table)
+                        if drop_sql:
+                            plan.append((table, drop_sql))
+                # Polaris via Trino with the namespace deleted: no statements.
+                # The catalog's only state is its database in this
+                # deployment's PostgreSQL, whose PVC goes with the namespace
+                # (the postgres step's label selector does not match the
+                # StatefulSet's claim labels). With create_namespace=false the
+                # PVC survives into the next deploy, so the tables are
+                # unregistered (non-purge drop, which Polaris allows) and a
+                # failure fails the step.
                 polaris_skip = (
                     engine.config.architecture.catalog.type.value == "polaris"
                     and maint_engine == "trino"
@@ -1709,7 +1807,7 @@ def destroy_all(
                     and bool(plan)
                 )
                 if polaris_skip:
-                    logger.info("Polaris via Trino: skipping %d DROP TABLE statement(s)", len(plan))
+                    logger.info("Polaris via Trino: skipping %d unregister statement(s)", len(plan))
                     plan = []
 
                 from lakebench.modules.table_formats.iceberg.maintenance import (
@@ -1769,22 +1867,45 @@ def destroy_all(
                 elif polaris_skip:
                     table_status = DeploymentStatus.SUCCESS
                     table_msg = (
-                        f"{table_format.title()} tables not dropped: Trino can only drop "
-                        "with purge, which Polaris refuses; the Polaris catalog database "
-                        "goes with the namespace, deleted below, and the bucket step "
-                        "handles the files"
+                        f"{table_format.title()} tables not unregistered: the Polaris "
+                        "catalog database goes with the namespace, deleted below, and "
+                        "the bucket step handles the files"
                     )
+                elif kept_registered:
+                    names = ", ".join(t.split(".", 1)[-1] for t in kept_registered[:5])
+                    if len(kept_registered) > 5:
+                        names += f" and {len(kept_registered) - 5} more"
+                    why = (
+                        f"a Spark Thrift DROP of a managed {table_format.title()} table "
+                        f"deletes its files, and {keep_why}"
+                    )
+                    if engine.config.platform.kubernetes.create_namespace is True:
+                        table_status = DeploymentStatus.SUCCESS
+                        table_msg = (
+                            f"{table_format.title()} tables not dropped ({why}); the "
+                            "catalog database goes with the namespace, deleted below"
+                        )
+                    else:
+                        table_status = DeploymentStatus.SKIPPED
+                        table_msg = (
+                            f"{len(kept_registered)} {table_format.title()} table(s) left "
+                            f"registered ({why}): {names}. create_namespace is false, so "
+                            "the catalog keeps them; drop them by hand once their files "
+                            "may go"
+                        )
                 else:
                     table_status = DeploymentStatus.SUCCESS
-                    if not clean_buckets:
-                        after = "bucket cleanup is off, so the tables' files remain in the buckets"
-                    elif delete_buckets and engine.config.platform.storage.s3.create_buckets:
-                        after = "buckets are emptied and deleted next"
-                    else:
-                        after = "buckets are emptied next and kept"
+                    verb = (
+                        "unregistered (metadata only)"
+                        if maint_engine == "trino"
+                        else "dropped (catalog entries)"
+                        if not _drop_deletes_files(maint_engine, table_format)
+                        else "dropped"
+                    )
                     table_msg = (
-                        f"{table_format.title()} tables dropped (via {maint_engine}); table "
-                        f"maintenance skipped ({after})"
+                        f"{table_format.title()} tables {verb} via {maint_engine}; their "
+                        "files are removed only by the bucket step, from buckets destroy "
+                        "owns; table maintenance skipped"
                     )
                 results.append(
                     DeploymentResult(

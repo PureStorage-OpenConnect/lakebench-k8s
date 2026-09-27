@@ -284,7 +284,8 @@ The deployment engine creates resources in a strict dependency order:
 9. **Grafana** -- dashboards (if observability is enabled)
 
 Destruction follows the reverse order: an ownership check, Spark jobs and pods
-first, then DROP TABLEs (no table maintenance runs first), emptying the S3
+first, then table removal from the catalog (metadata only, no table
+maintenance), emptying the S3
 buckets and deleting the ones this deployment created, infrastructure removal,
 and finally namespace deletion. The namespace is kept when a recorded bucket
 could not be deleted, and destroy waits for it to be NotFound before reporting

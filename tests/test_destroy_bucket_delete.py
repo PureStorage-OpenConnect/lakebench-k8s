@@ -211,6 +211,11 @@ class TestDestroyAllBuckets:
         if self._on_sql:
             self._on_sql(sql)
 
+    UNREG_SILVER = (
+        "CALL lakehouse.system.unregister_table(schema_name => 'silver', table_name => 't')"
+    )
+    UNREG_GOLD = "CALL lakehouse.system.unregister_table(schema_name => 'gold', table_name => 't')"
+
     # Incarnation reads before the bucket step: start, then the guards before
     # step 1 (Spark jobs), step 2 (pods), step 2b (datagen), step 3 (tables).
     PRE = 5
@@ -223,6 +228,7 @@ class TestDestroyAllBuckets:
             self._layers = None
 
     _layers: tuple[str, str, str] | None = None
+    _tables: tuple[str, ...] = ("silver.t", "gold.t")
 
     def _run(
         self,
@@ -266,7 +272,7 @@ class TestDestroyAllBuckets:
         engine.k8s.namespace_exists.return_value = namespace_present
         engine.k8s.get_namespace_uid.side_effect = uid or (lambda _ns: "uid-1")
         engine.k8s.get_namespace_annotation.side_effect = nonce or (lambda _ns, _k: "n-1")
-        cfg.architecture.tables.workload_tables.return_value = ["silver.t", "gold.t"]
+        cfg.architecture.tables.workload_tables.return_value = list(self._tables)
         if table_format:
             cfg.architecture.table_format.type.value = table_format
         cfg.architecture.catalog.type.value = catalog_type or "hive"
@@ -707,7 +713,7 @@ class TestDestroyAllBuckets:
             )
         finally:
             self._on_sql = None
-        assert ran == ["DROP lakehouse.silver.t"]
+        assert ran == [self.UNREG_SILVER]
         assert boto.buckets["a-bronze"] == ["r/new"]
         assert r.status is DeploymentStatus.FAILED
 
@@ -778,7 +784,7 @@ class TestDestroyAllBuckets:
         boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
 
         def fail_drop(sql):
-            if sql.startswith("DROP"):
+            if sql.startswith("CALL"):
                 raise RuntimeError("Query failed: coordinator connection reset")
 
         self._on_sql = fail_drop
@@ -892,7 +898,7 @@ class TestDestroyAllBuckets:
             raise ExecSqlTimeout("exec_sql timed out after 600s (may still be running)")
 
         tables = self._run_tables(hang)
-        assert ran == ["DROP lakehouse.silver.t"]
+        assert ran == [self.UNREG_SILVER]
         assert tables.status is DeploymentStatus.FAILED
         assert "not attempted" in tables.message and "1 statement(s)" in tables.message
 
@@ -906,7 +912,7 @@ class TestDestroyAllBuckets:
         monkeypatch.setattr(destroy_mod, "_monotonic", tick)
         ran: list[str] = []
         tables = self._run_tables(ran.append)
-        assert ran == ["DROP lakehouse.silver.t"]
+        assert ran == [self.UNREG_SILVER]
         assert tables.status is DeploymentStatus.FAILED
         assert "cap" in tables.message
 
@@ -916,10 +922,11 @@ class TestDestroyAllBuckets:
         assert destroy_mod._operative_sql("DROP TABLE IF EXISTS t") == "DROP"
 
     def test_iceberg_destroy_skips_snapshot_and_orphan_maintenance(self):
-        """The buckets are emptied and deleted right after; only DROP runs."""
+        """LB-186: Trino only unregisters (a DROP deletes every referenced
+        file); no maintenance statement runs."""
         ran: list[str] = []
         tables = self._run_tables(ran.append, table_format="iceberg")
-        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert ran == [self.UNREG_SILVER, self.UNREG_GOLD]
         assert tables.status is DeploymentStatus.SUCCESS
         assert "maintenance skipped" in tables.message
 
@@ -938,12 +945,11 @@ class TestDestroyAllBuckets:
         """Policy 2026-09-26: the buckets are emptied and deleted right after."""
         ran: list[str] = []
         tables = self._run_tables(ran.append, table_format="delta")
-        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert ran == [self.UNREG_SILVER, self.UNREG_GOLD]
         assert tables.status is DeploymentStatus.SUCCESS
         assert "maintenance skipped" in tables.message
 
-    def test_table_message_says_what_happens_to_the_buckets(self):
-        """--keep-buckets empties and keeps them; default empties and deletes."""
+    def test_table_message_says_files_go_only_through_the_bucket_step(self):
         boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
         self._run(
             boto,
@@ -951,16 +957,8 @@ class TestDestroyAllBuckets:
             maint=("trino", "trino-coordinator-0", "lakehouse"),
         )
         msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
-        assert "emptied and deleted next" in msg
-        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
-        self._run(
-            boto,
-            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
-            maint=("trino", "trino-coordinator-0", "lakehouse"),
-            delete_buckets=False,
-        )
-        msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
-        assert "emptied next and kept" in msg
+        assert "unregistered (metadata only)" in msg
+        assert "only by the bucket step" in msg
 
     # -- Polaris via Trino: DROP always requests purge, Polaris refuses it ----
 
@@ -990,7 +988,7 @@ class TestDestroyAllBuckets:
 
         def refuse(sql):
             ran.append(sql)
-            if sql.startswith("DROP"):
+            if sql.startswith(("DROP", "CALL")):
                 raise RuntimeError(
                     "exec_sql failed (rc=1): Query 20260927_043036_00175_hj3h7 failed: "
                     "Failed to drop table 'pacs008_raw'"
@@ -1001,12 +999,13 @@ class TestDestroyAllBuckets:
         )
         assert ran == []
         assert tables.status is DeploymentStatus.SUCCESS, tables.message
-        assert "not dropped" in tables.message and "Polaris" in tables.message
+        assert "not unregistered" in tables.message and "Polaris" in tables.message
         assert boto.buckets == {}, "the bucket step still runs"
 
-    def test_polaris_kept_namespace_still_attempts_drops(self):
+    def test_polaris_kept_namespace_still_unregisters(self):
         """create_namespace=false keeps the namespace and the PostgreSQL PVC,
-        so the catalog entries would outlive destroy: a refusal must fail."""
+        so the catalog entries would outlive destroy: they are unregistered
+        (a non-purge drop, never a purge) and a refusal must fail."""
         ran: list[str] = []
 
         def refuse(sql):
@@ -1019,7 +1018,7 @@ class TestDestroyAllBuckets:
             refuse,
             create_namespace=False,
         )
-        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert ran == [self.UNREG_SILVER, self.UNREG_GOLD]
         assert tables.status is DeploymentStatus.FAILED
 
     def test_polaris_via_spark_thrift_still_drops(self):
