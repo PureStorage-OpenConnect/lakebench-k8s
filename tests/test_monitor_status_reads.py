@@ -87,3 +87,38 @@ def test_stall_after_running_is_logged(caplog):
     assert r.success is True
     stalls = [x for x in caplog.messages if "was RUNNING and the operator has reported" in x]
     assert len(stalls) == 1 and "SUBMITTED" in stalls[0]
+
+
+def test_get_job_status_retries_a_transient_read_for_every_caller():
+    from urllib3.exceptions import ReadTimeoutError
+
+    from lakebench.modules.pipeline_engines.spark import job as jobmod
+
+    mgr = jobmod.SparkJobManager.__new__(jobmod.SparkJobManager)
+    mgr.namespace = "ns"
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = [
+        ReadTimeoutError(None, "/x", "read timed out"),
+        {"status": {"applicationState": {"state": "RUNNING"}}},
+    ]
+    with (
+        patch("kubernetes.client.CustomObjectsApi", return_value=api),
+        patch.object(jobmod.time, "sleep"),
+    ):
+        st = mgr.get_job_status("j")
+    assert st.state == jobmod.JobState.RUNNING
+
+
+def test_get_job_status_404_is_still_unknown():
+    from kubernetes.client.rest import ApiException
+
+    from lakebench.modules.pipeline_engines.spark import job as jobmod
+
+    mgr = jobmod.SparkJobManager.__new__(jobmod.SparkJobManager)
+    mgr.namespace = "ns"
+    api = MagicMock()
+    api.get_namespaced_custom_object.side_effect = ApiException(status=404)
+    with patch("kubernetes.client.CustomObjectsApi", return_value=api):
+        st = mgr.get_job_status("j")
+    assert st.state == jobmod.JobState.UNKNOWN
+    assert api.get_namespaced_custom_object.call_count == 1

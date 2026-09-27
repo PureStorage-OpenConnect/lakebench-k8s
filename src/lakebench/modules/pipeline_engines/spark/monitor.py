@@ -18,6 +18,7 @@ from lakebench.modules.pipeline_engines.spark.job import (
     JobState,
     JobStatus,
     SparkJobManager,
+    is_transient_status_error,
 )
 
 if TYPE_CHECKING:
@@ -44,16 +45,6 @@ _SLOW_POLL_S = 45.0
 # (SUBMITTED, PENDING_RERUN, UNKNOWN, ...) this long is logged once per state.
 # A 2026-09-27 sweep lost ~10 min per stage this way with nothing on screen.
 _STALL_WARN_S = 60.0
-
-
-def _is_transient_status_error(exc: BaseException) -> bool:
-    """A status read failure worth retrying: timeout, reset, 429 or 5xx."""
-    from kubernetes.client.rest import ApiException
-    from urllib3.exceptions import HTTPError as Urllib3HTTPError
-
-    if isinstance(exc, ApiException):
-        return exc.status == 429 or (exc.status or 0) >= 500
-    return isinstance(exc, (Urllib3HTTPError, ConnectionError, TimeoutError))
 
 
 @dataclass
@@ -246,7 +237,7 @@ class SparkJobMonitor:
             try:
                 status = self.job_manager.get_job_status(job_name)
             except Exception as e:
-                if not _is_transient_status_error(e):
+                if not is_transient_status_error(e):
                     raise
                 failed_reads += 1
                 logger.warning(
