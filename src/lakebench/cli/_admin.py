@@ -11,8 +11,8 @@ different workstations cannot race the same Helm upgrade or the same
 cluster-scoped resource rename. Non-mutating commands (``status``,
 ``doctor``) do not take the lease.
 
-See ``dev-artifacts/DESIGN-namespace-isolation.md`` for the design
-rationale and the commit-sequence context.
+See ``docs/design/namespace-isolation.md`` for the design
+rationale.
 """
 
 from __future__ import annotations

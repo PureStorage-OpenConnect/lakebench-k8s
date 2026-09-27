@@ -1,6 +1,6 @@
 # Lakebench design docs
 
-This directory holds the design rationale for architectural choices in lakebench. Reference material for maintainers and external contributors, curated from work-in-progress notes that live locally in the maintainer's `dev-artifacts/` directory.
+This directory holds the design rationale for architectural choices in lakebench. Reference material for maintainers and external contributors, curated from the maintainers' working notes once a design has shipped.
 
 Each design doc follows one shape:
 
@@ -32,4 +32,4 @@ If you are new to lakebench and evaluating whether to contribute:
 1. `docs/architecture.md` for the module map.
 2. `docs/getting-started.md` to run a first pipeline.
 3. `docs/design/namespace-isolation.md` (this directory) for the ownership rules any deploy/destroy change must respect.
-4. `dev-artifacts/uat-scenarios/` in the maintainer's tree (not in the public repo by design) shows the six live parallel-safety tests that gate each release.
+4. The six live parallel-safety scenarios (S-P1 to S-P6, listed in [namespace-isolation.md](namespace-isolation.md#verification)) gate each release; the maintainers run them against a real cluster, so their scripts are not in this repository.

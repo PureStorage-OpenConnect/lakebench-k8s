@@ -10,7 +10,7 @@ The design goal is one invariant:
 
 > **Destroying deployment A does not affect deployment B running in parallel.**
 
-This is a testable proposition. The verification plan (`dev-artifacts/uat-scenarios/`) exercises the six failure modes on a live cluster before each release.
+This is a testable proposition. The verification plan (six live scenarios, listed under Verification below) exercises the six failure modes on a live cluster before each release.
 
 ## The four categories
 
@@ -102,7 +102,7 @@ Unit-level proxies run on every commit:
 - `tests/test_watch_list_strict.py` -- strict-mode dispatch, lease-held refusal, WatchListMutationError text pointing at `admin repair-operator`.
 - `tests/test_destroy_unwatches_namespace.py` -- destroy blocks namespace delete on watch-list failure.
 
-Six live UAT scenarios (`dev-artifacts/uat-scenarios/`, gitignored by design) run once per release:
+Six live UAT scenarios run once per release against a real cluster (maintainer-run; the scripts are not in this repository):
 - **S-P1**: Destroy A while B is running; B finishes with `success=True` and `scale_ratio > 0.95`.
 - **S-P2**: Two deploys within 5 seconds; both reach infrastructure-ready with distinct identity stamps.
 - **S-P3**: Destroy B mid-Generate on A; A finishes clean, B destroys without touching A.
