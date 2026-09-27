@@ -6,7 +6,9 @@ distribution. Citations are file:line against integrate/v1.5.0 at 70b4cf2 and
 will drift; the symbol names are the stable reference.
 
 Ordered by impact on the mission. **[owner]** needs a product decision;
-**[impl]** is implementation work inside the model.
+**[impl]** is implementation work inside the model. **[decided]** marks an
+owner decision already taken (see the decision log at the end); the item then
+remains open only as implementation work.
 
 1. **Nothing records whether compared runs produced the same results.**
    `_build_comparison` (`cli/_compare.py:299-375`) refuses QpH across query
@@ -19,9 +21,9 @@ Ordered by impact on the mission. **[owner]** needs a product decision;
    beeline flag order, DuckDB progress-bar output), not data differences;
    they are being fixed on lane/compare-equiv. Resolution: record per-query
    result fingerprints and per-stage row counts and digests in metrics.json,
-   and mark mismatched comparisons invalid [impl]. Whether `compare`
-   hard-refuses instead of warning is a CLI contract change [owner];
-   recommendation: refuse the performance rows, keep the rest visible.
+   and mark mismatched comparisons invalid [impl]. [decided D1] `compare`
+   shows the evidence, gives a NOT COMPARABLE verdict, suppresses any winner
+   or performance conclusion, and exits non-zero.
 
 2. **Queries are never checked for non-empty or correct results.**
    `rows_returned` (`benchmark/runner.py:37`) is only displayed
@@ -31,17 +33,18 @@ Ordered by impact on the mission. **[owner]** needs a product decision;
    Resolution: fail a query with an empty result where the set declares one
    impossible, and add expected-result checks per workload query set [impl].
 
-3. **The supported set is far larger than the evidence behind it.** [owner]
+3. **The supported set is far larger than the evidence behind it.**
+   [decided D3]
    `_SUPPORTED_COMBINATIONS` (`config/schema.py:1232-1253`) has 11 tuples, and
    both workloads and both modes are accepted on each: about 44 experiment
-   shapes. DESIGN.md 6.5 requires a live, correct end-to-end run for a
-   combination to be supported; most have none, for example AML on Polaris,
-   Thrift, DuckDB or no query engine, and AML continuous. Recommendation: the
-   release declares a small supported set per workload (for example
-   hive-iceberg-spark-trino and polaris-iceberg-spark-trino for both, plus
-   the Delta and Thrift recipes for Customer 360) backed by release-tree runs;
-   everything else the config accepts is labelled "unverified" in the
-   evidence and excluded from published comparisons.
+   shapes. The tuple list expresses architecture validity only. DESIGN.md 6.5
+   requires workload and mode compatibility plus a live, correct end-to-end
+   run for "supported"; most combinations have no such run, for example AML
+   on Polaris, Thrift, DuckDB or no query engine, and AML continuous.
+   Remaining work [impl]: declare workload and mode compatibility, compute
+   the support state (supported / unverified / unsupported) per workload x
+   mode x architecture, stamp it in the evidence, and exclude unverified
+   runs from published comparisons.
 
 4. **AML on Delta is accepted and runs Iceberg code.** [impl] The tuple list
    has no workload axis; `job.py:1774-1797` picks financial scripts before
@@ -49,23 +52,23 @@ Ordered by impact on the mission. **[owner]** needs a product decision;
    (`silver_build_financial.py:189`, `deploy/financial_ddl.py:114`).
    Resolution: workloads declare supported formats and modes; reject at load.
 
-5. **Maintenance work differs by composition.** [owner] DuckDB and Delta with
+5. **Maintenance work differs by composition.** [decided D5] DuckDB and Delta with
    Thrift skip maintenance (`cli/_sustained.py:964-978`); Delta OPTIMIZE is
    skipped for Trino and Thrift (`cli/_sustained.py:1116-1125`); the run keeps
    the full maintenance policy id, which marks only `--skip-maintenance`.
-   Compositions therefore do not execute equivalent work. Whether maintenance
-   is part of the workload's work or of the architecture's cost is
-   measurement meaning. Recommendation: treat it as part of the workload,
-   stamp the effective policy in the evidence, and mark comparisons across
-   different effective policies invalid.
+   The owner rejected treating maintenance as workload semantics: it is an
+   execution condition, and runs with different effective policies are not
+   like-for-like. Remaining work [impl]: stamp the effective policy (what
+   actually ran, not what was requested) in the evidence whenever a
+   composition cannot execute the requested policy, and make the difference
+   visible in the report and in comparisons.
 
-6. **Customer 360 has no expected-result definition.** [impl, with owner
-   sign-off on what "correct" means] Non-empty guards exist
+6. **Customer 360 has no expected-result definition.** [decided D6] Non-empty guards exist
    (`bronze_verify.py:139`, `silver_build.py:449`, `gold_finalize.py:313`) and
    the continuous zero-row gate (`cli/_sustained.py:48`), but a zero KPI count
    is only logged and nothing checks gold KPIs against what the generator
-   produced. Resolution: derive expected aggregates from the generator and
-   check them in gold-finalize.
+   produced. Remaining work [impl]: derive expected results from the
+   generator; the owner approves their meaning before they gate a run.
 
 7. **A benchmark exception leaves the run successful.** [impl] Existing gates
    cover failed queries and AML zero alerts, but an exception in the
@@ -101,32 +104,41 @@ Ordered by impact on the mission. **[owner]** needs a product decision;
     (`cli/_compare.py:156-159`), and pipeline scores carry no repetition
     count. Resolution: sample count on every published figure.
 
-12. **Workload is nested in architecture and has no object.** [impl; moving
-    the YAML key is owner] `ArchitectureConfig.workload` and `.tables`
+12. **Workload is nested in architecture and has no object.** [decided D12] `ArchitectureConfig.workload` and `.tables`
     (`config/schema.py:1596-1598`) hold workload identity and table names;
     `financial_table_defaults` (`:1623-1648`, unreachable code `:1649-1654`)
     rewrites names from an architecture validator; dispatch is
     `== "financial"` across `cli/_run.py`, `deploy/datagen.py:63`, `job.py`
     and `config/scale.py`; local mode hard-codes c360 tables
-    (`local_job.py:196`, `cli/_local.py`). Resolution: one Workload
-    definition looked up by name.
+    (`local_job.py:196`, `cli/_local.py`). Remaining work [impl]: make
+    `workload` a top-level config key, accept the old location with a
+    deprecation warning, and add one Workload definition looked up by name.
 
-13. **Custom workloads fall back to Customer 360.** [owner]
+13. **Custom workloads fall back to Customer 360.** [decided D13]
     `WorkloadSchema.CUSTOM` maps to the c360 query set
     (`benchmark/queries.py:616`) and unknown schemas fall back to it.
-    Recommendation: reject `custom` until workloads can be declared.
+    Remaining work [impl]: reject `custom` at config load in v1.6.
 
-14. **DuckDB bypasses the catalog.** [owner] `duckdb/executor.py:210-237`
-    rewrites tables to `iceberg_scan`/`delta_scan` on a guessed path.
-    Recommendation: keep the recipes, label them catalog-bypassing in the
-    evidence, exclude them from catalog comparisons.
+14. **DuckDB bypasses the catalog, and the access path is not recorded.**
+    [decided D14] `duckdb/executor.py:210-237` rewrites tables to
+    `iceberg_scan`/`delta_scan` on a guessed path. Under DESIGN.md 2.2 the
+    access path is part of the architecture. Remaining work [impl]: record
+    `query_access_path` (for example `catalog` or `direct_storage`) in the
+    evidence; allow whole-composition comparison when results match; refuse
+    to attribute a difference to a single component when access paths
+    differ.
 
-15. **Observability deploys shared cluster objects from `deploy`.** [impl]
-    When enabled (default off, `config/schema.py:1733`),
+15. **`deploy` can still install shared operators and observability.**
+    [impl] DESIGN.md 2.1 says shared infrastructure is administered
+    separately and `deploy` creates only experiment-owned resources. Two
+    opt-in paths contradict it. The Spark and Stackable operators install from
+    `deploy` when their `install` option is set (`SparkOperatorConfig.install`,
+    `StackableOperatorConfig.install`, `config/schema.py:341`, `:442`, default
+    False). With `observability.enabled` (default off, `config/schema.py:1733`),
     `deploy/observability.py:143-158` installs kube-prometheus-stack, a
-    category 3 chart with CRDs and cluster roles, without stamp or lock;
-    destroy uninstalls it (`deploy/destroy.py:2028-2037`). Resolution: install
-    via `lakebench admin` like the other operators.
+    category 3 chart with CRDs and cluster roles, without stamp or lock, and
+    destroy uninstalls it (`deploy/destroy.py:2028-2037`). Resolution: move
+    these installs to `lakebench admin` and have `deploy` verify only.
 
 16. **Workload sizing lives in the pipeline-engine module.** [impl]
     `_JOB_PROFILES` (`job.py:51`) is c360-shaped, patched by
@@ -140,20 +152,20 @@ Ordered by impact on the mission. **[owner]** needs a product decision;
     implementation or caller. Resolution: route through the registry, or
     delete.
 
-18. **The code deprecates the product's mode name.** [owner]
+18. **The code deprecates the product's mode name.** [decided D18]
     `PipelineMode.SUSTAINED` (`config/schema.py:164-175`); `--continuous` is
     a hidden alias of `--sustained` (`cli/_run.py:1109-1120`);
     `pipeline.continuous` is deprecated (`config/schema.py:910-926`);
     `ProcessingPattern` (`:126-133`) adds "streaming", read only by the
-    autosizer (`config/autosizer.py:558`). Recommendation: make `continuous`
-    canonical, keep `sustained` as an alias, remove `ProcessingPattern`.
+    autosizer (`config/autosizer.py:558`). Remaining work [impl]: make
+    `continuous` canonical with `sustained` as a transitional alias, keep old
+    metrics readable, and remove `ProcessingPattern`.
 
-19. **Config fields nothing reads.** [owner: config contract]
+19. **Config fields nothing reads.** [decided D19]
     `ImagesConfig.prometheus` and `.grafana` (`config/schema.py:210-211`),
     `ReportsConfig` (`:1711-1722`), `IcebergConfig.file_format` and
     `.properties` (`:549-550`) look like controls and change nothing.
-    Recommendation: a deprecation warning on use for one release, then
-    removal with a clear error.
+    Remaining work [impl]: warn on use in v1.6; remove in v1.7.
 
 20. **Published docs disagree with the supported set.** [impl]
     `docs/architecture.md` and `docs/supported-components.md:122` omit the
@@ -162,3 +174,28 @@ Ordered by impact on the mission. **[owner]** needs a product decision;
     template lists a nonexistent `iot` schema (`config/loader.py:664`).
     Resolution: generate these tables from `_SUPPORTED_COMBINATIONS` and
     `RECIPES`.
+
+## Owner decisions, 2026-09-26
+
+- **D1** (item 1), accepted. `compare` shows the evidence, gives a NOT
+  COMPARABLE verdict, suppresses any winner or performance conclusion, and
+  exits non-zero when the runs are not comparable.
+- **D3** (item 3), amended. Support has three states, supported, unverified
+  and unsupported, judged over workload x mode x architecture.
+- **D5** (item 5), rejected as proposed. Maintenance policy is an execution
+  condition, not workload semantics. Runs with different effective
+  maintenance policies are not like-for-like. When a composition cannot
+  execute the requested policy (DuckDB cannot run maintenance, for example),
+  the effective policy is stamped and the difference is visible.
+- **D6** (item 6), accepted. Customer 360 expected results are derived by the
+  implementation; the owner approves their meaning before they gate.
+- **D12** (item 12), accepted. `workload` is a top-level config key; the old
+  location is accepted with a deprecation warning.
+- **D13** (item 13), accepted. Reject `custom` in v1.6.
+- **D14** (item 14), amended. The architecture includes the access paths
+  between components; the access path is recorded in evidence. Whole
+  compositions are comparable when results match; single-component
+  attribution is not valid when access paths differ.
+- **D18** (item 18), accepted. `continuous` is canonical; `sustained` is a
+  transitional alias.
+- **D19** (item 19), accepted. Warn in v1.6, remove in v1.7.
