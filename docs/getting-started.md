@@ -116,8 +116,9 @@ compares the peak request against your cluster's allocatable capacity and
 fails immediately with the specific shortfall, rather than leaving pods
 `Pending` until the job times out. Skipped when you pass `--skip-preflight`.
 
-Run `lakebench recommend` after install to check your cluster's maximum
-supported scale.
+Run `lakebench config recommend lakebench.yaml` after install to check your
+cluster's maximum supported scale, and `lakebench config show lakebench.yaml`
+to see the peak request for the scale in your config.
 
 ### CLI tools on PATH
 
@@ -175,7 +176,7 @@ You will need: an endpoint URL, an access key, and a secret key.
 
 ### Spark Operator
 
-The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; a developer's `deploy` will not install or upgrade it.
+The **Kubeflow Spark Operator v2.x** (2.5.1 is the current default) must be installed cluster-wide before any `lakebench deploy` runs. Lakebench treats it as shared infrastructure; a developer's `deploy` will not install or upgrade it. `deploy` does add its own namespace to the operator's `spark.jobNamespaces` watch list, under the `lakebench-cluster-lock` lease, and `destroy` removes it again. Never edit that list by hand with `helm upgrade --reuse-values`: it skips the lease and can drop another deployment's entry.
 
 The supported installation path is:
 
@@ -343,7 +344,9 @@ lakebench config validate lakebench.yaml
 ```
 
 This checks YAML syntax, Pydantic schema validation, Kubernetes connectivity,
-and S3 reachability. Fix any errors before continuing.
+and S3 reachability. Fix any errors before continuing. Before the first
+deploy, the Spark Operator section reports that the namespace is not yet
+watched; that is expected, because `deploy` adds it.
 
 ### 4. Run everything (single command)
 
@@ -361,10 +364,10 @@ Alternatively, run each step separately for more control:
 lakebench deploy lakebench.yaml --yes     # deploy infrastructure
 lakebench status lakebench.yaml           # verify deployment
 lakebench generate lakebench.yaml --wait  # generate test data (~5 min at scale 1)
-lakebench run lakebench.yaml --skip-preflight  # run pipeline + benchmark
+lakebench run lakebench.yaml              # run pipeline + benchmark
 ```
 
-### What happens during `run`
+### 5. What happens during `run`
 
 ```bash
 lakebench run lakebench.yaml
@@ -375,18 +378,18 @@ This executes three Spark jobs in sequence, followed by a query benchmark:
 1. **bronze-verify** -- validates and deduplicates raw Parquet data
 2. **silver-build** -- enriches, normalizes, and writes an Iceberg table
 3. **gold-finalize** -- aggregates into a business-ready executive dashboard
-4. **benchmark** -- runs 8 analytical queries against the gold table via the
-   active query engine (Trino by default)
+4. **benchmark** -- runs 8 analytical queries against the silver and gold
+   tables via the active query engine (Trino by default)
 
 Each job's progress, duration, and throughput are recorded to metrics.
 
-### 7. Generate a report
+### 6. Generate a report
 
 ```bash
 lakebench report
 ```
 
-This produces an HTML report in `lakebench-output/runs/<run-id>/report.html`
+This produces an HTML report in `lakebench-output/runs/run-<id>/report.html`
 containing job performance tables, query latencies, throughput metrics, and a
 configuration snapshot. Open it in your browser to review the results.
 
@@ -395,6 +398,20 @@ To list all recorded runs:
 ```bash
 lakebench report --list
 ```
+
+`lakebench results lakebench.yaml` prints the same scorecard in the terminal
+(`--format json` or `csv` for scripts).
+
+### 7. Compare two configurations
+
+```bash
+lakebench compare lakebench.yaml lakebench-polaris.yaml --generate
+```
+
+`compare` runs each config through the pipeline and benchmark in turn and
+prints the two results side by side. It destroys each deployment after its
+run unless you pass `--keep`, and it does not deploy a missing stack, so run
+`lakebench deploy` on both configs first.
 
 ### 8. Tear down
 
@@ -411,7 +428,11 @@ datagen pods, drop tables (no snapshot expiry, orphan removal, or VACUUM runs
 first), empty the S3 buckets and delete the ones lakebench created, tear down
 infrastructure in reverse deploy order, and finally delete the namespace and
 wait for it to be gone. If a bucket lakebench created cannot be deleted, the
-namespace is kept so a re-run can finish.
+namespace is kept so a re-run can finish. Buckets that existed before deploy
+are emptied but never deleted. On a backend without bucket tagging
+(FlashBlade), a bucket that deploy did not create is not even emptied, since
+its name is the only evidence of ownership; destroy reports it and
+`--force-legacy` empties it.
 
 ---
 
@@ -421,7 +442,8 @@ namespace is kept so a re-run can finish.
 idempotent -- components that already exist are skipped.
 
 **Generate fails or times out:** Increase the timeout with `--timeout 14400`
-(4 hours). Datagen supports resume -- re-running picks up where it left off.
+(4 hours). Datagen supports resume: re-run with `--resume` to pick up where
+it left off.
 
 **A pipeline stage fails:** Re-run just that stage:
 
@@ -499,12 +521,12 @@ Polaris, Trino coordinator and workers, Spark service account, and S3 buckets.
 ### Review configuration
 
 ```bash
-lakebench info lakebench.yaml
+lakebench config show lakebench.yaml
 ```
 
-Prints the resolved configuration including computed values: which recipe
-(catalog + table format + query engine) is active, how many executors each
-Spark job will use at the current scale, and the component versions.
+Prints the resolved configuration with the source of each value (recipe,
+config file or default), and the peak CPU, memory and scratch the pipeline
+requests at the configured scale.
 
 ### Stream component logs
 
@@ -544,8 +566,8 @@ To run at a larger scale, change the `scale` value in your config:
 | 100 | 1 TB | 10M | 240M |
 | 1,000 | 10 TB | 100M | 2.4B |
 
-Use `lakebench recommend` to get cluster-aware sizing guidance before scaling
-up. At scale 100+ you will want to increase the `--timeout` on both generate
+Use `lakebench config recommend lakebench.yaml` to get cluster-aware sizing
+guidance before scaling up. At scale 100+ you will want to increase the `--timeout` on both generate
 and run commands:
 
 ```bash
@@ -574,8 +596,8 @@ in the `images` section of your YAML.
 
 ## Choosing a Recipe
 
-The default deployment uses Hive + Iceberg + Trino. Lakebench supports 8
-validated component combinations ("recipes"). Use the `recipe:` field for
+The default deployment uses Hive + Iceberg + Trino. Lakebench supports 11
+component combinations ("recipes"); the eight Iceberg ones are below. Use the `recipe:` field for
 quick setup, or set architecture fields individually:
 
 ```yaml
@@ -596,12 +618,9 @@ recipe: polaris-iceberg-spark-trino   # one-line setup
 See the [Recipes Guide](recipes.md) for all 11 combinations, decision guidance,
 and detailed YAML snippets.
 
-Use `lakebench recommend` to get cluster-aware sizing guidance before choosing
-a scale factor:
-
-```bash
-lakebench recommend --scale 100
-```
+Use `lakebench config recommend lakebench.yaml` to get cluster-aware sizing
+guidance before choosing a scale factor. To see what a given scale requests,
+set it in the config and run `lakebench config show lakebench.yaml`.
 
 ---
 

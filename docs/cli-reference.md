@@ -325,7 +325,10 @@ with their readiness status and replica counts.
 
 ### info
 
-Show configuration summary with scale dimensions and compute guidance.
+Deprecated and hidden; use `lakebench config show`, which carries the same
+peak-request figure. `info` still works.
+
+Show configuration summary with scale dimensions and peak requested resources.
 
 ```
 lakebench info [CONFIG_FILE]
@@ -334,9 +337,15 @@ lakebench info [CONFIG_FILE]
 Displays deployment name, namespace, recipe, schema, scale factor, derived
 dimensions (customers, rows, data size), per-job executor counts (auto vs
 override), catalog type, table format, query engine, S3 endpoint, and bucket
-names. No additional flags.
+names, and the peak CPU / memory / scratch the pipeline requests
+(`compute_peak_requirements()` plus the query engine and catalog). No
+additional flags.
 
 ### recommend
+
+Deprecated and hidden; `lakebench config recommend <config>` runs the same
+logic for the config's pipeline mode. The Spark figure is never below
+`compute_peak_requirements()`, the request the deploy preflight checks.
 
 Show cluster sizing guidance for lakebench workloads.
 

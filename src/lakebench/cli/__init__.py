@@ -2145,6 +2145,7 @@ def recommend(
         lakebench recommend --scale 100000      # what do I need for 1 PB?
     """
     from lakebench.config.scale import customer360_dimensions, full_compute_guidance
+    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
     from lakebench.spark.job import _JOB_PROFILES, _scale_executor_count
 
     # Resolve --extended -> --slow-datagen
@@ -2167,18 +2168,29 @@ def recommend(
         return f"{gb:.0f} GB"
 
     def _streaming_resources(scale: int) -> tuple[int, int]:
-        """Compute total streaming cores and memory for sustained mode."""
-        streaming_jobs = ("bronze-ingest", "silver-stream", "gold-refresh")
-        cores = sum(
-            _scale_executor_count(_JOB_PROFILES[j], scale) * _JOB_PROFILES[j]["executor_cores"]
-            for j in streaming_jobs
+        """Streaming cores and memory requested in sustained mode.
+
+        From compute_peak_requirements(), the single source of truth, so
+        executor memory overhead and drivers are counted (heap alone
+        under-reported the request).
+        """
+        peak = compute_peak_requirements(scale, "sustained")
+        return peak.cpu_cores, peak.memory_gb
+
+    def _batch_spark_resources(scale: int, guidance) -> tuple[int, int]:
+        """Batch Spark cores and memory: never below the real peak request.
+
+        compute_guidance() is advisory and under-reported the request (8
+        cores at scale 1 against 36 requested by silver-build). The floor is
+        compute_peak_requirements(); guidance only raises it at scales where
+        the executor cap binds and a bigger cluster would still help.
+        """
+        peak = compute_peak_requirements(scale, "batch")
+        g_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
+        g_mem = guidance.spark.recommended_executors * int(
+            guidance.spark.recommended_memory.rstrip("g")
         )
-        mem_gi = sum(
-            _scale_executor_count(_JOB_PROFILES[j], scale)
-            * int(_JOB_PROFILES[j]["executor_memory"].rstrip("g"))
-            for j in streaming_jobs
-        )
-        return cores, mem_gi
+        return max(peak.cpu_cores, g_cores), max(peak.memory_gb, g_mem)
 
     def compute_cluster_requirements(scale: int) -> dict:
         """Compute minimum cluster requirements for a given scale."""
@@ -2215,10 +2227,7 @@ def recommend(
             peak_cores = datagen_cores + streaming_cores + trino_cores + infra_cores
             peak_mem = datagen_mem_gi + streaming_mem + trino_mem_gi + infra_mem_gi
         else:
-            spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-            spark_mem_gi = guidance.spark.recommended_executors * int(
-                guidance.spark.recommended_memory.rstrip("g")
-            )
+            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
             peak_cores = max(spark_cores, datagen_cores) + trino_cores + infra_cores
             peak_mem = max(spark_mem_gi, datagen_mem_gi) + trino_mem_gi + infra_mem_gi
 
@@ -2244,9 +2253,8 @@ def recommend(
             )
             result["streaming_cores"] = streaming_cores
         else:
-            result["spark_executors"] = guidance.spark.recommended_executors
-            result["spark_cores_per_exec"] = guidance.spark.recommended_cores
-            result["spark_mem_per_exec"] = guidance.spark.recommended_memory
+            result["spark_cores"] = spark_cores
+            result["spark_mem_gi"] = spark_mem_gi
 
         return result
 
@@ -2273,10 +2281,7 @@ def recommend(
             total_cores = streaming_cores + trino_cores + infra_cores
             total_mem_gi = streaming_mem + trino_mem_gi + infra_mem_gi
         else:
-            spark_cores = guidance.spark.recommended_executors * guidance.spark.recommended_cores
-            spark_mem_gi = guidance.spark.recommended_executors * int(
-                guidance.spark.recommended_memory.rstrip("g")
-            )
+            spark_cores, spark_mem_gi = _batch_spark_resources(scale, guidance)
             total_cores = spark_cores + trino_cores + infra_cores
             total_mem_gi = spark_mem_gi + trino_mem_gi + infra_mem_gi
 
@@ -2301,9 +2306,8 @@ def recommend(
             )
             result["streaming_cores"] = streaming_cores
         else:
-            result["spark_executors"] = guidance.spark.recommended_executors
-            result["spark_cores_per_exec"] = guidance.spark.recommended_cores
-            result["spark_mem_per_exec"] = guidance.spark.recommended_memory
+            result["spark_cores"] = spark_cores
+            result["spark_mem_gi"] = spark_mem_gi
 
         return result
 
@@ -2338,9 +2342,8 @@ def recommend(
             )
         else:
             workload_line = (
-                f"  Spark:           {reqs['spark_executors']} x "
-                f"{reqs['spark_cores_per_exec']} cores x "
-                f"{reqs['spark_mem_per_exec']}"
+                f"  Spark (peak):    {reqs['spark_cores']} cores, "
+                f"{reqs['spark_mem_gi']} GB requested"
             )
 
         console.print(

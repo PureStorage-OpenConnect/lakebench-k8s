@@ -146,3 +146,25 @@ def test_config_show_reports_peak_request(monkeypatch):
     assert (
         f"{peak.cpu_cores + co_cores} cores / {peak.memory_gb + co_gb} GB memory" in result.output
     )
+
+
+@pytest.mark.parametrize("mode", ["batch", "sustained"])
+def test_recommend_never_below_compute_peak_requirements(mode):
+    """`recommend --scale` (and `config recommend`) sized Spark from the
+    advisory compute_guidance(): 8 cores at scale 1 against 36 requested."""
+    from typer.testing import CliRunner
+
+    from lakebench.cli import app
+    from lakebench.modules.pipeline_engines.spark.job import compute_peak_requirements
+
+    peak = compute_peak_requirements(1, mode)
+    result = CliRunner().invoke(
+        app, ["recommend", "--scale", "1", "--mode", mode], env={"COLUMNS": "200"}
+    )
+    assert result.exit_code == 0, result.output
+    import re
+
+    cores = int(re.search(r"CPU cores:\s+([\d,]+)", result.output).group(1).replace(",", ""))
+    mem = int(re.search(r"Memory:\s+([\d,]+) GB", result.output).group(1).replace(",", ""))
+    assert cores >= peak.cpu_cores
+    assert mem >= peak.memory_gb
