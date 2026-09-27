@@ -135,3 +135,14 @@ def test_perf_gate_and_reproduce_do_not_refuse_on_the_round_count():
     old = {k: v for k, v in ex.identity(baseline).items() if k != "benchmark rounds"}
     reasons = ex.stored_identity_refusals(old, ex.result_fingerprints(baseline), run, "package")
     assert not any("older experiment identity" in r for r in reasons), reasons
+
+
+def test_zero_rounds_never_gates_against_an_in_stream_median():
+    """Fix-pass finding: with 0 rounds composite_qph is the post-stream
+    benchmark, a different estimator from the reference's in-stream median."""
+    for ref, run in ((5, 0), (0, 3)):
+        baseline, current = _exp("sustained", ref), _exp("sustained", run)
+        reasons = ex.stored_identity_refusals(
+            ex.identity(baseline), ex.result_fingerprints(baseline), current, "baseline"
+        )
+        assert any("continuous QpH estimator differs" in r for r in reasons), reasons

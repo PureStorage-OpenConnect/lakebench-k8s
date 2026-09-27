@@ -1066,6 +1066,19 @@ def stored_identity_refusals(
         ]
     expected = {k: v for k, v in expected_identity.items() if k not in OUTCOME_CONDITION_KEYS}
     reasons = [f"{r} from the {what}" for r in diff_identities(expected, actual_identity)]
+    # The count itself may differ, but not the estimator: with no in-stream
+    # round composite_qph is the post-stream benchmark (streams stopped),
+    # which must not stand against an in-stream median, or a regression that
+    # empties every round would read as a pass.
+    r_ref, r_run = (
+        expected_identity.get("benchmark rounds"),
+        identity(actual).get("benchmark rounds"),
+    )
+    if r_ref is not None and r_run is not None and (r_ref > 0) != (r_run > 0):
+        reasons.append(
+            f"continuous QpH estimator differs: the {what}'s is a median of {r_ref} in-stream "
+            f"round(s), the run's of {r_run} (0 means the post-stream benchmark)"
+        )
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
     established = results_established(actual)
     if established is not True:
