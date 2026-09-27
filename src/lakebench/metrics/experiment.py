@@ -48,7 +48,7 @@ WORKLOAD_VERSIONS: dict[str, str] = {
 #: no model version of its own; its identity is the image reference, whose
 #: tag is the datagen_rs commit it was built from.
 DATAGEN_MODEL_VERSIONS: dict[str, str | None] = {
-    "financial": "datagen-v2-rs-0.2",
+    "financial": "datagen-v2-rs-0.3",
     "customer360": None,
     "custom": None,
 }
