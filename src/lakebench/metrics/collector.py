@@ -266,6 +266,9 @@ class PipelineMetrics:
 
     # Benchmark results (optional -- populated after query benchmark runs)
     benchmark: BenchmarkMetrics | None = None
+    # Why the benchmark did not complete, when it raised (the run then fails
+    # and no QpH is recorded). None when it completed or was not attempted.
+    benchmark_error: str | None = None
 
     # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
@@ -331,6 +334,8 @@ class PipelineMetrics:
             d["provenance"] = self.provenance
         if self.benchmark is not None:
             d["benchmark"] = self.benchmark.to_dict()
+        if self.benchmark_error is not None:
+            d["benchmark_error"] = self.benchmark_error
         if self.benchmark_rounds:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
         if self.pipeline_benchmark is not None:

@@ -451,6 +451,7 @@ class MetricsStorage:
             tm_operations=data.get("tm_operations"),
             maintenance_policy_id=recorded_policy(data),
             provenance=data.get("provenance"),
+            benchmark_error=data.get("benchmark_error"),
         )
 
         if data.get("end_time"):
