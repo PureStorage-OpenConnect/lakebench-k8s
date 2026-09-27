@@ -344,6 +344,19 @@ def _samples_per_query(metrics: dict) -> int | None:
     return samples_per_query((qb or {}).get("queries") or [])
 
 
+_RENAMED_SCORES = {"query_time_freshness_seconds": "query_time_event_age_seconds"}
+
+
+def _renamed_scores(scores: dict) -> dict:
+    """Score keys under their current names (old metrics.json files)."""
+    out = dict(scores)
+    for old, new in _RENAMED_SCORES.items():
+        if old in out:
+            value = out.pop(old)
+            out.setdefault(new, value)
+    return out
+
+
 def _build_comparison(
     name_a: str,
     metrics_a: dict,
@@ -368,6 +381,9 @@ def _build_comparison(
         if "error" not in metrics_b
         else {}
     )
+
+    # Pre-v1.6 runs wrote the gold event-date age as a freshness figure.
+    scores_a, scores_b = _renamed_scores(scores_a), _renamed_scores(scores_b)
 
     # Collect all score keys from both
     all_keys = sorted(set(list(scores_a.keys()) + list(scores_b.keys())))

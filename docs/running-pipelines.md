@@ -374,7 +374,7 @@ Continuous mode produces a different set of scores than batch:
 | Score | Description |
 |---|---|
 | **data_freshness_seconds** | Worst-case gold table staleness from streaming logs. |
-| **query_time_freshness_seconds** | Median gold staleness at Trino query time (when in-stream rounds ran). |
+| **query_time_event_age_seconds** | Diagnostic, not freshness: median age of gold's newest event date at query time (when in-stream rounds ran). Written as `query_time_freshness_seconds` before v1.6. |
 | **sustained_throughput_rps** | Rows/sec bronze ingested inside the window, over the seconds data was arriving (`arrival_seconds`). |
 | **composite_qph** | In-stream median QpH. |
 | **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |

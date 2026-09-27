@@ -85,8 +85,9 @@ MAX_INGEST_RATIO = 1.05
 # the run started belongs to an earlier generate: its datagen numbers are
 # left out rather than attributed to the run.
 MAX_DATAGEN_AGE_HOURS = 24.0
-# start_time is naive local time on the host that ran lakebench, and the
-# zone is not recorded. UTC offsets run from -12h to +14h, so the age is
+# Before v1.6 start_time is naive local time on the host that ran lakebench,
+# and the zone is not recorded (from v1.6 it is UTC with its offset, and the
+# age is exact). UTC offsets run from -12h to +14h, so the age is
 # taken at its smallest over every zone: a sidecar is only called stale when
 # it is stale wherever the run happened, whichever host runs the gate.
 _MAX_UTC_OFFSET_HOURS = 14.0
@@ -468,6 +469,43 @@ def _datagen_stale(run: RunRecord) -> str | None:
     return None
 
 
+# How batch stage seconds were timed (JobMetrics.timing_source). Before v1.6
+# every stage ended on the 15 s job-monitor poll; from v1.6 at the Spark
+# application's real end. The two are not comparable (the poll rounds each
+# stage up by 0-15 s), so a baseline and a run must share a basis.
+STAGE_TIMING_POLL = "poll"
+STAGE_TIMING_CLUSTER = "cluster"
+STAGE_TIMING_MIXED = "mixed"
+
+
+def _stage_basis(stage: Mapping[str, Any]) -> str:
+    src = str(stage.get("timing_source") or "")
+    if src in ("driver_container", "spark_application"):
+        return STAGE_TIMING_CLUSTER
+    if src == "":
+        return STAGE_TIMING_POLL  # pre-v1.6: the 15 s poll
+    if src == "poll":
+        # A v1.6 poll fallback, at its own interval: not the old 15 s poll.
+        res = stage.get("timing_resolution_seconds")
+        return f"poll{res:g}s" if isinstance(res, (int, float)) else STAGE_TIMING_POLL
+    return src  # local_runner, submit_failed: a basis of their own
+
+
+def stage_timing_basis(run: RunRecord) -> str | None:
+    """The timing basis of the run's batch Spark stages, None with none.
+
+    STAGE_TIMING_MIXED when the stages were not all timed the same way; such
+    a run is neither gated nor recorded, since a per-stage basis that differs
+    from the baseline's cannot be told apart from a change in the stage.
+    """
+    kinds = {
+        _stage_basis(s) for s in run.pb_raw.get("stages") or [] if s.get("stage_type") == "batch"
+    }
+    if not kinds:
+        return None
+    return kinds.pop() if len(kinds) == 1 else STAGE_TIMING_MIXED
+
+
 def ttv_basis(run: RunRecord) -> str:
     if run.mode == "batch" and _pipeline_ttv(run) is not None:
         return TTV_FROM_STAGES
@@ -766,8 +804,8 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
 def _datagen_age_hours(run: RunRecord) -> float | None:
     """Smallest possible hours between the datagen sidecar and the run start.
 
-    written_at is UTC-aware. start_time is naive local time on the run host
-    (datetime.now() in the run path) with no zone recorded, so it is read as
+    written_at is UTC-aware. A pre-v1.6 start_time is naive local time on the
+    run host with no zone recorded, so it is read as
     UTC and the largest positive offset is subtracted: the result is a lower
     bound on the true age in every zone and does not depend on the gate
     host's zone. An aware start_time is used as is.
@@ -815,6 +853,9 @@ class Baseline:
     corpus_drained: bool | None = None
     # Batch runs only: TTV_FROM_STAGES or TTV_FROM_SCORECARD.
     ttv_basis: str | None = None
+    # Batch runs only: STAGE_TIMING_*. None: recorded before v1.6, when every
+    # stage was poll-timed.
+    stage_timing: str | None = None
     # Table-maintenance policy of the baseline run (metrics/maintenance_policy).
     # None (a baseline recorded before the field) is the legacy policy.
     maintenance_policy_id: str | None = None
@@ -842,6 +883,7 @@ class Baseline:
             "recorded_at",
             "corpus_drained",
             "ttv_basis",
+            "stage_timing",
             "maintenance_policy_id",
             "experiment_identity",
             "result_fingerprints",
@@ -941,6 +983,7 @@ def load_store(path: Path) -> BaselineStore:
             notes=entry.get("notes"),
             corpus_drained=entry.get("corpus_drained"),
             ttv_basis=entry.get("ttv_basis"),
+            stage_timing=entry.get("stage_timing"),
             maintenance_policy_id=entry.get("maintenance_policy_id"),
             experiment_identity=entry.get("experiment_identity"),
             result_fingerprints=entry.get("result_fingerprints"),
@@ -1068,6 +1111,21 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
                 "time to value cannot be separated from the datagen stage (stages carry "
                 "no timestamps) and the datagen stage differs from the baseline's or is stale"
             )
+    if run.mode == "batch":
+        run_timing = stage_timing_basis(run)
+        base_timing = baseline.stage_timing or STAGE_TIMING_POLL
+        if run_timing == STAGE_TIMING_MIXED:
+            result.reasons.append(
+                "batch stages are not all timed the same way (some fell back to the poll); "
+                "stage seconds and time to value are not like for like with any baseline"
+            )
+        elif run_timing is not None and run_timing != base_timing:
+            result.reasons.append(
+                f"batch stage times are {run_timing}-timed in the run but "
+                f"{base_timing}-timed in the baseline (v1.6 times stages from the Spark "
+                "application's end, not the 15 s poll); stage seconds and time to value "
+                "are not like for like: record a new baseline"
+            )
     want_stages = {
         k for k in baseline.metrics if _is_stage_seconds(k) and k not in _OPTIONAL_STAGE_KEYS
     }
@@ -1174,6 +1232,11 @@ def record_baseline(
     pinned = store.pinned(name)
     reasons = run_refusals(run, pinned)
     basis = ttv_basis(run) if run.mode == "batch" else None
+    if run.mode == "batch" and stage_timing_basis(run) == STAGE_TIMING_MIXED:
+        reasons.append(
+            "batch stages are not all timed the same way (some fell back to the poll); "
+            "not recordable as a baseline"
+        )
     if basis == TTV_FROM_SCORECARD and _datagen_stale(run):
         reasons.append(
             "time to value cannot be separated from a stale datagen stage (stages carry "
@@ -1246,6 +1309,7 @@ def record_baseline(
         notes=current.notes,
         corpus_drained=(run.scores.get("corpus_drained") if run.mode == "sustained" else None),
         ttv_basis=basis,
+        stage_timing=stage_timing_basis(run) if run.mode == "batch" else None,
         maintenance_policy_id=recorded_policy(run.raw),
         experiment_identity=identity(exp),
         result_fingerprints=result_fingerprints(exp),

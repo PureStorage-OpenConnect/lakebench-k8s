@@ -1557,3 +1557,69 @@ def test_continuous_run_without_a_result_check_is_not_a_baseline(env):
     run = pg.load_run(env.write_run(data))
     with pytest.raises(pg.PerfGateError, match="comparability not established"):
         pg.record_baseline(env.store(), "c360-continuous-s10", run, "abc")
+
+
+def _cluster_timed(data: dict) -> dict:
+    for st in data["pipeline_benchmark"]["stages"]:
+        if st["stage_type"] == "batch":
+            st["timing_source"] = "driver_container"
+    return data
+
+
+def test_poll_timed_baseline_refuses_a_cluster_timed_run(env):
+    """v1.6 times batch stages from the Spark application's end; a pre-v1.6
+    baseline ended every stage on the 15 s poll (lb16: 90.14 s bronze)."""
+    snap = env.snaps["c360-batch-s10"]
+    store = _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    assert store.baselines["c360-batch-s10"].stage_timing == pg.STAGE_TIMING_POLL
+    c = _compare(
+        env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-110000-bbbbbb", ttv=540.0))
+    )
+    assert c.verdict == pg.REFUSED
+    assert any("cluster-timed in the run but poll-timed" in r for r in c.reasons)
+
+
+def test_cluster_timed_baseline_gates_a_cluster_timed_run(env):
+    snap = env.snaps["c360-batch-s10"]
+    store = _record(
+        env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-100000-aaaaaa"))
+    )
+    assert store.baselines["c360-batch-s10"].stage_timing == pg.STAGE_TIMING_CLUSTER
+    c = _compare(
+        env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-110000-bbbbbb", ttv=690.0))
+    )
+    assert c.verdict == pg.REGRESSION
+
+
+def test_mixed_stage_timing_is_its_own_basis(env):
+    snap = env.snaps["c360-batch-s10"]
+    data = _batch_run(snap, "20260924-110000-bbbbbb")
+    data["pipeline_benchmark"]["stages"][1]["timing_source"] = "spark_application"
+    assert pg.stage_timing_basis(pg.load_run(env.write_run(data))) == pg.STAGE_TIMING_MIXED
+
+
+def test_mixed_stage_timing_is_refused_and_not_recordable(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _cluster_timed(_batch_run(snap, "20260924-100000-aaaaaa")))
+    data = _cluster_timed(_batch_run(snap, "20260924-110000-bbbbbb"))
+    data["pipeline_benchmark"]["stages"][1]["timing_source"] = "poll"
+    data["pipeline_benchmark"]["stages"][1]["timing_resolution_seconds"] = 5.0
+    run = pg.load_run(env.write_run(data))
+    c = pg.compare_run(env.store(), "c360-batch-s10", run)
+    assert c.verdict == pg.REFUSED
+    assert any("not all timed the same way" in r for r in c.reasons)
+    with pytest.raises(pg.PerfGateError):
+        pg.record_baseline(env.store(), "c360-batch-s10", run, "abc", replace=True)
+
+
+def test_v16_poll_fallback_is_not_the_old_15s_poll(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    data = _batch_run(snap, "20260924-110000-bbbbbb")
+    for st in data["pipeline_benchmark"]["stages"]:
+        if st["stage_type"] == "batch":
+            st["timing_source"] = "poll"
+            st["timing_resolution_seconds"] = 5.0
+    run = pg.load_run(env.write_run(data))
+    assert pg.stage_timing_basis(run) == "poll5s"
+    assert pg.compare_run(env.store(), "c360-batch-s10", run).verdict == pg.REFUSED

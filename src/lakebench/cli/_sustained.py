@@ -19,6 +19,7 @@ from rich.table import Table
 if TYPE_CHECKING:
     from rich.console import Console
 
+from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -684,7 +685,7 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
 
         print_info("Collecting platform metrics from Prometheus...")
         collector = PlatformCollector(prometheus_url, namespace)
-        pm = collector.collect(run_metrics.start_time, run_metrics.end_time or datetime.now())
+        pm = collector.collect(run_metrics.start_time, run_metrics.end_time or utc_now())
         run_metrics.platform_metrics = pm.to_dict()
 
         # Clean up port-forward if we started one
@@ -1078,6 +1079,62 @@ def _operation_outcomes(plan: list[tuple[str, str]], out: dict, retention: dict)
     return list(ops.values())
 
 
+def applied_retentions(table_format: str, retention_threshold: str, live_streams: bool) -> dict:
+    """The retentions table maintenance runs at, from the configured threshold.
+
+    Iceberg: orphan removal never below 24 h 10 min, on any engine or path
+    (build_maintenance_sql enforces it too); expire at the threshold, floored
+    at 1 h while streams are live. Delta: one VACUUM retention, never below
+    Delta's 7 d default while streams are live. The single source for what
+    runs and for what the run records (continuous.retention).
+    """
+    from lakebench.modules.table_formats.iceberg.maintenance import (
+        LIVE_EXPIRE_MIN_RETENTION_SECONDS,
+        ORPHAN_MIN_RETENTION_SECONDS,
+        _format_duration,
+        _parse_threshold_seconds,
+    )
+
+    if table_format == "delta":
+        from lakebench.deploy.delta_maintenance import parse_retention_to_hours
+
+        expire = retention_threshold
+        if live_streams and parse_retention_to_hours(retention_threshold) < (
+            _DELTA_DEFAULT_RETENTION_HOURS
+        ):
+            expire = "168h"
+        return {"expire": expire, "orphan": expire}
+    configured_s = _parse_threshold_seconds(retention_threshold)
+    expire = retention_threshold
+    if live_streams:
+        expire = _format_duration(max(configured_s, LIVE_EXPIRE_MIN_RETENTION_SECONDS))
+    return {
+        "expire": expire,
+        "orphan": _format_duration(max(configured_s, ORPHAN_MIN_RETENTION_SECONDS)),
+    }
+
+
+def continuous_retention_record(cfg) -> dict:
+    """What the continuous maintenance loop runs at, for the metrics record.
+
+    Every continuous maintenance round runs beside live streams, so the
+    applied expiry is the floored one. ``configured_by`` says whether the
+    config set retention_threshold or the default stood.
+    """
+    sustained = cfg.architecture.pipeline.sustained
+    applied = applied_retentions(
+        cfg.architecture.table_format.type.value, sustained.retention_threshold, live_streams=True
+    )
+    return {
+        "configured": sustained.retention_threshold,
+        "configured_by": (
+            "config" if "retention_threshold" in sustained.model_fields_set else "default"
+        ),
+        "applied_expire": applied["expire"],
+        "applied_orphan": applied["orphan"],
+    }
+
+
 def _run_iceberg_maintenance(
     cfg,
     k8s,
@@ -1135,15 +1192,14 @@ def _run_iceberg_maintenance(
     table_names = _rotated(all_tables, start_at)
 
     # Build SQL based on table format. Delta VACUUM has one retention.
-    orphan_retention = retention_threshold
+    applied = applied_retentions(table_format, retention_threshold, live_streams)
     if table_format == "delta":
         from lakebench.deploy.delta_maintenance import (
             build_delta_maintenance_sql,
             parse_retention_to_hours,
         )
 
-        retention_hours = parse_retention_to_hours(retention_threshold)
-        if live_streams and retention_hours < _DELTA_DEFAULT_RETENTION_HOURS:
+        if applied["expire"] != retention_threshold:
             # Policy: never VACUUM below Delta's default while streams are
             # live; no retention override is sent.
             console.print("  [dim]Delta VACUUM at default 7d retention (live streams)[/dim]")
@@ -1153,32 +1209,17 @@ def _run_iceberg_maintenance(
                 message="Delta VACUUM at default 7d retention (live streams)",
                 details={"requested_retention": retention_threshold},
             )
-            retention_hours = _DELTA_DEFAULT_RETENTION_HOURS
-            retention_threshold = "168h"
-        orphan_retention = retention_threshold
+        retention_threshold = applied["expire"]
+        orphan_retention = applied["orphan"]
+        retention_hours = parse_retention_to_hours(retention_threshold)
 
         def build_sql(tbl):
             return build_delta_maintenance_sql(engine, catalog, tbl, retention_hours)
     else:
         from lakebench.deploy.iceberg import build_maintenance_sql
-        from lakebench.modules.table_formats.iceberg.maintenance import (
-            LIVE_EXPIRE_MIN_RETENTION_SECONDS,
-            ORPHAN_MIN_RETENTION_SECONDS,
-            _format_duration,
-            _parse_threshold_seconds,
-        )
 
-        # Policy: orphan removal never below 24 h + 10 min, on any engine
-        # or path (build_maintenance_sql enforces it too). Expire at the
-        # threshold, floored at 1 h while streams are live.
-        orphan_retention = _format_duration(
-            max(_parse_threshold_seconds(retention_threshold), ORPHAN_MIN_RETENTION_SECONDS)
-        )
-        if live_streams:
-            expire_s = max(
-                _parse_threshold_seconds(retention_threshold), LIVE_EXPIRE_MIN_RETENTION_SECONDS
-            )
-            retention_threshold = _format_duration(expire_s)
+        retention_threshold = applied["expire"]
+        orphan_retention = applied["orphan"]
 
         def build_sql(tbl):
             return build_maintenance_sql(
@@ -1532,7 +1573,7 @@ def _run_benchmark_round(
 
     round_meta = BenchmarkRoundMeta(
         round_index=round_index,
-        timestamp=datetime.now(),
+        timestamp=utc_now(),
     )
 
     # Table health probe (v1.1.0)
@@ -1552,7 +1593,10 @@ def _run_benchmark_round(
     except Exception:
         pass
 
-    # 2. Freshness probe: measure gold table staleness at query time
+    # 2. Event-age probe: query time minus gold's newest event date. This is
+    # where the corpus's event timestamps sit (a 2025 corpus reads ~600 days),
+    # not pipeline freshness; data_freshness_seconds is that score. Recorded
+    # as a diagnostic and never printed as freshness.
     try:
         catalog = bench_runner.catalog
         gold_table = bench_runner.gold_table
@@ -1566,15 +1610,15 @@ def _run_benchmark_round(
             value = scalar_from_output(freshness_result.engine, freshness_result.raw_output)
             if value is None:
                 print_warning(
-                    "Gold freshness probe: could not read a number from the "
-                    f"{freshness_result.engine} output; freshness not recorded for this round"
+                    "Gold event-age probe: could not read a number from the "
+                    f"{freshness_result.engine} output; event age not recorded for this round"
                 )
             else:
-                round_meta.gold_freshness_seconds = value
+                round_meta.gold_event_age_seconds = value
         else:
-            print_warning(f"Gold freshness probe failed: {freshness_result.error}")
+            print_warning(f"Gold event-age probe failed: {freshness_result.error}")
     except Exception as e:  # noqa: BLE001
-        print_warning(f"Gold freshness probe failed: {e}")
+        print_warning(f"Gold event-age probe failed: {e}")
 
     # 3. Run the full 8-query power benchmark
     # One sample per query: gold refreshes under the round, so repeats would
@@ -1645,8 +1689,8 @@ def _run_benchmark_round(
 
     # 7. Print inline result
     freshness_str = (
-        f" | Freshness: {round_meta.gold_freshness_seconds:.1f}s"
-        if (round_meta.gold_freshness_seconds or 0) > 0
+        f" | Gold event age: {event_age_label(round_meta.gold_event_age_seconds)}"
+        if (round_meta.gold_event_age_seconds or 0) > 0
         else ""
     )
     q9_str = ""
@@ -1666,14 +1710,37 @@ def _run_benchmark_round(
             "qph": round(bench_result.qph, 1),
             "passed": passed,
             "total": total,
-            "freshness_seconds": (
-                round(round_meta.gold_freshness_seconds, 2)
-                if round_meta.gold_freshness_seconds is not None
+            "gold_event_age_seconds": (
+                round(round_meta.gold_event_age_seconds, 2)
+                if round_meta.gold_event_age_seconds is not None
                 else None
             ),
             "q9_contention": round_meta.q9_contention_observed,
         },
     )
+
+
+def event_age_label(seconds: float | None) -> str:
+    """Gold's newest event date, as an age in days.
+
+    The probe is day-resolution (MAX(interaction_date)) and measures where the
+    corpus's event timestamps sit, so seconds would read as a precise
+    freshness figure. It never is one.
+    """
+    if seconds is None:
+        return "n/a"
+    return f"{seconds / 86400:.1f} d"
+
+
+def pipeline_score_freshness(pb) -> str:
+    """The freshness the Pipeline Score line prints: the scored one.
+
+    data_freshness_seconds is the continuous primary score. The query-time
+    probe measured event-date age (about 635 days on a 2025 corpus, lb16) and
+    headlined the score line until v1.6; it stays a labelled diagnostic.
+    """
+    value = pb.data_freshness_seconds
+    return f"{value:.1f}s" if value is not None else "n/a"
 
 
 def _print_rounds_summary(console, rounds: list) -> None:
@@ -1690,7 +1757,8 @@ def _print_rounds_summary(console, rounds: list) -> None:
             query_names.append(name)
             table.add_column(name, justify="right")
 
-    table.add_column("Freshness", justify="right")
+    # Event-date age, not freshness: see event_age_label.
+    table.add_column("Gold event age", justify="right")
     table.add_column("Q9", justify="center")
 
     import statistics
@@ -1715,10 +1783,10 @@ def _print_rounds_summary(console, rounds: list) -> None:
             if not matched:
                 row.append("-")
 
-        # Freshness
-        if meta and (meta.gold_freshness_seconds or 0) > 0:
-            row.append(f"{meta.gold_freshness_seconds:.1f}s")
-            freshness_values.append(meta.gold_freshness_seconds)
+        # Gold event-date age
+        if meta and (meta.gold_event_age_seconds or 0) > 0:
+            row.append(event_age_label(meta.gold_event_age_seconds))
+            freshness_values.append(meta.gold_event_age_seconds)
         else:
             row.append("-")
 
@@ -1737,7 +1805,10 @@ def _print_rounds_summary(console, rounds: list) -> None:
     median_freshness = statistics.median(freshness_values) if freshness_values else 0.0
     parts = [f"Median QpH: {median_qph:.1f}"]
     if median_freshness > 0:
-        parts.append(f"Median freshness: {median_freshness:.1f}s")
+        parts.append(
+            f"Median gold event age: {event_age_label(median_freshness)} "
+            "(corpus event time, not freshness)"
+        )
     console.print(f"  {' | '.join(parts)}")
 
 
@@ -2980,6 +3051,13 @@ def _run_sustained(
             },
             "gate_problems": list(window_problems),
             "trickle": trickle,
+            # Applied retention (expiry floored while streams are live), so a
+            # default below the floor is recorded as what ran.
+            "retention": (
+                {"skipped": "--skip-maintenance"}
+                if skip_maintenance
+                else continuous_retention_record(cfg)
+            ),
         }
         if collector.current_run is not None:
             if collector.current_run.continuous is None:
@@ -3341,19 +3419,8 @@ def _run_sustained(
                             if pb.stage_latency_profile
                             else "n/a"
                         )
-                        freshness_label = "freshness"
-                        freshness_val = pb.data_freshness_seconds
-                        # Query-time freshness is event-date based and keeps
-                        # growing after a drained corpus (LB-145); show the
-                        # gold-cycle figure then.
-                        if (pb.query_time_freshness_seconds or 0) > 0 and not pb.corpus_drained:
-                            freshness_label = "freshness (at query time)"
-                            freshness_val = pb.query_time_freshness_seconds
-                        freshness_str = (
-                            f"{freshness_val:.1f}s" if freshness_val is not None else "n/a"
-                        )
                         print_info(
-                            f"Pipeline Score: {freshness_str} {freshness_label}"
+                            f"Pipeline Score: {pipeline_score_freshness(pb)} freshness"
                             f" | {pb.sustained_throughput_rps:,.0f} rows/s continuous"
                             f" | {latency_str}ms latency (b/s/g)"
                         )

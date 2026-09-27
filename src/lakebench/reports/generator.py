@@ -910,7 +910,9 @@ class ReportGenerator:
     def _generate_stability_section(self, metrics: PipelineMetrics) -> str:
         """Generate stability over time section (Layer 2, sustained mode only).
 
-        Shows QpH and freshness trends across in-stream benchmark rounds.
+        Shows the QpH trend across in-stream benchmark rounds. The per-round
+        gold event-date age is not plotted: it is corpus event time, not
+        freshness, and rises with the wall clock whatever the pipeline does.
         """
         if not self._is_sustained(metrics):
             return ""
@@ -920,20 +922,12 @@ class ReportGenerator:
             return ""
 
         qph_values = [r.qph for r in pb.benchmark_rounds]
-        raw_freshness = [
-            r.round_meta.gold_freshness_seconds
-            if r.round_meta and (r.round_meta.gold_freshness_seconds or 0) > 0
-            else 0.0
-            for r in pb.benchmark_rounds
-        ]
-        # Suppress freshness line when all values are zero (adds no information)
-        freshness_values = raw_freshness if any(v > 0 for v in raw_freshness) else []
 
         chart = self._render_line_chart_svg(
             series1=qph_values,
-            series2=freshness_values,
+            series2=[],
             label1="QpH",
-            label2="Freshness (s)",
+            label2="",
         )
 
         if not chart:
@@ -974,57 +968,6 @@ class ReportGenerator:
         </section>
         """
 
-    def _generate_query_time_freshness_section(self, metrics: PipelineMetrics) -> str:
-        """Generate query-time freshness diagnostic (Layer 2, spec 7.6).
-
-        Shows median query-time freshness vs worst-case data freshness,
-        with a gap analysis call-out.
-        """
-        pb = metrics.pipeline_benchmark
-        if not pb or not self._is_sustained(metrics):
-            return ""
-        if pb.query_time_freshness_seconds <= 0 or not pb.data_freshness_seconds:
-            return ""
-
-        qt = pb.query_time_freshness_seconds
-        wc = pb.data_freshness_seconds
-        gap = wc - qt
-
-        if gap > 60:
-            call_out = (
-                "Freshness is highly variable -- it depends on when queries land "
-                "relative to gold refresh cycles."
-            )
-        else:
-            call_out = "Freshness is relatively consistent across the streaming window."
-
-        return f"""
-        <section>
-            <h2>Query-Time Freshness</h2>
-            <div style="display: flex; gap: 3rem; margin-bottom: 1rem;">
-                <div>
-                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">
-                        Query-Time (median)
-                    </div>
-                    <div style="font-size: 1.5rem; font-weight: 700;">{qt:.1f}s</div>
-                </div>
-                <div>
-                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">
-                        Worst-Case
-                    </div>
-                    <div style="font-size: 1.5rem; font-weight: 700;">{wc:.1f}s</div>
-                </div>
-                <div>
-                    <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">
-                        Gap
-                    </div>
-                    <div style="font-size: 1.5rem; font-weight: 700;">{gap:.1f}s</div>
-                </div>
-            </div>
-            <p style="color: var(--text-muted); font-style: italic;">{call_out}</p>
-        </section>
-        """
-
     def _generate_contention_section(self, metrics: PipelineMetrics) -> str:
         """Generate Q9 contention map (Layer 2, sustained mode only).
 
@@ -1056,8 +999,8 @@ class ReportGenerator:
                 continue
             ts = meta.timestamp or "-"
             freshness = (
-                f"{meta.gold_freshness_seconds:.1f}s"
-                if (meta.gold_freshness_seconds or 0) > 0
+                f"{meta.gold_event_age_seconds / 86400:.1f} d"
+                if (meta.gold_event_age_seconds or 0) > 0
                 else "-"
             )
             if meta.q9_retry_used:
@@ -1081,7 +1024,7 @@ class ReportGenerator:
                         <th>Round</th>
                         <th>Time</th>
                         <th>Q9 Status</th>
-                        <th>Freshness</th>
+                        <th title="Query time minus gold's newest event date: corpus event time, not freshness">Gold event age</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -1127,7 +1070,6 @@ class ReportGenerator:
         maintenance_html = self._generate_maintenance_section(metrics)
         validity_html = self._generate_data_validity_section(metrics)
         stability_html = self._generate_stability_section(metrics)
-        qt_freshness_html = self._generate_query_time_freshness_section(metrics)
         contention_html = self._generate_contention_section(metrics)
         overall_passed, fail_reasons, warnings = self._compute_overall_status(metrics)
         if overall_passed and not warnings:
@@ -1382,7 +1324,6 @@ class ReportGenerator:
 
         {stability_html}
 
-        {qt_freshness_html}
 
         {contention_html}
 
@@ -2021,8 +1962,8 @@ class ReportGenerator:
         for rnd in rounds:
             qph_values.append(rnd.qph)
             meta = rnd.round_meta
-            if meta and (meta.gold_freshness_seconds or 0) > 0:
-                freshness_values.append(meta.gold_freshness_seconds)
+            if meta and (meta.gold_event_age_seconds or 0) > 0:
+                freshness_values.append(meta.gold_event_age_seconds)
             if meta and meta.q9_contention_observed:
                 contention_count += 1
 
@@ -2107,7 +2048,10 @@ class ReportGenerator:
             f"Median QpH: <strong>{median_qph:.1f}</strong>",
         ]
         if median_freshness > 0:
-            summary_parts.append(f"Median freshness: {median_freshness:.1f}s")
+            summary_parts.append(
+                f"Median gold event age: {median_freshness / 86400:.1f} d "
+                "(corpus event time, not freshness)"
+            )
         if contention_count > 0:
             summary_parts.append(f"Q9 contention: {contention_count}x")
 

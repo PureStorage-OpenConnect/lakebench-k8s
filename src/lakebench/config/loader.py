@@ -324,13 +324,22 @@ def retention_floor_advisory(cfg: LakebenchConfig) -> str | None:
     live, so a lower retention_threshold is silently raised. The maintenance
     journal records the effective value, but nothing told the user. Only
     Iceberg recipes whose query engine runs maintenance (Trino, Spark
-    Thrift) are checked. Ignores the pipeline mode; callers decide.
+    Thrift) are checked, and only a threshold the config sets. Ignores the
+    pipeline mode; callers decide.
     """
     if cfg.architecture.table_format.type.value != "iceberg":
         return None
     if cfg.architecture.query_engine.type.value not in _MAINTENANCE_ENGINES:
         return None
-    threshold = cfg.architecture.pipeline.sustained.retention_threshold
+    sustained = cfg.architecture.pipeline.sustained
+    if "retention_threshold" not in sustained.model_fields_set:
+        # The 30m default stays (it is in every config's perf-gate
+        # fingerprint, so moving it would orphan every pinned baseline), and
+        # the floor raises live expiry to 1h on its own. The run records the
+        # applied value (continuous.retention), so the default needs no
+        # warning.
+        return None
+    threshold = sustained.retention_threshold
     m = re.fullmatch(r"(\d+)([smhd])", threshold)
     if m is None:
         return None

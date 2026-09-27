@@ -47,6 +47,22 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RUNS_DIR = str(Path(DEFAULT_OUTPUT_DIR) / "runs")
 
 
+def _sort_instant(value: Any) -> float:
+    """A start_time as epoch seconds for ordering runs.
+
+    Naive values (runs before v1.6) are host-local, as they were written;
+    aware ones carry their offset. Unparseable or missing sorts oldest.
+    """
+    try:
+        at = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return float("-inf")
+    try:
+        return at.timestamp()  # naive: local time, like .astimezone()
+    except (OverflowError, OSError, ValueError):
+        return float("-inf")
+
+
 def _deserialize_stage_latency_profile(raw: Any) -> list[float]:
     """Deserialize stage_latency_profile from JSON.
 
@@ -80,7 +96,11 @@ def _deserialize_benchmark_rounds(
                 timestamp=(
                     datetime.fromisoformat(rm["timestamp"]) if rm.get("timestamp") else None
                 ),
-                gold_freshness_seconds=rm.get("gold_freshness_seconds"),
+                # Renamed from gold_freshness_seconds: the probe has always
+                # measured event-date age, never pipeline freshness.
+                gold_event_age_seconds=rm.get(
+                    "gold_event_age_seconds", rm.get("gold_freshness_seconds")
+                ),
                 q9_contention_observed=rm.get("q9_contention_observed", False),
                 q9_retry_used=rm.get("q9_retry_used", False),
                 silver_data_file_count=th.get(
@@ -269,8 +289,10 @@ class MetricsStorage:
                     runs.append(summary)
                     seen_ids.add(summary["run_id"])
 
-        # Re-sort combined list by start_time descending
-        runs.sort(key=lambda r: r.get("start_time", ""), reverse=True)
+        # Re-sort combined list by start_time descending. Parsed, not as
+        # strings: runs from v1.6 record UTC with an offset, older ones naive
+        # host-local time, and the two do not sort as text.
+        runs.sort(key=lambda r: _sort_instant(r.get("start_time")), reverse=True)
         return runs
 
     @staticmethod
@@ -346,6 +368,8 @@ class MetricsStorage:
                 job_name=job_data.get("job_name", ""),
                 job_type=job_data.get("job_type", ""),
                 elapsed_seconds=job_data.get("elapsed_seconds", 0),
+                timing_source=job_data.get("timing_source") or "",
+                timing_resolution_seconds=job_data.get("timing_resolution_seconds"),
                 success=job_data.get("success", False),
                 error_message=job_data.get("error_message"),
                 input_size_gb=job_data.get("input_size_gb", 0),
@@ -501,6 +525,8 @@ class MetricsStorage:
                     stage_type=s_data.get("stage_type", ""),
                     engine=s_data.get("engine", ""),
                     elapsed_seconds=s_data.get("elapsed_seconds", 0.0),
+                    timing_source=s_data.get("timing_source") or "",
+                    timing_resolution_seconds=s_data.get("timing_resolution_seconds"),
                     success=s_data.get("success", False),
                     error_message=s_data.get("error_message"),
                     input_size_gb=s_data.get("input_size_gb", 0.0),

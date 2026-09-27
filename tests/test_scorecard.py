@@ -265,3 +265,32 @@ class TestFinancialDetailScorecard:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestFinancialScorecardEdgeRows:
+    """Rows the coverage floor found unexercised: continuous alert counts from
+    gold-refresh time-to-detect, and a crashed rule in batch."""
+
+    def test_continuous_counts_come_from_gold_refresh(self):
+        from types import SimpleNamespace
+
+        sm = SimpleNamespace(
+            job_type="gold-refresh",
+            ttd_by_rule={"W2_structuring": {"alerts": 12}, "W3_round_tripping": {"alerts": "x"}},
+        )
+        m = SimpleNamespace(jobs=[], streaming=[sm], financial_scoring=None, config_snapshot={})
+        html = FinancialScorecardBlock().render_detail_html(m)
+        assert "W2_structuring" in html and "12" in html
+
+    def test_crashed_rule_reads_error_not_zero(self):
+        from types import SimpleNamespace
+
+        job = SimpleNamespace(
+            job_type="gold-finalize",
+            alerts_by_rule={"W2_structuring": 0},
+            rules_skipped={},
+            rule_errors={"W2_structuring": "boom"},
+        )
+        m = SimpleNamespace(jobs=[job], streaming=[], financial_scoring=None, config_snapshot={})
+        html = FinancialScorecardBlock().render_detail_html(m)
+        assert "error" in html

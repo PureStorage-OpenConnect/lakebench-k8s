@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 from rich.panel import Panel
 
+from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -261,7 +262,7 @@ def _record_local_jobs(collector, cfg, result) -> None:
     from lakebench.metrics import JobMetrics
     from lakebench.modules.pipeline_engines.spark.job import get_local_job_profile
 
-    now = datetime.now()
+    now = utc_now()
     for stage_name, ok, elapsed in result.stages:
         profile = get_local_job_profile(stage_name) or {}
         cores = int(profile.get("cores", 2))
@@ -283,6 +284,7 @@ def _record_local_jobs(collector, cfg, result) -> None:
         metrics.elapsed_seconds = elapsed
         metrics.start_time = now - timedelta(seconds=elapsed)
         metrics.end_time = now
+        metrics.timing_source = "local_runner"
         metrics.success = ok
         metrics.executor_count = 1
         metrics.executor_cores = cores
@@ -418,6 +420,61 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     # Customer 360 expected-result facts (reporting only, D6).
     job_metrics.c360_check = parsed.c360_check
     job_metrics.c360_bronze = parsed.c360_bronze
+
+
+# Batch stage status poll. Stage times come from the cluster (_stage_timing),
+# not from this poll; it bounds how long lakebench takes to notice a stage has
+# ended, which sits inside time to value between stages. Was 15 s.
+_STAGE_POLL_S = 5
+
+
+def _stage_timing(monitor, app_name: str, result, submitted_at, observed_end):
+    """When a batch stage ran: submission to the Spark application's real end.
+
+    The end is the driver container's finish time (else the
+    SparkApplication's terminationTime) mapped to this host's clock through
+    the API server's clock offset, measured now. Anything unreadable or
+    inconsistent falls back to the poll that saw the job finish, and the
+    record says which (JobMetrics.timing_source).
+    """
+    from lakebench.cli._sustained import cluster_clock_offset_seconds
+    from lakebench.modules.pipeline_engines.spark.monitor import (
+        parse_k8s_time,
+        stage_timing,
+    )
+
+    status = getattr(result, "final_status", None)
+    try:
+        cluster_end, source = monitor.application_end(app_name, status)
+    except Exception as e:  # noqa: BLE001 -- best effort; the poll time stands
+        logger.debug("application end for %s not read: %s", app_name, e)
+        cluster_end, source = None, ""
+    offset = None
+    if cluster_end is not None:
+        # Read once per monitor (one run): it sits between stages, inside
+        # time to value, and can take up to its timeout.
+        offset = getattr(monitor, "_lb_clock_offset", None)
+        if not isinstance(offset, float):
+            offset = cluster_clock_offset_seconds()
+            if offset is not None:
+                try:
+                    monitor._lb_clock_offset = offset
+                except AttributeError:
+                    pass
+    return stage_timing(
+        submitted_at,
+        observed_end,
+        cluster_end,
+        source,
+        offset,
+        _STAGE_POLL_S,
+        last_submission=parse_k8s_time(status.start_time) if status is not None else None,
+        last_running=(
+            submitted_at + timedelta(seconds=result.last_running_elapsed)
+            if isinstance(getattr(result, "last_running_elapsed", None), (int, float))
+            else None
+        ),
+    )
 
 
 def _exclude_c360_check_time(job_metrics) -> float:
@@ -1859,7 +1916,7 @@ def run(
                     console.print(f"[bold]Stage: {stage_name}[/bold]")
                 print_info(description)
 
-                job_start = datetime.now()
+                job_start = utc_now()
 
                 # Submit job
                 job_status = job_manager.submit_job(job_type, cycle_env=cycle_env)
@@ -1870,8 +1927,9 @@ def run(
                             job_name=f"lakebench-{stage_name}",
                             job_type=stage_name,
                             start_time=job_start,
-                            end_time=datetime.now(),
-                            elapsed_seconds=(datetime.now() - job_start).total_seconds(),
+                            end_time=utc_now(),
+                            elapsed_seconds=(utc_now() - job_start).total_seconds(),
+                            timing_source="submit_failed",
                             success=False,
                             error_message=job_status.message,
                         )
@@ -1880,6 +1938,9 @@ def run(
                     raise typer.Exit(1)
 
                 print_success(f"Job submitted: lakebench-{stage_name}")
+                # The stage starts when the SparkApplication exists: the
+                # same point the monitor's elapsed counted from.
+                job_submitted = utc_now()
 
                 # Wait for completion -- capture max executor count seen
                 _max_executors = 0
@@ -1891,35 +1952,46 @@ def run(
                     nonlocal _max_executors, _last_reported_executors
                     if status.state == JobState.RUNNING:
                         _max_executors = max(_max_executors, status.executor_count)
-                        elapsed = (datetime.now() - _start).total_seconds()
+                        elapsed = (utc_now() - _start).total_seconds()
                         if status.executor_count != _last_reported_executors:
                             console.print(f"  Running... (executors: {status.executor_count})")
                             _last_reported_executors = status.executor_count
-                            _hb[0] = datetime.now()
-                        elif (datetime.now() - _hb[0]).total_seconds() >= 60:
+                            _hb[0] = utc_now()
+                        elif (utc_now() - _hb[0]).total_seconds() >= 60:
                             console.print(f"  Running... ({int(elapsed)}s elapsed)")
-                            _hb[0] = datetime.now()
+                            _hb[0] = utc_now()
 
                 result = monitor.wait_for_completion(
                     f"lakebench-{stage_name}",
                     timeout_seconds=timeout,
-                    poll_interval=15,
+                    poll_interval=_STAGE_POLL_S,
                     progress_callback=on_progress,
                 )
+                # The poll that saw the end, less the driver-log fetch the
+                # monitor did after it.
+                job_observed_end = job_submitted + timedelta(seconds=result.elapsed_seconds)
+                timing = _stage_timing(
+                    monitor, f"lakebench-{stage_name}", result, job_submitted, job_observed_end
+                )
 
-                job_end = datetime.now()
-
-                # Build job metrics
+                # Build job metrics. start_time stays the moment before
+                # submission (time to value counts lakebench's resubmit of
+                # the stage); elapsed runs from the SparkApplication's
+                # creation to the application's real end.
                 job_metrics = JobMetrics(
                     job_name=f"lakebench-{stage_name}",
                     job_type=stage_name,
                     start_time=job_start,
-                    end_time=job_end,
-                    elapsed_seconds=result.elapsed_seconds,
+                    end_time=timing.end,
+                    elapsed_seconds=timing.elapsed_seconds,
+                    timing_source=timing.source,
+                    timing_resolution_seconds=timing.resolution_seconds,
                     success=result.success,
                     error_message=result.message if not result.success else None,
                     executor_count=_max_executors,
                 )
+                if timing.note:
+                    logger.warning("%s timed by poll: %s", stage_name, timing.note)
 
                 # Parse driver logs for data metrics if available
                 if result.driver_logs:
@@ -2013,8 +2085,8 @@ def run(
                 _cycle_jobs.append(job_metrics)
 
                 if result.success:
-                    print_success(f"{stage_name} completed in {result.elapsed_seconds:.0f}s")
-                    results.append((stage_name, True, result.elapsed_seconds))
+                    print_success(f"{stage_name} completed in {job_metrics.elapsed_seconds:.1f}s")
+                    results.append((stage_name, True, job_metrics.elapsed_seconds))
                     _journal_safe(
                         j.record,
                         EventType.PIPELINE_STAGE,
@@ -2023,7 +2095,7 @@ def run(
                         details={
                             "stage": stage_name,
                             "success": True,
-                            "elapsed_seconds": result.elapsed_seconds,
+                            "elapsed_seconds": job_metrics.elapsed_seconds,
                             "input_gb": job_metrics.input_size_gb,
                             "output_rows": job_metrics.output_rows,
                         },
@@ -2034,7 +2106,7 @@ def run(
                         console.print("[dim]Driver logs (last 20 lines):[/dim]")
                         for line in result.driver_logs.split("\n")[-20:]:
                             console.print(f"  {line}")
-                    results.append((stage_name, False, result.elapsed_seconds))
+                    results.append((stage_name, False, job_metrics.elapsed_seconds))
                     _journal_safe(
                         j.record,
                         EventType.PIPELINE_STAGE,
@@ -2043,7 +2115,7 @@ def run(
                         details={
                             "stage": stage_name,
                             "success": False,
-                            "elapsed_seconds": result.elapsed_seconds,
+                            "elapsed_seconds": job_metrics.elapsed_seconds,
                         },
                     )
                     pipeline_success = False

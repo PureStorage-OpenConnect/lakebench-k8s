@@ -31,8 +31,10 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 
 | Score | Formula | Meaning |
 |---|---|---|
-| `time_to_value_seconds` | `max(end_time) - min(start_time)` | Wall-clock seconds from first stage start to last stage end. The primary batch score. Lower is better. |
+| `time_to_value_seconds` | `max(end_time) - min(start_time)` | Wall-clock seconds from the first stage's submission to the moment gold is queryable (the gold Spark application's end). It includes lakebench's work between stages (noticing a stage ended, reading its driver log and output size, submitting the next). The primary batch score. Lower is better. |
 | `total_elapsed_seconds` | `sum(stage.elapsed_seconds)` | Sum of all stage durations. May exceed time-to-value if stages overlap. |
+
+Batch stage times (v1.6). A Spark stage runs from its SparkApplication's creation to the driver container's finish time (else the SparkApplication's `terminationTime`), mapped to the lakebench host's clock through the API server's clock offset. Each stage records `timing_source` (`driver_container`, `spark_application`, or `poll` when no consistent cluster time could be read) and `timing_resolution_seconds` (2 s from the cluster, the poll interval otherwise). Before v1.6 every stage ended on the 15 s job-monitor poll, so older stage seconds and time to value are rounded up by up to 15 s per stage and include the gold driver-log fetch; the perf gate refuses to compare the two (record a new baseline).
 | `total_data_processed_gb` | `sum(stage.input_size_gb)` | Total input data across all stages. |
 | `pipeline_throughput_gb_per_second` | `total_data_processed_gb / time_to_value_seconds` | Composite throughput across the whole pipeline. Higher is better. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Higher means better resource utilization. |
@@ -430,10 +432,16 @@ cycle. If Q9 fails during a round, Lakebench retries up to twice with
 30s/60s backoff. The contention status is recorded per-round as
 `q9_contention_observed` and `q9_retry_used`.
 
-**Query-time freshness:** Each round measures gold-table staleness at the
-moment the engine queries it. This is more accurate than the streaming-log
-freshness (which is averaged over the entire run). The median of per-round
-freshness appears in the scorecard as `query_time_freshness_seconds`.
+**Gold event age (diagnostic, not freshness):** Each round also records how
+old gold's newest event date is at query time (query time minus
+`MAX(interaction_date)`, day resolution). That tracks where the corpus's event
+timestamps sit: a corpus dated 2024-12-18 to 2025-01-01 reads about 635 days in
+2026, however fresh gold is. The median appears as
+`query_time_event_age_seconds` and each round's value as
+`round_meta.gold_event_age_seconds`. Before v1.6 the same figure was written as
+`query_time_freshness_seconds` / `gold_freshness_seconds` and printed as the
+continuous Pipeline Score; the score line now always shows
+`data_freshness_seconds`, the scored freshness.
 
 If the run duration is too short for at least one round (less than
 `benchmark_warmup + benchmark_interval`), in-stream benchmarking is skipped
@@ -875,15 +883,8 @@ If any indicator is red, cross-run comparisons are unreliable.
 
 ### Stability Over Time (continuous only)
 
-A dual-axis line chart showing QpH and gold data freshness trends across
-in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
+A line chart showing the QpH trend across in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
 Helps identify performance degradation over time as table state grows.
-
-### Query-Time Freshness (continuous only)
-
-Shows median query-time freshness versus worst-case data freshness. The gap
-between these two values indicates how much freshness varies depending on
-when you query relative to the gold refresh cycle.
 
 ### Q9 Contention (continuous only)
 
