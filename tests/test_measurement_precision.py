@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -126,3 +126,78 @@ class TestContinuousFreshnessHeadline:
         assert "Query-Time Freshness" not in html
         assert "54890" not in html
         assert "Median freshness" not in html
+
+
+# ---------------------------------------------------------------------------
+# 4. Timestamps are UTC with a zone
+# ---------------------------------------------------------------------------
+
+
+class TestUtcTimestamps:
+    def test_run_start_and_end_are_aware_utc(self):
+        from lakebench.metrics.collector import MetricsCollector
+
+        c = MetricsCollector()
+        run = c.start_run("20260927-011043-e338c5", "d", {})
+        assert run.start_time.utcoffset() == timedelta(0)
+        done = c.end_run(success=True)
+        assert done is not None and done.end_time is not None
+        assert done.end_time.utcoffset() == timedelta(0)
+        d = done.to_dict()
+        assert d["start_time"].endswith("+00:00")
+        assert d["end_time"].endswith("+00:00")
+
+    def test_old_naive_metrics_still_load_and_score(self):
+        from lakebench.metrics.storage import MetricsStorage
+
+        raw = {
+            "run_id": "20260927-011123-497f02",
+            "deployment_name": "d",
+            "start_time": "2026-09-27T01:11:23",
+            "end_time": "2026-09-27T01:40:23",
+            "jobs": [
+                {
+                    "job_name": "lakebench-bronze-verify",
+                    "job_type": "bronze-verify",
+                    "start_time": "2026-09-27T01:11:25",
+                    "end_time": "2026-09-27T01:12:55",
+                    "elapsed_seconds": 90.1,
+                    "success": True,
+                }
+            ],
+        }
+        m = MetricsStorage.__new__(MetricsStorage)._dict_to_metrics(raw)
+        assert m.jobs[0].start_time.tzinfo is None
+        from lakebench.metrics import build_pipeline_benchmark
+
+        pb = build_pipeline_benchmark(m)
+        assert pb.time_to_value_seconds == pytest.approx(90.0)
+
+    def test_perf_gate_ttv_reads_aware_stage_times(self, tmp_path):
+        from lakebench.metrics import perf_gate
+
+        run_dir = tmp_path / "run-x"
+        run_dir.mkdir()
+        stages = [
+            {
+                "stage_name": "bronze",
+                "stage_type": "batch",
+                "start_time": "2026-09-27T07:11:25.500000+00:00",
+                "end_time": "2026-09-27T07:12:56.250000+00:00",
+                "elapsed_seconds": 90.75,
+                "input_size_gb": 9.0,
+            }
+        ]
+        (run_dir / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "run_id": "x",
+                    "deployment_name": "d",
+                    "start_time": "2026-09-27T07:11:20+00:00",
+                    "pipeline_benchmark": {"stages": stages, "scores": {}},
+                }
+            )
+        )
+        rec = perf_gate.load_run(run_dir)
+        ttv = perf_gate._pipeline_ttv(rec)
+        assert ttv is not None and ttv[0] == pytest.approx(90.75)

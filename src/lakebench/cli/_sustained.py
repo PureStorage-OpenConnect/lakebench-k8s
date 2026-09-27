@@ -19,6 +19,7 @@ from rich.table import Table
 if TYPE_CHECKING:
     from rich.console import Console
 
+from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -684,7 +685,7 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
 
         print_info("Collecting platform metrics from Prometheus...")
         collector = PlatformCollector(prometheus_url, namespace)
-        pm = collector.collect(run_metrics.start_time, run_metrics.end_time or datetime.now())
+        pm = collector.collect(run_metrics.start_time, run_metrics.end_time or utc_now())
         run_metrics.platform_metrics = pm.to_dict()
 
         # Clean up port-forward if we started one
@@ -1532,7 +1533,7 @@ def _run_benchmark_round(
 
     round_meta = BenchmarkRoundMeta(
         round_index=round_index,
-        timestamp=datetime.now(),
+        timestamp=utc_now(),
     )
 
     # Table health probe (v1.1.0)

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar
 
+from lakebench._clock import utc_now
 from lakebench.metrics.experiment import effective_trickle, experiment_inputs
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.provenance import run_provenance
@@ -2336,7 +2337,7 @@ class MetricsCollector:
         self.current_run = PipelineMetrics(
             run_id=run_id,
             deployment_name=deployment_name,
-            start_time=datetime.now(),
+            start_time=utc_now(),
             config_snapshot=config,
             provenance=dict(run_provenance()),
         )
@@ -2354,7 +2355,7 @@ class MetricsCollector:
         if not self.current_run:
             return None
 
-        self.current_run.end_time = datetime.now()
+        self.current_run.end_time = utc_now()
         self.current_run.total_elapsed_seconds = (
             self.current_run.end_time - self.current_run.start_time
         ).total_seconds()

@@ -11,6 +11,7 @@ from typing import Annotated, Any
 import typer
 from rich.panel import Panel
 
+from lakebench._clock import utc_now
 from lakebench.cli._helpers import (
     _journal_safe,
     console,
@@ -261,7 +262,7 @@ def _record_local_jobs(collector, cfg, result) -> None:
     from lakebench.metrics import JobMetrics
     from lakebench.modules.pipeline_engines.spark.job import get_local_job_profile
 
-    now = datetime.now()
+    now = utc_now()
     for stage_name, ok, elapsed in result.stages:
         profile = get_local_job_profile(stage_name) or {}
         cores = int(profile.get("cores", 2))
@@ -1845,7 +1846,7 @@ def run(
                     console.print(f"[bold]Stage: {stage_name}[/bold]")
                 print_info(description)
 
-                job_start = datetime.now()
+                job_start = utc_now()
 
                 # Submit job
                 job_status = job_manager.submit_job(job_type, cycle_env=cycle_env)
@@ -1856,8 +1857,8 @@ def run(
                             job_name=f"lakebench-{stage_name}",
                             job_type=stage_name,
                             start_time=job_start,
-                            end_time=datetime.now(),
-                            elapsed_seconds=(datetime.now() - job_start).total_seconds(),
+                            end_time=utc_now(),
+                            elapsed_seconds=(utc_now() - job_start).total_seconds(),
                             success=False,
                             error_message=job_status.message,
                         )
@@ -1877,14 +1878,14 @@ def run(
                     nonlocal _max_executors, _last_reported_executors
                     if status.state == JobState.RUNNING:
                         _max_executors = max(_max_executors, status.executor_count)
-                        elapsed = (datetime.now() - _start).total_seconds()
+                        elapsed = (utc_now() - _start).total_seconds()
                         if status.executor_count != _last_reported_executors:
                             console.print(f"  Running... (executors: {status.executor_count})")
                             _last_reported_executors = status.executor_count
-                            _hb[0] = datetime.now()
-                        elif (datetime.now() - _hb[0]).total_seconds() >= 60:
+                            _hb[0] = utc_now()
+                        elif (utc_now() - _hb[0]).total_seconds() >= 60:
                             console.print(f"  Running... ({int(elapsed)}s elapsed)")
-                            _hb[0] = datetime.now()
+                            _hb[0] = utc_now()
 
                 result = monitor.wait_for_completion(
                     f"lakebench-{stage_name}",
@@ -1893,7 +1894,7 @@ def run(
                     progress_callback=on_progress,
                 )
 
-                job_end = datetime.now()
+                job_end = utc_now()
 
                 # Build job metrics
                 job_metrics = JobMetrics(

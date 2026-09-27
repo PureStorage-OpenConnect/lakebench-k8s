@@ -108,9 +108,10 @@ A run is refused, never compared, when:
   data between gold and the next bronze, inside the time-to-value span, and
   `cycles` is not in the snapshot for the fingerprint to catch;
 - its batch stage timestamps span less time than the stages' own seconds add
-  up to. Timestamps are naive local time, so this is a clock change (a DST
-  fall-back) during the run. A spring-forward lengthens the span instead and
-  reads as a time-to-value regression.
+  up to. Runs recorded before v1.6 carry naive local timestamps, so this is a
+  clock change (a DST fall-back) during the run; a spring-forward lengthens the
+  span instead and reads as a time-to-value regression. From v1.6 the
+  timestamps are UTC with the offset recorded and a DST change cannot move them.
 
 Within a comparable run, some numbers are left out rather than trusted:
 
@@ -129,8 +130,9 @@ Within a comparable run, some numbers are left out rather than trusted:
   (`lakebench run --generate` writes no sidecar but attaches the last one). Generate once and run several times is a normal workflow. Nothing
   else is dropped with them: for batch runs time to value and GB/s are
   recomputed from the pipeline stages' own timestamps with the datagen stage
-  left out, and GB/core-hr counts batch or continuous stages only. The run's
-  `start_time` is naive local time with no zone recorded, so the age is taken
+  left out, and GB/core-hr counts batch or continuous stages only. From v1.6
+  the run's `start_time` is UTC with its offset and the age is exact. An older
+  run's `start_time` is naive local time with no zone recorded, so the age is taken
   at its smallest over every UTC offset (-12h to +14h): a sidecar is called
   stale only when it is more than 24 hours old wherever the run happened, and
   the answer does not depend on the gate host's zone. The cost is a wide
@@ -297,8 +299,8 @@ The datagen staleness bound is wide: a sidecar written up to 50 hours
 before the run (real time, depending on the run host's zone) can still be
 attributed to it, because the run's zone is unknown. A run that reuses the
 baseline's own sidecar inside that window compares datagen with itself.
-Recording `start_time` with its UTC offset in the run path would let the gate
-use the real 24-hour bound.
+Runs recorded from v1.6 carry `start_time` with its UTC offset, and the gate
+uses the real 24-hour bound for them; the wide bound applies to older runs only.
 
 ## Seeding
 
