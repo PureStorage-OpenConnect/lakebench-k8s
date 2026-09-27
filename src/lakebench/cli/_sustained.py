@@ -1827,7 +1827,7 @@ class StreamStartWatch:
         self.failures: list[dict] = []
         self.running_at: str | None = None
         self._last_key: tuple | None = None
-        self._next_beat = self.HEARTBEAT_S
+        self._next_beat: float = float(self.HEARTBEAT_S)
 
     def __call__(self, status, elapsed: float) -> None:
         from lakebench.metrics.continuous_window import classify_submission_failure
@@ -2553,6 +2553,8 @@ def _run_sustained(
                     raise typer.Exit(1)
         finally:
             if collector.current_run is not None:
+                if collector.current_run.continuous is None:
+                    collector.current_run.continuous = {}
                 collector.current_run.continuous["streams"] = {
                     name: {"running_at": w.running_at, "submission_failures": w.failures}
                     for name, w in stream_watch.items()
@@ -2980,6 +2982,8 @@ def _run_sustained(
             "trickle": trickle,
         }
         if collector.current_run is not None:
+            if collector.current_run.continuous is None:
+                collector.current_run.continuous = {}
             collector.current_run.continuous.update(continuous_record)
         _journal_safe(
             j.record,
@@ -3085,6 +3089,8 @@ def _run_sustained(
             else:
                 print_warning(f"Result check: {result_check.get('not_checked')}")
         if collector.current_run is not None:
+            if collector.current_run.continuous is None:
+                collector.current_run.continuous = {}
             collector.current_run.continuous["settle"] = settle
             collector.current_run.continuous["result_check"] = result_check
 

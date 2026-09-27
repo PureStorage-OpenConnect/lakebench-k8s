@@ -215,7 +215,8 @@ def window_stats(
     elif job_type == "silver-stream":
         rows_in: dict[int, int] = {}
         rows_out: dict[int, int] = {}
-        committed_in, committed_before = set(), set()
+        committed_in: set[int] = set()
+        committed_before: set[int] = set()
         commit_at: dict[int, datetime] = {}
         transformed = 0
         for e in events:

@@ -18,7 +18,7 @@ and the docs tables all read it from here.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -443,7 +443,7 @@ def render_recipe_table() -> str:
     return "\n".join(lines)
 
 
-GENERATED_BLOCKS = {
+GENERATED_BLOCKS: dict[str, Callable[[], str]] = {
     "support-states": render_support_table,
     "recipe-components": render_recipe_table,
 }

@@ -1220,10 +1220,10 @@ class PipelineBenchmark:
 
         # Query-time freshness from in-stream benchmark rounds
         if self.benchmark_rounds:
-            round_freshness = [
-                r.round_meta.gold_freshness_seconds
+            round_freshness: list[float] = [
+                f
                 for r in self.benchmark_rounds
-                if r.round_meta and (r.round_meta.gold_freshness_seconds or 0) > 0
+                if r.round_meta and (f := r.round_meta.gold_freshness_seconds) is not None and f > 0
             ]
             if round_freshness:
                 self.query_time_freshness_seconds = statistics.median(round_freshness)
