@@ -46,6 +46,8 @@ class _FakeCluster:
         self.tmp_after_upgrade = DEFAULT_CONTROLLER_TMP_SIZE
         self.tmp_before = "1Gi"
         self.upgraded = False
+        self.ready = "1"
+        self.stored_values: dict = {}
         self.calls: list[list[str]] = []
 
     def helm_upgrades(self) -> list[list[str]]:
@@ -60,6 +62,10 @@ class _FakeCluster:
             if not self.release:
                 return MagicMock(returncode=1, stdout="", stderr="Error: release: not found")
             return ok
+        if cmd[:3] == ["helm", "get", "values"]:
+            return MagicMock(returncode=0, stdout=json.dumps(self.stored_values))
+        if cmd[:2] == ["helm", "list"] and self.chart is None:
+            return MagicMock(returncode=1, stdout="", stderr="Error: Unauthorized")
         if cmd[:2] == ["helm", "list"]:
             return MagicMock(
                 returncode=0, stdout=json.dumps([{"name": "spark-operator", "chart": self.chart}])
@@ -83,7 +89,7 @@ class _FakeCluster:
                 returncode=0, stdout="NAMESPACE NAME\nspark-operator spark-operator-controller"
             )
         if cmd[:3] == ["kubectl", "get", "deployment"]:
-            return MagicMock(returncode=0, stdout="1")  # readyReplicas
+            return MagicMock(returncode=0, stdout=self.ready)  # readyReplicas
         return ok
 
 
@@ -351,3 +357,96 @@ class TestDoctorAndStatus:
             r = runner.invoke(admin_app, ["status"])
         assert r.exit_code == 0
         assert "controller /tmp: 8Gi" in " ".join(r.output.split())
+
+
+class _Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+
+
+class TestReviewFixes:
+    def test_deploy_path_never_upgrades_an_existing_not_ready_release(self):
+        """ensure_installed (operator.install: true) used to reinstall a
+        not-ready operator outside the cluster lease, pinned to the tenant's
+        config version; during an eviction storm that fires constantly."""
+        fake = _FakeCluster(release=True)
+        fake.ready = "0"
+        with (
+            patch(_RUN, side_effect=fake),
+            patch("lakebench.modules.pipeline_engines.spark.operator.time", _Clock()),
+        ):
+            status = SparkOperatorManager(version="2.4.0", job_namespace="t").ensure_installed()
+        assert fake.helm_upgrades() == []
+        assert status.ready is False
+        assert "admin repair-operator" in status.message
+
+    def test_deploy_path_still_installs_a_missing_release(self):
+        fake = _FakeCluster(release=False)
+        fake.ready = "0"
+        with (
+            patch(_RUN, side_effect=fake),
+            patch("lakebench.modules.pipeline_engines.spark.operator.time", _Clock()),
+        ):
+            SparkOperatorManager(version="2.5.1", job_namespace="t").ensure_installed()
+        assert len(fake.helm_upgrades()) == 1
+
+    def test_refuses_to_drop_other_stored_controller_volumes(self):
+        fake = _FakeCluster(release=True)
+        fake.stored_values = {"controller": {"volumes": [{"name": "tmp"}, {"name": "ca-bundle"}]}}
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager(version="2.5.1").install() is False
+            assert SparkOperatorManager().apply_controller_tmp_size("8Gi") is False
+        assert fake.helm_upgrades() == []
+
+    def test_upgrade_without_a_size_keeps_a_larger_one(self):
+        fake = _FakeCluster(release=True)
+        fake.tmp_before = fake.tmp_after_upgrade = "16Gi"
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager(version="2.5.1").install() is True
+        (cmd,) = fake.helm_upgrades()
+        assert "controller.volumes[0].emptyDir.sizeLimit=16Gi" in _set_values(cmd)
+
+    def test_unreadable_installed_version_refuses_unpinned_upgrade(self):
+        fake = _FakeCluster(release=True, chart=None)
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager().install() is False
+            # The config's pin is not a stand-in for the installed chart.
+            assert SparkOperatorManager(version="2.4.0").apply_controller_tmp_size("8Gi") is False
+        assert fake.helm_upgrades() == []
+
+    def test_evictions_before_a_resize_are_history(self):
+        msg = TestDiagnose._EVICT_MSG
+        old = {
+            "metadata": {
+                "name": "spark-operator-controller-79cc857c77-kmn94",
+                "ownerReferences": [{"name": "spark-operator-controller-79cc857c77"}],
+            },
+            "status": {"reason": "Evicted", "message": msg},
+        }
+        live = {
+            "metadata": {
+                "name": "spark-operator-controller-5d8f6-abcde",
+                "ownerReferences": [{"name": "spark-operator-controller-5d8f6"}],
+            },
+            "status": {"phase": "Running", "containerStatuses": [{"restartCount": 0}]},
+        }
+        event = {
+            "reason": "Evicted",
+            "involvedObject": {"kind": "Pod", "name": "spark-operator-controller-79cc857c77-kmn94"},
+            "message": msg,
+            "lastTimestamp": "2026-09-27T15:05:41Z",
+        }
+        diag = diagnose(_deployment("8Gi"), [old, live], [event])
+        assert diag.healthy
+        assert diag.past_storage_evictions == 1
+        # The same eviction on the running ReplicaSet is a problem.
+        old["metadata"]["ownerReferences"] = [{"name": "spark-operator-controller-5d8f6"}]
+        event["involvedObject"]["name"] = "spark-operator-controller-5d8f6-zzzzz"
+        diag = diagnose(_deployment("8Gi"), [old, live], [event])
+        assert not diag.healthy

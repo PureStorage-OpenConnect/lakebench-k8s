@@ -1441,6 +1441,74 @@ class SparkOperatorManager:
         except ValueError as e:
             raise _DeploymentReadError(f"unparseable deployment JSON: {e}") from e
 
+    def _stored_controller_volumes(self) -> list[Any]:
+        """``controller.volumes`` in the release's user-supplied values.
+
+        Raises _DeploymentReadError when the values cannot be read.
+        """
+        import json
+
+        try:
+            result = self._run(
+                [
+                    "helm",
+                    "get",
+                    "values",
+                    self.HELM_RELEASE_NAME,
+                    "-n",
+                    self.namespace,
+                    "-o",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise _DeploymentReadError(f"helm not found: {e}") from e
+        if result.returncode != 0:
+            raise _DeploymentReadError((result.stderr or "").strip() or "helm get values failed")
+        text = (result.stdout or "").strip()
+        try:
+            values = json.loads(text) if text else {}
+        except ValueError as e:
+            raise _DeploymentReadError(f"unparseable helm values: {e}") from e
+        vols = ((values or {}).get("controller") or {}).get("volumes") or []
+        return list(vols) if isinstance(vols, list) else []
+
+    def _upgrade_tmp_size(self, requested: str | None) -> str | None:
+        """The size an upgrade of the existing release should set, or None to refuse.
+
+        Helm replaces lists wholesale, so writing controller.volumes[0] would
+        drop any other stored controller volume and leave its mount dangling
+        (a failed release). Refused then. An unrequested upgrade never lowers
+        a larger size an admin set earlier.
+        """
+        from lakebench.modules.pipeline_engines.spark.operator_scratch import parse_quantity
+
+        try:
+            stored = self._stored_controller_volumes()
+        except _DeploymentReadError as e:
+            logger.error("Cannot read the release's stored controller volumes: %s", e)
+            return None
+        others = [v for v in stored if not isinstance(v, dict) or v.get("name") != "tmp"]
+        if others:
+            logger.error(
+                "The release stores controller volumes besides 'tmp' (%s); setting the /tmp "
+                "size would drop them. Resize by hand with the full controller.volumes list.",
+                others,
+            )
+            return None
+        size = requested or DEFAULT_CONTROLLER_TMP_SIZE
+        if requested is None:
+            try:
+                current = self.controller_tmp_volume()
+            except _DeploymentReadError:
+                current = None
+            cur = current.limit_bytes if current is not None else None
+            if current is not None and cur is not None and cur > (parse_quantity(size) or 0):
+                size = str(current.size_limit)
+        return size
+
     def controller_tmp_volume(self) -> TmpVolume:
         """The controller's /tmp volume; raises _DeploymentReadError."""
         return tmp_volume(self._controller_deployment())
@@ -1489,7 +1557,7 @@ class SparkOperatorManager:
         logger.info("Controller /tmp emptyDir sizeLimit is %s", vol.size_limit)
         return True
 
-    def apply_controller_tmp_size(self, tmp_size: str = DEFAULT_CONTROLLER_TMP_SIZE) -> bool:
+    def apply_controller_tmp_size(self, tmp_size: str | None = None) -> bool:
         """Resize the controller's /tmp emptyDir on the installed release.
 
         The caller must hold the ``lakebench-cluster-lock`` lease (admin
@@ -1497,7 +1565,19 @@ class SparkOperatorManager:
         every other stored value, and the installed chart version is pinned
         so the resize never upgrades the operator. Rolls the controller.
         """
-        pin = self._get_helm_version() or self.target_version
+        pin = self._get_helm_version()
+        if not pin:
+            # Without --version Helm would move the shared release to the
+            # repo's latest chart (gotcha 3b); the config's pin may differ
+            # from what is installed.
+            logger.error(
+                "Cannot read the installed chart version; not resizing the controller /tmp"
+            )
+            return False
+        size = self._upgrade_tmp_size(tmp_size)
+        if size is None:
+            return False
+        tmp_size = size
         cmd = [
             "helm",
             "upgrade",
@@ -1507,8 +1587,7 @@ class SparkOperatorManager:
             self.namespace,
             "--reuse-values",
         ]
-        if pin:
-            cmd += ["--version", pin]
+        cmd += ["--version", pin]
         cmd += self._reuse_values_backfill(pin, tmp_size)
         try:
             result = self._run(cmd, capture_output=True, text=True)
@@ -1529,7 +1608,7 @@ class SparkOperatorManager:
         self,
         version: str | None = None,
         values: dict[str, Any] | None = None,
-        tmp_size: str = DEFAULT_CONTROLLER_TMP_SIZE,
+        tmp_size: str | None = None,
     ) -> bool:
         """Install or upgrade the Spark Operator via Helm.
 
@@ -1551,7 +1630,8 @@ class SparkOperatorManager:
             version: Chart version (default: the manager's target version,
                 then the installed chart, then the repo's latest)
             values: Custom Helm values
-            tmp_size: Controller /tmp emptyDir sizeLimit
+            tmp_size: Controller /tmp emptyDir sizeLimit (default 8Gi; an
+                upgrade without it keeps a larger size already set)
 
         Returns:
             True if installation succeeded
@@ -1611,9 +1691,18 @@ class SparkOperatorManager:
                 # Keep the stored values (the watch list above all) and the
                 # installed chart unless a version was asked for.
                 pin = version or self._get_helm_version()
+                if not pin:
+                    logger.error(
+                        "Cannot read the installed chart version and none was given; "
+                        "refusing an unpinned upgrade of the shared operator"
+                    )
+                    return False
+                size = self._upgrade_tmp_size(tmp_size)
+                if size is None:
+                    return False
+                tmp_size = size
                 cmd.append("--reuse-values")
-                if pin:
-                    cmd.extend(["--version", pin])
+                cmd.extend(["--version", pin])
                 cmd.extend(self._reuse_values_backfill(pin, tmp_size))
             else:
                 # Tell the operator which namespace(s) to watch
@@ -1621,6 +1710,7 @@ class SparkOperatorManager:
                     cmd.extend(["--set", f"spark.jobNamespaces={{{self.job_namespace}}}"])
                 if version:
                     cmd.extend(["--version", version])
+                tmp_size = tmp_size or DEFAULT_CONTROLLER_TMP_SIZE
                 cmd.extend(controller_tmp_helm_set_args(tmp_size))
 
             # Add custom values
@@ -1719,11 +1809,26 @@ class SparkOperatorManager:
                     message="Failed to install Spark Operator",
                 )
 
-        # CRD exists but operator not ready, try reinstall
-        logger.info("Spark Operator not ready, attempting reinstall...")
-        if self.install():
+        # CRD exists but the operator is not ready. With a release in place
+        # this is usually a controller restart (an eviction, a watch-list
+        # rollout): wait for it. Upgrading here would mutate the shared
+        # operator outside the cluster lease and pin it to this tenant's
+        # config version, so an existing release is left to the admin
+        # commands.
+        exists = self._release_exists()
+        if exists is False:
+            logger.info("Spark Operator release missing, installing...")
+            if self.install(version=self.target_version):
+                return self.check_status()
+            return status
+        logger.info("Spark Operator not ready, waiting for it to recover...")
+        if self._wait_for_ready(timeout=120):
             return self.check_status()
-
+        status.message = (
+            f"{status.message}. lakebench does not reinstall a shared operator from "
+            "deploy; a cluster admin can run 'lakebench admin doctor' and "
+            "'lakebench admin repair-operator'."
+        )
         return status
 
     def ensure_namespace_watched(self, *, can_heal: bool = False) -> OperatorStatus:

@@ -145,13 +145,17 @@ def _print_operator_scratch(core_v1, operator_ns: str) -> bool:
         size = vol.size_limit or "unbounded"
     if diag.healthy:
         print_success(
-            f"Spark Operator controller /tmp: {size}; no storage evictions on record "
-            "(pods and events cover about the last hour)"
+            f"Spark Operator controller /tmp: {size}; no storage evictions of the current spec"
         )
     else:
         for problem in diag.problems:
             print_error(f"Spark Operator: {problem}")
         print_info(repair_hint())
+    if diag.past_storage_evictions:
+        print_info(
+            f"{diag.past_storage_evictions} earlier controller pod(s) evicted for storage under "
+            "an older spec (history; delete the Failed pods to clear it)"
+        )
     if diag.other_evictions:
         print_warning(f"{diag.other_evictions} controller pod(s) evicted for other reasons")
     if diag.container_restarts:
@@ -488,13 +492,15 @@ def install_spark_operator(
         typer.Option("--operator-namespace", help="Namespace to install into."),
     ] = "spark-operator",
     controller_tmp_size: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--controller-tmp-size",
             help="sizeLimit of the controller's /tmp emptyDir, which holds "
-            "spark-submit's Ivy jar cache (chart default 1Gi is too small).",
+            "spark-submit's Ivy jar cache (chart default 1Gi is too small). "
+            f"Default {DEFAULT_CONTROLLER_TMP_SIZE}; an upgrade without the flag "
+            "keeps a larger size already set.",
         ),
-    ] = DEFAULT_CONTROLLER_TMP_SIZE,
+    ] = None,
 ) -> None:
     """Install or upgrade the shared Spark Operator Helm release.
 
@@ -507,7 +513,8 @@ def install_spark_operator(
     from lakebench.modules.pipeline_engines.spark.operator_scratch import validate_size
 
     try:
-        validate_size(controller_tmp_size)
+        if controller_tmp_size is not None:
+            validate_size(controller_tmp_size)
     except ValueError as e:
         print_error(f"--controller-tmp-size: {e}")
         raise typer.Exit(2) from e
@@ -543,7 +550,8 @@ def install_spark_operator(
         raise typer.Exit(1)
     print_success(
         f"Spark Operator install/upgrade ok (namespace={ns}, "
-        f"version={v or 'installed chart'}, controller /tmp={controller_tmp_size})"
+        f"version={v or 'installed chart'}, "
+        f"controller /tmp={controller_tmp_size or 'default or larger existing'})"
     )
 
 
