@@ -440,3 +440,62 @@ class TestInfoLabels:
         fin = make_config(workload={"schema": "financial"})
         fin.architecture.workload.datagen.timestamp_start = "2024-12-18"
         assert info_date_range(fin, 1826) == "1826 days"
+
+
+# ---------------------------------------------------------------------------
+# 6. Destroy names the tables whose files stay in a refused bucket
+# ---------------------------------------------------------------------------
+
+
+class TestDestroyNamesTablesLeftInRefusedBuckets:
+    def _engine(self):
+        from tests.conftest import make_config
+
+        cfg = make_config(workload={"schema": "financial"})
+        cfg.platform.storage.s3.buckets.bronze = "lb16-lb186-bronze"
+        cfg.platform.storage.s3.buckets.silver = "lb16-lb186-silver"
+        cfg.platform.storage.s3.buckets.gold = "lb16-lb186-gold"
+        return SimpleNamespace(config=cfg)
+
+    def test_refused_bronze_names_its_tables_only(self):
+        from lakebench.deploy import destroy as destroy_mod
+
+        engine = self._engine()
+        tables = engine.config.architecture.tables
+        bronze = [f"lakehouse.{t}" for t in tables.workload_tables("financial", layers=("bronze",))]
+        silver = [f"lakehouse.{t}" for t in tables.workload_tables("financial", layers=("silver",))]
+        notes = destroy_mod._files_left_in_refused_buckets(
+            engine, {"lb16-lb186-bronze"}, bronze + silver
+        )
+        assert len(notes) == 1
+        assert "remain in lb16-lb186-bronze" in notes[0]
+        for t in bronze:
+            assert t.split(".", 1)[1] in notes[0]
+        for t in silver:
+            assert t.split(".", 1)[1] not in notes[0]
+
+    def test_nothing_refused_or_nothing_unregistered(self):
+        from lakebench.deploy import destroy as destroy_mod
+
+        engine = self._engine()
+        assert destroy_mod._files_left_in_refused_buckets(engine, set(), ["lakehouse.a.b"]) == []
+        assert destroy_mod._files_left_in_refused_buckets(engine, {"lb16-lb186-bronze"}, []) == []
+
+    def test_end_to_end_the_bucket_step_says_where_the_files_stay(self):
+        """LB-186 live: bronze refused (tagless, not on the record), Trino
+        unregistered the tables, and the refused bucket kept their files."""
+        from tests.test_destroy_bucket_delete import FakeBoto, TestDestroyAllBuckets
+
+        h = TestDestroyAllBuckets()
+        boto = FakeBoto({"a-bronze": ["warehouse/t/data.parquet"], "a-silver": [], "a-gold": []})
+        r = h._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
+            created={"a-silver", "a-gold"},
+            maint=("trino", "trino-coordinator-0", "lakehouse"),
+        )
+        assert boto.buckets == {"a-bronze": ["warehouse/t/data.parquet"]}
+        assert "their files remain in a-bronze" in r.message
+        assert "silver.t" in r.message
+        tables = [x for x in h._results if x.component == "table-cleanup"][-1]
+        assert "silver.t, gold.t" in tables.message

@@ -426,6 +426,38 @@ class _BucketPlan:
     transient: bool
 
 
+def _files_left_in_refused_buckets(engine, refused: set[str], unregistered: list[str]) -> list[str]:
+    """One note per refused bucket naming the tables whose files stay in it.
+
+    The table step removed these tables from the catalog only; their data
+    and metadata files live in their layer's bucket, and a refused bucket is
+    not emptied. Without this the user learned only that the bucket was kept
+    (lb16-checks2, LB-186).
+    """
+    if not refused or not unregistered:
+        return []
+    cfg = engine.config
+    buckets = cfg.platform.storage.s3.buckets
+    schema = cfg.architecture.workload.schema_type.value
+    left: dict[str, list[str]] = {}
+    for layer in ("bronze", "silver", "gold"):
+        bucket = getattr(buckets, layer)
+        if bucket not in refused:
+            continue
+        try:
+            layer_tables = set(cfg.architecture.tables.workload_tables(schema, layers=(layer,)))
+        except Exception:  # noqa: BLE001 -- the note is best effort
+            continue
+        for full in unregistered:
+            if full.split(".", 1)[-1] in layer_tables and full not in left.get(bucket, []):
+                left.setdefault(bucket, []).append(full)
+    return [
+        f"tables unregistered but their files remain in {bucket} (not emptied): "
+        + ", ".join(_short(t) for t in tables)
+        for bucket, tables in left.items()
+    ]
+
+
 def _classify_buckets(
     engine,
     s3,
@@ -1765,6 +1797,10 @@ def destroy_all(
     if stopped is not None:
         return stopped
     table_step_stopped = False
+    # Tables removed from the catalog without touching their files (Trino
+    # unregister, Spark Thrift Iceberg DROP): the bucket step names those
+    # whose bucket it refused, since their files stay there (lb16-checks2).
+    unregistered_tables: list[str] = []
     if not data_steps_allowed:
         results.append(
             DeploymentResult(
@@ -1904,6 +1940,9 @@ def destroy_all(
 
                 not_attempted: list[str] = []
                 stop_reason = ""
+                metadata_only = maint_engine == "trino" or not _drop_deletes_files(
+                    maint_engine, table_format
+                )
                 for n, (table, sql) in enumerate(plan):
                     if _monotonic() - step_start > _TABLE_STEP_CAP:
                         stop_reason = f"table step exceeded its {_TABLE_STEP_CAP}s cap"
@@ -1920,6 +1959,8 @@ def destroy_all(
                             sql,
                             timeout=_TABLE_SQL_TIMEOUT,
                         )
+                        if metadata_only:
+                            unregistered_tables.append(table)
                     except ExecSqlTimeout as e:
                         # The engine may still be running it; queueing more
                         # statements behind a stuck coordinator only adds
@@ -2008,6 +2049,8 @@ def destroy_all(
                         f"{table_format.title()} tables {verb} via {maint_engine}; "
                         f"{files}; table maintenance skipped"
                     )
+                    if unregistered_tables:
+                        table_msg += ": " + ", ".join(_short(t) for t in unregistered_tables)
                 table_details: dict = {}
                 if left:
                     table_details["tables_left_registered"] = [
@@ -2313,6 +2356,9 @@ def destroy_all(
                 notes.extend(bucket_notes)
                 if refusal_msg:
                     notes.append(refusal_msg)
+                    notes.extend(
+                        _files_left_in_refused_buckets(engine, refused_set, unregistered_tables)
+                    )
                     delete_failed = True
                     if disowned_recorded and namespace_present:
                         try:
