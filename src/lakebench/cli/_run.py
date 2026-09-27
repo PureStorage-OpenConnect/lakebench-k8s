@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -419,6 +419,45 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     # Customer 360 expected-result facts (reporting only, D6).
     job_metrics.c360_check = parsed.c360_check
     job_metrics.c360_bronze = parsed.c360_bronze
+
+
+# Batch stage status poll. Stage times come from the cluster (_stage_timing),
+# not from this poll; it bounds how long lakebench takes to notice a stage has
+# ended, which sits inside time to value between stages. Was 15 s.
+_STAGE_POLL_S = 5
+
+
+def _stage_timing(monitor, app_name: str, result, submitted_at, observed_end):
+    """When a batch stage ran: submission to the Spark application's real end.
+
+    The end is the driver container's finish time (else the
+    SparkApplication's terminationTime) mapped to this host's clock through
+    the API server's clock offset, measured now. Anything unreadable or
+    inconsistent falls back to the poll that saw the job finish, and the
+    record says which (JobMetrics.timing_source).
+    """
+    from lakebench.cli._sustained import cluster_clock_offset_seconds
+    from lakebench.modules.pipeline_engines.spark.monitor import (
+        parse_k8s_time,
+        stage_timing,
+    )
+
+    status = getattr(result, "final_status", None)
+    try:
+        cluster_end, source = monitor.application_end(app_name, status)
+    except Exception as e:  # noqa: BLE001 -- best effort; the poll time stands
+        logger.debug("application end for %s not read: %s", app_name, e)
+        cluster_end, source = None, ""
+    offset = cluster_clock_offset_seconds() if cluster_end is not None else None
+    return stage_timing(
+        submitted_at,
+        observed_end,
+        cluster_end,
+        source,
+        offset,
+        _STAGE_POLL_S,
+        last_submission=parse_k8s_time(status.start_time) if status is not None else None,
+    )
 
 
 def _exclude_c360_check_time(job_metrics) -> float:
@@ -1867,6 +1906,9 @@ def run(
                     raise typer.Exit(1)
 
                 print_success(f"Job submitted: lakebench-{stage_name}")
+                # The stage starts when the SparkApplication exists: the
+                # same point the monitor's elapsed counted from.
+                job_submitted = utc_now()
 
                 # Wait for completion -- capture max executor count seen
                 _max_executors = 0
@@ -1890,23 +1932,34 @@ def run(
                 result = monitor.wait_for_completion(
                     f"lakebench-{stage_name}",
                     timeout_seconds=timeout,
-                    poll_interval=15,
+                    poll_interval=_STAGE_POLL_S,
                     progress_callback=on_progress,
                 )
+                # The poll that saw the end, less the driver-log fetch the
+                # monitor did after it.
+                job_observed_end = job_submitted + timedelta(seconds=result.elapsed_seconds)
+                timing = _stage_timing(
+                    monitor, f"lakebench-{stage_name}", result, job_submitted, job_observed_end
+                )
 
-                job_end = utc_now()
-
-                # Build job metrics
+                # Build job metrics. start_time stays the moment before
+                # submission (time to value counts lakebench's resubmit of
+                # the stage); elapsed runs from the SparkApplication's
+                # creation to the application's real end.
                 job_metrics = JobMetrics(
                     job_name=f"lakebench-{stage_name}",
                     job_type=stage_name,
                     start_time=job_start,
-                    end_time=job_end,
-                    elapsed_seconds=result.elapsed_seconds,
+                    end_time=timing.end,
+                    elapsed_seconds=timing.elapsed_seconds,
+                    timing_source=timing.source,
+                    timing_resolution_seconds=timing.resolution_seconds,
                     success=result.success,
                     error_message=result.message if not result.success else None,
                     executor_count=_max_executors,
                 )
+                if timing.note:
+                    logger.info("%s timed by poll: %s", stage_name, timing.note)
 
                 # Parse driver logs for data metrics if available
                 if result.driver_logs:
@@ -2000,8 +2053,8 @@ def run(
                 _cycle_jobs.append(job_metrics)
 
                 if result.success:
-                    print_success(f"{stage_name} completed in {result.elapsed_seconds:.0f}s")
-                    results.append((stage_name, True, result.elapsed_seconds))
+                    print_success(f"{stage_name} completed in {job_metrics.elapsed_seconds:.1f}s")
+                    results.append((stage_name, True, job_metrics.elapsed_seconds))
                     _journal_safe(
                         j.record,
                         EventType.PIPELINE_STAGE,

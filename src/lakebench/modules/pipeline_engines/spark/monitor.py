@@ -9,6 +9,7 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from lakebench.modules.pipeline_engines.spark.job import (
@@ -46,6 +47,97 @@ class JobResult:
     message: str
     elapsed_seconds: float
     driver_logs: str | None = None
+    # The SparkApplication status that ended the wait (None on a timeout
+    # before any status was read).
+    final_status: JobStatus | None = None
+
+
+# Stage timing sources, best first (JobMetrics.timing_source).
+TIMING_DRIVER = "driver_container"  # driver container terminated.finishedAt
+TIMING_APPLICATION = "spark_application"  # SparkApplication status.terminationTime
+TIMING_POLL = "poll"  # the monitor poll that first saw the terminal state
+
+# A cluster timestamp is RFC 3339 truncated to the second (its true time is up
+# to 1 s later) and the host-to-cluster offset comes from a Date header of the
+# same resolution: each is centred with +0.5 s, which leaves about +/-1 s.
+_CLUSTER_TIMING_RESOLUTION_S = 1.0
+# How far a cluster end may sit outside [submitted, observed] before it is
+# taken as clock skew or a stale status rather than rounding.
+_CLUSTER_TIMING_TOLERANCE_S = 2.0
+
+
+@dataclass
+class StageTiming:
+    """When a batch stage ran, on this host's clock."""
+
+    start: datetime
+    end: datetime
+    source: str
+    resolution_seconds: float
+    note: str = ""
+
+    @property
+    def elapsed_seconds(self) -> float:
+        return max(0.0, (self.end - self.start).total_seconds())
+
+
+def parse_k8s_time(value: object) -> datetime | None:
+    """An aware UTC datetime from a Kubernetes timestamp (str or datetime)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        at = value
+    else:
+        try:
+            at = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at.astimezone(timezone.utc)
+
+
+def stage_timing(
+    submitted_at: datetime,
+    observed_end: datetime,
+    cluster_end: datetime | None,
+    cluster_source: str,
+    clock_offset_seconds: float | None,
+    poll_interval: float,
+    last_submission: datetime | None = None,
+) -> StageTiming:
+    """Time a batch stage from its submission to the application's real end.
+
+    *submitted_at* and *observed_end* are this host's clock, aware: the moment
+    the SparkApplication was created and the poll that first saw it finish.
+    *cluster_end* is the cluster's own end time for the application (see
+    TIMING_DRIVER / TIMING_APPLICATION), mapped to this host's clock with
+    *clock_offset_seconds* (cluster minus host). Without both, or when the
+    mapped end falls outside [submitted_at, observed_end] by more than
+    rounding (clock skew, or a status left from an earlier attempt: an end
+    before *last_submission*), the poll time is used and the resolution is
+    the poll interval.
+    """
+    poll = StageTiming(submitted_at, observed_end, TIMING_POLL, float(poll_interval))
+    if cluster_end is None:
+        return poll
+    if clock_offset_seconds is None:
+        poll.note = "cluster clock offset unknown"
+        return poll
+    if last_submission is not None and cluster_end < last_submission:
+        poll.note = f"{cluster_source} precedes the last submission (stale status)"
+        return poll
+    end = cluster_end + timedelta(seconds=0.5 - clock_offset_seconds)
+    tol = timedelta(seconds=_CLUSTER_TIMING_TOLERANCE_S)
+    if end < submitted_at - tol or end > observed_end + tol:
+        poll.note = (
+            f"{cluster_source} {cluster_end.isoformat()} is outside the observed run "
+            f"({submitted_at.isoformat()} .. {observed_end.isoformat()}) after the "
+            f"{clock_offset_seconds:+.1f}s clock offset"
+        )
+        return poll
+    end = min(max(end, submitted_at), observed_end)
+    return StageTiming(submitted_at, end, cluster_source, _CLUSTER_TIMING_RESOLUTION_S)
 
 
 class SparkJobMonitor:
@@ -132,6 +224,7 @@ class SparkJobMonitor:
                     message="Job completed successfully",
                     elapsed_seconds=elapsed,
                     driver_logs=self._get_driver_logs(job_name, tail_lines=None),
+                    final_status=status,
                 )
 
             if status.state == JobState.SUBMISSION_FAILED:
@@ -149,9 +242,47 @@ class SparkJobMonitor:
                     message=f"Job failed: {status.message}",
                     elapsed_seconds=elapsed,
                     driver_logs=self._get_driver_logs(job_name),
+                    final_status=status,
                 )
 
             time.sleep(poll_interval)
+
+    def application_end(
+        self, job_name: str, status: JobStatus | None
+    ) -> tuple[datetime | None, str]:
+        """The cluster's end time for a finished application, and its source.
+
+        The driver container's terminated.finishedAt (kubelet, the current
+        attempt's pod) is preferred; the SparkApplication's terminationTime
+        is the fallback. (None, "") when neither is readable.
+        """
+        from kubernetes import client as k8s_client
+
+        try:
+            pods = k8s_client.CoreV1Api().list_namespaced_pod(
+                self.namespace,
+                label_selector=f"spark-role=driver,sparkoperator.k8s.io/app-name={job_name}",
+            )
+            for pod in pods.items or []:
+                if (
+                    status is not None
+                    and status.driver_pod
+                    and pod.metadata.name != status.driver_pod
+                ):
+                    continue
+                for cs in (pod.status and pod.status.container_statuses) or []:
+                    if cs.name != "spark-kubernetes-driver":
+                        continue
+                    term = cs.state and cs.state.terminated
+                    finished = parse_k8s_time(term.finished_at) if term else None
+                    if finished is not None:
+                        return finished, TIMING_DRIVER
+        except Exception as e:  # noqa: BLE001 -- best effort; falls back to the status
+            logger.debug("driver pod end time for %s not read: %s", job_name, e)
+        ended = parse_k8s_time(status.completion_time) if status is not None else None
+        if ended is not None:
+            return ended, TIMING_APPLICATION
+        return None, ""
 
     def wait_until_running(
         self,

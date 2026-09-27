@@ -28,6 +28,11 @@ class JobMetrics:
     elapsed_seconds: float = 0.0
     success: bool = False
     error_message: str | None = None
+    # Where end_time and elapsed_seconds came from (TIMING_SOURCES), and how
+    # far either can be off in seconds. "" / None: a record from before v1.6,
+    # timed by the job-monitor poll that first saw the job finish.
+    timing_source: str = ""
+    timing_resolution_seconds: float | None = None
 
     # Data metrics
     input_size_gb: float = 0.0
@@ -578,6 +583,9 @@ class StageMetrics:
     elapsed_seconds: float = 0.0
     success: bool = False
     error_message: str | None = None
+    # Batch Spark stages: see JobMetrics.timing_source.
+    timing_source: str = ""
+    timing_resolution_seconds: float | None = None
 
     # Data volume
     input_size_gb: float = 0.0
@@ -1763,6 +1771,8 @@ def build_pipeline_benchmark(
             start_time=job.start_time,
             end_time=job.end_time,
             elapsed_seconds=job.elapsed_seconds,
+            timing_source=job.timing_source,
+            timing_resolution_seconds=job.timing_resolution_seconds,
             success=job.success,
             error_message=job.error_message,
             input_size_gb=input_gb,

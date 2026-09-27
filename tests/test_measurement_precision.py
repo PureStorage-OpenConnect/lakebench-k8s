@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -201,3 +203,189 @@ class TestUtcTimestamps:
         rec = perf_gate.load_run(run_dir)
         ttv = perf_gate._pipeline_ttv(rec)
         assert ttv is not None and ttv[0] == pytest.approx(90.75)
+
+
+# ---------------------------------------------------------------------------
+# 2. Batch stage times from the Spark application, not the poll
+# ---------------------------------------------------------------------------
+
+T0 = datetime(2026, 9, 27, 7, 11, 25, 250000, tzinfo=timezone.utc)
+
+
+def _timing(**kw):
+    from lakebench.modules.pipeline_engines.spark.monitor import stage_timing
+
+    args = {
+        "submitted_at": T0,
+        # lb16: every stage ended on a 15 s poll tick
+        "observed_end": T0 + timedelta(seconds=90.09),
+        "cluster_end": None,
+        "cluster_source": "driver_container",
+        "clock_offset_seconds": 4.5,
+        "poll_interval": 15,
+    }
+    args.update(kw)
+    return stage_timing(**args)
+
+
+class TestStageTiming:
+    def test_cluster_end_replaces_the_poll_tick(self):
+        # True end 83.7 s after submission on this host; the cluster clock is
+        # 4.5 s ahead and the kubelet truncates to the second.
+        true_end = T0 + timedelta(seconds=83.7)
+        recorded = (true_end + timedelta(seconds=4.5)).replace(microsecond=0)
+        t = _timing(cluster_end=recorded)
+        assert t.source == "driver_container"
+        assert t.resolution_seconds == 1.0
+        assert abs(t.elapsed_seconds - 83.7) <= 1.0
+        assert t.start == T0
+
+    def test_no_cluster_end_uses_the_poll_and_says_so(self):
+        t = _timing()
+        assert t.source == "poll"
+        assert t.resolution_seconds == 15.0
+        assert t.elapsed_seconds == pytest.approx(90.09)
+
+    def test_unknown_clock_offset_uses_the_poll(self):
+        t = _timing(cluster_end=T0 + timedelta(seconds=80), clock_offset_seconds=None)
+        assert t.source == "poll" and "offset unknown" in t.note
+
+    @pytest.mark.parametrize("secs", [-30.0, 200.0])
+    def test_end_outside_the_observed_run_is_skew_not_a_time(self, secs):
+        t = _timing(cluster_end=T0 + timedelta(seconds=secs + 4.5))
+        assert t.source == "poll"
+        assert "outside the observed run" in t.note
+
+    def test_end_before_the_last_submission_is_a_stale_status(self):
+        """A retried application: terminationTime left from the first attempt."""
+        t = _timing(
+            cluster_end=T0 + timedelta(seconds=20),
+            last_submission=T0 + timedelta(seconds=40),
+        )
+        assert t.source == "poll" and "stale" in t.note
+
+    def test_rounding_past_the_observed_end_is_clamped(self):
+        t = _timing(cluster_end=T0 + timedelta(seconds=90.09 + 4.5 + 1.0))
+        assert t.source == "driver_container"
+        assert t.end == T0 + timedelta(seconds=90.09)
+
+    def test_parse_k8s_time(self):
+        from lakebench.modules.pipeline_engines.spark.monitor import parse_k8s_time
+
+        assert parse_k8s_time("2026-09-27T07:12:55Z") == datetime(
+            2026, 9, 27, 7, 12, 55, tzinfo=timezone.utc
+        )
+        naive = datetime(2026, 9, 27, 7, 12, 55)
+        assert parse_k8s_time(naive).tzinfo is timezone.utc
+        assert parse_k8s_time("") is None
+        assert parse_k8s_time("not a time") is None
+
+
+def _driver_pod(name, finished):
+    term = SimpleNamespace(finished_at=finished)
+    cs = SimpleNamespace(name="spark-kubernetes-driver", state=SimpleNamespace(terminated=term))
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name), status=SimpleNamespace(container_statuses=[cs])
+    )
+
+
+class TestApplicationEnd:
+    def _monitor(self):
+        from lakebench.modules.pipeline_engines.spark.monitor import SparkJobMonitor
+
+        m = SparkJobMonitor.__new__(SparkJobMonitor)
+        m.namespace = "ns"
+        return m
+
+    def _status(self, **kw):
+        from lakebench.modules.pipeline_engines.spark.job import JobState, JobStatus
+
+        return JobStatus(name="lakebench-silver-build", state=JobState.COMPLETED, message="", **kw)
+
+    def test_prefers_the_current_driver_container(self):
+        finished = datetime(2026, 9, 27, 7, 15, 1, tzinfo=timezone.utc)
+        pods = [
+            _driver_pod("old-driver", finished - timedelta(hours=1)),
+            _driver_pod("d", finished),
+        ]
+        status = self._status(driver_pod="d", completion_time="2026-09-27T07:15:09Z")
+        with patch("kubernetes.client.CoreV1Api") as core:
+            core.return_value.list_namespaced_pod.return_value = SimpleNamespace(items=pods)
+            end, source = self._monitor().application_end("lakebench-silver-build", status)
+        assert (end, source) == (finished, "driver_container")
+
+    def test_falls_back_to_termination_time(self):
+        status = self._status(driver_pod="d", completion_time="2026-09-27T07:15:09Z")
+        with patch("kubernetes.client.CoreV1Api") as core:
+            core.return_value.list_namespaced_pod.side_effect = RuntimeError("no cluster")
+            end, source = self._monitor().application_end("lakebench-silver-build", status)
+        assert source == "spark_application"
+        assert end == datetime(2026, 9, 27, 7, 15, 9, tzinfo=timezone.utc)
+
+    def test_nothing_readable(self):
+        with patch("kubernetes.client.CoreV1Api") as core:
+            core.return_value.list_namespaced_pod.return_value = SimpleNamespace(items=[])
+            assert self._monitor().application_end("x", None) == (None, "")
+
+
+class TestRunStageTiming:
+    def test_run_loop_helper_uses_the_cluster_end(self):
+        from lakebench.cli import _run
+
+        result = SimpleNamespace(final_status=None)
+        monitor = SimpleNamespace(
+            application_end=lambda _n, _s: (T0 + timedelta(seconds=64.0), "spark_application")
+        )
+        with patch("lakebench.cli._sustained.cluster_clock_offset_seconds", return_value=0.0):
+            t = _run._stage_timing(
+                monitor, "lakebench-bronze-verify", result, T0, T0 + timedelta(seconds=75.1)
+            )
+        assert t.source == "spark_application"
+        # +0.5 s centres the second-truncated cluster timestamp
+        assert t.elapsed_seconds == pytest.approx(64.5, abs=0.01)
+
+    def test_run_loop_helper_survives_an_unreadable_cluster(self):
+        from lakebench.cli import _run
+
+        def boom(_n, _s):
+            raise RuntimeError("api down")
+
+        t = _run._stage_timing(
+            SimpleNamespace(application_end=boom),
+            "x",
+            SimpleNamespace(final_status=None),
+            T0,
+            T0 + timedelta(seconds=30),
+        )
+        assert t.source == "poll" and t.resolution_seconds == _run._STAGE_POLL_S
+
+    def test_poll_is_no_longer_15s(self):
+        from lakebench.cli import _run
+
+        assert _run._STAGE_POLL_S <= 5
+
+    def test_timing_source_reaches_the_stage_and_survives_a_reload(self):
+        from lakebench.metrics import build_pipeline_benchmark
+        from lakebench.metrics.collector import JobMetrics, PipelineMetrics
+        from lakebench.metrics.storage import MetricsStorage
+
+        job = JobMetrics(
+            job_name="lakebench-bronze-verify",
+            job_type="bronze-verify",
+            start_time=T0,
+            end_time=T0 + timedelta(seconds=64.25),
+            elapsed_seconds=64.25,
+            timing_source="driver_container",
+            timing_resolution_seconds=1.0,
+            success=True,
+        )
+        run = PipelineMetrics(run_id="r", deployment_name="d", start_time=T0, jobs=[job])
+        run.pipeline_benchmark = build_pipeline_benchmark(run)
+        stage = run.pipeline_benchmark.stages[0]
+        assert (stage.timing_source, stage.timing_resolution_seconds) == ("driver_container", 1.0)
+        back = MetricsStorage.__new__(MetricsStorage)._dict_to_metrics(
+            json.loads(json.dumps(run.to_dict()))
+        )
+        assert back.jobs[0].timing_source == "driver_container"
+        assert back.pipeline_benchmark.stages[0].timing_resolution_seconds == 1.0
+        assert back.pipeline_benchmark.time_to_value_seconds == pytest.approx(64.25)
