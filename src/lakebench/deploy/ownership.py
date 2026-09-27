@@ -70,6 +70,10 @@ TAG_WORKLOAD_SCHEMA = "lakebench.workload"
 # below); buckets deploy adopted are emptied but kept.
 TAG_CREATED_BY_LAKEBENCH = "lakebench.created"
 ANNOTATION_CREATED_BUCKETS = "lakebench.deployment/created-buckets"
+# Buckets deploy adopted while they held no objects, on a backend without
+# bucket tagging. Everything in them was written by this deployment, so
+# destroy may empty them (never delete: lakebench did not create them).
+ANNOTATION_ADOPTED_EMPTY_BUCKETS = "lakebench.deployment/adopted-empty-buckets"
 # A fresh random value written by every deploy. Destroy records it at start
 # and stops if it changes: that is a redeploy into the same namespace, which
 # the UID cannot show (same incarnation, or create_namespace=false).
@@ -702,6 +706,51 @@ def read_created_buckets(core_v1: Any, namespace: str) -> set[str]:
     if not isinstance(raw, str):
         return set()
     return {b.strip() for b in raw.split(",") if b.strip()}
+
+
+def read_adopted_empty_buckets(core_v1: Any, namespace: str) -> set[str]:
+    """Buckets recorded as adopted while empty (see ANNOTATION_ADOPTED_EMPTY_BUCKETS).
+
+    Same error contract as ``read_created_buckets``.
+    """
+    from kubernetes.client.rest import ApiException
+
+    try:
+        ns = core_v1.read_namespace(namespace)
+    except ApiException as e:
+        if e.status == 404:
+            return set()
+        raise
+    anns = (ns.metadata.annotations if ns and ns.metadata else None) or {}
+    raw = anns.get(ANNOTATION_ADOPTED_EMPTY_BUCKETS) or ""
+    if not isinstance(raw, str):
+        return set()
+    return {b.strip() for b in raw.split(",") if b.strip()}
+
+
+def record_adopted_empty_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:
+    """Add ``buckets`` to the adopted-while-empty annotation (union)."""
+    if not buckets:
+        return
+    merged = read_adopted_empty_buckets(core_v1, namespace) | set(buckets)
+    body = {
+        "metadata": {"annotations": {ANNOTATION_ADOPTED_EMPTY_BUCKETS: ",".join(sorted(merged))}}
+    }
+    core_v1.patch_namespace(namespace, body)
+
+
+def tagless_contents_are_ours(core_v1: Any, namespace: str, bucket: str) -> bool:
+    """On a backend without tagging: may this deployment empty ``bucket``?
+
+    The name alone is not proof (deploy adopts a pre-existing bucket that
+    merely prefix-matches). True only when the namespace records that
+    lakebench created the bucket or adopted it while it was empty. Callers
+    still apply the longest-prefix name check. Read errors propagate; the
+    caller refuses on them.
+    """
+    return bucket in read_created_buckets(core_v1, namespace) or bucket in (
+        read_adopted_empty_buckets(core_v1, namespace)
+    )
 
 
 def record_created_buckets(core_v1: Any, namespace: str, buckets: list[str]) -> None:

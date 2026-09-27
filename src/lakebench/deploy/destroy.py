@@ -1457,6 +1457,7 @@ def destroy_all(
             from lakebench.deploy.ownership import (
                 TAG_CREATED_BY_LAKEBENCH,
                 forget_created_buckets,
+                read_adopted_empty_buckets,
                 read_bucket_ownership_tag,
                 read_created_buckets,
             )
@@ -1543,11 +1544,18 @@ def destroy_all(
                 # too (each still has to pass the ownership check below),
                 # or they leak and the namespace delete erases the record.
                 created_record: set[str] = set()
+                # Tagless backends: buckets deploy adopted while empty. Their
+                # data is this deployment's, so they may be emptied (never
+                # deleted: not in created_record).
+                adopted_empty_record: set[str] = set()
                 record_unreadable: list[str] = []
                 if namespace_present:
                     try:
                         created_record = set(
                             read_created_buckets(k8s_client.CoreV1Api(), namespace)
+                        )
+                        adopted_empty_record = set(
+                            read_adopted_empty_buckets(k8s_client.CoreV1Api(), namespace)
                         )
                     except Exception as e:  # noqa: BLE001
                         logger.warning("could not read created-buckets record: %s", e)
@@ -1573,6 +1581,7 @@ def destroy_all(
                 unsupported_by_prefix: list[str] = []
                 # Tagless backend, name matches, but not on the created record.
                 unsupported_unrecorded: list[str] = []
+                unsupported_forced_unrecorded: list[str] = []
                 owned_by_tag: list[str] = []
                 absent_buckets: list[str] = []
                 for bucket in buckets:
@@ -1628,9 +1637,13 @@ def destroy_all(
                         # --force-legacy a tagged backend demands. Only the
                         # namespace's created-buckets record shows lakebench
                         # made it, so an unrecorded bucket is left alone.
-                        if prefix_ok and bucket not in created_record:
+                        if (
+                            prefix_ok
+                            and bucket not in created_record
+                            and bucket not in adopted_empty_record
+                        ):
                             if force_legacy:
-                                unsupported_forced.append(bucket)
+                                unsupported_forced_unrecorded.append(bucket)
                                 logger.warning(
                                     "destroy --force-legacy: emptying bucket %s on a "
                                     "backend without tagging; not recorded as created "
@@ -1716,8 +1729,8 @@ def destroy_all(
                     if unsupported_unrecorded:
                         parts.append(
                             "backend does not support bucket tagging and this "
-                            "deployment's created-buckets record does not list "
-                            "(pre-existing or adopted, so its data may not be "
+                            "deployment's record lists neither as created nor as "
+                            "adopted while empty (so its data may not be "
                             "lakebench's): "
                             + ", ".join(unsupported_unrecorded)
                             + " (left in place, not emptied; pass --force-legacy "
@@ -1940,6 +1953,13 @@ def destroy_all(
                         f"{len(unsupported_by_prefix)} buckets emptied by "
                         "name-prefix and created-buckets record (backend does "
                         "not support tagging): " + ", ".join(unsupported_by_prefix)
+                    )
+                if unsupported_forced_unrecorded:
+                    notes.append(
+                        f"WARN: {len(unsupported_forced_unrecorded)} buckets emptied by "
+                        "--force-legacy on a backend without tagging; the name matches "
+                        "but no record shows this deployment created or adopted them "
+                        "empty (kept): " + ", ".join(unsupported_forced_unrecorded)
                     )
                 if unsupported_forced:
                     notes.append(

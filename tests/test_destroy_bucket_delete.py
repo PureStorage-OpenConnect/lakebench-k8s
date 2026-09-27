@@ -233,6 +233,7 @@ class TestDestroyAllBuckets:
         force_legacy=False,
         other=(),
         created=None,
+        adopted_empty=(),
         uid=None,
         namespace_present=True,
         create_namespace=False,
@@ -301,6 +302,10 @@ class TestDestroyAllBuckets:
                     if created_error
                     else {"return_value": created_record}
                 ),
+            ),
+            patch(
+                "lakebench.deploy.ownership.read_adopted_empty_buckets",
+                return_value=set(adopted_empty),
             ),
             patch(
                 "lakebench.deploy.ownership.forget_created_buckets", side_effect=forget_error
@@ -447,8 +452,22 @@ class TestDestroyAllBuckets:
         assert boto.buckets == {"a-bronze": ["user data"]}
         assert "a-bronze" not in boto.delete_bucket_calls
         assert r.status is DeploymentStatus.FAILED
-        assert "created-buckets record does not list" in r.message
+        assert "lists neither as created nor as adopted while empty" in r.message
         assert "a-bronze" in r.message
+
+    def test_tagless_bucket_adopted_while_empty_is_emptied_not_deleted(self):
+        """--keep-buckets then redeploy, or create_buckets=false: deploy adopted
+        the bucket empty, so its data is this deployment's."""
+        boto = FakeBoto({"a-bronze": ["ours"], "a-silver": [], "a-gold": []})
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
+            created={"a-silver", "a-gold"},
+            adopted_empty={"a-bronze"},
+        )
+        assert boto.buckets == {"a-bronze": []}
+        assert "a-bronze" not in boto.delete_bucket_calls
+        assert r.status is DeploymentStatus.SUCCESS, r.message
 
     def test_tagless_unrecorded_bucket_is_emptied_only_on_force_legacy_never_deleted(self):
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})

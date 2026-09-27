@@ -94,7 +94,9 @@ lakebench compare config-hive.yaml config-polaris.yaml --generate
 
 `compare` runs each config through the pipeline and benchmark in turn, then
 destroys that deployment unless you pass `--keep`. Deploy both configs
-first; `--generate` fills each bronze bucket before its run.
+first; `--generate` fills each bronze bucket before its run. The two configs
+need different names and bucket names, or the first destroy empties the
+second run's data.
 
 For all recipes, see [`examples/`](examples/) or run `lakebench init --advanced`
 for the full interactive wizard.
@@ -160,7 +162,7 @@ pod).
   350 cores (44 pods x 8 cores, measured in run-20260925-104703-c02890).
   The request figures come from `compute_peak_requirements()`. See
   [Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)
-  for the full table. Lakebench fails fast if the cluster is too small.
+  for the full table. `lakebench run` fails fast if the cluster is too small.
 - S3-compatible object storage. FlashBlade and Garage are validated; others are
   expected to work. Run `lakebench config storage` to check yours. See
   [Storage Backends](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/storage-backends.md).

@@ -274,3 +274,32 @@ def test_recommend_sizes_the_financial_schema():
     )
     cores = int(re.search(r"CPU cores:\s+([\d,]+)", out).group(1).replace(",", ""))
     assert cores >= peak.cpu_cores
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_continuous_reset_needs_the_record_on_tagless_backends(monkeypatch, recorded):
+    """Review: the continuous reset deleted checkpoint and raw prefixes in any
+    name-matching bucket on FlashBlade, record or not."""
+    from unittest.mock import MagicMock, patch
+
+    from lakebench.cli import _sustained
+    from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+    cfg = MagicMock()
+    cfg.name = "a"
+    cfg.get_namespace.return_value = "a"
+    b = cfg.platform.storage.s3.buckets
+    b.bronze, b.silver, b.gold = "a-bronze", "a-silver", "a-gold"
+    with (
+        patch("lakebench.s3.S3Client"),
+        patch(
+            "lakebench.deploy.ownership.verify_bucket_ownership",
+            side_effect=lambda _c, bucket, _n: IdentityReport(
+                verdict=IdentityVerdict.UNSUPPORTED, resource_name=bucket, expected_deployment="a"
+            ),
+        ),
+        patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
+        patch("lakebench.deploy.ownership.tagless_contents_are_ours", return_value=recorded),
+    ):
+        problem = _sustained._bucket_ownership_problem(cfg, MagicMock())
+    assert (problem is None) is recorded

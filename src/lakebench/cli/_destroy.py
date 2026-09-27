@@ -206,7 +206,9 @@ def destroy(
                 "destroy deletes the emptied buckets this deployment "
                 "created (listed in the namespace's created-buckets record) "
                 "and provably owns (ownership tag, or name prefix on "
-                "backends without tagging) when create_buckets is true."
+                "backends without tagging) when create_buckets is true. "
+                "Without tagging, a bucket is emptied only if the namespace "
+                "records creating it or adopting it empty."
             ),
         ),
     ] = False,

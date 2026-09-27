@@ -377,6 +377,33 @@ def clean(
                         prefix_ok = other_deployments is not None and (
                             bucket_name_matches_deployment(bucket, cfg.name, other_deployments)
                         )
+                        # The name is not proof: deploy adopts a pre-existing
+                        # matching bucket on these backends. Same rule as
+                        # destroy: the namespace must record that lakebench
+                        # created it or adopted it empty.
+                        if prefix_ok and not force_legacy:
+                            try:
+                                from kubernetes import client as _k8s_rec
+
+                                from lakebench.deploy.ownership import (
+                                    tagless_contents_are_ours,
+                                )
+
+                                recorded = tagless_contents_are_ours(
+                                    _k8s_rec.CoreV1Api(), cfg.get_namespace(), bucket
+                                )
+                            except Exception:  # noqa: BLE001
+                                recorded = False
+                            if not recorded:
+                                errors.append(f"{layer}: not recorded as created or adopted empty")
+                                print_error(
+                                    f"Refusing to clean {layer}: bucket {bucket!r} is on a "
+                                    "backend without bucket tagging and this deployment's "
+                                    "namespace does not record creating it or adopting it "
+                                    "empty, so its data may not be lakebench's. Pass "
+                                    "--force-legacy only if you have confirmed it is yours."
+                                )
+                                continue
                         if not prefix_ok and not force_legacy:
                             reason = (
                                 "could not list other lakebench deployments to check name ownership"

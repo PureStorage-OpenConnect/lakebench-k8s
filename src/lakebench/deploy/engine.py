@@ -1228,6 +1228,23 @@ class DeploymentEngine:
         other_deployments = list_lakebench_deployment_names(
             _kclient.CoreV1Api(), exclude=self.config.get_namespace()
         )
+        adopted_empty: list[str] = []
+        _created_cache: list[set[str]] = []
+
+        def _recorded_created() -> set[str]:
+            # Buckets an earlier deploy of this namespace created are ours
+            # whatever they hold; read the record once, on first need.
+            if not _created_cache:
+                from lakebench.deploy.ownership import read_created_buckets
+
+                try:
+                    _created_cache.append(
+                        read_created_buckets(_kclient.CoreV1Api(), self.config.get_namespace())
+                    )
+                except Exception:  # noqa: BLE001
+                    _created_cache.append(set())
+            return _created_cache[0]
+
         for name in bucket_names:
             v = verify_bucket_ownership(boto, name, identity.name)
             if v.verdict is IdentityVerdict.MISMATCH:
@@ -1325,6 +1342,26 @@ class DeploymentEngine:
                         "no tag written (backend unsupported).",
                         name,
                     )
+                elif name not in _recorded_created():
+                    # The name does not prove ownership of a pre-existing
+                    # bucket, so destroy will not empty it on name alone.
+                    # One adopted while empty holds only this deployment's
+                    # data from here on; record that so destroy may empty it
+                    # (never delete). A bucket that already holds objects
+                    # stays unrecorded and destroy leaves its data alone.
+                    try:
+                        resp = boto.list_objects_v2(Bucket=name, MaxKeys=1)
+                        if int(resp.get("KeyCount", 0)) == 0:
+                            adopted_empty.append(name)
+                        else:
+                            logger.warning(
+                                "bucket %s already holds objects and the backend has no "
+                                "bucket tagging; destroy will not empty it without "
+                                "--force-legacy.",
+                                name,
+                            )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("could not check whether bucket %s is empty: %s", name, e)
                 continue
             # LB-159: keep the created-by-lakebench marker across redeploys
             # (the tag set is rewritten each time) and add it on create.
@@ -1381,6 +1418,22 @@ class DeploymentEngine:
                     status=DeploymentStatus.FAILED,
                     message=f"Bucket ownership tag failed for {name}: {e}",
                     elapsed_seconds=time.time() - start,
+                )
+
+        if adopted_empty:
+            from lakebench.deploy.ownership import record_adopted_empty_buckets
+
+            try:
+                record_adopted_empty_buckets(
+                    _kclient.CoreV1Api(), self.config.get_namespace(), adopted_empty
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "Could not record adopted empty buckets %s on namespace %s (%s); "
+                    "destroy will leave their data in place.",
+                    adopted_empty,
+                    self.config.get_namespace(),
+                    e,
                 )
 
         parts = []

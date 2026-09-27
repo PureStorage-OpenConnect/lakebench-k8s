@@ -147,7 +147,22 @@ def _bucket_ownership_problem(cfg, core_v1) -> str | None:
             if others is None:
                 others = list_lakebench_deployment_names(core_v1, exclude=cfg.get_namespace())
             if others is not None and bucket_name_matches_deployment(bucket, cfg.name, others):
-                continue
+                # The name alone does not prove the data is ours (deploy adopts
+                # a pre-existing matching bucket on these backends); same
+                # record rule as destroy.
+                from lakebench.deploy.ownership import tagless_contents_are_ours
+
+                try:
+                    recorded = tagless_contents_are_ours(core_v1, cfg.get_namespace(), bucket)
+                except Exception:  # noqa: BLE001
+                    recorded = False
+                if recorded:
+                    continue
+                return (
+                    f"bucket {bucket}: backend has no bucket tagging and the namespace does "
+                    "not record creating it or adopting it empty, so its data may not be "
+                    f"deployment {cfg.name!r}'s"
+                )
             return (
                 f"bucket {bucket}: backend has no bucket tagging and the name does not "
                 f"prove it belongs to deployment {cfg.name!r}"

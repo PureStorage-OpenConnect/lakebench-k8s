@@ -1439,3 +1439,48 @@ class TestBucketCreationRecord:
         assert result.status == DeploymentStatus.FAILED
         record.assert_called_once()
         assert record.call_args.args[2] == ["lakebench-bronze"]
+
+
+class TestTaglessAdoptionRecord:
+    """Backends without bucket tagging: deploy records a pre-existing bucket
+    it adopts while empty, so destroy may empty it later; one that already
+    holds objects is not recorded (its data may not be lakebench's)."""
+
+    def test_empty_adopted_bucket_is_recorded_non_empty_is_not(self):
+        from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+        config = _make_config(name="td")
+        b = config.platform.storage.s3.buckets
+        b.bronze, b.silver, b.gold = "td-bronze", "td-silver", "td-gold"
+        engine = DeploymentEngine(config, k8s_client=_mock_k8s())
+        client = MagicMock()
+        client._init_error = None
+        client.ensure_buckets.return_value = {
+            "td-bronze": False,
+            "td-silver": False,
+            "td-gold": True,
+        }
+        client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys: {
+            "KeyCount": 1 if Bucket == "td-silver" else 0
+        }
+        with (
+            patch("lakebench.deploy.engine.DeploymentEngine._detect_openshift", return_value=False),
+            patch("lakebench.s3.S3Client", return_value=client),
+            patch(
+                "lakebench.deploy.ownership.verify_bucket_ownership",
+                side_effect=lambda _b, name, _id: IdentityReport(
+                    verdict=IdentityVerdict.UNSUPPORTED,
+                    resource_name=name,
+                    expected_deployment="td",
+                ),
+            ),
+            patch("lakebench.deploy.ownership.record_created_buckets"),
+            patch("lakebench.deploy.ownership.read_created_buckets", return_value=set()),
+            patch("lakebench.deploy.ownership.record_adopted_empty_buckets") as adopted,
+            patch("lakebench.k8s.get_k8s_client"),
+            patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
+        ):
+            result = engine._deploy_buckets()
+        assert result.status == DeploymentStatus.SUCCESS, result.message
+        adopted.assert_called_once()
+        assert adopted.call_args.args[2] == ["td-bronze"]

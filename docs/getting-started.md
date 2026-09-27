@@ -411,7 +411,9 @@ lakebench compare lakebench.yaml lakebench-polaris.yaml --generate
 `compare` runs each config through the pipeline and benchmark in turn and
 prints the two results side by side. It destroys each deployment after its
 run unless you pass `--keep`, and it does not deploy a missing stack, so run
-`lakebench deploy` on both configs first.
+`lakebench deploy` on both configs first. Give the two configs different
+names and bucket names: the first deployment's destroy empties its buckets
+before the second one runs.
 
 ### 8. Tear down
 
@@ -430,8 +432,9 @@ infrastructure in reverse deploy order, and finally delete the namespace and
 wait for it to be gone. If a bucket lakebench created cannot be deleted, the
 namespace is kept so a re-run can finish. Buckets that existed before deploy
 are emptied but never deleted. On a backend without bucket tagging
-(FlashBlade), a bucket that deploy did not create is not even emptied, since
-its name is the only evidence of ownership; destroy reports it and
+(FlashBlade) the name is the only other evidence of ownership, so destroy
+empties a pre-existing bucket only if deploy found it empty and recorded
+that; one that already held data is left alone and reported, and
 `--force-legacy` empties it.
 
 ---
@@ -442,8 +445,8 @@ its name is the only evidence of ownership; destroy reports it and
 idempotent -- components that already exist are skipped.
 
 **Generate fails or times out:** Increase the timeout with `--timeout 14400`
-(4 hours). Datagen supports resume: re-run with `--resume` to pick up where
-it left off.
+(4 hours). A re-run regenerates the corpus from the start. `generate
+--resume` is accepted, but the current generator ignores it.
 
 **A pipeline stage fails:** Re-run just that stage:
 
@@ -488,14 +491,14 @@ Gold: Aggregate into an executive dashboard with daily KPIs, channel performance
       customer lifetime value
   |                    (written as an Iceberg table)
   v
-Benchmark: 8 queries against the gold table via query engine (RFM segmentation,
+Benchmark: 8 queries against the silver and gold tables (RFM segmentation,
            revenue moving averages, cohort retention, channel attribution, CLV, etc.)
 ```
 
 The bronze layer lives as raw Parquet files in S3. Silver and gold are Apache
 Iceberg tables registered in the catalog (Hive Metastore or Polaris). The
-query engine (Trino, Spark Thrift, or DuckDB) queries the gold table through
-its Iceberg connector.
+query engine (Trino, Spark Thrift, or DuckDB) queries the silver and gold
+tables through its Iceberg connector.
 
 All processing is done by Apache Spark running on Kubernetes via the Spark
 Operator. Executor count scales automatically with the data volume (controlled
