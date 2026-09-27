@@ -1584,6 +1584,23 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
     return health
 
 
+def gold_event_age_sql(engine: str, fq_gold: str) -> str:
+    """Seconds from gold's newest event date to now, in *engine*'s dialect.
+
+    Trino and DuckDB take ``date_diff('second', start, end)``. Spark SQL has
+    no string-unit form: Spark Thrift rejected it on every round with
+    INVALID_PARAMETER_VALUE.DATETIME_UNIT (lb16-cs), and adapt_query only
+    rewrites the 'day' form. Spark gets the difference of unix_timestamp
+    values, which is whole seconds like date_diff.
+    """
+    newest = "CAST(MAX(interaction_date) AS TIMESTAMP)"
+    if engine == "spark-thrift":
+        expr = f"CAST(unix_timestamp(current_timestamp()) - unix_timestamp({newest}) AS BIGINT)"
+    else:
+        expr = f"date_diff('second', {newest}, current_timestamp)"
+    return f"SELECT {expr} FROM {fq_gold}"
+
+
 def _run_benchmark_round(
     cfg,
     bench_runner,
@@ -1632,9 +1649,8 @@ def _run_benchmark_round(
     try:
         catalog = bench_runner.catalog
         gold_table = bench_runner.gold_table
-        freshness_sql = (
-            f"SELECT date_diff('second', CAST(MAX(interaction_date) AS timestamp), current_timestamp) "
-            f"FROM {catalog}.{gold_table}"
+        freshness_sql = gold_event_age_sql(
+            bench_runner.executor.engine_name(), f"{catalog}.{gold_table}"
         )
         freshness_sql = bench_runner.executor.adapt_query(freshness_sql)
         freshness_result = bench_runner.executor.execute_query(freshness_sql, timeout=30)
