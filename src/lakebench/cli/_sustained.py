@@ -2213,6 +2213,7 @@ def _run_sustained(
     pipeline_success = True
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
+    _datagen_output_files = 0
     # Streams submitted and not yet stopped: the finally block stops them on
     # any early exit, so an error or Ctrl-C never leaves them running.
     submitted: list = []
@@ -2842,6 +2843,7 @@ def _run_sustained(
             )
             if _fleet.data_quality == "complete" and _fleet.total_rows_written > 0:
                 _datagen_output_rows = _fleet.total_rows_written
+                _datagen_output_files = int(_fleet.total_files_written or 0)
         except Exception as e:
             logger.warning("Could not read datagen row counts: %s", e)
 
@@ -3270,6 +3272,7 @@ def _run_sustained(
                     run_metrics,
                     datagen_output_gb=_datagen_output_gb,
                     datagen_output_rows=_datagen_output_rows,
+                    datagen_output_files=_datagen_output_files,
                 )
                 pb.total_s3_objects = _total_s3_objects
                 run_metrics.pipeline_benchmark = pb

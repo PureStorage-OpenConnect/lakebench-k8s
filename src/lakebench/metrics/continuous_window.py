@@ -183,6 +183,9 @@ def window_stats(
         "trailing_idle_cycles": 0,
         "last_write_offset_seconds": None,
         "first_write_offset_seconds": None,
+        # Bronze: its first write of the run, window-relative (negative when
+        # before the window): when the trickle started releasing files.
+        "trickle_start_offset_seconds": None,
         "write_batches": 0,
         # Totals as of the window's end (logs are read after it closes).
         "rows_to_end": 0,
@@ -202,6 +205,10 @@ def window_stats(
         out["output_rows"] = sum(e.rows or 0 for e in writes) if writes else 0
         out["rows_to_end"] = out["output_rows"]
         out["write_batches"] = len(inside)
+        if writes:
+            out["trickle_start_offset_seconds"] = (
+                min(e.at for e in writes) - start
+            ).total_seconds()
         if inside:
             out["last_write_offset_seconds"] = (max(e.at for e in inside) - start).total_seconds()
             out["first_write_offset_seconds"] = (min(e.at for e in inside) - start).total_seconds()
@@ -418,6 +425,31 @@ def arrival_seconds(
     if not corpus_in_bronze:
         return float(window_s)
     return float(min(window_s, last_write_offset_s + (bronze_trigger_s or 0.0)))
+
+
+def released_rows(
+    window_s: float,
+    trickle_start_offset_s: float | None,
+    trigger_s: float | None,
+    files_per_trigger: int | None,
+    corpus_rows: int,
+    corpus_files: int,
+) -> int | None:
+    """Rows the trickle had released to bronze by the window's end: one
+    batch of *files_per_trigger* files per trigger from bronze's first write
+    to the window's end, at the corpus's mean rows per file, never more than
+    the corpus. None when any input is unknown."""
+    if (
+        trickle_start_offset_s is None
+        or not trigger_s
+        or not files_per_trigger
+        or corpus_rows <= 0
+        or corpus_files <= 0
+    ):
+        return None
+    triggers = int(max(0.0, window_s - trickle_start_offset_s) // trigger_s) + 1
+    files = min(corpus_files, triggers * files_per_trigger)
+    return min(corpus_rows, round(files * corpus_rows / corpus_files))
 
 
 def expected_arrival_seconds(

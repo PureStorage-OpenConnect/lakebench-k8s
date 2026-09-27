@@ -924,3 +924,63 @@ def test_the_run_uses_the_resolved_trickle(monkeypatch, tmp_path):
     trickle = saved.continuous["trickle"]
     assert trickle["source"] == "auto" and trickle["value"] >= 1
     assert saved.config_snapshot["sustained"]["max_files_per_trigger"] == trickle["value"]
+
+
+# ------------------------------------- ingest_ratio against what was released
+
+
+def _trickle_pb(bronze_rows, trickle_start, datagen_rows=1_000_000, files=100, mpt=2):
+    t0 = datetime(2026, 9, 27, tzinfo=timezone.utc)
+    pb = PipelineBenchmark(
+        run_id="t",
+        deployment_name="t",
+        pipeline_mode="sustained",
+        start_time=t0,
+        end_time=t0 + timedelta(seconds=1800),
+        success=True,
+        stages=[
+            StageMetrics(
+                stage_name="bronze",
+                stage_type="streaming",
+                engine="spark",
+                elapsed_seconds=1800,
+                input_rows=bronze_rows,
+                window_input_rows=bronze_rows,
+                pre_window_input_rows=0,
+                last_write_offset_seconds=1790,
+                trickle_start_offset_seconds=trickle_start,
+            )
+        ],
+        config_snapshot={
+            "datagen_output_rows": datagen_rows,
+            "datagen_output_files": files,
+            "sustained": {"bronze_trigger_interval": "30 seconds", "max_files_per_trigger": mpt},
+        },
+    )
+    pb.compute_aggregates()
+    return pb
+
+
+def test_a_trickle_that_has_not_released_the_corpus_is_not_saturation():
+    # A default-shaped run: the trickle (2 files per 30 s from t=0) had
+    # released 61 x 2 = 122 of 150 files (1,220,000 rows) by the window's
+    # end, and bronze took all of them: 81% of the corpus, 100% of arrival.
+    pb = _trickle_pb(1_220_000, 0.0, datagen_rows=1_500_000, files=150)
+    assert pb.corpus_ingest_ratio == pytest.approx(0.8133, abs=1e-3)
+    assert pb.released_rows == 1_220_000
+    assert pb.ingest_ratio == pytest.approx(1.0)
+    assert pb.pipeline_saturated is False
+    scores = pb.to_dict()["scores"]
+    assert scores["corpus_ingest_ratio"] == pytest.approx(0.8133, abs=1e-3)
+
+
+def test_bronze_behind_what_was_released_is_saturation():
+    pb = _trickle_pb(900_000, 0.0, datagen_rows=1_500_000, files=150)
+    assert pb.ingest_ratio == pytest.approx(900_000 / 1_220_000)
+    assert pb.pipeline_saturated is True
+
+
+def test_without_a_file_count_the_corpus_ratio_stands():
+    pb = _trickle_pb(1_220_000, 0.0, datagen_rows=1_500_000, files=0)
+    assert pb.released_rows is None
+    assert pb.ingest_ratio == pytest.approx(pb.corpus_ingest_ratio)
