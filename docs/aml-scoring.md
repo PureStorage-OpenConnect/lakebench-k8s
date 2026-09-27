@@ -230,6 +230,14 @@ The verdicts:
 | `insufficient_labels` | one or more typology classes had fewer than `min_positive_per_class` rows in the sampled frame. Per-typology rows still populate but treat them as directional. |
 | `no_sklearn` | the driver image did not ship scikit-learn. The AML pipeline still produces rule scores; the reference detector row is empty and the `aggregate_reference_vs_rule` query labels it `not_run`. |
 
+## Held-out evaluation
+
+The published Level-2 result is measured on held-out corpora that are never
+used during development. The seeds, the pre-registered gate constants and the
+rules for when the one-shot evaluation and robustness runs may be taken are
+fixed in `src/lakebench/spark/data/aml/aml_preregistration.json`. Maintainers:
+the full protocol is `docs/internal/aml-protocol.md` in the source repository.
+
 ## Metric-trust caveats
 
 Marcus's roleplay pass flagged three places where the scorecard names
