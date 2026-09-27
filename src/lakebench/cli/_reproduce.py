@@ -801,8 +801,8 @@ def _find_reproduce_run(storage, deployment_name: str, start_watermark: datetime
             run_start = datetime.fromisoformat(start_time)
         except ValueError:
             continue
-        # R3: MetricsCollector.start_run uses naive datetime.now() (local
-        # time). Labelling that as UTC would shift the timestamp by the
+        # R3: before v1.6 MetricsCollector.start_run used naive
+        # datetime.now() (local time; now aware UTC). Labelling that as UTC would shift the timestamp by the
         # host's UTC offset -- on a west-of-UTC host every legitimate run
         # would fall BEFORE the UTC watermark and be dropped. .astimezone()
         # on a naive datetime interprets it as local (Python 3.6+), which

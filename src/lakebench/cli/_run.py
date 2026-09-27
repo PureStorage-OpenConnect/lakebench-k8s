@@ -284,6 +284,7 @@ def _record_local_jobs(collector, cfg, result) -> None:
         metrics.elapsed_seconds = elapsed
         metrics.start_time = now - timedelta(seconds=elapsed)
         metrics.end_time = now
+        metrics.timing_source = "local_runner"
         metrics.success = ok
         metrics.executor_count = 1
         metrics.executor_cores = cores
@@ -1909,6 +1910,7 @@ def run(
                             start_time=job_start,
                             end_time=utc_now(),
                             elapsed_seconds=(utc_now() - job_start).total_seconds(),
+                            timing_source="submit_failed",
                             success=False,
                             error_message=job_status.message,
                         )

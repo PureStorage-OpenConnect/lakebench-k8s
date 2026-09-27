@@ -85,8 +85,9 @@ MAX_INGEST_RATIO = 1.05
 # the run started belongs to an earlier generate: its datagen numbers are
 # left out rather than attributed to the run.
 MAX_DATAGEN_AGE_HOURS = 24.0
-# start_time is naive local time on the host that ran lakebench, and the
-# zone is not recorded. UTC offsets run from -12h to +14h, so the age is
+# Before v1.6 start_time is naive local time on the host that ran lakebench,
+# and the zone is not recorded (from v1.6 it is UTC with its offset, and the
+# age is exact). UTC offsets run from -12h to +14h, so the age is
 # taken at its smallest over every zone: a sidecar is only called stale when
 # it is stale wherever the run happened, whichever host runs the gate.
 _MAX_UTC_OFFSET_HOURS = 14.0
@@ -486,7 +487,14 @@ def stage_timing_basis(run: RunRecord) -> str | None:
     }
     if not sources:
         return None
-    kinds = {STAGE_TIMING_POLL if src in ("", "poll") else STAGE_TIMING_CLUSTER for src in sources}
+    kinds = {
+        STAGE_TIMING_POLL
+        if src in ("", "poll")
+        else STAGE_TIMING_CLUSTER
+        if src in ("driver_container", "spark_application")
+        else src  # local_runner, submit_failed: a basis of their own
+        for src in sources
+    }
     return kinds.pop() if len(kinds) == 1 else STAGE_TIMING_MIXED
 
 
@@ -788,8 +796,8 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
 def _datagen_age_hours(run: RunRecord) -> float | None:
     """Smallest possible hours between the datagen sidecar and the run start.
 
-    written_at is UTC-aware. start_time is naive local time on the run host
-    (datetime.now() in the run path) with no zone recorded, so it is read as
+    written_at is UTC-aware. A pre-v1.6 start_time is naive local time on the
+    run host with no zone recorded, so it is read as
     UTC and the largest positive offset is subtracted: the result is a lower
     bound on the true age in every zone and does not depend on the gate
     host's zone. An aware start_time is used as is.

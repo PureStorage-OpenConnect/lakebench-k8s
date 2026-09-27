@@ -542,3 +542,30 @@ class TestReviewFixes:
             "query_time_event_age_seconds": 5.0,
             "x": 1,
         }
+
+
+class TestRunOrdering:
+    def test_latest_run_is_by_instant_not_string(self, tmp_path, monkeypatch):
+        """Review: on a UTC+5:30 host an old naive run at 10:00 local sorted
+        after a new UTC run at 05:30Z (11:00 local)."""
+        import time
+
+        from lakebench.metrics.storage import MetricsStorage
+
+        monkeypatch.setenv("TZ", "Asia/Kolkata")
+        time.tzset()
+        try:
+            for rid, start in (
+                ("20260927-100000-aaaaaa", "2026-09-27T10:00:00.000001"),
+                ("20260927-110000-bbbbbb", "2026-09-27T05:30:00.000001+00:00"),
+            ):
+                d = tmp_path / f"run-{rid}"
+                d.mkdir()
+                (d / "metrics.json").write_text(
+                    json.dumps({"run_id": rid, "deployment_name": "d", "start_time": start})
+                )
+            runs = MetricsStorage(metrics_dir=tmp_path).list_runs()
+        finally:
+            monkeypatch.delenv("TZ")
+            time.tzset()
+        assert [r["run_id"] for r in runs][0] == "20260927-110000-bbbbbb"

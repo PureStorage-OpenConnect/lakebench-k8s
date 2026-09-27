@@ -47,6 +47,22 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RUNS_DIR = str(Path(DEFAULT_OUTPUT_DIR) / "runs")
 
 
+def _sort_instant(value: Any) -> float:
+    """A start_time as epoch seconds for ordering runs.
+
+    Naive values (runs before v1.6) are host-local, as they were written;
+    aware ones carry their offset. Unparseable or missing sorts oldest.
+    """
+    try:
+        at = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return float("-inf")
+    try:
+        return at.timestamp()  # naive: local time, like .astimezone()
+    except (OverflowError, OSError, ValueError):
+        return float("-inf")
+
+
 def _deserialize_stage_latency_profile(raw: Any) -> list[float]:
     """Deserialize stage_latency_profile from JSON.
 
@@ -273,8 +289,10 @@ class MetricsStorage:
                     runs.append(summary)
                     seen_ids.add(summary["run_id"])
 
-        # Re-sort combined list by start_time descending
-        runs.sort(key=lambda r: r.get("start_time", ""), reverse=True)
+        # Re-sort combined list by start_time descending. Parsed, not as
+        # strings: runs from v1.6 record UTC with an offset, older ones naive
+        # host-local time, and the two do not sort as text.
+        runs.sort(key=lambda r: _sort_instant(r.get("start_time")), reverse=True)
         return runs
 
     @staticmethod

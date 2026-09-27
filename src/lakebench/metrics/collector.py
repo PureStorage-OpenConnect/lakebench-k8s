@@ -28,9 +28,11 @@ class JobMetrics:
     elapsed_seconds: float = 0.0
     success: bool = False
     error_message: str | None = None
-    # Where end_time and elapsed_seconds came from (TIMING_SOURCES), and how
-    # far either can be off in seconds. "" / None: a record from before v1.6,
-    # timed by the job-monitor poll that first saw the job finish.
+    # Where end_time and elapsed_seconds came from, and how far either can be
+    # off in seconds: driver_container / spark_application (cluster times),
+    # poll (the job-monitor poll that saw the job finish), local_runner
+    # (--local wall clock), submit_failed. "" / None: a cluster record from
+    # before v1.6, poll-timed.
     timing_source: str = ""
     timing_resolution_seconds: float | None = None
 
