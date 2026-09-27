@@ -430,10 +430,16 @@ cycle. If Q9 fails during a round, Lakebench retries up to twice with
 30s/60s backoff. The contention status is recorded per-round as
 `q9_contention_observed` and `q9_retry_used`.
 
-**Query-time freshness:** Each round measures gold-table staleness at the
-moment the engine queries it. This is more accurate than the streaming-log
-freshness (which is averaged over the entire run). The median of per-round
-freshness appears in the scorecard as `query_time_freshness_seconds`.
+**Gold event age (diagnostic, not freshness):** Each round also records how
+old gold's newest event date is at query time (query time minus
+`MAX(interaction_date)`, day resolution). That tracks where the corpus's event
+timestamps sit: a corpus dated 2024-12-18 to 2025-01-01 reads about 635 days in
+2026, however fresh gold is. The median appears as
+`query_time_event_age_seconds` and each round's value as
+`round_meta.gold_event_age_seconds`. Before v1.6 the same figure was written as
+`query_time_freshness_seconds` / `gold_freshness_seconds` and printed as the
+continuous Pipeline Score; the score line now always shows
+`data_freshness_seconds`, the scored freshness.
 
 If the run duration is too short for at least one round (less than
 `benchmark_warmup + benchmark_interval`), in-stream benchmarking is skipped
@@ -875,15 +881,8 @@ If any indicator is red, cross-run comparisons are unreliable.
 
 ### Stability Over Time (continuous only)
 
-A dual-axis line chart showing QpH and gold data freshness trends across
-in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
+A line chart showing the QpH trend across in-stream benchmark rounds. Requires at least 5 rounds for trend analysis.
 Helps identify performance degradation over time as table state grows.
-
-### Query-Time Freshness (continuous only)
-
-Shows median query-time freshness versus worst-case data freshness. The gap
-between these two values indicates how much freshness varies depending on
-when you query relative to the gold refresh cycle.
 
 ### Q9 Contention (continuous only)
 

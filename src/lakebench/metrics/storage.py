@@ -80,7 +80,11 @@ def _deserialize_benchmark_rounds(
                 timestamp=(
                     datetime.fromisoformat(rm["timestamp"]) if rm.get("timestamp") else None
                 ),
-                gold_freshness_seconds=rm.get("gold_freshness_seconds"),
+                # Renamed from gold_freshness_seconds: the probe has always
+                # measured event-date age, never pipeline freshness.
+                gold_event_age_seconds=rm.get(
+                    "gold_event_age_seconds", rm.get("gold_freshness_seconds")
+                ),
                 q9_contention_observed=rm.get("q9_contention_observed", False),
                 q9_retry_used=rm.get("q9_retry_used", False),
                 silver_data_file_count=th.get(

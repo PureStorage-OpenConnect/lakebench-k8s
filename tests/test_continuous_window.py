@@ -271,7 +271,7 @@ def test_gold_freshness_comes_from_cycles_inside_the_window():
 def test_unmeasured_round_freshness_and_table_health_are_absent():
     meta = BenchmarkRoundMeta(round_index=1, gold_data_file_count=12)
     d = meta.to_dict()
-    assert d["gold_freshness_seconds"] is None
+    assert d["gold_event_age_seconds"] is None
     assert d["table_health"] == {"gold_data_file_count": 12}  # no -1, no stand-in 0
 
 

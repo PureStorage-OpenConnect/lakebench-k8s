@@ -1552,7 +1552,10 @@ def _run_benchmark_round(
     except Exception:
         pass
 
-    # 2. Freshness probe: measure gold table staleness at query time
+    # 2. Event-age probe: query time minus gold's newest event date. This is
+    # where the corpus's event timestamps sit (a 2025 corpus reads ~600 days),
+    # not pipeline freshness; data_freshness_seconds is that score. Recorded
+    # as a diagnostic and never printed as freshness.
     try:
         catalog = bench_runner.catalog
         gold_table = bench_runner.gold_table
@@ -1566,15 +1569,15 @@ def _run_benchmark_round(
             value = scalar_from_output(freshness_result.engine, freshness_result.raw_output)
             if value is None:
                 print_warning(
-                    "Gold freshness probe: could not read a number from the "
-                    f"{freshness_result.engine} output; freshness not recorded for this round"
+                    "Gold event-age probe: could not read a number from the "
+                    f"{freshness_result.engine} output; event age not recorded for this round"
                 )
             else:
-                round_meta.gold_freshness_seconds = value
+                round_meta.gold_event_age_seconds = value
         else:
-            print_warning(f"Gold freshness probe failed: {freshness_result.error}")
+            print_warning(f"Gold event-age probe failed: {freshness_result.error}")
     except Exception as e:  # noqa: BLE001
-        print_warning(f"Gold freshness probe failed: {e}")
+        print_warning(f"Gold event-age probe failed: {e}")
 
     # 3. Run the full 8-query power benchmark
     # One sample per query: gold refreshes under the round, so repeats would
@@ -1645,8 +1648,8 @@ def _run_benchmark_round(
 
     # 7. Print inline result
     freshness_str = (
-        f" | Freshness: {round_meta.gold_freshness_seconds:.1f}s"
-        if (round_meta.gold_freshness_seconds or 0) > 0
+        f" | Gold event age: {event_age_label(round_meta.gold_event_age_seconds)}"
+        if (round_meta.gold_event_age_seconds or 0) > 0
         else ""
     )
     q9_str = ""
@@ -1666,14 +1669,37 @@ def _run_benchmark_round(
             "qph": round(bench_result.qph, 1),
             "passed": passed,
             "total": total,
-            "freshness_seconds": (
-                round(round_meta.gold_freshness_seconds, 2)
-                if round_meta.gold_freshness_seconds is not None
+            "gold_event_age_seconds": (
+                round(round_meta.gold_event_age_seconds, 2)
+                if round_meta.gold_event_age_seconds is not None
                 else None
             ),
             "q9_contention": round_meta.q9_contention_observed,
         },
     )
+
+
+def event_age_label(seconds: float | None) -> str:
+    """Gold's newest event date, as an age in days.
+
+    The probe is day-resolution (MAX(interaction_date)) and measures where the
+    corpus's event timestamps sit, so seconds would read as a precise
+    freshness figure. It never is one.
+    """
+    if seconds is None:
+        return "n/a"
+    return f"{seconds / 86400:.1f} d"
+
+
+def pipeline_score_freshness(pb) -> str:
+    """The freshness the Pipeline Score line prints: the scored one.
+
+    data_freshness_seconds is the continuous primary score. The query-time
+    probe measured event-date age (about 635 days on a 2025 corpus, lb16) and
+    headlined the score line until v1.6; it stays a labelled diagnostic.
+    """
+    value = pb.data_freshness_seconds
+    return f"{value:.1f}s" if value is not None else "n/a"
 
 
 def _print_rounds_summary(console, rounds: list) -> None:
@@ -1690,7 +1716,8 @@ def _print_rounds_summary(console, rounds: list) -> None:
             query_names.append(name)
             table.add_column(name, justify="right")
 
-    table.add_column("Freshness", justify="right")
+    # Event-date age, not freshness: see event_age_label.
+    table.add_column("Gold event age", justify="right")
     table.add_column("Q9", justify="center")
 
     import statistics
@@ -1715,10 +1742,10 @@ def _print_rounds_summary(console, rounds: list) -> None:
             if not matched:
                 row.append("-")
 
-        # Freshness
-        if meta and (meta.gold_freshness_seconds or 0) > 0:
-            row.append(f"{meta.gold_freshness_seconds:.1f}s")
-            freshness_values.append(meta.gold_freshness_seconds)
+        # Gold event-date age
+        if meta and (meta.gold_event_age_seconds or 0) > 0:
+            row.append(event_age_label(meta.gold_event_age_seconds))
+            freshness_values.append(meta.gold_event_age_seconds)
         else:
             row.append("-")
 
@@ -1737,7 +1764,10 @@ def _print_rounds_summary(console, rounds: list) -> None:
     median_freshness = statistics.median(freshness_values) if freshness_values else 0.0
     parts = [f"Median QpH: {median_qph:.1f}"]
     if median_freshness > 0:
-        parts.append(f"Median freshness: {median_freshness:.1f}s")
+        parts.append(
+            f"Median gold event age: {event_age_label(median_freshness)} "
+            "(corpus event time, not freshness)"
+        )
     console.print(f"  {' | '.join(parts)}")
 
 
@@ -3335,19 +3365,8 @@ def _run_sustained(
                             if pb.stage_latency_profile
                             else "n/a"
                         )
-                        freshness_label = "freshness"
-                        freshness_val = pb.data_freshness_seconds
-                        # Query-time freshness is event-date based and keeps
-                        # growing after a drained corpus (LB-145); show the
-                        # gold-cycle figure then.
-                        if (pb.query_time_freshness_seconds or 0) > 0 and not pb.corpus_drained:
-                            freshness_label = "freshness (at query time)"
-                            freshness_val = pb.query_time_freshness_seconds
-                        freshness_str = (
-                            f"{freshness_val:.1f}s" if freshness_val is not None else "n/a"
-                        )
                         print_info(
-                            f"Pipeline Score: {freshness_str} {freshness_label}"
+                            f"Pipeline Score: {pipeline_score_freshness(pb)} freshness"
                             f" | {pb.sustained_throughput_rps:,.0f} rows/s continuous"
                             f" | {latency_str}ms latency (b/s/g)"
                         )

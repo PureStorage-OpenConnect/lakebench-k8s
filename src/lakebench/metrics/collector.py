@@ -237,15 +237,18 @@ class CycleMetrics:
 class BenchmarkRoundMeta:
     """Per-round metadata for in-stream benchmark rounds.
 
-    Tracks which benchmark round this is, when it ran, the gold table
-    freshness measured at query time, and whether Q9 (the only gold-table
+    Tracks which benchmark round this is, when it ran, the age of gold's
+    newest event date at query time, and whether Q9 (the only gold-table
     query) hit a contention window from ``createOrReplace()``.
     """
 
     round_index: int
     timestamp: datetime | None = None
-    # None: the probe failed or returned no number (never a stand-in 0).
-    gold_freshness_seconds: float | None = None
+    # Query time minus MAX(interaction_date) in gold: where the corpus's event
+    # timestamps sit, not pipeline freshness (a 2025 corpus reads ~600 days).
+    # Written as gold_freshness_seconds before v1.6. None: the probe failed or
+    # returned no number (never a stand-in 0).
+    gold_event_age_seconds: float | None = None
     q9_contention_observed: bool = False
     q9_retry_used: bool = False
     # Table health metrics (v1.1.0) -- captured at benchmark time. None: the
@@ -260,9 +263,9 @@ class BenchmarkRoundMeta:
         d: dict[str, Any] = {
             "round_index": self.round_index,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
-            "gold_freshness_seconds": (
-                round(self.gold_freshness_seconds, 2)
-                if self.gold_freshness_seconds is not None
+            "gold_event_age_seconds": (
+                round(self.gold_event_age_seconds, 2)
+                if self.gold_event_age_seconds is not None
                 else None
             ),
             "q9_contention_observed": self.q9_contention_observed,
@@ -484,7 +487,7 @@ class BenchmarkMetrics:
     """Metrics from a Trino query benchmark run.
 
     When used as an in-stream benchmark round, ``round_meta`` carries
-    per-round metadata (round index, timestamp, freshness at query time,
+    per-round metadata (round index, timestamp, gold event-date age at query time,
     Q9 contention status).  For aggregated benchmarks,
     ``round_meta`` is ``None``.
     """
@@ -775,7 +778,7 @@ class PipelineBenchmark:
         "corpus_drained": "True when every datagen row reached bronze and silver committed all of them before the window ended: freshness covers only gold cycles that saw new data, and arrival_seconds stops at bronze's last write",
         "total_rows_processed": "Rows taken in across all streaming stages inside the measurement window (gold re-reads of silver included)",
         "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
-        "query_time_freshness_seconds": "Diagnostic. Median gold staleness measured at benchmark query time (lower is better). Gap between this and data_freshness_seconds indicates freshness variability.",
+        "query_time_event_age_seconds": "Diagnostic, not freshness. Median age of the newest event date in gold at benchmark query time (query time minus MAX(interaction_date), day resolution). It tracks where the corpus's event timestamps sit, not how stale gold is; data_freshness_seconds is the freshness score. Replaces query_time_freshness_seconds, which carried this figure under a freshness name",
         "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
         "benchmark_rounds_count": "Number of in-stream benchmark rounds executed",
         "qph_degradation_pct": "QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)",
@@ -895,7 +898,8 @@ class PipelineBenchmark:
 
     # In-stream benchmark rounds (sustained mode only)
     benchmark_rounds: list[BenchmarkMetrics] = field(default_factory=list)
-    query_time_freshness_seconds: float = 0.0  # median freshness at Trino query time
+    # Median gold event-date age at query time (corpus position, not freshness).
+    query_time_event_age_seconds: float = 0.0
 
     # S3 object health (sustained mode -- set by cli.py after monitoring)
     total_s3_objects: int = 0
@@ -1218,15 +1222,17 @@ class PipelineBenchmark:
             # Fallback: max of stage durations (concurrent, not sum)
             self.total_elapsed_seconds = max((s.elapsed_seconds for s in streaming), default=0.0)
 
-        # Query-time freshness from in-stream benchmark rounds
+        # Gold event-date age at query time, from in-stream benchmark rounds
         if self.benchmark_rounds:
-            round_freshness = [
-                r.round_meta.gold_freshness_seconds
+            round_event_age: list[float] = [
+                r.round_meta.gold_event_age_seconds
                 for r in self.benchmark_rounds
-                if r.round_meta and (r.round_meta.gold_freshness_seconds or 0) > 0
+                if r.round_meta
+                and r.round_meta.gold_event_age_seconds is not None
+                and r.round_meta.gold_event_age_seconds > 0
             ]
-            if round_freshness:
-                self.query_time_freshness_seconds = statistics.median(round_freshness)
+            if round_event_age:
+                self.query_time_event_age_seconds = statistics.median(round_event_age)
 
         # QpH degradation: compare first-half vs second-half median QpH
         if self.benchmark_rounds and len(self.benchmark_rounds) >= 4:
@@ -1426,8 +1432,8 @@ class PipelineBenchmark:
                     else None
                 )
                 scores["pre_window_rows"] = self.pre_window_rows
-            if self.query_time_freshness_seconds > 0:
-                scores["query_time_freshness_seconds"] = round(self.query_time_freshness_seconds, 2)
+            if self.query_time_event_age_seconds > 0:
+                scores["query_time_event_age_seconds"] = round(self.query_time_event_age_seconds, 2)
             # AML runs always carry the keys, None when unmeasured, so a
             # missing measurement is visible rather than an absent field.
             if (

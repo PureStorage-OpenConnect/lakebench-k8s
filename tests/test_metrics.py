@@ -1116,7 +1116,7 @@ class TestSustainedReport:
                 compute_efficiency_gb_per_core_hour=0.42,
                 total_rows_processed=23_400_000,
                 total_elapsed_seconds=1800.0,
-                query_time_freshness_seconds=22.0,
+                query_time_event_age_seconds=22.0,
             ),
             config_snapshot={
                 "name": "cont-deploy",
@@ -3479,7 +3479,7 @@ class TestBenchmarkRoundMeta:
         meta = BenchmarkRoundMeta(round_index=1)
         assert meta.round_index == 1
         assert meta.timestamp is None
-        assert meta.gold_freshness_seconds is None  # unmeasured, not 0
+        assert meta.gold_event_age_seconds is None  # unmeasured, not 0
         assert meta.q9_contention_observed is False
         assert meta.q9_retry_used is False
 
@@ -3488,14 +3488,14 @@ class TestBenchmarkRoundMeta:
         meta = BenchmarkRoundMeta(
             round_index=3,
             timestamp=now,
-            gold_freshness_seconds=42.5,
+            gold_event_age_seconds=42.5,
             q9_contention_observed=True,
             q9_retry_used=True,
         )
         d = meta.to_dict()
         assert d["round_index"] == 3
         assert d["timestamp"] == now.isoformat()
-        assert d["gold_freshness_seconds"] == 42.5
+        assert d["gold_event_age_seconds"] == 42.5
         assert d["q9_contention_observed"] is True
         assert d["q9_retry_used"] is True
 
@@ -3527,7 +3527,7 @@ class TestBenchmarkMetricsRoundMeta:
         meta = BenchmarkRoundMeta(
             round_index=2,
             timestamp=now,
-            gold_freshness_seconds=38.0,
+            gold_event_age_seconds=38.0,
         )
         bm = BenchmarkMetrics(
             mode="power",
@@ -3540,7 +3540,7 @@ class TestBenchmarkMetricsRoundMeta:
         d = bm.to_dict()
         assert "round_meta" in d
         assert d["round_meta"]["round_index"] == 2
-        assert d["round_meta"]["gold_freshness_seconds"] == 38.0
+        assert d["round_meta"]["gold_event_age_seconds"] == 38.0
 
 
 # ---------------------------------------------------------------------------
@@ -3563,7 +3563,7 @@ class TestAggregateBenchmarkRounds:
         meta = BenchmarkRoundMeta(
             round_index=round_index,
             timestamp=datetime.now(),
-            gold_freshness_seconds=freshness,
+            gold_event_age_seconds=freshness,
         )
         return BenchmarkMetrics(
             mode="power",
@@ -3730,7 +3730,7 @@ class TestRecordBenchmarkRound:
 
 
 # ---------------------------------------------------------------------------
-# PipelineBenchmark with benchmark_rounds and query_time_freshness
+# PipelineBenchmark with benchmark_rounds and query_time_event_age
 # ---------------------------------------------------------------------------
 
 
@@ -3744,7 +3744,7 @@ class TestPipelineBenchmarkRounds:
             meta = BenchmarkRoundMeta(
                 round_index=i + 1,
                 timestamp=now + timedelta(seconds=300 * (i + 1)),
-                gold_freshness_seconds=30.0 + i * 10,  # 30, 40, 50
+                gold_event_age_seconds=30.0 + i * 10,  # 30, 40, 50
             )
             rounds.append(
                 BenchmarkMetrics(
@@ -3803,11 +3803,11 @@ class TestPipelineBenchmarkRounds:
         pb = build_pipeline_benchmark(run)
         assert len(pb.benchmark_rounds) == 3
 
-    def test_query_time_freshness_computed(self):
+    def test_query_time_event_age_computed(self):
         run = self._make_streaming_run_with_rounds()
         pb = build_pipeline_benchmark(run)
         # Freshness values: 30, 40, 50 -- median = 40
-        assert pb.query_time_freshness_seconds == pytest.approx(40.0)
+        assert pb.query_time_event_age_seconds == pytest.approx(40.0)
 
     def test_scores_dict_with_rounds(self):
         run = self._make_streaming_run_with_rounds()
@@ -3820,7 +3820,7 @@ class TestPipelineBenchmarkRounds:
         assert scores["in_stream_composite_qph"] == 225.0
         assert "post_stream_qph" not in scores
         assert scores["benchmark_rounds_count"] == 3
-        assert scores["query_time_freshness_seconds"] == pytest.approx(40.0)
+        assert scores["query_time_event_age_seconds"] == pytest.approx(40.0)
 
     def test_to_dict_includes_rounds(self):
         run = self._make_streaming_run_with_rounds()
