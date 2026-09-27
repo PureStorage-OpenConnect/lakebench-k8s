@@ -91,7 +91,35 @@ spark_image: apache/spark:4.1.1-python3
 ```
 
 Eleven recipes are available -- see [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md)
-for the full list.
+for the full list. Support is judged per workload x recipe x mode:
+**supported** means a live run on the release tree validated it end to end,
+**unverified** means it is valid but not release-validated, and
+**unsupported** is refused before a run
+([rules](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/compatibility-matrix.md#support-states)).
+Every run records its state in `metrics.json`. As computed by this release:
+
+<!-- BEGIN GENERATED: support-states -->
+<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+
+| Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
+|---|---|---|---|---|
+| `hive-delta-spark-none` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-thrift` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-trino` | unverified | unverified | unsupported | unsupported |
+| `hive-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
+- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
+
+<!-- END GENERATED: support-states -->
 
 Compare two configurations side-by-side:
 
