@@ -199,6 +199,15 @@ class TestEmptyGateInRounds:
         assert _benchmark_gate_problems(_cfg(), qs, check_empty=True)
         assert empty_benchmark_queries(qs) == ["Q1_full_aggregation_scan"]
 
+    def test_empty_q9_is_gated_in_the_final_round_only(self):
+        from lakebench.cli._sustained import tolerated_q9_results
+
+        empty = {"name": "Q9_gold_dashboard", "success": True, "rows_returned": 0}
+        failed = {"name": "Q9_gold_dashboard", "success": False, "rows_returned": 0}
+        assert tolerated_q9_results([empty], final=False) == [empty]
+        assert tolerated_q9_results([empty], final=True) == []
+        assert tolerated_q9_results([failed], final=True) == [failed]
+
 
 class TestFreshnessProbe:
     @pytest.mark.parametrize(

@@ -45,6 +45,22 @@ _DELTA_DEFAULT_RETENTION_HOURS = 168.0
 _C360_REQUIRED_STREAM_JOBS = ("bronze-ingest", "silver-stream")
 
 
+def tolerated_q9_results(queries: list[dict], *, final: bool) -> list[dict]:
+    """Q9 results a continuous benchmark round reports but does not gate.
+
+    Gold refresh replaces the table Q9 reads, so a failed Q9 after its
+    contention retries is expected in any round. An empty Q9 is tolerated
+    only before the last round: Q9 is the one c360 query that reads gold,
+    so an empty final Q9 means gold never held rows and the gate must see it.
+    """
+    return [
+        q
+        for q in queries
+        if str(q.get("name", "")).startswith("Q9")
+        and (not q.get("success") or (not final and not q.get("rows_returned")))
+    ]
+
+
 def _c360_continuous_gate_problems(rows_by_job: dict[str, int | None]) -> list[str]:
     """Reasons a c360 continuous run must not pass: a required stream with no
     parseable logs, or one that processed zero rows."""
@@ -2594,12 +2610,8 @@ def _run_sustained(
                     from lakebench.cli._run import _benchmark_gate_problems, empty_benchmark_queries
 
                     for idx, rnd in enumerate(rounds, 1):
-                        q9 = [
-                            q
-                            for q in rnd.queries
-                            if str(q.get("name", "")).startswith("Q9")
-                            and (not q.get("success") or not q.get("rows_returned"))
-                        ]
+                        final = idx == len(rounds)
+                        q9 = tolerated_q9_results(rnd.queries, final=final)
                         for q in q9:
                             what = "failed" if not q.get("success") else "returned no rows"
                             print_warning(
@@ -2610,7 +2622,6 @@ def _run_sustained(
                         # Early rounds can run before gold or the alert tables
                         # hold rows; an empty result there is reported, and
                         # only the last round is held to the empty-result gate.
-                        final = idx == len(rounds)
                         if not final:
                             for name in empty_benchmark_queries(rest):
                                 print_warning(f"Round {idx}: {name} returned no rows")
