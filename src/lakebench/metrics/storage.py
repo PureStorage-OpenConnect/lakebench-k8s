@@ -455,6 +455,11 @@ class MetricsStorage:
             maintenance_policy_id=recorded_policy(data),
             provenance=data.get("provenance"),
             benchmark_error=data.get("benchmark_error"),
+            autosize_cuts=data.get("autosize_cuts"),
+            maintenance_outcomes=data.get("maintenance_outcomes"),
+            # Kept as written. A record from before the block has none, and its
+            # snapshot has no experiment inputs, so it never gets one.
+            experiment=data.get("experiment"),
         )
 
         if data.get("end_time"):

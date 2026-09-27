@@ -373,7 +373,7 @@ class TestBenchmarkLocal:
             results, qph = benchmark_local(cfg, _deployment(tmp_path), workdir=tmp_path)
 
         assert qph == 0.0
-        assert all(not ok for _, ok, _, _ in results)
+        assert all(not r[1] for r in results)
 
     def test_unhealthy_engine_skips_rather_than_reporting_zeros(self, cfg, tmp_path):
         class DeadExecutor:

@@ -842,10 +842,13 @@ def test_legacy_query_set_ids_are_pinned_not_hashed_from_todays_sql():
     # A 12-query record from before ids (unscoped investigator SQL) is not
     # matched to today's SQL.
     assert legacy_query_set_id([{"name": n} for n in fin], late) == "unknown"
-    # Today the pinned sets still have these ids; when a query's SQL changes,
-    # this line fails and the new id makes legacy runs incomparable, as it
-    # should. Update this assertion, never the pinned constants.
-    assert {query_set_id(c360), query_set_id(fin8)} == {v[0] for v in LEGACY_QUERY_SET_IDS.values()}
+    # The total-order tiebreakers and the Q1 average fix (lane
+    # compare-equiv) changed the SQL, so today's ids differ from the pinned
+    # ones and legacy runs are not comparable with current runs, as they
+    # should not be. Update this assertion, never the pinned constants.
+    assert {query_set_id(c360), query_set_id(fin8)}.isdisjoint(
+        {v[0] for v in LEGACY_QUERY_SET_IDS.values()}
+    )
 
 
 def test_extension_threshold_needs_two_shared_payments_on_small_priors():

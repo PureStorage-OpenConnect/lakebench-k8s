@@ -161,6 +161,7 @@ spec:
                 --conf spark.driver.cores={{ spark_thrift_cores }} \
                 --conf spark.local.dir=/tmp/spark-local \
                 --conf spark.sql.warehouse.dir=/tmp/spark-warehouse \
+                --conf spark.sql.session.timeZone=UTC \
 {% if observability_enabled | default(false) %}
                 --conf spark.ui.prometheus.enabled=true \
                 --conf spark.metrics.conf.*.sink.prometheusServlet.class=org.apache.spark.metrics.sink.PrometheusServlet \

@@ -15,6 +15,7 @@ from lakebench.benchmark.queries import (
 from lakebench.config.schema import WorkloadSchema
 from lakebench.metrics import BenchmarkMetrics, MetricsStorage, PipelineMetrics
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+from tests.conftest import stub_experiment
 
 FIN = [q.name for q in get_benchmark_queries(WorkloadSchema.FINANCIAL)]
 FIN8 = [n for n in FIN if n not in {q.name for q in INVESTIGATOR_QUERIES}]
@@ -64,12 +65,17 @@ def test_legacy_run_gets_the_id_of_the_set_it_ran(tmp_path):
     raw["benchmark"].pop("query_set_id")
     path.write_text(json.dumps(raw))
     loaded = st.load_run("old").benchmark
-    assert loaded.query_set_id == query_set_id(FIN8)
-    assert qph_comparable(loaded.query_set_id, query_set_id(FIN8))[0] is True
+    # It keeps the id of the SQL it ran, which is not today's: the total-order
+    # tiebreakers (FQ2-FQ4, FQ6-FQ8) changed that SQL, so today's FQ1-FQ8
+    # set is a different set and QpH does not compare across them.
+    assert loaded.query_set_id == "qs8-1c2902f0b26a"
+    assert query_set_id(FIN8) != loaded.query_set_id
+    assert qph_comparable(loaded.query_set_id, "qs8-1c2902f0b26a")[0] is True
+    assert qph_comparable(loaded.query_set_id, query_set_id(FIN8))[0] is False
     assert qph_comparable(loaded.query_set_id, query_set_id(FIN))[0] is False
 
 
-def test_compare_keeps_legacy_c360_runs_comparable():
+def test_compare_keeps_legacy_c360_runs_comparable_among_themselves():
     from lakebench.cli._compare import _build_comparison
 
     c360 = [q.name for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360)]
@@ -85,9 +91,14 @@ def test_compare_keeps_legacy_c360_runs_comparable():
             "pipeline_benchmark": {"scores": {"composite_qph": qph}},
         }
 
-    c = _build_comparison("a", m(old, 500), "b", m(new, 480))
+    # Two legacy runs over the same pinned SQL still compare with each other.
+    c = _build_comparison("a", m(old, 500), "b", m(dict(old), 480))
     assert c["qph_comparable"] is True
     assert [r["metric"] for r in c["metrics"]] == ["composite_qph"]
+    # A legacy run against a current one does not: the Q4 tiebreaker moved
+    # the current c360 id past the pinned one.
+    c = _build_comparison("a", m(old, 500), "b", m(new, 480))
+    assert c["qph_comparable"] is False
     # Recorded before the last c360 SQL change (Q6 recency): not the same SQL.
     c = _build_comparison("a", m(old, 500, "2026-09-20T10:00:00-06:00"), "b", m(new, 480))
     assert c["qph_comparable"] is False
@@ -138,6 +149,7 @@ def test_reproduce_refuses_qph_across_query_sets():
             run_id="r",
             benchmark=None,
             maintenance_policy_id=MAINTENANCE_POLICY_ID,
+            experiment=stub_experiment(FIN),
         ),
         config_reference=None,
         commit_sha="abc",

@@ -33,6 +33,7 @@ from lakebench.cli._reproduce import (
     reproduce,
 )
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+from tests.conftest import stub_experiment
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -78,6 +79,7 @@ def _metrics(**overrides):
         "config_snapshot": {"name": "c360-scale-0-1", "scale": 0.1},
         # A run from this code carries the current policy (PipelineMetrics default).
         "maintenance_policy_id": MAINTENANCE_POLICY_ID,
+        "experiment": stub_experiment(["Q1"]),
         "datagen_fleet": {
             "pods_reported": 2,
             "aggregate_mbps": 154.4,
@@ -1225,3 +1227,61 @@ def test_verify_refuses_config_with_other_sample_count_before_running(tmp_path):
     ):
         reproduce(package=pkg_path)
     assert exc.value.exit_code == 2
+
+
+class TestExperimentChecks:
+    """A reproduce verifies the same experiment returned the same results
+    (invariant 1) before any number is compared."""
+
+    def _pkg(self, metrics=None):
+        return _build_package(metrics or _metrics(), config_reference="c.yaml", commit_sha="abc")
+
+    def test_package_carries_identity_and_fingerprints(self):
+        meta = self._pkg(_metrics(experiment=stub_experiment(["Q1"])))["reproduction_metadata"]
+        assert meta["experiment_identity"]["seed"] == 42
+        assert meta["result_fingerprints"]["Q1"]["exact"]
+
+    def test_same_experiment_same_results_passes(self):
+        from lakebench.cli._reproduce import _experiment_refusal
+
+        m = _metrics(experiment=stub_experiment(["Q1"]))
+        assert _experiment_refusal(self._pkg(m)["reproduction_metadata"], m) is None
+
+    def test_different_results_refuse(self):
+        from lakebench.benchmark.fingerprint import fingerprint_rows
+        from lakebench.cli._reproduce import _experiment_refusal
+
+        meta = self._pkg(_metrics(experiment=stub_experiment(["Q1"])))["reproduction_metadata"]
+        other = stub_experiment(["Q1"])
+        other["results"]["fingerprints"]["Q1"] = fingerprint_rows([("Q1", 2)])
+        why = _experiment_refusal(meta, _metrics(experiment=other))
+        assert why and "Q1 results not shown equal" in why
+
+    def test_different_seed_refuses(self):
+        from lakebench.cli._reproduce import _experiment_refusal
+
+        meta = self._pkg()["reproduction_metadata"]
+        why = _experiment_refusal(meta, _metrics(experiment=stub_experiment(seed=7)))
+        assert why and "seed differs" in why
+
+    def test_source_run_without_provenance_cannot_be_packaged(self):
+        with pytest.raises(ReproduceError, match="no provenance"):
+            self._pkg(_metrics(experiment=None))
+
+    def test_legacy_package_refused_before_running(self, tmp_path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(_ONE_SAMPLE_CFG)
+        pkg = _build_package(_metrics(), config_reference="cfg.yaml", commit_sha="abc")
+        del pkg["reproduction_metadata"]["experiment_identity"]
+        pkg_path = tmp_path / "pkg.yaml"
+        pkg_path.write_text(yaml.safe_dump(pkg))
+        with (
+            mock.patch("lakebench.cli._reproduce._current_commit_sha", return_value="abc"),
+            mock.patch(
+                "lakebench.cli._reproduce._run_pipeline",
+                side_effect=AssertionError("must refuse before running"),
+            ),
+            pytest.raises(typer.Exit) as exc,
+        ):
+            reproduce(package=pkg_path)
+        assert exc.value.exit_code == 2

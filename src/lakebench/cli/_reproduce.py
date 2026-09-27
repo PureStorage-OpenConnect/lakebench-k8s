@@ -272,6 +272,46 @@ def _policy_refusal(meta: dict[str, Any], actual: str | None) -> str | None:
     return problem + "; make a new run with this version and record the package from it"
 
 
+def _run_experiment(metrics: Any) -> dict[str, Any] | None:
+    """The run's experiment block (metrics/experiment.py), or None."""
+    block = getattr(metrics, "experiment_block", None)
+    exp = block() if callable(block) else getattr(metrics, "experiment", None)
+    return exp if isinstance(exp, dict) and exp.get("schema") else None
+
+
+def _failed_queries(metrics: Any) -> set[str]:
+    """Benchmark queries the run records as failed."""
+    bench = getattr(metrics, "benchmark", None)
+    if bench is None:
+        bench = getattr(getattr(metrics, "pipeline_benchmark", None), "query_benchmark", None)
+    out = set()
+    for q in getattr(bench, "queries", None) or []:
+        if isinstance(q, dict) and not q.get("success", True):
+            name = q.get("name") or q.get("query_name")
+            if name:
+                out.add(str(name))
+    return out
+
+
+def _experiment_refusal(meta: dict[str, Any], metrics: Any) -> str | None:
+    """Why the reproduce run is not the package's experiment, or returned
+    different benchmark results, or None."""
+    from lakebench.metrics.experiment import stored_identity_refusals
+
+    reasons = stored_identity_refusals(
+        meta.get("experiment_identity"),
+        meta.get("result_fingerprints"),
+        _run_experiment(metrics),
+        "package",
+        # A failed query is reported once, as a failed number, like the
+        # perf gate does, not a second time as a result mismatch.
+        failed=_failed_queries(metrics),
+    )
+    if not reasons:
+        return None
+    return "The run cannot verify the package: " + "; ".join(reasons) + "."
+
+
 def _benchmark_samples(metrics: Any) -> int | None:
     """Timed samples per query behind the run's QpH; 1 for pre-LB-150 records."""
     from lakebench.benchmark.spread import samples_per_query
@@ -337,6 +377,33 @@ def _build_package(
         # Such a package could never verify on this version.
         raise ReproduceError(f"The source run cannot be packaged: {stale_policy}.")
 
+    from lakebench.metrics.experiment import NO_PROVENANCE, identity, result_fingerprints
+
+    experiment = _run_experiment(metrics)
+    if experiment is None:
+        raise ReproduceError(
+            f"The source run cannot be packaged: {NO_PROVENANCE} (it predates the "
+            "experiment block, so a reproduce could not check it ran the same experiment)."
+        )
+    from lakebench.benchmark.fingerprint import usable
+    from lakebench.metrics.experiment import results_established, unchecked_by_design
+
+    established = results_established(experiment)
+    if established is not True and not unchecked_by_design(experiment):
+        raise ReproduceError(
+            f"The source run cannot be packaged: comparability not established ({established}); "
+            "a reproduce could never show it returned the same results."
+        )
+    failed = _failed_queries(metrics)
+    unfp = sorted(
+        n for n, f in result_fingerprints(experiment).items() if n not in failed and not usable(f)
+    )
+    if unfp and not unchecked_by_design(experiment):
+        raise ReproduceError(
+            "The source run cannot be packaged: queries without a usable result fingerprint "
+            f"({', '.join(unfp)}) could never be shown equal to a reproduce run."
+        )
+
     required = "scale_ratio" if pipeline_mode == "batch" else "ingest_ratio"
     if required not in numbers:
         raise ReproduceError(
@@ -360,6 +427,10 @@ def _build_package(
             # ...and under the same table-maintenance policy.
             "maintenance_policy_id": _run_maintenance_policy(metrics),
             "benchmark_samples_per_query": _benchmark_samples(metrics) or 1,
+            # The experiment (workload, corpus, seed, scale, mode) and what
+            # each benchmark query returned: a reproduce must match both.
+            "experiment_identity": identity(experiment),
+            "result_fingerprints": result_fingerprints(experiment),
             "tolerance_pct": dict(DEFAULT_TOLERANCES),
             "config_snapshot": snapshot,
             "datagen_fleet_summary": {
@@ -898,6 +969,14 @@ def _verify(
     if _mismatch:
         print_error(_mismatch)
         raise typer.Exit(2)
+    if not meta.get("experiment_identity"):
+        from lakebench.metrics.experiment import NO_PROVENANCE
+
+        print_error(
+            f"The package cannot be verified: {NO_PROVENANCE} (it was recorded before "
+            "packages carried an experiment identity); record it again from a current run."
+        )
+        raise typer.Exit(2)
 
     if dry_run:
         print_warning("--dry-run set: package validation only, no pipeline run")
@@ -911,8 +990,10 @@ def _verify(
         print_error(str(e))
         raise typer.Exit(2) from None
 
-    _mismatch = _sample_mismatch(meta, _benchmark_samples(metrics)) or _policy_refusal(
-        meta, _run_maintenance_policy(metrics)
+    _mismatch = (
+        _sample_mismatch(meta, _benchmark_samples(metrics))
+        or _policy_refusal(meta, _run_maintenance_policy(metrics))
+        or _experiment_refusal(meta, metrics)
     )
     if _mismatch:
         print_error(_mismatch)

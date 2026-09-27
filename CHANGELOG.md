@@ -37,6 +37,37 @@ Draft notes for 1.6.0.
   `lakebench-observability` namespace only when none exists, never upgrades
   an existing one, and `destroy` never uninstalls it (a release an older
   lakebench put in the deployment's own namespace is still removed).
+- **Cross-engine row counts were wrong on Spark Thrift and DuckDB.** Thrift
+  reported `n + 3 x ceil(n/100)` rows (beeline options after `-e` were
+  dropped, so it printed its table format), and DuckDB reported 2 rows for
+  any query slower than 2 s (its progress bar broke the JSON payload and the
+  executor counted lines). Both are fixed; a DuckDB payload that cannot be
+  read is now an error. Every engine session is pinned to UTC.
+- **Benchmark SQL changed: total-order tiebreakers.** FQ2, FQ3, FQ4, FQ6,
+  FQ7, FQ8, IQ3 and Q4 now order totally (ORDER BY keys only), so every
+  engine returns the same rows. Both query-set ids moved: QpH from before
+  does not compare with QpH from now.
+- **Every metrics.json carries an `experiment` block** (workload and
+  version, corpus as generated, architecture and access path, effective
+  maintenance, limits that bound the run, support state, repetitions, and a
+  result fingerprint per benchmark query). report.html shows it.
+- **`lakebench compare` contract.** It now has three verdicts: comparable,
+  NOT COMPARABLE (different experiments, different results, a failed run,
+  or a record without the experiment block) and comparability not
+  established (a side has no checked results: continuous, `--skip-benchmark`,
+  a recipe without a query engine). Only NOT COMPARABLE exits 1, and it now
+  also covers a failed run. Deltas and winner colouring are withheld unless
+  the pair is comparable; a comparable pair whose execution conditions
+  differ is labelled not like-for-like. `comparison.json` gains `verdict`,
+  `comparable`, `like_for_like`, `condition_differences`, `support` and
+  `refusals`; CSV output gains `comparable` and `like_for_like` columns.
+- **Perf-gate baselines and reproduce packages must be re-recorded.**
+  Both now refuse a run whose experiment identity, execution conditions or
+  benchmark results differ from the reference, and a reference recorded
+  before this release carries no identity, so it refuses every run.
+- **A benchmark query that returns no rows fails the run** unless the query
+  is declared allowed-empty (IQ2 and IQ4). In continuous mode only the last
+  in-stream round is held to this.
 - **Every v1.5 continuous number was measured with no snapshot expiry and
   no VACUUM (LB-172, LB-173, LB-174).** `exec_sql` discarded the exit code,
   so failed maintenance statements were reported as successes. Underneath

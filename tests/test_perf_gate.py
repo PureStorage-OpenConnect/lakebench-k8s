@@ -19,6 +19,7 @@ import yaml
 
 from lakebench.metrics import perf_gate as pg
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+from tests.conftest import stub_experiment
 
 ROOT = Path(__file__).resolve().parents[1]
 PERF = ROOT / "benchmarks" / "perf"
@@ -115,6 +116,9 @@ def _batch_run(snapshot: dict, run_id: str, **over) -> dict:
         "start_time": "2026-09-24T10:00:00",
         "success": over.get("success", True),
         "config_snapshot": snapshot,
+        "experiment": over.get(
+            "experiment", stub_experiment(QUERIES, failed=over.get("failed", ()))
+        ),
         "maintenance_policy_id": over.get("policy", MAINTENANCE_POLICY_ID),
         "pipeline_benchmark": {
             "run_id": run_id,
@@ -170,6 +174,7 @@ def _cont_run(
         "start_time": "2026-09-24T10:00:00",
         "success": True,
         "config_snapshot": snapshot,
+        "experiment": stub_experiment(mode="sustained"),
         "maintenance_policy_id": MAINTENANCE_POLICY_ID,
         "pipeline_benchmark": {
             "run_id": run_id,
@@ -250,6 +255,69 @@ def test_regression_detected(env):
     assert c.verdict == pg.REGRESSION
     assert _row(c, "time_to_value_seconds").status == "regression"
     assert round(_row(c, "time_to_value_seconds").drift_pct, 1) == 15.0
+
+
+def test_different_query_results_are_refused_not_gated(env):
+    """Invariant 1: a run whose benchmark returned other results than the
+    baseline's is not a performance comparison at all."""
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    other = stub_experiment(QUERIES)
+    from lakebench.benchmark.fingerprint import fingerprint_rows
+
+    other["results"]["fingerprints"]["Q2_filter"] = fingerprint_rows([("Q2_filter", 2)])
+    c = _compare(
+        env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb", experiment=other)
+    )
+    assert c.verdict == pg.REFUSED
+    assert any("Q2_filter results not shown equal" in r for r in c.reasons), c.reasons
+
+
+def test_different_experiment_or_conditions_refused(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    for over, field in (({"seed": 7}, "seed"), ({"maintenance": "x"}, "effective maintenance")):
+        run_id = f"20260924-11000{len(field) % 10}-bbbbbb"
+        run = _batch_run(snap, run_id, experiment=stub_experiment(QUERIES, **over))
+        c = _compare(env, "c360-batch-s10", run)
+        assert c.verdict == pg.REFUSED and any(r.startswith(field) for r in c.reasons), c.reasons
+
+
+def test_run_without_provenance_is_refused_and_not_recordable(env):
+    snap = env.snaps["c360-batch-s10"]
+    with pytest.raises(pg.PerfGateError, match="no provenance"):
+        _record(
+            env,
+            "c360-batch-s10",
+            _batch_run(snap, "20260924-090000-cccccc") | {"experiment": None},
+        )
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    legacy = _batch_run(snap, "20260924-110000-bbbbbb")
+    legacy.pop("experiment")
+    c = _compare(env, "c360-batch-s10", legacy)
+    assert c.verdict == pg.REFUSED
+    assert any("no provenance" in r for r in c.reasons), c.reasons
+
+
+def test_legacy_baseline_without_identity_refuses_every_run(env):
+    snap = env.snaps["c360-batch-s10"]
+    _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa"))
+    store = yaml.safe_load(env.store_path.read_text())
+    entry = store["baselines"]["c360-batch-s10"]
+    entry.pop("experiment_identity")
+    entry.pop("result_fingerprints")
+    env.store_path.write_text(yaml.safe_dump(store, sort_keys=False))
+    c = _compare(env, "c360-batch-s10", _batch_run(snap, "20260924-110000-bbbbbb"))
+    assert c.verdict == pg.REFUSED
+    assert any("baseline was recorded without an experiment identity" in r for r in c.reasons)
+
+
+def test_baseline_needs_a_usable_fingerprint_per_query(env):
+    snap = env.snaps["c360-batch-s10"]
+    exp = stub_experiment(QUERIES)
+    exp["results"]["fingerprints"]["Q3_join"] = {"spec": "rf1", "error": "timed out"}
+    with pytest.raises(pg.PerfGateError, match="Q3_join"):
+        _record(env, "c360-batch-s10", _batch_run(snap, "20260924-100000-aaaaaa", experiment=exp))
 
 
 def test_higher_is_better_drop_is_a_regression(env):
@@ -1092,7 +1160,13 @@ def _real_run(snap: dict, run_id: str, silver_s: float = 200.0):
         qph=400.0,
         total_seconds=30.0,
         queries=[
-            {"name": "Q1", "elapsed_seconds": 30.0, "success": True, "samples": [29.0, 30.0, 31.0]}
+            {
+                "name": "Q1",
+                "elapsed_seconds": 30.0,
+                "success": True,
+                "samples": [29.0, 30.0, 31.0],
+                "result_fingerprint": stub_experiment(["Q1"])["results"]["fingerprints"]["Q1"],
+            }
         ],
         iterations=3,
     )

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar
 
+from lakebench.metrics.experiment import experiment_inputs
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.provenance import run_provenance
 
@@ -322,9 +323,37 @@ class PipelineMetrics:
     # the field existed.
     provenance: dict[str, Any] | None = None
 
+    # Lakebench-imposed cuts to fit the cluster (config.autosizer), in the
+    # words printed at run start. None: not recorded.
+    autosize_cuts: list[str] | None = None
+
+    # What the run's table-maintenance calls actually did (cli/_sustained
+    # _note_outcome): one dict per call with kind (expire, compaction),
+    # statement counts or a skip/error reason. None: not recorded (a record
+    # from before the field, or a path that never reached maintenance).
+    maintenance_outcomes: list[dict[str, Any]] | None = None
+
+    # The experiment block as loaded from metrics.json (metrics/experiment.py).
+    # experiment_block() rebuilds it from the record when the snapshot holds
+    # experiment_inputs; a record from before the block has none and never
+    # gets one.
+    experiment: dict[str, Any] | None = None
+
+    def experiment_block(self) -> dict[str, Any] | None:
+        """The experiment block, rebuilt from the record whenever its snapshot
+        carries the config half (``experiment_inputs``, frozen at run start):
+        the run half then always describes the record as it is now, including
+        after ``lakebench benchmark`` replaced its benchmark. A record from
+        before the block has no inputs and keeps what it was written with
+        (normally nothing)."""
+        from lakebench.metrics.experiment import build_experiment
+
+        built = build_experiment(self)
+        return built if built is not None else self.experiment
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        d = {
+        d: dict[str, Any] = {
             "run_id": self.run_id,
             "deployment_name": self.deployment_name,
             "start_time": self.start_time.isoformat(),
@@ -342,6 +371,13 @@ class PipelineMetrics:
         }
         if self.provenance is not None:
             d["provenance"] = self.provenance
+        if self.autosize_cuts is not None:
+            d["autosize_cuts"] = list(self.autosize_cuts)
+        if self.maintenance_outcomes is not None:
+            d["maintenance_outcomes"] = list(self.maintenance_outcomes)
+        experiment = self.experiment_block()
+        if experiment is not None:
+            d["experiment"] = experiment
         if self.benchmark is not None:
             d["benchmark"] = self.benchmark.to_dict()
         if self.benchmark_error is not None:
@@ -1750,6 +1786,12 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     for name, times in query_times.items():
         qd = dict(query_template[name])
         qd["elapsed_seconds"] = round(statistics.median(times), 3)
+        if "result_fingerprint" in qd:
+            # Each in-stream round read a different state of tables still
+            # being written; the first round's fingerprint is not the
+            # aggregate's.
+            qd["result_fingerprint"] = None
+            qd["result_fingerprint_note"] = "aggregated over in-stream rounds"
         aggregated_queries.append(qd)
 
     return BenchmarkMetrics(
@@ -1875,6 +1917,9 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
             "compaction_enabled": pipeline.sustained.compaction_enabled,
             "compaction_interval": pipeline.sustained.compaction_interval,
         },
+        # Config half of the metrics.json experiment block
+        # (metrics/experiment.py). Not a perf-gate fingerprint key.
+        "experiment_inputs": experiment_inputs(cfg),
     }
 
     return snapshot

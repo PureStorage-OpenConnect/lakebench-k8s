@@ -1116,7 +1116,9 @@ class ReportGenerator:
         benchmark_rounds_html = self._generate_benchmark_rounds_section(metrics)
         pipeline_bench_html = self._generate_pipeline_benchmark_section(metrics)
         summary_html = self._generate_summary(metrics)
-        config_html = self._generate_config_section(metrics)
+        config_html = self._generate_config_section(metrics) + self._generate_experiment_section(
+            metrics
+        )
         platform_html = self._generate_platform_section(platform_metrics)
         # Layer 2: Diagnosis
         bottleneck_html = self._generate_bottleneck_section(metrics)
@@ -2418,6 +2420,117 @@ class ReportGenerator:
             </div>
         </section>
         """
+
+    def _generate_experiment_section(self, metrics: PipelineMetrics) -> str:
+        """The experiment block (metrics/experiment.py): what produced the run."""
+        from lakebench.benchmark.fingerprint import describe
+
+        e = _html_escape
+        exp = metrics.experiment_block()
+        if not exp:
+            return (
+                "<section><h2>Experiment</h2><p>No provenance: this run was recorded before "
+                "the experiment block, so it cannot be compared with another run.</p></section>"
+            )
+        w = exp.get("workload") or {}
+        c = exp.get("corpus") or {}
+        dg = c.get("datagen") or {}
+        a = exp.get("architecture") or {}
+        lim = exp.get("limits") or {}
+        st = exp.get("stages") or {}
+        rules = exp.get("rules") or {}
+        res = exp.get("results") or {}
+        sup = exp.get("support") or {}
+        eff = exp.get("effective_maintenance") or {}
+        rep = exp.get("repetitions") or {}
+
+        def comp(key: str) -> str:
+            v = a.get(key) or {}
+            return f"{v.get('type')} ({v.get('version') or v.get('image') or 'version unknown'})"
+
+        digest = dg.get("digest") or f"unresolved: {dg.get('digest_reason', 'unknown')}"
+        caps_hit = [x["job_type"] for x in lim.get("executors") or [] if x.get("cap_hit")]
+        rows = [
+            ("Workload", f"{w.get('name')} {w.get('version')}"),
+            ("Generator model version", w.get("generator_model_version") or "none"),
+            ("Corpus id", c.get("id")),
+            ("Seed", c.get("seed")),
+            ("Corpus role", c.get("corpus_role") or "none"),
+            ("Scale", c.get("scale")),
+            ("Mode", exp.get("mode")),
+            ("Datagen image", dg.get("pod_image") or c.get("generator_image")),
+            ("Datagen digest", digest),
+            ("Recipe", a.get("recipe")),
+            ("Catalog", comp("catalog")),
+            ("Table format", comp("table_format")),
+            ("Pipeline engine", comp("pipeline_engine")),
+            ("Query engine", comp("query_engine")),
+            ("Query access path", a.get("query_access_path") or "none"),
+            ("Support state", f"{sup.get('state', 'unknown')} ({sup.get('basis', '')})"),
+            ("Maintenance policy (requested)", exp.get("maintenance_policy_id")),
+            (
+                "Maintenance (effective, what ran)",
+                f"{eff.get('id')} [{eff.get('detail_id') or ''}; {eff.get('basis') or ''}]"
+                + (f" -- {'; '.join(eff.get('reasons') or [])}" if eff.get("reasons") else ""),
+            ),
+            ("Maintenance settings", exp.get("maintenance_settings") or "none"),
+            ("System", exp.get("system") or "unknown"),
+            (
+                "Corpus observed",
+                "yes (from the datagen pods)"
+                if c.get("observed")
+                else c.get("observed_note") or "no",
+            ),
+            ("Corpus problems", "; ".join(c.get("problems") or []) or "none"),
+            (
+                "Repetitions",
+                f"runs n={rep.get('runs', 1)}, benchmark samples per query "
+                f"{rep.get('benchmark_samples_per_query') or 'none'}"
+                + (
+                    f", in-stream rounds {rep['benchmark_rounds']}"
+                    if rep.get("benchmark_rounds")
+                    else ""
+                ),
+            ),
+            ("Stages executed", ", ".join(st.get("executed") or []) or "none"),
+            ("Stages skipped or failed", ", ".join(st.get("skipped") or []) or "none"),
+            ("Executor caps hit (Lakebench limit)", ", ".join(caps_hit) or "none"),
+            ("Lakebench limits that bound the run", "; ".join(lim.get("bound") or []) or "none"),
+            (
+                "Auto-sizing cuts (Lakebench limit)",
+                "; ".join(lim.get("autosize_cuts") or []) or "none",
+            ),
+        ]
+        if rules:
+            rows.append(("Rules executed", ", ".join(rules.get("executed") or []) or "none"))
+            skipped = rules.get("skipped") or {}
+            rows.append(
+                ("Rules skipped", ", ".join(f"{k} ({v})" for k, v in skipped.items()) or "none")
+            )
+        if lim.get("max_files_per_trigger") is not None:
+            rows.append(("Trickle rate (files per trigger)", lim["max_files_per_trigger"]))
+        body = "".join(
+            f"<tr><td>{e(str(k))}</td><td><code class='mono'>{e(str(v))}</code></td></tr>"
+            for k, v in rows
+        )
+        fps = res.get("fingerprints") or {}
+        fp_rows = "".join(
+            f"<tr><td>{e(n)}</td><td><code class='mono'>{e(describe(f))}</code></td></tr>"
+            for n, f in sorted(fps.items())
+        )
+        note = res.get("not_checked")
+        fp_html = (
+            f"<p>{e(note)}</p>"
+            if note
+            else f"<table><thead><tr><th>Query</th><th>Result fingerprint</th></tr></thead>"
+            f"<tbody>{fp_rows}</tbody></table>"
+        )
+        return (
+            "<section><h2>Experiment</h2>"
+            f"<table><tbody>{body}</tbody></table>"
+            "<h3>Result fingerprints</h3>"
+            f"{fp_html}</section>"
+        )
 
     # Infrastructure pods excluded from the per-stage summary table
     # (observability stack overhead, not pipeline performance data).

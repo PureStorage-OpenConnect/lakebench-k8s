@@ -301,12 +301,14 @@ def exec_sql(
         result = k8s.exec_in_pod(
             pod_name,
             [
+                # Options before -e: after it, beeline reads them as more
+                # -e statements and drops them.
                 "/opt/spark/bin/beeline",
                 "-u",
                 "jdbc:hive2://localhost:10000",
+                "--silent=true",
                 "-e",
                 sql,
-                "--silent=true",
             ],
             namespace,
             container="spark-thrift",
@@ -346,12 +348,14 @@ def query_sql(
         rc, stdout, stderr = k8s.exec_in_pod(
             pod_name,
             [
+                # Options before -e: after it, beeline reads them as more
+                # -e statements and drops them.
                 "/opt/spark/bin/beeline",
                 "-u",
                 "jdbc:hive2://localhost:10000",
+                "--silent=true",
                 "-e",
                 sql,
-                "--silent=true",
             ],
             namespace,
             container="spark-thrift",

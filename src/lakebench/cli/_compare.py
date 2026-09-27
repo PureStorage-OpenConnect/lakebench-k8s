@@ -90,6 +90,30 @@ def compare(
         cfg_a.architecture.workload.datagen.scale = scale
         cfg_b.architecture.workload.datagen.scale = scale
 
+    # Different workloads, corpora, seeds, scales or modes are different
+    # experiments; say so before hours are spent running them. The runs still
+    # happen (the evidence is shown), and the command exits 1 at the end.
+    differences = config_identity_differences(cfg_a, cfg_b)
+    if differences:
+        console.print(
+            Panel(
+                "[bold red]NOT COMPARABLE[/bold red]: the two configs describe different "
+                "experiments, so their performance numbers will not be compared.\n  "
+                + "\n  ".join(differences),
+                border_style="red",
+            )
+        )
+    conditions = config_condition_differences(cfg_a, cfg_b)
+    if conditions:
+        console.print(
+            Panel(
+                "[bold yellow]Not like-for-like[/bold yellow]: the configs will execute under "
+                "different conditions; matching results will be shown as comparable, not "
+                "like-for-like.\n  " + "\n  ".join(conditions),
+                border_style="yellow",
+            )
+        )
+
     # Show comparison plan
     where = "local (podman/docker)" if local else "Kubernetes"
     console.print(
@@ -151,6 +175,30 @@ def compare(
     with open(compare_dir / "comparison.json", "w") as f:
         json.dump(comparison, f, indent=2)
     console.print(f"\n[dim]Comparison saved to {compare_dir}[/dim]")
+    if (
+        comparison.get("verdict", "not_comparable" if comparison.get("comparable") is False else "")
+        == "not_comparable"
+    ):
+        # Owner decision 2026-09-26: a non-comparable pair exits non-zero.
+        # A pair whose comparability is not established exits 0: nothing
+        # shows it differs.
+        raise typer.Exit(1)
+
+
+def config_identity_differences(cfg_a, cfg_b) -> list[str]:
+    """Why two configs cannot produce comparable runs (experiment identity),
+    known before either runs. The generator digest is only known after."""
+    from lakebench.metrics.experiment import identity_differences, planned_experiment
+
+    return identity_differences(planned_experiment(cfg_a), planned_experiment(cfg_b))
+
+
+def config_condition_differences(cfg_a, cfg_b) -> list[str]:
+    """Execution conditions two configs will run under differently (planned
+    effective maintenance, query access path): not like-for-like."""
+    from lakebench.metrics.experiment import condition_differences, planned_experiment
+
+    return condition_differences(planned_experiment(cfg_a), planned_experiment(cfg_b))
 
 
 # Repeated local benchmarks on unchanged data measured 0.9% spread (n=5,
@@ -302,7 +350,14 @@ def _build_comparison(
     name_b: str,
     metrics_b: dict,
 ) -> dict[str, Any]:
-    """Build a structured comparison dict from two metric sets."""
+    """Build a structured comparison dict from two metric sets.
+
+    When the runs are different experiments or returned different benchmark
+    results (metrics.experiment.refusals), ``comparable`` is False, the
+    reasons are under ``refusals``, and every row is marked
+    ``not_comparable``: the raw numbers stay visible, but no delta or winner
+    is derived from them.
+    """
     scores_a = (
         metrics_a.get("pipeline_benchmark", {}).get("scores", metrics_a.get("scorecard", {}))
         if "error" not in metrics_a
@@ -327,11 +382,55 @@ def _build_comparison(
         refused = [k for k in all_keys if "qph" in k.lower()]
         all_keys = [k for k in all_keys if k not in refused]
 
+    from lakebench.metrics.experiment import (
+        experiment_of,
+        like_for_like,
+        results_established,
+        support_of,
+    )
+    from lakebench.metrics.experiment import refusals as experiment_refusals
+
+    provenance_refusals: list[str] = []
+    result_refusals: list[str] = []
+    result_notes: list[str] = []
+    conditions: list[str] = []
+    if "error" not in metrics_a and "error" not in metrics_b:
+        provenance_refusals, result_refusals, result_notes = experiment_refusals(
+            metrics_a, metrics_b
+        )
+        conditions = like_for_like(metrics_a, metrics_b)
+    else:
+        # A run that failed has no evidence to compare (invariant 1).
+        for label, m in (("A", metrics_a), ("B", metrics_b)):
+            if "error" in m:
+                provenance_refusals.append(f"run {label} did not complete: {m['error']}")
+    # Three verdicts. not_comparable: different experiments or different
+    # results. not_established: nothing contradicts the pair, but at least
+    # one side has no checked results (continuous, --skip-benchmark, a
+    # recipe without a query engine), so equivalence is not shown either.
+    # comparable: results shown equivalent.
+    unestablished: list[str] = []
+    if not provenance_refusals and not result_refusals:
+        for label, m in (("A", metrics_a), ("B", metrics_b)):
+            why = results_established(experiment_of(m))
+            if why is not True:
+                unestablished.append(f"run {label}: {why}")
+    if provenance_refusals or result_refusals:
+        verdict = "not_comparable"
+    elif unestablished:
+        verdict = "not_established"
+    else:
+        verdict = "comparable"
+    comparable = verdict == "comparable"
+
     rows = []
     for key in all_keys:
         val_a = scores_a.get(key)
         val_b = scores_b.get(key)
-        rows.append({"metric": key, "config_a": val_a, "config_b": val_b})
+        row: dict[str, Any] = {"metric": key, "config_a": val_a, "config_b": val_b}
+        if not comparable:
+            row["not_comparable"] = True
+        rows.append(row)
 
     warnings = []
     n_a, n_b = _samples_per_query(metrics_a), _samples_per_query(metrics_b)
@@ -354,8 +453,18 @@ def _build_comparison(
         if policy_problem:
             warnings.append(policy_problem)
 
+    warnings.extend(result_notes)
     return {
         "timestamp": datetime.now().isoformat(),
+        "verdict": verdict,
+        "comparable": comparable,
+        "not_established": unestablished,
+        # DESIGN 6.5: comparable pairs whose effective execution conditions
+        # differ are shown with those differences and not called like-for-like.
+        "like_for_like": comparable and not conditions,
+        "condition_differences": conditions,
+        "support": {"config_a": support_of(metrics_a), "config_b": support_of(metrics_b)},
+        "refusals": {"provenance": provenance_refusals, "results": result_refusals},
         "warnings": warnings,
         "config_a": {
             "name": name_a,
@@ -408,7 +517,62 @@ def _print_comparison_table(comparison: dict) -> None:
     for warning in comparison.get("warnings") or []:
         console.print(f"[yellow]Warning: {warning}[/yellow]")
 
-    table = Table(title="Comparison Results", show_header=True, header_style="bold")
+    refused = comparison.get("refusals") or {}
+    reasons = []
+    if refused.get("provenance"):
+        reasons.append("the runs are different experiments:")
+        reasons.extend(f"  {r}" for r in refused["provenance"])
+    if refused.get("results"):
+        reasons.append("the benchmark queries returned results not shown equal:")
+        reasons.extend(f"  {r}" for r in refused["results"])
+    verdict = comparison.get("verdict") or (
+        "comparable" if comparison.get("comparable") is not False else "not_comparable"
+    )
+    not_comparable = verdict == "not_comparable"
+    if verdict == "not_established":
+        console.print(
+            Panel(
+                "[bold yellow]COMPARABILITY NOT ESTABLISHED[/bold yellow]: no checked benchmark "
+                "results on both sides, so nothing shows the two runs did equivalent work. The "
+                "raw numbers are shown; no deltas or winner.\n"
+                + "\n".join(f"  {r}" for r in comparison.get("not_established") or []),
+                border_style="yellow",
+            )
+        )
+    elif not_comparable:
+        console.print(
+            Panel(
+                "[bold red]NOT COMPARABLE[/bold red]: the numbers below measure different "
+                "work, so no deltas are shown.\n" + "\n".join(reasons),
+                border_style="red",
+            )
+        )
+    elif comparison.get("condition_differences"):
+        console.print(
+            Panel(
+                "[bold yellow]COMPARABLE, NOT LIKE-FOR-LIKE[/bold yellow]: the benchmark "
+                "results match, but the runs executed under different conditions, so a "
+                "difference below may come from those rather than the architecture.\n"
+                + "\n".join(f"  {d}" for d in comparison["condition_differences"]),
+                border_style="yellow",
+            )
+        )
+    support = comparison.get("support") or {}
+    if support:
+        console.print(
+            f"Support state: A {support.get('config_a', 'unknown')}, "
+            f"B {support.get('config_b', 'unknown')} "
+            "[dim](unverified: ran correctly but not release-validated)[/dim]"
+        )
+    if not_comparable:
+        title = "Comparison Results -- NOT COMPARABLE"
+    elif verdict == "not_established":
+        title = "Comparison Results -- comparability not established"
+    elif comparison.get("condition_differences"):
+        title = "Comparison Results -- comparable, not like-for-like"
+    else:
+        title = "Comparison Results"
+    table = Table(title=title, show_header=True, header_style="bold")
     table.add_column("Metric", style="cyan")
     table.add_column(name_a, justify="right")
     table.add_column(name_b, justify="right")
@@ -435,6 +599,12 @@ def _print_comparison_table(comparison: dict) -> None:
                 better = "green" if _higher_is_better(row["metric"]) == (pct > 0) else "red"
                 delta = f"[{better}]{pct:+.1f}%[/{better}]"
 
+        if row.get("not_comparable"):
+            delta = (
+                "[yellow]not established[/yellow]"
+                if verdict == "not_established"
+                else "[red]not comparable[/red]"
+            )
         table.add_row(
             row["metric"],
             _fmt(val_a),
@@ -477,9 +647,20 @@ def _save_comparison(comparison: dict, path: Path, fmt: str) -> None:
         import csv
 
         with open(path, "w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=["metric", "config_a", "config_b"])
+            writer = csv.DictWriter(
+                f, fieldnames=["metric", "config_a", "config_b", "comparable", "like_for_like"]
+            )
             writer.writeheader()
-            writer.writerows(comparison["metrics"])
+            for row in comparison["metrics"]:
+                writer.writerow(
+                    {
+                        "metric": row["metric"],
+                        "config_a": row["config_a"],
+                        "config_b": row["config_b"],
+                        "comparable": not row.get("not_comparable"),
+                        "like_for_like": bool(comparison.get("like_for_like")),
+                    }
+                )
     else:
         # Default to JSON for unsupported formats
         with open(path, "w") as f:

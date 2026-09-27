@@ -316,15 +316,17 @@ def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
             # value stays in the config snapshot, which is what compare reads.
             scale=max(1, int(cfg.architecture.workload.datagen.scale)),
             qph=qph,
-            total_seconds=sum(elapsed for _, _, elapsed, _ in bench_results),
+            total_seconds=sum(r[2] for r in bench_results),
             queries=[
                 {
-                    "query_name": name,
-                    "elapsed_seconds": elapsed,
-                    "success": ok,
-                    "rows_returned": rows,
+                    "query_name": r[0],
+                    "elapsed_seconds": r[2],
+                    "success": r[1],
+                    "rows_returned": r[3],
+                    # (name, ok, elapsed, rows[, fingerprint]): see benchmark_local.
+                    "result_fingerprint": r[4] if len(r) > 4 else None,
                 }
-                for name, ok, elapsed, rows in bench_results
+                for r in bench_results
             ],
             iterations=1,
         )
@@ -613,7 +615,7 @@ def _warm_benchmark(runner, query_timeout: int) -> None:
     """
     try:
         # One sample: the pass exists to touch every table, not to be timed.
-        runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1)
+        runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1, fingerprint=False)
     except Exception as e:  # noqa: BLE001
         logger.warning("benchmark warm-up pass failed: %s", e)
 
@@ -691,13 +693,15 @@ def _settle_after_maintenance(
     return result
 
 
-def _benchmark_gate_problems(cfg, queries) -> list[str]:
+def _benchmark_gate_problems(cfg, queries, check_empty: bool = True) -> list[str]:
     """Reasons the benchmark result is not a valid score.
 
     QpH is computed over the queries that succeeded, so a run where most
     queries failed still printed a QpH (live AML run, 2026-09-24: 1 of 8
     passed, QpH 166, exit 0). Every failure outside the known upstream list
-    fails the run.
+    fails the run. With *check_empty* (the default), so does a successful
+    query that returned no rows and is not declared allow_empty; the
+    continuous path turns it off for rounds before its last.
     """
     fmt = cfg.architecture.table_format.type.value
     engine = cfg.architecture.query_engine.type.value
@@ -712,13 +716,44 @@ def _benchmark_gate_problems(cfg, queries) -> list[str]:
     bad = [
         q for q in queries if not _ok(q) and (fmt, engine, _name(q)) not in _KNOWN_QUERY_FAILURES
     ]
-    if not bad:
-        return []
-    names = ", ".join(_name(q) for q in bad)
-    return [
-        f"Benchmark gate: {len(bad)} of {len(queries)} queries failed ({names}); "
-        "QpH over the rest is not a valid score. Marking FAILURE."
-    ]
+    # A query that "succeeded" with no rows measured nothing (invariant 3):
+    # an empty table, a filter that matched nothing, or a reader that read
+    # nothing. Only a query declared allow_empty may return none.
+    empty_names = set(empty_benchmark_queries(queries)) if check_empty else set()
+    empty = [q for q in queries if _name(q) in empty_names]
+    problems = []
+    if bad:
+        names = ", ".join(_name(q) for q in bad)
+        problems.append(
+            f"Benchmark gate: {len(bad)} of {len(queries)} queries failed ({names}); "
+            "QpH over the rest is not a valid score. Marking FAILURE."
+        )
+    if empty:
+        names = ", ".join(_name(q) for q in empty)
+        problems.append(
+            f"Benchmark gate: {len(empty)} of {len(queries)} queries returned no rows "
+            f"({names}); an empty result measures nothing. Marking FAILURE."
+        )
+    return problems
+
+
+def empty_benchmark_queries(queries) -> list[str]:
+    """Names of successful queries (QueryResult or dict) that returned no
+    rows and are not declared allow_empty."""
+    from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
+
+    allow_empty = {
+        bq.name for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for bq in qs if bq.allow_empty
+    }
+    out = []
+    for q in queries:
+        d = isinstance(q, dict)
+        name = q.get("name") if d else q.query.name
+        ok = q.get("success") if d else q.success
+        rows = (q.get("rows_returned") if d else q.rows_returned) or 0
+        if ok and int(rows) == 0 and name not in allow_empty:
+            out.append(str(name))
+    return out
 
 
 def _aml_batch_gate_problems(
@@ -1060,7 +1095,7 @@ def _run_local_mode(
                 "queries_per_hour": qph,
                 "queries": [
                     {"name": n, "success": ok, "elapsed": e, "rows": r}
-                    for n, ok, e, r in bench_results
+                    for n, ok, e, r, *_ in bench_results
                 ],
             },
         )
@@ -1319,7 +1354,8 @@ def run(
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
     # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
-    for cut in resolve_auto_sizing(cfg, cluster_cap) or []:
+    autosize_cuts = [str(c) for c in resolve_auto_sizing(cfg, cluster_cap) or []]
+    for cut in autosize_cuts:
         print_warning(f"Auto-sizing: {cut}")
 
     # Auto-scale timeout if not explicitly set
@@ -1444,6 +1480,7 @@ def run(
             skip_generate=skip_generate,
             skip_maintenance=skip_maintenance,
             force_reset=force_reset,
+            autosize_cuts=autosize_cuts,
         )
         return
 
@@ -1472,6 +1509,11 @@ def run(
 
     config_snapshot = build_config_snapshot(cfg)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    if collector.current_run is not None:
+        collector.current_run.autosize_cuts = autosize_cuts
+        # [] from the start: a run that ends before the maintenance phase is
+        # then stamped "not run", never with the policy's request.
+        collector.current_run.maintenance_outcomes = []
     if skip_maintenance and collector.current_run is not None:
         # No table maintenance: not comparable with runs under the policy.
         from lakebench.metrics.maintenance_policy import skipped_policy_id
@@ -2057,6 +2099,13 @@ def run(
         pre_file_count = 0
         post_file_count = 0
         maint_elapsed = 0.0
+        # What each maintenance and compaction call actually did, for the
+        # experiment block's effective maintenance. [] when none ran.
+        maint_outcomes: list = []
+        if collector.current_run is not None:
+            if collector.current_run.maintenance_outcomes is None:
+                collector.current_run.maintenance_outcomes = []
+            maint_outcomes = collector.current_run.maintenance_outcomes
 
         do_maintenance = (
             not skip_benchmark
@@ -2065,6 +2114,15 @@ def run(
         )
 
         if not do_maintenance:
+            why = (
+                "--skip-benchmark"
+                if skip_benchmark
+                else "--skip-maintenance"
+                if skip_maintenance
+                else "pre_benchmark_maintenance is off"
+            )
+            for kind in ("expire", "compaction"):
+                maint_outcomes.append({"kind": kind, "user_skip": why})
             if skip_benchmark and cfg.architecture.query_engine.type.value == "none":
                 print_info("Skipped (no query engine)")
             elif skip_benchmark:
@@ -2120,6 +2178,8 @@ def run(
                         iterations=cfg.architecture.benchmark.iterations,
                         progress_callback=_bench_progress,
                         query_timeout=_pre_timeout,
+                        # Results are checked on the post-maintenance benchmark.
+                        fingerprint=False,
                     )
                     pre_compaction_qph = _pre_result.qph
                     _pre_record = _pre_result.to_dict()
@@ -2172,6 +2232,7 @@ def run(
                     timeout=PRE_BENCHMARK_MAINTENANCE_TIMEOUT,
                     live_streams=bool(live_apps),
                     budget=maint_budget,
+                    outcomes=maint_outcomes,
                 )
                 _run_iceberg_compaction(
                     cfg,
@@ -2181,6 +2242,7 @@ def run(
                     live_streams=bool(live_apps),
                     timeout=PRE_BENCHMARK_COMPACTION_TIMEOUT,
                     budget=maint_budget,
+                    outcomes=maint_outcomes,
                 )
                 maint_stop_reason = maint_budget.stopped
                 if maint_budget.stopped:
@@ -2205,8 +2267,27 @@ def run(
                     post_file_count = _data_file_total(_post_health)
                 except Exception:
                     pass
+                if pre_file_count > 0 and post_file_count > 0:
+                    # Detail, not identity: a compaction that changed no
+                    # files still ran (effective maintenance reasons).
+                    maint_outcomes.append(
+                        {
+                            "kind": "compaction",
+                            "files_before": pre_file_count,
+                            "files_after": post_file_count,
+                            **(
+                                {"note": f"no-op: data files {pre_file_count} -> {post_file_count}"}
+                                if post_file_count == pre_file_count
+                                else {}
+                            ),
+                        }
+                    )
 
             except Exception as e:
+                reached = any(o.get("kind") in ("expire", "compaction") for o in maint_outcomes)
+                maint_outcomes.append(
+                    {"kind": "maintenance", "error": str(e), "before_statements": not reached}
+                )
                 print_warning(f"Maintenance failed (non-fatal): {e}")
 
             # 5. Wait for storage to settle before the post round (LB-150).

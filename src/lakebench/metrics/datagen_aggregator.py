@@ -222,9 +222,22 @@ class FleetSummary:
     # the pods disagree (then it is listed in mixed_params).
     customer_id_max: int | None = None
     mixed_params: list[str] = field(default_factory=list)
+    # The datagen container's image as the pod spec named it, and the
+    # resolved image ids (registry@sha256 digests) the kubelet reported in
+    # pod status. More than one id means the pods did not all run one image.
+    image: str | None = None
+    image_ids: list[str] = field(default_factory=list)
+    # --seed and --scale the datagen pods ran with (their container args),
+    # when every pod agrees; a disagreement is listed in mixed_params.
+    seed: int | None = None
+    scale: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "image": self.image,
+            "image_ids": list(self.image_ids),
+            "seed": self.seed,
+            "scale": self.scale,
             "schema": self.schema,
             "pods_expected": self.pods_expected,
             "pods_reported": self.pods_reported,
@@ -280,6 +293,8 @@ def parse_metrics_line(log_text: str) -> dict[str, Any] | None:
 def collect_from_pod_logs(
     pod_logs: dict[str, str],
     expected_pods: int | None = None,
+    pod_images: dict[str, tuple[str | None, str | None]] | None = None,
+    pod_args: dict[str, dict[str, Any]] | None = None,
 ) -> FleetSummary:
     """Parse a mapping of pod_name -> log text into a FleetSummary.
 
@@ -297,7 +312,46 @@ def collect_from_pod_logs(
         except (KeyError, TypeError, ValueError) as e:
             logger.warning("pod %s metrics line unusable: %s", pod_name, e)
 
-    return _summarize(pods, expected_pods or len(pod_logs))
+    summary = _summarize(pods, expected_pods or len(pod_logs))
+    images = pod_images or {}
+    specs = sorted({img for img, _ in images.values() if img})
+    summary.image = specs[0] if len(specs) == 1 else (", ".join(specs) or None)
+    summary.image_ids = sorted({iid for _, iid in images.values() if iid})
+    for key in ("seed", "scale"):
+        values = {a.get(key) for a in (pod_args or {}).values() if a.get(key) is not None}
+        if len(values) == 1:
+            setattr(summary, key, values.pop())
+        elif len(values) > 1:
+            summary.mixed_params.append(f"{key} (container args)")
+            summary.data_quality = "mixed"
+    return summary
+
+
+def _datagen_args(pod: Any) -> dict[str, Any]:
+    """--seed and --scale from a datagen pod's first container args."""
+    try:
+        args = list(pod.spec.containers[0].args or [])
+    except (AttributeError, IndexError, TypeError):
+        return {}
+    out: dict[str, Any] = {}
+    for flag, key, conv in (("--seed", "seed", int), ("--scale", "scale", float)):
+        if flag in args and args.index(flag) + 1 < len(args):
+            try:
+                out[key] = conv(args[args.index(flag) + 1])
+            except ValueError:
+                pass
+    return out
+
+
+def _datagen_image(pod: Any) -> tuple[str | None, str | None]:
+    """(spec image, status image id) of a datagen pod's first container."""
+    try:
+        spec = pod.spec.containers[0].image if pod.spec and pod.spec.containers else None
+        statuses = (pod.status.container_statuses or []) if pod.status else []
+        image_id = next((cs.image_id for cs in statuses if getattr(cs, "image_id", None)), None)
+    except (AttributeError, IndexError, TypeError):
+        return None, None
+    return spec, image_id
 
 
 _CORPUS_PARAMS = ("schema", "customer_id_max", "scale", "target_tb", "dirty_ratio")
@@ -450,8 +504,12 @@ def collect_from_k8s(
         return _summarize([], job_completions or 0)
 
     pod_logs: dict[str, str] = {}
+    pod_images: dict[str, tuple[str | None, str | None]] = {}
+    pod_args: dict[str, dict[str, Any]] = {}
     for pod in pods.items:
         name = pod.metadata.name
+        pod_images[name] = _datagen_image(pod)
+        pod_args[name] = _datagen_args(pod)
         try:
             text = core_v1.read_namespaced_pod_log(
                 name=name,
@@ -470,4 +528,9 @@ def collect_from_k8s(
             logger.info("could not read log for pod %s: %s", name, e)
             pod_logs[name] = ""
 
-    return collect_from_pod_logs(pod_logs, expected_pods=job_completions or len(pods.items))
+    return collect_from_pod_logs(
+        pod_logs,
+        expected_pods=job_completions or len(pods.items),
+        pod_images=pod_images,
+        pod_args=pod_args,
+    )
