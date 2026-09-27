@@ -147,12 +147,22 @@ def ensure_partition_transform(spark, fq_table, old, new):
 
 
 def path_size_gb(spark, uri):
-    """Total bytes under a Hadoop-FS path, in GiB; 0.0 if it cannot be measured."""
+    """Total bytes under a Hadoop-FS path or glob, in GiB; 0.0 if it cannot be
+    measured.
+
+    The file system comes from ``Path.getFileSystem``: ``java.net.URI(uri)``
+    rejects glob characters such as ``[0-9]`` (common.c360_bronze_path).
+    """
     try:
         jvm = spark._jvm
         hconf = spark._jsc.hadoopConfiguration()
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(uri), hconf)
         path = jvm.org.apache.hadoop.fs.Path(uri)
+        fs = path.getFileSystem(hconf)
+        if any(ch in uri for ch in "*?[{"):
+            total = 0
+            for st in fs.globStatus(path) or []:
+                total += fs.getContentSummary(st.getPath()).getLength()
+            return total / (1024**3)
         if not fs.exists(path):
             return 0.0
         return fs.getContentSummary(path).getLength() / (1024**3)
@@ -738,6 +748,54 @@ def resolve_data_clock(df_fallback=None):
     return anchor
 
 
+def c360_bronze_path(bronze_uri, appending=False):
+    """The bronze files a c360 silver-build reads.
+
+    Single-cycle runs (``LB_BRONZE_CYCLE`` unset) read every file under
+    ``customer/interactions/``. In a multi-cycle run the CLI passes the
+    cycle index as ``LB_BRONZE_CYCLE`` and datagen_rs names the files
+    ``part-{fid:06}.parquet`` for cycle 0 and ``part-c{cycle:03}-{fid:06}``
+    for cycle n (``datagen_rs::cycle::c360_key``):
+
+    - cycle 0 reads only cycle-0 names, so ``part-c*`` files left by an
+      earlier multi-cycle run in the same bucket are not rebuilt into it;
+    - cycles 2+ appending to silver read only their own files. Reading the
+      whole prefix and appending re-added every earlier cycle's rows, so
+      every gold count and revenue KPI was inflated.
+
+    A later cycle that finds no silver table to append to rebuilds from the
+    whole prefix.
+    """
+    base = bronze_uri + "customer/interactions/"
+    cycle = os.environ.get("LB_BRONZE_CYCLE", "").strip()
+    if not cycle:
+        return base
+    n = int(cycle)
+    if n == 0:
+        return base + "part-[0-9]*.parquet"
+    if appending:
+        return base + f"part-c{n:03d}-*.parquet"
+    return base
+
+
+def c360_bronze_run_path(bronze_uri):
+    """Every bronze file this run's cycles wrote, for bronze-verify.
+
+    The whole prefix for a single-cycle run. In a multi-cycle run at cycle n,
+    the cycle-0 names plus ``part-c001`` .. ``part-c{n:03}``: the files silver
+    holds after cycle n (``c360_bronze_path``), so bronze-verify counts what
+    silver must hold and not files an earlier run left in the bucket.
+    """
+    base = bronze_uri + "customer/interactions/"
+    cycle = os.environ.get("LB_BRONZE_CYCLE", "").strip()
+    if not cycle:
+        return base
+    names = ["part-[0-9]*.parquet"] + [f"part-c{i:03d}-*.parquet" for i in range(1, int(cycle) + 1)]
+    if len(names) == 1:
+        return base + names[0]
+    return base + "{" + ",".join(names) + "}"
+
+
 def apply_silver_transformations_anchored(df_bronze, anchor_date):
     """``apply_silver_transformations`` with recency anchored to the data clock.
 
@@ -895,12 +953,26 @@ def await_stream(spark, query):
 def get_daily_kpi_aggregations():
     """Return the list of aggregation expressions for daily KPIs.
 
-    Shared between gold_finalize.py (batch) and gold_refresh.py
-    (streaming via foreachBatch). Produces 46 KPI columns.
+    Shared by every c360 gold writer: gold_finalize.py and
+    gold_finalize_delta.py (batch), gold_refresh.py and gold_refresh_delta.py
+    (continuous), so the Iceberg and Delta adapters publish identical KPIs.
+    Produces 30 KPI columns (plus the ``interaction_date`` group key).
+
+    Averages are taken over the rows the KPI is about, not over every
+    interaction. The generator (datagen_rs customer360.rs) writes
+    ``transaction_amount = 0.0`` on every non-purchase row and
+    ``page_views = time_on_site_seconds = 0`` on every row that is not a
+    purchase or browse, so an average over all rows mixes in structural
+    zeros: avg_transaction_value was about 5.5x low (the 18% purchase share),
+    avg_page_views and avg_time_on_site_seconds about 1.9x low (the 53%
+    visit share). A transaction is a row with ``transaction_amount > 0``
+    (the same test as ``total_transactions``); a site visit is a row with
+    ``page_views > 0``. A day with no transactions has a NULL average, not 0.
     """
     from pyspark.sql.functions import (
         avg,
         col,
+        count,
         countDistinct,
         when,
     )
@@ -921,7 +993,10 @@ def get_daily_kpi_aggregations():
         countDistinct("session_id").alias("total_sessions"),
         # Revenue metrics
         round_(sum_("transaction_amount"), 2).alias("total_daily_revenue"),
-        round_(avg("transaction_amount"), 2).alias("avg_transaction_value"),
+        # Mean value of a transaction (purchase rows), not of an interaction.
+        round_(avg(when(col("transaction_amount") > 0, col("transaction_amount"))), 2).alias(
+            "avg_transaction_value"
+        ),
         round_(max_("transaction_amount"), 2).alias("largest_transaction"),
         sum_(when(col("transaction_amount") > 0, 1).otherwise(0)).alias("total_transactions"),
         # Channel revenue breakdown
@@ -939,8 +1014,11 @@ def get_daily_kpi_aggregations():
         ).alias("call_center_revenue"),
         # Engagement metrics
         round_(avg("engagement_score"), 2).alias("avg_engagement_score"),
-        round_(avg("time_on_site_seconds"), 0).alias("avg_time_on_site_seconds"),
-        round_(avg("page_views"), 1).alias("avg_page_views"),
+        # Per site visit (page_views > 0); support calls and logins have none.
+        round_(avg(when(col("page_views") > 0, col("time_on_site_seconds"))), 0).alias(
+            "avg_time_on_site_seconds"
+        ),
+        round_(avg(when(col("page_views") > 0, col("page_views"))), 1).alias("avg_page_views"),
         # Conversion funnel
         sum_(when(col("customer_journey_stage") == "awareness", 1).otherwise(0)).alias(
             "awareness_interactions"
@@ -961,7 +1039,11 @@ def get_daily_kpi_aggregations():
         sum_("points_earned").alias("total_points_earned"),
         sum_("points_redeemed").alias("total_points_redeemed"),
         # Customer satisfaction
-        countDistinct("support_ticket_id").alias("support_tickets_created"),
+        # One ticket per support interaction. The generator draws ticket ids
+        # at random from 90,000 values (TKT10000-TKT99999), so a distinct
+        # count merged unrelated tickets that collided: about 5% low at
+        # 10,000 tickets a day and capped at 90,000 however many were opened.
+        count("support_ticket_id").alias("support_tickets_created"),
         round_(avg("satisfaction_score"), 2).alias("avg_satisfaction_score"),
         # Risk indicators
         sum_(when(col("churn_risk_indicator") == "high_risk", 1).otherwise(0)).alias(
@@ -972,12 +1054,292 @@ def get_daily_kpi_aggregations():
         ),
         # Value metrics
         round_(sum_("lifetime_value_estimate"), 2).alias("total_estimated_ltv"),
-        round_(avg("lifetime_value_estimate"), 2).alias("avg_estimated_ltv"),
+        # Per transaction, like avg_transaction_value: the estimate is 0 on
+        # every row without a transaction amount.
+        round_(avg(when(col("transaction_amount") > 0, col("lifetime_value_estimate"))), 2).alias(
+            "avg_estimated_ltv"
+        ),
         # Channel distribution
         sum_(when(col("channel") == "web", 1).otherwise(0)).alias("web_interactions"),
         sum_(when(col("channel") == "mobile_app", 1).otherwise(0)).alias("mobile_interactions"),
         sum_(when(col("channel") == "store", 1).otherwise(0)).alias("store_interactions"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# c360 correctness facts (reported after gold-finalize, D6: reporting only)
+# ---------------------------------------------------------------------------
+
+C360_CHECK_TAG = "[c360-check]"
+
+# Gold columns that count rows or sum non-negative amounts: never negative,
+# never NULL on a day that exists.
+C360_GOLD_NONNEG_COLUMNS = (
+    "daily_active_customers",
+    "unique_emails",
+    "total_sessions",
+    "total_daily_revenue",
+    "largest_transaction",
+    "total_transactions",
+    "web_revenue",
+    "mobile_revenue",
+    "store_revenue",
+    "call_center_revenue",
+    "awareness_interactions",
+    "consideration_interactions",
+    "conversions",
+    "retention_interactions",
+    "loyalty_member_interactions",
+    "total_points_earned",
+    "total_points_redeemed",
+    "support_tickets_created",
+    "high_churn_risk_count",
+    "medium_churn_risk_count",
+    "total_estimated_ltv",
+    "web_interactions",
+    "mobile_interactions",
+    "store_interactions",
+)
+
+# Gold columns summed over days for the silver-to-gold reconciliation.
+C360_GOLD_SUM_COLUMNS = (
+    "total_daily_revenue",
+    "total_transactions",
+    "awareness_interactions",
+    "consideration_interactions",
+    "conversions",
+    "retention_interactions",
+    "support_tickets_created",
+    "high_churn_risk_count",
+    "medium_churn_risk_count",
+    "total_points_earned",
+)
+
+
+def _num(v):
+    """A JSON-safe number: None stays None, Decimal/int/float become float."""
+    return None if v is None else float(v)
+
+
+def c360_silver_facts(silver_df):
+    """One aggregation pass over silver: the counts the checks reconcile to.
+
+    Reads only the columns named here (columnar), no join, one distinct
+    count (customers). Every value is exact.
+    """
+    from pyspark.sql.functions import col, count, countDistinct, lit, when
+    from pyspark.sql.functions import max as max_
+    from pyspark.sql.functions import min as min_
+    from pyspark.sql.functions import sum as sum_
+
+    it = col("interaction_type")
+    amt = col("transaction_amount")
+    pv = col("page_views")
+
+    def n(cond):
+        return sum_(when(cond, 1).otherwise(0))
+
+    row = silver_df.agg(
+        count(lit(1)).alias("rows"),
+        n(col("data_quality_flag") == "duplicate_suspected").alias("duplicate_flag_rows"),
+        n(it == "purchase").alias("purchase_rows"),
+        n(it == "browse").alias("browse_rows"),
+        n(it == "support").alias("support_rows"),
+        n(it == "login").alias("login_rows"),
+        n(it == "abandoned_cart").alias("abandoned_cart_rows"),
+        n(amt > 0).alias("transaction_rows"),
+        n((amt > 0) & ((it != "purchase") | it.isNull())).alias("non_purchase_amount_rows"),
+        n(amt.isNull()).alias("null_amount_rows"),
+        sum_(amt).alias("revenue"),
+        min_(when(it == "purchase", amt)).alias("purchase_amount_min"),
+        max_(when(it == "purchase", amt)).alias("purchase_amount_max"),
+        n(pv > 0).alias("visit_rows"),
+        sum_(when(pv > 0, pv)).alias("visit_page_views"),
+        sum_(when(pv > 0, col("time_on_site_seconds"))).alias("visit_time_on_site"),
+        count("satisfaction_score").alias("satisfaction_rows"),
+        sum_("satisfaction_score").alias("satisfaction_sum"),
+        count("support_ticket_id").alias("ticket_rows"),
+        n(col("churn_risk_indicator") == "high_risk").alias("high_churn_rows"),
+        n(col("churn_risk_indicator") == "medium_risk").alias("medium_churn_rows"),
+        sum_("points_earned").alias("points_earned"),
+        n(col("customer_id").isNull()).alias("null_customer_rows"),
+        min_("customer_id").alias("customer_id_min"),
+        max_("customer_id").alias("customer_id_max"),
+        countDistinct("customer_id").alias("distinct_customers"),
+        n(col("interaction_date").isNull()).alias("null_date_rows"),
+        min_("interaction_date").alias("date_min"),
+        max_("interaction_date").alias("date_max"),
+        countDistinct("interaction_date").alias("distinct_dates"),
+    ).collect()[0]
+    out = {}
+    for k, v in row.asDict().items():
+        if k in ("date_min", "date_max"):
+            out[k] = v.isoformat() if v is not None else None
+        elif k in ("revenue", "purchase_amount_min", "purchase_amount_max"):
+            out[k] = _num(v)
+        else:
+            out[k] = None if v is None else int(v)
+    return out
+
+
+def c360_gold_facts(gold_df):
+    """Facts over the gold table as written: totals, and per-day identities.
+
+    Gold is one row per day (a few hundred), so it is collected and checked
+    on the driver. ``days`` carries the per-day values the statistical
+    checks need; the identities are counted here as violations.
+    """
+    rows = [r.asDict() for r in gold_df.collect()]
+    dates = [r.get("interaction_date") for r in rows]
+    present = [d for d in dates if d is not None]
+    sums = dict.fromkeys(C360_GOLD_SUM_COLUMNS, 0.0)
+    neg = {}
+    nulls = {}
+    viol = {
+        "avg_transaction_value_mismatch": 0,
+        "avg_transaction_value_null_mismatch": 0,
+        "avg_estimated_ltv_mismatch": 0,
+        "transactions_ne_conversions": 0,
+        "tickets_ne_support": 0,
+        "channel_revenue_exceeds_total": 0,
+        "churn_exceeds_support": 0,
+        "largest_transaction_out_of_range": 0,
+        "ltv_below_revenue": 0,
+    }
+    examples = {}
+
+    def flag(name, day):
+        viol[name] += 1
+        examples.setdefault(name, str(day))
+
+    days = []
+    max_dau = 0
+    for r in rows:
+        d = r.get("interaction_date")
+        for c in C360_GOLD_NONNEG_COLUMNS:
+            v = r.get(c)
+            if v is None:
+                nulls[c] = nulls.get(c, 0) + 1
+            elif float(v) < 0:
+                neg[c] = neg.get(c, 0) + 1
+        for c in C360_GOLD_SUM_COLUMNS:
+            sums[c] += float(r.get(c) or 0)
+        tx = int(r.get("total_transactions") or 0)
+        rev = float(r.get("total_daily_revenue") or 0)
+        atv = r.get("avg_transaction_value")
+        if (tx == 0) != (atv is None):
+            flag("avg_transaction_value_null_mismatch", d)
+        # Both sides are rounded to cents: 0.005 each, plus float slack.
+        if tx > 0 and atv is not None and abs(float(atv) - rev / tx) > 0.011:
+            flag("avg_transaction_value_mismatch", d)
+        # Non-transaction rows carry an LTV estimate of 0, so the per-
+        # transaction average is total / transactions.
+        altv = r.get("avg_estimated_ltv")
+        if (tx == 0) != (altv is None) or (
+            tx > 0
+            and altv is not None
+            and abs(float(altv) - float(r.get("total_estimated_ltv") or 0) / tx) > 0.011
+        ):
+            flag("avg_estimated_ltv_mismatch", d)
+        if tx != int(r.get("conversions") or 0):
+            flag("transactions_ne_conversions", d)
+        support = int(r.get("retention_interactions") or 0)
+        if int(r.get("support_tickets_created") or 0) != support:
+            flag("tickets_ne_support", d)
+        channels = sum(
+            float(r.get(c) or 0)
+            for c in ("web_revenue", "mobile_revenue", "store_revenue", "call_center_revenue")
+        )
+        if channels > rev + 0.05:
+            flag("channel_revenue_exceeds_total", d)
+        churn = int(r.get("high_churn_risk_count") or 0) + int(
+            r.get("medium_churn_risk_count") or 0
+        )
+        if churn > support:
+            flag("churn_exceeds_support", d)
+        largest = r.get("largest_transaction")
+        if tx > 0 and atv is not None and largest is not None:
+            if float(largest) > 9999.99 + 1e-6 or float(largest) < float(atv) - 0.011:
+                flag("largest_transaction_out_of_range", d)
+        ltv = float(r.get("total_estimated_ltv") or 0)
+        if ltv < rev - 0.02:
+            flag("ltv_below_revenue", d)
+        max_dau = max(max_dau, int(r.get("daily_active_customers") or 0))
+        days.append(
+            [
+                d.isoformat() if d is not None else None,
+                tx,
+                _num(atv),
+                int(r.get("awareness_interactions") or 0) + int(r.get("conversions") or 0),
+                _num(r.get("avg_page_views")),
+                _num(r.get("avg_time_on_site_seconds")),
+                support,
+                _num(r.get("avg_satisfaction_score")),
+            ]
+        )
+    days.sort(key=lambda x: x[0] or "")
+    return {
+        "rows": len(rows),
+        "null_dates": len(dates) - len(present),
+        "distinct_dates": len(set(present)),
+        "date_min": min(present).isoformat() if present else None,
+        "date_max": max(present).isoformat() if present else None,
+        "sums": {k: round(v, 2) for k, v in sums.items()},
+        "negative_values": neg,
+        "null_values": nulls,
+        "violations": viol,
+        "violation_examples": examples,
+        "max_daily_active_customers": max_dau,
+        # [date, transactions, avg_transaction_value, visits, avg_page_views,
+        #  avg_time_on_site_seconds, support_interactions, avg_satisfaction]
+        "days_columns": [
+            "date",
+            "transactions",
+            "avg_transaction_value",
+            "visits",
+            "avg_page_views",
+            "avg_time_on_site_seconds",
+            "support",
+            "avg_satisfaction_score",
+        ],
+        "days": days,
+    }
+
+
+def c360_check_facts(silver_df, gold_df):
+    """Silver and gold facts for the c360 expected-result checks.
+
+    The checks themselves (what a correct corpus must produce) live in
+    ``lakebench.metrics.c360_correctness`` on the CLI side, which reads the
+    ``[c360-check]`` line this produces.
+    """
+    return {"version": 1, "silver": c360_silver_facts(silver_df), "gold": c360_gold_facts(gold_df)}
+
+
+def log_c360_check(spark, silver_tbl, gold_tbl):
+    """Log the ``[c360-check] {json}`` line after gold is written.
+
+    Reporting only (owner decision D6): an error here is logged in the line
+    and never fails the stage. It runs inside the gold-finalize pod, so the
+    pod's wall clock includes it; the line records ``check_seconds`` and the
+    CLI takes that off the stage's elapsed time and end time
+    (``cli/_run.py``), so time to value measures the pipeline, not
+    lakebench's own check. ``LB_C360_CHECK=false`` skips it.
+    """
+    import json
+    import time
+
+    if os.environ.get("LB_C360_CHECK", "true").lower() == "false":
+        log(C360_CHECK_TAG + " " + json.dumps({"version": 1, "skipped": "LB_C360_CHECK=false"}))
+        return
+    t0 = time.time()
+    try:
+        facts = c360_check_facts(spark.table(silver_tbl), spark.table(gold_tbl))
+    except Exception as e:  # noqa: BLE001 -- reporting only, never fail the stage
+        facts = {"version": 1, "error": one_line(e, 500)}
+    facts["check_seconds"] = round(time.time() - t0, 1)
+    # One physical line: the parser anchors on the tag and reads to the end.
+    log(C360_CHECK_TAG + " " + json.dumps(facts, separators=(",", ":"), default=str))
 
 
 # ---------------------------------------------------------------------------

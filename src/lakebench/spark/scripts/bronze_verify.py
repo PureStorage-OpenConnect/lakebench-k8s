@@ -20,7 +20,14 @@ from __future__ import annotations
 
 import time
 
-from common import env, log, path_size_gb, reset_stream_tables, set_utc_session
+from common import (
+    c360_bronze_run_path,
+    env,
+    log,
+    path_size_gb,
+    reset_stream_tables,
+    set_utc_session,
+)
 
 _INT = ("tinyint", "smallint", "int", "bigint")
 _NUM = _INT + ("float", "double", "decimal")
@@ -180,7 +187,8 @@ def main() -> None:
     from pyspark.sql import SparkSession
 
     bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-    source = bronze_uri + "customer/interactions/"
+    # This run's cycles only in a multi-cycle run (the files silver holds).
+    source = c360_bronze_run_path(bronze_uri)
 
     spark = SparkSession.builder.appName("lb-bronze-verify").getOrCreate()
     set_utc_session(spark)
@@ -221,6 +229,8 @@ def main() -> None:
         log(f"Event time range (UTC): {stats['ts_min']} .. {stats['ts_max']}")
     if "silver_rows" in stats:
         log(f"Rows passing the silver quality filter: {stats['silver_rows']:,}")
+        # Read by lakebench.metrics.c360_correctness: bronze rows silver must hold.
+        log(f"[c360-bronze] rows={row_count} silver_filter_rows={stats['silver_rows']}")
     log("Schema:")
     for field in df.schema.fields:
         log(f"  - {field.name} ({field.dataType.simpleString()})")

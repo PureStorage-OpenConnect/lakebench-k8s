@@ -17,7 +17,14 @@ import sys
 import time
 from enum import Enum
 
-from common import env, get_daily_kpi_aggregations, log, set_utc_session, write_delta_table
+from common import (
+    env,
+    get_daily_kpi_aggregations,
+    log,
+    log_c360_check,
+    set_utc_session,
+    write_delta_table,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
@@ -389,4 +396,6 @@ log(f"estimated_rows: {silver_count}")
 log(f"output_rows: {kpi_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
 log("=" * 60)
+# Expected-result facts (reporting only, D6), after the timing above.
+log_c360_check(spark, silver_tbl, gold_tbl)
 spark.stop()

@@ -64,6 +64,11 @@ class JobMetrics:
     # ``[tm-status]`` lines by cycle: {"status", "reason"}; says whether the
     # layer ran and why not.
     tm_status: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Customer 360 expected-result facts (metrics/c360_correctness.py): the
+    # ``[c360-check]`` JSON from gold-finalize, the ``[c360-bronze]`` counts
+    # from bronze-verify. None on other jobs and workloads.
+    c360_check: dict[str, Any] | None = None
+    c360_bronze: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -299,6 +304,11 @@ class PipelineMetrics:
     # is where its TM section comes from.
     tm_operations: dict[str, Any] | None = None
 
+    # Customer 360 expected-result verdict (metrics/c360_correctness.py):
+    # every check with observed, expected and tolerance. Reporting only
+    # until the owner approves the checks' meaning (``gating`` is false).
+    c360_correctness: dict[str, Any] | None = None
+
     # Table-maintenance policy the run was measured under
     # (metrics/maintenance_policy.py). A run gets the current id; a record
     # loaded without one is the legacy policy (set by the storage loader).
@@ -345,6 +355,8 @@ class PipelineMetrics:
             d["financial_scoring"] = self.financial_scoring
         if self.tm_operations is not None:
             d["tm_operations"] = self.tm_operations
+        if self.c360_correctness is not None:
+            d["c360_correctness"] = self.c360_correctness
         return d
 
 
@@ -2320,6 +2332,12 @@ class MetricsCollector:
         metrics.tm_invariants = {str(c): inv for c, inv in parse_tm_invariants(logs).items()}
         metrics.tm_status = {str(c): st for c, st in parse_tm_status(logs).items()}
         metrics.tm_ops = parse_tm_ops(logs)
+
+        # Customer 360 expected-result facts (reporting only, D6).
+        from lakebench.metrics.c360_correctness import parse_c360_bronze, parse_c360_check
+
+        metrics.c360_check = parse_c360_check(logs)
+        metrics.c360_bronze = parse_c360_bronze(logs)
 
         # Calculate throughput
         if metrics.elapsed_seconds > 0:
