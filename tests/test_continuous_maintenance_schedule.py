@@ -139,3 +139,12 @@ def test_run_start_writes_the_resolved_values_back(monkeypatch):
         sus._run_sustained(cfg, Path("c.yaml"), 100, False, 3600)
     s = cfg.architecture.pipeline.sustained
     assert (s.retention_interval, s.compaction_interval) == (1200, 2400)
+
+
+def test_batch_snapshot_does_not_carry_continuous_intervals():
+    """Review finding: a batch fingerprint moved with sustained.run_duration."""
+    from lakebench.metrics.collector import build_config_snapshot
+
+    snap = build_config_snapshot(make_config())
+    assert snap["maintenance"]["retention_interval"] is None
+    assert snap["maintenance"]["compaction_interval"] is None

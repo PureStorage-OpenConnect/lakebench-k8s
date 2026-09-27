@@ -78,3 +78,11 @@ def test_reset_drops_all_three_tables_in_spark_catalog(result):
 
 def test_a_fresh_stream_after_the_reset_recreates_bronze(result):
     assert result["bronze_rows_after_restart"] == 10
+
+
+def test_reset_clears_an_unregistered_bronze_log(result):
+    """Review finding: DROP of the EXTERNAL bronze leaves its _delta_log; the
+    reset skipped the unregistered table and bronze-ingest then refused it."""
+    assert result["orphan_log_left"] is True
+    assert result["orphan_dir_files_after_reset"] == 0
+    assert result["bronze_rows_after_orphan_reset"] == 10

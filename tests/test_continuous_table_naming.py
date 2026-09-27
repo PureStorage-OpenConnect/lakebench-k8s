@@ -161,3 +161,16 @@ def test_continuous_scripts_never_name_tables_through_catalog_name(script):
     name from it breaks Delta + Hive (it names no Spark catalog there)."""
     src = (SCRIPTS / script).read_text()
     assert not re.search(r"env\(\s*[\"']CATALOG_NAME[\"']", src), script
+
+
+@pytest.mark.parametrize("recipe", _RECIPES)
+def test_reset_clears_the_path_bronze_ingest_creates(recipe, scripts, monkeypatch):
+    """The reset's explicit-location list is the Delta bronze target, and
+    empty for Iceberg (whose DROP ... PURGE removes the files)."""
+    manifest = _manifest(recipe, JobType.BRONZE_VERIFY)
+    _use_env(monkeypatch, manifest)
+    import bronze_ingest_delta
+    import bronze_verify
+
+    got = bronze_verify.continuous_reset_explicit_locations()
+    assert got == ([bronze_ingest_delta.bronze_target()] if "-delta-" in recipe else [])

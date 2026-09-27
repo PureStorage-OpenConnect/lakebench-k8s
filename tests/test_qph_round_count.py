@@ -120,3 +120,18 @@ def test_report_shows_the_round_count(tmp_path):
         _continuous_run([200.0, 250.0])
     )
     assert "In-stream QpH rounds" in html
+
+
+def test_perf_gate_and_reproduce_do_not_refuse_on_the_round_count():
+    """Review finding: the count is an outcome (a slower build fits fewer
+    rounds), so refusing on it would turn a regression into "not comparable"."""
+    baseline = _exp("sustained", 5)
+    run = _exp("sustained", 4)
+    reasons = ex.stored_identity_refusals(
+        ex.identity(baseline), ex.result_fingerprints(baseline), run, "baseline"
+    )
+    assert not any("benchmark rounds" in r for r in reasons), reasons
+    # A reference stored before the key existed is not "older" for it.
+    old = {k: v for k, v in ex.identity(baseline).items() if k != "benchmark rounds"}
+    reasons = ex.stored_identity_refusals(old, ex.result_fingerprints(baseline), run, "package")
+    assert not any("older experiment identity" in r for r in reasons), reasons

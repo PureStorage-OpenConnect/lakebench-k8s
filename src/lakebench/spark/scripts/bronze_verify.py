@@ -21,10 +21,13 @@ from __future__ import annotations
 import time
 
 from common import (
+    _s3_table_path,
     c360_bronze_run_path,
+    clear_unregistered_table_dirs,
     env,
     log,
     path_size_gb,
+    pipeline_catalog,
     pipeline_table,
     reset_stream_tables,
     set_utc_session,
@@ -182,6 +185,22 @@ def continuous_reset_targets():
     return tables, owned, bronze_uri + "customer/interactions/"
 
 
+def continuous_reset_explicit_locations():
+    """(table, location) for continuous tables created at an explicit path,
+    whose files a DROP leaves: the Delta + Hive bronze table
+    (bronze_ingest_delta.bronze_target). spark_catalog as the pipeline
+    catalog means Delta + Hive (job.py)."""
+    if pipeline_catalog() != "spark_catalog":
+        return []
+    bronze_table = env("LB_BRONZE_TABLE", "default.bronze_raw")
+    return [
+        (
+            pipeline_table("LB_BRONZE_TABLE", "default.bronze_raw"),
+            _s3_table_path(env("LB_BRONZE_URI", "s3a://lb-bronze/"), bronze_table),
+        )
+    ]
+
+
 def main() -> None:
     from pyspark.sql import SparkSession
 
@@ -199,6 +218,9 @@ def main() -> None:
         log("Continuous reset (no verification)")
         log("=" * 60)
         dropped = reset_stream_tables(spark, tables, owned_uris=owned, keep_uris=[raw])
+        clear_unregistered_table_dirs(
+            spark, continuous_reset_explicit_locations(), owned_uris=owned, keep_uris=[raw]
+        )
         log(f"Continuous reset complete: {len(dropped)} of {len(tables)} tables dropped")
         # No JOB METRICS block: this is not a bronze-verify stage.
         spark.stop()

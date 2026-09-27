@@ -873,6 +873,14 @@ CONDITION_KEYS = frozenset(
 )
 
 
+#: Conditions that are also outcomes of the run: the in-stream round count
+#: depends on how long each round took, so a slower build fits fewer rounds.
+#: compare reports a difference (not like-for-like); the perf gate and
+#: reproduce do not refuse on it, or a regression that costs a round would
+#: read as "not comparable" instead of a regression.
+OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds"})
+
+
 def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
     """Why a run's corpus is not one known corpus (see _observed_corpus)."""
     return list(((exp or {}).get("corpus") or {}).get("problems") or [])
@@ -1038,7 +1046,8 @@ def stored_identity_refusals(
     keep only the identity and the result fingerprints. *what* names the
     reference in messages ("baseline", "package"). Every identity field
     counts here, execution conditions included: a reference is only matched
-    like-for-like.
+    like-for-like. The exception is OUTCOME_CONDITION_KEYS (the in-stream
+    round count), which the run's own speed decides.
 
     *failed* names queries that failed in the run. The caller already fails
     the run for them (a regression, not a different experiment), so they are
@@ -1048,13 +1057,15 @@ def stored_identity_refusals(
         return [f"{NO_PROVENANCE} (the run has no experiment block)"]
     if not expected_identity:
         return [f"{NO_PROVENANCE} (the {what} was recorded without an experiment identity)"]
-    missing = [k for k in identity(actual) if k not in expected_identity]
+    actual_identity = {k: v for k, v in identity(actual).items() if k not in OUTCOME_CONDITION_KEYS}
+    missing = [k for k in actual_identity if k not in expected_identity]
     if missing:
         return [
             f"not comparable: the {what} was recorded with an older experiment identity "
             f"(no {', '.join(missing)}); record it again from a current run"
         ]
-    reasons = [f"{r} from the {what}" for r in diff_identities(expected_identity, identity(actual))]
+    expected = {k: v for k, v in expected_identity.items() if k not in OUTCOME_CONDITION_KEYS}
+    reasons = [f"{r} from the {what}" for r in diff_identities(expected, actual_identity)]
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
     established = results_established(actual)
     if established is not True:

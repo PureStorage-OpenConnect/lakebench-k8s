@@ -1366,6 +1366,34 @@ def log_c360_check(spark, silver_tbl, gold_tbl):
 # ---------------------------------------------------------------------------
 
 
+def clear_unregistered_table_dirs(spark, targets, *, owned_uris, keep_uris):
+    """Delete the directory of each (table, location) whose table is not in
+    the catalog. Returns the locations deleted.
+
+    For tables created at an explicit path (the Delta continuous bronze
+    table): DROP leaves their files, so a reset interrupted between its DROP
+    and its directory delete, or a first commit whose catalog registration
+    failed, leaves a _delta_log that the next create refuses to adopt
+    (refuse_orphan_delta_log). reset_stream_tables skips a table that is not
+    registered, so without this the deployment stayed wedged. The same
+    ``owned_table_dir`` guard applies.
+    """
+    cleared = []
+    for fq, location in targets:
+        if table_exists(spark, fq):
+            continue
+        name = fq.rsplit(".", 1)[-1]
+        if not owned_table_dir(location, owned_uris, keep_uris, name):
+            log(f"Continuous reset: kept {location} (outside this deployment or not its own dir)")
+            continue
+        fs, path = _hadoop_fs(spark, location)
+        if fs.exists(path):
+            fs.delete(path, True)
+            cleared.append(location)
+            log(f"Continuous reset: deleted {location} ({fq} is not in the catalog)")
+    return cleared
+
+
 def _is_unity_catalog():
     """Check if the current catalog is Unity (requires EXTERNAL table writes)."""
     return os.getenv("LB_CATALOG_TYPE", "hive") == "unity"

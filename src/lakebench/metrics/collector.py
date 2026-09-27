@@ -2065,6 +2065,7 @@ def build_config_snapshot(
     pipeline = cfg.architecture.pipeline
     s3 = cfg.platform.storage.s3
     scratch = cfg.platform.storage.scratch
+    _continuous = is_continuous_mode(pipeline.mode) or run_mode in ("continuous", "sustained")
 
     snapshot: dict[str, Any] = {
         "name": cfg.name,
@@ -2164,10 +2165,16 @@ def build_config_snapshot(
             "pre_benchmark_maintenance": pipeline.pre_benchmark_maintenance,
             # Effective values: unset intervals resolve from run_duration
             # (a continuous run writes its resolved values back first).
-            "retention_interval": pipeline.sustained.effective_retention_interval(),
+            # None in batch, which never reads them: a batch fingerprint must
+            # not move with sustained.run_duration.
+            "retention_interval": (
+                pipeline.sustained.effective_retention_interval() if _continuous else None
+            ),
             "retention_threshold": pipeline.sustained.retention_threshold,
             "compaction_enabled": pipeline.sustained.compaction_enabled,
-            "compaction_interval": pipeline.sustained.effective_compaction_interval(),
+            "compaction_interval": (
+                pipeline.sustained.effective_compaction_interval() if _continuous else None
+            ),
         },
         # Config half of the metrics.json experiment block
         # (metrics/experiment.py). Not a perf-gate fingerprint key.

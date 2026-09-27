@@ -101,6 +101,21 @@ def main():
     src = stage_files(spark, work, "bronze-again", 1, 10, start=100)
     run_stream(spark, src, f"{work}/ckpt-bronze-again", write)
     out["bronze_rows_after_restart"] = spark.table(name).count()
+
+    # A reset interrupted after its DROP (or a create whose registration
+    # failed): the EXTERNAL table's files and _delta_log stay, unregistered.
+    spark.sql(f"DROP TABLE {name}")
+    out["orphan_log_left"] = os.path.isdir(
+        f"{buckets['bronze']}/warehouse/default.db/bronze_raw/_delta_log"
+    )
+    bronze_verify.main()  # the next reset clears it
+    spark = session(jar_dir, work)
+    out["orphan_dir_files_after_reset"] = _files_under(
+        f"{buckets['bronze']}/warehouse/default.db/bronze_raw"
+    )
+    src = stage_files(spark, work, "bronze-third", 1, 10, start=200)
+    run_stream(spark, src, f"{work}/ckpt-bronze-third", write)
+    out["bronze_rows_after_orphan_reset"] = spark.table(name).count()
     spark.stop()
     print(json.dumps(out, default=str))
 
