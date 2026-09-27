@@ -505,7 +505,7 @@ scale-1 corpus in about 82 s, so a 600 s window at scale 1 would measure one
 pass followed by an idle pipeline. The run prints a warning at start when the
 trickle will offer the corpus in less time than the window, with the
 `max_files_per_trigger` that would make arrival last it (for c360 scale 1 and
-a 600 s window, 8 files per 30 s). Whatever the estimate, the continuous gate
+a 900 s window, 5 files per 30 s). Whatever the estimate, the continuous gate
 decides on what the run did (see Continuous Gate below).
 
 **Continuous gate.** A continuous run passes only on continuous processing
