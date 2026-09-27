@@ -9,6 +9,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Draft notes for 1.6.0.
 
 ### Behaviour changes you must know
+- **AML sanctions and PEP screening is scored (generator 0.3).** Every AML
+  corpus now carries a synthetic, dated watchlist
+  (`bronze/watchlist.parquet`: a sanctions list in two versions and a PEP
+  list) and planted payments to listed parties under name variants, with
+  namesake decoys. W5 is a fuzzy screen against that list at transaction
+  time plus a rescreen on each list version; W6 uses the same screen for
+  PEP payments of $10,000 or more. Both are scored for recall and precision
+  against planted `sanctions_match` / `pep_match` instances. The packaged
+  `sanctions_list.json` and `pep_list.json` are gone; a corpus without a
+  watchlist reports W5/W6 as "not run".
+- **No answer keys in the AML party zone.** `party.parquet` no longer has
+  `sanctions_status`, `pep_status` or `initial_risk_score`, the customer
+  risk rating no longer uses PEP status, and `silver.entities` leaves those
+  three columns NULL. Datagen `MODEL_VERSION` is `datagen-v2-rs-0.3`; a 0.2
+  corpus is pre-freeze.
+- **FATF list refreshed to June 2026.** `high_risk_jurisdictions.json` now
+  holds the FATF lists published on 19 June 2026, dated and sourced. No
+  generator home country is on them, so W7 also alerts on the generator's
+  synthetic high-risk corridor countries (`synthetic_corridors.json`,
+  labelled synthetic), and W7 alert volume is not comparable with 1.5.
 - **Every v1.5 continuous number was measured with no snapshot expiry and
   no VACUUM (LB-172, LB-173, LB-174).** `exec_sql` discarded the exit code,
   so failed maintenance statements were reported as successes. Underneath

@@ -499,10 +499,10 @@ def build_kyc(party, account):
         for name, sql_type in KYC_ENTITY_COLUMNS
         if name != "home_fi"
     ]
+    # The party master carries no sanctions or PEP flag (AML-GOALS #50): that
+    # is the answer the screening rules W5/W6 are scored against.
     prt = party.select(
         col("entity_id").alias("_dg_id"),
-        col("pep_status").cast("boolean").alias("pep_status"),
-        col("sanctions_status").alias("sanctions_status"),
         col("home_fi").alias("home_fi"),
         *kyc_cols,
     )
@@ -551,11 +551,6 @@ def build_entities(txns_df, bronze=None, kyc=None):
             *[col(c).alias(f"_{c}") for c in kyc.columns if c != "iban"],
         )
         picked = picked.join(k, "iban", "left")
-        # sanctions_status / pep_status default when an entity has no party row.
-        picked = picked.withColumn(
-            "_sanctions_status",
-            when(col("_sanctions_status") == lit("SDN"), lit("sdn")).otherwise(lit("clear")),
-        ).withColumn("_pep_status", coalesce(col("_pep_status"), lit(False)))
     return picked.select(
         col("entity_id"),
         # We can't tell Person from Company from FI from pacs.008 name alone;
@@ -587,9 +582,11 @@ def build_entities(txns_df, bronze=None, kyc=None):
         col("country").cast("string").alias("country"),
         lit(None).cast("string").alias("lei"),
         lit(None).cast("string").alias("bic"),
-        (col("_sanctions_status") if use_kyc else lit("clear")).alias("sanctions_status"),
-        (col("_pep_status") if use_kyc else lit(False)).alias("pep_status"),
-        lit(0.0).alias("initial_risk_score"),
+        # Not screened in silver: screening outcomes are W5/W6 alerts in
+        # gold.alerts, and the corpus carries no answer key to copy here.
+        lit(None).cast("string").alias("sanctions_status"),
+        lit(None).cast("boolean").alias("pep_status"),
+        lit(None).cast("double").alias("initial_risk_score"),
         *[
             (col(f"_{name}") if use_kyc else lit(None)).cast(sql_type).alias(name)
             for name, sql_type in KYC_ENTITY_COLUMNS

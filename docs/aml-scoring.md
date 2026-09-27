@@ -39,9 +39,46 @@ The rule set:
 | W3_round_tripping | cycle | funds returning to the originator through 2-5 transfers within 30 days |
 | W4_risk_propagation | rapid_layering | pass-through of 80%+ within 6 h |
 | W17_layering_chain | stack | open chains of 3+ transfers, each forwarding 80-100% of the previous within 7 days |
-| W7_cross_border_high_risk | corridor_high_risk | corridors to FATF grey / high-risk jurisdictions |
+| W7_cross_border_high_risk | corridor_high_risk | cross-border payments into a FATF black / grey list country or one of the generator's synthetic high-risk corridor countries |
 | W8_dormant_reactivation | dormant_reactivation | inactive account, sudden large flow |
-| W5_sanctions_match, W6_pep_counterparty | -- | detect-only; no planted typology today (party-flag targets are datagen follow-up) |
+| W5_sanctions_match | sanctions_match | fuzzy screen of payment beneficiaries against the corpus's dated sanctions list, at transaction time and as a rescreen when a list version is published |
+| W6_pep_counterparty | pep_match | the same fuzzy screen against the corpus's PEP list, payments of $10,000 or more |
+
+### Sanctions and PEP screening track
+
+The generator publishes a synthetic, dated watchlist with every corpus
+(`bronze/watchlist.parquet`): a sanctions list in two versions (version 1 at
+the corpus start, version 2 adding about a quarter more entries three
+quarters of the way through) and a PEP list. Entries carry a name, aliases,
+country and town; nothing marks which entries were paid. Listed parties are
+external counterparties, never the bank's customers and never in the party
+master.
+
+About 70% of listed parties are paid by one or two customers, one to three
+payments each. The creditor name on a planted payment is the list spelling,
+an alias, a token-order swap, a one-letter typo, a different romanisation or
+(companies) the legal suffix dropped, so an exact join on the list name
+misses most of them. Version-2 parties are paid only before their listing,
+so only the rescreen finds them. Namesake decoys (the same given and family
+name with another middle name, another line of business, or the same name in
+another country) are paid too and are not in the manifest, so a screen that
+ignores the country or matches too loosely pays for it in precision.
+
+Ground truth is the manifest: one `sanctions_match` or `pep_match` instance
+per (customer, listed party), its UETRs the customer's payments to that
+party, with `list_id`, `list_version`, `detectable_by` (`transaction_screen`
+or `rescreen`) and the per-payment name variants in `injection_parameters`.
+Recall and precision are computed exactly as for the behavioural rules.
+
+The screen is bounded on purpose: Soundex token-pair blocking, Levenshtein
+similarity of at least 0.85 over normalized, token-sorted names
+(`SCREEN_SIMILARITY_MIN`, self-chosen), and the entry's country as the only
+secondary identifier. No phonetic keys, no date of birth, no identifier
+matching; this is a benchmark workload, not a screening product. W6's
+$10,000 floor is a rule parameter: every PEP payment is a planted target,
+so the floor shows up as missed recall. The high-risk corridor list W7 uses
+alongside the FATF list (`synthetic_corridors.json`) is synthetic: no
+generator home country is on the June 2026 FATF lists.
 
 W9-W16 are workload ids the spec reserves (writeback, reproduce, ingest, the
 ML workloads), which is why the layering-chain rule is W17. W3 and W17 skip

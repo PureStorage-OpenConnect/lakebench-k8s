@@ -36,6 +36,9 @@ _ALL_PLANTED_TYPOLOGIES = frozenset(
         "micro_structuring",
         "rapid_layering",
         "tbml_repeated_invoice",
+        # Screening track, datagen_rs/src/screening.rs (not in SPECS).
+        "sanctions_match",
+        "pep_match",
     }
 )
 
@@ -50,20 +53,17 @@ def test_all_w_rules_have_target_entry():
 
 
 def test_query_count_matches_documented():
-    """7 rules with typology targets * 4 kinds (detect + precision +
-    recall + pattern_span) + 2 rules with no target * 1 kind (detect only) +
-    4 aggregate queries = 34. W5/W6 have `None` target because
-    sanctions and PEP are party attributes in the datagen, not
-    typology_type rows, so precision/recall/pattern_span would silently report
-    0/0 -- omitted rather than misleading. See RULE_TARGETS docstring.
-    The 4th aggregate is `aggregate_reference_vs_rule` from PR-A
+    """9 rules with typology targets * 4 kinds (detect + precision +
+    recall + pattern_span) + 4 aggregate queries = 40. W5/W6 target the
+    planted screening typologies (sanctions_match, pep_match) since the
+    generator plants them. The 4th aggregate is `aggregate_reference_vs_rule`
     (reference-detector + leakage-gate wiring)."""
-    assert query_count() == 34
+    assert query_count() == 40
 
 
 def test_load_aml_queries_returns_expected_count():
     qs = load_aml_queries("iceberg")
-    assert len(qs) == 34
+    assert len(qs) == 40
 
 
 def test_reference_vs_rule_aggregate_present():
@@ -140,7 +140,7 @@ def test_rule_targets_reference_real_typology_names():
     `RAW_TYPOLOGIES`. Anything RULE_TARGETS points at (that isn't None)
     must match one of those names exactly.
     """
-    valid_typology_names = {
+    valid_typology_names = _ALL_PLANTED_TYPOLOGIES | {
         "bipartite",
         "cycle",
         "fan_in",

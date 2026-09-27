@@ -301,8 +301,8 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         )
         target_uetrs = manifest_uetrs.select("uetr", "typology_type").where(col("uetr").isNotNull())
         # One row per (alert, uetr) with whether that txn belongs to the
-        # alert rule's target typology. Rules with no target (W5/W6 list
-        # matches) are left out: "false positive" has no meaning for them.
+        # alert rule's target typology. A rule with no target is left out:
+        # "false positive" has no meaning for it.
         refs = (
             alert_uetrs.join(broadcast(target_df), "rule_id")
             .join(target_uetrs, "uetr", "left")

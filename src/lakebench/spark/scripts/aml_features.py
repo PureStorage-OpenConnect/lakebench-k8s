@@ -809,11 +809,20 @@ def label_agreement(by_id: DataFrame, by_uetr: DataFrame) -> dict:
     }
 
 
+#: Screening-track typologies (datagen_rs screening.rs). Planted on top of
+#: the corpus row budget, outside REQ-G-03's typology density, so D11 leaves
+#: them out of the planted count.
+SCREENING_TYPOLOGIES = ("sanctions_match", "pep_match")
+
+
 def typology_density(txns: DataFrame, manifest: DataFrame) -> dict:
-    """D11 inputs: total rows, planted rows, planted rows per typology."""
-    planted = manifest.select(
-        col("typology_type"), explode(col("participant_uetrs")).alias("uetr")
-    ).dropDuplicates(["uetr"])
+    """D11 inputs: total rows, planted rows, planted rows per typology
+    (behavioural typologies only; SCREENING_TYPOLOGIES are excluded)."""
+    planted = (
+        manifest.filter(~col("typology_type").isin(*SCREENING_TYPOLOGIES))
+        .select(col("typology_type"), explode(col("participant_uetrs")).alias("uetr"))
+        .dropDuplicates(["uetr"])
+    )
     total = txns.count()
     hit = txns.select("uetr").join(planted, "uetr", "inner")
     per = {
