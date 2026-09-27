@@ -960,6 +960,31 @@ def _buckets_hold_data(engine) -> bool | None:
         return None
 
 
+def _no_engine_table_message(
+    engine_type: str, table_format: str, *, ns_goes: bool, clean_buckets: bool
+) -> str:
+    """What destroy's table step did when no engine could drop tables, and
+    what happens to the tables anyway."""
+    fmt = table_format.title()
+    if engine_type == "none":
+        why = "no query engine in this recipe to drop them through"
+    elif engine_type == "duckdb":
+        why = "DuckDB cannot drop catalog tables"
+    else:
+        why = f"no running {engine_type} pod to drop them through"
+    catalog = (
+        "the catalog database goes with the namespace, deleted below"
+        if ns_goes
+        else "create_namespace is false, so they stay registered in the catalog"
+    )
+    files = (
+        "their files are removed only by the bucket step, from buckets destroy owns"
+        if clean_buckets
+        else "no files are removed (bucket cleanup is off)"
+    )
+    return f"{fmt} tables not dropped: {why}; {catalog}; {files}"
+
+
 def destroy_all(
     engine: DeploymentEngine,
     progress_callback: Callable[[str, DeploymentStatus, str], None] | None = None,
@@ -2066,11 +2091,11 @@ def destroy_all(
                 )
                 report("table-cleanup", table_status, table_msg)
             else:
-                engine_type = engine.config.architecture.query_engine.type.value
-                msg = (
-                    "DuckDB cannot run table maintenance, skipping table cleanup"
-                    if engine_type == "duckdb"
-                    else "No capable engine pod found, skipping table cleanup"
+                msg = _no_engine_table_message(
+                    engine.config.architecture.query_engine.type.value,
+                    table_format,
+                    ns_goes=engine.config.platform.kubernetes.create_namespace is True,
+                    clean_buckets=clean_buckets,
                 )
                 results.append(
                     DeploymentResult(
@@ -2079,6 +2104,9 @@ def destroy_all(
                         message=msg,
                     )
                 )
+                # Printed like every other outcome of this step: the no-engine
+                # and DuckDB destroys used to show an empty table-cleanup step.
+                report("table-cleanup", DeploymentStatus.SKIPPED, msg)
         except (_NamespaceReplaced, _NamespaceUnverifiable) as e:
             table_step_stopped = True
             results.append(
