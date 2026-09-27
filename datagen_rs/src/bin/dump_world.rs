@@ -4,7 +4,7 @@
 use std::fs::File;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, Int32Array, Int64Array, StringArray};
+use arrow::array::{ArrayRef, Int32Array, Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
@@ -37,8 +37,6 @@ fn main() {
     let lei: Vec<&str> = idx.clone().map(|i| w.lei[i].as_str()).collect();
     let bic: Vec<&str> = idx.clone().map(|i| w.bic[i].as_str()).collect();
     let ccy: Vec<&str> = idx.clone().map(|i| w.ccy[i]).collect();
-    let sanc: Vec<bool> = idx.clone().map(|i| w.sanctioned[i]).collect();
-    let pep: Vec<bool> = idx.clone().map(|i| w.pep[i]).collect();
     let nacct: Vec<i32> = idx.clone().map(|i| w.n_accounts[i]).collect();
 
     let schema = Arc::new(Schema::new(vec![
@@ -55,8 +53,6 @@ fn main() {
         Field::new("lei", DataType::Utf8, false),
         Field::new("bic", DataType::Utf8, false),
         Field::new("ccy", DataType::Utf8, false),
-        Field::new("sanc", DataType::Boolean, false),
-        Field::new("pep", DataType::Boolean, false),
         Field::new("nacct", DataType::Int32, false),
     ]));
 
@@ -74,8 +70,6 @@ fn main() {
         Arc::new(StringArray::from(lei)),
         Arc::new(StringArray::from(bic)),
         Arc::new(StringArray::from(ccy)),
-        Arc::new(BooleanArray::from(sanc)),
-        Arc::new(BooleanArray::from(pep)),
         Arc::new(Int32Array::from(nacct)),
     ];
     let batch = RecordBatch::try_new(schema.clone(), cols).unwrap();

@@ -37,8 +37,12 @@ pub const CUSTOMER_RATE: f64 = 0.50;
 
 /// Countries on the FATF grey or black list among the generator's home codes.
 /// Mirrors `spark/data/aml/high_risk_jurisdictions.json` (a drift test checks
-/// every code here is in that file, and that no other home code is).
-pub const FATF_LISTED: [&str; 1] = ["AE"];
+/// every code here is in that file, and that no other home code is). Empty
+/// since the June 2026 FATF lists: the UAE left the grey list in February
+/// 2024 and no other home code is listed, so the CRR country factor never
+/// scores 2 on this corpus. The generator's high-risk corridor is synthetic
+/// (typology::HIGH_RISK_CC), not FATF.
+pub const FATF_LISTED: [&str; 0] = [];
 
 const DOMESTIC: &str = "US";
 
@@ -199,14 +203,10 @@ pub fn expected_monthly_volume_usd(
 /// - declared expected monthly volume: 0 below $10K, 1 below $100K, 2 above
 ///
 /// Score is the sum (0..6); tier low for 0-1, medium for 2-3, high for 4+.
-/// PEP overrides the tier to high: PEPs require enhanced due diligence (FATF
-/// Recommendation 12). Returns (score, tier, factors string).
-pub fn crr(
-    ty: i8,
-    country: &str,
-    pep: bool,
-    expected_volume_usd: f64,
-) -> (i32, &'static str, String) {
+/// PEP status is not a CRR input: it is the answer W6 (the PEP screen)
+/// is scored against, so the party zone carries no PEP flag and the CRR is
+/// computed without one (AML-GOALS #50). Returns (score, tier, factors).
+pub fn crr(ty: i8, country: &str, expected_volume_usd: f64) -> (i32, &'static str, String) {
     let c = if country == DOMESTIC {
         0
     } else if FATF_LISTED.contains(&country) {
@@ -227,13 +227,13 @@ pub fn crr(
         2
     };
     let score = c + t + v;
-    let tier = if pep || score >= 4 {
+    let tier = if score >= 4 {
         "high"
     } else if score >= 2 {
         "medium"
     } else {
         "low"
     };
-    let factors = format!("country={};type={};volume={};pep={}", c, t, v, pep as i32);
+    let factors = format!("country={};type={};volume={}", c, t, v);
     (score, tier, factors)
 }

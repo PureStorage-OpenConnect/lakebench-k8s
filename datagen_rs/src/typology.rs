@@ -170,11 +170,12 @@ pub const SPECS: [Spec; 15] = [
 /// orders of magnitude headroom and stays well within i64 for tid up to 14.
 const TID_SEED_STRIDE: i64 = 100_000_000;
 
-/// Country codes classified as elevated-risk corridors for demo purposes only
-/// (paired with any non-matching second country). These are not a regulatory
-/// list; they are picked to give the corridor_high_risk typology a stable,
-/// deterministic pool of participants regardless of the US-heavy home
-/// distribution.
+/// SYNTHETIC high-risk corridor countries (paired with any non-matching
+/// second country). Not a regulatory, FATF or sanctions list: picked to give
+/// the corridor_high_risk typology a stable, deterministic pool of
+/// participants regardless of the US-heavy home distribution. Published as
+/// `spark/data/aml/synthetic_corridors.json` (risk_tier synthetic_corridor)
+/// for W7; a drift test keeps the two equal.
 const HIGH_RISK_CC: [&str; 6] = ["AE", "CN", "SG", "HK", "MX", "IN"];
 
 /// dormant_reactivation episode length bounds, days (log-uniform between).

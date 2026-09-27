@@ -227,7 +227,7 @@ fn financial_seed_is_required_strict_and_never_spent() {
     }
 }
 
-fn total_txns(dir: &Path, extra: &[&str]) -> u64 {
+fn expected_rows(dir: &Path, extra: &[&str]) -> u64 {
     let out = Command::new(env!("CARGO_BIN_EXE_generate"))
         .env("DG_LOCAL_DIR", dir)
         // Large enough that 1 MB files outnumber the 64-file floor.
@@ -244,11 +244,16 @@ fn total_txns(dir: &Path, extra: &[&str]) -> u64 {
     );
     let text =
         String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    let v = text
-        .split("total_txns=")
-        .nth(1)
-        .expect("total_txns in output");
-    v.split_whitespace().next().unwrap().parse().unwrap()
+    let num = |key: &str| -> u64 {
+        let v = text
+            .split(key)
+            .nth(1)
+            .unwrap_or_else(|| panic!("{key} in output"));
+        v.split_whitespace().next().unwrap().parse().unwrap()
+    };
+    // Screening payments (screening.rs) are added on top of the corpus row
+    // budget, so the rows written are total_txns plus screen_rows.
+    num("total_txns=") + num("screen_rows=")
 }
 
 #[test]
@@ -260,9 +265,9 @@ fn rows_are_independent_of_threads_file_size_and_nodes() {
     let _ = std::fs::remove_dir_all(&tmp);
     let a = tmp.join("a");
     let b = tmp.join("b2");
-    let want = total_txns(&a, &["--threads", "2"]);
+    let want = expected_rows(&a, &["--threads", "2"]);
     for node in ["0", "1"] {
-        total_txns(
+        expected_rows(
             &b,
             &[
                 "--threads",
@@ -286,7 +291,7 @@ fn rows_are_independent_of_threads_file_size_and_nodes() {
         na
     );
     let rb = rows(&fb);
-    assert_eq!(ra.len() as u64, want, "rows != total_txns");
+    assert_eq!(ra.len() as u64, want, "rows != total_txns + screen_rows");
     assert!(ra == rb, "rows depend on threads, file size or nodes");
     let _ = std::fs::remove_dir_all(&tmp);
 }

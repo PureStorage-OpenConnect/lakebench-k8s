@@ -14,7 +14,13 @@ use crate::world as W;
 /// version with the monitored population and KYC (party.is_customer etc.):
 /// silver_build_financial refuses to write NULL KYC for a 0.2+ corpus whose
 /// party/account files are missing. Bump on any change readers must detect.
-pub const MODEL_VERSION: &str = "datagen-v2-rs-0.2";
+///
+/// 0.3 (AML generator freeze, AML-GOALS #50 and #44): the sanctions and PEP
+/// screening track (bronze/watchlist.parquet, planted sanctions_match and
+/// pep_match instances) and the answer keys moved out of the party zone
+/// (no sanctions_status, pep_status or initial_risk_score; crr ignores PEP).
+/// A pre-freeze corpus carries 0.2 and must not pass as current.
+pub const MODEL_VERSION: &str = "datagen-v2-rs-0.3";
 
 pub struct World {
     pub seed: i64,
@@ -39,8 +45,6 @@ pub struct World {
     pub lei: Vec<String>,
     pub bic: Vec<String>,
     pub ccy: Vec<&'static str>,
-    pub sanctioned: Vec<bool>,
-    pub pep: Vec<bool>,
     pub n_accounts: Vec<i32>,
     pub ring_sz: Vec<i64>,
     /// Per-entity activity rate: BASELINE_ACTIVITY[type] * persona rate_mult(id).
@@ -56,6 +60,69 @@ pub struct World {
     pub amount_logshift: Vec<f64>,
     pub ring_hit: Vec<f64>,
     pub bic_pool: Vec<String>,
+    /// External counterparties above the population (crate::screening):
+    /// listed parties and their namesake decoys. Never customers, never in
+    /// the party or account zones; only the pacs.008 emit reads them, as a
+    /// beneficiary. Empty until `attach_external`.
+    pub ext_first: usize,
+    pub ext_name: Vec<String>,
+    pub ext_street: Vec<String>,
+    pub ext_town: Vec<String>,
+    pub ext_country: Vec<&'static str>,
+}
+
+impl World {
+    /// Register external counterparties with ids `population + 1 ..`, in
+    /// order. Leaves every population column untouched.
+    pub fn attach_external(&mut self, ents: Vec<(String, String, String, &'static str)>) {
+        self.ext_first = self.population + 1;
+        for (n, s, t, c) in ents {
+            self.ext_name.push(n);
+            self.ext_street.push(s);
+            self.ext_town.push(t);
+            self.ext_country.push(c);
+        }
+    }
+
+    #[inline]
+    pub fn is_external(&self, id: usize) -> bool {
+        id > self.population
+    }
+
+    /// Counterparty name, street, town and country for any entity id,
+    /// population or external.
+    #[inline]
+    pub fn cp_name(&self, id: usize) -> &str {
+        if id > self.population {
+            &self.ext_name[id - self.ext_first]
+        } else {
+            self.name.get(id)
+        }
+    }
+    #[inline]
+    pub fn cp_street(&self, id: usize) -> &str {
+        if id > self.population {
+            &self.ext_street[id - self.ext_first]
+        } else {
+            self.street.get(id)
+        }
+    }
+    #[inline]
+    pub fn cp_town(&self, id: usize) -> &str {
+        if id > self.population {
+            &self.ext_town[id - self.ext_first]
+        } else {
+            self.town.get(id)
+        }
+    }
+    #[inline]
+    pub fn cp_country(&self, id: usize) -> &'static str {
+        if id > self.population {
+            self.ext_country[id - self.ext_first]
+        } else {
+            self.country[id]
+        }
+    }
 }
 
 pub fn build_world(scale: f64, seed: i64, corpus_months: i64) -> World {
@@ -63,7 +130,7 @@ pub fn build_world(scale: f64, seed: i64, corpus_months: i64) -> World {
 }
 
 /// `bronze_only` skips the columns the pacs.008 emit path never reads
-/// (region, postcode, email, sanctioned, pep, n_accounts). Those exist only for
+/// (region, postcode, email, n_accounts). Those exist only for
 /// the party/account reference tables, so a dedicated-bronze pod that does not
 /// write the reference zones pays nothing for them -- at scale 100 that removes
 /// roughly six full-population passes (email being the costly one) from every
@@ -286,16 +353,6 @@ pub fn build_world_p(
         lei,
         bic,
         ccy,
-        sanctioned: if bronze_only {
-            Vec::new()
-        } else {
-            W::sanctioned_set(n, seed)
-        },
-        pep: if bronze_only {
-            Vec::new()
-        } else {
-            W::pep_set(n, seed)
-        },
         n_accounts,
         ring_sz,
         activity,
@@ -303,5 +360,10 @@ pub fn build_world_p(
         amount_logshift,
         ring_hit,
         bic_pool: pool,
+        ext_first: n + 1,
+        ext_name: Vec::new(),
+        ext_street: Vec::new(),
+        ext_town: Vec::new(),
+        ext_country: Vec::new(),
     }
 }
