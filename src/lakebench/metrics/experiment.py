@@ -220,7 +220,14 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
                     "compaction_interval": sustained.compaction_interval,
                 }
                 if arch.pipeline.mode.value in ("sustained", "continuous")
-                else {"retention_threshold": _batch_retention(cfg)}
+                else {
+                    "retention_threshold": _batch_retention(cfg),
+                    # Batch pre-benchmark expiry does not use
+                    # sustained.retention_threshold: resolve_maintenance_retention
+                    # gives 0s (every older snapshot) unless the workload
+                    # retains history (retention_workload).
+                    "retention_source": "resolve_maintenance_retention (batch pre-benchmark)",
+                }
             ),
         },
         "mode": arch.pipeline.mode.value,
@@ -360,6 +367,28 @@ def _caps_bound(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str
     return out
 
 
+def _bound_kinds(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str]:
+    """Which limits bound, without the counts: the like-for-like condition.
+    The counts (a concurrent budget granted from live cluster capacity)
+    vary between runs of one config and stay in ``bound`` as evidence."""
+    out = {
+        f"{x['job_type']}: executor cap" for x in limits.get("executors") or [] if x.get("cap_hit")
+    }
+    out |= {
+        f"{x['job_type']}: concurrent executor budget"
+        for x in limits.get("executors") or []
+        if x.get("budget_cap")
+    }
+    if limits.get("tm_alerts_over_capacity"):
+        out.add("TM max_alerts_per_customer")
+    if limits.get("autosize_cuts"):
+        out.add("auto-sizing cuts")
+    if limits.get("maintenance_stopped"):
+        out.add("pre-benchmark maintenance budget")
+    out |= {f"rule {r} cap" for r, why in (rules.get("skipped") or {}).items() if "cap" in str(why)}
+    return sorted(out)
+
+
 def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
@@ -441,7 +470,8 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
         if seen is None:
             continue
         declared = corpus.get(key)
-        if declared is not None and float(declared) != float(seen):
+        # The pods get --scale as "%.6f" (deploy/datagen.py).
+        if declared is not None and abs(float(declared) - float(seen)) > 1e-6:
             problems.append(f"config {key} {declared!r} but the datagen pods ran {seen!r}")
         out[key] = int(seen) if key == "seed" else float(seen)
     if dg.get("pod_image") and "," not in str(dg["pod_image"]):
@@ -524,6 +554,17 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         limits["tm_alerts_over_capacity"] = tm_over
     rules = _rules(metrics)
     limits["bound"] = _caps_bound(limits, rules)
+    limits["bound_kinds"] = _bound_kinds(limits, rules)
+    bench = metrics.benchmark
+    if bench is None and metrics.pipeline_benchmark is not None:
+        bench = metrics.pipeline_benchmark.query_benchmark
+    if bench is not None:
+        # What the recorded benchmark ran with (lakebench benchmark can
+        # rerun it with other --iterations or --mode than the config's).
+        limits["benchmark_iterations"] = getattr(bench, "iterations", None) or limits.get(
+            "benchmark_iterations"
+        )
+        limits["benchmark_mode"] = getattr(bench, "mode", None)
     from lakebench.metrics.maintenance_policy import effective_maintenance
 
     arch = dict(inputs.get("architecture") or {})
@@ -643,7 +684,8 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
         "query access path": (exp.get("architecture") or {}).get("query_access_path"),
         "system": exp.get("system"),
         "benchmark iterations": (exp.get("limits") or {}).get("benchmark_iterations"),
-        "Lakebench limits that bound": sorted((exp.get("limits") or {}).get("bound") or []),
+        "benchmark mode": (exp.get("limits") or {}).get("benchmark_mode"),
+        "Lakebench limits that bound": list((exp.get("limits") or {}).get("bound_kinds") or []),
     }
 
 
@@ -655,6 +697,7 @@ CONDITION_KEYS = frozenset(
         "query access path",
         "system",
         "benchmark iterations",
+        "benchmark mode",
         "Lakebench limits that bound",
     }
 )
@@ -844,6 +887,12 @@ def stored_identity_refusals(
         return [f"{NO_PROVENANCE} (the run has no experiment block)"]
     if not expected_identity:
         return [f"{NO_PROVENANCE} (the {what} was recorded without an experiment identity)"]
+    missing = [k for k in identity(actual) if k not in expected_identity]
+    if missing:
+        return [
+            f"not comparable: the {what} was recorded with an older experiment identity "
+            f"(no {', '.join(missing)}); record it again from a current run"
+        ]
     reasons = [f"{r} from the {what}" for r in diff_identities(expected_identity, identity(actual))]
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
     established = results_established(actual)

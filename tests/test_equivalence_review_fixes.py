@@ -394,8 +394,9 @@ class TestStamps:
         assert any("over capacity" in b for b in lim["bound"])
 
     def test_iterations_and_bound_limits_are_conditions(self):
-        a = _run(_cfg(benchmark={"iterations": 1})).to_dict()
-        b = _run(_cfg(benchmark={"iterations": 3})).to_dict()
+        ra, rb = _run(_cfg(benchmark={"iterations": 1})), _run(_cfg(benchmark={"iterations": 3}))
+        ra.benchmark.iterations, rb.benchmark.iterations = 1, 3
+        a, b = ra.to_dict(), rb.to_dict()
         assert ex.refusals(a, b)[0] == []
         assert any(d.startswith("benchmark iterations") for d in ex.like_for_like(a, b))
 
@@ -459,3 +460,144 @@ class TestRunLocalIds:
         other = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "other")], cols)
         assert mismatch(run1, other)
         assert mismatch(run1, fingerprint_rows([(None, "2026-01-01 00:00:00", "acme")], cols))
+
+
+# ---------------------------------------------------------------------------
+# Fix-pass review and live run 61489ab (M1-M3)
+# ---------------------------------------------------------------------------
+
+
+class TestFixPass:
+    def test_continuous_run_with_rounds_can_be_a_baseline_and_a_package(self):
+        from lakebench.cli._reproduce import _build_package
+        from lakebench.metrics import perf_gate as pg
+        from tests.test_reproduce import _metrics
+
+        exp = stub_experiment(["Q1_full_aggregation_scan"], mode="sustained")
+        exp["results"]["fingerprints"] = {"Q1_full_aggregation_scan": None}  # aggregated rounds
+        run = SimpleNamespace(raw={"experiment": exp}, run_id="r")
+        with mock.patch.object(pg, "run_refusals", return_value=[]):
+            try:
+                pg.record_baseline(pg.BaselineStore(path=None, baselines={}), "x", run, "abc")
+            except pg.PerfGateError as e:
+                assert "usable result fingerprint" not in str(e), e
+            except Exception:  # noqa: BLE001 -- later steps need a full record
+                pass
+        pb = SimpleNamespace(
+            pipeline_mode="sustained",
+            ingest_ratio=1.0,
+            sustained_throughput_rps=1.0,
+            data_freshness_seconds=1.0,
+            compute_efficiency_gb_per_core_hour=1.0,
+            post_compaction_qph=0.0,
+            query_benchmark=None,
+            stages=[],
+        )
+        pkg = _build_package(
+            _metrics(experiment=exp, pipeline_benchmark=pb), config_reference="c", commit_sha="a"
+        )
+        assert pkg["reproduction_metadata"]["result_fingerprints"]
+
+    def test_bound_condition_carries_no_counts(self):
+        def run(granted):
+            r = _run(_cfg(pipeline={"mode": "sustained"}))
+            r.streaming.append(
+                StreamingJobMetrics(
+                    job_name="s", job_type="silver-stream", requested_executors=granted
+                )
+            )
+            return r.to_dict()
+
+        a, b = run(1), run(2)
+        ea, eb = ex.experiment_of(a), ex.experiment_of(b)
+        assert ea["limits"]["bound"] != eb["limits"]["bound"]  # evidence keeps the counts
+        assert not [d for d in ex.like_for_like(a, b) if d.startswith("Lakebench limits")]
+
+    def test_iterations_come_from_the_recorded_benchmark(self):
+        r = _run(_cfg(benchmark={"iterations": 3}))
+        r.benchmark.iterations = 5
+        assert r.to_dict()["experiment"]["limits"]["benchmark_iterations"] == 5
+
+    def test_one_row_approx_tolerance_is_a_few_quanta(self):
+        a = fingerprint_rows([("x", 10.0)], {1: 1.0})
+        assert mismatch(a, fingerprint_rows([("x", 21.0)], {1: 1.0}))
+        assert mismatch(a, fingerprint_rows([("x", 12.0)], {1: 1.0})) is None
+
+    def test_old_stored_identity_gets_one_clear_message(self):
+        exp = stub_experiment(["Q1"])
+        old = {k: v for k, v in ex.identity(exp).items() if k != "system"}
+        refs = ex.stored_identity_refusals(old, ex.result_fingerprints(exp), exp, "baseline")
+        assert len(refs) == 1 and "record it again" in refs[0]
+
+    def test_scale_rendered_to_six_places_is_not_a_disagreement(self):
+        corpus, problems = ex._observed_corpus({"scale": 0.1234567}, {"scale": 0.123457})
+        assert problems == []
+
+    def test_error_before_any_statement_is_not_run(self):
+        from lakebench.metrics.maintenance_policy import (
+            MAINTENANCE_POLICY_ID,
+            effective_maintenance,
+        )
+
+        e = effective_maintenance(
+            MAINTENANCE_POLICY_ID,
+            table_format="iceberg",
+            query_engine="trino",
+            mode="batch",
+            outcomes=[{"kind": "maintenance", "error": "x", "before_statements": True}],
+        )
+        assert e["id"].endswith("expire=not_run,compaction=not_run")
+
+
+class TestLiveRun61489ab:
+    def test_batch_c360_maintenance_skips_the_continuous_bronze_table(self):
+        from lakebench.cli._sustained import maintained_tables
+
+        batch = maintained_tables(_cfg())
+        assert not any("bronze" in t for t in batch)
+        assert any("bronze" in t for t in maintained_tables(_cfg(pipeline={"mode": "sustained"})))
+        fin = maintained_tables(_cfg(workload={"schema": "financial", "datagen": {"scale": 1}}))
+        assert any(t.startswith("bronze") for t in fin)
+
+    def test_applied_retention_and_its_source_are_stamped(self):
+        r = _run()
+        r.maintenance_outcomes = [
+            {"kind": "expire", "total": 4, "succeeded": 4, "retention": "0s"},
+            {"kind": "compaction", "total": 2, "succeeded": 2},
+        ]
+        e = r.to_dict()["experiment"]
+        assert e["effective_maintenance"]["detail"]["applied_retention"] == ["0s"]
+        assert e["maintenance_settings"]["retention_threshold"] == "0s"
+        assert "batch pre-benchmark" in e["maintenance_settings"]["retention_source"]
+
+    def test_failed_operations_are_recorded_as_failed(self):
+        r = _run()
+        r.maintenance_outcomes = [
+            {"kind": "expire", "total": 6, "succeeded": 0},
+            {"kind": "compaction", "total": 2, "succeeded": 2},
+        ]
+        assert "expire=failed" in r.to_dict()["experiment"]["effective_maintenance"]["id"]
+
+    def test_compaction_no_op_is_detail_not_identity(self):
+        from lakebench.metrics.maintenance_policy import (
+            MAINTENANCE_POLICY_ID,
+            effective_maintenance,
+        )
+
+        base = [
+            {"kind": "expire", "total": 4, "succeeded": 4},
+            {"kind": "compaction", "total": 2, "succeeded": 2},
+        ]
+        noop = [
+            *base,
+            {
+                "kind": "compaction",
+                "files_before": 367,
+                "files_after": 367,
+                "note": "no-op: data files 367 -> 367",
+            },
+        ]
+        kw = {"table_format": "iceberg", "query_engine": "trino", "mode": "batch"}
+        a = effective_maintenance(MAINTENANCE_POLICY_ID, outcomes=base, **kw)
+        b = effective_maintenance(MAINTENANCE_POLICY_ID, outcomes=noop, **kw)
+        assert a["id"] == b["id"] and any("no-op" in r for r in b["reasons"])

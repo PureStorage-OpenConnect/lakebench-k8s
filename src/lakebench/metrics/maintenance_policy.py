@@ -165,17 +165,28 @@ def effective_maintenance(
         turn(("compaction",), SKIPPED_BY_USER, "continuous compaction is disabled")
 
     detail = {k: ("on" if v == RAN else "off") for k, v in cls.items()}
+    applied: set[str] = set()
     if outcomes is not None:
         for o in outcomes:
             if o.get("error"):
                 reasons.append(f"{o.get('kind', 'maintenance')} call failed: {o['error']}")
+            if o.get("note"):
+                reasons.append(f"{o.get('kind')}: {o['note']}")
+            if o.get("retention"):
+                applied.add(str(o["retention"]))
             if o.get("user_skip") and o.get("kind") in cls:
                 turn((o["kind"],), SKIPPED_BY_USER, f"{o['kind']} skipped: {o['user_skip']}")
         for kind in both:
             if cls[kind] != RAN:
                 detail[kind] = "off"
                 continue
-            mine = [o for o in outcomes if o.get("kind") in (kind, "maintenance")]
+            # A phase that raised before any statement was attempted never
+            # reached this operation: not an attempt.
+            mine = [
+                o
+                for o in outcomes
+                if o.get("kind") in (kind, "maintenance") and not o.get("before_statements")
+            ]
             total = sum(int(o.get("total") or 0) for o in mine if o.get("kind") == kind)
             ok = sum(int(o.get("succeeded") or 0) for o in mine if o.get("kind") == kind)
             # A round or phase that raised counts as one failed attempt.
@@ -204,7 +215,7 @@ def effective_maintenance(
         "detail_id": f"{policy}:" + ",".join(detail_parts),
         "expire": cls["expire"],
         "compaction": cls["compaction"],
-        "detail": detail,
+        "detail": {**detail, **({"applied_retention": sorted(applied)} if applied else {})},
         "basis": "recorded outcomes"
         if outcomes is not None
         else "policy rules (no outcomes recorded)",

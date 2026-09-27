@@ -2206,9 +2206,27 @@ def run(
                     post_file_count = _data_file_total(_post_health)
                 except Exception:
                     pass
+                if pre_file_count > 0 and post_file_count > 0:
+                    # Detail, not identity: a compaction that changed no
+                    # files still ran (effective maintenance reasons).
+                    maint_outcomes.append(
+                        {
+                            "kind": "compaction",
+                            "files_before": pre_file_count,
+                            "files_after": post_file_count,
+                            **(
+                                {"note": f"no-op: data files {pre_file_count} -> {post_file_count}"}
+                                if post_file_count == pre_file_count
+                                else {}
+                            ),
+                        }
+                    )
 
             except Exception as e:
-                maint_outcomes.append({"kind": "maintenance", "error": str(e)})
+                reached = any(o.get("kind") in ("expire", "compaction") for o in maint_outcomes)
+                maint_outcomes.append(
+                    {"kind": "maintenance", "error": str(e), "before_statements": not reached}
+                )
                 print_warning(f"Maintenance failed (non-fatal): {e}")
 
             # 5. Wait for storage to settle before the post round (LB-150).

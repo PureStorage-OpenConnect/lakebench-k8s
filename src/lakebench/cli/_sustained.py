@@ -964,6 +964,20 @@ def scalar_from_output(engine: str, output: str) -> float | None:
         return None
 
 
+def maintained_tables(cfg) -> list[str]:
+    """Tables table maintenance (expire, orphan removal) runs on: those the
+    pipeline writes for this workload and mode. Batch Customer 360 has no
+    bronze table (bronze-verify reads the datagen Parquet in place); the
+    continuous bronze_raw only exists in continuous mode. Maintenance on it
+    failed 2 of 6 statements on every batch c360 run (live, 61489ab)."""
+    schema = cfg.architecture.workload.schema_type.value
+    continuous = cfg.architecture.pipeline.mode.value in ("sustained", "continuous")
+    layers: tuple[str, ...] = ("bronze", "silver", "gold")
+    if schema != "financial" and not continuous:
+        layers = ("silver", "gold")
+    return cfg.architecture.tables.workload_tables(schema, layers=layers)
+
+
 def _note_outcome(outcomes: list | None, kind: str, **details) -> None:
     """Record what a maintenance or compaction call actually did, for the
     experiment block's effective maintenance (metrics/maintenance_policy)."""
@@ -1035,9 +1049,7 @@ def _run_iceberg_maintenance(
         _note_outcome(outcomes, "expire", skipped="no capable engine pod found")
         return None
 
-    tables = cfg.architecture.tables
-    schema = cfg.architecture.workload.schema_type.value
-    all_tables = [f"{catalog}.{t}" for t in tables.workload_tables(schema)]
+    all_tables = [f"{catalog}.{t}" for t in maintained_tables(cfg)]
     table_names = _rotated(all_tables, start_at)
 
     # Build SQL based on table format. Delta VACUUM has one retention.

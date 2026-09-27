@@ -1206,7 +1206,7 @@ def record_baseline(
     unfp = sorted(
         n for n, f in result_fingerprints(exp).items() if n not in failed and not usable(f)
     )
-    if unfp:
+    if unfp and not unchecked_by_design(exp):
         raise PerfGateError(
             f"run {run.run_id} cannot be a baseline for {name}: queries without a usable "
             f"result fingerprint ({', '.join(unfp)}) could never be shown equal to a later run"

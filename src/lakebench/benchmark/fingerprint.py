@@ -206,14 +206,16 @@ def _approx_value(value: object) -> float | str | None:
 VOLATILE = -1.0
 
 #: An approximate column matches when its sums differ by at most
-#: quantum x (APPROX_FLIP_ALLOWANCE + sqrt(rows)): summation-order noise
-#: moves a rounded value by about one quantum in a few rows, not in every
-#: row, so the slack does not grow linearly into dollars at hundreds of rows.
-APPROX_FLIP_ALLOWANCE = 10.0
+#: quantum x (APPROX_FLIP_ALLOWANCE + 0.5 x sqrt(rows)): summation-order
+#: noise moves a rounded value by a quantum or so in a few rows, not in
+#: every row, so the slack does not grow linearly with the row count. The
+#: base allowance covers a single-row DOUBLE sum over 2e8 rows at scale 100
+#: (about two quanta of noise); a one-row average may move 3 quanta.
+APPROX_FLIP_ALLOWANCE = 3.0
 
 
 def approx_tolerance(quantum: float, rows: int) -> float:
-    return float(quantum) * (APPROX_FLIP_ALLOWANCE + math.sqrt(max(rows, 0)))
+    return float(quantum) * (APPROX_FLIP_ALLOWANCE + 0.5 * math.sqrt(max(rows, 0)))
 
 
 def fingerprint_rows(rows, approx_columns=None, engine=None, adapted_sql=None) -> dict:

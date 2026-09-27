@@ -143,15 +143,14 @@ def test_rotated_and_next_start():
 
 def _run_maint_with_timeout_on(cfg, bad_table_index: int, start_at: int):
     """Run a continuous maintenance round where one table's first statement times out."""
-    from lakebench.cli._sustained import MaintenanceBudget, _run_iceberg_maintenance
+    from lakebench.cli._sustained import (
+        MaintenanceBudget,
+        _run_iceberg_maintenance,
+        maintained_tables,
+    )
     from lakebench.modules.table_formats.iceberg.maintenance import ExecSqlTimeout
 
-    tables = [
-        f"lakehouse.{t}"
-        for t in cfg.architecture.tables.workload_tables(
-            cfg.architecture.workload.schema_type.value
-        )
-    ]
+    tables = [f"lakehouse.{t}" for t in maintained_tables(cfg)]
     sent: list[str] = []
 
     def fake_exec(engine, k8s, pod, ns, sql, timeout):
@@ -184,7 +183,8 @@ def test_a_stuck_table_costs_one_statement_per_round():
     """Round 1 stalls on the stuck table; round 2 starts after it and finishes."""
     from tests.conftest import make_config
 
-    cfg = make_config()
+    # A continuous round: its maintenance includes the continuous bronze table.
+    cfg = make_config(architecture={"pipeline": {"mode": "sustained"}})
     tables, sent, nxt = _run_maint_with_timeout_on(cfg, bad_table_index=1, start_at=0)
     assert len(tables) >= 3
     assert tables[0] in sent[0]

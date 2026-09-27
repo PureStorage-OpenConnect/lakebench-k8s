@@ -398,7 +398,7 @@ def _build_package(
     unfp = sorted(
         n for n, f in result_fingerprints(experiment).items() if n not in failed and not usable(f)
     )
-    if unfp:
+    if unfp and not unchecked_by_design(experiment):
         raise ReproduceError(
             "The source run cannot be packaged: queries without a usable result fingerprint "
             f"({', '.join(unfp)}) could never be shown equal to a reproduce run."
