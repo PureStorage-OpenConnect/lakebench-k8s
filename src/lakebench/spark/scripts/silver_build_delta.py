@@ -20,6 +20,7 @@ from enum import Enum
 
 from common import (
     apply_silver_transformations_anchored,
+    c360_bronze_path,
     env,
     log,
     resolve_data_clock,
@@ -292,7 +293,8 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
 
-    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
+    appending = incremental and _table_exists(spark, silver_tbl)
+    df_bronze = spark.read.parquet(c360_bronze_path(bronze_uri, appending))
     bronze_count = df_bronze.count()
     log(f"Bronze records: {bronze_count:,}")
     _COUNTED["bronze_rows"] = bronze_count
@@ -303,7 +305,7 @@ def silver_simple(spark, bronze_uri, silver_tbl, catalog, incremental=False):
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
-    if incremental and _table_exists(spark, silver_tbl):
+    if appending:
         log("Appending to existing table (incremental mode)")
         write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
     else:
@@ -339,7 +341,8 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
         f"Input size: {profile.total_size_gb:.1f} GB (estimated {profile.transaction_count:,} rows)"
     )
 
-    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
+    appending = incremental and _table_exists(spark, silver_tbl)
+    df_bronze = spark.read.parquet(c360_bronze_path(bronze_uri, appending))
 
     # LB_DATA_CLOCK when set; a one-column pass over bronze only without it.
     anchor = resolve_data_clock(df_bronze)
@@ -349,7 +352,7 @@ def silver_streaming(spark, bronze_uri, silver_tbl, catalog, profile, incrementa
 
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
-    if incremental and _table_exists(spark, silver_tbl):
+    if appending:
         log("Appending to existing table (incremental mode)")
         write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
     else:

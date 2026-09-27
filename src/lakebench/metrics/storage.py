@@ -380,6 +380,8 @@ class MetricsStorage:
                 tm_invariants=job_data.get("tm_invariants") or {},
                 tm_ops=job_data.get("tm_ops"),
                 tm_status=job_data.get("tm_status") or {},
+                c360_check=job_data.get("c360_check"),
+                c360_bronze=job_data.get("c360_bronze"),
             )
 
             if job_data.get("start_time"):
@@ -449,6 +451,7 @@ class MetricsStorage:
             datagen_fleet=data.get("datagen_fleet"),
             financial_scoring=data.get("financial_scoring"),
             tm_operations=data.get("tm_operations"),
+            c360_correctness=data.get("c360_correctness"),
             maintenance_policy_id=recorded_policy(data),
             provenance=data.get("provenance"),
         )

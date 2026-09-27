@@ -221,6 +221,8 @@ def main() -> None:
         log(f"Event time range (UTC): {stats['ts_min']} .. {stats['ts_max']}")
     if "silver_rows" in stats:
         log(f"Rows passing the silver quality filter: {stats['silver_rows']:,}")
+        # Read by lakebench.metrics.c360_correctness: bronze rows silver must hold.
+        log(f"[c360-bronze] rows={row_count} silver_filter_rows={stats['silver_rows']}")
     log("Schema:")
     for field in df.schema.fields:
         log(f"  - {field.name} ({field.dataType.simpleString()})")

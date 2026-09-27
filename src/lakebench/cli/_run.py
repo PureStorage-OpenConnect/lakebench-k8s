@@ -413,6 +413,9 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     job_metrics.tm_invariants = parsed.tm_invariants
     job_metrics.tm_ops = parsed.tm_ops
     job_metrics.tm_status = parsed.tm_status
+    # Customer 360 expected-result facts (reporting only, D6).
+    job_metrics.c360_check = parsed.c360_check
+    job_metrics.c360_bronze = parsed.c360_bronze
 
 
 # Upstream failures a benchmark may carry without failing the run, as
@@ -1685,6 +1688,10 @@ def run(
             # LB_RUN_ID ties gold.alerts / gold.detection_status rows to this
             # run's metrics.json; without it every pod drew its own uuid.
             cycle_env: dict[str, str] = {"LB_RUN_ID": f"{run_id}-c{cycle_idx + 1}"}
+            if total_cycles > 1:
+                # c360 silver appends read only this cycle's bronze files
+                # (common.c360_bronze_path); the whole prefix double-counted.
+                cycle_env["LB_BRONZE_CYCLE"] = str(cycle_idx)
             if cycle_idx > 0:
                 cycle_env.update(
                     {
@@ -1973,6 +1980,28 @@ def run(
                 _tm_run_id = run_id
             if _report_tm_verdict(_tm, "AML batch gate"):
                 pipeline_success = False
+
+        # Customer 360 expected results (D6): reported, never gating until the
+        # owner approves what each check means (c360_correctness.GATING).
+        if (
+            cfg.architecture.workload.schema_type.value == "customer360"
+            and not stage
+            and collector.current_run is not None
+        ):
+            try:
+                from lakebench.metrics import c360_correctness as _c360
+
+                _jobs = collector.current_run.jobs
+                _c360_rec = _c360.evaluate_run(
+                    [jm for jm in _jobs if getattr(jm, "job_type", "") == "gold-finalize"],
+                    [jm for jm in _jobs if getattr(jm, "job_type", "") == "bronze-verify"],
+                    _c360.expected_context(cfg),
+                )
+                collector.current_run.c360_correctness = _c360_rec
+                for _line in _c360.summary_lines(_c360_rec):
+                    (print_warning if _c360_rec["status"] != "pass" else print_info)(_line)
+            except Exception as e:  # noqa: BLE001 -- reporting only
+                print_warning(f"Customer 360 expected-result check could not run: {e}")
 
         # -- Phase 5/7: Maintenance ------------------------------------------------
         console.print()
@@ -2303,6 +2332,23 @@ def run(
                     print_error(_p)
                 if _bench_problems:
                     pipeline_success = False
+
+                # Customer 360 benchmark row counts (reporting only, D6).
+                if (
+                    collector.current_run is not None
+                    and collector.current_run.c360_correctness is not None
+                ):
+                    try:
+                        from lakebench.metrics import c360_correctness as _c360
+
+                        _c360_rec = _c360.add_benchmark_checks(
+                            collector.current_run.c360_correctness, bench_result.queries
+                        )
+                        collector.current_run.c360_correctness = _c360_rec
+                        for _line in _c360.summary_lines(_c360_rec):
+                            (print_warning if _c360_rec["status"] != "pass" else print_info)(_line)
+                    except Exception as e:  # noqa: BLE001 -- reporting only
+                        print_warning(f"Customer 360 benchmark row check could not run: {e}")
 
                 _journal_safe(
                     j.record,
