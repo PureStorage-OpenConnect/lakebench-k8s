@@ -87,7 +87,9 @@ class TestStamping:
         assert e["lakebench"]["lakebench_version"]
         assert "executors" in e["limits"]
         if schema == "financial":
-            assert e["workload"]["generator_model_version"] == ex.DATAGEN_MODEL_VERSIONS["financial"]
+            assert (
+                e["workload"]["generator_model_version"] == ex.DATAGEN_MODEL_VERSIONS["financial"]
+            )
             assert "corpus_role" in e["corpus"]
             assert e["limits"]["w1_max_vertices"] == cfg.architecture.workload.w1_max_vertices
         if mode == "sustained":
@@ -165,9 +167,26 @@ class TestStamping:
         assert e["support"]["state"] == "unverified"
         assert e["repetitions"]["runs"] == 1
         assert e["repetitions"]["benchmark_samples_per_query"] == 1
-        key = ("customer360", "hive-iceberg-spark-trino", "batch")
-        with mock.patch.object(ex, "RELEASE_VALIDATED", frozenset({key})):
-            assert _metrics(_cfg()).to_dict()["experiment"]["support"]["state"] == "supported"
+        assert "validated_combinations.yaml" in e["support"]["basis"]
+
+    def test_support_is_supported_only_when_the_record_lists_it(self, tmp_path):
+        from lakebench.config import support
+
+        rec = tmp_path / "validated_combinations.yaml"
+        rec.write_text(
+            "validated:\n"
+            "  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch,\n"
+            "     tree: abc1234, runs: [run-1]}\n"
+        )
+        with mock.patch.object(support, "VALIDATION_RECORD", rec):
+            s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+        assert s["state"] == "supported"
+        assert s["validation_runs"] == ["run-1"] and "abc1234" in s["basis"]
+        # Listed for another mode only: still unverified.
+        rec.write_text(rec.read_text().replace("mode: batch", "mode: continuous"))
+        with mock.patch.object(support, "VALIDATION_RECORD", rec):
+            s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+        assert s["state"] == "unverified"
 
     def test_autosize_cuts_are_a_recorded_limit(self):
         run = _metrics(_cfg())

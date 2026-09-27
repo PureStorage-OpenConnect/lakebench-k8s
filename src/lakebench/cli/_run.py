@@ -1344,6 +1344,19 @@ def run(
         print_error(f"Config error: {e}")
         raise typer.Exit(1)  # noqa: B904
 
+    # DESIGN 6.5: an unsupported workload x architecture x mode is refused
+    # before anything runs. Load already checks the config's own mode;
+    # --continuous and --sustained do not write the mode back, so check the
+    # mode this run will use.
+    from lakebench.config.support import UNSUPPORTED, support_state_for_config
+
+    _support = support_state_for_config(
+        cfg, "continuous" if (sustained or continuous) else cfg.architecture.pipeline.mode
+    )
+    if _support["state"] == UNSUPPORTED:
+        print_error(f"Unsupported combination, refused: {_support['basis']}")
+        raise typer.Exit(1)
+
     # Local mode runs before auto-sizing: there is no cluster to size against,
     # and the local profiles are fixed rather than derived from capacity.
     if local:

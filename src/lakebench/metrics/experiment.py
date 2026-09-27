@@ -525,23 +525,27 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
     return out, problems
 
 
-#: (workload, recipe, mode) combinations validated end to end on the
-#: release tree (DESIGN 6.5 layer 4). Empty until a release records its
-#: validation runs here: every run is "unverified" until then. A config that
-#: fails layers 1-3 is refused at load, so "unsupported" is never stamped on
-#: a run that got this far.
-RELEASE_VALIDATED: frozenset[tuple[str, str, str]] = frozenset()
+def support_state(
+    workload: str | None, arch: Mapping[str, Any], mode: str | None, *, system: str = "cluster"
+) -> dict[str, Any]:
+    """The DESIGN 6.5 support state of a run's workload x architecture x mode,
+    computed by lakebench.config.support from layers 1-3 and the release
+    validation record (config/validated_combinations.yaml)."""
+    from lakebench.config.support import support_state as _state
 
+    def t(key: str) -> str | None:
+        v = arch.get(key)
+        return (v or {}).get("type") if isinstance(v, Mapping) else v
 
-def support_state(workload: str | None, recipe: str | None, mode: str | None) -> dict[str, Any]:
-    """The DESIGN 6.5 support state of a run's workload x recipe x mode."""
-    key = (str(workload), str(recipe), "sustained" if mode == "continuous" else str(mode))
-    if key in RELEASE_VALIDATED:
-        return {"state": "supported", "basis": "in this release's validation list"}
-    return {
-        "state": "unverified",
-        "basis": "not in this release's validation list (metrics.experiment.RELEASE_VALIDATED)",
-    }
+    return _state(
+        workload,
+        t("catalog"),
+        t("table_format"),
+        t("pipeline_engine"),
+        t("query_engine"),
+        mode,
+        system=system,
+    )
 
 
 def _repetitions(metrics: Any) -> dict[str, Any]:
@@ -646,7 +650,10 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         "schema": EXPERIMENT_SCHEMA,
         "system": "local" if local else "cluster",
         "support": support_state(
-            (inputs.get("workload") or {}).get("name"), arch.get("recipe"), mode
+            schema,
+            arch,
+            mode,
+            system="local" if local else "cluster",
         ),
         "repetitions": _repetitions(metrics),
         "workload": dict(inputs.get("workload") or {}),
