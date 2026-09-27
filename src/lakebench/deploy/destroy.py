@@ -10,6 +10,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -396,6 +397,359 @@ def _delete_owned_buckets(
             "and re-run destroy)"
         )
     return notes, bool(errors)
+
+
+@dataclass
+class _BucketPlan:
+    """What the bucket step will do with each of the deployment's buckets.
+
+    ``buckets`` is the list destroy empties (refused ones removed). The table
+    step reads it to decide whether a file-deleting DROP is safe (LB-186); the
+    bucket step recomputes it right before emptying, so a verdict never goes
+    stale between the check and the delete.
+    """
+
+    buckets: list[str]
+    refused_set: set[str]
+    refusal_msg: str
+    created_record: set[str]
+    record_unreadable: list[str]
+    owned_by_tag: list[str]
+    absent_buckets: list[str]
+    legacy_forced: list[str]
+    unsupported_by_prefix: list[str]
+    unsupported_forced_unrecorded: list[str]
+    unsupported_forced: list[str]
+    disowned_recorded: list[str]
+    transient: bool
+
+
+def _classify_buckets(
+    engine,
+    s3,
+    namespace: str,
+    namespace_present: bool,
+    force_legacy: bool,
+    report: Callable[[str, DeploymentStatus, str], None] | None = None,
+) -> _BucketPlan:
+    """Decide, per bucket, whether destroy may empty it (ownership proof).
+
+    Read-only: reads bucket tags, one object listing on recorded-only
+    buckets, the namespace's bucket records and the list of other
+    lakebench deployments. ``report`` receives the progress messages; the
+    table step passes None to classify silently.
+    """
+    from kubernetes import client as k8s_client
+
+    def _progress(component: str, status: DeploymentStatus, message: str) -> None:
+        if report is not None:
+            report(component, status, message)
+
+    from lakebench.deploy.ownership import read_adopted_empty_buckets, read_created_buckets
+
+    s3_cfg = engine.config.platform.storage.s3
+    transient = False
+    buckets = list(
+        dict.fromkeys(
+            [
+                s3_cfg.buckets.bronze,
+                s3_cfg.buckets.silver,
+                s3_cfg.buckets.gold,
+            ]
+        )
+    )
+    # Ownership check per bucket: refuse to empty a bucket
+    # that carries another deployment's tag OR that has no
+    # lakebench ownership tag at all (legacy). The design
+    # invariant is "destroy refuses without proof of
+    # ownership"; a warn-and-proceed on absent tags would
+    # let a destroy empty a bucket that belongs to another
+    # workload. `--force-legacy` is the explicit opt-in.
+    from lakebench.deploy.ownership import (
+        IdentityVerdict,
+        bucket_name_matches_deployment,
+        list_lakebench_deployment_names,
+        verify_bucket_ownership,
+    )
+
+    identity_name = engine.config.name
+    # Cluster-scan other lakebench deployments so the
+    # UNSUPPORTED fallback can enforce longest-prefix-wins.
+    # ``None`` means "cannot know" and the UNSUPPORTED
+    # branch below MUST refuse rather than fall back to
+    # naive prefix. F8 (round-3): load the kubeconfig via
+    # get_k8s_client(context=...) so a stale ambient
+    # KUBECONFIG cannot make CoreV1Api target the wrong
+    # cluster.
+    from kubernetes import client as _kclient
+
+    from lakebench.k8s import get_k8s_client as _get_k8s
+
+    _get_k8s(
+        context=engine.config.platform.kubernetes.context or "",
+        namespace=engine.config.get_namespace(),
+    )
+    other_deployments = list_lakebench_deployment_names(
+        _kclient.CoreV1Api(),
+        exclude=engine.config.get_namespace(),
+    )
+    # LB-177: the namespace records which buckets lakebench
+    # created, possibly under an earlier config. Consider those
+    # too (each still has to pass the ownership check below),
+    # or they leak and the namespace delete erases the record.
+    created_record: set[str] = set()
+    # Tagless backends: buckets deploy adopted while empty. Their
+    # data is this deployment's, so they may be emptied (never
+    # deleted: not in created_record).
+    adopted_empty_record: set[str] = set()
+    record_unreadable: list[str] = []
+    if namespace_present:
+        try:
+            created_record = set(read_created_buckets(k8s_client.CoreV1Api(), namespace))
+            adopted_empty_record = set(
+                read_adopted_empty_buckets(k8s_client.CoreV1Api(), namespace)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not read created-buckets record: %s", e)
+            record_unreadable.append(f"namespace annotation: {e}")
+    recorded_only = sorted(created_record - set(buckets))
+    recorded_only_set = set(recorded_only)
+    buckets = buckets + recorded_only
+    refused_names: list[str] = []
+    # Recorded-only buckets are not named by the current config.
+    # Review of LB-177: on backends without tagging the only
+    # ownership proof is the name, and another deployment may be
+    # using such a bucket now (S-P6 style shared bronze), so a
+    # non-empty one is left in place, never emptied.
+    held_recorded: list[str] = []
+    # A recorded bucket another deployment's tag now claims is
+    # provably not ours any more; it comes off the record.
+    disowned_recorded: list[str] = []
+    mismatched: list[str] = []
+    legacy_refused: list[str] = []
+    legacy_forced: list[str] = []
+    unsupported_refused: list[str] = []
+    unsupported_forced: list[str] = []
+    unsupported_by_prefix: list[str] = []
+    # Tagless backend, name matches, but not on the created record.
+    unsupported_unrecorded: list[str] = []
+    unsupported_forced_unrecorded: list[str] = []
+    owned_by_tag: list[str] = []
+    absent_buckets: list[str] = []
+    for bucket in buckets:
+        v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
+        if v.verdict is IdentityVerdict.MATCH:
+            owned_by_tag.append(bucket)
+        elif v.verdict is IdentityVerdict.NOT_FOUND:
+            absent_buckets.append(bucket)
+        if v.verdict is IdentityVerdict.MISMATCH:
+            mismatched.append(f"{bucket} ({v.hint})")
+            refused_names.append(bucket)
+            if bucket in created_record:
+                disowned_recorded.append(bucket)
+        elif v.verdict is IdentityVerdict.ABSENT:
+            # --force-legacy vouches for the config's buckets the
+            # operator can see, never for a name in the record.
+            if not force_legacy or bucket in recorded_only_set:
+                legacy_refused.append(bucket)
+                refused_names.append(bucket)
+            else:
+                legacy_forced.append(bucket)
+                logger.warning(
+                    "destroy --force-legacy: emptying untagged "
+                    "bucket %s (no lakebench ownership tag; "
+                    "may contain data from another workload)",
+                    bucket,
+                )
+                _progress(
+                    "s3-buckets",
+                    DeploymentStatus.IN_PROGRESS,
+                    f"--force-legacy: untagged bucket {bucket}",
+                )
+        elif v.verdict is IdentityVerdict.UNSUPPORTED:
+            # Backend does not implement bucket tagging.
+            # Fallback: proceed only if the bucket name
+            # prefix-matches this deployment AND no other
+            # lakebench deployment on the cluster has a
+            # longer-prefix claim (longest-prefix-wins).
+            # ``other_deployments is None`` means the
+            # enumeration itself failed and we cannot
+            # enforce longest-prefix -- refuse rather than
+            # fall back to naive prefix (F2, round-3).
+            prefix_ok = other_deployments is not None and bucket_name_matches_deployment(
+                bucket, identity_name, other_deployments
+            )
+            # The name is not proof on its own: deploy adopts a
+            # pre-existing bucket that merely prefix-matches
+            # (a user's `lb16-bronze`, or one left by an earlier
+            # deployment whose record is gone) without the
+            # --force-legacy a tagged backend demands. Only the
+            # namespace's created-buckets record shows lakebench
+            # made it, so an unrecorded bucket is left alone.
+            if prefix_ok and bucket not in created_record and bucket not in adopted_empty_record:
+                if force_legacy:
+                    unsupported_forced_unrecorded.append(bucket)
+                    logger.warning(
+                        "destroy --force-legacy: emptying bucket %s on a "
+                        "backend without tagging; not recorded as created "
+                        "by deployment %r. Operator has asserted ownership.",
+                        bucket,
+                        identity_name,
+                    )
+                    _progress(
+                        "s3-buckets",
+                        DeploymentStatus.IN_PROGRESS,
+                        f"--force-legacy (no tagging, not recorded): {bucket}",
+                    )
+                else:
+                    unsupported_unrecorded.append(bucket)
+                    refused_names.append(bucket)
+                continue
+            if prefix_ok and bucket in recorded_only_set:
+                try:
+                    resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
+                    holds = int(resp.get("KeyCount", 0)) > 0
+                except Exception:  # noqa: BLE001
+                    holds = True
+            else:
+                holds = False
+            if prefix_ok and holds:
+                held_recorded.append(bucket)
+                refused_names.append(bucket)
+            elif prefix_ok:
+                unsupported_by_prefix.append(bucket)
+                logger.warning(
+                    "destroy: bucket %s on a backend without "
+                    "tagging support. Proceeding by "
+                    "name-prefix match and the created-buckets "
+                    "record of deployment %r.",
+                    bucket,
+                    identity_name,
+                )
+                _progress(
+                    "s3-buckets",
+                    DeploymentStatus.IN_PROGRESS,
+                    f"name-prefix ownership: {bucket}",
+                )
+            elif force_legacy and bucket not in recorded_only_set:
+                unsupported_forced.append(bucket)
+                logger.warning(
+                    "destroy --force-legacy: emptying bucket "
+                    "%s on a backend without tagging support "
+                    "AND without name-prefix match against "
+                    "deployment %r. Operator has asserted "
+                    "ownership.",
+                    bucket,
+                    identity_name,
+                )
+                # F6: mirror the IN_PROGRESS report on the
+                # forced branch so a --force-legacy wipe is
+                # visible in the progress stream, not just
+                # in the final summary.
+                _progress(
+                    "s3-buckets",
+                    DeploymentStatus.IN_PROGRESS,
+                    f"--force-legacy (no tagging, no prefix match): {bucket}",
+                )
+            else:
+                unsupported_refused.append(bucket)
+                refused_names.append(bucket)
+    if unsupported_refused and other_deployments is None:
+        # Could not list sibling deployments: a transient cluster
+        # or RBAC problem, not proof the buckets are someone
+        # else's. Keep the namespace so a re-run can finish.
+        transient = True
+    if unsupported_unrecorded and record_unreadable:
+        # The record could not be read, so these may well be ours.
+        # Keep the namespace (the record) so a re-run can decide.
+        transient = True
+    if (
+        mismatched
+        or legacy_refused
+        or unsupported_refused
+        or held_recorded
+        or unsupported_unrecorded
+    ):
+        parts = []
+        if unsupported_unrecorded:
+            parts.append(
+                "backend does not support bucket tagging and this "
+                "deployment's record lists neither as created nor as "
+                "adopted while empty (so its data may not be "
+                "lakebench's): "
+                + ", ".join(unsupported_unrecorded)
+                + " (left in place, not emptied; pass --force-legacy "
+                "to empty it if you have confirmed it is yours; it is "
+                "never deleted)"
+            )
+        if held_recorded:
+            parts.append(
+                "recorded as created by this deployment under an earlier config "
+                "but not named by this one, and not empty (another deployment "
+                "may be using it; the bucket name is the only ownership proof "
+                "here): " + ", ".join(held_recorded) + " (left in place; if it "
+                "is unused, re-run destroy with a config that names it)"
+            )
+        if mismatched:
+            parts.append("owned by another deployment: " + "; ".join(mismatched))
+        if legacy_refused:
+            parts.append(
+                "no lakebench ownership tag: "
+                + ", ".join(legacy_refused)
+                + " (pass --force-legacy if you have "
+                "confirmed these are yours; otherwise use "
+                "`lakebench admin reclaim-bucket <name>` to "
+                "adopt an untagged bucket)"
+            )
+        if unsupported_refused:
+            if other_deployments is None:
+                unsupported_reason = (
+                    "backend does not support bucket tagging, "
+                    "and lakebench could not enumerate other "
+                    "deployments on the cluster (likely RBAC "
+                    "on `namespaces` list) so longest-prefix "
+                    "safety cannot be enforced: "
+                )
+            else:
+                unsupported_reason = (
+                    "backend does not support bucket tagging "
+                    f"and bucket name does not grant "
+                    f"deployment {identity_name!r} a "
+                    "name-prefix claim (or another lakebench "
+                    "deployment on this cluster has a longer "
+                    "prefix): "
+                )
+            parts.append(
+                unsupported_reason
+                + ", ".join(unsupported_refused)
+                + " (rename buckets to start with the "
+                "deployment name, grant cluster-wide "
+                "`list namespaces`, or pass --force-legacy "
+                "if you have confirmed these are yours)"
+            )
+        refusal_msg = "Bucket ownership refused; " + " | ".join(parts)
+        _progress("s3-buckets", DeploymentStatus.IN_PROGRESS, refusal_msg)
+    else:
+        refusal_msg = ""
+    # LB-177: a refusal on one bucket leaves it alone but does not
+    # stop the deployment's other, owned buckets.
+    refused_set = set(refused_names)
+    buckets = [b for b in buckets if b not in refused_set]
+    return _BucketPlan(
+        buckets=buckets,
+        refused_set=refused_set,
+        refusal_msg=refusal_msg,
+        created_record=created_record,
+        record_unreadable=record_unreadable,
+        owned_by_tag=owned_by_tag,
+        absent_buckets=absent_buckets,
+        legacy_forced=legacy_forced,
+        unsupported_by_prefix=unsupported_by_prefix,
+        unsupported_forced_unrecorded=unsupported_forced_unrecorded,
+        unsupported_forced=unsupported_forced,
+        disowned_recorded=disowned_recorded,
+        transient=transient,
+    )
 
 
 def _is_last_lakebench_namespace(namespace_names: list[str], current: str) -> bool:
@@ -1492,9 +1846,7 @@ def destroy_all(
             from lakebench.deploy.ownership import (
                 TAG_CREATED_BY_LAKEBENCH,
                 forget_created_buckets,
-                read_adopted_empty_buckets,
                 read_bucket_ownership_tag,
-                read_created_buckets,
             )
             from lakebench.s3 import S3BucketVanished, S3Client
 
@@ -1530,302 +1882,23 @@ def destroy_all(
                 )
             else:
                 # dict.fromkeys: one bucket may back two layers; handle it once.
-                buckets = list(
-                    dict.fromkeys(
-                        [
-                            s3_cfg.buckets.bronze,
-                            s3_cfg.buckets.silver,
-                            s3_cfg.buckets.gold,
-                        ]
-                    )
+                plan_b = _classify_buckets(
+                    engine, s3, namespace, namespace_present, force_legacy, report
                 )
-                # Ownership check per bucket: refuse to empty a bucket
-                # that carries another deployment's tag OR that has no
-                # lakebench ownership tag at all (legacy). The design
-                # invariant is "destroy refuses without proof of
-                # ownership"; a warn-and-proceed on absent tags would
-                # let a destroy empty a bucket that belongs to another
-                # workload. `--force-legacy` is the explicit opt-in.
-                from lakebench.deploy.ownership import (
-                    IdentityVerdict,
-                    bucket_name_matches_deployment,
-                    list_lakebench_deployment_names,
-                    verify_bucket_ownership,
-                )
-
-                identity_name = engine.config.name
-                # Cluster-scan other lakebench deployments so the
-                # UNSUPPORTED fallback can enforce longest-prefix-wins.
-                # ``None`` means "cannot know" and the UNSUPPORTED
-                # branch below MUST refuse rather than fall back to
-                # naive prefix. F8 (round-3): load the kubeconfig via
-                # get_k8s_client(context=...) so a stale ambient
-                # KUBECONFIG cannot make CoreV1Api target the wrong
-                # cluster.
-                from kubernetes import client as _kclient
-
-                from lakebench.k8s import get_k8s_client as _get_k8s
-
-                _get_k8s(
-                    context=engine.config.platform.kubernetes.context or "",
-                    namespace=engine.config.get_namespace(),
-                )
-                other_deployments = list_lakebench_deployment_names(
-                    _kclient.CoreV1Api(),
-                    exclude=engine.config.get_namespace(),
-                )
-                # LB-177: the namespace records which buckets lakebench
-                # created, possibly under an earlier config. Consider those
-                # too (each still has to pass the ownership check below),
-                # or they leak and the namespace delete erases the record.
-                created_record: set[str] = set()
-                # Tagless backends: buckets deploy adopted while empty. Their
-                # data is this deployment's, so they may be emptied (never
-                # deleted: not in created_record).
-                adopted_empty_record: set[str] = set()
-                record_unreadable: list[str] = []
-                if namespace_present:
-                    try:
-                        created_record = set(
-                            read_created_buckets(k8s_client.CoreV1Api(), namespace)
-                        )
-                        adopted_empty_record = set(
-                            read_adopted_empty_buckets(k8s_client.CoreV1Api(), namespace)
-                        )
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("could not read created-buckets record: %s", e)
-                        record_unreadable.append(f"namespace annotation: {e}")
-                recorded_only = sorted(created_record - set(buckets))
-                recorded_only_set = set(recorded_only)
-                buckets = buckets + recorded_only
-                refused_names: list[str] = []
-                # Recorded-only buckets are not named by the current config.
-                # Review of LB-177: on backends without tagging the only
-                # ownership proof is the name, and another deployment may be
-                # using such a bucket now (S-P6 style shared bronze), so a
-                # non-empty one is left in place, never emptied.
-                held_recorded: list[str] = []
-                # A recorded bucket another deployment's tag now claims is
-                # provably not ours any more; it comes off the record.
-                disowned_recorded: list[str] = []
-                mismatched: list[str] = []
-                legacy_refused: list[str] = []
-                legacy_forced: list[str] = []
-                unsupported_refused: list[str] = []
-                unsupported_forced: list[str] = []
-                unsupported_by_prefix: list[str] = []
-                # Tagless backend, name matches, but not on the created record.
-                unsupported_unrecorded: list[str] = []
-                unsupported_forced_unrecorded: list[str] = []
-                owned_by_tag: list[str] = []
-                absent_buckets: list[str] = []
-                for bucket in buckets:
-                    v = verify_bucket_ownership(s3.raw_client, bucket, identity_name)
-                    if v.verdict is IdentityVerdict.MATCH:
-                        owned_by_tag.append(bucket)
-                    elif v.verdict is IdentityVerdict.NOT_FOUND:
-                        absent_buckets.append(bucket)
-                    if v.verdict is IdentityVerdict.MISMATCH:
-                        mismatched.append(f"{bucket} ({v.hint})")
-                        refused_names.append(bucket)
-                        if bucket in created_record:
-                            disowned_recorded.append(bucket)
-                    elif v.verdict is IdentityVerdict.ABSENT:
-                        # --force-legacy vouches for the config's buckets the
-                        # operator can see, never for a name in the record.
-                        if not force_legacy or bucket in recorded_only_set:
-                            legacy_refused.append(bucket)
-                            refused_names.append(bucket)
-                        else:
-                            legacy_forced.append(bucket)
-                            logger.warning(
-                                "destroy --force-legacy: emptying untagged "
-                                "bucket %s (no lakebench ownership tag; "
-                                "may contain data from another workload)",
-                                bucket,
-                            )
-                            report(
-                                "s3-buckets",
-                                DeploymentStatus.IN_PROGRESS,
-                                f"--force-legacy: untagged bucket {bucket}",
-                            )
-                    elif v.verdict is IdentityVerdict.UNSUPPORTED:
-                        # Backend does not implement bucket tagging.
-                        # Fallback: proceed only if the bucket name
-                        # prefix-matches this deployment AND no other
-                        # lakebench deployment on the cluster has a
-                        # longer-prefix claim (longest-prefix-wins).
-                        # ``other_deployments is None`` means the
-                        # enumeration itself failed and we cannot
-                        # enforce longest-prefix -- refuse rather than
-                        # fall back to naive prefix (F2, round-3).
-                        prefix_ok = (
-                            other_deployments is not None
-                            and bucket_name_matches_deployment(
-                                bucket, identity_name, other_deployments
-                            )
-                        )
-                        # The name is not proof on its own: deploy adopts a
-                        # pre-existing bucket that merely prefix-matches
-                        # (a user's `lb16-bronze`, or one left by an earlier
-                        # deployment whose record is gone) without the
-                        # --force-legacy a tagged backend demands. Only the
-                        # namespace's created-buckets record shows lakebench
-                        # made it, so an unrecorded bucket is left alone.
-                        if (
-                            prefix_ok
-                            and bucket not in created_record
-                            and bucket not in adopted_empty_record
-                        ):
-                            if force_legacy:
-                                unsupported_forced_unrecorded.append(bucket)
-                                logger.warning(
-                                    "destroy --force-legacy: emptying bucket %s on a "
-                                    "backend without tagging; not recorded as created "
-                                    "by deployment %r. Operator has asserted ownership.",
-                                    bucket,
-                                    identity_name,
-                                )
-                                report(
-                                    "s3-buckets",
-                                    DeploymentStatus.IN_PROGRESS,
-                                    f"--force-legacy (no tagging, not recorded): {bucket}",
-                                )
-                            else:
-                                unsupported_unrecorded.append(bucket)
-                                refused_names.append(bucket)
-                            continue
-                        if prefix_ok and bucket in recorded_only_set:
-                            try:
-                                resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
-                                holds = int(resp.get("KeyCount", 0)) > 0
-                            except Exception:  # noqa: BLE001
-                                holds = True
-                        else:
-                            holds = False
-                        if prefix_ok and holds:
-                            held_recorded.append(bucket)
-                            refused_names.append(bucket)
-                        elif prefix_ok:
-                            unsupported_by_prefix.append(bucket)
-                            logger.warning(
-                                "destroy: bucket %s on a backend without "
-                                "tagging support. Proceeding by "
-                                "name-prefix match and the created-buckets "
-                                "record of deployment %r.",
-                                bucket,
-                                identity_name,
-                            )
-                            report(
-                                "s3-buckets",
-                                DeploymentStatus.IN_PROGRESS,
-                                f"name-prefix ownership: {bucket}",
-                            )
-                        elif force_legacy and bucket not in recorded_only_set:
-                            unsupported_forced.append(bucket)
-                            logger.warning(
-                                "destroy --force-legacy: emptying bucket "
-                                "%s on a backend without tagging support "
-                                "AND without name-prefix match against "
-                                "deployment %r. Operator has asserted "
-                                "ownership.",
-                                bucket,
-                                identity_name,
-                            )
-                            # F6: mirror the IN_PROGRESS report on the
-                            # forced branch so a --force-legacy wipe is
-                            # visible in the progress stream, not just
-                            # in the final summary.
-                            report(
-                                "s3-buckets",
-                                DeploymentStatus.IN_PROGRESS,
-                                f"--force-legacy (no tagging, no prefix match): {bucket}",
-                            )
-                        else:
-                            unsupported_refused.append(bucket)
-                            refused_names.append(bucket)
-                if unsupported_refused and other_deployments is None:
-                    # Could not list sibling deployments: a transient cluster
-                    # or RBAC problem, not proof the buckets are someone
-                    # else's. Keep the namespace so a re-run can finish.
+                if plan_b.transient:
                     bucket_transient_failure = True
-                if unsupported_unrecorded and record_unreadable:
-                    # The record could not be read, so these may well be ours.
-                    # Keep the namespace (the record) so a re-run can decide.
-                    bucket_transient_failure = True
-                if (
-                    mismatched
-                    or legacy_refused
-                    or unsupported_refused
-                    or held_recorded
-                    or unsupported_unrecorded
-                ):
-                    parts = []
-                    if unsupported_unrecorded:
-                        parts.append(
-                            "backend does not support bucket tagging and this "
-                            "deployment's record lists neither as created nor as "
-                            "adopted while empty (so its data may not be "
-                            "lakebench's): "
-                            + ", ".join(unsupported_unrecorded)
-                            + " (left in place, not emptied; pass --force-legacy "
-                            "to empty it if you have confirmed it is yours; it is "
-                            "never deleted)"
-                        )
-                    if held_recorded:
-                        parts.append(
-                            "recorded as created by this deployment under an earlier config "
-                            "but not named by this one, and not empty (another deployment "
-                            "may be using it; the bucket name is the only ownership proof "
-                            "here): " + ", ".join(held_recorded) + " (left in place; if it "
-                            "is unused, re-run destroy with a config that names it)"
-                        )
-                    if mismatched:
-                        parts.append("owned by another deployment: " + "; ".join(mismatched))
-                    if legacy_refused:
-                        parts.append(
-                            "no lakebench ownership tag: "
-                            + ", ".join(legacy_refused)
-                            + " (pass --force-legacy if you have "
-                            "confirmed these are yours; otherwise use "
-                            "`lakebench admin reclaim-bucket <name>` to "
-                            "adopt an untagged bucket)"
-                        )
-                    if unsupported_refused:
-                        if other_deployments is None:
-                            unsupported_reason = (
-                                "backend does not support bucket tagging, "
-                                "and lakebench could not enumerate other "
-                                "deployments on the cluster (likely RBAC "
-                                "on `namespaces` list) so longest-prefix "
-                                "safety cannot be enforced: "
-                            )
-                        else:
-                            unsupported_reason = (
-                                "backend does not support bucket tagging "
-                                f"and bucket name does not grant "
-                                f"deployment {identity_name!r} a "
-                                "name-prefix claim (or another lakebench "
-                                "deployment on this cluster has a longer "
-                                "prefix): "
-                            )
-                        parts.append(
-                            unsupported_reason
-                            + ", ".join(unsupported_refused)
-                            + " (rename buckets to start with the "
-                            "deployment name, grant cluster-wide "
-                            "`list namespaces`, or pass --force-legacy "
-                            "if you have confirmed these are yours)"
-                        )
-                    refusal_msg = "Bucket ownership refused; " + " | ".join(parts)
-                    report("s3-buckets", DeploymentStatus.IN_PROGRESS, refusal_msg)
-                else:
-                    refusal_msg = ""
-                # LB-177: a refusal on one bucket leaves it alone but does not
-                # stop the deployment's other, owned buckets.
-                refused_set = set(refused_names)
-                buckets = [b for b in buckets if b not in refused_set]
-                legacy = legacy_forced  # preserved local name for summary below
+                buckets = plan_b.buckets
+                refused_set = plan_b.refused_set
+                refusal_msg = plan_b.refusal_msg
+                created_record = plan_b.created_record
+                record_unreadable = plan_b.record_unreadable
+                owned_by_tag = plan_b.owned_by_tag
+                absent_buckets = plan_b.absent_buckets
+                unsupported_by_prefix = plan_b.unsupported_by_prefix
+                unsupported_forced_unrecorded = plan_b.unsupported_forced_unrecorded
+                unsupported_forced = plan_b.unsupported_forced
+                disowned_recorded = plan_b.disowned_recorded
+                legacy = plan_b.legacy_forced  # preserved local name for summary below
                 # Re-check the namespace before touching data: a slow
                 # destroy that lost a race to a concurrent destroy plus a
                 # redeploy must not empty the redeploy's buckets, which
