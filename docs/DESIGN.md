@@ -3,8 +3,9 @@
 This document states what Lakebench is, the objects it is built from, the
 rules those objects must obey, and how the product is extended. It is the
 durable reference: release plans change, this model should not. Where the
-current code departs from the model, the departure is listed under "Open
-contradictions" at the end rather than hidden in the model.
+current code departs from the model, the departure is recorded in
+`docs/internal/design-contradictions.md` (maintainer material, not shipped
+with the package) rather than hidden in the model.
 
 Detail lives elsewhere: `docs/architecture.md` (modules, deploy order),
 `docs/design/namespace-isolation.md` (ownership), `docs/benchmarking.md`
@@ -26,37 +27,39 @@ generated corpus, a pipeline over it, a definition of the correct answer and
 measurements; Customer 360 and AML today. The **execution conditions** are
 scale, mode, seed, maintenance policy and any limit Lakebench imposes.
 
-A benchmark, a demonstration and a proof are three uses of one experiment,
-not three subsystems. A benchmark compares experiments that differ in one
-axis; a demonstration shows one experiment's stages and outcome; a proof
-shows an architecture ran a workload to the correct answer. All three read
-the same evidence.
+Benchmarking, demonstration and proof are different uses of the same
+experiment, not three subsystems; all three read the same evidence. How each
+use is defined in detail (for example, what a proof must show) is a product
+decision and is not fixed here.
 
 Composability is the load-bearing property. A workload must mean the same
 thing on every architecture it is allowed to run on. If a composition cannot
-preserve that meaning, it is rejected, not run and reported.
+correctly support a workload, it is rejected at config load, or clearly
+excluded and labelled in the evidence; it is never presented as comparable.
 
 ## 2. Object model
 
 ### 2.1 System
 
 The Kubernetes cluster and object store an experiment runs on. Lakebench
-observes the system rather than configuring it. Today the evidence records
-only the S3 endpoint, buckets and scratch storage class
-(`metrics/collector.py` `build_config_snapshot`). Backend behaviour is
-characterised by `lakebench config storage` (`s3/conformance.py`), which
-reports and never gates.
+mostly observes the system rather than configuring it: shared infrastructure
+such as StorageClasses and operators is installed once by `lakebench admin`,
+and `deploy` only verifies it. The exceptions are opt-in: `deploy` installs
+the Spark or Stackable operator when its `install` option is set
+(`SparkOperatorConfig`, `StackableOperatorConfig`) and the observability stack
+when `observability.enabled` is set. What the evidence records about
+the system comes from `build_config_snapshot` (`metrics/collector.py`).
+Backend behaviour is characterised by `lakebench config storage`
+(`s3/conformance.py`), which reports and never gates.
 
 ### 2.2 Architecture
 
-Four component slots, each an enum in `config/schema.py`:
-
-| Slot | Enum | Values today |
-|---|---|---|
-| Catalog | `CatalogType` | hive, polaris, unity (no supported combination) |
-| Table format | `TableFormatType` | iceberg, delta |
-| Pipeline engine | `PipelineEngineType` | spark |
-| Query engine | `QueryEngineType` | trino, spark-thrift, duckdb, none |
+Four component slots, each an enum in `config/schema.py`: `CatalogType`,
+`TableFormatType`, `PipelineEngineType` and `QueryEngineType`. An enum value
+is a name the config accepts, not a promise of support; `CatalogType` and
+`QueryEngineType` both carry a `none` value, and a value that appears in no
+supported combination can never pass validation. `docs/recipes.md` and
+`docs/compatibility-matrix.md` list what is supported in a given release.
 
 The supported set is `_SUPPORTED_COMBINATIONS` (`config/schema.py`),
 enforced at load by `ArchitectureConfig.validate_component_combination`, which
@@ -76,7 +79,7 @@ Components live under `src/lakebench/modules/` against the protocols in
 `PipelineEngineModule`, `QueryEngineModule`, `Deployer`), plus
 `QueryExecutor` (`benchmark/executor.py`) and `PipelineEngine`
 (`engine/protocol.py`, factory `get_engine`). `modules/registry.py` exists but
-the deploy engine does not use it yet.
+orchestration does not route through it yet.
 
 ### 2.3 Workload
 
@@ -92,10 +95,15 @@ credible, and none of them may depend on which architecture runs it.
    Continuous: bronze-ingest, silver-stream, gold-refresh. Stage logic is
    Spark scripts in `spark/scripts/` (`*_financial.py` for AML; unsuffixed and
    `*_delta.py` for Customer 360). AML adds scoring and TM operations stages.
-3. **Expected correctness.** What a correct run produces. Customer 360 has
-   non-empty guards in its stage scripts. AML has the batch honesty gate
-   (`cli/_run.py` `_aml_batch_gate_problems`), recall and precision against
-   planted ground truth, a reference detector and a leakage gate (`aml/`).
+3. **Expected correctness.** What a correct run produces, and the gates that
+   fail a run that did not produce it. Existing gates: non-empty guards in
+   the Customer 360 stage scripts; `_benchmark_gate_problems` (failed
+   queries) and, for AML, `_aml_batch_gate_problems` (crashed rules, zero
+   alerts) and `_aml_tm_verdict` (TM operations invariants) in `cli/_run.py`;
+   in continuous mode `_c360_continuous_gate_problems` (zero rows) and the
+   AML continuous gate (no gold-refresh logs or zero alerts) in
+   `cli/_sustained.py`. AML also scores recall and precision against planted
+   ground truth and has a reference detector and leakage gate (`aml/`).
 4. **Measurements.** Stage timings and throughput, the query set and its QpH
    (`benchmark/queries.py`, `get_benchmark_queries` keyed by workload, with a
    `query_set_id` per set), and workload-specific scores such as AML recall.
@@ -115,9 +123,10 @@ policy, benchmark iterations, and any Lakebench-imposed cap. The config file
 declares the experiment; `lakebench deploy`, `generate` and `run` execute it;
 `destroy` removes what it owned.
 
-Caps are part of the experiment, not the system: for example
-`_MAX_EXECUTORS_SAFE` and per-job `max_executors` (`job.py`), the 30-minute
-pre-benchmark maintenance budget, `workload.w1_max_vertices`.
+Caps are part of the experiment, not the system: for example the executor
+ceiling `_MAX_EXECUTORS_SAFE` and per-job `max_executors` (`job.py`), the
+pre-benchmark maintenance budget (`PRE_BENCHMARK_MAINTENANCE_CAP`,
+`cli/_run.py`) and `workload.w1_max_vertices`.
 
 ### 2.5 Evidence
 
@@ -167,13 +176,15 @@ conditions; orchestration (`deploy/`, `cli/`) executes them; evidence
 
 ## 4. Invariants
 
-These hold across releases. Changing one is a product decision for the
-owner.
+These are the product's invariants as the mission states them. The owner
+alone changes them.
 
-1. **Correctness before comparison.** A performance number is valid only for
-   a run that completed its workload correctly. Two experiments may be
-   compared only if they executed equivalent work and produced equivalent
-   workload results; otherwise the comparison is refused, not caveated.
+1. **Correctness before comparison.** Performance results are valid only when
+   the workload completed correctly, and a performance comparison is invalid
+   when the compared systems produced different workload results. How the
+   tooling acts on an invalid comparison is an implementation and product
+   question: today `lakebench compare` warns, while the perf gate and
+   `lakebench reproduce` refuse.
 2. **Non-degenerate pass.** A successful exit is not evidence if the output
    is empty, degenerate, skipped or otherwise invalid. Every stage and every
    gate checks what it produced, not that it returned.
@@ -193,17 +204,14 @@ owner.
    (identity stamps, bucket tags, deploy nonce), `deploy/cluster_lock.py` and
    `deploy/destroy.py` (UID and nonce re-check). Destroy deletes only
    category 1 resources it can prove it owns.
-7. **Held-out evaluation data and pre-registered measurement semantics are
-   immutable without an owner decision.** AML evaluation and robustness
-   corpora are generated and scored once, as the registered run for their
-   role; spent seeds are refused. The protocol is the pre-registration at
-   `src/lakebench/spark/data/aml/aml_preregistration.json`, its look record
-   `aml_registered_looks.json` beside it, and the guard in
-   `config/datagen_seed.py`. Gate constants and metric definitions registered
-   there change only by owner decision.
-8. **Workload meaning is architecture-independent.** Swapping a component
-   must not silently change what the workload computes. A combination that
-   cannot preserve the meaning is rejected at config load.
+7. **Held-out evaluation data.** Held-out AML evaluation data must not be
+   used during development, and pre-registered measurement semantics do not
+   change without an owner decision. The registered AML protocol defines the
+   mechanism; see `docs/aml-scoring.md`.
+8. **Workload meaning is architecture-independent.** Changing a component
+   must not silently change the meaning of the workload. A combination that
+   cannot preserve it is rejected at config load, or clearly excluded and
+   labelled in the evidence.
 
 ## 5. Terminology
 
@@ -256,7 +264,9 @@ component module:
 
 Queries belong to a workload's set in `benchmark/queries.py`. Changing one
 changes the set's `query_set_id`, and QpH across ids is refused
-(`qph_comparable`). A query must return a non-empty, checkable result.
+(`qph_comparable`). A new query should return a non-empty result whose
+correctness can be checked on a correct corpus; the harness does not yet
+enforce this (see the contradictions file).
 
 ### 6.4 Adding a metric
 
@@ -279,122 +289,15 @@ mode) is supported only when:
 - any upstream limitation that changes behaviour (such as a skipped
   maintenance step) is in `RECIPE_NOTES` and in the evidence.
 
-Incompatible combinations are rejected at config load, never discovered as a
-failed job.
+Incompatible combinations are rejected at config load, or clearly excluded
+and labelled in the evidence; they are never discovered as a failed job and
+never presented as comparable. A combination the config accepts is not
+thereby supported.
 
 ## 7. Open contradictions
 
-Ordered by impact on the mission. **[owner]** needs a product decision;
-**[impl]** is implementation work inside the model above.
+Where the implementation or published docs disagree with this model is
+tracked, with file:line evidence and a recommended resolution, in
+`docs/internal/design-contradictions.md`.
 
-1. **Comparisons never check that results match.** [impl] `_build_comparison`
-   (`cli/_compare.py:299-375`) refuses QpH across query sets and only warns on
-   sample count and maintenance policy; the perf gate guards config and volume
-   only (`metrics/perf_gate.py:22-23`). `rows_returned` is captured
-   (`benchmark/runner.py:37`) but never compared, and no result digest exists.
-   Fix: per-query digests and per-stage row counts; refuse on mismatch.
 
-2. **Degenerate runs can pass.** [impl] Job success is Spark state alone
-   (`modules/pipeline_engines/spark/monitor.py:127-134`); a benchmark
-   exception leaves the run successful (`cli/_run.py:2320-2324`); no validity
-   flag gates `composite_qph` or throughput; the report shows a scale ratio of
-   0 as "Complete" (`reports/generator.py:700-704`). Fix: one run-level
-   validity verdict honoured by scores, report and exit code.
-
-3. **AML on Delta is accepted and runs Iceberg code.** [impl]
-   `_SUPPORTED_COMBINATIONS` (`config/schema.py:1232-1253`) has no workload
-   axis; `job.py:1774-1797` picks financial scripts before checking format, and
-   they hard-code `USING iceberg` (`silver_build_financial.py:189`,
-   `deploy/financial_ddl.py:114`). Fix: workloads declare supported formats
-   and modes; reject at load.
-
-4. **Customer 360 has no expected-correctness definition.** [impl] Its
-   scripts only refuse empty input (`bronze_verify.py:139`,
-   `silver_build.py:449`, `gold_finalize.py:313`). Nothing checks gold KPIs
-   against what the generator produced, so a wrong but non-empty dashboard
-   passes. Fix: derive expected aggregates from the generator and check them.
-
-5. **Evidence does not identify corpus, system or effective conditions.**
-   [impl] `build_config_snapshot` (`metrics/collector.py:1767-1860`) omits the
-   datagen seed and corpus role (recorded only by the AML reference score,
-   `score_financial_reference.py:628`), format and catalog versions, recipe
-   name, image digests, Kubernetes version and storage backend. Skipped stages
-   other than `--skip-maintenance` are not recorded, and engine-driven
-   maintenance skips (`cli/_sustained.py:964-978`) keep the full policy id.
-   `config_sha256` is read by the perf gate (`perf_gate.py:656`) and written
-   nowhere. Fix: record effective conditions and fingerprint on them.
-
-6. **Recorded benchmark settings are not what ran.** [impl] The snapshot
-   records `benchmark.mode`, `streams` and `cache` (`collector.py:1846-1848`),
-   but `lakebench run` always calls `run_power(cache="hot", ...)`
-   (`cli/_run.py:2237-2239`). Fix: record what executed; reject ignored
-   settings.
-
-7. **Caps are not recorded as caps.** [impl] Whether `_MAX_EXECUTORS_SAFE` or
-   a job's `max_executors` (`job.py:49`, `:62`) bound, the maintenance budget
-   and query timeouts (`cli/_run.py:2052-2054`) are absent from metrics.json;
-   only settle and maintenance stops are flagged (`collector.py:786`). Fix: a
-   `caps` section with value and "bound" per cap, shown in the report.
-
-8. **Nothing labels `n=1`.** [impl] Baselines are one run
-   (`perf_gate.py:1120`), compare's noise floor is a fixed figure
-   (`cli/_compare.py:156-159`), and pipeline scores carry no repetition count.
-   Fix: sample count on every published figure; label single runs.
-
-9. **Workload is nested in architecture and has no object.** [impl; moving
-   the YAML key is owner] `ArchitectureConfig.workload` and `.tables`
-   (`config/schema.py:1596-1598`) hold workload identity and table names;
-   `financial_table_defaults` (`:1623-1648`, dead code `:1649-1654`) rewrites
-   names from an architecture validator; dispatch is `== "financial"` across
-   `cli/_run.py`, `deploy/datagen.py:63`, `job.py` and `config/scale.py`;
-   local mode hard-codes c360 tables (`local_job.py:196`, `cli/_local.py`).
-   Fix: one Workload definition looked up by name.
-
-10. **Custom workloads fall back to Customer 360.** [owner]
-    `WorkloadSchema.CUSTOM` maps to the c360 query set
-    (`benchmark/queries.py:616`) and unknown schemas fall back to it, so a
-    custom workload would publish c360 QpH. Recommendation: reject `custom`
-    until workloads can be declared.
-
-11. **DuckDB bypasses the catalog.** [owner] `duckdb/executor.py:210-237`
-    rewrites tables to `iceberg_scan`/`delta_scan` on a guessed path, so the
-    catalog is not in the query path. Recommendation: keep the recipes, label
-    them catalog-bypassing, exclude them from catalog comparisons.
-
-12. **Observability deploys shared cluster objects from `deploy`.** [impl]
-    When enabled (default off, `config/schema.py:1733`),
-    `deploy/observability.py:143-158` installs kube-prometheus-stack, a
-    category 3 chart with CRDs and cluster roles, without stamp or lock, and
-    destroy uninstalls it (`deploy/destroy.py:2028-2037`). Fix: install via
-    `lakebench admin` like the other operators.
-
-13. **Workload sizing lives in the pipeline-engine module.** [impl]
-    `_JOB_PROFILES` (`job.py:51`) is c360-shaped, patched by
-    `_SCHEMA_PROFILE_OVERRIDES["financial"]` (`job.py:211`); AML-only job types
-    register for every workload (`job.py:1798-1806`). Fix: resource demands
-    belong to the workload definition.
-
-14. **The registry and part of the protocol surface are unused.** [impl]
-    `modules/registry.py:1-10` states deploy and destroy do not use it;
-    `TableFormatModule.get_pipeline_scripts` (`modules/base.py:188`) has no
-    implementation or caller. Fix: route through the registry, or delete.
-
-15. **The code deprecates the product's mode name.** [owner]
-    `PipelineMode.SUSTAINED` (`config/schema.py:164-175`); `--continuous` is a
-    hidden alias of `--sustained` (`cli/_run.py:1109-1120`);
-    `pipeline.continuous` is deprecated (`config/schema.py:910-926`);
-    `ProcessingPattern` (`:126-133`) adds "streaming", read only by the
-    autosizer (`config/autosizer.py:558`). Recommendation: make `continuous`
-    canonical, keep `sustained` as an alias, remove `ProcessingPattern`.
-
-16. **Config fields nothing reads.** [impl] `ImagesConfig.prometheus` and
-    `.grafana` (`config/schema.py:210-211`), `ReportsConfig` (`:1711-1722`),
-    `IcebergConfig.file_format` and `.properties` (`:549-550`) look like
-    controls and change nothing. Fix: remove with a clear error on use.
-
-17. **Published docs disagree with the supported set.** [impl]
-    `docs/architecture.md` and `docs/supported-components.md:122` omit the
-    three Hive + Delta recipes; `docs/compatibility-matrix.md:175` presents
-    Unity + Delta as working though no Unity combination is supported; the
-    config template lists a nonexistent `iot` schema (`config/loader.py:664`).
-    Fix: generate these tables from `_SUPPORTED_COMBINATIONS` and `RECIPES`.
