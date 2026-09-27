@@ -254,7 +254,7 @@ deliberately narrow feature set:
 
 The training API refuses at call time on any of five columns that
 directly encode the label: `amount_in_structuring_band`,
-`is_structuring`, `typology_type`, `typology_id`, `expected_workload`.
+`is_structuring`, `typology_type`, `typology_id`, `expected_workload` (the generator's AML category, not the detecting rule; the scorer reports it as `workload_category` beside `designated_rules`).
 Passing one raises `ValueError` naming the column. The refusal is a
 correctness feature -- exactly the mistake the standing rule warns
 against -- so it lives in the library rather than in the driver.

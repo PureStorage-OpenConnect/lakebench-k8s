@@ -287,8 +287,9 @@ class PipelineMetrics:
     # Financial (AML) recall scoring (optional -- populated for a batch
     # financial run when `financial score` is folded into `run` (LB-123)).
     # Shape: the recall.json sidecar written by score_financial.py --
-    # {"typologies": [{typology_type, expected_workload, recall,
-    # instance_count, detection_status}], "total_alerts", "fp_alerts",
+    # {"typologies": [{typology_type, workload_category, designated_rules,
+    # recall, instance_count, detection_status}], "typology_counts",
+    # "rules" (every rule's status and skip reason), "total_alerts", "fp_alerts",
     # "fp_rate", "run_id", "computed_by"}. The scorecard reads this to render
     # per-rule recall/precision; None means recall was not computed.
     financial_scoring: dict[str, Any] | None = None
