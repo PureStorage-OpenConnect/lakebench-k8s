@@ -294,12 +294,18 @@ def support_state(
             return out
     v = record.get((wl, str(recipe), m))
     if v is not None and v.runs:
-        if provenance and provenance.get("git_dirty"):
+        # A checkout whose status is unknown (git status failed or timed out)
+        # is not proven clean; a wheel install has no sha and no status.
+        if provenance and (
+            provenance.get("git_dirty")
+            or (provenance.get("git_sha") and provenance.get("git_dirty") is None)
+        ):
             out.update(
                 state=UNVERIFIED,
                 basis=(
-                    "listed as validated, but this lakebench ran from a modified tree "
-                    f"({provenance.get('git_sha') or 'unknown commit'} with local changes)"
+                    "listed as validated, but this lakebench ran from a modified tree or one "
+                    "whose status is unknown "
+                    f"(commit {provenance.get('git_sha') or 'unknown'})"
                 ),
             )
             return out

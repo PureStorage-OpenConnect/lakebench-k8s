@@ -194,6 +194,14 @@ class TestStamping:
             with mock.patch.object(provenance, "run_provenance", lambda: dirty):
                 s = _metrics(_cfg()).to_dict()["experiment"]["support"]
             assert s["state"] == "unverified" and "modified tree" in s["basis"]
+            unknown = dict(clean, git_dirty=None)
+            with mock.patch.object(provenance, "run_provenance", lambda: unknown):
+                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+            assert s["state"] == "unverified"
+            wheel = dict(clean, git_sha=None, git_dirty=None)
+            with mock.patch.object(provenance, "run_provenance", lambda: wheel):
+                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+            assert s["state"] == "supported"
         # Frozen at run start: re-rendering after the record changes keeps it.
         assert run.to_dict()["experiment"]["support"]["state"] == "supported"
         # Listed for another mode only: still unverified.
