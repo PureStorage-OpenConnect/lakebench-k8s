@@ -1571,6 +1571,8 @@ def destroy_all(
                 unsupported_refused: list[str] = []
                 unsupported_forced: list[str] = []
                 unsupported_by_prefix: list[str] = []
+                # Tagless backend, name matches, but not on the created record.
+                unsupported_unrecorded: list[str] = []
                 owned_by_tag: list[str] = []
                 absent_buckets: list[str] = []
                 for bucket in buckets:
@@ -1619,6 +1621,32 @@ def destroy_all(
                                 bucket, identity_name, other_deployments
                             )
                         )
+                        # The name is not proof on its own: deploy adopts a
+                        # pre-existing bucket that merely prefix-matches
+                        # (a user's `lb16-bronze`, or one left by an earlier
+                        # deployment whose record is gone) without the
+                        # --force-legacy a tagged backend demands. Only the
+                        # namespace's created-buckets record shows lakebench
+                        # made it, so an unrecorded bucket is left alone.
+                        if prefix_ok and bucket not in created_record:
+                            if force_legacy:
+                                unsupported_forced.append(bucket)
+                                logger.warning(
+                                    "destroy --force-legacy: emptying bucket %s on a "
+                                    "backend without tagging; not recorded as created "
+                                    "by deployment %r. Operator has asserted ownership.",
+                                    bucket,
+                                    identity_name,
+                                )
+                                report(
+                                    "s3-buckets",
+                                    DeploymentStatus.IN_PROGRESS,
+                                    f"--force-legacy (no tagging, not recorded): {bucket}",
+                                )
+                            else:
+                                unsupported_unrecorded.append(bucket)
+                                refused_names.append(bucket)
+                            continue
                         if prefix_ok and bucket in recorded_only_set:
                             try:
                                 resp = s3.raw_client.list_objects_v2(Bucket=bucket, MaxKeys=1)
@@ -1635,7 +1663,8 @@ def destroy_all(
                             logger.warning(
                                 "destroy: bucket %s on a backend without "
                                 "tagging support. Proceeding by "
-                                "name-prefix match against deployment %r.",
+                                "name-prefix match and the created-buckets "
+                                "record of deployment %r.",
                                 bucket,
                                 identity_name,
                             )
@@ -1672,8 +1701,29 @@ def destroy_all(
                     # or RBAC problem, not proof the buckets are someone
                     # else's. Keep the namespace so a re-run can finish.
                     bucket_transient_failure = True
-                if mismatched or legacy_refused or unsupported_refused or held_recorded:
+                if unsupported_unrecorded and record_unreadable:
+                    # The record could not be read, so these may well be ours.
+                    # Keep the namespace (the record) so a re-run can decide.
+                    bucket_transient_failure = True
+                if (
+                    mismatched
+                    or legacy_refused
+                    or unsupported_refused
+                    or held_recorded
+                    or unsupported_unrecorded
+                ):
                     parts = []
+                    if unsupported_unrecorded:
+                        parts.append(
+                            "backend does not support bucket tagging and this "
+                            "deployment's created-buckets record does not list "
+                            "(pre-existing or adopted, so its data may not be "
+                            "lakebench's): "
+                            + ", ".join(unsupported_unrecorded)
+                            + " (left in place, not emptied; pass --force-legacy "
+                            "to empty it if you have confirmed it is yours; it is "
+                            "never deleted)"
+                        )
                     if held_recorded:
                         parts.append(
                             "recorded as created by this deployment under an earlier config "
@@ -1888,8 +1938,8 @@ def destroy_all(
                 if unsupported_by_prefix:
                     notes.append(
                         f"{len(unsupported_by_prefix)} buckets emptied by "
-                        "name-prefix (backend does not support tagging): "
-                        + ", ".join(unsupported_by_prefix)
+                        "name-prefix and created-buckets record (backend does "
+                        "not support tagging): " + ", ".join(unsupported_by_prefix)
                     )
                 if unsupported_forced:
                     notes.append(

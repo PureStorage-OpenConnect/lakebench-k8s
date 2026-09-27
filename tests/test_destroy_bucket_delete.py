@@ -423,13 +423,71 @@ class TestDestroyAllBuckets:
         boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
         r = self._run(
             boto,
-            {"a-bronze": "MATCH", "a-silver": "MATCH", "a-gold": "UNSUPPORTED"},
+            {"a-bronze": "MATCH", "a-silver": "MATCH", "a-gold": "MATCH"},
             created={"a-silver"},
         )
         assert r.status is DeploymentStatus.SUCCESS
         assert set(boto.buckets) == {"a-bronze", "a-gold"}
         assert boto.buckets["a-bronze"] == [], "adopted buckets are still emptied"
         assert "provenance unknown" in r.message
+
+    # -- Tagless backends (FlashBlade): the name alone is not ownership -------
+
+    def test_tagless_unrecorded_bucket_with_matching_name_is_not_emptied(self):
+        """A user's own bucket named like a lakebench one (a-bronze), adopted by
+        deploy on a backend without tagging, must survive destroy: nothing but
+        the name says lakebench made it. A tagged backend would have demanded
+        --force-legacy at deploy; this one never asked."""
+        boto = FakeBoto({"a-bronze": ["user data"], "a-silver": [], "a-gold": []})
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
+            created={"a-silver", "a-gold"},
+        )
+        assert boto.buckets == {"a-bronze": ["user data"]}
+        assert "a-bronze" not in boto.delete_bucket_calls
+        assert r.status is DeploymentStatus.FAILED
+        assert "created-buckets record does not list" in r.message
+        assert "a-bronze" in r.message
+
+    def test_tagless_unrecorded_bucket_is_emptied_only_on_force_legacy_never_deleted(self):
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
+            created={"a-silver", "a-gold"},
+            force_legacy=True,
+        )
+        assert boto.buckets == {"a-bronze": []}
+        assert "a-bronze" not in boto.delete_bucket_calls
+        assert r.status is DeploymentStatus.SUCCESS, r.message
+
+    def test_tagless_sibling_with_longer_prefix_keeps_its_recorded_buckets(self):
+        """lb16 vs lb16-base near miss: lb16's config (or a stale record) names
+        lb16-base-bronze, which lb16-base, live on the cluster, owns. Even a
+        created-record entry for it must not let lb16 empty or delete it."""
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": [], "a-base-bronze": ["B"]})
+        r = self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold", "a-base-bronze"], "UNSUPPORTED"),
+            created={"a-bronze", "a-silver", "a-gold", "a-base-bronze"},
+            other=["a-base"],
+            create_namespace=True,
+        )
+        assert boto.buckets == {"a-base-bronze": ["B"]}
+        assert "a-base-bronze" not in boto.delete_bucket_calls
+        assert r.status is DeploymentStatus.FAILED
+
+    def test_tagless_unrecorded_with_unreadable_record_keeps_the_namespace(self):
+        boto = FakeBoto({"a-bronze": ["x"], "a-silver": [], "a-gold": []})
+        self._run(
+            boto,
+            dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "UNSUPPORTED"),
+            created_error=RuntimeError("apiserver 503"),
+            create_namespace=True,
+        )
+        assert boto.buckets["a-bronze"] == ["x"]
+        self.engine.k8s.delete_namespace.assert_not_called()
 
     def test_created_tag_marks_a_bucket_for_deletion(self):
         from lakebench.deploy.ownership import TAG_CREATED_BY_LAKEBENCH, TAG_DEPLOYMENT_NAME

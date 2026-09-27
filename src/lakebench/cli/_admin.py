@@ -940,8 +940,11 @@ def reclaim_bucket(
                         "support tagging: nothing to write, and the "
                         f"name grants deployment {cfg.name!r} a "
                         "longest-prefix claim over any sibling "
-                        "deployment on the cluster. Destroy will "
-                        "proceed on the name-prefix fallback."
+                        "deployment on the cluster. Destroy empties and "
+                        "deletes it only if this deployment's "
+                        "created-buckets record lists it (deploy "
+                        "created it); otherwise destroy leaves it in "
+                        "place unless --force-legacy is passed."
                     )
                     raise typer.Exit(0) from None
                 print_error(
