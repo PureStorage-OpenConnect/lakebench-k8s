@@ -1937,39 +1937,63 @@ class StreamStartWatch:
     submission failure while the operator retries it, and a heartbeat while
     the wait goes on, instead of waiting silently (the 2026-09-27 discovery
     run printed nothing for 9 minutes while two streams failed five times).
-    ``failures`` is what the metrics record."""
+    ``failures`` is what the metrics record: ``{"at", "attempt", "reason",
+    "lost_seconds"}``, lost_seconds from the first poll that saw the failure
+    to the first that saw another state (good to one poll interval), as for
+    batch stages (JobResult.submission_failures)."""
 
     HEARTBEAT_S = 60
 
-    def __init__(self, job_name: str, journal=None):
+    def __init__(self, job_name: str, journal=None, clock=time.monotonic):
         self.job_name = job_name
         self.journal = journal
         self.failures: list[dict] = []
         self.running_at: str | None = None
         self._last_key: tuple | None = None
         self._next_beat: float = float(self.HEARTBEAT_S)
+        self._clock = clock
+        self._open: tuple[dict, float] | None = None
 
-    def __call__(self, status, elapsed: float) -> None:
+    @property
+    def submission_retry_seconds(self) -> float:
+        """Seconds this stream spent in failed submissions before it ran."""
+        return round(sum(f.get("lost_seconds") or 0.0 for f in self.failures), 1)
+
+    def close(self) -> None:
+        """Close the failure still open (the wait ended while it failed)."""
+        if self._open is not None:
+            record, seen = self._open
+            record["lost_seconds"] = round(self._clock() - seen, 1)
+            self._open = None
+
+    def __call__(self, status, elapsed: float, *, heartbeat: bool = True) -> None:
         from lakebench.metrics.continuous_window import classify_submission_failure
         from lakebench.modules.pipeline_engines.spark.job import SUCCESS_STATES, JobState
 
+        if status.state != JobState.SUBMISSION_FAILED:
+            self.close()
         if status.state == JobState.RUNNING or status.state in SUCCESS_STATES:
             if self.running_at is None:
                 self.running_at = datetime.now(timezone.utc).isoformat()
             return
         if status.state == JobState.SUBMISSION_FAILED:
+            # A stream seen running that fails a resubmission is not running:
+            # running_at is the time it ran again, not the first sighting.
+            self.running_at = None
             key = (status.submission_attempts, status.message)
             if key != self._last_key:
                 self._last_key = key
+                self.close()
                 reason = classify_submission_failure(status.message)
                 attempt = status.submission_attempts or len(self.failures) + 1
-                self.failures.append(
-                    {
-                        "at": datetime.now(timezone.utc).isoformat(),
-                        "attempt": attempt,
-                        "reason": reason,
-                    }
-                )
+                record = {
+                    "at": datetime.now(timezone.utc).isoformat(),
+                    "attempt": attempt,
+                    "reason": reason,
+                    "lost_seconds": 0.0,
+                }
+                self.failures.append(record)
+                self._open = (record, self._clock())
                 print_warning(
                     f"lakebench-{self.job_name}: submission attempt {attempt} failed: {reason}. "
                     "The Spark Operator retries it; the window opens only when every stream runs."
@@ -1982,12 +2006,100 @@ class StreamStartWatch:
                         details={"job": self.job_name, "attempt": attempt, "reason": reason},
                     )
                 return
-        if elapsed >= self._next_beat:
+        if heartbeat and elapsed >= self._next_beat:
             self._next_beat = elapsed + self.HEARTBEAT_S
             console.print(
                 f"  [dim]Waiting for lakebench-{self.job_name} to start "
                 f"({status.state.value or 'NEW'}, {elapsed:.0f}s)...[/dim]"
             )
+
+
+def maintenance_schedule_lines(
+    table_format: str,
+    query_engine: str,
+    *,
+    skip_maintenance: bool,
+    retention_interval: int,
+    retention_source: str,
+    retention_threshold: str,
+    compaction_configured: bool,
+    compaction_interval: int,
+    compaction_source: str,
+) -> list[tuple[str, str]]:
+    """The run header's maintenance lines, as ``(level, text)``: what the
+    table format and query engine will actually run, not the Iceberg
+    schedule for every run (lb16-cf Delta runs printed "Iceberg retention").
+    """
+    fmt = (table_format or "").lower()
+    engine = (query_engine or "").lower()
+    if fmt != "delta":
+        if engine == "duckdb":
+            return [("info", "Iceberg maintenance: not run (DuckDB cannot run table maintenance)")]
+        lines = [
+            (
+                "info",
+                "Iceberg retention: disabled (--skip-maintenance)"
+                if skip_maintenance
+                else f"Iceberg retention: every {retention_interval}s "
+                f"({retention_source}; threshold: {retention_threshold})",
+            )
+        ]
+        if compaction_configured and not skip_maintenance:
+            lines.append(
+                ("info", f"Iceberg compaction: every {compaction_interval}s ({compaction_source})")
+            )
+        elif compaction_configured:
+            lines.append(("info", "Iceberg compaction: disabled (--skip-maintenance)"))
+        return lines
+
+    from lakebench.metrics.maintenance_policy import DELTA_CONTINUOUS_LIMITATION
+
+    if skip_maintenance:
+        vacuum = "Delta VACUUM: disabled (--skip-maintenance)"
+    elif engine == "duckdb":
+        vacuum = "Delta VACUUM: not run (DuckDB cannot run table maintenance)"
+    elif engine == "spark-thrift":
+        vacuum = "Delta VACUUM: not run (it OOMs Spark Thrift at 4Gi)"
+    else:
+        applied = applied_retentions("delta", retention_threshold, live_streams=True)["expire"]
+        vacuum = (
+            f"Delta VACUUM: every {retention_interval}s ({retention_source}; retention "
+            f"{applied}, Delta's 7 d default or longer while streams are live, so nothing "
+            "written in the window is eligible)"
+        )
+    return [
+        ("info", vacuum),
+        ("info", "Delta OPTIMIZE: not run (it exhausts engine memory)"),
+        ("warning", DELTA_CONTINUOUS_LIMITATION[0].upper() + DELTA_CONTINUOUS_LIMITATION[1:]),
+    ]
+
+
+def watch_all_streams(job_manager, watches: dict[str, StreamStartWatch], current: str):
+    """``wait_until_running`` callback for the stream being waited on that
+    also polls every other stream not yet running.
+
+    The streams are submitted together but waited on one at a time, so a
+    stream whose submission failed while an earlier one was waited on was
+    RUNNING again by its own turn and its failures were never seen: lb16-cf
+    recorded only bronze-ingest's, while silver-stream's and gold-refresh's
+    showed only in the operator watch. Streams already seen running stay
+    polled: one that dies and fails its resubmission before its own turn
+    would otherwise go unrecorded the same way.
+    """
+
+    def on_status(status, elapsed: float) -> None:
+        watches[current](status, elapsed)
+        for name, watch in watches.items():
+            if name == current:
+                continue
+            try:
+                other = job_manager.get_job_status(f"lakebench-{name}")
+            except Exception as e:  # noqa: BLE001 -- a missed poll is retried next interval
+                logger.debug("stream status poll for %s failed: %s", name, e)
+                continue
+            watch(other, elapsed, heartbeat=False)
+
+    return on_status
 
 
 def _size_mb(size: str) -> float:
@@ -2748,18 +2860,24 @@ def _run_sustained(
                 running = monitor.wait_until_running(
                     f"lakebench-{job_name}",
                     timeout_seconds=max(0, int(_start_deadline - time.time())),
-                    on_status=stream_watch[job_name],
+                    on_status=watch_all_streams(job_manager, stream_watch, job_name),
                 )
                 if not running.success:
                     print_error(f"lakebench-{job_name} did not start: {running.message}")
                     pipeline_success = False
                     raise typer.Exit(1)
         finally:
+            for w in stream_watch.values():
+                w.close()
             if collector.current_run is not None:
                 if collector.current_run.continuous is None:
                     collector.current_run.continuous = {}
                 collector.current_run.continuous["streams"] = {
-                    name: {"running_at": w.running_at, "submission_failures": w.failures}
+                    name: {
+                        "running_at": w.running_at,
+                        "submission_failures": w.failures,
+                        "submission_retry_seconds": w.submission_retry_seconds,
+                    }
                     for name, w in stream_watch.items()
                 }
         # The window in cluster time (pod log clocks), not this host's.
@@ -2837,15 +2955,24 @@ def _run_sustained(
         # freshness/throughput measurement.
         retention_interval = sustained_cfg.effective_retention_interval(run_duration)
         retention_threshold = sustained_cfg.retention_threshold
+        compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
+        compaction_interval = sustained_cfg.effective_compaction_interval(run_duration)
+        for _level, _line in maintenance_schedule_lines(
+            cfg.architecture.table_format.type.value,
+            cfg.architecture.query_engine.type.value,
+            skip_maintenance=skip_maintenance,
+            retention_interval=retention_interval,
+            retention_source=schedule["retention_source"],
+            retention_threshold=retention_threshold,
+            compaction_configured=sustained_cfg.compaction_enabled,
+            compaction_interval=compaction_interval,
+            compaction_source=schedule["compaction_source"],
+        ):
+            (print_warning if _level == "warning" else print_info)(_line)
         if skip_maintenance:
             next_maintenance_at = float("inf")
-            print_info("Iceberg retention: disabled (--skip-maintenance)")
         else:
             next_maintenance_at = float(retention_interval)  # first run after one interval
-            print_info(
-                f"Iceberg retention: every {retention_interval}s "
-                f"({schedule['retention_source']}; threshold: {retention_threshold})"
-            )
             from lakebench.config.loader import retention_floor_advisory
 
             floor_msg = retention_floor_advisory(cfg)
@@ -2853,16 +2980,8 @@ def _run_sustained(
                 # Continuous configs already warned at load.
                 print_warning(floor_msg)
 
-        # Iceberg compaction scheduling (v1.1.0)
-        compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
-        compaction_interval = sustained_cfg.effective_compaction_interval(run_duration)
+        # Compaction scheduling (v1.1.0); Delta OPTIMIZE never runs.
         next_compaction_at = float(compaction_interval) if compaction_enabled else float("inf")
-        if compaction_enabled:
-            print_info(
-                f"Iceberg compaction: every {compaction_interval}s ({schedule['compaction_source']})"
-            )
-        elif sustained_cfg.compaction_enabled and skip_maintenance:
-            print_info("Iceberg compaction: disabled (--skip-maintenance)")
 
         start = time.time()
         check_interval = 30

@@ -420,7 +420,8 @@ class PipelineMetrics:
 
     # Continuous runs (cli/_sustained.py): the measurement window
     # {"start", "end", "seconds"} in UTC, each stream's start
-    # {"streams": {job: {"running_at", "submission_failures"}}}, the gate's
+    # {"streams": {job: {"running_at", "submission_failures",
+    # "submission_retry_seconds"}}}, the gate's
     # problems, and the result check {"settle": {...}, "result_check":
     # {"query_set_id", "fingerprints"} or {"not_checked": reason}}: gold and
     # the query set read once the whole corpus has passed through, so two
@@ -1387,6 +1388,53 @@ class PipelineBenchmark:
         QpH; a round whose every query failed has none and is not in it)."""
         return sum(1 for r in self.benchmark_rounds if r.qph > 0)
 
+    def qph_trend(self) -> dict[str, Any] | None:
+        """How in-stream QpH moved across the window, beside the median.
+
+        A composite QpH median over a falling series (small files
+        accumulating with no effective maintenance) reads like a steady
+        state; the first and last rounds and the silver data file count at
+        each end show whether it was one. None when no round has a QpH.
+        """
+        rounds = [r for r in self.benchmark_rounds if r.qph > 0]
+        if not rounds:
+            return None
+        first, last = rounds[0].qph, rounds[-1].qph
+        trend: dict[str, Any] = {
+            "rounds": len(rounds),
+            "first_round_qph": round(first, 1),
+            "last_round_qph": round(last, 1),
+            "change_pct": round((last / first - 1) * 100, 1) if first > 0 else None,
+        }
+        counted = [
+            r.round_meta.silver_data_file_count
+            for r in self.benchmark_rounds
+            if r.round_meta is not None
+            and r.round_meta.silver_data_file_count is not None
+            and r.round_meta.silver_data_file_count >= 0
+        ]
+        if counted:
+            trend["silver_data_files_start"] = counted[0]
+            trend["silver_data_files_end"] = counted[-1]
+            trend["silver_data_files_rounds"] = len(counted)
+        else:
+            trend["silver_data_files_unavailable"] = self._file_count_unavailable_reason()
+        return trend
+
+    def _file_count_unavailable_reason(self) -> str:
+        cs = self.config_snapshot or {}
+        engine = str(cs.get("query_engine") or "")
+        if engine in ("duckdb", "none", ""):
+            return f"no table health probe on query engine {engine or 'none'}"
+        if cs.get("table_format") == "delta":
+            from lakebench.modules.table_formats.delta.maintenance import (
+                DELTA_HEALTH_UNAVAILABLE,
+            )
+
+            if engine in DELTA_HEALTH_UNAVAILABLE:
+                return f"unavailable on {engine}: {DELTA_HEALTH_UNAVAILABLE[engine]}"
+        return "the table health probe returned no count in any round"
+
     def _scores_dict(self) -> dict[str, Any]:
         """Build the mode-appropriate scores sub-dict for JSON output."""
         qph = round(self.query_benchmark.qph, 1) if self.query_benchmark else 0.0
@@ -1646,6 +1694,10 @@ class PipelineBenchmark:
             d["maintenance_settle"] = self.maintenance_settle
         if self.benchmark_rounds:
             d["benchmark_rounds"] = [r.to_dict() for r in self.benchmark_rounds]
+            trend = self.qph_trend()
+            if trend is not None:
+                # Beside the scores, not in them: compare deltas scores.
+                d["qph_trend"] = trend
         if self.cycles:
             d["cycles"] = [c.to_dict() for c in self.cycles]
         # Include human-readable descriptions for every score key present
@@ -1894,6 +1946,12 @@ def build_pipeline_benchmark(
             stage_type="streaming",
             engine="spark",
             elapsed_seconds=sj.elapsed_seconds,
+            # Failed submissions before the driver ran: the window opens only
+            # when every stream runs, so their time delays it.
+            submission_failures=list(sj.submission_failures),
+            submission_retry_seconds=round(
+                sum(f.get("lost_seconds") or 0.0 for f in sj.submission_failures), 1
+            ),
             success=sj.success,
             error_message=sj.error_message,
             input_rows=sj.total_rows_processed,

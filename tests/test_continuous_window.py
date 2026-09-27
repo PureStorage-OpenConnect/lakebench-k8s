@@ -984,3 +984,183 @@ def test_without_a_file_count_the_corpus_ratio_stands():
     pb = _trickle_pb(1_220_000, 0.0, datagen_rows=1_500_000, files=0)
     assert pb.released_rows is None
     assert pb.ingest_ratio == pytest.approx(pb.corpus_ingest_ratio)
+
+
+def test_every_streams_submission_failures_are_recorded_while_another_is_waited_on():
+    """lb16-cf: the streams are waited on one at a time, so silver-stream's
+    and gold-refresh's failures happened while bronze-ingest was waited on
+    and were never recorded. The callback polls every stream not yet running."""
+    from lakebench.cli._sustained import StreamStartWatch, watch_all_streams
+    from lakebench.spark.job import JobState, JobStatus
+
+    now = [0.0]
+    watches = {
+        n: StreamStartWatch(n, clock=lambda: now[0])
+        for n in ("bronze-ingest", "silver-stream", "gold-refresh")
+    }
+    failed = JobState.SUBMISSION_FAILED
+
+    def st(state, attempt=0):
+        return JobStatus(name="x", state=state, message=_MAVEN, submission_attempts=attempt)
+
+    others = {
+        "lakebench-silver-stream": [st(failed, 1), st(JobState.SUBMITTED), st(JobState.RUNNING)],
+        "lakebench-gold-refresh": [st(failed, 1), st(failed, 2), st(JobState.RUNNING)],
+    }
+    jm = MagicMock()
+    jm.get_job_status.side_effect = lambda name: others[name].pop(0)
+    cb = watch_all_streams(jm, watches, "bronze-ingest")
+    for t, own in ((0.0, JobState.SUBMITTED), (10.0, JobState.SUBMITTED), (20.0, JobState.RUNNING)):
+        now[0] = t
+        cb(st(own), t)
+    assert watches["bronze-ingest"].failures == []
+    silver, gold = watches["silver-stream"], watches["gold-refresh"]
+    assert [f["attempt"] for f in silver.failures] == [1]
+    assert [f["attempt"] for f in gold.failures] == [1, 2]
+    assert silver.failures[0]["lost_seconds"] == 10.0
+    assert [f["lost_seconds"] for f in gold.failures] == [10.0, 10.0]
+    assert gold.submission_retry_seconds == 20.0
+    assert silver.running_at and gold.running_at
+    # A stream seen running stays polled: a failed resubmission is recorded
+    # and running_at moves to when it ran again.
+    first_up = silver.running_at
+    others["lakebench-silver-stream"] = [st(failed, 2), st(JobState.RUNNING)]
+    others["lakebench-gold-refresh"] = [st(JobState.RUNNING), st(JobState.RUNNING)]
+    now[0] = 30.0
+    cb(st(JobState.RUNNING), 30.0)
+    assert [f["attempt"] for f in silver.failures] == [1, 2] and silver.running_at is None
+    now[0] = 40.0
+    cb(st(JobState.RUNNING), 40.0)
+    assert silver.failures[1]["lost_seconds"] == 10.0
+    assert silver.running_at is not None and silver.running_at >= first_up
+
+
+def test_a_failure_open_when_the_wait_ends_is_closed_with_its_time():
+    from lakebench.cli._sustained import StreamStartWatch
+    from lakebench.spark.job import JobState, JobStatus
+
+    now = [100.0]
+    w = StreamStartWatch("gold-refresh", clock=lambda: now[0])
+    w(JobStatus(name="g", state=JobState.SUBMISSION_FAILED, message="m", submission_attempts=1), 0)
+    now[0] = 145.0
+    w.close()
+    assert w.failures[0]["lost_seconds"] == 45.0 and w.submission_retry_seconds == 45.0
+
+
+def test_stream_submission_failures_reach_the_stage_and_the_report(tmp_path):
+    from lakebench.metrics.collector import (
+        PipelineMetrics,
+        StreamingJobMetrics,
+        build_pipeline_benchmark,
+    )
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.reports.generator import ReportGenerator
+
+    m = PipelineMetrics(
+        run_id="20260927-000000-dddddd",
+        deployment_name="d",
+        start_time=datetime(2026, 9, 27),
+        success=True,
+        config_snapshot={"mode": "continuous", "table_format": "iceberg"},
+    )
+    fail = {"at": "t", "attempt": 1, "reason": "r", "lost_seconds": 42.0}
+    m.streaming = [
+        StreamingJobMetrics(job_name="lakebench-bronze-ingest", job_type="bronze-ingest"),
+        StreamingJobMetrics(
+            job_name="lakebench-gold-refresh",
+            job_type="gold-refresh",
+            submission_failures=[fail, {**fail, "attempt": 2, "lost_seconds": 18.0}],
+        ),
+    ]
+    pb = build_pipeline_benchmark(m)
+    gold = next(s for s in pb.stages if s.submission_failures)
+    assert gold.submission_retry_seconds == 60.0 and len(gold.submission_failures) == 2
+    m.pipeline_benchmark = pb
+    MetricsStorage(tmp_path).save_run(m)
+    html = (
+        ReportGenerator(metrics_dir=tmp_path, output_dir=tmp_path)
+        .generate_report(m.run_id)
+        .read_text()
+    )
+    assert "2 failed submissions, 60s before it ran" in html
+
+
+def test_stream_failures_recorded_without_lost_seconds_say_so(tmp_path):
+    """A record from before lost_seconds was kept reads unknown, not 0s."""
+    from lakebench.metrics.collector import (
+        PipelineMetrics,
+        StreamingJobMetrics,
+        build_pipeline_benchmark,
+    )
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.reports.generator import ReportGenerator
+
+    m = PipelineMetrics(
+        run_id="20260927-000000-eeeeee",
+        deployment_name="d",
+        start_time=datetime(2026, 9, 27),
+        success=True,
+        config_snapshot={"mode": "continuous", "table_format": "iceberg"},
+    )
+    m.streaming = [
+        StreamingJobMetrics(
+            job_name="lakebench-bronze-ingest",
+            job_type="bronze-ingest",
+            submission_failures=[{"at": "t", "attempt": 1, "reason": "r"}],
+        )
+    ]
+    m.pipeline_benchmark = build_pipeline_benchmark(m)
+    MetricsStorage(tmp_path).save_run(m)
+    html = (
+        ReportGenerator(metrics_dir=tmp_path, output_dir=tmp_path)
+        .generate_report(m.run_id)
+        .read_text()
+    )
+    assert "1 failed submission, time lost not recorded" in html
+    assert "0s before it ran" not in html
+
+
+def _header(fmt: str, engine: str, **kw) -> list[tuple[str, str]]:
+    from lakebench.cli._sustained import maintenance_schedule_lines
+
+    args = {
+        "skip_maintenance": False,
+        "retention_interval": 600,
+        "retention_source": "auto",
+        "retention_threshold": "30m",
+        "compaction_configured": True,
+        "compaction_interval": 1200,
+        "compaction_source": "auto",
+        **kw,
+    }
+    return maintenance_schedule_lines(fmt, engine, **args)
+
+
+def test_delta_run_header_names_delta_maintenance_not_iceberg():
+    """lb16-cf: Delta runs printed "Iceberg retention: every 600s"."""
+    trino = _header("delta", "trino")
+    text = " | ".join(t for _, t in trino)
+    assert "Iceberg" not in text
+    assert "Delta VACUUM: every 600s (auto; retention 168h" in text
+    assert "Delta OPTIMIZE: not run" in text
+    assert trino[-1][0] == "warning" and "owner decision #46" in trino[-1][1]
+    thrift = " | ".join(t for _, t in _header("delta", "spark-thrift"))
+    assert "Delta VACUUM: not run (it OOMs Spark Thrift" in thrift and "Iceberg" not in thrift
+    skipped = _header("delta", "trino", skip_maintenance=True)
+    assert skipped[0][1] == "Delta VACUUM: disabled (--skip-maintenance)"
+    assert "DuckDB" in _header("delta", "duckdb")[0][1]
+
+
+def test_iceberg_run_header_is_unchanged():
+    assert _header("iceberg", "trino") == [
+        ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
+        ("info", "Iceberg compaction: every 1200s (auto)"),
+    ]
+    assert _header("iceberg", "trino", skip_maintenance=True) == [
+        ("info", "Iceberg retention: disabled (--skip-maintenance)"),
+        ("info", "Iceberg compaction: disabled (--skip-maintenance)"),
+    ]
+    assert _header("iceberg", "trino", compaction_configured=False) == [
+        ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
+    ]
+    assert "not run" in _header("iceberg", "duckdb")[0][1]

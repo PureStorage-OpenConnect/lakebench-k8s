@@ -533,6 +533,16 @@ class ReportGenerator:
             policy_rows.append(
                 f"<tr><td>Continuous maintenance</td><td>{DELTA_CONTINUOUS_NO_MAINTENANCE}</td></tr>"
             )
+        if self._is_sustained(metrics):
+            from lakebench.reports.scorecard import continuous_trend_rows
+
+            policy_rows.extend(
+                continuous_trend_rows(
+                    pb,
+                    delta_limitation=cs.get("table_format") == "delta"
+                    and metrics.maintenance_policy_id != LEGACY_MAINTENANCE_POLICY_ID,
+                )
+            )
         if not pb:
             return self._maintenance_table(policy_rows)
 
@@ -2179,12 +2189,29 @@ class ReportGenerator:
             else:
                 cpu_hrs = "-"
 
+            elapsed = f"{stage.elapsed_seconds:.1f}s"
+            n_fail = len(stage.submission_failures)
+            if is_sustained and n_fail:
+                # The stream waited on operator submission retries before
+                # the window could open.
+                # Records from before lost_seconds was kept: the time is
+                # unknown, not zero.
+                lost = (
+                    f"{stage.submission_retry_seconds:.0f}s before it ran"
+                    if all("lost_seconds" in f for f in stage.submission_failures)
+                    else "time lost not recorded"
+                )
+                elapsed += (
+                    f"<br><small>{n_fail} failed submission{'s' if n_fail != 1 else ''}, "
+                    f"{lost}</small>"
+                )
+
             if is_sustained:
                 rows.append(f"""
                 <tr>
                     <td><strong>{stage.stage_name}</strong></td>
                     <td>{stage.engine}</td>
-                    <td>{stage.elapsed_seconds:.1f}s</td>
+                    <td>{elapsed}</td>
                     <td>{in_rows}</td>
                     <td>{rows_s}</td>
                     <td>{latency}</td>
@@ -2427,6 +2454,11 @@ class ReportGenerator:
                 "Maintenance (effective, what ran)",
                 f"{eff.get('id')} [{eff.get('detail_id') or ''}; {eff.get('basis') or ''}]"
                 + (f" -- {'; '.join(eff.get('reasons') or [])}" if eff.get("reasons") else ""),
+            ),
+            *(
+                [("Maintenance known limitations", "; ".join(eff["known_limitations"]))]
+                if eff.get("known_limitations")
+                else []
             ),
             ("Maintenance settings", exp.get("maintenance_settings") or "none"),
             *(

@@ -383,7 +383,10 @@ class TestEffectiveMaintenance:
             ("iceberg", "duckdb", "batch", False, False),
             ("delta", "trino", "batch", True, False),
             ("delta", "spark-thrift", "batch", False, False),
-            ("delta", "trino", "sustained", False, False),
+            # Continuous Delta VACUUM executes on Trino but at the 7 d
+            # default, so nothing written in the window is eligible.
+            ("delta", "trino", "sustained", "no_effect", False),
+            ("delta", "spark-thrift", "sustained", False, False),
             ("iceberg", "spark-thrift", "sustained", True, True),
         ],
     )
@@ -392,7 +395,7 @@ class TestEffectiveMaintenance:
             MAINTENANCE_POLICY_ID, table_format=fmt, query_engine=engine, mode=mode
         )
         # Coarse classes: what the composition can run, not whether it ran.
-        ok = {True: "ran", False: "not_supported"}
+        ok = {True: "ran", False: "not_supported", "no_effect": "ran_no_effect"}
         assert (e["expire"], e["compaction"]) == (ok[expire], ok[compaction])
 
     def test_recorded_outcomes_decide_what_ran(self):

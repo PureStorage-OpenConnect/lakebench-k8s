@@ -143,7 +143,8 @@ def build_delta_compaction_sql(
 DELTA_HEALTH_UNAVAILABLE = {
     "trino": (
         "Trino's Delta connector has no metadata table with a data file count "
-        "($properties holds table properties, not counts)"
+        "($properties holds table properties, not counts), and counting distinct "
+        '"$path" values would scan the table inside the measured window'
     ),
 }
 
