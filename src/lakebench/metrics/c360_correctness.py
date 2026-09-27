@@ -821,9 +821,10 @@ def gating_problems(
     is absent from the record is a problem, and so is a record with no
     facts. ``only`` limits the answer to check ids with those prefixes (the
     benchmark shapes, judged after the benchmark ran); the pipeline pass
-    leaves those ids to it. Gate only checks that apply at every scale the
-    run uses: thin corpora leave some statistical and shape checks
-    unchecked.
+    leaves those ids to it, so a gated shape is judged only when the
+    benchmark ran (a skipped benchmark is the benchmark gate's concern).
+    Gate only checks that apply at every scale the run uses: thin corpora
+    leave some statistical and shape checks unchecked.
     """
     gating = {
         g
@@ -846,9 +847,9 @@ def gating_problems(
             out.append(f"Customer 360 correctness gate: {gid} was not evaluated.")
         elif c["status"] != "pass":
             out.append(
-                f"Customer 360 correctness gate: {gid} {c['status']} (observed "
-                f"{c['observed']}, expected {c['expected']}, tolerance {c['tolerance']}; "
-                f"{c['detail']})."
+                f"Customer 360 correctness gate: {gid} {c.get('status')} (observed "
+                f"{c.get('observed')}, expected {c.get('expected')}, tolerance "
+                f"{c.get('tolerance')}; {c.get('detail', '')})."
             )
     return out
 
