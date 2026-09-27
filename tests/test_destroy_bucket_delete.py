@@ -250,6 +250,7 @@ class TestDestroyAllBuckets:
         table_format=None,
         delete_buckets=True,
         catalog_type=None,
+        clean_buckets=True,
     ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
@@ -341,7 +342,7 @@ class TestDestroyAllBuckets:
             self.custom = custom
             results = destroy_mod.destroy_all(
                 engine,
-                clean_buckets=True,
+                clean_buckets=clean_buckets,
                 force_legacy=force_legacy,
                 delete_buckets=delete_buckets,
             )

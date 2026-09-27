@@ -1400,6 +1400,52 @@ def _s3_table_path(bucket_uri, fq_table):
     return f"{bucket_uri.rstrip('/')}/warehouse/{schema}.db/{table}"
 
 
+_REGISTERED_DELTA_TABLES: set[str] = set()
+
+
+def refuse_orphan_delta_log(spark, fq_table):
+    """Refuse to create a managed Delta table over an unregistered _delta_log.
+
+    Destroy unregisters tables whose files sit in a bucket it does not own
+    and leaves the files (LB-186). A later run with the same names would find
+    the table missing from the catalog and create it at the same managed
+    location, appending to or adopting the old log. Stop instead.
+    """
+    if fq_table in _REGISTERED_DELTA_TABLES:
+        return  # a micro-batch loop: checked once per table and process
+    if table_exists(spark, fq_table):
+        _REGISTERED_DELTA_TABLES.add(fq_table)
+        return
+    parts = fq_table.split(".")
+    name = parts[-1]
+    ns_ref = ".".join(parts[:-1]) or "default"
+    try:
+        rows = spark.sql(f"DESCRIBE NAMESPACE EXTENDED {ns_ref}").collect()
+    except Exception as e:  # noqa: BLE001
+        text = str(e)
+        if "SCHEMA_NOT_FOUND" in text or "NoSuchNamespace" in text or "not found" in text:
+            return  # no namespace yet, so no location either
+        raise
+    location = None
+    for row in rows:
+        d = row.asDict() if hasattr(row, "asDict") else dict(row)
+        key = str(d.get("info_name") or d.get("database_description_item") or "")
+        if key.strip().lower() == "location":
+            location = str(d.get("info_value") or d.get("database_description_value") or "")
+            break
+    if not location:
+        return
+    log_dir = f"{location.rstrip('/')}/{name.lower()}/_delta_log"
+    fs, path = _hadoop_fs(spark, log_dir)
+    if fs.exists(path):
+        raise RuntimeError(
+            f"{fq_table} is not in the catalog but {log_dir} already holds a Delta log "
+            "(most likely left by a destroy that could not prove it owned the bucket). "
+            "Refusing to append to or adopt it: delete that directory if its data may "
+            "go, or point this deployment at other buckets."
+        )
+
+
 def write_delta_table(
     spark, df, fq_table, bucket_uri, mode="append", partition_cols=None, options=None
 ):
@@ -1450,5 +1496,6 @@ def write_delta_table(
         )
     else:
         # Managed table path -- saveAsTable registers via DeltaCatalog/Hive
+        refuse_orphan_delta_log(spark, fq_table)
         log(f"Writing managed Delta table {fq_table} (mode={mode})")
         writer.saveAsTable(fq_table)

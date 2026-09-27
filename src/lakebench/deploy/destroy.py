@@ -765,13 +765,60 @@ def _drop_deletes_files(maint_engine: str, table_format: str) -> bool:
     return not (maint_engine == "spark-thrift" and table_format == "iceberg")
 
 
+def _split_table(table: str) -> tuple[str, str, str] | None:
+    """``(catalog, schema, table)`` for a three-part name, None otherwise."""
+    parts = table.split(".")
+    if len(parts) != 3 or not all(p.strip() for p in parts):
+        return None
+    return parts[0], parts[1], parts[2]
+
+
+def _short(table: str) -> str:
+    """A table name without its catalog, for messages."""
+    return table.split(".", 1)[-1] if table.count(".") >= 2 else table
+
+
+def _one_line(e: Exception, limit: int = 160) -> str:
+    text = " ".join(str(e).split())
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+_S3_URI_RE = re.compile(r"\bs3[an]?://([^/\s|'\"]+)")
+
+
+def _table_location_bucket(
+    query_sql, maint_engine: str, k8s, pod_name: str, namespace: str, table: str
+) -> tuple[str | None, str]:
+    """The bucket holding a Delta table's location, from ``DESCRIBE DETAIL``.
+
+    Returns ``(bucket, "")``, ``(None, "missing")`` when the table (or its
+    schema) is not there, or ``(None, reason)`` when the location cannot be
+    read or is not a single S3 bucket.
+    """
+    try:
+        out = query_sql(maint_engine, k8s, pod_name, namespace, f"DESCRIBE DETAIL {table}")
+    except Exception as e:  # noqa: BLE001
+        if _is_table_missing(e):
+            return None, "missing"
+        return None, f"location unreadable: {_one_line(e)}"
+    buckets = set(_S3_URI_RE.findall(out or ""))
+    if len(buckets) != 1:
+        if not buckets:
+            return None, "no S3 location in DESCRIBE DETAIL output"
+        return None, "DESCRIBE DETAIL names more than one bucket: " + ", ".join(sorted(buckets))
+    return buckets.pop(), ""
+
+
 def _trino_unregister_sql(table: str) -> str:
     """``CALL <catalog>.system.unregister_table(...)`` for ``catalog.schema.table``.
 
     Removes the catalog entry and leaves every file in place, for Iceberg
     (Hive metastore and REST catalogs) and Delta alike.
     """
-    catalog, schema, name = table.split(".", 2)
+    parts = _split_table(table)
+    if parts is None:
+        raise ValueError(f"not a <catalog>.<schema>.<table> name: {table!r}")
+    catalog, schema, name = parts
 
     def lit(v: str) -> str:
         return "'" + v.replace("'", "''") + "'"
@@ -784,12 +831,13 @@ def _trino_unregister_sql(table: str) -> str:
 
 def _buckets_destroy_empties(
     engine, namespace: str, namespace_present: bool, force_legacy: bool, clean_buckets: bool
-) -> tuple[set[str], str]:
-    """The buckets the bucket step will empty, and why the set is short.
+) -> tuple[set[str] | None, str]:
+    """The buckets the bucket step will empty, and a reason when it is short.
 
-    Read-only; the same classification the bucket step runs. Any doubt
-    (bucket cleanup off, S3 unreachable, a classification error) returns
-    an empty set, so the caller keeps its file-deleting statements back.
+    Read-only; the same classification the bucket step runs. Bucket cleanup
+    off returns an empty set; S3 unreachable or a classification error
+    returns None (unknown), so the caller keeps its file-deleting statements
+    back and reports why.
     """
     if not clean_buckets:
         return set(), "bucket cleanup is off"
@@ -807,11 +855,11 @@ def _buckets_destroy_empties(
             verify_ssl=s3_cfg.verify_ssl,
         )
         if s3._init_error:
-            return set(), f"bucket ownership could not be checked ({s3._init_error})"
+            return None, f"bucket ownership could not be checked ({s3._init_error})"
         bplan = _classify_buckets(engine, s3, namespace, namespace_present, force_legacy)
     except Exception as e:  # noqa: BLE001
         logger.warning("bucket ownership check before the table step failed: %s", e)
-        return set(), f"bucket ownership could not be checked ({e})"
+        return None, f"bucket ownership could not be checked ({e})"
     return set(bplan.buckets), ""
 
 
@@ -1762,30 +1810,55 @@ def destroy_all(
                 #   drops with deleteData=true).
                 # So Trino always unregisters, and the files go only through
                 # the bucket step's ownership checks. Spark Thrift has no
-                # metadata-only drop for a managed Delta table, so that DROP
-                # runs only when every bucket of the deployment (the only
-                # places a lakebench table lives) is one destroy empties.
+                # metadata-only drop for a managed Delta table, so each one is
+                # dropped only when DESCRIBE DETAIL puts its location in a
+                # bucket the bucket step will empty; otherwise it is left
+                # registered and reported (fail safe when the location or the
+                # ownership cannot be read).
                 plan: list[tuple[str, str]] = []
-                kept_registered: list[str] = []
-                keep_why = ""
+                # (table, reason): outside proven ownership, reported, exit 0.
+                kept_registered: list[tuple[str, str]] = []
+                # (table, reason): could not decide; FAILED when the catalog
+                # outlives destroy.
+                kept_unresolved: list[tuple[str, str]] = []
                 if maint_engine == "trino":
-                    plan = [(t, _trino_unregister_sql(t)) for t in tables_to_drop]
+                    for table in tables_to_drop:
+                        if _split_table(table) is None:
+                            failed_sql.append(
+                                f"{table}: table name is not <catalog>.<schema>.<table>; "
+                                "not unregistered"
+                            )
+                            continue
+                        plan.append((table, _trino_unregister_sql(table)))
                 elif _drop_deletes_files(maint_engine, table_format):
-                    s3_buckets = engine.config.platform.storage.s3.buckets
-                    homes = {s3_buckets.bronze, s3_buckets.silver, s3_buckets.gold}
-                    emptied, keep_why = _buckets_destroy_empties(
+                    from lakebench.deploy.iceberg import query_sql
+
+                    emptied, own_why = _buckets_destroy_empties(
                         engine, namespace, namespace_present, force_legacy, clean_buckets
                     )
-                    if homes <= emptied:
-                        for table in tables_to_drop:
-                            drop_sql = build_drop_table_sql(maint_engine, table)
-                            if drop_sql:
-                                plan.append((table, drop_sql))
-                    else:
-                        kept_registered = list(tables_to_drop)
-                        if not keep_why:
-                            keep_why = "destroy does not empty " + ", ".join(
-                                sorted(homes - emptied)
+                    for table in tables_to_drop:
+                        drop_sql = build_drop_table_sql(maint_engine, table)
+                        if not drop_sql:
+                            continue
+                        if emptied is None:
+                            kept_unresolved.append((table, own_why))
+                            continue
+                        if not clean_buckets:
+                            kept_registered.append((table, own_why))
+                            continue
+                        bucket, err = _table_location_bucket(
+                            query_sql, maint_engine, engine.k8s, pod_name, namespace, table
+                        )
+                        if err == "missing":
+                            logger.info("%s not present, nothing to drop", table)
+                            continue
+                        if bucket is None:
+                            kept_unresolved.append((table, err))
+                        elif bucket in emptied:
+                            plan.append((table, drop_sql))
+                        else:
+                            kept_registered.append(
+                                (table, f"its data is in {bucket}, which destroy does not empty")
                             )
                 else:
                     for table in tables_to_drop:
@@ -1858,7 +1931,23 @@ def destroy_all(
                         f"stopped ({stop_reason}); {len(not_attempted)} statement(s) not "
                         "attempted: " + "; ".join(not_attempted[:5])
                     )
-                if failed_sql:
+                ns_goes = engine.config.platform.kubernetes.create_namespace is True
+                left = [] if ns_goes else kept_registered + kept_unresolved
+                if kept_unresolved and not ns_goes:
+                    # Could not prove where these tables' files are or whether
+                    # destroy owns them: kept (never a file-deleting DROP on a
+                    # guess) and the step fails so a re-run can finish.
+                    table_status = DeploymentStatus.FAILED
+                    table_msg = (
+                        f"{len(kept_unresolved)} {table_format.title()} table(s) not "
+                        "dropped: a Spark Thrift DROP deletes their files and "
+                        "ownership of their location could not be proven: "
+                        + "; ".join(f"{_short(t)} ({why})" for t, why in kept_unresolved[:5])
+                        + ". Re-run destroy when the engine and S3 are reachable."
+                    )
+                    if failed_sql:
+                        table_msg += " Also failed: " + "; ".join(failed_sql[:5])
+                elif failed_sql:
                     table_status = DeploymentStatus.FAILED
                     table_msg = (
                         f"{table_format.title()} table cleanup had {len(failed_sql)} failed "
@@ -1871,27 +1960,24 @@ def destroy_all(
                         "catalog database goes with the namespace, deleted below, and "
                         "the bucket step handles the files"
                     )
-                elif kept_registered:
-                    names = ", ".join(t.split(".", 1)[-1] for t in kept_registered[:5])
-                    if len(kept_registered) > 5:
-                        names += f" and {len(kept_registered) - 5} more"
-                    why = (
-                        f"a Spark Thrift DROP of a managed {table_format.title()} table "
-                        f"deletes its files, and {keep_why}"
-                    )
-                    if engine.config.platform.kubernetes.create_namespace is True:
+                elif kept_registered or kept_unresolved:
+                    kept = kept_registered + kept_unresolved
+                    listing = "; ".join(f"{_short(t)} ({why})" for t, why in kept)
+                    if ns_goes:
                         table_status = DeploymentStatus.SUCCESS
                         table_msg = (
-                            f"{table_format.title()} tables not dropped ({why}); the "
-                            "catalog database goes with the namespace, deleted below"
+                            f"{len(kept)} {table_format.title()} table(s) not dropped "
+                            "(a Spark Thrift DROP deletes their files): "
+                            + listing
+                            + "; the catalog database goes with the namespace, deleted below"
                         )
                     else:
                         table_status = DeploymentStatus.SKIPPED
                         table_msg = (
-                            f"{len(kept_registered)} {table_format.title()} table(s) left "
-                            f"registered ({why}): {names}. create_namespace is false, so "
-                            "the catalog keeps them; drop them by hand once their files "
-                            "may go"
+                            f"{len(kept)} {table_format.title()} table(s) left registered "
+                            "(a Spark Thrift DROP deletes their files): " + listing + ". "
+                            "create_namespace is false, so the catalog keeps them; drop "
+                            "them by hand once their files may go"
                         )
                 else:
                     table_status = DeploymentStatus.SUCCESS
@@ -1902,14 +1988,27 @@ def destroy_all(
                         if not _drop_deletes_files(maint_engine, table_format)
                         else "dropped"
                     )
-                    table_msg = (
-                        f"{table_format.title()} tables {verb} via {maint_engine}; their "
-                        "files are removed only by the bucket step, from buckets destroy "
-                        "owns; table maintenance skipped"
+                    files = (
+                        "no files are removed (bucket cleanup is off)"
+                        if not clean_buckets
+                        else "their files are removed only by the bucket step, from "
+                        "buckets destroy owns"
                     )
+                    table_msg = (
+                        f"{table_format.title()} tables {verb} via {maint_engine}; "
+                        f"{files}; table maintenance skipped"
+                    )
+                table_details: dict = {}
+                if left:
+                    table_details["tables_left_registered"] = [
+                        {"table": t, "reason": why} for t, why in left
+                    ]
                 results.append(
                     DeploymentResult(
-                        component="table-cleanup", status=table_status, message=table_msg
+                        component="table-cleanup",
+                        status=table_status,
+                        message=table_msg,
+                        details=table_details,
                     )
                 )
                 report("table-cleanup", table_status, table_msg)
@@ -1938,13 +2037,18 @@ def destroy_all(
             )
         except Exception as e:
             logger.warning("Table cleanup failed: %s", e, exc_info=True)
+            # With the namespace deleted the catalog database goes with it;
+            # otherwise the tables outlive destroy and the error must show.
+            if engine.config.platform.kubernetes.create_namespace is True:
+                t_status = DeploymentStatus.SKIPPED
+                t_msg = f"Table cleanup skipped: {e}; the catalog database goes with the namespace"
+            else:
+                t_status = DeploymentStatus.FAILED
+                t_msg = f"Table cleanup failed: {e}; the tables may still be registered"
             results.append(
-                DeploymentResult(
-                    component="table-cleanup",
-                    status=DeploymentStatus.SKIPPED,
-                    message=f"Table cleanup skipped: {e}",
-                )
+                DeploymentResult(component="table-cleanup", status=t_status, message=t_msg)
             )
+            report("table-cleanup", t_status, t_msg)
 
     if table_step_stopped:
         stopped = _stop_if_changed("the bucket step")
