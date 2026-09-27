@@ -191,8 +191,7 @@ class FinancialScorecardBlock:
                 recall_cell = "n/a"
                 alerts_cell = "-"
             elif typ is None:
-                # Attribute rule (W5 sanctions / W6 PEP): matches a party flag,
-                # no planted typology to score recall against.
+                # A rule with no planted typology to score recall against.
                 status = "ran" if alerts is not None or not continuous_alerts else "no data"
                 recall_cell = "n/a (attribute)"
                 alerts_cell = f"{alerts:,}" if alerts is not None else missing_alerts
@@ -214,6 +213,12 @@ class FinancialScorecardBlock:
                 elif trow and trow.get("detection_status") == "rule_skipped":
                     status = '<span style="color: var(--warning);">not run</span>'
                     recall_cell = "n/a"
+                elif trow and trow.get("detection_status") == "no_rule":
+                    # Scored run, but this rule was never scheduled (no
+                    # detection_status row): unknown, not "ran, 0 alerts".
+                    status = '<span style="color: var(--warning);">not run</span> (not scheduled)'
+                    recall_cell = "n/a"
+                    alerts_cell = "-"
                 elif trow and trow.get("recall") is not None:
                     status = '<span style="color: var(--success, green);">scored</span>'
                     recall_cell = f"{float(trow['recall']) * 100:.1f}%"

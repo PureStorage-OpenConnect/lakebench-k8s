@@ -756,6 +756,28 @@ def empty_benchmark_queries(queries) -> list[str]:
     return out
 
 
+def scoring_count_line(summary: dict) -> str:
+    """'6 of 15 typologies scored; 8 no rule, 1 rule skipped' from a
+    recall.json summary: never every manifest typology as scored."""
+    typs = summary.get("typologies", []) or []
+    counts = summary.get("typology_counts")
+    if counts is None:
+        counts = {}
+        for t in typs:
+            st = t.get("detection_status") or "unknown"
+            counts[st] = counts.get(st, 0) + 1
+    labels = (
+        ("partial", "partial"),
+        ("no_rule", "no rule"),
+        ("rule_skipped", "rule skipped"),
+        ("rule_error", "rule error"),
+        ("unknown", "unknown"),
+    )
+    rest = [f"{counts[k]} {lab}" for k, lab in labels if counts.get(k)]
+    line = f"{counts.get('scored', 0)} of {len(typs)} typologies scored"
+    return line + (f"; {', '.join(rest)}" if rest else "")
+
+
 def _aml_batch_gate_problems(
     gold_jobs: list, scoring: dict | None = None
 ) -> tuple[list[str], list[str]]:
@@ -961,8 +983,7 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
         )
         body = client.raw_client.get_object(Bucket=s3.buckets.gold, Key=json_key)["Body"].read()
         summary = _json.loads(body)
-        n = len(summary.get("typologies", []))
-        print_success(f"Financial scoring complete ({n} typologies scored)")
+        print_success(f"Financial scoring complete ({scoring_count_line(summary)})")
         return summary
     except Exception as e:  # noqa: BLE001 -- scoring is best-effort enrichment
         print_warning(f"Financial scoring failed ({e}); scorecard will omit recall.")

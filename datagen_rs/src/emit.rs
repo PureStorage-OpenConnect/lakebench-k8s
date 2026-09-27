@@ -237,21 +237,26 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
 
         day.push((ts / 86_400_000_000) as i32);
 
+        // The beneficiary can be an external counterparty (a listed party or
+        // a decoy, crate::screening): cp_* resolves both. Originators are
+        // always population entities.
+        let c_country = w.cp_country(c);
         b_no.append_value(w.name.get(o));
-        b_nc.append_value(w.name.get(c));
+        b_nc.append_value(w.cp_name(c));
         b_sto.append_value(w.street.get(o));
-        b_stc.append_value(w.street.get(c));
+        b_stc.append_value(w.cp_street(c));
         b_two.append_value(w.town.get(o));
-        b_twc.append_value(w.town.get(c));
+        b_twc.append_value(w.cp_town(c));
         b_cto.append_value(w.country[o]);
-        b_ctc.append_value(w.country[c]);
+        b_ctc.append_value(c_country);
         // Recompute fixed-width ids (identical bytes to the world columns, which
         // were built by these same functions) instead of random-gathering them.
         // Customers' accounts are US accounts at the reporting FI (kyc).
         let cust_o = is_customer(b.orig[i], w.seed);
-        let cust_c = is_customer(b.bene[i], w.seed);
+        // An external counterparty is never a customer.
+        let cust_c = !w.is_external(c) && is_customer(b.bene[i], w.seed);
         let cco = account_country(cust_o, w.country[o]).as_bytes();
-        let ccc = account_country(cust_c, w.country[c]).as_bytes();
+        let ccc = account_country(cust_c, c_country).as_bytes();
         iban_into(&[cco[0], cco[1]], b.orig[i], &mut ib_o);
         iban_into(&[ccc[0], ccc[1]], b.bene[i], &mut ib_c);
         lei_into(b.orig[i], &mut le_o);
@@ -268,9 +273,9 @@ pub fn build_batch(w: &World, b: &Batch) -> RecordBatch {
         b_bico.append_value(bic_o);
         b_bicc.append_value(bic_c);
         ct_o_ref.push(w.country[o]);
-        ct_c_ref.push(w.country[c]);
+        ct_c_ref.push(c_country);
 
-        let cross = w.country[o] != w.country[c];
+        let cross = w.country[o] != c_country;
         let hop = splitmix64(s ^ 0xF00);
         if (hop & 0xFFFF) < 15_000 {
             b_instg.append_value(&pool[(splitmix64(b.orig[i] ^ 0x2222) % plen) as usize]);

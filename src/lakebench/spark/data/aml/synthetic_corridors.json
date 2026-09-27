@@ -1,0 +1,37 @@
+{
+  "source": "SYNTHETIC. Not a regulatory, FATF or sanctions designation of any country. These are the six generator home countries the corridor_high_risk typology draws its participants from (datagen_rs typology.rs HIGH_RISK_CC, mirrored by aml_features.HIGH_RISK_COUNTRIES; a drift test keeps them equal). Chosen as a stable, deterministic corridor pool against the US-heavy home distribution, not for any real risk assessment.",
+  "license": "Synthetic, no restriction.",
+  "note": "W7 alerts on cross-border payments into these countries alongside the FATF list, with risk_tier synthetic_corridor in its evidence, so its target typology can be detected at all: no generator home country is FATF-listed.",
+  "entries": [
+    {
+      "country_code": "AE",
+      "country_name": "United Arab Emirates",
+      "risk_tier": "synthetic_corridor"
+    },
+    {
+      "country_code": "CN",
+      "country_name": "China",
+      "risk_tier": "synthetic_corridor"
+    },
+    {
+      "country_code": "SG",
+      "country_name": "Singapore",
+      "risk_tier": "synthetic_corridor"
+    },
+    {
+      "country_code": "HK",
+      "country_name": "Hong Kong",
+      "risk_tier": "synthetic_corridor"
+    },
+    {
+      "country_code": "MX",
+      "country_name": "Mexico",
+      "risk_tier": "synthetic_corridor"
+    },
+    {
+      "country_code": "IN",
+      "country_name": "India",
+      "risk_tier": "synthetic_corridor"
+    }
+  ]
+}

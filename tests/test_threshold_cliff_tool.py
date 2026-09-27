@@ -50,10 +50,13 @@ def test_thresholds_come_from_the_rule_source():
 
 def test_a_rule_the_tool_cannot_read_fails_loudly():
     t = _tool()
+    # W6's amount line lives in PEP_MIN_USD (a MED/LOW priority split); a W6
+    # whose body no longer references it or a >= literal cannot be read.
     src = t.RULES.read_text().replace(
-        'coalesce(txn_amount_usd, txn_amount) >= 10000"',
-        'coalesce(txn_amount_usd, txn_amount) > 10000"',
+        'f"coalesce(txn_amount_usd, txn_amount) >= {PEP_MIN_USD}"',
+        'f"coalesce(txn_amount_usd, txn_amount) > {10_000}"',
     )
+    assert "> {10_000}" in src
     with pytest.raises(ValueError, match="w6"):
         t.load_thresholds(src, t.SILVER.read_text(), json.loads(t.PREREG.read_text()))
 

@@ -34,11 +34,13 @@ TYPOLOGY_RS = ROOT / "datagen_rs/src/typology.rs"
 
 
 @pytest.fixture(autouse=True)
-def _few_threads():
+def _few_threads(monkeypatch):
     """Tiny frames: OpenMP fan-out across every core costs more than the fit,
-    and on a shared host it oversubscribes badly."""
+    and on a shared host it oversubscribes badly. The gate's own worker
+    count follows LB_AML_GATE_JOBS."""
     from threadpoolctl import threadpool_limits
 
+    monkeypatch.setenv("LB_AML_GATE_JOBS", "4")
     with threadpool_limits(limits=2):
         yield
 
@@ -54,6 +56,20 @@ def _prereg(**over):
     p["level2"] = {**p["level2"], "n": 1, "k_in_band": 1}
     p["classification"] = {**p["classification"], "defining_feature": {"defn": "planted"}}
     p["power"] = {**p["power"], "bootstrap_iterations": 50, "min_positives": 40}
+    # v3.6.0 fits the reference model about ten times per typology (single and
+    # pair shortcuts, nuisance model, ablations); fewer boosting rounds keep a
+    # test in seconds. Tests of the registered model itself restore max_iter.
+    p["reference_model"] = {**p["reference_model"], "max_iter": 20}
+    # The leakage sets must name real features: noise_b stands in for the
+    # nuisance features, and each feature is its own ablation group.
+    p["leakage"] = {
+        **p["leakage"],
+        "nuisance_features": ["noise_b"],
+        "ablation": {
+            **p["leakage"]["ablation"],
+            "feature_groups": {"g_planted": ["planted"], "g_a": ["noise_a"], "g_b": ["noise_b"]},
+        },
+    }
     for k, v in over.items():
         p[k] = v
     return p
@@ -104,12 +120,12 @@ def test_noise_gives_ap_near_prevalence():
     assert lo <= r["ap"] <= hi
     # Nothing leaks: every shortcut is near prevalence, well under the 0.20 cap.
     assert r["shortcuts"]["single_feature"]["pass_abs"] is True
-    assert r["shortcuts"]["feature_pair_depth2"]["pass_abs"] is True
+    assert r["shortcuts"]["feature_pair"]["pass_abs"] is True
     assert rep["typologies"]["defn"]["definitional_check"]["pass"] is False
 
 
 def test_pair_shortcut_catches_a_conjunction():
-    """Label = a AND b: each alone is weak, the depth-2 pair is exact."""
+    """Label = a AND b: each alone is weak, the pair is exact."""
     rng = np.random.default_rng(3)
     n = 3000
     a = rng.random(n) < 0.3
@@ -126,7 +142,7 @@ def test_pair_shortcut_catches_a_conjunction():
     )
     rep = fg.evaluate_gate(df, _prereg())
     r = rep["typologies"]["beh"]
-    pair = r["shortcuts"]["feature_pair_depth2"]
+    pair = r["shortcuts"]["feature_pair"]
     assert set(pair["best"]["features"]) == {"planted", "noise_a"}
     assert pair["best"]["ap"] > 0.99
     assert r["shortcuts"]["single_feature"]["best"]["ap"] < 0.5
@@ -226,7 +242,20 @@ def test_real_preregistration_runs_end_to_end():
     p, sha = fg.load_preregistration(PREREG)
     p = copy.deepcopy(p)
     p["power"]["bootstrap_iterations"] = 5
-    p["features"] = p["features"][:4] + list(p["classification"]["defining_feature"].values())
+    # v3.6.0 fits the reference model on every pair and every ablation: keep
+    # the feature list and the boosting rounds small (the registered values
+    # are pinned in test_prereg_version_and_model_blocks).
+    p["reference_model"]["max_iter"] = 5
+    nuis = p["leakage"]["nuisance_features"]
+    p["features"] = p["features"][:1] + nuis[:2]
+    p["features"] += list(p["classification"]["defining_feature"].values())
+    p["leakage"]["nuisance_features"] = nuis = nuis[:2]
+    kept = set(p["features"])
+    groups = {
+        g: [f for f in fs if f in kept]
+        for g, fs in p["leakage"]["ablation"]["feature_groups"].items()
+    }
+    p["leakage"]["ablation"]["feature_groups"] = {g: fs for g, fs in groups.items() if fs}
     rng = np.random.default_rng(1)
     n = 400
     data = {f: rng.normal(0, 1, n) for f in p["features"]}
@@ -238,6 +267,9 @@ def test_real_preregistration_runs_end_to_end():
     assert rep["prereg_version"] == p["version"] and len(rep["prereg_sha256"]) == 64
     assert all(r["status"] == "ok" for r in rep["typologies"].values())
     assert rep["level2"]["n"] == len(p["behavioural_subset"])
+    r = next(iter(rep["typologies"].values()))
+    assert set(r["shortcuts"]) == set(p["leakage"]["shortcut_models"])
+    assert r["ablation"]["nuisance"]["features"] == nuis
     assert fg.summary_lines(rep)
 
 
@@ -314,7 +346,12 @@ def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
     assert p["version"] == "3.6.0"
     assert "#37/#38" in p["_doc"] and p["changelog"][0]["version"] == "3.6.0"
-    assert [c["version"] for c in p["changelog"][1:4]] == ["3.5.2", "3.5.1", "3.5.0"]
+    # 3.6.0 has two entries: the D8 rule (#45/#45a) and the D5 strengthening.
+    assert [(c["version"], c.get("part")) for c in p["changelog"][:2]] == [
+        ("3.6.0", "D8"),
+        ("3.6.0", "D5"),
+    ]
+    assert [c["version"] for c in p["changelog"][2:5]] == ["3.5.2", "3.5.1", "3.5.0"]
     assert p["corpora"]["registered_looks_open"] is False
     assert {42, 50000042} <= set(p["corpora"]["spent_seeds"])
     u = p["unit_of_scoring"]
@@ -328,6 +365,11 @@ def test_prereg_version_and_model_blocks():
     assert p["reference_model"]["estimator"] == "HistGradientBoostingClassifier"
     assert p["reference_model"]["l2_regularization"] > 0
     assert p["shortcut_model"]["max_depth"] == 2
+    assert p["shortcut_model"]["also_reference_model"] is True
+    lk = p["leakage"]
+    assert lk["shortcut_models"] == ["single_feature", "feature_pair", "nuisance_only"]
+    # v3.6.0 adds no threshold: the new checks reuse the 3.5.0 caps.
+    assert lk["ablation"]["gated"] == "nuisance_features"
     assert {k: p["cv"][k] for k in ("folds", "stratified", "seed")} == {
         "folds": 5,
         "stratified": True,
@@ -442,7 +484,15 @@ def test_relative_cap_as_lift_over_prevalence():
     that edges above prevalence; a real shortcut still fails."""
     df = _frame(n=4000, prev=0.08, separable=False)
     p = _prereg()
-    p["leakage"] = {**p["leakage"], "relative_cap_formula": "ratio"}
+    # The legacy ratio formula predates the nuisance ablation, which needs a
+    # lift formula (_leakage_sets refuses the pairing).
+    p["leakage"] = {
+        **p["leakage"],
+        "relative_cap_formula": "ratio",
+        "shortcut_models": ["single_feature", "feature_pair"],
+    }
+    del p["leakage"]["ablation"]
+    p["leakage"]["nuisance_features"] = []
     ratio = fg.evaluate_gate(df, p)["typologies"]["beh"]
     p = _prereg()
     p["leakage"] = {**p["leakage"], "relative_cap_formula": "lift_over_prevalence"}
@@ -676,8 +726,253 @@ def test_reference_model_does_not_saturate_at_rare_prevalence():
     )
     p = _prereg()
     p["power"] = {**p["power"], "min_positives": 5}
+    p["reference_model"] = fg.load_preregistration(PREREG)[0]["reference_model"]
     X, yy = df[p["features"]].to_numpy(float), df["label:beh"].to_numpy(int)
     folds = fg._folds(yy, np.arange(n), p)
     oof = fg._oof_scores(lambda: fg._reference_model(p), X, yy, np.ones(n), folds)
     assert ((oof > 0) & (oof < 1)).all()
     assert fg._ap(yy, oof, np.ones(n)) > 10 * yy.mean()
+
+
+# ---------------------------------------------------------------------------
+# v3.6.0 D5: reference-model shortcuts, nuisance-only model, ablation
+# ---------------------------------------------------------------------------
+
+
+def test_real_prereg_leakage_sets_are_consistent():
+    """The shipped nuisance list names real features and the ablation groups
+    partition the feature list, for the monthly and the lifetime unit."""
+    p, _ = fg.load_preregistration(PREREG)
+    nuis, groups = fg._leakage_sets(p)
+    assert nuis == [
+        "frac_overnight",
+        "frac_weekend",
+        "hour_of_day_entropy",
+        "frac_round_amount",
+        "customer_type",
+        "crr_tier",
+    ]
+    assert set(nuis) == set(groups["clock"] + groups["rounding"] + groups["segment"])
+    life = fg.lifetime_prereg(p)
+    _, lgroups = fg._leakage_sets(life)
+    assert "history" not in lgroups
+
+
+def test_leakage_sets_refuse_a_bad_prereg():
+    p = _prereg()
+    p["leakage"] = {**p["leakage"], "nuisance_features": ["hour_of_day_entropy"]}
+    with pytest.raises(ValueError, match="nuisance_features"):
+        fg._leakage_sets(p)
+    q = _prereg()
+    q["leakage"]["ablation"] = {
+        **q["leakage"]["ablation"],
+        "feature_groups": {"a": ["planted", "noise_a"], "b": ["noise_a"]},
+    }
+    with pytest.raises(ValueError, match="partition"):
+        fg._leakage_sets(q)
+
+
+def test_lifetime_prereg_drops_history_from_ablation_groups():
+    p = _prereg()
+    p["unit_of_scoring"] = {"window": "utc_calendar_month", "history_features": ["noise_a"]}
+    life = fg.lifetime_prereg(p)
+    assert "g_a" not in life["leakage"]["ablation"]["feature_groups"]
+    fg._leakage_sets(life)
+
+
+def test_oof_many_matches_oof_scores():
+    """The parallel fold fitter gives the numbers the sequential one gives,
+    narrow or wide."""
+    df = _frame(n=1500, prev=0.06, separable=False)
+    p = _prereg()
+    X = df[p["features"]].to_numpy(float)
+    y = df["label:beh"].to_numpy(int)
+    w = np.ones(len(y))
+    folds = fg._folds(y, np.arange(len(y)), p)
+    sets = [[0], [1, 2], [0, 1, 2]]
+    for wide in (False, True):
+        got = fg._oof_many(lambda: fg._reference_model(p), X, sets, y, w, folds, wide)
+        for cols, g in zip(sets, got, strict=True):
+            want = fg._oof_scores(lambda: fg._reference_model(p), X[:, cols], y, w, folds)
+            np.testing.assert_array_equal(g, want)
+
+
+def _band_frame(n=20000, seed=5):
+    """Label = both features inside a narrow central band: needs four splits,
+    so a depth-2 tree cannot isolate it and the reference model can."""
+    rng = np.random.default_rng(seed)
+    a = rng.normal(0, 1, n)
+    b = rng.normal(0, 1, n)
+    y = ((np.abs(a) < 0.25) & (np.abs(b) < 0.25)).astype(int)
+    return pd.DataFrame(
+        {
+            "planted": a,
+            "noise_a": b,
+            "noise_b": rng.normal(0, 1, n),
+            "label:beh": y,
+            "label:defn": y,
+        }
+    )
+
+
+def test_reference_model_pair_catches_what_a_depth2_tree_misses():
+    rep = fg.evaluate_gate(_band_frame(), _prereg())
+    pair = rep["typologies"]["beh"]["shortcuts"]["feature_pair"]
+    best = pair["best"]
+    assert set(best["features"]) == {"planted", "noise_a"}
+    assert best["tree_ap"] < 0.5 < best["ref_ap"]
+    assert best["ap"] == best["ref_ap"] and pair["pass"] is False
+    # Without the registered flag the v3.5.2 tree-only check is what remains.
+    p = _prereg()
+    p["shortcut_model"] = {**p["shortcut_model"], "also_reference_model": False}
+    old = fg.evaluate_gate(_band_frame(), p)["typologies"]["beh"]["shortcuts"]["feature_pair"]
+    assert old["best"]["ap"] < 0.5 and old["best"]["ref_ap"] is None
+
+
+def test_nuisance_only_model_and_ablation_catch_a_nuisance_leak():
+    """A label readable from the nuisance feature fails nuisance_only, and
+    the model loses most of its lift without it (the gated ablation)."""
+    rng = np.random.default_rng(9)
+    n = 6000
+    y = (rng.random(n) < 0.05).astype(int)
+    df = pd.DataFrame(
+        {
+            "planted": y * rng.normal(1.0, 1.0, n) + rng.normal(0, 1, n),
+            "noise_a": rng.normal(0, 1, n),
+            "noise_b": y + rng.normal(0, 0.05, n),
+            "label:beh": y,
+            "label:defn": y,
+        }
+    )
+    r = fg.evaluate_gate(df, _prereg())["typologies"]["beh"]
+    nu = r["shortcuts"]["nuisance_only"]
+    assert nu["best"]["features"] == ["noise_b"] and nu["best"]["ap"] > 0.9
+    assert nu["pass"] is False
+    nab = r["ablation"]["nuisance"]
+    assert nab["drop"] > nab["drop_cap"] and nab["pass"] is False
+    assert r["leakage_pass"] is False
+    assert {g["group"] for g in r["ablation"]["groups"]} == {
+        "g_planted",
+        "g_a",
+        "g_b",
+        "nuisance_features",
+    }
+
+
+def test_clean_nuisance_passes_ablation():
+    """Signal in a behaviour feature, noise in the nuisance one: the
+    nuisance-only model sits near prevalence and dropping it costs nothing."""
+    rng = np.random.default_rng(11)
+    n = 6000
+    y = (rng.random(n) < 0.05).astype(int)
+    df = pd.DataFrame(
+        {
+            "planted": y * rng.normal(1.5, 1.0, n) + rng.normal(0, 1, n),
+            "noise_a": rng.normal(0, 1, n),
+            "noise_b": rng.normal(0, 1, n),
+            "label:beh": y,
+            "label:defn": y,
+        }
+    )
+    r = fg.evaluate_gate(df, _prereg())["typologies"]["beh"]
+    assert r["shortcuts"]["nuisance_only"]["pass"] is True
+    nab = r["ablation"]["nuisance"]
+    assert nab["pass"] is True
+    prev, ap = r["prevalence"], r["ap"]
+    rel = _prereg()["leakage"]["shortcut_ap_rel_max"]
+    assert nab["drop_cap"] == pytest.approx(rel * (max(ap, _prereg()["band"]["ap_min"]) - prev))
+    planted = next(g for g in r["ablation"]["groups"] if g["group"] == "g_planted")
+    assert planted["drop"] > nab["drop"]  # reported, not gated
+
+
+def test_nuisance_ablation_verdict_caps_and_band_floor():
+    """The drop is capped like a shortcut (lift share, never above the
+    absolute cap), and an in-band AP must stay above the band floor without
+    the nuisance features."""
+    p = _prereg()
+    lk, band = p["leakage"], p["band"]
+    prev = 1e-4
+    ref = 0.45
+    rel_cap = prev + lk["shortcut_ap_rel_max"] * (ref - prev)
+    # In band, drop 0.17 is under both caps, but the model without the
+    # nuisance features falls below the floor: fail.
+    v = fg._nuisance_ablation_verdict(ref, ref - 0.17, rel_cap, prev, p)
+    assert v["pass_drop"] is True and v["pass_band_floor_without"] is False and v["pass"] is False
+    # Same drop from a stronger model that stays in band without them: pass.
+    ap = 0.7
+    rel_cap = prev + lk["shortcut_ap_rel_max"] * (ap - prev)
+    v = fg._nuisance_ablation_verdict(ap, ap - 0.17, rel_cap, prev, p)
+    assert v["pass"] is True
+    # The absolute cap bounds the drop even when the lift share is larger.
+    v = fg._nuisance_ablation_verdict(ap, ap - (lk["shortcut_ap_abs_max"] + 0.01), rel_cap, prev, p)
+    assert v["drop_cap"] == lk["shortcut_ap_abs_max"] and v["pass"] is False
+    # Below band the floor rule does not apply (the typology is a miss anyway).
+    low = band["ap_min"] / 2
+    rel_cap = prev + lk["shortcut_ap_rel_max"] * (band["ap_min"] - prev)
+    assert fg._nuisance_ablation_verdict(low, low - 0.01, rel_cap, prev, p)["pass"] is True
+
+
+def test_leakage_block_fails_closed():
+    p = _prereg()
+    del p["leakage"]["ablation"]
+    with pytest.raises(ValueError, match="ablation is missing"):
+        fg.evaluate_gate(_frame(), p)
+    # Missing ablation is refused even when nuisance_only is not registered.
+    p["leakage"]["shortcut_models"] = ["single_feature", "feature_pair"]
+    with pytest.raises(ValueError, match="ablation is missing"):
+        fg._leakage_sets(p)
+    q = _prereg()
+    q["leakage"] = {**q["leakage"], "relative_cap_formula": "ratio"}
+    with pytest.raises(ValueError, match="lift"):
+        fg._leakage_sets(q)
+    r = _prereg()
+    r["leakage"]["ablation"] = {**r["leakage"]["ablation"], "gated": "clock"}
+    with pytest.raises(ValueError, match="unsupported"):
+        fg._leakage_sets(r)
+
+
+def test_secondary_lifetime_skips_the_new_fits():
+    p = _prereg()
+    life = fg.lifetime_prereg(p, secondary=True)
+    assert life["shortcut_model"]["also_reference_model"] is False
+    assert "ablation" not in life["leakage"]
+    # Only the caller can declare the secondary block: the same prereg on
+    # the primary path is refused.
+    with pytest.raises(ValueError, match="ablation is missing"):
+        fg.evaluate_gate(_frame(), life)
+    rep = fg.evaluate_gate(_frame(), life, secondary=True)
+    r = rep["typologies"]["beh"]
+    assert "ablation" not in r and set(r["shortcuts"]) == set(p["leakage"]["shortcut_models"])
+    assert r["shortcuts"]["feature_pair"]["best"]["ref_ap"] is None
+    # The primary lifetime conversion keeps every check.
+    assert fg.lifetime_prereg(p)["shortcut_model"]["also_reference_model"] is True
+
+
+def test_definitional_check_keeps_the_352_statistic():
+    rep = fg.evaluate_gate(_band_frame(), _prereg())
+    d = rep["typologies"]["defn"]
+    row = next(r for r in d["single_feature_table"] if r["feature"] == "planted")
+    assert d["definitional_check"]["single_ap"] == max(row["tree_ap"], row["rank_ap"])
+
+
+def test_oof_many_one_class_fold_and_batches(monkeypatch):
+    """Every positive in one customer: that fold trains on one class and
+    falls back to the training prevalence, as _oof_scores does; batching
+    (one set per batch) does not change any AP."""
+    rng = np.random.default_rng(4)
+    n = 600
+    groups = rng.integers(0, 60, n)
+    y = (groups == 7).astype(int)
+    X = rng.normal(0, 1, (n, 3))
+    w = np.ones(n)
+    p = _prereg()
+    folds = fg._folds(y, groups, p)
+    assert any(len(np.unique(y[tr])) < 2 for tr, _ in folds)
+    sets = [[0], [1], [0, 2]]
+    got = fg._oof_many(lambda: fg._reference_model(p), X, sets, y, w, folds)
+    for cols, g in zip(sets, got, strict=True):
+        want = fg._oof_scores(lambda: fg._reference_model(p), X[:, cols], y, w, folds)
+        np.testing.assert_array_equal(g, want)
+    wide = fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds)
+    monkeypatch.setenv("LB_AML_GATE_JOBS", "1")
+    assert fg._ap_many(lambda: fg._reference_model(p), X, sets, y, w, folds) == wide

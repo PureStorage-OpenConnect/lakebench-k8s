@@ -3,7 +3,7 @@
 Ships four SQL templates (detect / precision / recall / pattern_span)
 that are
 instantiated once per W-rule, plus four aggregate queries that run
-as-is. This lands 34 executable queries with 8 source files. What the
+as-is. This lands 40 executable queries with 8 source files. What the
 scores mean, and their caveats, is in `docs/aml-scoring.md`.
 
 Precision, recall, and pattern-span all need to know which planted
@@ -43,15 +43,14 @@ RULE_TARGETS: dict[str, str | None] = {
     "W2_structuring": "micro_structuring",
     "W3_round_tripping": "cycle",  # funds return to origin via 2-5 hops
     "W4_risk_propagation": "rapid_layering",  # pass-through within hours
-    # W5/W6 target no planted typology today. Sanctions and PEP hits
-    # live as party attributes in the datagen (see
-    # `datagen_rs/src/party.rs::party_flags`), not as typology_type
-    # rows in `bronze.manifest`. Extending the datagen to plant
-    # sanctions/PEP typologies is a follow-up; until then these rules
-    # only emit the `detect` query and skip precision/recall/pattern_span
-    # (downstream reports N/A rather than a bogus 0/0).
-    "W5_sanctions_match": None,
-    "W6_pep_counterparty": None,
+    # Screening track (datagen_rs/src/screening.rs, AML-GOALS #50): one
+    # instance per (customer, listed party) relationship, its UETRs the
+    # customer's payments to that party. Sanctions instances include the
+    # payments before a list-version-2 entry was listed (only a rescreen
+    # finds those). Namesake decoys are paid too and are not instances, so
+    # a loose screen shows up as false positives.
+    "W5_sanctions_match": "sanctions_match",
+    "W6_pep_counterparty": "pep_match",
     # W7 targets `corridor_high_risk` (typology.rs enum name, not
     # `high_risk_corridor` -- the latter is the transposed variant an
     # earlier draft used and it silently matched zero manifest rows).
@@ -140,8 +139,8 @@ def _read_template(name: str) -> str:
 def load_aml_queries(catalog: str) -> list[AmlQuery]:
     """Return the full AML query set instantiated for `catalog`.
 
-    30 rule queries (9 detect + 7 targeted rules x 3 kinds) + 4 aggregate
-    queries = 34 total.
+    36 rule queries (9 detect + 9 targeted rules x 3 kinds) + 4 aggregate
+    queries = 40 total.
     Query text uses `{catalog}` as a placeholder; the caller has
     already picked the catalog name (varies per config: iceberg,
     spark_catalog, polaris, etc.).

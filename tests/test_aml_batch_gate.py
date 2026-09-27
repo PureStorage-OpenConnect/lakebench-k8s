@@ -144,3 +144,40 @@ def test_a_cycle_with_no_log_is_unknown_not_pass():
 def test_all_pass():
     v = _tm([_tjob({"W2": 3}, ops={"funnel": {}})])
     assert v["status"] == "pass" and v["ops"] == {"funnel": {}} and v["mode"] == "batch"
+
+
+def test_scoring_count_line_never_calls_every_typology_scored():
+    """Live s1 run 2026-09-26 said '15 typologies scored' when 6 were."""
+    from lakebench.cli._run import scoring_count_line
+
+    typs = [{"typology_type": f"t{i}", "detection_status": "scored"} for i in range(6)]
+    typs += [{"typology_type": f"n{i}", "detection_status": "no_rule"} for i in range(8)]
+    typs += [{"typology_type": "gather_scatter", "detection_status": "rule_skipped"}]
+    line = scoring_count_line({"typologies": typs})
+    assert line == "6 of 15 typologies scored; 8 no rule, 1 rule skipped"
+    counts = {"scored": 6, "no_rule": 8, "rule_skipped": 1}
+    assert scoring_count_line({"typologies": typs, "typology_counts": counts}) == line
+
+
+def test_scorer_reports_the_manifest_workload_as_a_category():
+    """The manifest's expected_workload is the generator's category
+    (typology.rs Spec.workload), not the detecting rule; RULE_TARGETS is the
+    rule (AML-GOALS #27). The scorer must not publish the category under a
+    name that claims to be the rule, and the designation it does publish
+    comes from the same map on both sides of the package boundary."""
+    import ast
+    from pathlib import Path
+
+    from lakebench.benchmark.aml_queries import RULE_TARGETS
+
+    root = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
+    src = (root / "score_financial.py").read_text()
+    assert '"expected_workload": r.get(' not in src
+    assert '"workload_category": r.get("workload_category")' in src
+    tree = ast.parse((root / "detection_rules.py").read_text())
+    rtt = next(
+        ast.literal_eval(n.value)
+        for n in tree.body
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "RULE_TARGET_TYPOLOGY"
+    )
+    assert rtt == RULE_TARGETS

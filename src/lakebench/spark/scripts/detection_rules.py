@@ -13,13 +13,14 @@ Rules implemented in this file:
 - W3_round_tripping: funds that return to their originator through 2-5
   transfers within a bounded window (temporal cycle search).
 - W4_risk_propagation: high-velocity entity-to-entity chains.
-- W5_sanctions_match: transactions with a counterparty entity name that
-  fuzzy-matches an OFAC SDN entry (Phase 3D).
-- W6_pep_counterparty: transactions with a counterparty on the PEP
-  (politically exposed persons) list, filtered by co-occurring
-  velocity anomaly.
+- W5_sanctions_match: payments whose beneficiary fuzzy-matches an entry on
+  the corpus's dated synthetic sanctions list, screened at transaction time
+  and rescreened when a list version is published.
+- W6_pep_counterparty: payments of $10,000 or more whose beneficiary
+  fuzzy-matches an entry on the corpus's synthetic PEP list.
 - W7_cross_border_high_risk: cross-border transactions to a FATF grey/
-  black list jurisdiction.
+  black list jurisdiction or to one of the generator's synthetic high-risk
+  corridor countries (synthetic_corridors.json, not a regulatory list).
 - W8_dormant_reactivation: originator account inactive > 90 days then
   a transaction >= $5,000-equivalent.
 - W17_layering_chain: open chains of 3+ transfers where each hop forwards
@@ -109,8 +110,8 @@ RULE_TARGET_TYPOLOGY = {
     "W2_structuring": "micro_structuring",
     "W3_round_tripping": "cycle",
     "W4_risk_propagation": "rapid_layering",
-    "W5_sanctions_match": None,
-    "W6_pep_counterparty": None,
+    "W5_sanctions_match": "sanctions_match",
+    "W6_pep_counterparty": "pep_match",
     "W7_cross_border_high_risk": "corridor_high_risk",
     "W8_dormant_reactivation": "dormant_reactivation",
     "W17_layering_chain": "stack",
@@ -2086,51 +2087,183 @@ def _normalize_name_expr(col_name: str) -> str:
     )
 
 
-def w5_sanctions_match(
-    silver_txns: DataFrame,
-    silver_entities: DataFrame | None = None,
-    run_id: str = "unknown",
-) -> DataFrame:
-    """Flag transactions whose beneficiary name matches an SDN entry.
+# ---------------------------------------------------------------------------
+# W5/W6: watchlist screening (AML-GOALS #50). The corpus carries its own dated
+# watchlist (bronze/watchlist.parquet: a sanctions list in two versions and a
+# PEP list); planted payments name listed parties as the payer typed them.
+# ---------------------------------------------------------------------------
 
-    Customer-scoped: the subject is the originator, and only a customer
-    originator alerts (the beneficiary is the listed party).
+#: Minimum name similarity for a screening hit: 1 - Levenshtein distance /
+#: longer length, over the normalized, token-sorted names. Self-chosen: it
+#: admits one edit in a name of seven or more letters and a token-order swap
+#: (sorting removes it), and rejects a different middle name in a typical
+#: three-token name. Not tuned to the planted variants' recall.
+SCREEN_SIMILARITY_MIN = 0.85
+#: Most prior payments a rescreen alert lists as related transactions.
+RESCREEN_MAX_RELATED = 200
 
-    Exact match on the normalized (uppercased/trimmed/collapsed) name.
-    Fuzzy match (Jaccard 3-gram or Levenshtein) is a Phase 2 extension
-    tracked as a follow-up. Exact match is the FIRST pass -- it matches
-    real production sanctions filters' "hard hit" tier.
+
+def _watchlist_path() -> str:
+    import os
+
+    override = os.environ.get("LB_FINANCIAL_WATCHLIST_PATH")
+    if override:
+        return override
+    uri = os.environ.get("LB_BRONZE_URI", "s3a://lb-bronze/")
+    root = os.environ.get("LB_FINANCIAL_BRONZE_PREFIX", "pacs008/").rstrip("/")
+    return f"{uri}{root}/bronze/watchlist.parquet"
+
+
+def _load_watchlist(spark, list_type: str, rule: str) -> DataFrame:
+    """The corpus watchlist entries of one list type. A corpus without a
+    watchlist (generated before the screening track) or with no entry of
+    this type raises RuleSkipped, so the rule reads "not run", never 0%."""
+    from pyspark.sql.utils import AnalysisException
+
+    path = _watchlist_path()
+    try:
+        wl = spark.read.parquet(path)
+    except AnalysisException as e:
+        raise RuleSkipped("no-watchlist", f"{rule}: {path} not readable ({e})") from None
+    wl = wl.filter(col("list_type") == lit(list_type))
+    if not wl.take(1):
+        raise RuleSkipped("empty-watchlist", f"{rule}: no {list_type} entries in {path}")
+    return wl
+
+
+def _name_tokens_expr(col_name: str) -> str:
+    """Sorted, non-empty tokens of the normalized name."""
+    return f"array_sort(array_remove(split({_normalize_name_expr(col_name)}, ' '), ''))"
+
+
+def _block_keys_expr(tokens: str) -> str:
+    """Blocking keys: every unordered pair of the tokens' Soundex codes (a
+    one-token name blocks on its code). Soundex absorbs most vowel and
+    doubled-letter respellings (MOHAMMED and MUHAMMAD share M530), and a
+    typo that does change a code changes one token, so a three-token name
+    keeps at least one intact pair. Pairs, not single codes, keep the
+    candidate set near the namesakes of an entry rather than everyone who
+    shares a given name."""
+    codes = f"array_sort(array_distinct(transform({tokens}, t -> soundex(t))))"
+    return (
+        f"case when size({codes}) < 2 then {codes} else "
+        f"flatten(transform(sequence(0, size({codes}) - 2), i -> "
+        f"transform(sequence(i + 1, size({codes}) - 1), j -> "
+        f"concat(element_at({codes}, i + 1), '|', element_at({codes}, j + 1))))) end"
+    )
+
+
+def _entity_country_frame(silver_entities: DataFrame) -> DataFrame:
+    """One country per entity_id, deterministically (lexicographic minimum)."""
+    from pyspark.sql.functions import min as _min_agg
+
+    return (
+        silver_entities.filter(col("country").isNotNull())
+        .select(col("entity_id").alias("bene_entity_id"), col("country").alias("bene_country"))
+        .groupBy("bene_entity_id")
+        .agg(_min_agg("bene_country").alias("bene_country"))
+    )
+
+
+def screen_counterparties(names: DataFrame, watchlist: DataFrame) -> DataFrame:
+    """Fuzzy-screen distinct counterparties against watchlist entries.
+
+    ``names``: (rptd_beneficiary_name, bene_country). ``watchlist``: the
+    bronze watchlist rows. A counterparty matches an entry when one of the
+    entry's names (primary or alias) has similarity >= SCREEN_SIMILARITY_MIN
+    to it and the entry's country, when it has one, is the counterparty's
+    country (the secondary identifier that separates namesakes abroad).
+
+    Returns (rptd_beneficiary_name, bene_country, list_id, list_version,
+    version_published_date, listed_date, similarity, match_mode) with the best
+    similarity per (counterparty, entry).
     """
-    from pyspark.sql.functions import broadcast
+    from pyspark.sql.functions import broadcast, length, levenshtein
 
-    spark = silver_txns.sparkSession
-    customers = _customer_ids(spark, silver_entities, "W5")
-    raw = _load_reference(
-        spark,
-        "sanctions_list.json",
-        "sdn_id string, entity_name string, entity_type string, program string",
+    wl_names = watchlist.select(
+        "list_id",
+        "list_version",
+        "version_published_date",
+        "listed_date",
+        col("country").alias("wl_country"),
+        explode(expr("concat(array(name), coalesce(aliases, array()))")).alias("wl_name"),
     )
-    if raw is None:
-        return _empty_alerts_df(spark, run_id)
-    sdn = raw.select(
-        col("sdn_id"),
-        expr(_normalize_name_expr("entity_name")).alias("sdn_name_key"),
+    wl_keyed = (
+        wl_names.withColumn("wl_tokens", expr(_name_tokens_expr("wl_name")))
+        .withColumn("wl_key", expr("array_join(wl_tokens, ' ')"))
+        .withColumn("block", explode(expr(_block_keys_expr("wl_tokens"))))
+        .drop("wl_tokens", "wl_name")
+        .distinct()
+    )
+    cp = (
+        names.select("rptd_beneficiary_name", "bene_country")
+        .distinct()
+        .withColumn("cp_tokens", expr(_name_tokens_expr("rptd_beneficiary_name")))
+        .withColumn("cp_key", expr("array_join(cp_tokens, ' ')"))
+    )
+    cand = (
+        cp.withColumn("block", explode(expr(_block_keys_expr("cp_tokens"))))
+        .drop("cp_tokens")
+        .join(broadcast(wl_keyed), "block", "inner")
+        .drop("block")
+        .distinct()
+    )
+    sim = lit(1.0) - levenshtein(col("cp_key"), col("wl_key")) / expr(
+        "greatest(length(cp_key), length(wl_key), 1)"
+    )
+    hits = (
+        cand.filter(length(col("cp_key")) > 0)
+        .withColumn("similarity", sim.cast("double"))
+        .filter(col("similarity") >= lit(SCREEN_SIMILARITY_MIN))
+        .filter(col("wl_country").isNull() | (col("wl_country") == col("bene_country")))
+    )
+    best = Window.partitionBy("rptd_beneficiary_name", "bene_country", "list_id").orderBy(
+        col("similarity").desc()
+    )
+    return (
+        hits.withColumn("_rn", row_number().over(best))
+        .filter(col("_rn") == 1)
+        .select(
+            "rptd_beneficiary_name",
+            "bene_country",
+            "list_id",
+            "list_version",
+            "version_published_date",
+            "listed_date",
+            "similarity",
+            when(col("similarity") >= lit(1.0), lit("exact"))
+            .otherwise(lit("fuzzy"))
+            .alias("match_mode"),
+        )
     )
 
-    hits = silver_txns.select(
+
+def _screen_txns(silver_txns: DataFrame, silver_entities: DataFrame) -> DataFrame:
+    """silver_txns with the beneficiary's country, for screening."""
+    return silver_txns.join(
+        _entity_country_frame(silver_entities),
+        col("beneficiary_id") == col("bene_entity_id"),
+        "left",
+    ).select(
         col("uetr"),
         col("originator_id").alias("entity_id"),
         col("beneficiary_id"),
         col("txn_timestamp"),
-        col("txn_currency"),
-        col("txn_amount").cast("double").alias("amount"),
+        col("txn_amount_usd"),
+        col("txn_amount"),
         col("rptd_beneficiary_name"),
-        expr(_normalize_name_expr("rptd_beneficiary_name")).alias("bene_name_key"),
-    ).join(broadcast(sdn), col("bene_name_key") == col("sdn_name_key"), "inner")
+        col("bene_country"),
+    )
 
-    alerts = hits.select(
+
+def _screen_alerts(hits: DataFrame, rule_id: str, alert_type: str, run_id: str, score, priority):
+    """gold.alerts rows for per-transaction screening hits (one alert per
+    transaction, on its best-matching entry)."""
+    best = Window.partitionBy("uetr").orderBy(col("similarity").desc(), col("list_id"))
+    h = hits.withColumn("_rn", row_number().over(best)).filter(col("_rn") == 1)
+    return h.select(
         expr("uuid()").alias("alert_id"),
-        lit("W5_sanctions_match").alias("rule_id"),
+        lit(rule_id).alias("rule_id"),
         lit(RULE_VERSION).alias("rule_version"),
         lit(MODEL_ID).alias("model_id"),
         lit(MODEL_VERSION).alias("model_version"),
@@ -2138,27 +2271,133 @@ def w5_sanctions_match(
         array(col("uetr")).alias("related_txn_ids"),
         expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
         col("txn_timestamp").alias("alert_ts"),
-        lit(0.95).cast("double").alias("alert_score"),
+        score.cast("double").alias("alert_score"),
+        (lit(priority) if isinstance(priority, str) else priority).alias("priority"),
+        lit("OPEN").alias("status"),
+        lit(None).cast("string").alias("disposition"),
+        lit(alert_type).alias("alert_type"),
+        lit(run_id).alias("run_id"),
+        expr(
+            "concat('Beneficiary ', coalesce(rptd_beneficiary_name, ''), ' matches watchlist "
+            "entry ', list_id, ' (', match_mode, ', similarity ', "
+            "cast(round(similarity, 3) as string), ') on transaction ', uetr)"
+        ).alias("narrative"),
+        map_from_arrays(
+            array(
+                lit("rule"),
+                lit("list_id"),
+                lit("list_version"),
+                lit("match_mode"),
+                lit("similarity"),
+            ),
+            array(
+                lit(rule_id),
+                col("list_id"),
+                col("list_version").cast("string"),
+                col("match_mode"),
+                expr("cast(round(similarity, 4) as string)"),
+            ),
+        ).alias("evidence"),
+        # LB-125: wall-clock at rule execution, last to match the DDL order.
+        current_timestamp().alias("detected_ts"),
+    )
+
+
+def w5_sanctions_match(
+    silver_txns: DataFrame,
+    silver_entities: DataFrame | None = None,
+    run_id: str = "unknown",
+) -> DataFrame:
+    """Sanctions screen: payments to a party on the corpus sanctions list.
+
+    Customer-scoped: the subject is the originator, and only a customer
+    originator alerts (the beneficiary is the listed party).
+
+    Two passes, both a fuzzy name screen (screen_counterparties) against the
+    dated list:
+
+    - Transaction screen: each payment is screened against the entries
+      listed on or before its date.
+    - Rescreen: when a list version is published, the counterparty base is
+      screened against the entries it adds; payments made to a newly listed
+      party before its listing raise one alert per (customer, counterparty,
+      entry), dated at the publication, listing those prior payments.
+
+    Bounded by design (the mission excludes production screening
+    completeness): no phonetic keys, no date-of-birth or identifier
+    matching, the country as the only secondary identifier.
+    """
+    spark = silver_txns.sparkSession
+    silver_entities = _entities_frame(spark, silver_entities, "W5")
+    customers = _customer_ids(spark, silver_entities, "W5")
+    wl = _load_watchlist(spark, "sanctions", "W5")
+    txns = _screen_txns(silver_txns, silver_entities)
+    matches = screen_counterparties(txns, wl)
+    from pyspark.sql.functions import broadcast
+
+    hits = txns.join(broadcast(matches), ["rptd_beneficiary_name", "bene_country"], "inner")
+    listed_ts = expr("cast(listed_date as timestamp)")
+    at_txn = hits.filter(col("txn_timestamp") >= listed_ts)
+    txn_alerts = _screen_alerts(
+        at_txn,
+        "W5_sanctions_match",
+        "sanctions_match",
+        run_id,
+        lit(0.5) + lit(0.45) * col("similarity"),
+        "HIGH",
+    )
+    pre = hits.filter((col("txn_timestamp") < listed_ts) & (col("list_version") > lit(1)))
+    grouped = pre.groupBy("entity_id", "beneficiary_id", "list_id").agg(
+        collect_list(struct(col("txn_timestamp"), col("uetr"))).alias("_txns"),
+        max_(col("similarity")).alias("similarity"),
+        min_(col("version_published_date")).alias("version_published_date"),
+        min_(col("list_version")).alias("list_version"),
+        max_(col("rptd_beneficiary_name")).alias("rptd_beneficiary_name"),
+    )
+    rescreen = grouped.select(
+        expr("uuid()").alias("alert_id"),
+        lit("W5_sanctions_match").alias("rule_id"),
+        lit(RULE_VERSION).alias("rule_version"),
+        lit(MODEL_ID).alias("model_id"),
+        lit(MODEL_VERSION).alias("model_version"),
+        col("entity_id"),
+        expr(f"slice(transform(array_sort(_txns), x -> x.uetr), 1, {RESCREEN_MAX_RELATED})").alias(
+            "related_txn_ids"
+        ),
+        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
+        expr("cast(version_published_date as timestamp)").alias("alert_ts"),
+        (lit(0.5) + lit(0.45) * col("similarity")).cast("double").alias("alert_score"),
         lit("HIGH").alias("priority"),
         lit("OPEN").alias("status"),
         lit(None).cast("string").alias("disposition"),
-        lit("sanctions_match").alias("alert_type"),
+        lit("sanctions_rescreen").alias("alert_type"),
         lit(run_id).alias("run_id"),
         expr(
-            "concat('Beneficiary ', rptd_beneficiary_name, ' matches SDN entry ', sdn_id, "
-            "' on transaction ', uetr)"
+            "concat('Rescreen on list version ', cast(list_version as string), ': prior "
+            "counterparty ', coalesce(rptd_beneficiary_name, ''), ' matches new entry ', "
+            "list_id, ' (', cast(size(_txns) as string), ' prior payments)')"
         ).alias("narrative"),
         map_from_arrays(
-            array(lit("rule"), lit("sdn_id"), lit("match_mode")),
-            array(lit("W5_sanctions_match"), col("sdn_id"), lit("exact")),
+            array(lit("rule"), lit("list_id"), lit("list_version"), lit("match_mode")),
+            array(
+                lit("W5_sanctions_match"),
+                col("list_id"),
+                col("list_version").cast("string"),
+                lit("rescreen"),
+            ),
         ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
         current_timestamp().alias("detected_ts"),
     )
-    return _customers_only(alerts, customers)
+    return _customers_only(txn_alerts.unionByName(rescreen), customers)
+
+
+#: W6 screens every payment; this USD equivalent splits triage priority
+#: (MED at or above, LOW below). Small PEP payments are mostly
+#: administrative, and PEP exposure feeds enhanced due diligence rather than
+#: blocking, so the line orders the queue instead of dropping hits: an
+#: amount floor would make W6 recall a property of the amount distribution
+#: rather than of the screen.
+PEP_MIN_USD = 10_000.0
 
 
 def w6_pep_counterparty(
@@ -2166,83 +2405,34 @@ def w6_pep_counterparty(
     silver_entities: DataFrame | None = None,
     run_id: str = "unknown",
 ) -> DataFrame:
-    """Flag transactions with a PEP beneficiary.
+    """PEP screen: payments to a party on the corpus PEP list, by the same
+    fuzzy screen as W5 (transaction screen only).
 
     Customer-scoped: the subject is the originator, and only a customer
-    originator alerts.
-
-    Unlike sanctions matches, PEP counterparties are not intrinsically
-    fraudulent -- they trigger enhanced due diligence, not blocking. So
-    the alert priority defaults to MED, and we only emit an alert when
-    the transaction is over $10,000 USD equivalent (small PEP payments
-    are administrative and generate too many false positives).
+    originator alerts. PEP counterparties are not intrinsically suspicious,
+    so priority is MED at PEP_MIN_USD or more and LOW below. The USD amount
+    falls back to txn_amount when the FX enrichment is missing.
     """
+    spark = silver_txns.sparkSession
+    silver_entities = _entities_frame(spark, silver_entities, "W6")
+    customers = _customer_ids(spark, silver_entities, "W6")
+    wl = _load_watchlist(spark, "pep", "W6")
+    txns = _screen_txns(silver_txns, silver_entities)
+    matches = screen_counterparties(txns, wl)
     from pyspark.sql.functions import broadcast
 
-    spark = silver_txns.sparkSession
-    customers = _customer_ids(spark, silver_entities, "W6")
-    raw = _load_reference(
-        spark,
-        "pep_list.json",
-        "pep_id string, entity_name string, entity_type string, position string",
+    hits = txns.join(broadcast(matches), ["rptd_beneficiary_name", "bene_country"], "inner").filter(
+        col("txn_timestamp") >= expr("cast(listed_date as timestamp)")
     )
-    if raw is None:
-        return _empty_alerts_df(spark, run_id)
-    pep = raw.select(
-        col("pep_id"),
-        expr(_normalize_name_expr("entity_name")).alias("pep_name_key"),
-        col("position"),
-    )
-
-    # Use txn_amount when txn_amount_usd is NULL (missing FX enrichment).
-    # A JPY / EUR PEP payment without the USD conversion would otherwise
-    # silently drop out of alerts because `NULL >= 10000` filters to false.
-    # Using the raw txn_amount is a conservative fallback: false-positive
-    # rate rises slightly on foreign currencies but no PEP hits vanish.
-    hits = (
-        silver_txns.filter(expr("coalesce(txn_amount_usd, txn_amount) >= 10000"))
-        .select(
-            col("uetr"),
-            col("originator_id").alias("entity_id"),
-            col("beneficiary_id"),
-            col("txn_timestamp"),
-            col("txn_amount").cast("double").alias("amount"),
-            col("txn_amount_usd"),
-            col("rptd_beneficiary_name"),
-            expr(_normalize_name_expr("rptd_beneficiary_name")).alias("bene_name_key"),
-        )
-        .join(broadcast(pep), col("bene_name_key") == col("pep_name_key"), "inner")
-    )
-
-    alerts = hits.select(
-        expr("uuid()").alias("alert_id"),
-        lit("W6_pep_counterparty").alias("rule_id"),
-        lit(RULE_VERSION).alias("rule_version"),
-        lit(MODEL_ID).alias("model_id"),
-        lit(MODEL_VERSION).alias("model_version"),
-        col("entity_id"),
-        array(col("uetr")).alias("related_txn_ids"),
-        expr("array(cast(beneficiary_id as bigint))").alias("related_entity_ids"),
-        col("txn_timestamp").alias("alert_ts"),
-        lit(0.65).cast("double").alias("alert_score"),
-        lit("MED").alias("priority"),
-        lit("OPEN").alias("status"),
-        lit(None).cast("string").alias("disposition"),
-        lit("pep_counterparty").alias("alert_type"),
-        lit(run_id).alias("run_id"),
-        expr(
-            "concat('Beneficiary ', rptd_beneficiary_name, ' is PEP ', pep_id, "
-            "' (', position, ') with USD equivalent ', cast(txn_amount_usd as string))"
-        ).alias("narrative"),
-        map_from_arrays(
-            array(lit("rule"), lit("pep_id"), lit("position")),
-            array(lit("W6_pep_counterparty"), col("pep_id"), col("position")),
-        ).alias("evidence"),
-        # LB-125: wall-clock at rule execution. Batch = detection time;
-        # continuous = the far end of detected_ts - ingest_ts (freshness /
-        # time-to-detect). Appended LAST to match the gold.alerts DDL column
-        # order, because gold_finalize writes via positional INSERT ... SELECT *.
-        current_timestamp().alias("detected_ts"),
+    alerts = _screen_alerts(
+        hits,
+        "W6_pep_counterparty",
+        "pep_counterparty",
+        run_id,
+        lit(0.3) + lit(0.4) * col("similarity"),
+        when(expr(f"coalesce(txn_amount_usd, txn_amount) >= {PEP_MIN_USD}"), lit("MED")).otherwise(
+            lit("LOW")
+        ),
     )
     return _customers_only(alerts, customers)
 
@@ -2285,6 +2475,17 @@ def w7_cross_border_high_risk(
     if raw is None:
         print("[W7] high_risk_jurisdictions.json not available; skipping.")
         return _empty_alerts_df(spark, run_id)
+    # The FATF list names none of the generator's home countries (June 2026),
+    # so on its own W7 could never fire on this corpus. The synthetic
+    # corridor list is the set corridor_high_risk plants against, labelled
+    # synthetic in its file and as risk_tier "synthetic_corridor" in evidence.
+    corridors = _load_reference(
+        spark,
+        "synthetic_corridors.json",
+        "country_code string, country_name string, risk_tier string",
+    )
+    if corridors is not None:
+        raw = raw.unionByName(corridors)
 
     hrj = raw.select(
         col("country_code"),
@@ -2352,8 +2553,10 @@ def w7_cross_border_high_risk(
         lit("cross_border_high_risk").alias("alert_type"),
         lit(run_id).alias("run_id"),
         expr(
-            "concat('Cross-border transaction to ', bene_country, ' (FATF ', risk_tier, ' list) "
-            "for ', cast(amount as string), ' on ', cast(txn_timestamp as string))"
+            "concat('Cross-border transaction to ', bene_country, ' (', "
+            "case when risk_tier = 'synthetic_corridor' then 'synthetic high-risk corridor' "
+            "else concat('FATF ', risk_tier, ' list') end, ') for ', cast(amount as string), "
+            "' on ', cast(txn_timestamp as string))"
         ).alias("narrative"),
         map_from_arrays(
             array(lit("rule"), lit("country"), lit("risk_tier")),

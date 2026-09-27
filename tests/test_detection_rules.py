@@ -193,8 +193,7 @@ def test_aml_reference_files_exist_and_parse():
     ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
     for filename in (
         "high_risk_jurisdictions.json",
-        "sanctions_list.json",
-        "pep_list.json",
+        "synthetic_corridors.json",
     ):
         p = ref_dir / filename
         assert p.exists(), f"missing AML reference {p}"
@@ -216,16 +215,28 @@ def test_aml_reference_shapes():
         assert "country_code" in row and len(row["country_code"]) == 2
         assert row["risk_tier"] in ("grey", "black")
 
-    sdn = json.loads((ref_dir / "sanctions_list.json").read_text())["entries"]
-    for row in sdn:
-        assert row["sdn_id"].startswith("SDN-")
-        assert row["entity_name"]
+    corr = json.loads((ref_dir / "synthetic_corridors.json").read_text())
+    assert corr["source"].startswith("SYNTHETIC")
+    for row in corr["entries"]:
+        assert row["risk_tier"] == "synthetic_corridor"
+    # The sanctions and PEP lists are per-corpus generator output
+    # (bronze/watchlist.parquet), not packaged files.
+    assert not (ref_dir / "sanctions_list.json").exists()
+    assert not (ref_dir / "pep_list.json").exists()
 
-    pep = json.loads((ref_dir / "pep_list.json").read_text())["entries"]
-    for row in pep:
-        assert row["pep_id"].startswith("PEP-")
-        assert row["entity_name"]
-        assert row["position"]
+
+def test_fatf_list_is_dated_and_sourced():
+    import json
+
+    ref_dir = Path(__file__).resolve().parents[1] / "src/lakebench/spark/data/aml"
+    hrj = json.loads((ref_dir / "high_risk_jurisdictions.json").read_text())
+    assert hrj["as_of"] == "2026-06-19" and "fatf-gafi.org" in hrj["source"]
+    tiers = {}
+    for e in hrj["entries"]:
+        tiers.setdefault(e["risk_tier"], set()).add(e["country_code"])
+    assert tiers["black"] == {"IR", "KP", "MM"}
+    assert len(tiers["grey"]) == 22 and {"BA", "IQ"} <= tiers["grey"]
+    assert not {"DZ", "NA", "AE"} & tiers["grey"]
 
 
 def test_normalize_name_expr_strips_punctuation_and_suffix():
@@ -275,7 +286,7 @@ def test_load_reference_short_circuits_on_empty():
     assert "if not entries:" in src
     assert "return None" in src
     # Every caller must check `if raw is None`.
-    for rule in ("w5_sanctions_match", "w6_pep_counterparty", "w7_cross_border_high_risk"):
+    for rule in ("w7_cross_border_high_risk",):
         # Extract the function body via AST for a scoped check.
         tree = ast.parse(src)
         fn = next(
@@ -998,6 +1009,16 @@ def test_all_rules_stamp_detected_ts():
         # silently corrupt rows while still "containing" detected_ts. Assert
         # POSITION, not just presence.
         alias_names = re.findall(r'\.alias\(\s*["\'](\w+)["\']\s*\)', fn_src)
+        if not alias_names and "_screen_alerts(" in fn_src:
+            # W6 projects through the shared screening helper (W5 too, plus
+            # its own rescreen projection); check the helper instead.
+            helper = next(
+                n
+                for n in tree.body
+                if isinstance(n, ast.FunctionDef) and n.name == "_screen_alerts"
+            )
+            fn_src = ast.get_source_segment(src, helper)
+            alias_names = re.findall(r'\.alias\(\s*["\'](\w+)["\']\s*\)', fn_src)
         assert alias_names, f"{fn.name} has no aliased columns"
         assert alias_names[-1] == "detected_ts", (
             f"{fn.name} must project detected_ts LAST (positional INSERT); "
@@ -1029,3 +1050,50 @@ def test_detected_ts_in_empty_schema_and_all_ddls():
     assert "detected_ts" in rp
     assert "ADD COLUMNS (detected_ts TIMESTAMP)" in rp
     assert '"detected_ts" not in' in rp
+
+
+def test_w5_w6_screen_the_corpus_watchlist_fuzzily():
+    """AML-GOALS #50: W5/W6 read the corpus's own dated watchlist (a missing
+    one is RuleSkipped, never 0 alerts) and go through the fuzzy screen, not
+    an exact join on the normalized name; W5 also rescreens on a list
+    version."""
+    tree = _module_ast()
+    fns = {n.name: ast.unparse(n) for n in tree.body if isinstance(n, ast.FunctionDef)}
+    for rule, kind in (("w5_sanctions_match", "'sanctions'"), ("w6_pep_counterparty", "'pep'")):
+        body = fns[rule]
+        assert f"_load_watchlist(spark, {kind}" in body
+        assert "screen_counterparties(" in body
+        assert "_customers_only(" in body
+    assert "sanctions_rescreen" in fns["w5_sanctions_match"]
+    load = fns["_load_watchlist"]
+    assert "RuleSkipped('no-watchlist'" in load and "RuleSkipped('empty-watchlist'" in load
+    screen = fns["screen_counterparties"]
+    assert "levenshtein" in screen and "SCREEN_SIMILARITY_MIN" in screen
+    assert "wl_country" in screen and "bene_country" in screen
+
+
+def test_every_targeted_rule_is_scheduled_or_declared_skipped():
+    """A rule with a planted target must run in batch, and in continuous
+    either run or be recorded as skipped, or its typology reads 0 alerts
+    (review finding: W5/W6 were targeted but never invoked)."""
+    import re as _re
+
+    scripts = DETECTION_RULES_PATH.parent
+
+    def _tuple(path, name):
+        tree = ast.parse(Path(path).read_text())
+        for n in tree.body:
+            if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == name:
+                return set(ast.literal_eval(n.value))
+        raise AssertionError(name)
+
+    src = DETECTION_RULES_PATH.read_text()
+    block = _re.search(r"RULE_TARGET_TYPOLOGY = \{(.*?)\n\}", src, _re.S).group(1)
+    targeted = set(_re.findall(r'"(W\d+_\w+)": "', block))
+    batch = _tuple(scripts / "gold_finalize_financial.py", "DEFAULT_DETECTION_RULES")
+    cont = _tuple(scripts / "gold_refresh_financial.py", "CONTINUOUS_RULES") | _tuple(
+        scripts / "gold_refresh_financial.py", "CONTINUOUS_SKIPPED_RULES"
+    )
+    assert {"W5_sanctions_match", "W6_pep_counterparty"} <= targeted
+    assert targeted <= batch, targeted - batch
+    assert targeted <= cont, targeted - cont

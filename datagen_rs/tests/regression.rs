@@ -1159,7 +1159,7 @@ fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
             w.population,
             w.dims.txn_per_entity_per_month,
         );
-        crr(w.ty[i], w.country[i], w.pep[i], v).1
+        crr(w.ty[i], w.country[i], v).1
     };
     let mut all = [0usize; 3];
     let mut person_us = [0usize; 3];

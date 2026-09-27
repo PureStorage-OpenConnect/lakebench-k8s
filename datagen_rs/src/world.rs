@@ -25,9 +25,6 @@ pub const BASELINE_ACTIVITY: [f64; 3] = [60.0, 240.0, 1500.0];
 // Share of transactions whose beneficiary is drawn from the originator's ring.
 pub const RING_HIT_RATE: [f64; 3] = [0.95, 0.80, 0.60];
 
-pub const SANCTIONS_RATE: f64 = 0.0005;
-pub const PEP_RATE: f64 = 0.0020;
-
 // --- Persona (P2, LB-130 datagen fidelity) --------------------------------
 // Before P2 every account of a given type shared one activity rate and one
 // amount distribution, so entity_profiles features (avg_gap_days,
@@ -200,35 +197,4 @@ pub fn ring_member(orig: u64, slot: u64, population: usize, seed: i64) -> u64 {
 pub fn accounts_for(id: u64, seed: i64) -> i32 {
     let f = hash_frac(id, seed + 808);
     (searchsorted_left(&ACCT_CDF, f) + 1) as i32
-}
-
-/// Exact-quota flagged ids (1-based), matching world.flagged_ids: hash every id,
-/// take the n with the smallest hash. n = round(rate * population).
-fn flagged_ids(population: usize, rate: f64, salt: i64) -> Vec<u64> {
-    let n = (rate * population as f64).round() as usize;
-    if n == 0 {
-        return Vec::new();
-    }
-    let saltv = (salt as u64).wrapping_mul(0xDEAD_BEEF);
-    let mut h: Vec<(u64, u64)> = (1..=population as u64)
-        .map(|id| (splitmix64(id ^ saltv), id))
-        .collect();
-    h.sort_unstable();
-    h.into_iter().take(n).map(|(_, id)| id).collect()
-}
-
-pub fn sanctioned_set(population: usize, seed: i64) -> Vec<bool> {
-    let mut m = vec![false; population + 1];
-    for id in flagged_ids(population, SANCTIONS_RATE, seed + 606) {
-        m[id as usize] = true;
-    }
-    m
-}
-
-pub fn pep_set(population: usize, seed: i64) -> Vec<bool> {
-    let mut m = vec![false; population + 1];
-    for id in flagged_ids(population, PEP_RATE, seed + 707) {
-        m[id as usize] = true;
-    }
-    m
 }

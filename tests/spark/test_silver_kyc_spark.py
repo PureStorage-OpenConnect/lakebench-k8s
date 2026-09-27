@@ -114,9 +114,15 @@ def test_entities_carry_kyc_for_customers_only(spark):
     assert a["customer_since"] == dt.date(2015, 5, 1)
     assert float(a["expected_monthly_volume_usd"]) == 1234.5
     assert b["crr_tier"] is None and b["customer_since"] is None
-    # PEP and sanctions now come from the party master, not constants.
-    assert a["pep_status"] is True and b["pep_status"] is False
-    assert (a["sanctions_status"], b["sanctions_status"]) == ("clear", "sdn")
+    # Answer keys never reach silver (AML-GOALS #50): even a party master
+    # that still carries sanctions/PEP flags (a pre-0.3 corpus, as here) is
+    # not copied; screening outcomes are W5/W6 alerts.
+    for r in (a, b):
+        assert (r["pep_status"], r["sanctions_status"], r["initial_risk_score"]) == (
+            None,
+            None,
+            None,
+        )
     # Column order is the DDL's (the inline DDL is what silver bootstraps).
     ddl_cols = [
         ln.split()[0] for ln in DDL_ENTITIES.split("(", 1)[1].splitlines() if ln.startswith("    ")
@@ -157,7 +163,7 @@ def test_missing_or_old_reference_files_give_null_kyc(spark):
     assert build_kyc(party.drop("is_customer"), account) is None
     bronze = _bronze(spark)
     ents = build_entities(_txns(bronze), bronze, None).collect()
-    assert all(r["is_customer"] is None and r["pep_status"] is False for r in ents)
+    assert all(r["is_customer"] is None and r["pep_status"] is None for r in ents)
     assert all(r["home_fi"] is None for r in build_accounts(bronze, None).collect())
 
 

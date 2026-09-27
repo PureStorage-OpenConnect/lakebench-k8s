@@ -109,8 +109,18 @@ def test_skipped_error_and_no_rule_are_not_zero(spark):
     from score_financial import compute_scores
 
     alerts = _alerts(spark, [("a-w4", "W4_risk_propagation", ["u5", "u6", "u7"])])
-    per, _ = compute_scores(spark, _manifest(spark), alerts, STATUS)
+    per, summ = compute_scores(spark, _manifest(spark), alerts, STATUS)
     t = _by_type(per)
+    # Counts say what was scored, never "every manifest typology scored".
+    c = summ["typology_counts"]
+    assert c["rule_skipped"] >= 1 and c["rule_error"] >= 1 and c["no_rule"] >= 1
+    assert sum(c.values()) == len(t)
+    # Every rule's outcome with its reason is in the evidence.
+    by_rule = {r["rule_id"]: r for r in summ["rules"]}
+    assert {r["status"] for r in summ["rules"]} >= {"skipped", "error"}
+    assert all("reason" in r for r in by_rule.values())
+    # The manifest column is reported as the workload category.
+    assert "workload_category" in per.columns and "expected_workload" not in per.columns
     assert t["gather_scatter"]["detection_status"] == "rule_skipped"
     assert t["gather_scatter"]["recall"] is None
     assert t["rapid_layering"]["detection_status"] == "rule_error"

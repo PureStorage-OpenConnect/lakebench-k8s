@@ -17,9 +17,10 @@ use datagen_rs::customer360_realism::{CustomerIdSampler, LoyaltyLookup};
 use datagen_rs::cycle;
 use datagen_rs::emit::{build_batch, Batch};
 use datagen_rs::hash::{hash_frac, splitmix64, Rng};
+use datagen_rs::kyc::is_customer;
 use datagen_rs::metrics::PodMetrics;
 use datagen_rs::model::build_world_p;
-use datagen_rs::party::{build_manifest_p, write_account_to, write_party_to};
+use datagen_rs::party::{build_manifest_x, watchlist_batch, write_account_to, write_party_to};
 use datagen_rs::robustness::{perturbation_for_seed, Perturbation};
 use datagen_rs::s3sink::S3Sink;
 use datagen_rs::timing::{sample_ts_on_day, DayCal};
@@ -395,7 +396,13 @@ fn pacs008_main() {
     // A dedicated-bronze pod (writes no reference zones) can skip the
     // reference-only world columns entirely.
     let bronze_only = do_bronze && !do_reference;
-    let w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
+    let mut w = build_world_p(scale, seed, corpus_months, bronze_only, &perturb);
+    // Screening track (AML-GOALS #50): the watchlist and its external
+    // counterparties, from their own salted streams. Attaching them adds
+    // entities above the population and changes no population column.
+    let screening = datagen_rs::screening::build(w.population, seed, start_us, end_us);
+    w.attach_external(screening.external_entities());
+    let w = w;
     let t_world = t0.elapsed().as_secs_f64();
     let dims = &w.dims;
     let total_txns = dims.total_txns();
@@ -624,6 +631,87 @@ fn pacs008_main() {
         lo as u64
     }
 
+    // Screening payments (AML-GOALS #50), planted after the base row count
+    // above is fixed, so they are added on top of the corpus rather than
+    // taken from it: every base, scheduled and typology row keeps its content
+    // and uid. Originators are activity-weighted customers outside any
+    // dormancy window; amounts come from a per-row stream keyed by the row's
+    // uid, drawn the way a base row's amount is.
+    let (planted, negative_rows) = datagen_rs::screening::plant(
+        &screening,
+        seed,
+        &gcal,
+        start_us,
+        end_us,
+        |rng: &mut Rng| {
+            for _ in 0..64 {
+                let o = sample_orig(&cum, total_w, pop, rng);
+                if is_customer(o, seed) {
+                    return Some(o);
+                }
+            }
+            None
+        },
+        |o| w.country[o as usize],
+        |o, t| !in_suppress_window(&is_suppressed, &suppress_windows, o, t),
+    );
+    let screen_amount = |uid: u64, o: u64| -> f64 {
+        let mut rng = Rng::new(splitmix64(
+            uid ^ datagen_rs::screening::SCREEN_SALT ^ 0xA307,
+        ));
+        native_amount(&mut rng, w.amount_logshift[o as usize], w.ccy[o as usize])
+    };
+    let mut screen_instances: Vec<datagen_rs::typology::Instance> = Vec::new();
+    let mut screen_extra: HashMap<String, Vec<(&'static str, String)>> = HashMap::new();
+    let mut n_screen_rows = 0usize;
+    for pl in &planted {
+        for (row_idx, r) in pl.rows.iter().enumerate() {
+            let uid = datagen_rs::screening::screen_uid(pl.inst.seed, row_idx);
+            let m = gcal.mass_at(r.ts_us);
+            let last = inst_last_mass.entry(pl.inst.id.clone()).or_insert(m);
+            *last = last.max(m);
+            typ_by_file[file_of(r.ts_us) as usize].push(TypRow {
+                orig: r.orig,
+                bene: r.bene,
+                ts_us: r.ts_us,
+                amount: screen_amount(uid, r.orig),
+                ccy: w.ccy[r.orig as usize],
+                uid,
+            });
+            inst_uids.entry(pl.inst.id.clone()).or_default().push(uid);
+            n_screen_rows += 1;
+        }
+        screen_instances.push(pl.inst.clone());
+        screen_extra.insert(pl.inst.id.clone(), pl.extra.clone());
+    }
+    // Decoy and background rows: ordinary negatives, never in the manifest.
+    // The account's external id seeds its uids, so they differ from every
+    // planted row's.
+    let mut neg_idx: HashMap<u64, usize> = HashMap::new();
+    for r in &negative_rows {
+        let k = neg_idx.entry(r.bene).or_insert(0);
+        let uid = datagen_rs::screening::screen_uid(!(r.bene as i64), *k);
+        *k += 1;
+        typ_by_file[file_of(r.ts_us) as usize].push(TypRow {
+            orig: r.orig,
+            bene: r.bene,
+            ts_us: r.ts_us,
+            amount: screen_amount(uid, r.orig),
+            ccy: w.ccy[r.orig as usize],
+            uid,
+        });
+        n_screen_rows += 1;
+    }
+    // screen_rows is on top of total_txns (tests/cycles.rs parses it).
+    eprintln!(
+        "screening: listed_parties={} decoys={} background_payees={} planted_instances={} screen_rows={}",
+        screening.parties.len(),
+        screening.decoys.len(),
+        screening.background.len(),
+        screen_instances.len(),
+        n_screen_rows
+    );
+
     let t_typ = t_typ0.elapsed().as_secs_f64();
 
     // Reference zones (manifest, account, party) go before this pod's bronze
@@ -666,6 +754,7 @@ fn pacs008_main() {
         // slice (an instance with no emitted rows goes by its window end).
         let mine: Vec<datagen_rs::typology::Instance> = instances
             .iter()
+            .chain(screen_instances.iter())
             .filter(|i| {
                 let m = inst_last_mass
                     .get(&i.id)
@@ -676,7 +765,7 @@ fn pacs008_main() {
             .cloned()
             .collect();
         let man_bytes = encode_parquet(
-            &build_manifest_p(&mine, seed, &inst_uids, &perturb),
+            &build_manifest_x(&mine, seed, &inst_uids, &perturb, &screen_extra),
             8 * 1024 * 1024,
         );
         ref_bytes += man_bytes.len() as u64;
@@ -695,6 +784,14 @@ fn pacs008_main() {
                 .unwrap_or_else(|e| panic!("account.parquet mpu finish: {}", e));
             ref_bytes += acct_bytes;
             ref_files += 1;
+
+            // The watchlist is an input the bank holds (the published list
+            // versions), not ground truth: which listed party was paid is only
+            // in the manifest. Before party, which silver-stream waits for.
+            let wl_bytes = encode_parquet(&watchlist_batch(&screening), 1024 * 1024);
+            ref_bytes += wl_bytes.len() as u64;
+            ref_files += 1;
+            sink.put("bronze/watchlist.parquet", wl_bytes);
 
             let mut party_mpu = sink.put_multipart("bronze/party.parquet");
             write_party_to(&w, &instances, &mut party_mpu);
@@ -914,7 +1011,6 @@ fn pacs008_main() {
         // Permute the pre-assigned uid[] with the same sort so each row's
         // UETR derivation lines up with its position in the batch.
         let uid: Vec<u64> = idx.iter().map(|&i| uid_pre[i]).collect();
-
         let tb = std::time::Instant::now();
         let batch = build_batch(
             &w,

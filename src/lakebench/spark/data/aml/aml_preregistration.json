@@ -1,5 +1,5 @@
 {
-  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.5.0 (2026-09-25, AML-GOALS section 9 #37/#38) replaces the reference model's hyperparameters, the relative leakage cap and the calibration and evaluation seeds after D0 at v3.4.1 was voided as a harness failure; see changelog. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
+  "_doc": "AML Level-2 pre-registration. Single source of truth for the datagen freeze gate and the Level-2 claim. The gate (src/lakebench/aml/fidelity_gate.py, via scripts/aml_gate.py locally and score_financial_reference.py on the cluster) loads this file; AML-GOALS.md describes it. v3.6.0 (2026-09-26) replaces the D8 scale-invariance rule (AML-GOALS section 9 #45/#45a) and strengthens the D5 leakage check (proposed after the adversarial review of D5 power; see its changelog entry). v3.5.0 (2026-09-25, AML-GOALS section 9 #37/#38) replaced the reference model's hyperparameters, the relative leakage cap and the calibration and evaluation seeds after D0 at v3.4.1 was voided as a harness failure; see changelog. Changing any value after a gate run (D0 included) requires a dated entry in AML-GOALS.md section 9 and a new evaluation seed. See AML-GOALS.md sections 3-5a.",
   "version": "3.6.0",
   "registered": "2026-09-25",
   "metric": "average_precision",
@@ -42,7 +42,9 @@
     "estimator": "DecisionTreeClassifier",
     "max_depth": 2,
     "single_feature_also_scores_raw_rank": true,
-    "raw_rank": "out of fold: direction chosen on the training folds, within-fold percentile ranks pooled"
+    "raw_rank": "out of fold: direction chosen on the training folds, within-fold percentile ranks pooled",
+    "also_reference_model": true,
+    "also_reference_model_note": "v3.6.0: every single-feature and feature-pair shortcut is also fit with reference_model (same estimator and hyperparameters, restricted to those columns) and scores the larger of the two APs. A depth-2 tree has four leaves, so at monthly prevalence (6e-5 to 3e-4) it cannot reach a pure leaf and its AP says little about a two-feature shortcut. Taking the maximum means the check can only become stricter than v3.5.2."
   },
   "model_outputs": {
     "persisted": [
@@ -128,11 +130,77 @@
     "shortcut_ap_rel_max": 0.5,
     "shortcut_models": [
       "single_feature",
-      "feature_pair_depth2"
+      "feature_pair",
+      "nuisance_only"
     ],
     "relative_cap_formula": "lift_over_prevalence_band_floor",
     "relative_cap_definition": "(shortcut_ap - prevalence) <= shortcut_ap_rel_max * (max(ap, band.ap_min) - prevalence); the absolute cap is unchanged and applies as well",
-    "relative_cap_rationale": "v3.5.0 (#37/#38): the check asks whether one or two features carry a large share of the signal a typology must have to count. That reference is the band floor unless the model does better. Against the model's own AP alone the cap shrinks to the prevalence as a model weakens, so at prevalence 1e-4 a shortcut a few hundredths above it fails from noise. In band the rule equals lift_over_prevalence; below band the relative cap is at most prevalence + 0.5 x (0.30 - prevalence), about 0.15, under the absolute cap of 0.20, so it is never looser than the absolute cap."
+    "relative_cap_rationale": "v3.5.0 (#37/#38): the check asks whether one or two features carry a large share of the signal a typology must have to count. That reference is the band floor unless the model does better. Against the model's own AP alone the cap shrinks to the prevalence as a model weakens, so at prevalence 1e-4 a shortcut a few hundredths above it fails from noise. In band the rule equals lift_over_prevalence; below band the relative cap is at most prevalence + 0.5 x (0.30 - prevalence), about 0.15, under the absolute cap of 0.20, so it is never looser than the absolute cap.",
+    "shortcut_models_note": "v3.6.0: feature_pair replaces feature_pair_depth2 (same pairs, now the larger AP of the depth-2 tree and reference_model on the pair); nuisance_only is reference_model on nuisance_features alone. All three are held to the same absolute and relative caps (relative_cap_formula).",
+    "nuisance_features": [
+      "frac_overnight",
+      "frac_weekend",
+      "hour_of_day_entropy",
+      "frac_round_amount",
+      "customer_type",
+      "crr_tier"
+    ],
+    "nuisance_features_note": "Features that describe the clock, amount rounding or customer segment rather than the behaviour a typology plants: LB-103 (typology timestamps once uniform while the baseline was shaped: hour-of-day and weekday), round native amounts, and the segment attributes the generator conditions subjects on (#32). No typology's label is defined on them. Known channels NOT in this set, because they carry typology behaviour by definition and are guarded only by the single and pair shortcut caps: frac_in_structuring_band (the LB-137 channel: currency scaling of the structuring bands) and the LB-103-derived day-level features (active_days, max_burst_24h, gap_*). nuisance_only has little power at monthly prevalence (a nuisance shift that matters only jointly with behaviour cannot rank alone); the ablation carries most of the nuisance check.",
+    "ablation": {
+      "method": "leave_one_group_out",
+      "model": "reference_model",
+      "feature_groups": {
+        "volume": [
+          "txn_count",
+          "active_days",
+          "max_burst_24h"
+        ],
+        "gaps": [
+          "gap_mean_days",
+          "gap_max_days",
+          "gap_cv",
+          "max_gap_over_mean_gap"
+        ],
+        "amounts": [
+          "amount_mean_usd",
+          "amount_max_usd",
+          "amount_cv",
+          "frac_in_structuring_band"
+        ],
+        "counterparties_geo": [
+          "n_counterparties",
+          "frac_cross_border",
+          "home_country_high_risk",
+          "frac_high_risk_corridor"
+        ],
+        "clock": [
+          "frac_overnight",
+          "frac_weekend",
+          "hour_of_day_entropy"
+        ],
+        "rounding": [
+          "frac_round_amount"
+        ],
+        "segment": [
+          "customer_type",
+          "crr_tier"
+        ],
+        "history": [
+          "days_since_prior_send",
+          "txn_count_vs_history",
+          "amount_mean_vs_history_median",
+          "frac_counterparties_new"
+        ]
+      },
+      "gated": "nuisance_features",
+      "drop_cap_definition": "(ap - ap_without_nuisance_features) <= min(shortcut_ap_rel_max * (max(ap, band.ap_min) - prevalence), shortcut_ap_abs_max), and when ap is in band, ap_without_nuisance_features >= band.ap_min: removing every nuisance feature may cost at most what a shortcut may carry, and an in-band verdict must not rest on them. Needs a lift relative_cap_formula (the gate refuses 'ratio').",
+      "note": "feature_groups partition features and the settings are checked before any model is fit (a malformed block fails closed). Each group is dropped in turn and the reference model refit on the same folds; every drop is reported. Only the drop from removing nuisance_features together is gated: a behavioural group is expected to carry its typology, a nuisance group is not. The group partition is a descriptive grouping of the feature list by what each feature measures; only the nuisance set is gated. Lifetime unit: the history group is absent and skipped."
+    },
+    "secondary_lifetime_skips": [
+      "also_reference_model",
+      "ablation"
+    ],
+    "secondary_lifetime_skips_note": "The ungated secondary lifetime block runs the 3.5.2 tree and rank shortcuts plus nuisance_only, not the reference-model shortcut fits or the ablation (hours of compute for a block that gates nothing)."
   },
   "scale_invariance": {
     "rule": "Per behavioural typology, s2 = the scale-2 runs (corpora.calibration_seed and corpora.calibration_replicate_seeds, one gate run each at corpora.gate_scale) and s10 = the n_shards shards of one large_scale corpus on corpora.calibration_seed. Each scale's estimate is the mean of logit(AP) over its runs; its SE is max(sqrt(sum of the runs' customer-bootstrap variances of logit AP) / n, between-run sd / sqrt(n)); its CI is estimate +/- t(n - 1) x SE at (1 + power.ci_level) / 2, back-transformed. A typology is gated when either scale's CI touches [band.ap_min, band.ap_max]; it passes when |logit_s10 - logit_s2| <= logit_diff_abs_max, the difference CI (difference_ci) is no wider than logit_diff_ci_width_max, and there is no confident verdict flip. A typology whose CIs lie wholly outside the band at both scales passes when both are on the same side; its AP ratio and ratio CI are reported, not gated. Every run needs power.min_positives positives; fewer is a miss. D8 passes when every behavioural typology passes, every feature passes KS, and every provenance check holds.",
@@ -265,7 +333,8 @@
     },
     "definitional_min_single_ap": 0.95,
     "reclassification": "behavioural -> definitional is forbidden for this release after any gate run (D0 included); if it happens N stays 4 and the typology counts as a miss. definitional -> behavioural is always allowed.",
-    "note": "AML-GOALS section 9 #36 (2026-09-24): micro_structuring and corridor_high_risk moved to the behavioural subset; the definitional subset is empty. defining_feature and definitional_min_single_ap are kept for the record and are unused while the subset is empty."
+    "note": "AML-GOALS section 9 #36 (2026-09-24): micro_structuring and corridor_high_risk moved to the behavioural subset; the definitional subset is empty. defining_feature and definitional_min_single_ap are kept for the record and are unused while the subset is empty.",
+    "definitional_statistic_note": "v3.6.0: the definitional check keeps the 3.5.2 single-feature statistic (depth-2 tree or raw rank), not the reference-model shortcut, so it cannot get easier to pass."
   },
   "power": {
     "min_positives": 200,
@@ -317,6 +386,7 @@
     {
       "version": "3.6.0",
       "date": "2026-09-26",
+      "part": "D8",
       "approved": "AML-GOALS section 9 #45 (D8 replaced, owner decision) with the statistics reviewer's corrections, registered before any scale-10, replicate or evaluation corpus exists; level2 additions per AML-GOALS section 9 #46 (D-7, D-8)",
       "changes": [
         "scale_invariance: the 3.5.x rule (95% CI of AP_s10 - AP_s2 inside +/-0.05) is replaced by the logit rule in scale_invariance.rule (thresholds 0.30 and 0.70, confident-flip and out-of-band side rules, KS unchanged)",
@@ -335,6 +405,27 @@
         "look integrity: a registered look also appends its claim to an out-of-tree ledger (~/.lakebench/aml_looks.jsonl) and refuses a seed found there or in any commit of the record, so reverting the record cannot un-spend it; predictions require the current fidelity_gate code"
       ],
       "unchanged": "every other gated value: band, K/N, unit, labels, gate scale, typologies, features, CV, reference and shortcut models, leakage caps, power, timing_mixture, density, and the calibration, evaluation and robustness seeds (no evaluation or robustness data exists, so the evaluation seed need not move)"
+    },
+    {
+      "version": "3.6.0",
+      "date": "2026-09-26",
+      "part": "D5",
+      "approved": "PROPOSED, pending an AML-GOALS section 9 entry (lane D5, after the adversarial review of D5 power). OPEN DECISION for that entry: the _doc and corpora.seed_rule say a gated-value change after a gate run moves the evaluation seed; gate runs have been taken on calibration seed 43 (#39, #44). Either move the evaluation seed to the next seed_guard-valid value (it has never been generated) or record an explicit owner waiver.",
+      "changes": [
+        "shortcut_model.also_reference_model: single and pair shortcuts also fit with reference_model; shortcut AP is the larger AP (the gated leakage shortcuts are never looser than 3.5.2)",
+        "leakage.shortcut_models: feature_pair_depth2 renamed feature_pair (tree or reference_model), nuisance_only added",
+        "leakage.nuisance_features and leakage.ablation (leave-one-feature-group-out; the nuisance drop is gated, and an in-band verdict must hold without the nuisance features)",
+        "leakage.secondary_lifetime_skips: the ungated lifetime block skips the new fits",
+        "classification: the definitional check keeps the 3.5.2 statistic",
+        "no new number: every new check uses shortcut_ap_abs_max, shortcut_ap_rel_max, relative_cap_formula and band.ap_min as registered"
+      ],
+      "unchanged": "band, K/N, unit, labels, gate scale, typologies, features, CV, reference model, caps and their formula, power, timing_mixture, and the calibration, evaluation and robustness seeds (see the open decision above).",
+      "caveats": [
+        "The caps were set (#15) for a depth-2 tree; applied to a 31-leaf booster on two columns they are a stricter operating point. A typology whose real behaviour is compact in two features (corridor_high_risk: home_country_high_risk with frac_high_risk_corridor; micro_structuring: frac_in_structuring_band) can now fail D5 for how it is defined rather than for leakage. Registered knowingly: a calibration failure under 3.6.0 is not answered by relaxing a cap without an owner decision in section 9.",
+        "Known blind spot: a booster on a pair misses oblique or ratio-shaped two-feature rules at monthly prevalence (a thin diagonal scored 0.19 in the review's synthetic test, under the 0.20 cap).",
+        "Disclosure: the nuisance list was chosen after the 3.5.2 single-feature tables on seed 43 (rep-v6-43, every nuisance feature at prevalence) were visible; it follows the leakage classes AML-GOALS section 5a names.",
+        "Timeline: committed as 5a5d681; one seed-43 run of that version was started and stopped unread; the drop cap, band-floor rule, definitional statistic and fail-closed checks were then revised after the adversarial review and committed before any 3.6.0 result was read."
+      ]
     },
     {
       "version": "3.5.2",

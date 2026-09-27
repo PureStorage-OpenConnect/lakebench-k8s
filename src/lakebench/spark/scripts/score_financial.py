@@ -282,6 +282,9 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
             ),
         )
         .drop("recall_raw")
+        # The manifest column is the generator's AML category, not the
+        # detecting rule (designated_rules is): name it for what it is.
+        .withColumnRenamed("expected_workload", "workload_category")
     )
 
     # False positives. Global: alerts touching no planted txn at all. Per
@@ -301,8 +304,8 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         )
         target_uetrs = manifest_uetrs.select("uetr", "typology_type").where(col("uetr").isNotNull())
         # One row per (alert, uetr) with whether that txn belongs to the
-        # alert rule's target typology. Rules with no target (W5/W6 list
-        # matches) are left out: "false positive" has no meaning for them.
+        # alert rule's target typology. A rule with no target is left out:
+        # "false positive" has no meaning for it.
         refs = (
             alert_uetrs.join(broadcast(target_df), "rule_id")
             .join(target_uetrs, "uetr", "left")
@@ -350,7 +353,27 @@ def compute_scores(spark, manifest, alerts, status_rows: list[dict]):
         .withColumn("computed_by", lit("lb-score-financial"))
     )
     random_row = per_typology.filter(col("typology_type") == lit("random")).collect()
+    # Per-typology outcome counts, so a caller cannot report every manifest
+    # typology as "scored" (the 2026-09-26 live run said 15 of 15 when 6 were).
+    states = {typ: st for typ, st, _ in state_rows}
+    counts = {
+        k: sum(1 for v in states.values() if v == k)
+        for k in ("scored", "partial", "no_rule", "rule_skipped", "rule_error")
+    }
+    # Every rule's own outcome, skip and error reasons included.
+    rules = [
+        {
+            "rule_id": r["rule_id"],
+            "status": r.get("status"),
+            "reason": r.get("reason"),
+            "target_typology": r.get("target_typology"),
+            "alert_count": r.get("alert_count"),
+        }
+        for r in sorted(status_rows, key=lambda x: x["rule_id"])
+    ]
     summary = {
+        "typology_counts": counts,
+        "rules": rules,
         "total_alerts": int(total_alerts),
         "fp_alerts": int(fp_alerts),
         "fp_rate": fp_rate,
@@ -478,7 +501,12 @@ def main() -> None:
     summary["typologies"] = [
         {
             "typology_type": r.get("typology_type"),
-            "expected_workload": r.get("expected_workload"),
+            # The manifest's expected_workload is the generator's AML
+            # category (datagen_rs typology.rs Spec.workload: "W2_structuring"
+            # for stack, dormant_reactivation, random, ...), not the rule that
+            # detects the typology; designated_rules (RULE_TARGET_TYPOLOGY,
+            # AML-GOALS #27) is. It is reported under a name that says so.
+            "workload_category": r.get("workload_category"),
             "designated_rules": r.get("designated_rules"),
             "recall": r.get("recall"),
             "incidental_recall": r.get("incidental_recall"),

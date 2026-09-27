@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src/lakebench/spar
 
 T0 = datetime(2024, 1, 1, tzinfo=timezone.utc)
 CUSTOMERS = set(range(1, 10))
-AE = 60  # the only entity in a FATF-listed country
+AE = 60  # the only entity in a high-risk (synthetic corridor) country
 BACKGROUND = range(200, 260)  # even ids are customers
 
 # rule -> (customer subject, non-customer subject) planted in _txn_rows.
@@ -84,13 +84,14 @@ def _txn_rows():
     for bene, senders in ((2, (131, 132, 133)), (102, (134, 135, 136))):
         for i, s in enumerate(senders):
             add(s, bene, 121, i + 1, 9600.0)
-    # W5: a payment to an SDN-listed name.
+    # W5: a payment to a name on the corpus sanctions list.
     for o in (3, 103):
         add(o, 140, 122, 1, 100.0, name="GLOBAL COMMODITY TRADING LLC")
-    # W6: a payment over $10,000 to a PEP-listed name.
+    # W6: a payment over $10,000 to a name on the corpus PEP list.
     for o in (4, 104):
         add(o, 141, 123, 1, 20_000.0, name="MINISTRY OF FINANCE ARCADIA")
-    # W7: a cross-border payment into a FATF-listed country.
+    # W7: a cross-border payment into a synthetic high-risk corridor country
+    # (AE left the FATF grey list in 2024; synthetic_corridors.json).
     for o in (5, 105):
         add(o, AE, 124, 1, 100.0, xb=True)
     # W8: dormant 130 days, then $6,000.
@@ -160,8 +161,68 @@ def _run(spark, rule_id, txns, entities):
     return fn(txns, **kw)
 
 
+def _watchlist(spark, path):
+    """The corpus watchlist W5/W6 screen against (bronze/watchlist.parquet
+    shape), naming the two listed beneficiaries planted above."""
+    import datetime as dt
+
+    d0 = dt.date(2023, 1, 1)
+    spark.createDataFrame(
+        [
+            (
+                "LBS-000001",
+                "sanctions",
+                1,
+                d0,
+                d0,
+                "company",
+                "GLOBAL COMMODITY TRADING LLC",
+                [],
+                "US",
+                None,
+                "SDGT",
+                None,
+                "datagen-v2-rs-0.3",
+            ),
+            (
+                "LBP-000001",
+                "pep",
+                1,
+                d0,
+                d0,
+                "person",
+                "MINISTRY OF FINANCE ARCADIA",
+                [],
+                "US",
+                None,
+                None,
+                "minister",
+                "datagen-v2-rs-0.3",
+            ),
+        ],
+        "list_id string, list_type string, list_version int, version_published_date date, "
+        "listed_date date, entity_type string, name string, aliases array<string>, "
+        "country string, town string, program string, position string, model_version string",
+    ).write.mode("overwrite").parquet(path)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def watchlist_env(spark, tmp_path_factory):
+    import os
+
+    wl = str(tmp_path_factory.mktemp("watchlist") / "watchlist.parquet")
+    _watchlist(spark, wl)
+    old = os.environ.get("LB_FINANCIAL_WATCHLIST_PATH")
+    os.environ["LB_FINANCIAL_WATCHLIST_PATH"] = wl
+    yield wl
+    if old is None:
+        os.environ.pop("LB_FINANCIAL_WATCHLIST_PATH", None)
+    else:
+        os.environ["LB_FINANCIAL_WATCHLIST_PATH"] = old
+
+
 @pytest.fixture(scope="module")
-def alerts(spark):
+def alerts(spark, watchlist_env):
     txns, entities = _silver(spark)
     out = {}
     for rule in CUSTOMER_ONLY + GRAPH:

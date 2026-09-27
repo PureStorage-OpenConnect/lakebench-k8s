@@ -1,34 +1,135 @@
 {
-  "source": "FATF public statement 2026-02 -- jurisdictions under increased monitoring (grey list) and high-risk jurisdictions subject to a call for action (black list). Snapshotted 2026-09-20; refresh periodically.",
+  "source": "FATF, 'High-risk jurisdictions subject to a call for action' (black list) and 'Jurisdictions under increased monitoring' (grey list), both as published after the FATF Plenary of 17-19 June 2026 (publication dated 19 June 2026): https://www.fatf-gafi.org/en/publications/High-risk-and-other-monitored-jurisdictions/increased-monitoring-june-2026.html and https://www.fatf-gafi.org/en/countries/black-and-grey-lists.html. June 2026 changes: Bosnia and Herzegovina and Iraq added to the grey list; Algeria and Namibia removed; black list unchanged.",
+  "as_of": "2026-06-19",
+  "retrieved": "2026-09-26",
+  "next_review": "After the October 2026 FATF Plenary. The lists change three times a year; refresh this file and kyc.rs FATF_LISTED together (a drift test compares them).",
   "license": "Public. FATF documents are freely redistributable.",
+  "note": "Real regulatory list, nothing synthetic. None of the generator's 18 home countries is on it, so datagen_rs kyc::FATF_LISTED is empty and the high-risk corridor the generator plants is a separate synthetic list (synthetic_corridors.json).",
   "entries": [
-    {"country_code": "IR", "country_name": "Iran", "risk_tier": "black"},
-    {"country_code": "KP", "country_name": "Democratic People's Republic of Korea", "risk_tier": "black"},
-    {"country_code": "MM", "country_name": "Myanmar", "risk_tier": "black"},
-    {"country_code": "AF", "country_name": "Afghanistan", "risk_tier": "grey"},
-    {"country_code": "AL", "country_name": "Albania", "risk_tier": "grey"},
-    {"country_code": "BB", "country_name": "Barbados", "risk_tier": "grey"},
-    {"country_code": "BF", "country_name": "Burkina Faso", "risk_tier": "grey"},
-    {"country_code": "BW", "country_name": "Botswana", "risk_tier": "grey"},
-    {"country_code": "KH", "country_name": "Cambodia", "risk_tier": "grey"},
-    {"country_code": "KY", "country_name": "Cayman Islands", "risk_tier": "grey"},
-    {"country_code": "HT", "country_name": "Haiti", "risk_tier": "grey"},
-    {"country_code": "JM", "country_name": "Jamaica", "risk_tier": "grey"},
-    {"country_code": "JO", "country_name": "Jordan", "risk_tier": "grey"},
-    {"country_code": "ML", "country_name": "Mali", "risk_tier": "grey"},
-    {"country_code": "MA", "country_name": "Morocco", "risk_tier": "grey"},
-    {"country_code": "MZ", "country_name": "Mozambique", "risk_tier": "grey"},
-    {"country_code": "NI", "country_name": "Nicaragua", "risk_tier": "grey"},
-    {"country_code": "PK", "country_name": "Pakistan", "risk_tier": "grey"},
-    {"country_code": "PA", "country_name": "Panama", "risk_tier": "grey"},
-    {"country_code": "PH", "country_name": "Philippines", "risk_tier": "grey"},
-    {"country_code": "SN", "country_name": "Senegal", "risk_tier": "grey"},
-    {"country_code": "SS", "country_name": "South Sudan", "risk_tier": "grey"},
-    {"country_code": "SY", "country_name": "Syria", "risk_tier": "grey"},
-    {"country_code": "TZ", "country_name": "Tanzania", "risk_tier": "grey"},
-    {"country_code": "TR", "country_name": "Turkey", "risk_tier": "grey"},
-    {"country_code": "UG", "country_name": "Uganda", "risk_tier": "grey"},
-    {"country_code": "AE", "country_name": "United Arab Emirates", "risk_tier": "grey"},
-    {"country_code": "YE", "country_name": "Yemen", "risk_tier": "grey"}
+    {
+      "country_code": "IR",
+      "country_name": "Iran",
+      "risk_tier": "black"
+    },
+    {
+      "country_code": "KP",
+      "country_name": "Democratic People's Republic of Korea",
+      "risk_tier": "black"
+    },
+    {
+      "country_code": "MM",
+      "country_name": "Myanmar",
+      "risk_tier": "black"
+    },
+    {
+      "country_code": "AO",
+      "country_name": "Angola",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "BO",
+      "country_name": "Bolivia",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "BA",
+      "country_name": "Bosnia and Herzegovina",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "BG",
+      "country_name": "Bulgaria",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "CM",
+      "country_name": "Cameroon",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "CI",
+      "country_name": "Cote d'Ivoire",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "CD",
+      "country_name": "Democratic Republic of the Congo",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "HT",
+      "country_name": "Haiti",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "IQ",
+      "country_name": "Iraq",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "KE",
+      "country_name": "Kenya",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "KW",
+      "country_name": "Kuwait",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "LA",
+      "country_name": "Lao People's Democratic Republic",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "LB",
+      "country_name": "Lebanon",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "MC",
+      "country_name": "Monaco",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "NP",
+      "country_name": "Nepal",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "PG",
+      "country_name": "Papua New Guinea",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "SS",
+      "country_name": "South Sudan",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "SY",
+      "country_name": "Syria",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "VE",
+      "country_name": "Venezuela",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "VN",
+      "country_name": "Vietnam",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "VG",
+      "country_name": "Virgin Islands (UK)",
+      "risk_tier": "grey"
+    },
+    {
+      "country_code": "YE",
+      "country_name": "Yemen",
+      "risk_tier": "grey"
+    }
   ]
 }

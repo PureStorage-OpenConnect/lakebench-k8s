@@ -68,9 +68,10 @@ pub fn party_schema() -> SchemaRef {
         Field::new("country", DataType::Utf8, true),
         Field::new("lei", DataType::Utf8, true),
         Field::new("bic", DataType::Utf8, true),
-        Field::new("sanctions_status", DataType::Utf8, true),
-        Field::new("pep_status", DataType::Boolean, true),
-        Field::new("initial_risk_score", DataType::Float64, true),
+        // No sanctions_status, pep_status or initial_risk_score: whether a
+        // party is listed is the answer the screening rules (W5, W6) are
+        // scored against, so it lives only in the manifest (AML-GOALS #50).
+        // Listed parties are external counterparties, never in this zone.
         Field::new("model_version", DataType::Utf8, true),
         // Monitored population and KYC (GOALS P10 stages 0 and 2; see
         // crate::kyc). The KYC fields are NULL for non-customers: the
@@ -140,9 +141,6 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
     let mut ph = Vec::with_capacity(m);
     let mut lei: Vec<Option<String>> = Vec::with_capacity(m);
     let mut bic: Vec<Option<String>> = Vec::with_capacity(m);
-    let mut sanc = Vec::with_capacity(m);
-    let mut pep = Vec::with_capacity(m);
-    let mut risk = Vec::with_capacity(m);
     let mut is_cust = Vec::with_capacity(m);
     let mut home: Vec<String> = Vec::with_capacity(m);
     let mut since: Vec<Option<i32>> = Vec::with_capacity(m);
@@ -172,7 +170,7 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
                 w.population,
                 w.dims.txn_per_entity_per_month,
             );
-            let (sc, tier, f) = kyc::crr(w.ty[i], w.country[i], w.pep[i], v);
+            let (sc, tier, f) = kyc::crr(w.ty[i], w.country[i], v);
             exp_vol.push(Some(v));
             crr_score.push(Some(sc));
             crr_tier.push(Some(tier));
@@ -226,24 +224,6 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
         } else {
             None
         });
-        sanc.push(if w.sanctioned[i] {
-            "SDN".to_string()
-        } else {
-            "clear".to_string()
-        });
-        pep.push(w.pep[i]);
-        let mut r = match w.ty[i] {
-            TYPE_FI => 0.3,
-            TYPE_PERSON => 0.05,
-            _ => 0.15,
-        };
-        if w.sanctioned[i] {
-            r = (r + 0.6f64).min(0.99);
-        }
-        if w.pep[i] {
-            r = (r + 0.3f64).min(0.99);
-        }
-        risk.push(r);
     }
     let legal = names.clone();
     let addr = StructArray::new(
@@ -268,9 +248,6 @@ fn party_chunk(w: &World, lo: usize, hi: usize, ov: &HashMap<usize, Override>) -
         sarr(ctry),
         Arc::new(StringArray::from(lei)),
         Arc::new(StringArray::from(bic)),
-        sarr(sanc),
-        Arc::new(BooleanArray::from(pep)),
-        Arc::new(Float64Array::from(risk)),
         sarr(vec![MODEL_VERSION.to_string(); m]),
         Arc::new(BooleanArray::from(is_cust)),
         sarr(home),
@@ -489,6 +466,20 @@ pub fn build_manifest_p(
     inst_uids: &std::collections::HashMap<String, Vec<u64>>,
     perturb: &crate::robustness::Perturbation,
 ) -> RecordBatch {
+    build_manifest_x(instances, seed, inst_uids, perturb, &HashMap::new())
+}
+
+/// `build_manifest_p` plus per-instance injection_parameters entries (the
+/// screening track's list_id, list_version, detectable_by, name_variants),
+/// appended after the standard ones. An instance with no entry in `extra`
+/// gets exactly the `build_manifest_p` row.
+pub fn build_manifest_x(
+    instances: &[Instance],
+    seed: i64,
+    inst_uids: &std::collections::HashMap<String, Vec<u64>>,
+    perturb: &crate::robustness::Perturbation,
+    extra: &HashMap<String, Vec<(&'static str, String)>>,
+) -> RecordBatch {
     use crate::ids::uuid_v4_into;
     use arrow::array::TimestampMicrosecondArray;
     let m = instances.len();
@@ -540,6 +531,7 @@ pub fn build_manifest_p(
     let per_row = 1 + stamp.len();
     let mut key_vals: Vec<String> = Vec::with_capacity(m * per_row);
     let mut val_vals: Vec<String> = Vec::with_capacity(m * per_row);
+    let mut entry_counts: Vec<i32> = Vec::with_capacity(m);
     for i in instances {
         key_vals.push("rows_per_instance".to_string());
         val_vals.push(i.rows_per_instance.to_string());
@@ -547,6 +539,12 @@ pub fn build_manifest_p(
             key_vals.push((*k).to_string());
             val_vals.push(v.clone());
         }
+        let ex = extra.get(&i.id).map(|v| v.as_slice()).unwrap_or(&[]);
+        for (k, v) in ex {
+            key_vals.push((*k).to_string());
+            val_vals.push(v.clone());
+        }
+        entry_counts.push((per_row + ex.len()) as i32);
     }
     let keys = StringArray::from_iter_values(key_vals);
     let vals = StringArray::from_iter_values(val_vals);
@@ -566,13 +564,7 @@ pub fn build_manifest_p(
         ])),
         false,
     ));
-    let map = MapArray::new(
-        entries_field,
-        offsets(&vec![per_row as i32; m]),
-        entries,
-        None,
-        false,
-    );
+    let map = MapArray::new(entries_field, offsets(&entry_counts), entries, None, false);
 
     let cols: Vec<ArrayRef> = vec![
         sarr(tid),
@@ -640,4 +632,89 @@ fn phone_variant(phone: &str) -> String {
     } else {
         phone.replace('-', " ")
     }
+}
+
+// --- Watchlist -----------------------------------------------------------
+
+pub fn watchlist_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("list_id", DataType::Utf8, false),
+        // "sanctions" or "pep".
+        Field::new("list_type", DataType::Utf8, false),
+        // The version in which the entry first appears. Version n of a list is
+        // every entry with list_version <= n, published on its
+        // version_published_date.
+        Field::new("list_version", DataType::Int32, false),
+        Field::new("version_published_date", DataType::Date32, false),
+        Field::new("listed_date", DataType::Date32, false),
+        Field::new("entity_type", DataType::Utf8, false),
+        Field::new("name", DataType::Utf8, false),
+        Field::new(
+            "aliases",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            false,
+        ),
+        Field::new("country", DataType::Utf8, true),
+        Field::new("town", DataType::Utf8, true),
+        Field::new("program", DataType::Utf8, true),
+        Field::new("position", DataType::Utf8, true),
+        Field::new("model_version", DataType::Utf8, false),
+    ]))
+}
+
+/// The published watchlist (crate::screening): every list entry with its
+/// version and dates. Carries nothing about which entries were paid.
+pub fn watchlist_batch(scr: &crate::screening::Screening) -> RecordBatch {
+    const DAY: i64 = 86_400_000_000;
+    let ps = &scr.parties;
+    let n = ps.len();
+    let mut alias_vals: Vec<String> = Vec::new();
+    let mut alias_counts: Vec<i32> = Vec::with_capacity(n);
+    for p in ps {
+        alias_vals.extend(p.aliases.iter().cloned());
+        alias_counts.push(p.aliases.len() as i32);
+    }
+    let aliases = ListArray::new(
+        Arc::new(Field::new("item", DataType::Utf8, true)),
+        offsets(&alias_counts),
+        sarr(alias_vals),
+        None,
+    );
+    let published: Vec<i32> = ps
+        .iter()
+        .map(|p| {
+            let us = if p.list_version == 1 {
+                scr.v1_published_us
+            } else {
+                scr.v2_published_us
+            };
+            us.div_euclid(DAY) as i32
+        })
+        .collect();
+    let cols: Vec<ArrayRef> = vec![
+        sarr(ps.iter().map(|p| p.list_id.clone()).collect()),
+        sarr(ps.iter().map(|p| p.list_type.to_string()).collect()),
+        Arc::new(Int32Array::from(
+            ps.iter().map(|p| p.list_version).collect::<Vec<_>>(),
+        )),
+        Arc::new(Date32Array::from(published)),
+        Arc::new(Date32Array::from(
+            ps.iter()
+                .map(|p| p.listed_us.div_euclid(DAY) as i32)
+                .collect::<Vec<_>>(),
+        )),
+        sarr(ps.iter().map(|p| p.entity_type.to_string()).collect()),
+        sarr(ps.iter().map(|p| p.name.clone()).collect()),
+        Arc::new(aliases),
+        sarr(ps.iter().map(|p| p.country.to_string()).collect()),
+        sarr(ps.iter().map(|p| p.town.clone()).collect()),
+        Arc::new(StringArray::from(
+            ps.iter().map(|p| p.program).collect::<Vec<_>>(),
+        )),
+        Arc::new(StringArray::from(
+            ps.iter().map(|p| p.position).collect::<Vec<_>>(),
+        )),
+        sarr(vec![MODEL_VERSION.to_string(); n]),
+    ];
+    RecordBatch::try_new(watchlist_schema(), cols).unwrap()
 }

@@ -34,7 +34,7 @@ pub fn currency_for_country(cc: &str) -> &'static str {
 }
 
 // --- Names ---------------------------------------------------------------
-const FIRST: &[&str] = &[
+pub(crate) const FIRST: &[&str] = &[
     "James",
     "Mary",
     "Robert",
@@ -115,7 +115,7 @@ const FIRST: &[&str] = &[
     "Sekou",
     "Zainab",
 ];
-const LAST: &[&str] = &[
+pub(crate) const LAST: &[&str] = &[
     "Smith",
     "Johnson",
     "Williams",
@@ -194,7 +194,7 @@ const LAST: &[&str] = &[
     "Hassan",
     "Ibrahim",
 ];
-const CORP_HEAD: &[&str] = &[
+pub(crate) const CORP_HEAD: &[&str] = &[
     "Meridian",
     "Northgate",
     "Blackwell",
@@ -246,7 +246,7 @@ const CORP_HEAD: &[&str] = &[
     "Independent",
     "Regional",
 ];
-const CORP_DESC: &[&str] = &[
+pub(crate) const CORP_DESC: &[&str] = &[
     "Holdings",
     "Industries",
     "Trading",
@@ -278,7 +278,7 @@ const FI_SUFFIX: &[&str] = &[
     "Securities",
 ];
 
-fn legal_suffix(cc: &str, id: u64) -> &'static str {
+pub(crate) fn legal_suffix(cc: &str, id: u64) -> &'static str {
     let pool: &[&str] = match cc {
         "US" => &["Inc", "LLC", "Corp", "LP"],
         "GB" => &["Ltd", "plc", "LLP"],

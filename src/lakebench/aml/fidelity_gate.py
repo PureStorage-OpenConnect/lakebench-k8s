@@ -7,8 +7,11 @@ customers (one row per customer, the pre-registered feature columns, one 0/1
 - D9/D7: out-of-fold average precision of the reference GBT per typology,
   with a bootstrap CI, n_positives and the min_positives power flag; band
   verdict per typology and the K-of-N Level-2 summary on this corpus.
-- D5: best single-feature and best depth-2 feature-pair shortcut AP, same CV,
-  each checked against the absolute and relative leakage caps.
+- D5: best single-feature and best feature-pair shortcut AP (depth-2 tree or
+  the reference model on those columns, whichever scores higher), a
+  nuisance-only reference model, same CV, each checked against the absolute
+  and relative leakage caps; plus leave-one-feature-group-out ablation, with
+  the drop from removing every nuisance feature capped by the same formula.
 - Definitional check: the defining feature alone must reach
   definitional_min_single_ap.
 - D2: timing-mixture shares from counts the caller computed.
@@ -98,16 +101,77 @@ def unit_window(prereg: dict) -> str:
     return (prereg.get("unit_of_scoring") or {}).get("window", "lifetime")
 
 
-def lifetime_prereg(prereg: dict) -> dict:
+def lifetime_prereg(prereg: dict, secondary: bool = False) -> dict:
     """The pre-registration as the lifetime unit sees it: the monthly history
-    features dropped. Used for the ungated secondary lifetime block."""
+    features dropped. ``secondary=True`` is the ungated secondary lifetime
+    block, which also skips what leakage.secondary_lifetime_skips lists (the
+    reference-model shortcut and ablation fits, hours of compute for a block
+    that gates nothing)."""
     import copy
 
     p = copy.deepcopy(prereg)
+    if secondary:
+        skips = set((p.get("leakage") or {}).get("secondary_lifetime_skips") or [])
+        if "also_reference_model" in skips:
+            p["shortcut_model"]["also_reference_model"] = False
+        if "ablation" in skips:
+            p["leakage"].pop("ablation", None)
     hist = set((p.get("unit_of_scoring") or {}).get("history_features", []))
     p["features"] = [f for f in p["features"] if f not in hist]
     p.setdefault("unit_of_scoring", {})["window"] = "lifetime"
+    abl = (p.get("leakage") or {}).get("ablation")
+    if abl:
+        groups = {g: [f for f in fs if f not in hist] for g, fs in abl["feature_groups"].items()}
+        abl["feature_groups"] = {g: fs for g, fs in groups.items() if fs}
     return p
+
+
+def _leakage_sets(prereg: dict, secondary: bool = False) -> tuple[list[str], dict[str, list[str]]]:
+    """(nuisance_features, ablation feature_groups) from the leakage block,
+    checked against the feature list: the nuisance features must all be
+    features, and the groups must partition the features exactly, so a typo
+    in the pre-registration fails loudly instead of shrinking the check.
+    ``secondary`` (the ungated lifetime block, lifetime_prereg(secondary=True))
+    is the only case allowed to run without the ablation."""
+    lk = prereg["leakage"]
+    features = list(prereg["features"])
+    nuis = list(lk.get("nuisance_features") or [])
+    missing = [f for f in nuis if f not in features]
+    if missing:
+        raise ValueError(f"leakage.nuisance_features not in features: {missing}")
+    abl = lk.get("ablation")
+    if abl is None and nuis and not secondary:
+        # Fail closed: registered nuisance features without their ablation
+        # would silently skip the gated nuisance drop. Only the caller, never
+        # the pre-registration, can declare the ungated secondary block.
+        raise ValueError("leakage.ablation is missing while nuisance_features is registered")
+    if abl is not None:
+        want = {"method": "leave_one_group_out", "model": "reference_model"}
+        bad = {k: abl.get(k) for k, v in want.items() if abl.get(k) != v}
+        if abl.get("gated") != "nuisance_features":
+            bad["gated"] = abl.get("gated")
+        if bad:
+            raise ValueError(f"unsupported leakage.ablation settings {bad}")
+        if lk.get("relative_cap_formula") not in (
+            "lift_over_prevalence",
+            "lift_over_prevalence_band_floor",
+        ):
+            raise ValueError("leakage.ablation needs a lift relative_cap_formula")
+        if not nuis:
+            raise ValueError("leakage.ablation gates nuisance_features, which is empty")
+        if not abl.get("feature_groups"):
+            raise ValueError("leakage.ablation.feature_groups is empty")
+    groups = dict((abl or {}).get("feature_groups") or {})
+    if groups:
+        members = [f for fs in groups.values() for f in fs]
+        if sorted(members) != sorted(features):
+            raise ValueError(
+                "leakage.ablation.feature_groups must partition features: "
+                f"extra {sorted(set(members) - set(features))}, "
+                f"missing {sorted(set(features) - set(members))}, "
+                f"duplicated {sorted({f for f in members if members.count(f) > 1})}"
+            )
+    return nuis, groups
 
 
 def in_scope_typologies(prereg: dict) -> list[str]:
@@ -215,6 +279,80 @@ def _oof_scores(make_model, X, y, w, folds, models=None):
         if models is not None:
             models.append(m)
     return oof
+
+
+def _fit_predict(make_model, X, cols, y, w, train, test, n_threads, controller):
+    """One fold on columns ``cols``: fit on the ``train`` rows, score the
+    ``test`` rows, with OpenMP capped at ``n_threads`` in this thread
+    (HistGradientBoosting output does not depend on the thread count, only
+    memory and speed do). Only the fold's own rows are copied.
+
+    ``controller`` is a ThreadpoolController built on the calling (main)
+    thread: threadpool_limits() would rescan the loaded libraries here, and
+    its dl_iterate_phdr callback needs the GIL while holding the loader lock,
+    which deadlocks against another thread importing an extension module."""
+    import numpy as np
+
+    if len(np.unique(y[train])) < 2:
+        # Same fallback as _oof_scores: a one-class training fold scores its
+        # test fold at the training prevalence.
+        return np.full(len(test), float(np.average(y[train], weights=w[train])))
+    with controller.limit(limits=n_threads, user_api="openmp"):
+        m = make_model()
+        m.fit(X[np.ix_(train, cols)], y[train], sample_weight=w[train])
+        return m.predict_proba(X[np.ix_(test, cols)])[:, 1]
+
+
+def _oof_many(make_model, X, col_sets, y, w, folds, wide=False):
+    """Out-of-fold scores for each column set in ``col_sets``, on the given
+    folds (the same numbers _oof_scores gives per set). Narrow sets fan out
+    over every (set, fold) with one OpenMP thread per fit. ``wide`` sets (near
+    the full feature list: each fit copies its training rows) run one set at a
+    time, its folds in parallel sharing the cores, so memory stays bounded."""
+    import numpy as np
+    from threadpoolctl import ThreadpoolController
+
+    # Built here, on the calling thread, after the model's modules are
+    # imported (make_model()), so no worker thread scans or imports libraries.
+    make_model()
+    controller = ThreadpoolController()
+    jobs = _jobs()
+    tasks = [(s, f) for s in range(len(col_sets)) for f in range(len(folds))]
+    if wide:
+        per_fit = max(jobs // len(folds), 1)
+        outs = []
+        for cols in col_sets:
+            outs += _parallel(
+                lambda f, cols=cols: _fit_predict(
+                    make_model, X, cols, y, w, folds[f][0], folds[f][1], per_fit, controller
+                ),
+                range(len(folds)),
+                jobs=min(len(folds), jobs),
+            )
+    else:
+        outs = _parallel(
+            lambda t: _fit_predict(
+                make_model, X, col_sets[t[0]], y, w, folds[t[1]][0], folds[t[1]][1], 1, controller
+            ),
+            tasks,
+            jobs=jobs,
+        )
+    res = [np.zeros(len(y), dtype=float) for _ in col_sets]
+    for (s, f), pred in zip(tasks, outs, strict=True):
+        res[s][folds[f][1]] = pred
+    return res
+
+
+def _ap_many(make_model, X, col_sets, y, w, folds, wide=False):
+    """Out-of-fold AP for each column set; sets are scored a batch at a time
+    (one batch per worker count) so the out-of-fold arrays of hundreds of
+    pairs are never held at once."""
+    step = max(_jobs(), 1)
+    aps = []
+    for i in range(0, len(col_sets), step):
+        batch = col_sets[i : i + step]
+        aps += [_ap(y, sc, w) for sc in _oof_many(make_model, X, batch, y, w, folds, wide)]
+    return aps
 
 
 def _permutation_importance(models, X, y, w, folds, features, prereg) -> list[dict]:
@@ -355,7 +493,7 @@ def _bootstrap_ci(y, score, w, groups, prereg: dict) -> tuple[float | None, floa
 
 
 def _evaluate_typology(
-    name, X, y, w, groups, features, prereg, kind, score=True, sink=None
+    name, X, y, w, groups, features, prereg, kind, score=True, sink=None, secondary=False
 ) -> dict[str, Any]:
     import numpy as np
 
@@ -401,37 +539,68 @@ def _evaluate_typology(
     )
 
     # D5 shortcuts: every single feature and every feature pair, out of fold
-    # on the reference model's folds.
-    use_rank = prereg["shortcut_model"].get("single_feature_also_scores_raw_rank")
+    # on the reference model's folds. Each is fit as a depth-2 tree and, when
+    # registered, as the reference model on those columns; the larger AP
+    # counts (a four-leaf tree cannot isolate a few dozen positives among
+    # millions of units).
+    sm = prereg["shortcut_model"]
+    use_rank = sm.get("single_feature_also_scores_raw_rank")
+    use_ref = bool(sm.get("also_reference_model"))
+    lk = prereg["leakage"]
+    nuis, feat_groups = _leakage_sets(prereg, secondary)
+    nf = len(features)
 
-    def shortcut_ap(cols):
+    def ref_model():
+        return _reference_model(prereg)
+
+    def tree_ap(cols):
         return _ap(y, _oof_scores(lambda: _shortcut_model(prereg), X[:, cols], y, w, folds), w)
 
     def one(j):
-        tree = shortcut_ap([j])
+        tree = tree_ap([j])
         rank = _ap(y, _oof_rank_scores(X[:, j], y, w, folds), w) if use_rank else 0.0
-        return {"feature": features[j], "ap": max(tree, rank), "tree_ap": tree, "rank_ap": rank}
+        return {"feature": features[j], "tree_ap": tree, "rank_ap": rank}
 
-    single = _parallel(one, range(len(features)))
+    single = _parallel(one, range(nf))
+    ref1 = _ap_many(ref_model, X, [[j] for j in range(nf)], y, w, folds) if use_ref else []
+    for j, r in enumerate(single):
+        r["ref_ap"] = ref1[j] if use_ref else None
+        r["ap"] = max(r["tree_ap"], r["rank_ap"], ref1[j] if use_ref else r["tree_ap"])
     single.sort(key=lambda r: -r["ap"])
-    combos = [(a, b) for a in range(len(features)) for b in range(a + 1, len(features))]
-    pair_aps = _parallel(lambda ab: shortcut_ap(list(ab)), combos)
-    pairs = [
-        {"features": [features[a], features[b]], "ap": pap}
-        for (a, b), pap in zip(combos, pair_aps, strict=True)
-    ]
+    combos = [[a, b] for a in range(nf) for b in range(a + 1, nf)]
+    pair_tree = _parallel(tree_ap, combos)
+    pair_ref = _ap_many(ref_model, X, combos, y, w, folds) if use_ref else []
+    pairs = []
+    for i, (a, b) in enumerate(combos):
+        pr = pair_ref[i] if use_ref else None
+        pairs.append(
+            {
+                "features": [features[a], features[b]],
+                "ap": max(pair_tree[i], pr if use_ref else pair_tree[i]),
+                "tree_ap": pair_tree[i],
+                "ref_ap": pr,
+            }
+        )
     pairs.sort(key=lambda r: -r["ap"])
+    nuis_best = None
+    if nuis and "nuisance_only" in lk["shortcut_models"]:
+        idx = [features.index(f) for f in nuis]
+        nuis_best = {
+            "features": nuis,
+            "ap": _ap_many(ref_model, X, [idx], y, w, folds, wide=True)[0],
+        }
 
-    lk = prereg["leakage"]
     prev = out["prevalence"]
     formula = lk.get("relative_cap_formula", "ratio")
     if formula == "ratio":
         rel_cap = lk["shortcut_ap_rel_max"] * ap
+        lift_base = 0.0  # ablation refuses this formula (_leakage_sets)
     elif formula == "lift_over_prevalence":
         # (shortcut_ap - prevalence) <= rel_max * (ap - prevalence): the cap
         # applies to what each model gains over a random ranking, so a full
         # model that barely beats prevalence does not fail every feature.
         rel_cap = prev + lk["shortcut_ap_rel_max"] * (ap - prev)
+        lift_base = prev
     elif formula == "lift_over_prevalence_band_floor":
         # The same lift rule, measured against max(ap, band floor): the
         # question is whether one or two features carry a large share of the
@@ -441,12 +610,14 @@ def _evaluate_typology(
         # prev + rel_max * (ap_min - prev), under the absolute cap.
         ref = max(ap, prereg["band"]["ap_min"])
         rel_cap = prev + lk["shortcut_ap_rel_max"] * (ref - prev)
+        lift_base = prev
     else:
         raise ValueError(f"unknown leakage.relative_cap_formula {formula!r}")
     shortcuts = {}
     for model, best in (
         ("single_feature", single[0]),
-        ("feature_pair_depth2", pairs[0] if pairs else None),
+        ("feature_pair", pairs[0] if pairs else None),
+        ("nuisance_only", nuis_best),
     ):
         if model not in lk["shortcut_models"] or best is None:
             continue
@@ -467,8 +638,35 @@ def _evaluate_typology(
     # not measuring the typology (the D0 v3.4.1 failure mode).
     best_shortcut = max((v["best"]["ap"] for v in shortcuts.values()), default=None)
     out["model_beats_shortcuts"] = None if best_shortcut is None else bool(ap > best_shortcut)
-    out["leakage_pass"] = all(s["pass"] for s in shortcuts.values()) and len(shortcuts) == len(
-        lk["shortcut_models"]
+
+    # Leave-one-feature-group-out: the reference model refit without each
+    # group, and without every nuisance feature at once, on the same folds.
+    # Every drop is reported; only the nuisance drop is gated
+    # (_nuisance_ablation_verdict).
+    ablation_ok = True
+    if feat_groups:
+        drop_sets = [(g, fs) for g, fs in feat_groups.items()]
+        if nuis:
+            drop_sets.append(("nuisance_features", nuis))
+        col_sets = [[j for j, f in enumerate(features) if f not in set(fs)] for _, fs in drop_sets]
+        aps_wo = _ap_many(ref_model, X, col_sets, y, w, folds, wide=True)
+        rows = [
+            {"group": g, "features": list(fs), "ap_without": a, "drop": ap - a}
+            for (g, fs), a in zip(drop_sets, aps_wo, strict=True)
+        ]
+        abl: dict[str, Any] = {"groups": rows}
+        if nuis:
+            nrow = rows[-1]
+            abl["nuisance"] = {
+                **nrow,
+                **_nuisance_ablation_verdict(ap, nrow["ap_without"], rel_cap, lift_base, prereg),
+            }
+            ablation_ok = bool(abl["nuisance"]["pass"])
+        out["ablation"] = abl
+    out["leakage_pass"] = (
+        all(s["pass"] for s in shortcuts.values())
+        and len(shortcuts) == len(lk["shortcut_models"])
+        and ablation_ok
     )
     out["single_feature_table"] = single
     out["top_pairs"] = pairs[: len(features)]
@@ -482,7 +680,11 @@ def _evaluate_typology(
     if kind == "definitional":
         cls = prereg["classification"]
         dfeat = cls["defining_feature"].get(name)
-        d_ap = next((r["ap"] for r in single if r["feature"] == dfeat), None)
+        # The 3.5.2 statistic (tree or raw rank), not the reference-model
+        # shortcut: the definitional rule must not get easier to pass.
+        d_ap = next(
+            (max(r["tree_ap"], r["rank_ap"]) for r in single if r["feature"] == dfeat), None
+        )
         out["definitional_check"] = {
             "defining_feature": dfeat,
             "single_ap": d_ap,
@@ -505,6 +707,24 @@ def _l2_sensitivity(X, y, w, groups, prereg: dict, values) -> dict[str, float | 
         oof = _oof_scores(lambda p=p: _reference_model(p), X, y, w, folds)
         out[str(float(v))] = _ap(y, oof, w)
     return out
+
+
+def _nuisance_ablation_verdict(ap, ap_without, rel_cap, lift_base, prereg) -> dict:
+    """The gated nuisance ablation (leakage.ablation.drop_cap_definition):
+    the drop from removing every nuisance feature is capped like a shortcut
+    (the lift share the relative cap allows, never more than the absolute
+    cap), and an in-band verdict must hold without them."""
+    lk, band = prereg["leakage"], prereg["band"]
+    drop = ap - ap_without
+    drop_cap = min(rel_cap - lift_base, lk["shortcut_ap_abs_max"])
+    full_in_band = band["ap_min"] <= ap <= band["ap_max"]
+    floor_ok = (not full_in_band) or ap_without >= band["ap_min"]
+    return {
+        "drop_cap": drop_cap,
+        "pass_drop": drop <= drop_cap,
+        "pass_band_floor_without": floor_ok,
+        "pass": drop <= drop_cap and floor_ok,
+    }
 
 
 def _level2(per: dict[str, dict], prereg: dict) -> dict[str, Any]:
@@ -652,6 +872,7 @@ def evaluate_gate(
     score: bool = True,
     collect_outputs: bool = False,
     l2_values: list | None = None,
+    secondary: bool = False,
 ) -> dict[str, Any]:
     """Run every gate on ``frame`` and return one JSON-serialisable report.
 
@@ -664,6 +885,10 @@ def evaluate_gate(
     n_positives, prevalence and n_excluded (a smoke test that must not look at
     AP), verdict "counts_only", no level2 or passes.
 
+    ``secondary=True`` marks the ungated secondary lifetime block (built with
+    lifetime_prereg(secondary=True)), the one run allowed without the nuisance
+    ablation.
+
     ``collect_outputs=True`` also returns the reference model's outputs under
     report["_model_outputs"] (callers pop it and write files): per-unit
     out-of-fold scores, permutation importances on the held-out folds, the
@@ -675,6 +900,9 @@ def evaluate_gate(
         prereg = lifetime_prereg(prereg)
     features = list(prereg["features"])
     typologies = in_scope_typologies(prereg)
+    # Before any model: a malformed leakage block must not surface only after
+    # AP exists (a registered look would be spent on a crash).
+    _leakage_sets(prereg, secondary)
     report: dict[str, Any] = {
         "gate": "aml-fidelity",
         "prereg_version": prereg.get("version"),
@@ -756,6 +984,7 @@ def evaluate_gate(
             kind,
             score=score,
             sink=sink,
+            secondary=secondary,
         )
         if sink is not None and "scores" in sink:
             sinks[t] = sink
@@ -936,13 +1165,17 @@ def summary_lines(report: dict) -> list[str]:
             continue
         sc = r["shortcuts"]
         s1 = sc.get("single_feature", {}).get("best", {})
-        s2 = sc.get("feature_pair_depth2", {}).get("best", {})
+        s2 = sc.get("feature_pair", {}).get("best", {})
+        s3 = sc.get("nuisance_only", {}).get("best", {})
+        nab = (r.get("ablation") or {}).get("nuisance") or {}
         lo, hi = (v if v is not None else float("nan") for v in r["ap_ci"])
         lines.append(
             f"  {t} [{r['kind']}]: AP={r['ap']:.3f} CI=[{lo:.3f},{hi:.3f}] "
             f"n_pos={r['n_positives']} in_band={r['in_band']} "
             f"single={s1.get('feature')}:{s1.get('ap', float('nan')):.3f} "
             f"pair={'+'.join(s2.get('features', []))}:{s2.get('ap', float('nan')):.3f} "
+            f"nuisance_only={s3.get('ap', float('nan')):.3f} "
+            f"nuisance_drop={nab.get('drop', float('nan')):.3f} "
             f"leakage_pass={r['leakage_pass']}"
         )
     l2 = report.get("level2")

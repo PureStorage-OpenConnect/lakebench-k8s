@@ -286,3 +286,22 @@ def test_datagen_fatf_list_matches_the_reference_file():
     ref = json.loads(Path("src/lakebench/spark/data/aml/high_risk_jurisdictions.json").read_text())
     fatf = {e["country_code"] for e in ref["entries"]}
     assert sorted(listed) == sorted(set(home) & fatf)
+
+
+def test_synthetic_corridor_list_matches_the_generator():
+    """synthetic_corridors.json (W7's synthetic list), typology.rs
+    HIGH_RISK_CC and aml_features.HIGH_RISK_COUNTRIES name one set, and none
+    of it is presented as FATF."""
+    import json
+    import re
+    from pathlib import Path
+
+    typ = Path("datagen_rs/src/typology.rs").read_text()
+    cc = re.findall(r'"([A-Z]{2})"', re.search(r"HIGH_RISK_CC[^=]*=\s*\[(.*?)\];", typ).group(1))
+    ref = json.loads(Path("src/lakebench/spark/data/aml/synthetic_corridors.json").read_text())
+    codes = {e["country_code"] for e in ref["entries"]}
+    feats = Path("src/lakebench/spark/scripts/aml_features.py").read_text()
+    hr = re.findall(r'"([A-Z]{2})"', re.search(r"HIGH_RISK_COUNTRIES = \((.*?)\)", feats).group(1))
+    assert codes == set(cc) == set(hr)
+    assert ref["source"].startswith("SYNTHETIC")
+    assert {e["risk_tier"] for e in ref["entries"]} == {"synthetic_corridor"}
