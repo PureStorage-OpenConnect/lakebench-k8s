@@ -159,7 +159,8 @@ class TestDuckDBBenchmarkWorkflow:
         d = result.to_dict()
 
         assert d["mode"] == "power"
-        assert d["benchmark_type"] == "trino_query"
+        # The real engine, not "trino_query" on every engine (lb16 sweep).
+        assert d["benchmark_type"] == "duckdb_query"
         assert len(d["queries"]) == 8
         assert isinstance(d["qph"], float)
         assert isinstance(d["category_qph"], dict)
