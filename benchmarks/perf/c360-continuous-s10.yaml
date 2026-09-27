@@ -74,7 +74,10 @@ architecture:
       silver_trigger_interval: 60 seconds
       gold_refresh_interval: 5 minutes
       run_duration: 1800
-      max_files_per_trigger: 50
+      # The auto value for scale 10 and 1800 s (cli/_sustained resolve_trickle),
+      # pinned: about 2190 s of arrival, so data arrives through the window.
+      # 50 offered the scale-10 corpus in about 960 s and is now refused.
+      max_files_per_trigger: 22
       bronze_target_file_size_mb: 512
       silver_target_file_size_mb: 512
       gold_target_file_size_mb: 128

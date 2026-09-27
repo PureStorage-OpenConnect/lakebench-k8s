@@ -868,3 +868,59 @@ def test_a_rerun_with_the_same_pod_name_is_caught_by_submission_time():
     assert len(probs) == 1 and "resubmitted inside the window" in probs[0]
     same = {"silver-stream": ("lakebench-silver-stream-driver", 1, "2026-09-27T04:14:00Z")}
     assert end_of_window_problems(jm, ["silver-stream"], same) == []
+
+
+# ------------------------------------------- default path keeps data arriving
+
+
+def _cont_cfg(scale=1, schema="customer360", **sustained):
+    from tests.conftest import make_config
+
+    return make_config(
+        workload={"schema": schema, "datagen": {"scale": scale}},
+        architecture={"pipeline": {"mode": "continuous", "continuous": sustained}},
+    )
+
+
+@pytest.mark.parametrize(
+    "scale,schema,want",
+    [(1, "customer360", 2), (10, "customer360", 22), (100, "customer360", 50), (1, "financial", 1)],
+)
+def test_default_trickle_keeps_data_arriving_through_the_window(scale, schema, want):
+    from lakebench.cli._sustained import resolve_trickle
+
+    t = resolve_trickle(_cont_cfg(scale, schema), 1800)
+    assert t["source"] == "auto" and t["value"] == want and t["problem"] is None
+    assert t["arrival_seconds"] >= 1800
+
+
+def test_an_explicit_trickle_that_drains_early_is_refused_with_the_setting():
+    from lakebench.cli._sustained import resolve_trickle
+
+    t = resolve_trickle(_cont_cfg(1, max_files_per_trigger=50), 600)
+    assert "max_files_per_trigger to 6 or lower" in t["problem"]
+    assert resolve_trickle(_cont_cfg(1, max_files_per_trigger=6), 600)["problem"] is None
+
+
+def test_a_refused_trickle_starts_nothing(monkeypatch, tmp_path, capsys):
+    from lakebench.cli import _sustained
+
+    monkeypatch.chdir(tmp_path)
+    jm = MagicMock()
+    monkeypatch.setattr("lakebench.engine.get_engine", lambda c, k: jm)
+    op = MagicMock()
+    monkeypatch.setattr("lakebench.spark.SparkOperatorManager", lambda **kw: op)
+    with pytest.raises(typer.Exit) as exc:
+        _sustained._run_sustained(
+            _cont_cfg(1, max_files_per_trigger=50), tmp_path / "c.yaml", 60, True, 900
+        )
+    assert exc.value.exit_code == 1
+    op.check_status.assert_not_called()
+    assert "max_files_per_trigger" in capsys.readouterr().out
+
+
+def test_the_run_uses_the_resolved_trickle(monkeypatch, tmp_path):
+    code, saved = _drive(monkeypatch, tmp_path, _settling_logs)
+    trickle = saved.continuous["trickle"]
+    assert trickle["source"] == "auto" and trickle["value"] >= 1
+    assert saved.config_snapshot["sustained"]["max_files_per_trigger"] == trickle["value"]

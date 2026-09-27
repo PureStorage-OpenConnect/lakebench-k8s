@@ -295,7 +295,7 @@ architecture:
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
       run_duration: 1800              # Seconds (30 min default)
-      max_files_per_trigger: 50
+      # max_files_per_trigger: auto (unset) keeps data arriving through the window
       checkpoint_base: checkpoints
       benchmark_interval: 300         # Clamped to gold_refresh_interval at runtime
       benchmark_warmup: 300           # Clamped to gold_refresh_interval at runtime
@@ -509,8 +509,8 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `architecture.pipeline.continuous.bronze_trigger_interval` | string | `30 seconds` | Bronze streaming trigger interval. |
 | `architecture.pipeline.continuous.silver_trigger_interval` | string | `60 seconds` | Silver streaming trigger interval. |
 | `architecture.pipeline.continuous.gold_refresh_interval` | string | `5 minutes` | Gold refresh trigger interval. |
-| `architecture.pipeline.continuous.run_duration` | int | `1800` | Streaming run duration in seconds. Minimum 60. |
-| `architecture.pipeline.continuous.max_files_per_trigger` | int | `50` | Max Parquet files bronze reads per trigger. With `bronze_trigger_interval` it sets the offered load, the same at every scale (50 files per 30 s is about 107 MB/s). |
+| `architecture.pipeline.continuous.run_duration` | int | `1800` | Measurement window in seconds. The schema accepts 60 and up; a continuous run refuses less than 3 x `gold_refresh_interval` (900 s at defaults). Use 900 s or more, UAT included. |
+| `architecture.pipeline.continuous.max_files_per_trigger` | int | auto | Max Parquet files bronze reads per trigger; with `bronze_trigger_interval` it sets the offered load. Unset: derived per run so data keeps arriving for about 1.2 x `run_duration`, capped at 50 (50 files per 30 s is about 107 MB/s). An explicit value that would offer the corpus before the window ends is refused at run start. |
 | `architecture.pipeline.continuous.checkpoint_base` | string | `checkpoints` | S3 prefix for streaming checkpoints. |
 | `architecture.pipeline.continuous.benchmark_interval` | int | `300` | Seconds between in-stream benchmark rounds. Clamped to `gold_refresh_interval` at runtime -- intervals shorter than the gold cycle cause Q9 contention. Range: 60--3600. |
 | `architecture.pipeline.continuous.benchmark_warmup` | int | `300` | Seconds before first in-stream benchmark round. Clamped to `gold_refresh_interval` at runtime -- rounds before the first gold refresh produce inflated QpH. Range: 60--1800. |

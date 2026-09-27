@@ -832,14 +832,17 @@ class SustainedConfig(ConfigModel):
 
     # Throughput tuning -- these control how much data the streaming
     # pipeline can process per trigger interval.
-    max_files_per_trigger: int = Field(
-        default=50,
+    max_files_per_trigger: int | None = Field(
+        default=None,
         ge=1,
         description=(
             "Max Parquet files bronze-ingest reads per trigger. With "
-            "bronze_trigger_interval it sets the offered load, which does not "
-            "change with scale: 50 files per 30 s is about 107 MB/s (c360: "
-            "15,491 rows per 64 MB file, ~775K rows per trigger)."
+            "bronze_trigger_interval it sets the offered load. Unset (auto): "
+            "the run derives it from the corpus size and run_duration so data "
+            "keeps arriving through the window (about 1.2 x run_duration of "
+            "arrival), capped at 50 files per trigger (about 107 MB/s at 30 s). "
+            "An explicit value that would offer the whole corpus before the "
+            "window ends is refused at run start."
         ),
     )
     bronze_target_file_size_mb: int = Field(

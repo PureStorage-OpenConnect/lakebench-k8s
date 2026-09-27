@@ -1884,7 +1884,8 @@ class TestBuildConfigSnapshot:
         assert "spark" in snapshot["images"]
         assert snapshot["trino"]["worker"]["replicas"] == 2  # default
         assert snapshot["sustained"]["run_duration"] == 1800  # default
-        assert snapshot["sustained"]["max_files_per_trigger"] == 50  # default
+        # Default is auto: the snapshot records the value a run would use.
+        assert snapshot["sustained"]["max_files_per_trigger"] >= 1
         assert snapshot["sustained"]["bronze_target_file_size_mb"] == 512
         assert snapshot["sustained"]["silver_target_file_size_mb"] == 512
         assert snapshot["sustained"]["gold_target_file_size_mb"] == 128

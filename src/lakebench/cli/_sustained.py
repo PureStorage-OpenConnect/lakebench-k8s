@@ -1868,35 +1868,66 @@ def _measure_bucket_sizes(cfg, collector) -> int:
         return 0
 
 
-def continuous_arrival_advisory(cfg, run_duration: int) -> str | None:
-    """A warning when the trickle will offer the whole corpus in less time
-    than the window, so the window would measure a drained pipeline and the
-    continuous gate would fail it. An estimate from the nominal corpus size;
-    the gate decides on what the run actually did."""
+#: Auto trickle: aim for this many window lengths of arrival, and never more
+#: than this many files per trigger (the pre-v1.6 fixed default).
+AUTO_ARRIVAL_MARGIN = 1.2
+AUTO_TRICKLE_CEILING = 50
+
+
+def resolve_trickle(cfg, run_duration: int) -> dict:
+    """The max_files_per_trigger this run uses, and why.
+
+    Unset (auto): the most files per trigger, up to AUTO_TRICKLE_CEILING,
+    whose arrival still lasts AUTO_ARRIVAL_MARGIN x run_duration, from the
+    nominal corpus size (scale dimensions / datagen file size). Returns
+    {"value", "source" ("auto" | "config"), "arrival_seconds" (estimate or
+    None), "problem" (why the run cannot keep data arriving, or None)}.
+    """
     from lakebench.metrics.continuous_window import expected_arrival_seconds
 
     sustained = cfg.architecture.pipeline.sustained
+    explicit = sustained.max_files_per_trigger
+    trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval)
     try:
         dims = cfg.get_scale_dimensions()
         file_mb = _size_mb(cfg.architecture.workload.datagen.file_size)
-    except Exception:  # noqa: BLE001 -- advisory only
-        return None
-    trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval)
-    need = expected_arrival_seconds(
-        dims.approx_bronze_gb, file_mb, sustained.max_files_per_trigger, trigger_s
-    )
-    if need is None or need >= run_duration:
-        return None
-    files = dims.approx_bronze_gb * 1024 / file_mb
-    fit = max(1, int(files * trigger_s // run_duration))
-    return (
-        f"The trickle offers this corpus (~{dims.approx_bronze_gb:.0f} GB, ~{files:.0f} files at "
-        f"{sustained.max_files_per_trigger} files per {trigger_s}s) in about {need:.0f}s, less "
-        f"than the {run_duration}s window: data would stop arriving before the window ends and "
-        f"the continuous gate fails a window with too little continuous processing. Set "
-        f"max_files_per_trigger to about {fit} (or lower) so arrival lasts the window, or "
-        f"shorten run_duration."
-    )
+        files = dims.approx_bronze_gb * 1024 / file_mb
+    except Exception:  # noqa: BLE001 -- unknown size: keep the ceiling, no refusal
+        files = None
+    if files is None or files <= 0 or not trigger_s:
+        value = explicit or AUTO_TRICKLE_CEILING
+        return {
+            "value": value,
+            "source": "config" if explicit else "auto",
+            "arrival_seconds": None,
+            "problem": None,
+        }
+    if explicit:
+        value, source = explicit, "config"
+    else:
+        value = int(files * trigger_s // (AUTO_ARRIVAL_MARGIN * run_duration))
+        value, source = max(1, min(AUTO_TRICKLE_CEILING, value)), "auto"
+    arrival = expected_arrival_seconds(dims.approx_bronze_gb, file_mb, value, trigger_s)
+    problem = None
+    if arrival is not None and arrival < run_duration:
+        if source == "config":
+            fit = max(1, int(files * trigger_s // (AUTO_ARRIVAL_MARGIN * run_duration)))
+            problem = (
+                f"max_files_per_trigger {value} offers this corpus (~{files:.0f} files of "
+                f"{file_mb:.0f} MB) in about {arrival:.0f}s, less than the {run_duration}s "
+                f"window, so data would stop arriving before it ends. Set "
+                f"architecture.pipeline.continuous.max_files_per_trigger to {fit} or lower "
+                "(or remove it to let the run derive it), or shorten run_duration."
+            )
+        else:
+            fit = int(files * trigger_s)
+            problem = (
+                f"This corpus (~{files:.0f} files) lasts at most {fit}s at one file per "
+                f"{trigger_s}s trigger, less than the {run_duration}s window. Set "
+                f"run_duration to {fit} or lower, raise the scale, or lengthen "
+                "bronze_trigger_interval."
+            )
+    return {"value": value, "source": source, "arrival_seconds": arrival, "problem": problem}
 
 
 def cluster_clock_offset_seconds(timeout_s: float = 5.0) -> float | None:
@@ -2135,6 +2166,20 @@ def _run_sustained(
 
     run_duration = duration or cfg.architecture.pipeline.sustained.run_duration
 
+    # The trickle this run offers: derived from the corpus and the window
+    # unless the config sets it, and refused when data would stop arriving
+    # before the window ends (DESIGN 5: a corpus that keeps arriving).
+    trickle = resolve_trickle(cfg, run_duration)
+    if trickle["problem"]:
+        print_error(trickle["problem"])
+        raise typer.Exit(1)
+    cfg.architecture.pipeline.sustained.max_files_per_trigger = trickle["value"]
+    _arrival = trickle["arrival_seconds"]
+    print_info(
+        f"Trickle: {trickle['value']} files per bronze trigger ({trickle['source']})"
+        + (f", about {_arrival:.0f}s of arrival for the {run_duration}s window" if _arrival else "")
+    )
+
     console.print(
         Panel(
             f"Running continuous pipeline for: [bold]{cfg.name}[/bold]\n\n"
@@ -2220,9 +2265,6 @@ def _run_sustained(
             print_error(_short)
             pipeline_success = False
             raise typer.Exit(1)
-        _advisory = continuous_arrival_advisory(cfg, run_duration)
-        if _advisory:
-            print_warning(_advisory)
         if not skip_benchmark and cfg.architecture.query_engine.type.value == "none":
             print_info("No query engine in this recipe: no in-stream rounds and no result check")
             skip_benchmark = True
@@ -2881,6 +2923,7 @@ def _run_sustained(
                 ),
             },
             "gate_problems": list(window_problems),
+            "trickle": trickle,
         }
         if collector.current_run is not None:
             collector.current_run.continuous.update(continuous_record)

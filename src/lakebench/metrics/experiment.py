@@ -92,6 +92,22 @@ def _batch_retention(cfg: Any) -> str | None:
         return None
 
 
+def effective_trickle(cfg: Any) -> int | None:
+    """max_files_per_trigger as a continuous run of *cfg* uses it: the config
+    value, or the auto value for its run_duration (cli/_sustained
+    resolve_trickle). A continuous run resolves it onto the config before
+    anything is recorded; this covers records built from a config directly."""
+    value = cfg.architecture.pipeline.sustained.max_files_per_trigger
+    if value is not None:
+        return value
+    try:
+        from lakebench.cli._sustained import resolve_trickle
+
+        return resolve_trickle(cfg, cfg.architecture.pipeline.sustained.run_duration)["value"]
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _stackable_hive(cfg: Any) -> str:
     """The Hive the Stackable operator runs: images.hive is only the
     HiveCluster productVersion, and the image is resolved by the operator
@@ -232,7 +248,7 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
         },
         "mode": arch.pipeline.mode.value,
         "config_limits": {
-            "max_files_per_trigger": sustained.max_files_per_trigger,
+            "max_files_per_trigger": effective_trickle(cfg),
             # Continuous in-stream rounds take one sample per query whatever
             # the benchmark block says (collector.CONTINUOUS_ROUND_BENCHMARK).
             "benchmark_iterations": (

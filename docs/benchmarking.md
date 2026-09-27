@@ -489,24 +489,34 @@ significantly higher latency, it is the bottleneck.
 **Offered load.** Continuous mode trickles a finite corpus. Datagen writes
 the whole scale's corpus at full speed (1 TB in 121 s on 44 pods at scale 100,
 run-20260924-201745-cb354f)
-and bronze reads it at a fixed rate: `max_files_per_trigger` files per
-`bronze_trigger_interval`. At the defaults that is 50 files of about 64 MB per
-30 s, about 107 MB/s, for every scale and both workloads: 25,818 rows/s for
-c360 (15,491 rows per file), about 324,000 rows/s for AML. The scale factor sets
-the corpus and table sizes, and with them the work per gold refresh; it does
-not set the rate. A run measures sustained throughput and freshness at that
-offered load. It does not try to drain the corpus: at the defaults a 30-minute
-window drains the scale-10 corpus (c360 in about 960 s) and takes 19% of the
-scale-100 corpus.
+and bronze reads it at a fixed rate: `max_files_per_trigger` files of about
+64 MB per `bronze_trigger_interval`. A run measures sustained throughput and
+freshness at that offered load.
 
-**Data must keep arriving through the window.** At the defaults the c360
-scale-1 corpus (about 2.5 million rows) is offered in about 96 s and the AML
-scale-1 corpus in about 82 s, so a 600 s window at scale 1 would measure one
-pass followed by an idle pipeline. The run prints a warning at start when the
-trickle will offer the corpus in less time than the window, with the
-`max_files_per_trigger` that would make arrival last it (for c360 scale 1 and
-a 900 s window, 5 files per 30 s). Whatever the estimate, the continuous gate
-decides on what the run did (see Continuous Gate below).
+**Data must keep arriving through the window.** `max_files_per_trigger` is
+unset by default (auto): the run derives the most files per trigger, up to
+50, whose arrival still lasts 1.2 x `run_duration`, from the nominal corpus
+size, and prints the value and the arrival it gives. At the defaults (30 s
+trigger, 1800 s window):
+
+| Corpus | Files per trigger | Arrival |
+|---|---|---|
+| c360 scale 1 (~160 files) | 2 | ~2,400 s |
+| c360 scale 10 (~1,600 files) | 22 | ~2,190 s |
+| c360 scale 100 | 50 (the cap) | ~9,600 s |
+| AML scale 1 | 1 | ~4,050 s |
+| AML scale 10 | 18 | ~2,250 s |
+
+So the offered load now grows with scale up to 50 files per 30 s (about
+107 MB/s, 25,818 rows/s for c360), where it stays: at scale 100 the window
+takes about 19% of the corpus, which the scorecard reports as
+`intake_limit: trickle_rate`, not saturation. A config that sets
+`max_files_per_trigger` explicitly to a value that would offer the corpus in
+less time than the window is refused at run start, with the value to set
+(for c360 scale 1 and a 600 s window, 6 or lower). Before this change the
+default was a fixed 50, which offered the c360 scale-1 corpus in about 96 s.
+Whatever the estimate, the continuous gate decides on what the run did (see
+Continuous Gate below).
 
 **Continuous gate.** A continuous run passes only on continuous processing
 inside the measurement window. It is refused before it starts when

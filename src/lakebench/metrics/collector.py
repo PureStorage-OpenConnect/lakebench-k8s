@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar
 
-from lakebench.metrics.experiment import experiment_inputs
+from lakebench.metrics.experiment import effective_trickle, experiment_inputs
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.provenance import run_provenance
 
@@ -2031,7 +2031,7 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
             "silver_trigger_interval": pipeline.sustained.silver_trigger_interval,
             "gold_refresh_interval": pipeline.sustained.gold_refresh_interval,
             "run_duration": pipeline.sustained.run_duration,
-            "max_files_per_trigger": pipeline.sustained.max_files_per_trigger,
+            "max_files_per_trigger": effective_trickle(cfg),
             "bronze_target_file_size_mb": pipeline.sustained.bronze_target_file_size_mb,
             "silver_target_file_size_mb": pipeline.sustained.silver_target_file_size_mb,
             "gold_target_file_size_mb": pipeline.sustained.gold_target_file_size_mb,
