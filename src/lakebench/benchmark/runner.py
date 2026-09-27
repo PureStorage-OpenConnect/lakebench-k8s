@@ -336,6 +336,7 @@ class BenchmarkRunner:
         iterations: int = 1,
         query_class: str | None = None,
         fingerprint: bool = True,
+        query_timeout: int = 300,
     ) -> BenchmarkResult:
         """Run throughput benchmark (N concurrent query streams).
 
@@ -380,6 +381,7 @@ class BenchmarkRunner:
                 stream_queries,
                 cache="hot",
                 iterations=iterations,
+                query_timeout=query_timeout,
             )
 
             stream_total = sum(r.elapsed_seconds for r in results)
@@ -416,7 +418,7 @@ class BenchmarkRunner:
         representative_queries = stream_results[0].queries if stream_results else []
         if fingerprint:
             # After the wall clock stopped: the fingerprint runs are untimed.
-            self.fingerprint_results(representative_queries)
+            self.fingerprint_results(representative_queries, query_timeout)
 
         return BenchmarkResult(
             mode="throughput",
@@ -628,16 +630,38 @@ class BenchmarkRunner:
                 out = fingerprint_query(
                     self._render_sql(r.query),
                     timeout=timeout,
-                    approx_columns=r.query.approx_columns,
+                    approx_columns=r.query.fingerprint_columns(),
                 )
                 fp = out.fingerprint
             except Exception as e:  # noqa: BLE001 -- recorded as an unusable fingerprint
                 fp = unusable("error", f"fingerprint run failed: {e}", engine)
-            r.result_fingerprint = (
-                fp
-                if isinstance(fp, dict)
-                else unusable("error", "fingerprint run returned nothing", engine)
-            )
+            if not isinstance(fp, dict):
+                fp = unusable("error", "fingerprint run returned nothing", engine)
+            elif "exact" in fp and int(fp.get("rows") or 0) != int(r.rows_returned or 0):
+                # The untimed run did not see what the timed run returned (an
+                # empty or truncated output, a table changing underneath):
+                # it cannot stand for the timed result.
+                fp = unusable(
+                    "error",
+                    f"fingerprint run saw {fp.get('rows')} rows, the timed run {r.rows_returned}",
+                    engine,
+                )
+            elif (
+                "unsupported" in fp
+                and r.rows_returned == 0
+                and "printed no rows" in str(fp["unsupported"])
+            ):
+                # Trino prints nothing for an empty result; the timed run
+                # agrees it was empty, so this is a real 0-row result.
+                from .fingerprint import fingerprint_rows
+
+                fp = fingerprint_rows(
+                    [],
+                    r.query.fingerprint_columns(),
+                    engine=engine,
+                    adapted_sql=self._render_sql(r.query),
+                )
+            r.result_fingerprint = fp
 
     def _execute_single_query(
         self,

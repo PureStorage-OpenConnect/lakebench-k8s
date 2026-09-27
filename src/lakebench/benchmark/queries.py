@@ -48,6 +48,17 @@ class BenchmarkQuery:
     sql: str
     approx_columns: dict[int, float] = field(default_factory=dict, compare=False, hash=False)
     allow_empty: bool = False
+    # 0-based output columns whose values are generated per pipeline run
+    # (a uuid), so two runs on one corpus differ there by construction: the
+    # fingerprint records only whether they are NULL.
+    volatile_columns: tuple[int, ...] = ()
+
+    def fingerprint_columns(self) -> dict[int, float]:
+        """approx_columns plus volatile_columns (as fingerprint.VOLATILE),
+        the form the executors' fingerprint_query takes."""
+        from lakebench.benchmark.fingerprint import VOLATILE
+
+        return {**self.approx_columns, **dict.fromkeys(self.volatile_columns, VOLATILE)}
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +462,7 @@ _FQ8 = BenchmarkQuery(
 WITH recent_alerts AS (
   SELECT alert_id, entity_id, alert_ts, related_txn_ids
   FROM {catalog}.{gold_alerts}
-  ORDER BY alert_ts DESC, alert_id
+  ORDER BY alert_ts DESC, entity_id, rule_id, alert_id
   LIMIT 100
 )
 SELECT
@@ -463,6 +474,8 @@ SELECT
 FROM recent_alerts a
 LEFT JOIN {catalog}.{silver_entities} e ON a.entity_id = e.entity_id
 ORDER BY a.alert_ts DESC, a.alert_id""",
+    # alert_id is uuid() per pipeline run (detection_rules.py).
+    volatile_columns=(0,),
 )
 
 
@@ -553,6 +566,8 @@ WHERE t.txn_timestamp >= CAST(s.opened_date AS TIMESTAMP) - INTERVAL '365' DAY
   AND t.txn_timestamp < CAST(s.opened_date AS TIMESTAMP)
 GROUP BY date_trunc('month', t.txn_timestamp)
 ORDER BY activity_month""",
+    # Needs an alert_escalation case; a small or short run may have none.
+    allow_empty=True,
 )
 
 _IQ3 = BenchmarkQuery(
@@ -616,6 +631,8 @@ WHERE c.base_run_id = '{tm_run_id}'
   AND c.case_status <> 'closed'
   AND c.opened_date <= c.as_of_date - INTERVAL '60' DAY
 ORDER BY age_days DESC, c.case_id""",
+    # Needs an open case older than 60 days; a short run may have none.
+    allow_empty=True,
 )
 
 INVESTIGATOR_QUERIES: list[BenchmarkQuery] = [_IQ1, _IQ2, _IQ3, _IQ4]

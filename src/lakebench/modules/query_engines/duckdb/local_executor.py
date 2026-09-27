@@ -253,7 +253,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
         # A zero exit with no result payload means the query never ran. Treating
         # that as success produces a timing that measures container startup and
         # nothing else.
-        if payload is None:
+        if payload is None or not isinstance(payload.get("rows"), int):
             return QueryExecutorResult(
                 sql=sql,
                 engine="duckdb",
@@ -270,7 +270,7 @@ class LocalDuckDBExecutor(DuckDBExecutor):
             sql=sql,
             engine="duckdb",
             duration_seconds=elapsed,
-            rows_returned=payload.get("rows", 0),
+            rows_returned=payload["rows"],
             raw_output=output,
         )
 

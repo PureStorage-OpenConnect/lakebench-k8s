@@ -488,7 +488,7 @@ def _fingerprint_local(executor, results, sent: dict[str, str], timeout: int) ->
     from lakebench.benchmark.fingerprint import unusable
     from lakebench.benchmark.queries import BENCHMARK_QUERIES
 
-    approx = {q.name: q.approx_columns for q in BENCHMARK_QUERIES}
+    approx = {q.name: q.fingerprint_columns() for q in BENCHMARK_QUERIES}
     out = []
     for name, ok, elapsed, rows, _ in results:
         fp = None

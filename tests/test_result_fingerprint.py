@@ -89,7 +89,7 @@ class TestCrossEngineEquality:
             (Decimal("0.10"), 0.1),
             ("-0.0", "0"),
             # Java's non-shortest Double.toString: 17 digits, same double.
-            ("0.30000000000000004", "0.3"),
+            ("0.30000000000000004", 0.30000000000000004),
         ],
     )
     def test_numeric_renderings_of_one_value_agree(self, a, b):
@@ -396,7 +396,7 @@ class TestQueryTiebreakers:
             ("FQ4_running_balance_window", "ORDER BY s.book_ts, s.entry_seq"),
             ("FQ6_structuring_scan", "txn_count DESC, originator_id, txn_currency"),
             ("FQ7_cross_border_concentration", "xborder_usd DESC, originator_bank_bic"),
-            ("FQ8_alert_to_entity_join", "ORDER BY alert_ts DESC, alert_id"),
+            ("FQ8_alert_to_entity_join", "ORDER BY alert_ts DESC, entity_id, rule_id, alert_id"),
             ("FQ8_alert_to_entity_join", "ORDER BY a.alert_ts DESC, a.alert_id"),
             ("IQ3_counterparty_two_hop", "h2.hop2_entity_id, h2.via_entity_id"),
         ],

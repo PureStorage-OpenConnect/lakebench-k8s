@@ -6,7 +6,8 @@ the runner executes it once more, untimed, and records a fingerprint of the
 rows. The perf gate and ``lakebench reproduce`` refuse when fingerprints do
 not match; ``lakebench compare`` labels the comparison not comparable.
 
-Spec ``rf1``. Bump SPEC whenever any rule here changes, so a fingerprint is
+Spec ``rf2`` (rf1 rounded every number to 15 significant digits, summed
+approximate columns without row association, and let NaN match anything). Bump SPEC whenever any rule here changes, so a fingerprint is
 only ever matched against one computed the same way.
 
 Cells. Each cell becomes a string:
@@ -16,12 +17,15 @@ Cells. Each cell becomes a string:
   DuckDB ``None``); the empty string stays the empty string.
 - booleans: ``true`` / ``false``.
 - numbers (a Python number, or text that parses as one: ``2263``,
-  ``2263.0``, ``123.40``, ``1.2345E7``): parsed as Decimal, rounded
-  half-even to 15 significant digits when longer (absorbs Java's
-  non-shortest ``Double.toString``), normalised and written fixed-point
-  with trailing zeros stripped and ``-0`` as ``0``. So decimal scale
-  differences between engines (Trino AVG at scale 2, Spark at scale 6) and
-  exponent notation do not matter. ``NaN`` and infinities have fixed names.
+  ``2263.0``, ``123.40``, ``1.2345E7``): parsed as Decimal, normalised and
+  written fixed-point with trailing zeros stripped and ``-0`` as ``0``, so
+  decimal scale differences between engines (Trino AVG at scale 2, Spark at
+  scale 6) do not matter, and exponent notation does not either. No digit
+  is ever rounded: integers and decimals keep every digit, and a double is
+  its shortest round-trip text (Python ``repr``; the JDKs Trino and Spark 4
+  run print the same, except Java 17's rare non-shortest ``Double.toString``,
+  which then reads as a difference, never as a false match). ``NaN`` and
+  infinities have fixed names.
 - dates (``YYYY-MM-DD``): as is.
 - timestamps (Trino ``... UTC``, Spark ``yyyy-MM-dd HH:mm:ss[.f]``, DuckDB
   ``...+00``, Python datetimes): converted to UTC and written
@@ -43,10 +47,14 @@ exactly across engines at scale (summation order moves the last digits the
 query rounds to). A query declares those columns with a quantum
 (``BenchmarkQuery.approx_columns``, e.g. ``{3: 0.01}`` for a ``ROUND(.., 2)``
 revenue). Their values are left out of ``exact`` (only whether they are
-NULL goes in) and summed per column with ``math.fsum``; two results match
-when each column's sums differ by at most ``quantum x rows``.
+NULL, NaN or infinite goes in) and summed per column with ``math.fsum``,
+once plainly and once weighted by a per-row factor in [1, 2) from the
+row's exact cells, so a value that moved between groups is seen. Two
+results match when both sums are within ``approx_tolerance`` (twice it for
+the weighted sum) and the NaN/infinity counts are equal.
 
-The fingerprint is ``{spec, rows, cols, exact, approx, quanta, engine,
+The fingerprint is ``{spec, rows, cols, exact, approx, approx_w, quanta,
+approx_special, engine,
 adapted_sql_sha}``. ``engine`` and ``adapted_sql_sha`` (the SQL actually
 sent, after the engine adapter) are evidence, not part of the match. A
 result that could not be fingerprinted is ``{spec, unsupported}`` or
@@ -64,11 +72,10 @@ import json
 import math
 import re
 from datetime import date, datetime, timezone
-from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 
-SPEC = "rf1"
+SPEC = "rf2"
 NULL = "\\N"
-SIGNIFICANT_DIGITS = 15
 _MOD = 1 << 64
 _SEP = "\x1f"
 
@@ -92,21 +99,21 @@ _TS = re.compile(
 
 
 class Unsupported(ValueError):
-    """A result the rf1 rules cannot fingerprint."""
+    """A result the rf2 rules cannot fingerprint."""
 
 
 def _canon_decimal(d: Decimal) -> str:
+    """Exact fixed-point text of *d*: no digit is ever rounded away (a
+    63-bit account id, a DECIMAL(38,2) sum). A Python float arrives as its
+    shortest round-trip repr, which is also what current JDKs print for a
+    double, so the same double renders the same on every engine."""
     if d.is_nan():
         return "nan"
     if d.is_infinite():
         return "inf" if d > 0 else "-inf"
     if d.is_zero():
         return "0"
-    d = d.normalize()
-    if len(d.as_tuple().digits) > SIGNIFICANT_DIGITS:
-        quantum = Decimal(1).scaleb(d.adjusted() - SIGNIFICANT_DIGITS + 1)
-        d = d.quantize(quantum, rounding=ROUND_HALF_EVEN).normalize()
-    out = format(d, "f")
+    out = format(d.normalize(), "f")
     if "." in out:
         out = out.rstrip("0").rstrip(".")
     return "0" if out in ("-0", "") else out
@@ -177,27 +184,57 @@ def canonical_cell(value: object) -> str:
     return text
 
 
-def _approx_value(value: object) -> float | None:
+def _approx_value(value: object) -> float | str | None:
+    """A finite float, a special name ("nan", "inf", "-inf"), or None."""
     if value is None:
         return None
     text = canonical_cell(value)
     if text == NULL:
         return None
+    if text in ("nan", "inf", "-inf"):
+        return text
     try:
         return float(text)
     except ValueError:
         raise Unsupported(f"approximate column holds a non-number ({text!r})") from None
 
 
+#: Quantum that marks a column volatile rather than approximate: its value
+#: is generated per pipeline run (FQ8's alert_id is a uuid()), so only
+#: whether it is NULL enters the fingerprint. BenchmarkQuery.volatile_columns
+#: is passed down in approx_columns with this value.
+VOLATILE = -1.0
+
+#: An approximate column matches when its sums differ by at most
+#: quantum x (APPROX_FLIP_ALLOWANCE + sqrt(rows)): summation-order noise
+#: moves a rounded value by about one quantum in a few rows, not in every
+#: row, so the slack does not grow linearly into dollars at hundreds of rows.
+APPROX_FLIP_ALLOWANCE = 10.0
+
+
+def approx_tolerance(quantum: float, rows: int) -> float:
+    return float(quantum) * (APPROX_FLIP_ALLOWANCE + math.sqrt(max(rows, 0)))
+
+
 def fingerprint_rows(rows, approx_columns=None, engine=None, adapted_sql=None) -> dict:
-    """The rf1 fingerprint of *rows* (sequences of cells).
+    """The rf2 fingerprint of *rows* (sequences of cells).
 
     *approx_columns* maps a 0-based column index to its quantum. Raises
     Unsupported for a result the rules cannot handle; ``fingerprint_or_reason``
     turns that into a fingerprint that matches nothing.
+
+    Each approximate column gets two sums: the plain sum, and a sum weighted
+    by a per-row factor in [1, 2) taken from the row's exact cells. The
+    plain sum cannot see a value moved from one group to another; the
+    weighted sum can. NaN and infinities are counted per column, not summed,
+    and must match exactly.
     """
-    approx = {int(k): float(v) for k, v in (approx_columns or {}).items()}
+    declared = {int(k): float(v) for k, v in (approx_columns or {}).items()}
+    volatile = {k for k, v in declared.items() if v == VOLATILE}
+    approx = {k: v for k, v in declared.items() if v != VOLATILE}
     sums: dict[int, list[float]] = {k: [] for k in approx}
+    wsums: dict[int, list[float]] = {k: [] for k in approx}
+    specials: dict[int, dict[str, int]] = {k: {} for k in approx}
     total = 0
     n = 0
     cols: int | None = None
@@ -208,18 +245,33 @@ def fingerprint_rows(rows, approx_columns=None, engine=None, adapted_sql=None) -
         elif len(row) != cols:
             raise Unsupported(f"rows have different column counts ({cols} and {len(row)})")
         cells = []
+        values: dict[int, float] = {}
         for i, value in enumerate(row):
-            if i in approx:
+            if i in volatile:
+                # A run-local value (a generated uuid): only its presence.
+                cells.append(NULL if value is None else "?")
+            elif i in approx:
                 v = _approx_value(value)
-                cells.append(NULL if v is None else "~")
-                if v is not None:
-                    sums[i].append(v)
+                if v is None:
+                    cells.append(NULL)
+                elif isinstance(v, str):
+                    cells.append(v)  # a special value is part of the exact hash
+                    specials[i][v] = specials[i].get(v, 0) + 1
+                else:
+                    cells.append("~")
+                    values[i] = v
             else:
                 cells.append(canonical_cell(value))
-        digest = hashlib.blake2b(_SEP.join(cells).encode(), digest_size=8).digest()
-        total = (total + int.from_bytes(digest, "big")) % _MOD
+        digest = int.from_bytes(
+            hashlib.blake2b(_SEP.join(cells).encode(), digest_size=8).digest(), "big"
+        )
+        weight = 1.0 + digest / _MOD
+        for i, v in values.items():
+            sums[i].append(v)
+            wsums[i].append(v * weight)
+        total = (total + digest) % _MOD
         n += 1
-    if cols is not None and any(k >= cols for k in approx):
+    if cols is not None and any(k >= cols for k in declared):
         raise Unsupported(f"approximate column index out of range for {cols} columns")
     out: dict = {
         "spec": SPEC,
@@ -227,8 +279,14 @@ def fingerprint_rows(rows, approx_columns=None, engine=None, adapted_sql=None) -
         "cols": cols or 0,
         "exact": f"{total:016x}",
         "approx": {str(k): math.fsum(v) for k, v in sorted(sums.items())},
+        "approx_w": {str(k): math.fsum(v) for k, v in sorted(wsums.items())},
         "quanta": {str(k): q for k, q in sorted(approx.items())},
     }
+    if volatile:
+        out["volatile"] = sorted(volatile)
+    special = {str(k): dict(sorted(v.items())) for k, v in sorted(specials.items()) if v}
+    if special:
+        out["approx_special"] = special
     if engine:
         out["engine"] = engine
     if adapted_sql is not None:
@@ -288,15 +346,21 @@ def mismatch(a: dict | None, b: dict | None) -> str | None:
     for key in ("rows", "cols", "exact"):
         if a.get(key) != b.get(key):
             return f"{key} differs"
-    if (a.get("quanta") or {}) != (b.get("quanta") or {}):
-        return "approximate columns declared differently"
-    rows = max(int(a.get("rows") or 0), 1)
+    if (a.get("quanta") or {}) != (b.get("quanta") or {}) or a.get("volatile") != b.get("volatile"):
+        return "approximate or volatile columns declared differently"
+    if (a.get("approx_special") or {}) != (b.get("approx_special") or {}):
+        return "NaN or infinite values differ in an approximate column"
+    rows = int(a.get("rows") or 0)
     for col, quantum in (a.get("quanta") or {}).items():
-        va = float((a.get("approx") or {}).get(col, 0.0))
-        vb = float((b.get("approx") or {}).get(col, 0.0))
-        tolerance = float(quantum) * rows
-        if abs(va - vb) > tolerance + 1e-9 * max(abs(va), abs(vb), 1.0):
-            return f"column {col} sums differ by more than {tolerance:g}"
+        for key, factor in (("approx", 1.0), ("approx_w", 2.0)):
+            if key == "approx_w" and (key not in a or key not in b):
+                return "a fingerprint lacks the row-weighted sums"
+            va = float((a.get(key) or {}).get(col, 0.0))
+            vb = float((b.get(key) or {}).get(col, 0.0))
+            tolerance = factor * approx_tolerance(float(quantum), rows)
+            if not abs(va - vb) <= tolerance + 1e-12 * max(abs(va), abs(vb), 1.0):
+                what = "sums" if key == "approx" else "row-weighted sums"
+                return f"column {col} {what} differ by more than {tolerance:g}"
     return None
 
 
@@ -307,8 +371,13 @@ def mismatch(a: dict | None, b: dict | None) -> str | None:
 
 def rows_from_trino_json(output: str) -> list[list]:
     """Rows of ``trino --output-format JSON``: one JSON object per line, in
-    column order. Doubles and decimals are read as Decimal (exact text);
-    duplicate column names are kept."""
+    column order. Numbers are kept as their text, so canonical_cell treats
+    them like any other engine's text (exact unless in exponent notation);
+    duplicate column names are kept. Empty output is unsupported: the CLI
+    prints nothing for an empty result, which cannot be told from no output
+    at all (the runner checks the row count against the timed run)."""
+    if not (output or "").strip():
+        raise Unsupported("Trino printed no rows (an empty result cannot be told from no output)")
     rows = []
     for line in output.splitlines():
         line = line.strip()
@@ -318,7 +387,8 @@ def rows_from_trino_json(output: str) -> list[list]:
             rows.append(
                 json.loads(
                     line,
-                    parse_float=Decimal,
+                    parse_float=str,
+                    parse_int=str,
                     object_pairs_hook=lambda pairs: [v for _, v in pairs],
                 )
             )
@@ -333,11 +403,16 @@ def rows_from_beeline_tsv2(output: str) -> list[list]:
     line per row, NULL as ``NULL``. tsv2 does not quote, so a string holding
     a tab or newline shows up as a row of the wrong width and the result is
     unsupported."""
-    lines = output.split("\n")
-    while lines and not lines[-1].strip():
-        lines.pop()
-    if not lines:
-        return []
+    text = output or ""
+    # Only the terminal newline goes: a row of empty cells (a one-column
+    # empty string) is a line with nothing on it and still a row.
+    if text.endswith("\n"):
+        text = text[:-1]
+    if text.endswith("\r"):
+        text = text[:-1]
+    if not text:
+        raise Unsupported("beeline printed no tsv2 header (the statement produced no result set)")
+    lines = text.split("\n")
     width = len(lines[0].split("\t"))
     rows = []
     for line in lines[1:]:

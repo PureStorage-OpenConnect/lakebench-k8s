@@ -43,6 +43,14 @@ def beeline_argv(sql: str, url: str = "jdbc:hive2://localhost:10000") -> list[st
     ]
 
 
+def _drop_terminal_newline(text: str) -> str:
+    if text.endswith("\n"):
+        text = text[:-1]
+    if text.endswith("\r"):
+        text = text[:-1]
+    return text
+
+
 class SparkThriftExecutor:
     """Executes queries via ``kubectl exec`` into beeline on the Spark Thrift Server."""
 
@@ -128,9 +136,11 @@ class SparkThriftExecutor:
                 error=error,
             )
 
-        output = result.stdout.strip()
+        output = _drop_terminal_newline(result.stdout or "")
         # tsv2 prints one header line and then a line per row, and prints
-        # the header for an empty result too: a header alone is 0 rows.
+        # the header for an empty result too: a header alone is 0 rows. Only
+        # the terminal newline is dropped: a one-column empty-string row is
+        # an empty line and still a row.
         lines = output.split("\n") if output else []
         data_rows = lines[1:]
         return QueryExecutorResult(
