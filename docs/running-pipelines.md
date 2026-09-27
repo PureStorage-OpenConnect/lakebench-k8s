@@ -294,7 +294,7 @@ schedule:
 architecture:
   pipeline:
     continuous:
-      retention_interval: 1800     # Seconds between maintenance rounds (300-7200)
+      retention_interval: 600      # Seconds between maintenance rounds (300-7200; unset = run_duration / 3)
       retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
 ```
 

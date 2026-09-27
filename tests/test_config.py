@@ -1141,7 +1141,9 @@ class TestSustainedRetentionConfig:
     def test_defaults(self):
         config = LakebenchConfig(name="test")
         c = config.architecture.pipeline.sustained
-        assert c.retention_interval == 1800
+        # Unset: derived from run_duration at run start (1800 / 3).
+        assert c.retention_interval is None
+        assert c.effective_retention_interval() == 600
         assert c.retention_threshold == "30m"
 
     def test_custom_values(self):
@@ -1351,8 +1353,9 @@ class TestSustainedCompactionConfig:
         config = LakebenchConfig(name="test")
         c = config.architecture.pipeline.sustained
         assert c.compaction_enabled is True
-        # Default compaction_interval=0 resolves to 2x retention_interval
-        assert c.compaction_interval == c.retention_interval * 2
+        # Default compaction_interval=0 resolves to 2x the effective retention_interval
+        assert c.compaction_interval == 0
+        assert c.effective_compaction_interval() == 2 * c.effective_retention_interval()
 
     def test_compaction_disabled(self):
         config = LakebenchConfig(
@@ -1384,7 +1387,7 @@ class TestSustainedCompactionConfig:
                 },
             },
         )
-        assert config.architecture.pipeline.sustained.compaction_interval == 1200
+        assert config.architecture.pipeline.sustained.effective_compaction_interval() == 1200
 
 
 class TestFinancialW1MaxVertices:

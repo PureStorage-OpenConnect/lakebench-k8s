@@ -319,8 +319,8 @@ def experiment_inputs(
             "settings": (
                 {
                     "retention_threshold": sustained.retention_threshold,
-                    "retention_interval": sustained.retention_interval,
-                    "compaction_interval": sustained.compaction_interval,
+                    "retention_interval": sustained.effective_retention_interval(),
+                    "compaction_interval": sustained.effective_compaction_interval(),
                 }
                 if arch.pipeline.mode.value in ("sustained", "continuous")
                 else {

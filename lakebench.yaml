@@ -252,7 +252,7 @@ architecture:
   #     silver_target_file_size_mb: 512
   #     gold_target_file_size_mb: 128
   #     ## Iceberg retention (periodic expire_snapshots + remove_orphan_files)
-  #     retention_interval: 1800     # Seconds between maintenance rounds (300-7200)
+  #     retention_interval: 600      # Seconds between maintenance rounds (300-7200; unset = run_duration / 3)
   #     retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
   #     ## In-stream benchmark rounds (runs Trino queries while streaming)
   #     benchmark_interval: 300      # Seconds between rounds (300-3600)

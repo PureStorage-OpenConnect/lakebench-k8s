@@ -2151,10 +2151,12 @@ def build_config_snapshot(
         # something else than one under the full policy.
         "maintenance": {
             "pre_benchmark_maintenance": pipeline.pre_benchmark_maintenance,
-            "retention_interval": pipeline.sustained.retention_interval,
+            # Effective values: unset intervals resolve from run_duration
+            # (a continuous run writes its resolved values back first).
+            "retention_interval": pipeline.sustained.effective_retention_interval(),
             "retention_threshold": pipeline.sustained.retention_threshold,
             "compaction_enabled": pipeline.sustained.compaction_enabled,
-            "compaction_interval": pipeline.sustained.compaction_interval,
+            "compaction_interval": pipeline.sustained.effective_compaction_interval(),
         },
         # Config half of the metrics.json experiment block
         # (metrics/experiment.py). Not a perf-gate fingerprint key.
