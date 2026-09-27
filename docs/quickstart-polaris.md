@@ -5,8 +5,9 @@ alternative to Hive Metastore for Iceberg catalog management. Polaris is an
 open-source REST catalog that provides OAuth2 authentication, fine-grained
 access control, and a standards-based Iceberg REST API.
 
-Switching to Polaris requires a single configuration change. The rest of the
-workflow -- deploy, generate, run, destroy -- stays exactly the same.
+Switching to Polaris takes two configuration changes: the catalog type and an
+OAuth2 client secret. The rest of the workflow -- deploy, generate, run,
+destroy -- stays exactly the same.
 
 ---
 
@@ -19,8 +20,8 @@ workflow -- deploy, generate, run, destroy -- stays exactly the same.
 
 **Why 1.3.0 minimum?** Polaris versions 1.1.0 and 1.2.0 have a credential vending
 bug ([apache/polaris#379](https://github.com/apache/polaris/issues/379))
-where the `TaskFileIOSupplier` class ignores the `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION`
-flag, causing server-side S3 operations to fail on non-AWS storage. The fix
+where `TaskFileIOSupplier` attempts STS credential subscoping even when told
+not to, causing server-side S3 operations to fail on non-AWS storage. The fix
 ([PR #400](https://github.com/apache/polaris/pull/400)) shipped in 1.3.0.
 Lakebench now defaults to 1.6.0, well past this floor.
 
@@ -36,24 +37,30 @@ native S3 file system required for current Trino releases.
 ## Configuration
 
 Start from an existing config file (or generate one with `lakebench init`).
-The only change needed is setting the catalog type:
+Set the catalog type and a client secret:
 
 ```yaml
 architecture:
   catalog:
     type: polaris
+    polaris:
+      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"
 ```
 
-That is it. Lakebench uses the default Polaris version (1.6.0) and
-Trino version (483), both of which satisfy the minimum requirements above.
+The client secret has no default: `deploy` and `run` refuse a Polaris config
+without it, and it must be the same for `deploy`, `run` and `destroy`.
+Generate one with `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`
+and export it, or write it into the file. Lakebench uses the default Polaris
+image (1.6.0) and Trino version (483), both of which satisfy the minimum
+requirements above.
 
 ### What changes under the hood
 
 When `catalog.type: polaris` is set, Lakebench automatically:
 
 - **Deploys a Polaris server** (Deployment + Service on port 8181) backed by
-  the same PostgreSQL instance used for Hive, but in a separate `polaris`
-  database.
+  the deployment's PostgreSQL instance, in a `polaris` database (no Hive
+  Metastore is deployed).
 - **Bootstraps the catalog** via a Kubernetes Job that creates the Polaris
   realm, root principal, catalog with S3 storage config
   (`stsUnavailable: true`, `pathStyleAccess: true`), and the required
@@ -92,7 +99,9 @@ platform:
 
 architecture:
   catalog:
-    type: polaris    # <-- the only change from the default
+    type: polaris    # <-- changed from the default
+    polaris:
+      client_secret: "${LAKEBENCH_POLARIS_CLIENT_SECRET}"   # required
 
 workload:
   datagen:
@@ -137,9 +146,12 @@ lakebench report
 lakebench destroy lakebench.yaml
 ```
 
-Destroy handles Polaris-specific cleanup: the bootstrap job, Polaris
-deployment, service, ConfigMap, and the `polaris` PostgreSQL database are all
-removed.
+Destroy handles Polaris-specific cleanup: it deletes the bootstrap job,
+Polaris deployment, service and ConfigMap. The `polaris` PostgreSQL database
+is not dropped separately; it lives on the PostgreSQL PVC, which goes with the
+namespace. With `platform.kubernetes.create_namespace: false` the namespace
+and that PVC survive, so destroy unregisters the tables from the catalog
+first.
 
 ---
 
@@ -177,11 +189,13 @@ credential subscoping flag is ignored in `TaskFileIOSupplier`.
 update it:
 
 ```yaml
-architecture:
-  catalog:
-    polaris:
-      version: "1.6.0"
+images:
+  polaris: "apache/polaris:1.6.0"
+  polaris_admin_tool: "apache/polaris-admin-tool:1.6.0"
 ```
+
+The Polaris version that runs is the tag of `images.polaris`;
+`architecture.catalog.polaris.version` is not read by the deployer.
 
 ### Bootstrap job fails with "already been bootstrapped"
 

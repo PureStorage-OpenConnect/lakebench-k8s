@@ -11,11 +11,11 @@ All observability settings live under the `observability` key as a flat model:
 ```yaml
 observability:
   enabled: false                     # Master switch for the observability stack
-  prometheus_stack_enabled: true     # Deploy kube-prometheus-stack
+  prometheus_stack_enabled: true     # Shown in status output only (see below)
   dashboards_enabled: true           # Enable Grafana dashboards
   retention: "7d"                    # Prometheus data retention period
   storage: "10Gi"                    # Prometheus PVC size
-  storage_class: ""                  # StorageClass (empty = cluster default)
+  storage_class: ""                  # Not applied (see below)
   chart_version: "87.19.2"           # kube-prometheus-stack chart version (pins Prometheus + Grafana)
 ```
 
@@ -23,10 +23,16 @@ observability:
 `report.html` into its run directory, and `lakebench report` regenerates it.
 
 `s3_metrics_enabled` and `spark_metrics_enabled` exist in the schema but nothing reads
-them; setting either prints a warning. Spark and S3 metrics are collected whenever the
-stack is enabled.
+them; setting either prints a warning. The Spark and Trino PodMonitors are applied
+whenever the stack is enabled.
 
-Set `observability.enabled: true` to deploy the stack. All sub-flags (`prometheus_stack_enabled`, `dashboards_enabled`, etc.) default to `true` when the stack is enabled.
+`prometheus_stack_enabled` and `storage_class` are not read by the deployer either:
+`observability.enabled: true` always installs (or reuses) the full stack, and the
+Prometheus PVC uses the chart's default StorageClass. `dashboards_enabled` sets the
+chart's `grafana.enabled`, and `retention` and `storage` set the Prometheus retention
+and PVC size.
+
+Set `observability.enabled: true` to deploy the stack.
 
 ## Local Metrics (Always On)
 
@@ -69,13 +75,10 @@ lakebench deploy test-config.yaml --include-observability
 
 Grafana is included in the kube-prometheus-stack install when `dashboards_enabled` is `true`. Default credentials are `admin` / `lakebench`.
 
-Three built-in dashboards are provisioned:
-
-| Dashboard | Panels |
-|---|---|
-| Lakebench Pipeline Overview | Pipeline stage durations, throughput, end-to-end timing |
-| Lakebench Spark Detail | Job duration, executor utilization, shuffle I/O |
-| Lakebench Storage I/O | S3 read/write throughput, object counts |
+One built-in dashboard, **Lakebench Overview**, is provisioned from a ConfigMap
+in the deployment's namespace. Its panels: Trino running queries, query
+throughput, query wall time (p50/p95/p99) and worker memory; Spark active
+executors, task throughput and JVM heap; node CPU usage.
 
 Access Grafana via port-forward:
 
@@ -85,17 +88,17 @@ kubectl port-forward svc/lakebench-observability-grafana 3000:80 -n lakebench-ob
 
 ## S3 Metrics
 
-When `s3_metrics_enabled` is `true`, the `S3MetricsWrapper` instruments CLI-side boto3 operations with Prometheus counters and histograms:
+`observability/s3_metrics.py` defines an `S3MetricsWrapper` with these Prometheus metrics for CLI-side boto3 operations:
 
 - `lakebench_s3_request_duration_seconds` -- request latency histogram
 - `lakebench_s3_requests_total` -- total request count by operation
 - `lakebench_s3_errors_total` -- error count by operation
 
-These metrics cover CLI operations (list, head, delete) -- not Spark/Trino data-path I/O.
+No code path instantiates the wrapper today, and `s3_metrics_enabled` has no effect, so these series are not emitted. They would cover CLI operations (list, head, delete), not Spark/Trino data-path I/O.
 
 ## Platform Metrics Collection
 
-After a benchmark run completes, the `PlatformCollector` queries the in-cluster Prometheus to snapshot infrastructure metrics (CPU, memory per pod, S3 I/O rates). These are included in the HTML report under the Platform Metrics tab when `reports.include.platform_metrics` is `true`.
+After a benchmark run completes, the `PlatformCollector` queries the in-cluster Prometheus to snapshot infrastructure metrics (CPU, memory per pod, S3 I/O rates). These are included in the HTML report under the Platform Metrics tab when collected. The `observability.reports` block (including `include.platform_metrics`) has no effect.
 
 ## Reports
 

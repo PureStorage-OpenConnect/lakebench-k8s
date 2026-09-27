@@ -285,14 +285,17 @@ def deploy(
 ) -> None:
     """Deploy lakehouse infrastructure.
 
-    Deploys all components in the correct order:
-    1. Namespace + Secrets + Scratch StorageClass
-    2. PostgreSQL
-    3. Catalog (Hive Metastore or Polaris)
-    4. Spark RBAC
-    5. Spark Operator (if operator.install: true)
-    6. Query Engine (Trino / Spark Thrift / DuckDB)
-    7. Observability (if enabled)
+    Deploys all components in this order:
+    1. Namespace, secrets and S3 buckets
+    2. Scratch StorageClass check (it must already exist; a cluster admin
+       installs it with `lakebench admin install-scratch-storage-class`)
+    3. PostgreSQL
+    4. Catalog (Hive Metastore or Polaris)
+    5. Spark RBAC (then Unity Catalog, only if catalog.type is unity)
+    6. Spark Operator check and watch-list entry for the namespace (always
+       runs; operator.install: true also installs a missing operator)
+    7. Query Engine (Trino / Spark Thrift / DuckDB)
+    8. Observability (if enabled)
     """
     from lakebench.deploy import DeploymentEngine, DeploymentStatus
 

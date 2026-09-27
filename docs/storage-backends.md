@@ -79,13 +79,21 @@ authoritative check.
 
 Pure Storage FlashBlade **does not implement** `GetBucketTagging` or
 `PutBucketTagging` at all -- both return HTTP 501 `NotImplemented`. Lakebench
-detects this at runtime and falls back to a weaker check: the bucket name must
-be exactly the deployment name or start with `{deployment_name}-`. The example
-configs and `lakebench init` follow this convention, so a user who does not go
-out of their way to rename buckets gets destroy safety on FlashBlade the same
-as on any other backend. A user who names buckets outside the convention on
-FlashBlade will hit a hard refusal on destroy and must pass `--force-legacy` to
-proceed.
+detects this at runtime and falls back to a weaker check with two parts.
+The bucket name must be exactly the deployment name or start with
+`{deployment_name}-` (the longest matching deployment name wins), and the
+bucket must be recorded on the deployment's namespace: in
+`lakebench.deployment/created-buckets` (buckets deploy created, which destroy
+empties and deletes) or `lakebench.deployment/adopted-empty-buckets`
+(pre-existing buckets that were empty when deploy adopted them, which destroy
+empties but never deletes). A bucket that matches the name but is in neither
+record, such as one that already held data when deploy adopted it, is left
+in place and reported; `--force-legacy` empties it and never deletes it. The
+example configs and `lakebench init` follow the naming convention, so a user
+who lets deploy create the buckets gets destroy safety on FlashBlade close to
+a tagged backend. A user who names buckets outside the convention on
+FlashBlade will hit a hard refusal on destroy and must pass `--force-legacy`
+to proceed.
 
 `lakebench deploy` logs a warning once per run when it takes this fallback, and
 `lakebench config storage` reports the backend's tagging support in the
@@ -115,7 +123,7 @@ the output says coverage was partial:
 
 ```
 Degraded run: No permission to create buckets. Ran read-only checks against
-existing bucket 'lakebench-bronze'. Write and multipart checks were skipped.
+existing bucket 'my-lakehouse-bronze'. Write and multipart checks were skipped.
 ```
 
 A degraded run tells you the backend is reachable and enumerates buckets. It
@@ -184,7 +192,8 @@ benchmarking.
 
 When no cluster or external object store is available, lakebench can deploy
 Garage as a container via podman or docker. This is the object store half of
-local mode.
+local mode; `lakebench deploy --local` starts it for you. The deployer can
+also be driven directly:
 
 ```python
 from lakebench.runtime.container import ContainerRuntime

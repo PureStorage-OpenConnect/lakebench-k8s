@@ -27,15 +27,16 @@ Benchmark queries are executed via `kubectl exec` into the pod using
 
 ### Init containers
 
-Two init containers run before the Spark Thrift Server starts:
+Two init containers run before the Spark Thrift Server starts (plus a
+CA-import container when `platform.storage.s3.ca_cert` is set):
 
 1. **Catalog wait** -- blocks until the catalog backend is reachable:
    - Hive: waits for `lakebench-hive-metastore:9083` (TCP)
    - Polaris: waits for `lakebench-polaris:8181` (TCP)
 
-2. **JAR download** -- downloads Iceberg runtime, AWS SDK, and Hadoop S3
-   JARs from Maven Central. These are required for reading Iceberg tables
-   on S3-compatible storage.
+2. **JAR download** -- downloads the table-format runtime (Iceberg or
+   Delta), AWS SDK, and Hadoop S3 JARs from Maven Central. These are
+   required for reading the tables on S3-compatible storage.
 
 ### Health checks
 
@@ -111,6 +112,7 @@ Spark Thrift Server is used by these recipes:
 
 - `hive-iceberg-spark-thrift`
 - `polaris-iceberg-spark-thrift`
+- `hive-delta-spark-thrift`
 
 See the [Recipes Guide](recipes.md) for all combinations.
 

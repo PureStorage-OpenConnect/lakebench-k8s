@@ -3,32 +3,40 @@
 Lakebench's AML workload measures a lakehouse stack against a
 Financial-crime / Anti-Money-Laundering (AML) detection pipeline: read
 pacs.008 wire messages from bronze, build silver entity / account /
-counterparty tables, aggregate risk in gold, then score six W-rule
-detectors against synthetic planted typologies. This document explains
+counterparty tables, aggregate risk in gold, then score nine W-rule
+detectors (W1-W8 and W17) against synthetic planted typologies. This document explains
 what the scorecard actually measures, what it does not measure, and how
 to run one end-to-end.
 
 ## What you get on the scorecard
 
-The two headline numbers are per-rule **recall** and per-rule
-**precision** against the planted typology set. A third per-rule
-quantity, **pattern-span**, is published alongside them but is a
-description of the injected data, not a platform measurement -- see the
-metric-trust caveats below before quoting it. All are computed by the
-SQL templates registered in
-[`src/lakebench/benchmark/aml_queries.py`](../src/lakebench/benchmark/aml_queries.py)
-and joined against the datagen manifest at `bronze.manifest`. Two
-aggregates round out the primary view:
+The two headline numbers are per-typology **recall** and per-rule
+**precision** against the planted typology set. Both are computed by the
+Spark job
+[`src/lakebench/spark/scripts/score_financial.py`](../src/lakebench/spark/scripts/score_financial.py),
+which a batch `lakebench run` submits after gold-finalize
+(`lakebench financial score` reruns it on demand). It joins `gold.alerts`
+against the datagen manifest (with the default path template,
+`s3a://<bronze>/pacs008/manifest/manifest*.parquet`) on transaction UETRs
+and writes `recall.parquet` and a `recall.json` summary under
+`s3a://<gold>/scoring/<run_id>/`. Recall counts only alerts from a
+typology's designated rules; alerts from other rules are reported
+separately as `incidental_recall`, and the `random` control typology's
+incidental recall is the chance floor. Precision is reported per rule as
+the share of its alerts touching no payment of its target typology
+(`fp_rate_by_rule`) and as transaction-level precision
+(`txn_precision_by_rule`).
 
-- **`aggregate_typology_coverage`** -- for each planted typology, does at
-  least one W-rule fire against it? Shows which typologies the rule set
-  can address at all, distinct from how well.
-- **`aggregate_reference_vs_rule`** -- rule recall vs a scikit-learn
-  Gradient Boosted reference detector's recall, per typology. Answers
-  "does the rule outscore what a canonical detector would learn from the
-  same data?" A rule that scores well above the reference is either a
-  smart heuristic or benefiting from a label leak; cross-reference with
-  the leakage report to tell which.
+[`src/lakebench/benchmark/aml_queries.py`](../src/lakebench/benchmark/aml_queries.py)
+holds the rule-to-typology mapping (`RULE_TARGETS`, `UNMAPPED_TYPOLOGIES`)
+and Trino SQL templates for per-rule detect, precision, recall and
+**pattern-span** queries plus four aggregates, among them
+`aggregate_typology_coverage` (does at least one W-rule fire on each
+planted typology) and `aggregate_reference_vs_rule` (rule recall beside the
+reference model's per-typology row in `reference_metrics.parquet`). No CLI
+command runs these templates in v1.6; they are for ad-hoc inspection.
+Pattern-span is a description of the injected data, not a platform
+measurement -- see the metric-trust caveats below before quoting it.
 
 The rule set:
 
@@ -81,14 +89,16 @@ so one heavily paid world entity whose name happens to sit near a list
 entry (world persons carry a middle initial, list entries a full middle
 name) can dominate it; read it beside the alert count.
 
-The screen is bounded on purpose: Soundex token-pair blocking, Levenshtein
-similarity of at least 0.85 over normalized, token-sorted names
-(`SCREEN_SIMILARITY_MIN`, self-chosen), and the entry's country as the only
-secondary identifier. No phonetic keys, no date of birth, no identifier
+The screen is bounded on purpose. Soundex codes of token pairs are used only
+to block candidate pairs; the match itself is Levenshtein similarity of at
+least 0.85 over normalized, token-sorted names (`SCREEN_SIMILARITY_MIN`,
+self-chosen), with the entry's country as the only secondary identifier.
+There is no phonetic similarity scoring, no date of birth and no identifier
 matching; this is a benchmark workload, not a screening product. W6 screens
 every payment and uses $10,000 only to order the queue, so its recall
-measures the screen, not the amount distribution. W5/W6 run in batch;
-continuous mode records them as skipped ("not run").
+measures the screen, not the amount distribution. In continuous mode only
+W2, W3, W4 and W17 run; W1, W5, W6, W7 and W8 are recorded as skipped
+("not run").
 
 The high-risk corridor list W7 uses alongside the FATF list
 (`synthetic_corridors.json`) is synthetic and is the same country pool the
@@ -167,9 +177,8 @@ Parameters are self-chosen; the D2 anchor is still pending a citation.
 The precision numbers in this benchmark answer a narrow question:
 against a synthetic bronze layer where every non-typology row is a
 log-normal baseline draw, what fraction of a rule's alerts land on
-manifest-tagged typology rows? A typical result at scale 10 reads
-around 0.80 -- 0.99 for the rules that target a planted typology, which
-looks great next to the 90 %+ false-positive rate that Tier-1 AML
+manifest-tagged typology rows? However high that reads, it is not
+comparable with the 90 %+ false-positive rate that Tier-1 AML
 literature reports from production alert queues.
 
 The two numbers measure different things.
@@ -241,49 +250,48 @@ baseline log-normal produced essentially none. A rule reading "amount
 between 9000 and 10000" reported 100 % recall and 99 % precision. The
 gate now catches that shape and fails the run.
 
-### Reference detector
+### Reference detector (the pre-registered fidelity gate)
 
-`train_reference_gbt` in
-[`src/lakebench/aml/reference_score.py`](../src/lakebench/aml/reference_score.py)
-trains a scikit-learn Gradient Boosted Classifier per typology on a
-deliberately narrow feature set:
+`lakebench financial reference-score CONFIG --manifest ... --output-prefix ...`
+submits
+[`score_financial_reference.py`](../src/lakebench/spark/scripts/score_financial_reference.py);
+`lakebench run` does not run it. After the band leakage gate, the script
+builds the pre-registered per-customer features from silver
+([`spark/scripts/aml_features.py`](../src/lakebench/spark/scripts/aml_features.py)):
+the 21 `FEATURE_COLUMNS` (activity counts and gaps, amount level and
+spread, counterparty count, cross-border, round-amount, structuring-band
+and high-risk-corridor fractions, the 24 h burst, overnight, weekend and
+hour-of-day entropy, `home_country_high_risk`, `customer_type`, `crr_tier`)
+plus the four `HISTORY_FEATURE_COLUMNS` of the monthly unit. It labels each
+customer by manifest participation and runs `evaluate_gate` in
+[`src/lakebench/aml/fidelity_gate.py`](../src/lakebench/aml/fidelity_gate.py).
+Only customers are scored.
 
-- `log_amount_mean`, `log_amount_std`, `amount_pct_of_ceiling` --
-  amount shape.
-- `mean_hour`, `std_hour` -- when in the day activity happens.
+The reference model is scikit-learn's `HistGradientBoostingClassifier`. Its
+hyperparameters, the feature list, the unit of scoring (customer by UTC
+calendar month), the cross-validation folds and every gate constant come
+from `aml_preregistration.json`. Per in-scope typology the gate reports
+out-of-fold average precision with a bootstrap confidence interval and the
+positive count, and checks single- and pair-feature shortcuts, a
+nuisance-only model and a nuisance ablation against the pre-registered
+leakage caps. It writes `aml_gate_report.json` (the full report) and
+`reference_metrics.parquet` (one aggregate row and one row per typology)
+under the output prefix. scikit-learn is not on the Spark image; the job
+installs it per run.
 
-The training API refuses at call time on any of five columns that
-directly encode the label: `amount_in_structuring_band`,
-`is_structuring`, `typology_type`, `typology_id`, `expected_workload` (the generator's AML category, not the detecting rule; the scorer reports it as `workload_category` beside `designated_rules`).
-Passing one raises `ValueError` naming the column. The refusal is a
-correctness feature -- exactly the mistake the standing rule warns
-against -- so it lives in the library rather than in the driver.
+The older `train_reference_gbt` in `src/lakebench/aml/reference_score.py`
+(a `GradientBoostingClassifier` on five amount and hour features) is no
+longer called by any driver; that module now supplies the band leakage
+gate.
 
-Three additional features were removed after adversarial review before
-PR-A landed and their absence is a deliberate trade-off in the current
-datagen:
-
-- **`high_risk_country_ratio`** was a byte-for-byte proxy for the
-  `corridor_high_risk` typology (same HIGH_RISK_CC set). Removed.
-- **`txn_count`** and **`unique_counterparties`** were cardinality
-  fingerprints of the graph typologies. Removed.
-
-The consequence: the reference detector cannot see the corridor or
-graph-cardinality typologies in the current datagen and will read
-`recall = 0` against them. That reads on the scorecard as "the rule
-has no reference floor to beat," not as "the detector is bad." The
-fix belongs in the datagen (probabilistic country overlays that mix
-baseline and typology country distributions, cardinality noise on the
-baseline entities), not in the reference model. When the datagen ships
-those overlays, the removed features become measurement-safe again.
-
-The verdicts:
+The report verdicts:
 
 | Verdict | Meaning |
 |---|---|
-| `ok` | trained and scored; `overall_f1` and per-typology recall/precision/f1 are meaningful. |
-| `insufficient_labels` | one or more typology classes had fewer than `min_positive_per_class` rows in the sampled frame. Per-typology rows still populate but treat them as directional. |
-| `no_sklearn` | the driver image did not ship scikit-learn. The AML pipeline still produces rule scores; the reference detector row is empty and the `aggregate_reference_vs_rule` query labels it `not_run`. |
+| `ok` | the gate ran; per-typology results and passes are in `aml_gate_report.json`. |
+| `counts_only` | the script's `--counts-only` option: per typology only counts and prevalence, no model. |
+| `no_sklearn` | scikit-learn was not importable on the driver. The band leakage gate still ran; the job does not fail. |
+| `empty_frame` / `error` | no customer could be scored, or the gate failed. Outputs are written and the job fails. |
 
 ## Held-out evaluation
 
@@ -298,7 +306,7 @@ the full protocol is `docs/internal/aml-protocol.md` in the source repository.
 Marcus's roleplay pass flagged three places where the scorecard names
 suggest more than they measure. They apply to the whole pipeline
 benchmark, not AML specifically. `compute_efficiency_gb_per_core_hour`
-shows up in every AML run; the other two only appear in sustained
+shows up in every AML run; the other two only appear in continuous
 mode, and the shipped AML example is batch mode.
 
 - **`compute_efficiency_gb_per_core_hour`** is `GB / core_hours
@@ -307,13 +315,17 @@ mode, and the shipped AML example is batch mode.
   cores and uses 2, even if they did identical work. Use it for
   release-to-release regression detection on the same config; do not
   compare against numbers from a stack sized differently.
-- **`ingest_ratio`** (continuous mode only) divides bronze row count by
-  a scale-derived estimate of what datagen would have produced, not a
-  measurement of what it did produce. The estimate is a
-  Customer 360 constant, so in a sustained AML run the denominator is
-  off by roughly the ratio of AML's per-scale-unit row count to
-  Customer 360's; treat the number as "did the pipeline keep pace at
-  all" rather than as a precise fraction.
+- **`ingest_ratio`** (continuous mode only) is bronze rows ingested by
+  the window's end divided by `released_rows`, the rows the trickle had
+  made available to bronze by then (`max_files_per_trigger` files per
+  bronze trigger since bronze's first write, at the corpus's mean rows
+  per file, capped at the corpus). 1.0 means bronze kept up with what
+  arrived; it is not the share of the corpus taken, which is
+  `corpus_ingest_ratio` (bronze rows over datagen rows produced) and
+  sits below 1 on a default run, whose trickle is sized to outlast the
+  window. The trickle rate is a Lakebench-imposed cap, so a run whose
+  `intake_limit` is `trickle_rate` measured the configured offered load,
+  not the pipeline's capacity.
 - **`qph_degradation_pct`** (continuous mode only) wants at least four
   rounds to read as a trend. Typical continuous runs produce five.
   Interpret values from a five-round run as a signal, not a conclusion.
@@ -360,7 +372,9 @@ label-proxy risks the leakage gate now catches.
 
 ## Running an AML pipeline
 
-The full loop is `deploy -> generate -> run -> financial score`. Every
+The full loop is `deploy -> generate -> run`. A batch `run` scores recall
+and precision inline after gold-finalize; `lakebench financial score` is an
+optional re-score (for example after a replay or a rule change). Every
 AML config points to a `workload.schema=financial` config; the
 example that ships is
 [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml)
@@ -372,17 +386,23 @@ datagen and the pipeline scripts, not the catalog choice.
 lakebench deploy   examples/polaris-iceberg-spark-financial.yaml
 lakebench generate examples/polaris-iceberg-spark-financial.yaml --wait
 lakebench run      examples/polaris-iceberg-spark-financial.yaml
+
+# Optional re-score (the manifest path assumes the default path template)
 lakebench financial score \
     examples/polaris-iceberg-spark-financial.yaml \
-    --manifest s3://<bronze-bucket>/manifest/manifest.parquet \
-    --output   s3://<bronze-bucket>/scores/recall.parquet
+    --manifest s3a://<bronze-bucket>/pacs008/manifest/manifest.parquet \
+    --output   s3a://<gold-bucket>/scoring/rescore/recall.parquet
 ```
+
+The inline score writes to `s3a://<gold-bucket>/scoring/<run_id>/recall.parquet`.
 
 Two operator-facing subcommands cover the retention-workload scenarios:
 
 - **`lakebench financial replay CONFIG --rule W2_structuring --depth-months 60`**
-  reruns one rule against an Iceberg snapshot from N months ago and
-  appends alerts to `gold.alerts` under a distinct `rule_id` scope. The
+  reruns one rule against an Iceberg snapshot from N months ago. By
+  default it writes to the config's gold alerts table with an `_replay`
+  suffix, first deleting that rule's rows there, so the batch run's
+  `gold.alerts` is never touched; `--output-alerts` names another table. The
   W8 verification scenario in the working spec asserts against a 60-month
   replay's wall-clock budget.
 - **`lakebench financial reproduce CONFIG --alert-id <id>`** takes a single alert
@@ -394,15 +414,17 @@ Two operator-facing subcommands cover the retention-workload scenarios:
 verbs load it, assert `workload.schema=financial`, and dispatch a
 SparkApplication.
 
-The scale factor sets bronze volume linearly: scale 1 is 8.4 GB of
-pacs.008 messages (26.7M transactions over 60 months), scale 100 is about
-840 GB, and scale 10000 is a tier-1 universal bank's AML retention target
-at about 84 TB.
-The Pydantic schema accepts up to scale 10000, but AML has been run end
-to end only up to scale 100 (about 950 GB of bronze measured in
-run-20260925-104703-c02890; runs land 11-13% above the 8.4 GB-per-scale
-estimate). Scale 500 (about 4.2 TB by that estimate) and above are untested;
-results there are on the user.
+The scale factor sets bronze volume linearly. Lakebench's estimate
+(`src/lakebench/config/scale.py`) is 111,111 entities x 4 transactions a
+month x 60 months per scale unit (about 26.7M transactions) and about
+8.4 GB of pacs.008 per scale unit. The 8.4 GB figure was measured at scale 1
+on the pre-freeze generator and is superseded; sizes measured on the v1.6
+frozen generator are pending. By the estimate, scale 100 is about 840 GB
+and scale 10000, a tier-1 universal bank's AML retention target, about
+84 TB. The Pydantic schema accepts up to scale 10000, but AML has been run
+end to end only up to scale 100, on the pre-freeze generator. Scale 500
+(about 4.2 TB by the estimate) and above are untested; results there are on
+the user.
 
 ## Known limitations in v1.6
 
@@ -432,11 +454,10 @@ results there are on the user.
   Trino, scale 10 and 100, idle, beside one other workload and beside
   everything, at least 100 executions each) moves to v1.7.
 - **AML datagen throughput is published, not gated.** AML datagen reports
-  per-pod write throughput and CPU-hours per TB, characterised up to scale
-  50. Unlike Customer360 (at least 500 MB/s per pod), no release gate fails
-  on the AML figure. Measured: about 240 MB/s per pod at 8 cores
-  (run-20260924-230333-bc5485) and about 119 MB/s per pod on 44 pods at
-  scale 100 (run-20260925-104703-c02890).
+  per-pod write throughput and CPU-hours per TB. Unlike Customer360 (at
+  least 500 MB/s per pod), no release gate fails on the AML figure. The
+  throughput figures published earlier were measured before the generator
+  freeze and are superseded; v1.6 figures are pending.
 
 ## The transaction-monitoring operations layer
 
@@ -604,8 +625,10 @@ is the one case this cannot tell apart.
 
 ## Where to look next
 
-- [`src/lakebench/spark/scripts/detection_rules.py`](../src/lakebench/spark/scripts/detection_rules.py) -- the six W-rule implementations.
+- [`src/lakebench/spark/scripts/detection_rules.py`](../src/lakebench/spark/scripts/detection_rules.py) -- the nine W-rule implementations.
 - [`src/lakebench/benchmark/aml_queries.py`](../src/lakebench/benchmark/aml_queries.py) -- rule -> typology mapping and query catalogue.
-- [`src/lakebench/aml/reference_score.py`](../src/lakebench/aml/reference_score.py) -- leakage gate + reference detector library.
-- [`src/lakebench/spark/scripts/score_financial_reference.py`](../src/lakebench/spark/scripts/score_financial_reference.py) -- Spark driver for both, called by `lakebench financial score`.
+- [`src/lakebench/spark/scripts/score_financial.py`](../src/lakebench/spark/scripts/score_financial.py) -- recall and precision, run inline by `lakebench run` and by `lakebench financial score`.
+- [`src/lakebench/aml/reference_score.py`](../src/lakebench/aml/reference_score.py) -- band leakage gate library.
+- [`src/lakebench/aml/fidelity_gate.py`](../src/lakebench/aml/fidelity_gate.py) -- pre-registered fidelity gate and reference model.
+- [`src/lakebench/spark/scripts/score_financial_reference.py`](../src/lakebench/spark/scripts/score_financial_reference.py) -- Spark driver for both gates, called by `lakebench financial reference-score`.
 - [`docs/financial-benchmark-baselines.md`](financial-benchmark-baselines.md) -- test-cluster wall-clock, recall and time-to-detect numbers, populated per release (pending the v1.6 frozen-generator runs).

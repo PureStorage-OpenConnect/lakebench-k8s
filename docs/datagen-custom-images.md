@@ -14,7 +14,7 @@ Common reasons to build your own datagen image:
 
 - **Add columns** to the schema (e.g., geographic coordinates, product SKUs,
   additional demographic fields).
-- **Change distributions** -- adjust the Zipf alpha for customer IDs, modify
+- **Change distributions** -- adjust the Zipf parameters for customer IDs, modify
   interaction type weights, or tune the log-normal parameters for transaction
   amounts.
 - **Use a different data domain** -- replace the Customer360 schema entirely
@@ -41,7 +41,7 @@ Common reasons to build your own datagen image:
 From the repository root, build and push the image:
 
 ```bash
-cd lakebench/datagen
+cd datagen_rs
 
 # Build the image
 podman build -t your-registry/lb-datagen:custom .
@@ -67,147 +67,77 @@ Setting `pull_policy: Always` is important after pushing a new image tag. Withou
 it, Kubernetes may use a cached version of the image if the tag already existed
 on the node. Prefer a new, immutable tag per build over reusing one.
 
-## Anatomy of generate.py
+A custom image is not the frozen AML generator (`datagen-v2-rs-0.3`, image
+tag `7c24641`). The run records the image reference you configured, and AML
+results from a modified generator are not comparable with results from the
+frozen one.
 
-The generator script is a single file (`datagen/generate.py`) with a
-straightforward structure. Understanding these sections helps you make targeted
-modifications.
+## Anatomy of `datagen_rs/`
 
-### Constants (lines 42-122)
+The generator is a Rust crate. The files you are most likely to change:
 
-Global lists and dictionaries that define the data domain:
+| File | Contents |
+|---|---|
+| `src/bin/generate.rs` | The `generate` binary: argument parsing, file-ID assignment per node (file `N` goes to node `N % total_nodes`), the rayon thread pool and the upload loop, for both schemas |
+| `src/schema.rs` | Arrow schemas: `customer360_schema()` (41 fields) and `pacs008_schema()` |
+| `src/customer360.rs` | `build_batch()`, which builds one Customer360 file: sessions, customer IDs, conditional nulls, dirty-data passes |
+| `src/customer360_realism.rs` | Customer360 value pools and weights (`INTERACTION_WEIGHTS`, `DATA_QUALITY_WEIGHTS`, `DATA_SOURCE_WEIGHTS`, `DIRTY_RATE_BY_SOURCE`, `CITIES`, `DIRTY_CITY_VARIANTS`, `DIRTY_STATE_VARIANTS`), the loyalty lookup (60% members, 70/20/10 tier split) and the truncated-Zipf `CustomerIdSampler` |
+| `src/writer.rs` | Parquet writer properties, `DG_COMPRESSION`, and the per-codec bytes-per-row tables that size files |
+| `src/model.rs`, `src/world.rs`, `src/typology.rs`, `src/party.rs` | The financial (AML) world model, planted typologies, party and account tables, and `MODEL_VERSION` |
+| `entrypoint.py` | Container entrypoint: maps the Kubernetes Job's arguments onto the binary, sizes threads from the pod CPU and memory limit, reads the node ID from `JOB_COMPLETION_INDEX` |
 
-- `INTERACTION_TYPES` / `INTERACTION_WEIGHTS` -- event types and their
-  probability weights.
-- `PRODUCT_CATEGORIES`, `CURRENCIES`, `CHANNELS`, `DEVICE_TYPES`, `BROWSERS` --
-  categorical value pools.
-- `LOYALTY_TIERS` -- loyalty program tiers (`bronze`, `silver`, `gold`).
-- `DATA_QUALITY_FLAGS` / `DATA_QUALITY_WEIGHTS` -- quality flag distribution.
-- `DATA_SOURCES` / `DATA_SOURCE_WEIGHTS` -- data source origin distribution.
-- `CITIES` -- city/state pairs with intentional inconsistencies.
-- `DIRTY_CITY_VARIANTS` / `DIRTY_STATE_VARIANTS` -- corruption dictionaries for
-  dirty data injection.
+**To add a Customer360 column:** add the field to `customer360_schema()` in
+`src/schema.rs`, build the column in `build_batch()` in `src/customer360.rs`,
+and update the schema tests in `src/schema.rs`.
 
-To add new categorical columns, add a new list here and reference it in the
-data generation function.
+**To change a distribution:** edit the weight arrays in
+`src/customer360_realism.rs`, or the transaction-amount log-normal parameters
+(mu 4.3, sigma 1.2) in `src/customer360.rs`.
 
-### Config Class (lines 129-181)
-
-The `Config` class holds all generation parameters: target size, worker count,
-seed, file size, S3 credentials, timestamp range, customer ID range, dirty data
-ratio, and derived values like rows per file. S3 credentials are read from
-environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-`S3_ENDPOINT`).
-
-### Loyalty Lookup (lines 212-236)
-
-`build_loyalty_lookup()` pre-generates a NumPy array that maps every customer ID
-to a deterministic (is_member, tier) tuple, so the same customer
-always has the same loyalty attributes. Modify the membership ratio (default
-60%) or tier split (default 70/20/10) here.
-
-### Generator Functions (lines 243-368)
-
-Utility functions for generating individual column types:
-
-- `generate_uuids()` -- UUID v4 strings
-- `generate_timestamps()` -- random timestamps within the configured date range
-- `generate_emails()` -- email addresses with optional `.DUPLICATE` markers and
-  corruption modes
-- `generate_phones()` -- phone numbers in mixed formats with corruption
-- `generate_ips()` -- random IPv4 addresses
-- `generate_user_agents()` -- synthetic browser user-agent strings
-- `generate_fingerprints()` -- 64-character hex session fingerprints
-- `generate_payloads()` -- random hex payloads (compression anchor)
-- `generate_categorical()` -- uniform random selection from a list
-- `generate_weighted_categorical()` -- weighted random selection
-
-### generate_file_data() (lines 408-650)
-
-This is the core function. It generates all 41 columns for a single Parquet
-file, applying all seven realism features (Zipf customer IDs, weighted
-interaction types, conditional nulls, dirty data corruption, channel-device
-coherence, log-normal transaction amounts, customer-consistent loyalty). It
-returns a PyArrow Table with an explicit schema.
-
-**To add a new column:**
-
-1. Generate the column data (add a new array or list to the `data` dictionary).
-2. Add the corresponding field to the `pa.schema([...])` definition at the
-   bottom of the function.
-
-**To change a distribution:** Modify the relevant NumPy call. For example, to
-change the Zipf alpha from 1.5 to 2.0, update the `rng.zipf(1.5, size=rows)`
-call.
-
-### Continuous Mode (lines 688-909)
-
-A multiprocessing pipeline with 8 generator processes and 2 uploader threads,
-connected via a bounded queue. Used for large-scale generation (100+ GB) where
-sustained throughput matters. You generally do not need to modify this section
-unless you are changing the upload behavior.
-
-### main() (lines 938-1107)
-
-CLI entry point with `argparse`. Handles argument parsing, node ID resolution
-from `JOB_COMPLETION_INDEX` (Kubernetes Indexed Jobs), checkpoint
-loading/saving, and orchestration of either batch or continuous mode.
+The binary always writes the whole corpus up front; there is no separate
+continuous-mode path and no checkpoint-resume.
 
 ## Testing Locally
 
-Test your changes locally before building a container image. The generator can
-write to a local directory or to an S3-compatible endpoint:
+Run the tests, then generate a small corpus into a local directory.
+`DG_LOCAL_DIR` makes the binary write `<dir>/<bucket>/<prefix>/<key>` on the
+local filesystem instead of S3, so no credentials are needed:
 
 ```bash
-# Write to local S3 (e.g., MinIO running locally)
-export AWS_ACCESS_KEY_ID=minioadmin
-export AWS_SECRET_ACCESS_KEY=minioadmin
-export S3_ENDPOINT=http://localhost:9000
+cd datagen_rs
+cargo test --release --locked
 
-python generate.py \
-  --target-tb 0.001 \
-  --workers 1 \
+DG_LOCAL_DIR=/tmp/lb-datagen cargo run --release --bin generate -- \
+  --schema customer360 \
   --bucket test-bronze \
-  --mode batch \
-  --seed 42
+  --seed 42 \
+  --scale 0.01 \
+  --target-tb 0.0001 \
+  --threads 1
 ```
 
-This generates a minimal dataset (~1 GB) to verify schema changes, column
+This writes a single 64 MB file, enough to verify schema changes, column
 types, and corruption patterns. Inspect the output with PyArrow:
 
 ```python
 import pyarrow.parquet as pq
 
-table = pq.read_table("/path/to/output/part-000000.parquet")
+table = pq.read_table("/tmp/lb-datagen/test-bronze/customer/interactions/part-000000.parquet")
 print(table.schema)
 print(table.to_pandas().head())
 ```
 
 ## Dockerfile Reference
 
-The Dockerfile is minimal:
+`datagen_rs/Dockerfile` is a two-stage build. Stage one compiles the
+`generate` binary in `rust:1.98.1-bookworm` (`cargo build --release --locked
+--bin generate`). Stage two is `python:3.13-slim` with `boto3`, the binary at
+`/app/datagen_rs` and `entrypoint.py`, which is the image entrypoint. S3
+credentials come from `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and
+`S3_ENDPOINT` in the pod environment.
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY generate.py .
-ENTRYPOINT ["python", "generate.py"]
-```
-
-Dependencies (`requirements.txt`):
-
-```
-pyarrow>=14.0.0
-boto3>=1.34.0
-numpy>=1.26.0
-tqdm>=4.66.0
-```
-
-If your custom generator needs additional libraries (e.g., `faker` for
-realistic names, `geopandas` for geographic data), add them to
-`requirements.txt` before building.
+Add Rust dependencies to `Cargo.toml` (and commit the updated `Cargo.lock`,
+since the build uses `--locked`).
 
 ## Registry Options
 

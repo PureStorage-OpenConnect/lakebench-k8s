@@ -12,7 +12,7 @@ infrastructure, data architecture, and observability.
 |   Prometheus  |  Grafana Dashboards  |  Local JSON Metrics + Reports  |
 +-----------------------------------------------------------------------+
 |                      Layer 2: Data Architecture                       |
-|  Catalog: Hive / Polaris  |  Table Format: Iceberg  |  Query: Trino  |
+| Catalog: Hive / Polaris | Format: Iceberg / Delta | Query: Trino etc. |
 |                     Processing: Apache Spark                          |
 +-----------------------------------------------------------------------+
 |                        Layer 1: Platform                              |
@@ -28,8 +28,10 @@ PostgreSQL stores catalog metadata.
 
 **Layer 2 (Data Architecture)** contains the lakehouse components. A catalog
 service (Hive Metastore or Apache Polaris) manages table metadata. Apache
-Iceberg provides the table format. Spark processes data through the medallion
-pipeline. Trino executes analytical queries for benchmarking.
+Iceberg or Delta Lake provides the table format (Delta runs only with Hive).
+Spark processes data through the medallion pipeline. A query engine (Trino,
+Spark Thrift Server or DuckDB; DuckDB with Iceberg only) executes analytical
+queries for benchmarking.
 
 **Layer 3 (Observability)** captures performance data. Prometheus scrapes
 Spark and Trino metrics. Grafana renders dashboards. The CLI also collects
@@ -66,9 +68,10 @@ Spark job reads from silver, computes business metrics (daily revenue,
 engagement, churn indicators), and writes the executive dashboard Iceberg table
 (`customer_executive_dashboard`).
 
-After the pipeline completes, Lakebench runs an 8-query benchmark via the
-active query engine (Trino, Spark Thrift, or DuckDB) against the gold layer
-and computes Queries per Hour (QpH).
+After the pipeline completes, Lakebench runs the workload's benchmark query
+set via the active query engine (Trino, Spark Thrift, or DuckDB) against the
+silver and gold tables and computes Queries per Hour (QpH): 8 queries for
+Customer 360, 12 for AML (8 analytical plus 4 investigator queries).
 
 ### Multi-Cycle Batch (v1.1.0)
 
@@ -77,7 +80,7 @@ table growth. Cycle 1 creates tables; cycles 2+ append incrementally.
 Iceberg compaction and table health tracking run between cycles. See
 [Configuration -- Multi-Cycle Batch](configuration.md#multi-cycle-batch).
 
-### Sustained Mode
+### Continuous Mode
 
 In addition to batch processing, Lakebench supports a continuous
 pipeline using Spark Structured Streaming:
@@ -86,9 +89,13 @@ pipeline using Spark Structured Streaming:
 - `silver-stream` incrementally transforms bronze to silver
 - `gold-refresh` periodically recomputes gold aggregations
 
-All three streaming jobs run concurrently alongside the datagen process. The
-streaming run duration, trigger intervals, and checkpoint locations are
-configurable.
+All three continuous jobs run concurrently. Datagen writes a fixed corpus
+(it does not generate at a paced rate, although the streams can start before
+it finishes), and `bronze-ingest` takes it at a Lakebench-imposed trickle rate (`max_files_per_trigger` files per trigger), so continuous
+intake figures are bounded by that cap. The continuous run duration, trigger
+intervals, and checkpoint locations are configurable. AML continuous runs
+detection rules W2, W3, W4 and W17 each tick and records W1, W5, W6, W7 and
+W8 as not run.
 
 ## Component Topology
 
@@ -154,9 +161,12 @@ register and serve Iceberg tables identically.
 ### Spark
 
 Spark jobs are submitted as `SparkApplication` custom resources managed by the
-Kubeflow Spark Operator (v2.x). The operator uses a mutating admission webhook
-to inject volumes (scripts ConfigMap, scratch PVCs, Ivy cache) into driver and
-executor pods.
+Kubeflow Spark Operator (v2.x). Lakebench does not rely on the operator's
+webhook for volumes, because it does not inject them from the
+SparkApplication spec. The scripts ConfigMap and emptyDir volumes are
+declared in driver and executor pod templates, and scratch PVCs are attached
+through `spark.kubernetes.*.volumes.persistentVolumeClaim.*` conf properties.
+See [component-spark.md](component-spark.md#spark-operator).
 
 Pipeline scripts are packaged into a `lakebench-spark-scripts` ConfigMap and
 mounted at `/opt/spark/scripts` in every Spark pod. The driver and executor
@@ -181,8 +191,8 @@ them causes OOM kills or disk-full failures at scale.
 
 | Stage | Cores | Memory | Overhead | Scratch PVC |
 |---|---|---|---|---|
-| `bronze-verify` | 2 | 4g | 2g | 50Gi (c360) / 500Gi (financial) |
-| `silver-build` | 4 | 48g | 12g | 150Gi |
+| `bronze-verify` | 2 | 4g (8g financial) | 2g (12g financial) | 50Gi (c360) / 500Gi (financial) |
+| `silver-build` | 4 | 48g | 12g | 300Gi |
 | `gold-finalize` | 4 | 32g | 8g | 100Gi |
 
 The financial workload's bronze-verify trips a CTAS fallback in
@@ -287,13 +297,23 @@ The deployment engine creates resources in a strict dependency order:
 
 1. **Namespace** -- creates the target namespace if it does not exist
 2. **Secrets** -- S3 credentials and PostgreSQL credentials
-3. **Scratch StorageClass** -- Portworx repl=1 class for Spark PVCs (if enabled)
-4. **PostgreSQL** -- StatefulSet with persistent volume
-5. **Catalog** -- Hive Metastore or Polaris (the non-selected one is skipped)
-6. **Trino** -- coordinator Deployment + worker StatefulSet
-7. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
-8. **Prometheus** -- metrics scraping (if observability is enabled)
-9. **Grafana** -- dashboards (if observability is enabled)
+3. **S3 buckets** -- creates the deployment's buckets
+4. **Scratch StorageClass check** -- verifies the scratch class exists (if
+   scratch is enabled); it never creates it. A cluster admin installs it once
+   with `lakebench admin install-scratch-storage-class`
+5. **PostgreSQL** -- StatefulSet with persistent volume
+6. **Hive Metastore** -- skipped unless the catalog is Hive
+7. **Polaris** -- skipped unless the catalog is Polaris
+8. **Spark RBAC** -- ServiceAccount, Role, RoleBinding (plus SCC on OpenShift)
+9. **Unity Catalog** -- skipped unless the catalog is Unity (not a supported
+   combination)
+10. **Spark Operator** -- verifies the shared operator (or installs a missing
+    one when `platform.compute.spark.operator.install: true`) and adds the
+    namespace to its watch list under the cluster lease
+11. **Trino** -- coordinator Deployment + worker StatefulSet (if selected)
+12. **Spark Thrift Server** -- if selected
+13. **DuckDB** -- if selected
+14. **Observability** -- one step for Prometheus and Grafana (if enabled)
 
 Destruction follows the reverse order: an ownership check, Spark jobs and pods
 first, then table removal from the catalog (metadata only, no table

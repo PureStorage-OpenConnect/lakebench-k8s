@@ -5,7 +5,7 @@ Lakebench is a CLI tool for deploying and benchmarking lakehouse architectures o
 ## Getting Started
 
 - [Getting Started](getting-started.md) -- Prerequisites, installation, and first deployment
-- [Recipes](recipes.md) -- All 8 supported component combinations with decision guidance
+- [Recipes](recipes.md) -- All 11 recipes (plus the `default` alias) with decision guidance
 - [Polaris Quickstart](quickstart-polaris.md) -- Switch from Hive Metastore to Apache Polaris
 
 ## Core Workflow
