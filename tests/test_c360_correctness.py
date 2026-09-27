@@ -39,6 +39,13 @@ def test_gating_set_fails_the_run_when_approved(monkeypatch):
     ok = c3.verdict([c3._check("x", "invariant", True, 0, 0)])
     ok["facts_present"] = True
     assert c3.gating_problems(ok) == []
+    # A gated check that did not run, or is missing, fails closed.
+    skipped = c3.verdict([c3._check("x", "invariant", None, None, 0)])
+    skipped["facts_present"] = True
+    assert "unchecked" in c3.gating_problems(skipped)[0]
+    absent = dict(c3.verdict([]), facts_present=True)
+    assert "not evaluated" in c3.gating_problems(absent)[0]
+    assert "not evaluated" in c3.gating_problems(absent, only=("benchmark_rows_",))[0]
     # Fails closed: no record, or no facts, is not a pass.
     assert c3.gating_problems(None)
     assert c3.gating_problems({"facts_present": False, "reason": "boom"})
@@ -319,6 +326,23 @@ def test_c360_bronze_path(monkeypatch):
     # Cycle 0 of a multi-cycle run never reads another run's cycle files.
     monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
     assert c360_bronze_path("s3a://b/", appending=False) == base + "part-[0-9]*.parquet"
+
+
+def test_c360_bronze_run_path(monkeypatch):
+    sys.path.insert(0, str(SCRIPTS))
+    try:
+        from common import c360_bronze_run_path
+    finally:
+        sys.path.remove(str(SCRIPTS))
+    base = "s3a://b/customer/interactions/"
+    monkeypatch.delenv("LB_BRONZE_CYCLE", raising=False)
+    assert c360_bronze_run_path("s3a://b/") == base
+    monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
+    assert c360_bronze_run_path("s3a://b/") == base + "part-[0-9]*.parquet"
+    monkeypatch.setenv("LB_BRONZE_CYCLE", "2")
+    assert c360_bronze_run_path("s3a://b/") == (
+        base + "{part-[0-9]*.parquet,part-c001-*.parquet,part-c002-*.parquet}"
+    )
 
 
 def test_cycle_index_is_passed_to_every_multi_cycle_job():

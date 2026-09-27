@@ -814,12 +814,23 @@ def verdict(checks: list[dict[str, Any]], reason: str = "") -> dict[str, Any]:
 def gating_problems(
     record: dict[str, Any] | None, only: tuple[str, ...] | None = None
 ) -> list[str]:
-    """Reasons the run must fail: a failed check named in ``GATING_CHECKS``,
-    or, when any check gates, no record or no facts to judge them by.
-    ``only`` limits the answer to check ids with those prefixes (the
-    benchmark shapes, judged after the benchmark). Empty while
-    ``GATING_CHECKS`` is empty (D6)."""
-    gating = {g for g in GATING_CHECKS if only is None or g.startswith(only)}
+    """Reasons the run must fail under ``GATING_CHECKS``. Empty while it is
+    empty (D6).
+
+    Fails closed: a gated check that failed, did not run (``unchecked``) or
+    is absent from the record is a problem, and so is a record with no
+    facts. ``only`` limits the answer to check ids with those prefixes (the
+    benchmark shapes, judged after the benchmark ran); the pipeline pass
+    leaves those ids to it. Gate only checks that apply at every scale the
+    run uses: thin corpora leave some statistical and shape checks
+    unchecked.
+    """
+    gating = {
+        g
+        for g in GATING_CHECKS
+        if (only is None and not g.startswith("benchmark_rows_"))
+        or (only is not None and g.startswith(only))
+    }
     if not gating:
         return []
     if record is None or not record.get("facts_present"):
@@ -827,12 +838,19 @@ def gating_problems(
             return []  # already reported when the pipeline was judged
         why = (record or {}).get("reason") or "the check did not run"
         return [f"Customer 360 correctness gate: no expected-result facts ({why})."]
-    return [
-        f"Customer 360 correctness gate: {c['id']} failed (observed {c['observed']}, "
-        f"expected {c['expected']}, tolerance {c['tolerance']})."
-        for c in record.get("checks") or []
-        if c["id"] in gating and c["status"] == "fail"
-    ]
+    by_id = {c["id"]: c for c in record.get("checks") or []}
+    out = []
+    for gid in sorted(gating):
+        c = by_id.get(gid)
+        if c is None:
+            out.append(f"Customer 360 correctness gate: {gid} was not evaluated.")
+        elif c["status"] != "pass":
+            out.append(
+                f"Customer 360 correctness gate: {gid} {c['status']} (observed "
+                f"{c['observed']}, expected {c['expected']}, tolerance {c['tolerance']}; "
+                f"{c['detail']})."
+            )
+    return out
 
 
 def evaluate_run(

@@ -22,6 +22,7 @@ from common import (
     c360_bronze_path,
     env,
     log,
+    path_size_gb,
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
@@ -67,25 +68,8 @@ _COUNTED: dict[str, int] = {}
 
 
 def get_path_size_gb(spark, path: str) -> float:
-    """Get size of a path in GB using Hadoop FileSystem API."""
-    try:
-        sc = spark.sparkContext
-        hadoop_conf = sc._jsc.hadoopConfiguration()
-        uri = sc._jvm.java.net.URI(path)
-        fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(uri, hadoop_conf)
-        hadoop_path = sc._jvm.org.apache.hadoop.fs.Path(path)
-
-        if any(ch in path for ch in "*?["):
-            # One cycle's files (common.c360_bronze_path): sum the matches.
-            matches = fs.globStatus(hadoop_path) or []
-            return sum(st.getLen() for st in matches if st.isFile()) / (1024**3)
-        if fs.exists(hadoop_path):
-            status = fs.getContentSummary(hadoop_path)
-            return status.getLength() / (1024**3)
-        return 0.0
-    except Exception as e:
-        log(f"Warning: Could not get path size for {path}: {e}")
-        return 0.0
+    """Size of a path or glob in GB (common.path_size_gb)."""
+    return path_size_gb(spark, path)
 
 
 def profile_bronze_data(spark, txn_path: str) -> DataProfile:

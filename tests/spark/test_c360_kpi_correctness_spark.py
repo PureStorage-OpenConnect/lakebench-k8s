@@ -296,3 +296,43 @@ def test_appending_cycle_reads_only_its_own_files(spark, tmp_path, monkeypatch):
     # A single-cycle run reads the whole prefix, as before.
     monkeypatch.delenv("LB_BRONZE_CYCLE")
     assert spark.read.parquet(c360_bronze_path(uri, appending=False)).count() == 14
+
+
+def test_globs_size_and_bronze_verify_scope(spark, tmp_path, monkeypatch):
+    """Silver sizes the glob it reads (a [0-9] class is not a legal
+    java.net.URI), and bronze-verify counts exactly this run's cycles."""
+    from c360_stream_scenarios import bronze_df
+    from common import c360_bronze_path, c360_bronze_run_path, path_size_gb
+
+    base = tmp_path / "customer" / "interactions"
+    base.mkdir(parents=True)
+    sizes = {}
+    for name, n, start in (
+        ("part-000000.parquet", 10, 0),
+        ("part-c001-000000.parquet", 4, 100),
+        ("part-c002-000000.parquet", 3, 200),  # left by an earlier, longer run
+    ):
+        out = tmp_path / "w" / name
+        bronze_df(spark, n, start=start).coalesce(1).write.parquet(str(out))
+        f = next(out.glob("part-*.parquet"))
+        sizes[name] = f.stat().st_size
+        f.rename(base / name)
+    uri = f"file://{tmp_path}/"
+    gib = 1024**3
+
+    monkeypatch.setenv("LB_BRONZE_CYCLE", "0")
+    assert path_size_gb(spark, c360_bronze_path(uri)) * gib == pytest.approx(
+        sizes["part-000000.parquet"]
+    )
+    assert spark.read.parquet(c360_bronze_run_path(uri)).count() == 10
+    monkeypatch.setenv("LB_BRONZE_CYCLE", "1")
+    assert path_size_gb(spark, c360_bronze_path(uri, appending=True)) * gib == pytest.approx(
+        sizes["part-c001-000000.parquet"]
+    )
+    # Cycles 0 and 1, not the stale cycle-2 file.
+    assert spark.read.parquet(c360_bronze_run_path(uri)).count() == 14
+    assert path_size_gb(spark, c360_bronze_run_path(uri)) * gib == pytest.approx(
+        sizes["part-000000.parquet"] + sizes["part-c001-000000.parquet"]
+    )
+    monkeypatch.delenv("LB_BRONZE_CYCLE")
+    assert spark.read.parquet(c360_bronze_run_path(uri)).count() == 17

@@ -147,12 +147,22 @@ def ensure_partition_transform(spark, fq_table, old, new):
 
 
 def path_size_gb(spark, uri):
-    """Total bytes under a Hadoop-FS path, in GiB; 0.0 if it cannot be measured."""
+    """Total bytes under a Hadoop-FS path or glob, in GiB; 0.0 if it cannot be
+    measured.
+
+    The file system comes from ``Path.getFileSystem``: ``java.net.URI(uri)``
+    rejects glob characters such as ``[0-9]`` (common.c360_bronze_path).
+    """
     try:
         jvm = spark._jvm
         hconf = spark._jsc.hadoopConfiguration()
-        fs = jvm.org.apache.hadoop.fs.FileSystem.get(jvm.java.net.URI(uri), hconf)
         path = jvm.org.apache.hadoop.fs.Path(uri)
+        fs = path.getFileSystem(hconf)
+        if any(ch in uri for ch in "*?[{"):
+            total = 0
+            for st in fs.globStatus(path) or []:
+                total += fs.getContentSummary(st.getPath()).getLength()
+            return total / (1024**3)
         if not fs.exists(path):
             return 0.0
         return fs.getContentSummary(path).getLength() / (1024**3)
@@ -766,6 +776,24 @@ def c360_bronze_path(bronze_uri, appending=False):
     if appending:
         return base + f"part-c{n:03d}-*.parquet"
     return base
+
+
+def c360_bronze_run_path(bronze_uri):
+    """Every bronze file this run's cycles wrote, for bronze-verify.
+
+    The whole prefix for a single-cycle run. In a multi-cycle run at cycle n,
+    the cycle-0 names plus ``part-c001`` .. ``part-c{n:03}``: the files silver
+    holds after cycle n (``c360_bronze_path``), so bronze-verify counts what
+    silver must hold and not files an earlier run left in the bucket.
+    """
+    base = bronze_uri + "customer/interactions/"
+    cycle = os.environ.get("LB_BRONZE_CYCLE", "").strip()
+    if not cycle:
+        return base
+    names = ["part-[0-9]*.parquet"] + [f"part-c{i:03d}-*.parquet" for i in range(1, int(cycle) + 1)]
+    if len(names) == 1:
+        return base + names[0]
+    return base + "{" + ",".join(names) + "}"
 
 
 def apply_silver_transformations_anchored(df_bronze, anchor_date):
