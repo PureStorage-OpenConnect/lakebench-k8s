@@ -83,6 +83,27 @@ def _recipe(snapshot_like: Mapping[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _batch_retention(cfg: Any) -> str | None:
+    try:
+        from lakebench.cli._sustained import resolve_maintenance_retention
+
+        return str(resolve_maintenance_retention(cfg))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _stackable_hive(cfg: Any) -> str:
+    """The Hive the Stackable operator runs: images.hive is only the
+    HiveCluster productVersion, and the image is resolved by the operator
+    from it and the SDP release (oci.stackable.tech/sdp/hive:<v>-stackable<sdp>).
+    Derived from the configured versions, not read from the pod."""
+    from lakebench.deploy.engine import image_tag
+
+    version = image_tag(cfg.images.hive)
+    sdp = cfg.architecture.catalog.hive.operator.version
+    return f"oci.stackable.tech/sdp/hive:{version}-stackable{sdp} (derived, not read from the pod)"
+
+
 def experiment_inputs(cfg: Any) -> dict[str, Any]:
     """The config-derived half of the experiment block."""
     arch = cfg.architecture
@@ -143,7 +164,7 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
 
     catalog = arch.catalog.type.value
     catalog_version = {
-        "hive": images.hive,
+        "hive": _stackable_hive(cfg),
         "polaris": images.polaris,
         "unity": images.unity,
     }.get(catalog)
@@ -190,6 +211,17 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
         "maintenance_config": {
             "pre_benchmark_maintenance": arch.pipeline.pre_benchmark_maintenance,
             "compaction_enabled": sustained.compaction_enabled,
+            # How aggressive the maintenance is, when it runs: an execution
+            # condition beside what ran.
+            "settings": (
+                {
+                    "retention_threshold": sustained.retention_threshold,
+                    "retention_interval": sustained.retention_interval,
+                    "compaction_interval": sustained.compaction_interval,
+                }
+                if arch.pipeline.mode.value in ("sustained", "continuous")
+                else {"retention_threshold": _batch_retention(cfg)}
+            ),
         },
         "mode": arch.pipeline.mode.value,
         "config_limits": {
@@ -231,16 +263,26 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
             (j.executor_count for j in metrics.jobs if j.job_type == job_type and j.executor_count),
             None,
         )
-        out.append(
-            {
-                "job_type": job_type,
-                "scale_derived": uncapped,
-                "cap": cap,
-                "override": override,
-                "cap_hit": override is None and uncapped > cap,
-                "observed": observed,
-            }
-        )
+        streaming = [s for s in metrics.streaming if s.job_type == job_type]
+        if observed is None and streaming:
+            # What the stream actually requested, after the concurrent budget.
+            observed = next(
+                (s.requested_executors for s in streaming if s.requested_executors), None
+            )
+        wanted = override if override is not None else min(uncapped, cap)
+        entry = {
+            "job_type": job_type,
+            "scale_derived": uncapped,
+            "cap": cap,
+            "override": override,
+            "cap_hit": override is None and uncapped > cap,
+            "observed": observed,
+        }
+        if streaming and override is None and observed is not None and observed < wanted:
+            # Continuous streams share a concurrent executor budget
+            # (job.py): the cluster granted fewer than the profile asks.
+            entry["budget_cap"] = {"requested": wanted, "granted": observed}
+        out.append(entry)
     return out
 
 
@@ -298,6 +340,17 @@ def _caps_bound(limits: Mapping[str, Any], rules: Mapping[str, Any]) -> list[str
         for x in limits.get("executors") or []
         if x.get("cap_hit")
     ]
+    out += [
+        f"{x['job_type']}: concurrent executor budget granted {x['budget_cap']['granted']} "
+        f"of {x['budget_cap']['requested']}"
+        for x in limits.get("executors") or []
+        if x.get("budget_cap")
+    ]
+    if limits.get("tm_alerts_over_capacity"):
+        out.append(
+            f"TM max_alerts_per_customer ({limits.get('tm_max_alerts_per_customer')}): "
+            f"{limits['tm_alerts_over_capacity']} alerts over capacity"
+        )
     out += [f"auto-sizing: {c}" for c in limits.get("autosize_cuts") or []]
     if limits.get("maintenance_stopped"):
         out.append("pre-benchmark maintenance stopped on its time budget")
@@ -330,6 +383,8 @@ def _results(metrics: Any, mode: str) -> dict[str, Any]:
         "fingerprints": fps,
     }
     if mode in ("sustained", "continuous"):
+        # Unchecked by design, not by accident: see unchecked_by_design.
+        out["by_design"] = True
         out["not_checked"] = (
             "continuous: in-stream benchmark rounds read tables still being written, "
             "so their results are not expected to match another run's"
@@ -351,12 +406,55 @@ def _datagen(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any]:
         reason = "no datagen fleet record for this run (data generated elsewhere or earlier)"
     else:
         reason = "the datagen fleet record carries no pod image id"
-    return {
+    out: dict[str, Any] = {
         "configured_image": (inputs.get("corpus") or {}).get("generator_image"),
         "pod_image": image,
         "digest": digest,
         **({"digest_reason": reason} if digest is None else {}),
+        # Corpus parameters the datagen pods ran with (their container args),
+        # when the fleet record carries them.
+        "observed": bool(fleet) and any(fleet.get(k) is not None for k in ("seed", "scale")),
+        "seed": fleet.get("seed"),
+        "scale": fleet.get("scale"),
+        "data_quality": fleet.get("data_quality"),
+        "mixed_params": list(fleet.get("mixed_params") or []),
     }
+    return out
+
+
+def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[dict, list[str]]:
+    """The corpus as generated: the config's values replaced by what the
+    datagen pods ran with where the fleet record says, and the problems that
+    make it not one known corpus (config and pods disagree, pods disagree)."""
+    out = dict(corpus)
+    problems: list[str] = []
+    if dg.get("data_quality") == "mixed":
+        problems.append(
+            "datagen pods did not write one corpus (mixed: "
+            + ", ".join(dg.get("mixed_params") or ["?"])
+            + ")"
+        )
+    if dg.get("pod_image") and "," in str(dg["pod_image"]):
+        problems.append(f"datagen pods ran different images ({dg['pod_image']})")
+    for key in ("seed", "scale"):
+        seen = dg.get(key)
+        if seen is None:
+            continue
+        declared = corpus.get(key)
+        if declared is not None and float(declared) != float(seen):
+            problems.append(f"config {key} {declared!r} but the datagen pods ran {seen!r}")
+        out[key] = int(seen) if key == "seed" else float(seen)
+    if dg.get("pod_image") and "," not in str(dg["pod_image"]):
+        if corpus.get("generator_image") and dg["pod_image"] != corpus["generator_image"]:
+            problems.append(
+                f"config generator image {corpus['generator_image']!r} but the pods ran "
+                f"{dg['pod_image']!r}"
+            )
+        out["generator_image"] = dg["pod_image"]
+    out["observed"] = bool(dg.get("observed"))
+    if not out["observed"]:
+        out["observed_note"] = "declared by the config, not observed from the datagen pods"
+    return out, problems
 
 
 #: (workload, recipe, mode) combinations validated end to end on the
@@ -418,11 +516,37 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     sampling = (metrics.financial_scoring or {}).get("sampling")
     if sampling:
         limits["scoring_sampling"] = sampling
+    tm_over = 0
+    for j in metrics.jobs:
+        ops = getattr(j, "tm_ops", None) or {}
+        tm_over = max(tm_over, int(ops.get("alerts_over_capacity") or 0))
+    if tm_over:
+        limits["tm_alerts_over_capacity"] = tm_over
     rules = _rules(metrics)
     limits["bound"] = _caps_bound(limits, rules)
     from lakebench.metrics.maintenance_policy import effective_maintenance
 
-    arch = inputs.get("architecture") or {}
+    arch = dict(inputs.get("architecture") or {})
+    local = bool(snapshot.get("local"))
+    if local:
+        # --local runs DuckDB against the tables in local object storage,
+        # whatever query engine and catalog the config names.
+        arch.update(
+            {
+                "configured_recipe": arch.get("recipe"),
+                "catalog": {"type": "none", "version": "local: tables read from storage"},
+                "query_engine": {"type": "duckdb", "version": "local container"},
+                "query_access_path": "direct_storage",
+            }
+        )
+        arch["recipe"] = _recipe(
+            {
+                "catalog": "none",
+                "table_format": (arch.get("table_format") or {}).get("type"),
+                "pipeline_engine": (arch.get("pipeline_engine") or {}).get("type"),
+                "query_engine": "duckdb",
+            }
+        )
     mcfg = inputs.get("maintenance_config") or {}
     effective = effective_maintenance(
         metrics.maintenance_policy_id,
@@ -432,17 +556,24 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
         pre_benchmark_maintenance=mcfg.get("pre_benchmark_maintenance"),
         compaction_enabled=mcfg.get("compaction_enabled"),
         stopped=getattr(pb, "maintenance_stopped", False) if mode == "batch" else False,
-        outcomes=getattr(metrics, "maintenance_outcomes", None),
+        outcomes=[] if local else getattr(metrics, "maintenance_outcomes", None),
     )
+    dg = _datagen(metrics, inputs)
+    corpus, corpus_problems = _observed_corpus(dict(inputs.get("corpus") or {}), dg)
+    corpus["datagen"] = dg
+    if corpus_problems:
+        corpus["problems"] = corpus_problems
     return {
         "schema": EXPERIMENT_SCHEMA,
+        "system": "local" if local else "cluster",
         "support": support_state(
             (inputs.get("workload") or {}).get("name"), arch.get("recipe"), mode
         ),
         "repetitions": _repetitions(metrics),
         "workload": dict(inputs.get("workload") or {}),
-        "corpus": {**dict(inputs.get("corpus") or {}), "datagen": _datagen(metrics, inputs)},
-        "architecture": dict(inputs.get("architecture") or {}),
+        "corpus": corpus,
+        "architecture": arch,
+        "maintenance_settings": dict(mcfg.get("settings") or {}),
         "mode": mode,
         "maintenance_policy_id": metrics.maintenance_policy_id,
         "effective_maintenance": effective,
@@ -467,6 +598,9 @@ def planned_experiment(cfg: Any) -> dict[str, Any]:
         "workload": inputs["workload"],
         "corpus": inputs["corpus"],
         "architecture": {"query_access_path": arch.get("query_access_path")},
+        "system": "cluster",
+        "limits": {"benchmark_iterations": inputs["config_limits"].get("benchmark_iterations")},
+        "maintenance_settings": dict(mcfg.get("settings") or {}),
         "mode": mode,
         "effective_maintenance": effective_maintenance(
             MAINTENANCE_POLICY_ID,
@@ -502,15 +636,54 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
         "mode": exp.get("mode"),
         "generator digest": dg.get("digest"),
         # Execution conditions (CONDITION_KEYS): a difference makes a pair
-        # comparable but not like-for-like (DESIGN 6.5). The perf gate and
-        # reproduce, which need the same experiment, refuse on them too.
+        # comparable but not like-for-like (DESIGN 2.4, 6.5). The perf gate
+        # and reproduce, which need the same experiment, refuse on them too.
         "effective maintenance": (exp.get("effective_maintenance") or {}).get("id"),
+        "maintenance settings": exp.get("maintenance_settings"),
         "query access path": (exp.get("architecture") or {}).get("query_access_path"),
+        "system": exp.get("system"),
+        "benchmark iterations": (exp.get("limits") or {}).get("benchmark_iterations"),
+        "Lakebench limits that bound": sorted((exp.get("limits") or {}).get("bound") or []),
     }
 
 
 #: identity() keys that are execution conditions, not experiment identity.
-CONDITION_KEYS = frozenset({"effective maintenance", "query access path"})
+CONDITION_KEYS = frozenset(
+    {
+        "effective maintenance",
+        "maintenance settings",
+        "query access path",
+        "system",
+        "benchmark iterations",
+        "Lakebench limits that bound",
+    }
+)
+
+
+def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
+    """Why a run's corpus is not one known corpus (see _observed_corpus)."""
+    return list(((exp or {}).get("corpus") or {}).get("problems") or [])
+
+
+def unchecked_by_design(exp: Mapping[str, Any] | None) -> bool:
+    """True for a continuous run, whose in-stream rounds read tables still
+    being written, so no result equivalence can be recorded at all. The perf
+    gate and reproduce, which compare a run with a reference of the same
+    pinned config, still gate these (with the caveat recorded); compare
+    reports the pair as comparability not established."""
+    return bool(((exp or {}).get("results") or {}).get("by_design"))
+
+
+def results_established(exp: Mapping[str, Any] | None) -> bool | str:
+    """True when the run recorded benchmark results that can be checked for
+    equivalence, else the reason they cannot (DESIGN 6.5: comparable means
+    the results are equivalent, which needs results)."""
+    res = (exp or {}).get("results") or {}
+    if res.get("not_checked"):
+        return str(res["not_checked"])
+    if not res.get("fingerprints"):
+        return "no benchmark query results were recorded"
+    return True
 
 
 def identity_hash(exp: Mapping[str, Any]) -> str:
@@ -614,6 +787,8 @@ def refusals(
         return prov, [], []
     assert ea is not None and eb is not None
     prov = identity_differences(ea, eb)
+    for label, exp in ((label_a, ea), (label_b, eb)):
+        prov.extend(f"{label}: {p}" for p in corpus_problems(exp))
     notes: list[str] = []
     res_a, res_b = ea.get("results") or {}, eb.get("results") or {}
     unchecked = res_a.get("not_checked") or res_b.get("not_checked")
@@ -670,10 +845,20 @@ def stored_identity_refusals(
     if not expected_identity:
         return [f"{NO_PROVENANCE} (the {what} was recorded without an experiment identity)"]
     reasons = [f"{r} from the {what}" for r in diff_identities(expected_identity, identity(actual))]
-    res = actual.get("results") or {}
-    if res.get("not_checked"):
+    reasons.extend(f"run: {p}" for p in corpus_problems(actual))
+    established = results_established(actual)
+    if established is not True:
+        if unchecked_by_design(actual):
+            return reasons
+        # Nothing shows the run returned the reference's results.
+        reasons.append(f"comparability not established (run: {established})")
         return reasons
-    skip = set(failed or ())
+    if not expected_fingerprints:
+        reasons.append(f"comparability not established (the {what} has no result fingerprints)")
+        return reasons
+    # Queries that failed in the run, and queries the reference recorded as
+    # failed (no fingerprint), have no pair of results to compare.
+    skip = set(failed or ()) | {n for n, f in (expected_fingerprints or {}).items() if f is None}
     got = {n: f for n, f in result_fingerprints(actual).items() if n not in skip}
     want = {n: f for n, f in (expected_fingerprints or {}).items() if n not in skip}
     reasons.extend(diff_fingerprints(want, got, what, "run"))

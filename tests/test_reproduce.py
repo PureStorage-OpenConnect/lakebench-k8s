@@ -79,7 +79,7 @@ def _metrics(**overrides):
         "config_snapshot": {"name": "c360-scale-0-1", "scale": 0.1},
         # A run from this code carries the current policy (PipelineMetrics default).
         "maintenance_policy_id": MAINTENANCE_POLICY_ID,
-        "experiment": stub_experiment(),
+        "experiment": stub_experiment(["Q1"]),
         "datagen_fleet": {
             "pods_reported": 2,
             "aggregate_mbps": 154.4,

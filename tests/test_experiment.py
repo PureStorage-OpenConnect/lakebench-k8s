@@ -316,54 +316,67 @@ class TestEffectiveMaintenance:
         e = effective_maintenance(
             MAINTENANCE_POLICY_ID, table_format=fmt, query_engine=engine, mode=mode
         )
-        on = {True: "on", False: "off"}
-        assert (e["expire"], e["compaction"]) == (on[expire], on[compaction])
+        # Coarse classes: what the composition can run, not whether it ran.
+        ok = {True: "ran", False: "not_supported"}
+        assert (e["expire"], e["compaction"]) == (ok[expire], ok[compaction])
 
     def test_recorded_outcomes_decide_what_ran(self):
         """Effective means what ran: a policy that asked for maintenance whose
-        statements failed is not stamped as having had it."""
+        statements failed is not stamped as having had it. Partial success
+        and stops are detail, not identity (one timed-out round in a long
+        run is the same experiment)."""
 
         def eff(outcomes, **kw):
             return effective_maintenance(
                 MAINTENANCE_POLICY_ID,
                 table_format=kw.get("fmt", "iceberg"),
                 query_engine="trino",
-                mode="batch",
+                mode=kw.get("mode", "batch"),
                 outcomes=outcomes,
+                stopped=kw.get("stopped", False),
             )
 
         ok = {"kind": "expire", "total": 4, "succeeded": 4}
         comp = {"kind": "compaction", "total": 2, "succeeded": 2}
-        assert eff([ok, comp])["id"].endswith("expire=on,compaction=on")
+        full = eff([ok, comp])
+        assert full["id"].endswith("expire=ran,compaction=ran")
         failed = eff([{**ok, "succeeded": 0}, comp])
-        assert "expire=off" in failed["id"] and "0 of 4" in " ".join(failed["reasons"])
-        assert "expire=partial" in eff([{**ok, "succeeded": 3}, comp])["id"]
-        # Nothing ran at all (pre_benchmark_maintenance off, --skip-benchmark).
-        assert eff([])["id"].endswith("expire=off,compaction=off")
+        assert "expire=failed" in failed["id"] and "0 of 4" in " ".join(failed["reasons"])
+        partial = eff([{**ok, "succeeded": 3}, comp], stopped=True)
+        assert partial["id"] == full["id"]
+        assert "expire=partial" in partial["detail_id"] and partial["detail_id"].endswith("stopped")
+        # The run ended before the maintenance phase.
+        assert eff([])["id"].endswith("expire=not_run,compaction=not_run")
+        # The user turned it off (--skip-benchmark, pre_benchmark_maintenance off).
+        user = [{"kind": k, "user_skip": "--skip-benchmark"} for k in ("expire", "compaction")]
+        assert eff(user)["id"].endswith("expire=skipped_by_user,compaction=skipped_by_user")
         # A crash in the maintenance phase is recorded, not assumed away.
         crashed = eff([{"kind": "maintenance", "error": "boom"}])
-        assert "expire=off" in crashed["id"] and any("boom" in r for r in crashed["reasons"])
-        # Outcomes never turn a kind up past the rules (Delta OPTIMIZE).
-        assert "compaction=off" in eff([ok, comp], fmt="delta")["id"]
+        assert "expire=failed" in crashed["id"] and any("boom" in r for r in crashed["reasons"])
+        # Continuous: rounds that raised count as failed attempts.
+        rounds = [{"kind": "expire", "error": "x"}] * 4 + [ok, comp]
+        assert "expire=partial" in eff(rounds, mode="sustained")["detail_id"]
+        # Outcomes never turn an operation up past the rules (Delta OPTIMIZE).
+        assert "compaction=not_supported" in eff([ok, comp], fmt="delta")["id"]
         assert eff(None)["basis"].startswith("policy rules")
 
     def test_run_outcomes_reach_the_experiment_block(self):
         run = _metrics(_cfg())
         run.maintenance_outcomes = [{"kind": "expire", "total": 2, "succeeded": 0}]
         e = run.to_dict()["experiment"]["effective_maintenance"]
-        assert "expire=off" in e["id"] and e["basis"] == "recorded outcomes"
+        assert "expire=failed" in e["id"] and e["basis"] == "recorded outcomes"
 
     def test_skip_flag_and_stop_show_in_the_id(self):
         skipped = effective_maintenance(
             MAINTENANCE_POLICY_ID + "+skipped", table_format="iceberg", query_engine="trino",
             mode="batch",
         )  # fmt: skip
-        assert "expire=off" in skipped["id"]
+        assert "expire=skipped_by_user" in skipped["id"]
         stopped = effective_maintenance(
             MAINTENANCE_POLICY_ID, table_format="iceberg", query_engine="trino", mode="batch",
             stopped=True,
         )  # fmt: skip
-        assert stopped["id"].endswith(",stopped")
+        assert stopped["detail_id"].endswith(",stopped") and "stopped" not in stopped["id"]
 
 
 class TestCompareCommand:
@@ -501,11 +514,11 @@ class TestBenchmarkGateEmptyResults:
         # Without the declaration the same result fails the gate.
         assert _benchmark_gate_problems(_cfg("financial"), qs)
 
-    def test_no_shipped_query_is_declared_allowed_empty(self):
-        """Every shipped query returned rows at scale 1 (Trino runs of
-        2026-09-24/25); an allow_empty declaration needs its own evidence."""
+    def test_only_the_case_queries_are_declared_allowed_empty(self):
+        """IQ2 and IQ4 need TM cases a small or short run may not have."""
         from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
 
-        assert not [
+        declared = {
             q.name for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for q in qs if q.allow_empty
-        ]
+        }
+        assert declared == {"IQ2_case_activity_12m", "IQ4_open_cases_over_60_days"}

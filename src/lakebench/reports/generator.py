@@ -2463,9 +2463,18 @@ class ReportGenerator:
             ("Maintenance policy (requested)", exp.get("maintenance_policy_id")),
             (
                 "Maintenance (effective, what ran)",
-                f"{eff.get('id')}"
+                f"{eff.get('id')} [{eff.get('detail_id') or ''}; {eff.get('basis') or ''}]"
                 + (f" -- {'; '.join(eff.get('reasons') or [])}" if eff.get("reasons") else ""),
             ),
+            ("Maintenance settings", exp.get("maintenance_settings") or "none"),
+            ("System", exp.get("system") or "unknown"),
+            (
+                "Corpus observed",
+                "yes (from the datagen pods)"
+                if c.get("observed")
+                else c.get("observed_note") or "no",
+            ),
+            ("Corpus problems", "; ".join(c.get("problems") or []) or "none"),
             (
                 "Repetitions",
                 f"runs n={rep.get('runs', 1)}, benchmark samples per query "

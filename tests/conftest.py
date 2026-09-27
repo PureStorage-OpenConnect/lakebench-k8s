@@ -195,6 +195,7 @@ def stub_experiment(
     }
     if mode != "batch":
         results["not_checked"] = "continuous"
+        results["by_design"] = True
     return {
         "schema": EXPERIMENT_SCHEMA,
         "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},

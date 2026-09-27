@@ -666,13 +666,15 @@ def _settle_after_maintenance(
     return result
 
 
-def _benchmark_gate_problems(cfg, queries) -> list[str]:
+def _benchmark_gate_problems(cfg, queries, check_empty: bool = True) -> list[str]:
     """Reasons the benchmark result is not a valid score.
 
     QpH is computed over the queries that succeeded, so a run where most
     queries failed still printed a QpH (live AML run, 2026-09-24: 1 of 8
     passed, QpH 166, exit 0). Every failure outside the known upstream list
-    fails the run.
+    fails the run. With *check_empty* (the default), so does a successful
+    query that returned no rows and is not declared allow_empty; the
+    continuous path turns it off for rounds before its last.
     """
     fmt = cfg.architecture.table_format.type.value
     engine = cfg.architecture.query_engine.type.value
@@ -684,21 +686,14 @@ def _benchmark_gate_problems(cfg, queries) -> list[str]:
     def _ok(q):
         return bool(q["success"] if isinstance(q, dict) else q.success)
 
-    def _rows(q):
-        return int((q.get("rows_returned") if isinstance(q, dict) else q.rows_returned) or 0)
-
-    from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
-
-    allow_empty = {
-        bq.name for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for bq in qs if bq.allow_empty
-    }
     bad = [
         q for q in queries if not _ok(q) and (fmt, engine, _name(q)) not in _KNOWN_QUERY_FAILURES
     ]
     # A query that "succeeded" with no rows measured nothing (invariant 3):
     # an empty table, a filter that matched nothing, or a reader that read
     # nothing. Only a query declared allow_empty may return none.
-    empty = [q for q in queries if _ok(q) and _rows(q) == 0 and _name(q) not in allow_empty]
+    empty_names = set(empty_benchmark_queries(queries)) if check_empty else set()
+    empty = [q for q in queries if _name(q) in empty_names]
     problems = []
     if bad:
         names = ", ".join(_name(q) for q in bad)
@@ -713,6 +708,25 @@ def _benchmark_gate_problems(cfg, queries) -> list[str]:
             f"({names}); an empty result measures nothing. Marking FAILURE."
         )
     return problems
+
+
+def empty_benchmark_queries(queries) -> list[str]:
+    """Names of successful queries (QueryResult or dict) that returned no
+    rows and are not declared allow_empty."""
+    from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
+
+    allow_empty = {
+        bq.name for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for bq in qs if bq.allow_empty
+    }
+    out = []
+    for q in queries:
+        d = isinstance(q, dict)
+        name = q.get("name") if d else q.query.name
+        ok = q.get("success") if d else q.success
+        rows = (q.get("rows_returned") if d else q.rows_returned) or 0
+        if ok and int(rows) == 0 and name not in allow_empty:
+            out.append(str(name))
+    return out
 
 
 def _aml_batch_gate_problems(
@@ -1468,6 +1482,9 @@ def run(
     collector.start_run(run_id, cfg.name, config_snapshot)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts
+        # [] from the start: a run that ends before the maintenance phase is
+        # then stamped "not run", never with the policy's request.
+        collector.current_run.maintenance_outcomes = []
     if skip_maintenance and collector.current_run is not None:
         # No table maintenance: not comparable with runs under the policy.
         from lakebench.metrics.maintenance_policy import skipped_policy_id
@@ -2025,7 +2042,9 @@ def run(
         # experiment block's effective maintenance. [] when none ran.
         maint_outcomes: list = []
         if collector.current_run is not None:
-            collector.current_run.maintenance_outcomes = maint_outcomes
+            if collector.current_run.maintenance_outcomes is None:
+                collector.current_run.maintenance_outcomes = []
+            maint_outcomes = collector.current_run.maintenance_outcomes
 
         do_maintenance = (
             not skip_benchmark
@@ -2034,6 +2053,15 @@ def run(
         )
 
         if not do_maintenance:
+            why = (
+                "--skip-benchmark"
+                if skip_benchmark
+                else "--skip-maintenance"
+                if skip_maintenance
+                else "pre_benchmark_maintenance is off"
+            )
+            for kind in ("expire", "compaction"):
+                maint_outcomes.append({"kind": kind, "user_skip": why})
             if skip_benchmark and cfg.architecture.query_engine.type.value == "none":
                 print_info("Skipped (no query engine)")
             elif skip_benchmark:

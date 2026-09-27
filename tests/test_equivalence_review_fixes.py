@@ -1,0 +1,461 @@
+"""Fixes from the adversarial reviews of the result-equivalence and evidence
+work (lane compare-equiv). Each test fails with its fix reverted."""
+
+from __future__ import annotations
+
+import io
+import json
+from types import SimpleNamespace
+from unittest import mock
+
+import pytest
+
+from lakebench.benchmark.fingerprint import (
+    Unsupported,
+    canonical_cell,
+    fingerprint_rows,
+    mismatch,
+    rows_from_beeline_tsv2,
+    rows_from_trino_json,
+)
+from lakebench.metrics import experiment as ex
+from lakebench.metrics.collector import (
+    BenchmarkMetrics,
+    JobMetrics,
+    MetricsCollector,
+    StreamingJobMetrics,
+    build_config_snapshot,
+)
+from tests.conftest import make_config, stub_experiment
+
+
+def _cfg(**arch):
+    base = {"workload": {"schema": "customer360", "datagen": {"scale": 1}}}
+    base.update(arch)
+    return make_config(architecture=base)
+
+
+def _run(cfg=None, fps=None, fleet=None):
+    cfg = cfg or _cfg()
+    run = MetricsCollector().start_run(
+        "20260926-120000-aaaaaa", cfg.name, build_config_snapshot(cfg)
+    )
+    fps = fps if fps is not None else {"Q1": fingerprint_rows([(1, "x")])}
+    run.benchmark = BenchmarkMetrics(
+        mode="power",
+        cache="hot",
+        scale=1,
+        qph=100.0,
+        total_seconds=10.0,
+        queries=[
+            {"name": n, "elapsed_seconds": 1.0, "success": True, "result_fingerprint": f}
+            for n, f in fps.items()
+        ],
+    )
+    run.datagen_fleet = fleet
+    return run
+
+
+# ---------------------------------------------------------------------------
+# S1-S3: fingerprint rules
+# ---------------------------------------------------------------------------
+
+
+class TestApproxRowAssociation:
+    def test_swapped_values_between_groups_differ(self):
+        a = fingerprint_rows([("web", 1000.00), ("mobile", 5.00)], {1: 0.01})
+        b = fingerprint_rows([("web", 5.00), ("mobile", 1000.00)], {1: 0.01})
+        assert a["approx"] == b["approx"]  # the plain sum cannot see it
+        assert mismatch(a, b) and "row-weighted" in mismatch(a, b)
+
+    def test_one_row_far_off_is_not_absorbed_by_row_count(self):
+        rows = [(f"d{i}", 100.0) for i in range(90)]
+        off = [*rows[:-1], ("d89", 189.0)]
+        assert mismatch(fingerprint_rows(rows, {1: 1.0}), fingerprint_rows(off, {1: 1.0}))
+
+    def test_summation_noise_still_matches(self):
+        rows = [(f"d{i}", 100.25) for i in range(455)]
+        noisy = [(k, v + (0.01 if i % 50 == 0 else 0.0)) for i, (k, v) in enumerate(rows)]
+        assert (
+            mismatch(fingerprint_rows(rows, {1: 0.01}), fingerprint_rows(noisy, {1: 0.01})) is None
+        )
+
+
+class TestApproxSpecials:
+    def test_nan_matches_only_nan(self):
+        nan = fingerprint_rows([("a", float("nan"))], {1: 0.01})
+        num = fingerprint_rows([("a", 1.0)], {1: 0.01})
+        assert mismatch(nan, num)
+        assert mismatch(nan, fingerprint_rows([("a", "NaN")], {1: 0.01})) is None
+        assert mismatch(
+            fingerprint_rows([("a", float("inf"))], {1: 0.01}),
+            fingerprint_rows([("a", float("-inf"))], {1: 0.01}),
+        )
+
+
+class TestExactDigits:
+    def test_bigint_ids_as_text_keep_every_digit(self):
+        """Beeline sends a 19-digit xxhash64 id as text; Trino and DuckDB as an int."""
+        assert canonical_cell("-1234567890123456789") == canonical_cell(-1234567890123456789)
+        assert canonical_cell("1234567890123456789") != canonical_cell("1234567890123456788")
+
+    def test_decimal_sums_keep_their_cents(self):
+        assert canonical_cell("12345678901234.57") != canonical_cell("12345678901234.56")
+        assert canonical_cell("12345678901234.570") == canonical_cell("12345678901234.57")
+
+    def test_trino_json_numbers_are_read_as_text(self):
+        rows = rows_from_trino_json('{"id":1234567890123456789,"v":12345678901234.57}\n')
+        tsv = rows_from_beeline_tsv2("id\tv\n1234567890123456789\t12345678901234.57\n")
+        assert fingerprint_rows(rows)["exact"] == fingerprint_rows(tsv)["exact"]
+
+
+# ---------------------------------------------------------------------------
+# S4, S6: empty output and empty rows
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyOutput:
+    def test_no_tsv2_header_is_unsupported_not_zero_rows(self):
+        with pytest.raises(Unsupported):
+            rows_from_beeline_tsv2("")
+
+    def test_empty_trino_output_is_unsupported(self):
+        with pytest.raises(Unsupported):
+            rows_from_trino_json("")
+
+    def test_a_row_of_empty_cells_is_kept(self):
+        assert rows_from_beeline_tsv2("name\n\n") == [[""]]
+
+    def test_thrift_count_keeps_a_row_of_empty_cells(self):
+        from lakebench.benchmark.executor import SparkThriftExecutor
+
+        ex_ = SparkThriftExecutor(namespace="t", catalog_name="c")
+        ex_._pod = "p"
+        with mock.patch("subprocess.run") as run:
+            run.return_value = mock.MagicMock(returncode=0, stdout="name\n\n", stderr="")
+            assert ex_.execute_query("SELECT ''").rows_returned == 1
+
+
+class TestRunnerCrossCheck:
+    def _runner(self, timed_rows, fp):
+        from lakebench.benchmark.result import QueryExecutorResult
+        from lakebench.benchmark.runner import BenchmarkRunner
+
+        class Ex:
+            catalog_name = "lakehouse"
+
+            def engine_name(self):
+                return "trino"
+
+            def adapt_query(self, sql):
+                return sql
+
+            def flush_cache(self):
+                pass
+
+            def execute_query(self, sql, timeout=300):
+                return QueryExecutorResult(sql, "trino", 1.0, timed_rows, "x")
+
+            def fingerprint_query(self, sql, timeout=300, approx_columns=None):
+                self.timeout = timeout
+                return QueryExecutorResult(sql, "trino", 1.0, 0, "", fingerprint=fp)
+
+        executor = Ex()
+        with mock.patch("lakebench.benchmark.executor.get_executor", return_value=executor):
+            return BenchmarkRunner(make_config()), executor
+
+    def test_row_count_disagreeing_with_the_timed_run_is_unusable(self):
+        runner, _ = self._runner(5, fingerprint_rows([(1,)]))
+        result = runner.run_power(iterations=1)
+        fp = result.queries[0].result_fingerprint
+        assert "error" in fp and "timed run" in fp["error"]
+
+    def test_empty_trino_result_agreeing_with_the_timed_run_is_zero_rows(self):
+        from lakebench.benchmark.fingerprint import unusable
+
+        fp = unusable("unsupported", "Trino printed no rows (an empty result ...)", "trino")
+        runner, _ = self._runner(0, fp)
+        result = runner.run_power(iterations=1)
+        got = result.queries[0].result_fingerprint
+        assert got["rows"] == 0 and "exact" in got
+
+    def test_throughput_fingerprints_use_the_query_timeout(self):
+        runner, executor = self._runner(1, fingerprint_rows([(1,)]))
+        runner.run_throughput(streams=1, query_timeout=1800)
+        assert executor.timeout == 1800
+
+
+# ---------------------------------------------------------------------------
+# S5, S7: benchmark gate and freshness probe
+# ---------------------------------------------------------------------------
+
+
+class TestEmptyGateInRounds:
+    def test_early_rounds_do_not_fail_on_empty_the_final_round_does(self):
+        from lakebench.cli._run import _benchmark_gate_problems, empty_benchmark_queries
+
+        qs = [{"name": "Q1_full_aggregation_scan", "success": True, "rows_returned": 0}]
+        assert _benchmark_gate_problems(_cfg(), qs, check_empty=False) == []
+        assert _benchmark_gate_problems(_cfg(), qs, check_empty=True)
+        assert empty_benchmark_queries(qs) == ["Q1_full_aggregation_scan"]
+
+
+class TestFreshnessProbe:
+    @pytest.mark.parametrize(
+        "engine,output,value",
+        [
+            ("trino", '"3600"\n', 3600.0),
+            ("spark-thrift", "_c0\n3600\n", 3600.0),
+            ("duckdb", '\r100% bar\n{"rows": 1, "data": ["(3600,)"]}', 3600.0),
+            ("spark-thrift", "3600\n", None),  # no header: not the value line
+            ("duckdb", '{"rows": 0, "data": []}', None),
+            ("trino", "", None),
+        ],
+    )
+    def test_scalar_parsing(self, engine, output, value):
+        from lakebench.cli._sustained import scalar_from_output
+
+        assert scalar_from_output(engine, output) == value
+
+
+# ---------------------------------------------------------------------------
+# S8, E7: failed queries are one failure, not also a result mismatch
+# ---------------------------------------------------------------------------
+
+
+class TestFailedQueries:
+    def test_reference_side_failed_query_is_not_a_mismatch(self):
+        exp = stub_experiment(["Q1", "Q2"])
+        refs = ex.stored_identity_refusals(
+            ex.identity(exp),
+            {"Q1": exp["results"]["fingerprints"]["Q1"], "Q2": None},
+            exp,
+            "baseline",
+        )
+        assert refs == []
+
+    def test_reproduce_skips_a_failed_query(self):
+        from lakebench.cli._reproduce import _experiment_refusal
+
+        exp = stub_experiment(["Q1", "Q2"])
+        meta = {
+            "experiment_identity": ex.identity(exp),
+            "result_fingerprints": ex.result_fingerprints(exp),
+        }
+        run_exp = stub_experiment(["Q1", "Q2"], failed=("Q2",))
+        bench = SimpleNamespace(
+            queries=[{"name": "Q1", "success": True}, {"name": "Q2", "success": False}]
+        )
+        metrics = SimpleNamespace(experiment=run_exp, benchmark=bench, pipeline_benchmark=None)
+        assert _experiment_refusal(meta, metrics) is None
+
+
+# ---------------------------------------------------------------------------
+# E1: comparability not established
+# ---------------------------------------------------------------------------
+
+
+class TestNotEstablished:
+    def _comparison(self, a, b):
+        from lakebench.cli._compare import _build_comparison
+
+        for m in (a, b):
+            m.setdefault("pipeline_benchmark", {})["scores"] = {"time_to_value_seconds": 100.0}
+        b["pipeline_benchmark"]["scores"]["time_to_value_seconds"] = 50.0
+        return _build_comparison("A", a, "B", b)
+
+    def test_runs_without_results_are_not_established(self):
+        a = _run(fps={}).to_dict()
+        b = _run(fps={}).to_dict()
+        c = self._comparison(a, b)
+        assert c["verdict"] == "not_established"
+        assert c["comparable"] is False and c["like_for_like"] is False
+        assert all(r["not_comparable"] for r in c["metrics"])
+
+    def test_table_shows_no_winner(self):
+        from rich.console import Console
+
+        from lakebench.cli import _compare
+
+        c = self._comparison(_run(fps={}).to_dict(), _run(fps={}).to_dict())
+        buf = io.StringIO()
+        with mock.patch.object(_compare, "console", Console(file=buf, width=200)):
+            _compare._print_comparison_table(c)
+        text = buf.getvalue()
+        assert "NOT ESTABLISHED" in text and "-50.0%" not in text
+
+    def test_compare_exits_zero_when_not_established(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+
+        for p in ("a.yaml", "b.yaml"):
+            (tmp_path / p).write_text("name: x\n")
+        a, b = _run(fps={}).to_dict(), _run(fps={}).to_dict()
+        with (
+            mock.patch("lakebench.cli._compare.load_config", side_effect=[_cfg(), _cfg()]),
+            mock.patch("lakebench.cli._compare._run_single", side_effect=[a, b]),
+            mock.patch("lakebench.cli._compare.DEFAULT_OUTPUT_DIR", str(tmp_path / "out")),
+        ):
+            result = CliRunner().invoke(
+                app, ["compare", str(tmp_path / "a.yaml"), str(tmp_path / "b.yaml"), "--yes"]
+            )
+        assert result.exit_code == 0, result.output
+        saved = next((tmp_path / "out" / "comparisons").glob("*/comparison.json"))
+        assert json.loads(saved.read_text())["verdict"] == "not_established"
+
+    def test_stored_references_refuse_a_batch_run_without_results(self):
+        exp = stub_experiment(["Q1"])
+        empty = stub_experiment([])
+        refs = ex.stored_identity_refusals(
+            ex.identity(exp), ex.result_fingerprints(exp), empty, "baseline"
+        )
+        assert any("comparability not established" in r for r in refs)
+        refs = ex.stored_identity_refusals(ex.identity(exp), {}, exp, "package")
+        assert any("package has no result fingerprints" in r for r in refs)
+
+
+# ---------------------------------------------------------------------------
+# E2: corpus as generated
+# ---------------------------------------------------------------------------
+
+
+class TestObservedCorpus:
+    def test_fleet_values_are_stamped_and_disagreement_refuses(self):
+        cfg = _cfg()
+        fleet = {"seed": 999, "scale": 1.0, "image": cfg.images.datagen, "image_ids": []}
+        e = _run(cfg, fleet=fleet).to_dict()["experiment"]
+        assert e["corpus"]["seed"] == 999 and e["corpus"]["observed"] is True
+        assert any("seed" in p for p in e["corpus"]["problems"])
+        good = _run(cfg).to_dict()
+        prov, _, _ = ex.refusals(good, _run(cfg, fleet=fleet).to_dict())
+        assert any("datagen pods ran 999" in p for p in prov), prov
+
+    def test_mixed_fleet_is_a_problem(self):
+        e = _run(fleet={"data_quality": "mixed", "mixed_params": ["scale"]}).to_dict()["experiment"]
+        assert any("mixed" in p for p in e["corpus"]["problems"])
+
+    def test_without_a_fleet_record_it_is_declared_not_observed(self):
+        c = _run().to_dict()["experiment"]["corpus"]
+        assert c["observed"] is False and "declared" in c["observed_note"]
+
+    def test_pod_args_reach_the_fleet_record(self):
+        from lakebench.metrics.datagen_aggregator import _datagen_args, collect_from_pod_logs
+
+        pod = SimpleNamespace(
+            spec=SimpleNamespace(
+                containers=[SimpleNamespace(args=["--seed", "7", "--scale", "1.000000"])]
+            )
+        )
+        assert _datagen_args(pod) == {"seed": 7, "scale": 1.0}
+        s = collect_from_pod_logs({"a": "", "b": ""}, pod_args={"a": {"seed": 7}, "b": {"seed": 8}})
+        assert s.seed is None and s.data_quality == "mixed"
+
+
+# ---------------------------------------------------------------------------
+# E3, E4, E5, E8: stamps
+# ---------------------------------------------------------------------------
+
+
+class TestStamps:
+    def test_local_run_stamps_what_ran(self):
+        run = _run(_cfg(query_engine={"type": "trino"}))
+        run.config_snapshot["local"] = True
+        e = run.to_dict()["experiment"]
+        assert e["system"] == "local"
+        assert e["architecture"]["query_engine"]["type"] == "duckdb"
+        assert e["architecture"]["query_access_path"] == "direct_storage"
+        assert "not_supported" in e["effective_maintenance"]["id"]
+        cluster = _run(_cfg(query_engine={"type": "duckdb"})).to_dict()
+        assert any(d.startswith("system") for d in ex.like_for_like(run.to_dict(), cluster))
+
+    def test_streaming_budget_cap_and_tm_cap_are_bound(self):
+        run = _run(
+            _cfg(
+                workload={"schema": "financial", "datagen": {"scale": 1}},
+                pipeline={"mode": "sustained"},
+            )
+        )
+        run.streaming.append(
+            StreamingJobMetrics(job_name="s", job_type="silver-stream", requested_executors=1)
+        )
+        run.jobs.append(
+            JobMetrics(
+                job_name="g",
+                job_type="gold-finalize",
+                success=True,
+                tm_ops={"alerts_over_capacity": 3},
+            )
+        )
+        lim = run.to_dict()["experiment"]["limits"]
+        silver = next(x for x in lim["executors"] if x["job_type"] == "silver-stream")
+        assert silver["observed"] == 1 and silver["budget_cap"]["granted"] == 1
+        assert any("concurrent executor budget" in b for b in lim["bound"])
+        assert any("over capacity" in b for b in lim["bound"])
+
+    def test_iterations_and_bound_limits_are_conditions(self):
+        a = _run(_cfg(benchmark={"iterations": 1})).to_dict()
+        b = _run(_cfg(benchmark={"iterations": 3})).to_dict()
+        assert ex.refusals(a, b)[0] == []
+        assert any(d.startswith("benchmark iterations") for d in ex.like_for_like(a, b))
+
+    def test_hive_version_is_the_stackable_image(self):
+        v = ex.experiment_inputs(_cfg())["architecture"]["catalog"]["version"]
+        assert v.startswith("oci.stackable.tech/sdp/hive:3.1.3-stackable25.7.0")
+
+
+# ---------------------------------------------------------------------------
+# Reviewer extras: stale block, package usability, maintenance never reached
+# ---------------------------------------------------------------------------
+
+
+class TestBlockFollowsTheRecord:
+    def test_benchmark_rewrite_updates_the_block(self, tmp_path):
+        from lakebench.metrics.storage import MetricsStorage
+
+        run = _run()
+        run.benchmark = None
+        storage = MetricsStorage(tmp_path)
+        storage.save_run(run)
+        loaded = storage.load_run(run.run_id)
+        assert loaded.to_dict()["experiment"]["results"]["not_checked"]
+        loaded.benchmark = _run().benchmark  # what `lakebench benchmark` does
+        storage.save_run(loaded)
+        e = storage.load_run(run.run_id).to_dict()["experiment"]
+        assert "not_checked" not in e["results"] and e["results"]["fingerprints"]
+
+    def test_run_ending_before_maintenance_is_not_run(self):
+        run = _run()
+        run.maintenance_outcomes = []
+        assert "not_run" in run.to_dict()["experiment"]["effective_maintenance"]["id"]
+
+
+class TestPackageUsability:
+    def test_package_refuses_an_unusable_fingerprint(self):
+        from lakebench.cli._reproduce import ReproduceError, _build_package
+        from tests.test_reproduce import _metrics
+
+        exp = stub_experiment(["Q1"])
+        exp["results"]["fingerprints"]["Q1"] = {"spec": "rf2", "error": "timed out"}
+        with pytest.raises(ReproduceError, match="usable result fingerprint"):
+            _build_package(_metrics(experiment=exp), config_reference="c.yaml", commit_sha="abc")
+
+
+class TestRunLocalIds:
+    def test_fq8_alert_id_is_volatile_and_its_pick_is_deterministic(self):
+        """alert_id is uuid() per pipeline run: two runs on one corpus must
+        still match, and the LIMIT must not pick among tied alerts by it."""
+        from lakebench.benchmark.queries import get_benchmark_queries
+        from lakebench.config.schema import WorkloadSchema
+
+        fq8 = next(
+            q for q in get_benchmark_queries(WorkloadSchema.FINANCIAL) if q.name.startswith("FQ8")
+        )
+        assert "ORDER BY alert_ts DESC, entity_id, rule_id, alert_id" in fq8.sql
+        cols = fq8.fingerprint_columns()
+        run1 = fingerprint_rows([("uuid-a", "2026-01-01 00:00:00", "acme")], cols)
+        run2 = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "acme")], cols)
+        assert mismatch(run1, run2) is None
+        other = fingerprint_rows([("uuid-b", "2026-01-01 00:00:00", "other")], cols)
+        assert mismatch(run1, other)
+        assert mismatch(run1, fingerprint_rows([(None, "2026-01-01 00:00:00", "acme")], cols))

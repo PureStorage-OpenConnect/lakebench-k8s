@@ -320,18 +320,23 @@ class PipelineMetrics:
     # from before the field, or a path that never reached maintenance).
     maintenance_outcomes: list[dict[str, Any]] | None = None
 
-    # The experiment block (metrics/experiment.py). None on a live run: built
-    # when the record is written. A loaded record keeps what it was written
-    # with; a record from before the block has none and never gets one.
+    # The experiment block as loaded from metrics.json (metrics/experiment.py).
+    # experiment_block() rebuilds it from the record when the snapshot holds
+    # experiment_inputs; a record from before the block has none and never
+    # gets one.
     experiment: dict[str, Any] | None = None
 
     def experiment_block(self) -> dict[str, Any] | None:
-        """The block this record carries or, for a run being written, builds."""
-        if self.experiment is not None:
-            return self.experiment
+        """The experiment block, rebuilt from the record whenever its snapshot
+        carries the config half (``experiment_inputs``, frozen at run start):
+        the run half then always describes the record as it is now, including
+        after ``lakebench benchmark`` replaced its benchmark. A record from
+        before the block has no inputs and keeps what it was written with
+        (normally nothing)."""
         from lakebench.metrics.experiment import build_experiment
 
-        return build_experiment(self)
+        built = build_experiment(self)
+        return built if built is not None else self.experiment
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

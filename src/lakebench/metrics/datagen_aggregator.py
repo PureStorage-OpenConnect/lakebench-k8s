@@ -227,11 +227,17 @@ class FleetSummary:
     # pod status. More than one id means the pods did not all run one image.
     image: str | None = None
     image_ids: list[str] = field(default_factory=list)
+    # --seed and --scale the datagen pods ran with (their container args),
+    # when every pod agrees; a disagreement is listed in mixed_params.
+    seed: int | None = None
+    scale: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "image": self.image,
             "image_ids": list(self.image_ids),
+            "seed": self.seed,
+            "scale": self.scale,
             "schema": self.schema,
             "pods_expected": self.pods_expected,
             "pods_reported": self.pods_reported,
@@ -288,6 +294,7 @@ def collect_from_pod_logs(
     pod_logs: dict[str, str],
     expected_pods: int | None = None,
     pod_images: dict[str, tuple[str | None, str | None]] | None = None,
+    pod_args: dict[str, dict[str, Any]] | None = None,
 ) -> FleetSummary:
     """Parse a mapping of pod_name -> log text into a FleetSummary.
 
@@ -310,7 +317,30 @@ def collect_from_pod_logs(
     specs = sorted({img for img, _ in images.values() if img})
     summary.image = specs[0] if len(specs) == 1 else (", ".join(specs) or None)
     summary.image_ids = sorted({iid for _, iid in images.values() if iid})
+    for key in ("seed", "scale"):
+        values = {a.get(key) for a in (pod_args or {}).values() if a.get(key) is not None}
+        if len(values) == 1:
+            setattr(summary, key, values.pop())
+        elif len(values) > 1:
+            summary.mixed_params.append(f"{key} (container args)")
+            summary.data_quality = "mixed"
     return summary
+
+
+def _datagen_args(pod: Any) -> dict[str, Any]:
+    """--seed and --scale from a datagen pod's first container args."""
+    try:
+        args = list(pod.spec.containers[0].args or [])
+    except (AttributeError, IndexError, TypeError):
+        return {}
+    out: dict[str, Any] = {}
+    for flag, key, conv in (("--seed", "seed", int), ("--scale", "scale", float)):
+        if flag in args and args.index(flag) + 1 < len(args):
+            try:
+                out[key] = conv(args[args.index(flag) + 1])
+            except ValueError:
+                pass
+    return out
 
 
 def _datagen_image(pod: Any) -> tuple[str | None, str | None]:
@@ -475,9 +505,11 @@ def collect_from_k8s(
 
     pod_logs: dict[str, str] = {}
     pod_images: dict[str, tuple[str | None, str | None]] = {}
+    pod_args: dict[str, dict[str, Any]] = {}
     for pod in pods.items:
         name = pod.metadata.name
         pod_images[name] = _datagen_image(pod)
+        pod_args[name] = _datagen_args(pod)
         try:
             text = core_v1.read_namespaced_pod_log(
                 name=name,
@@ -497,5 +529,8 @@ def collect_from_k8s(
             pod_logs[name] = ""
 
     return collect_from_pod_logs(
-        pod_logs, expected_pods=job_completions or len(pods.items), pod_images=pod_images
+        pod_logs,
+        expected_pods=job_completions or len(pods.items),
+        pod_images=pod_images,
+        pod_args=pod_args,
     )

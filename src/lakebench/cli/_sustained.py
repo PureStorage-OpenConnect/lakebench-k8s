@@ -929,6 +929,41 @@ def _outcome_details(out: dict, total: int, budget: MaintenanceBudget | None) ->
     }
 
 
+def scalar_from_output(engine: str, output: str) -> float | None:
+    """The single numeric value of a one-row, one-column result as each
+    executor prints it, or None. Trino: one CSV line, quoted. Spark Thrift:
+    a tsv2 header, then the value. DuckDB: a JSON payload whose ``data``
+    holds the row's Python repr, e.g. ``(1234,)``."""
+    import re
+
+    text = (output or "").strip()
+    if not text:
+        return None
+    if engine == "duckdb":
+        from lakebench.benchmark.fingerprint import last_json_line
+
+        payload = last_json_line(text)
+        data = (payload or {}).get("data") or []
+        if payload is None or payload.get("rows") != 1 or not data:
+            return None
+        m = re.search(r"[-+]?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", str(data[0]))
+        cell = m.group(0) if m else ""
+    elif engine == "spark-thrift":
+        lines = text.split("\n")
+        if len(lines) != 2:
+            return None
+        cell = lines[1]
+    else:
+        lines = text.split("\n")
+        if len(lines) != 1:
+            return None
+        cell = lines[0].strip().strip('"')
+    try:
+        return float(cell)
+    except ValueError:
+        return None
+
+
 def _note_outcome(outcomes: list | None, kind: str, **details) -> None:
     """Record what a maintenance or compaction call actually did, for the
     experiment block's effective maintenance (metrics/maintenance_policy)."""
@@ -1421,15 +1456,19 @@ def _run_benchmark_round(
         )
         freshness_sql = bench_runner.executor.adapt_query(freshness_sql)
         freshness_result = bench_runner.executor.execute_query(freshness_sql, timeout=30)
-        if freshness_result.success and freshness_result.raw_output.strip():
-            try:
-                round_meta.gold_freshness_seconds = float(
-                    freshness_result.raw_output.strip().split("\n")[0]
+        if freshness_result.success:
+            value = scalar_from_output(freshness_result.engine, freshness_result.raw_output)
+            if value is None:
+                print_warning(
+                    "Gold freshness probe: could not read a number from the "
+                    f"{freshness_result.engine} output; freshness not recorded for this round"
                 )
-            except (ValueError, IndexError):
-                pass
-    except Exception:
-        pass
+            else:
+                round_meta.gold_freshness_seconds = value
+        else:
+            print_warning(f"Gold freshness probe failed: {freshness_result.error}")
+    except Exception as e:  # noqa: BLE001
+        print_warning(f"Gold freshness probe failed: {e}")
 
     # 3. Run the full 8-query power benchmark
     # One sample per query: gold refreshes under the round, so repeats would
@@ -1748,6 +1787,9 @@ def _run_sustained(
     collector.start_run(run_id, cfg.name, config_snapshot)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts
+        # [] from the start: a run that ends before any maintenance round is
+        # then stamped "not run", never with the policy's request.
+        collector.current_run.maintenance_outcomes = []
     if skip_maintenance and collector.current_run is not None:
         # No table maintenance: not comparable with runs under the policy.
         from lakebench.metrics.maintenance_policy import skipped_policy_id
@@ -2101,7 +2143,16 @@ def _run_sustained(
         # experiment block's effective maintenance). [] = the loop ran none.
         maintenance_outcomes: list = []
         if collector.current_run is not None:
-            collector.current_run.maintenance_outcomes = maintenance_outcomes
+            if collector.current_run.maintenance_outcomes is None:
+                collector.current_run.maintenance_outcomes = []
+            maintenance_outcomes = collector.current_run.maintenance_outcomes
+        if skip_maintenance:
+            for kind in ("expire", "compaction"):
+                maintenance_outcomes.append({"kind": kind, "user_skip": "--skip-maintenance"})
+        elif not compaction_enabled:
+            maintenance_outcomes.append(
+                {"kind": "compaction", "user_skip": "continuous compaction is disabled"}
+            )
         # A timed-out maintenance statement may still be running; compaction
         # waits this long (seconds into the run) before touching the tables.
         compaction_hold_until = 0.0
@@ -2525,24 +2576,33 @@ def _run_sustained(
                     _print_rounds_summary(console, rounds)
                     # Same rule as batch: a round with failed queries is not
                     # a score (QpH counts only the queries that passed).
-                    from lakebench.cli._run import _benchmark_gate_problems
-
                     # Q9 reads the c360 gold table that gold-refresh replaces
                     # while rounds run; after its retries a Q9 failure is
                     # expected contention, reported but not a run failure.
+                    from lakebench.cli._run import _benchmark_gate_problems, empty_benchmark_queries
+
                     for idx, rnd in enumerate(rounds, 1):
                         q9 = [
                             q
                             for q in rnd.queries
-                            if str(q.get("name", "")).startswith("Q9") and not q.get("success")
+                            if str(q.get("name", "")).startswith("Q9")
+                            and (not q.get("success") or not q.get("rows_returned"))
                         ]
                         for q in q9:
+                            what = "failed" if not q.get("success") else "returned no rows"
                             print_warning(
-                                f"Round {idx}: {q['name']} failed after contention retries "
+                                f"Round {idx}: {q['name']} {what} after contention retries "
                                 "(gold refresh replaces the table it reads)"
                             )
                         rest = [q for q in rnd.queries if q not in q9]
-                        for problem in _benchmark_gate_problems(cfg, rest):
+                        # Early rounds can run before gold or the alert tables
+                        # hold rows; an empty result there is reported, and
+                        # only the last round is held to the empty-result gate.
+                        final = idx == len(rounds)
+                        if not final:
+                            for name in empty_benchmark_queries(rest):
+                                print_warning(f"Round {idx}: {name} returned no rows")
+                        for problem in _benchmark_gate_problems(cfg, rest, check_empty=final):
                             print_error(f"Round {idx}: {problem}")
                             pipeline_success = False
                     if not pipeline_success and collector.current_run:

@@ -82,6 +82,14 @@ def policy_mismatch(expected: str | None, actual: str | None) -> str | None:
     )
 
 
+#: Coarse per-operation classes for the effective maintenance identity.
+RAN = "ran"
+NOT_SUPPORTED = "not_supported"
+SKIPPED_BY_USER = "skipped_by_user"
+FAILED = "failed"
+NOT_RUN = "not_run"
+
+
 def effective_maintenance(
     policy_id: str | None,
     *,
@@ -93,84 +101,110 @@ def effective_maintenance(
     stopped: bool | None = False,
     outcomes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """The maintenance a run actually got under *policy_id*, which is not
-    always what the policy asks for: DuckDB runs none, Delta skips OPTIMIZE
-    everywhere and VACUUM on Spark Thrift, continuous Delta has none in
-    effect, and a stopped round did not finish.
+    """The maintenance a run actually got under *policy_id*.
+
+    Each operation (expire, compaction) gets a coarse class, which is what
+    the identity ``id`` carries: ``ran``, ``not_supported`` (the
+    composition cannot run it: DuckDB, Delta OPTIMIZE, Delta VACUUM on
+    Spark Thrift, continuous Delta VACUUM at its 7 d default),
+    ``skipped_by_user`` (--skip-maintenance, pre_benchmark_maintenance off,
+    --skip-benchmark, continuous compaction disabled), ``failed`` (it was
+    attempted and no statement succeeded) or ``not_run`` (the run ended
+    before the maintenance phase). Partial success, per-round timeouts and a
+    stopped budget are ``detail`` and ``reasons``, not identity: one timed-out
+    round in a 24 h run does not make it a different experiment.
 
     *outcomes* is what the run's maintenance calls recorded (one dict per
-    call: ``kind`` expire or compaction, statement counts, or a ``skipped``
-    or ``error`` reason). When given it decides: a kind whose statements all
-    failed, or that never ran, is off, and one where only some succeeded is
-    ``partial``. It can only turn a kind down from what the rules above
-    allow, never up (a continuous Delta VACUUM at 7 d succeeds and still
-    expires nothing inside the window). None (a record without outcomes, or
-    a planned run) falls back to the rules alone.
+    call: ``kind``, statement counts, or ``skipped``, ``user_skip`` or
+    ``error``). None (a record from before outcomes, or a planned run) falls
+    back to the rules alone, labelled so in ``basis``. Outcomes only turn an
+    operation down from what the rules allow, never up.
 
-    Returns ``{"id", "expire", "compaction", "reasons"}``; ``id`` is
-    ``<policy>:expire=<on|partial|off>,compaction=<on|partial|off>[,stopped]``.
-    Two runs with different effective ids measured under different execution
-    conditions.
+    Returns ``{"id", "detail_id", "expire", "compaction", "detail", "basis",
+    "reasons"}``.
     """
     policy = policy_id or LEGACY_MAINTENANCE_POLICY_ID
     fmt = (table_format or "").lower()
     engine = (query_engine or "").lower()
     continuous = (mode or "batch").lower() in ("sustained", "continuous")
     reasons: list[str] = []
-    expire = compaction = True
+    cls = {"expire": RAN, "compaction": RAN}
+
+    def turn(kinds, value, reason):
+        for k in kinds:
+            if cls[k] == RAN:
+                cls[k] = value
+        reasons.append(reason)
+
+    both = ("expire", "compaction")
     if policy.endswith(SKIPPED_SUFFIX):
-        expire = compaction = False
-        reasons.append("--skip-maintenance")
+        turn(both, SKIPPED_BY_USER, "--skip-maintenance")
     elif engine in ("duckdb", "none", ""):
-        expire = compaction = False
-        reasons.append(f"query engine {engine or 'none'} cannot run table maintenance")
+        turn(both, NOT_SUPPORTED, f"query engine {engine or 'none'} cannot run table maintenance")
     elif not continuous and pre_benchmark_maintenance is False:
-        expire = compaction = False
-        reasons.append("pre_benchmark_maintenance is off")
+        turn(both, SKIPPED_BY_USER, "pre_benchmark_maintenance is off")
     elif fmt == "delta":
-        compaction = False
-        reasons.append("Delta OPTIMIZE is never run (it exhausts engine memory)")
+        turn(
+            ("compaction",),
+            NOT_SUPPORTED,
+            "Delta OPTIMIZE is never run (it exhausts engine memory)",
+        )
         if continuous:
-            expire = False
-            reasons.append("continuous Delta VACUUM keeps the 7 d default: no effect in a window")
+            turn(
+                ("expire",),
+                NOT_SUPPORTED,
+                "continuous Delta VACUUM keeps the 7 d default: no effect in a window",
+            )
         elif engine == "spark-thrift":
-            expire = False
-            reasons.append("Delta VACUUM is skipped on Spark Thrift (it OOMs at 4Gi)")
+            turn(
+                ("expire",),
+                NOT_SUPPORTED,
+                "Delta VACUUM is skipped on Spark Thrift (it OOMs at 4Gi)",
+            )
     elif continuous and compaction_enabled is False:
-        compaction = False
-        reasons.append("continuous compaction is disabled")
-    states = {"expire": "on" if expire else "off", "compaction": "on" if compaction else "off"}
+        turn(("compaction",), SKIPPED_BY_USER, "continuous compaction is disabled")
+
+    detail = {k: ("on" if v == RAN else "off") for k, v in cls.items()}
     if outcomes is not None:
         for o in outcomes:
             if o.get("error"):
                 reasons.append(f"{o.get('kind', 'maintenance')} call failed: {o['error']}")
-        for kind in ("expire", "compaction"):
-            if states[kind] == "off":
+            if o.get("user_skip") and o.get("kind") in cls:
+                turn((o["kind"],), SKIPPED_BY_USER, f"{o['kind']} skipped: {o['user_skip']}")
+        for kind in both:
+            if cls[kind] != RAN:
+                detail[kind] = "off"
                 continue
-            ran = [o for o in outcomes if o.get("kind") == kind and o.get("total")]
-            total = sum(int(o.get("total") or 0) for o in ran)
-            ok = sum(int(o.get("succeeded") or 0) for o in ran)
-            for o in outcomes:
+            mine = [o for o in outcomes if o.get("kind") in (kind, "maintenance")]
+            total = sum(int(o.get("total") or 0) for o in mine if o.get("kind") == kind)
+            ok = sum(int(o.get("succeeded") or 0) for o in mine if o.get("kind") == kind)
+            # A round or phase that raised counts as one failed attempt.
+            total += sum(1 for o in mine if o.get("error"))
+            for o in mine:
                 if o.get("kind") == kind and o.get("skipped"):
                     reasons.append(f"{kind} skipped: {o['skipped']}")
-            if total == 0 or ok == 0:
-                states[kind] = "off"
+            attempted = bool(mine)
+            if not attempted:
+                cls[kind], detail[kind] = NOT_RUN, "off"
+                reasons.append(f"{kind}: never reached (the run ended before maintenance)")
+            elif total == 0 or ok == 0:
+                cls[kind], detail[kind] = FAILED, "off"
                 reasons.append(
                     f"{kind}: no statement ran" if total == 0 else f"{kind}: 0 of {total} succeeded"
                 )
             elif ok < total:
-                states[kind] = "partial"
+                detail[kind] = "partial"
                 reasons.append(f"{kind}: {ok} of {total} statements succeeded")
-    expire = states["expire"] != "off"
-    compaction = states["compaction"] != "off"
-    parts = [f"expire={states['expire']}", f"compaction={states['compaction']}"]
-    if stopped and (expire or compaction):
-        parts.append("stopped")
+    detail_parts = [f"expire={detail['expire']}", f"compaction={detail['compaction']}"]
+    if stopped and RAN in cls.values():
+        detail_parts.append("stopped")
         reasons.append("pre-benchmark maintenance stopped on its budget")
     return {
-        "id": f"{policy}:" + ",".join(parts),
-        "expire": states["expire"],
-        "compaction": states["compaction"],
+        "id": f"{policy}:expire={cls['expire']},compaction={cls['compaction']}",
+        "detail_id": f"{policy}:" + ",".join(detail_parts),
+        "expire": cls["expire"],
+        "compaction": cls["compaction"],
+        "detail": detail,
         "basis": "recorded outcomes"
         if outcomes is not None
         else "policy rules (no outcomes recorded)",

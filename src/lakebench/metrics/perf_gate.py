@@ -49,11 +49,14 @@ from lakebench.cli._reproduce import (
 )
 from lakebench.metrics.experiment import (
     NO_PROVENANCE,
+    corpus_problems,
     experiment_of,
     failed_queries,
     identity,
     result_fingerprints,
+    results_established,
     stored_identity_refusals,
+    unchecked_by_design,
 )
 from lakebench.metrics.maintenance_policy import not_current, policy_mismatch, recorded_policy
 
@@ -1179,15 +1182,35 @@ def record_baseline(
         )
     exp = experiment_of(run.raw)
     assert exp is not None  # run_refusals refused a run without one
-    if not (exp.get("results") or {}).get("not_checked"):
-        from lakebench.benchmark.fingerprint import usable
-
-        unfp = sorted(n for n, f in result_fingerprints(exp).items() if not usable(f))
-        if unfp:
-            raise PerfGateError(
-                f"run {run.run_id} cannot be a baseline for {name}: queries without a usable "
-                f"result fingerprint ({', '.join(unfp)}) could never be shown equal to a later run"
+    established = results_established(exp)
+    if unchecked_by_design(exp):
+        established = True  # continuous: gated without a result check (experiment.py)
+    problems = corpus_problems(exp)
+    if established is not True or problems:
+        raise PerfGateError(
+            f"run {run.run_id} cannot be a baseline for {name}: "
+            + "; ".join(
+                problems
+                + (
+                    [f"comparability not established ({established})"]
+                    if established is not True
+                    else []
+                )
             )
+        )
+    from lakebench.benchmark.fingerprint import usable
+
+    # A failed query (a known upstream failure included) has no result to
+    # fingerprint; the gate handles it as a failure, not here.
+    failed = failed_queries(run.raw)
+    unfp = sorted(
+        n for n, f in result_fingerprints(exp).items() if n not in failed and not usable(f)
+    )
+    if unfp:
+        raise PerfGateError(
+            f"run {run.run_id} cannot be a baseline for {name}: queries without a usable "
+            f"result fingerprint ({', '.join(unfp)}) could never be shown equal to a later run"
+        )
     numbers, excluded = extract_metrics(run)
     if not numbers:
         raise PerfGateError(f"run {run.run_id} has no performance numbers")
