@@ -803,3 +803,20 @@ class TestTrinoConfigMapFormatConditional:
         assert any("delta_lake" in cl for cl in connector_lines), (
             f"Expected delta_lake connector in lakehouse.properties, got: {connector_lines}"
         )
+
+
+class TestDuckDBProbeTimeouts:
+    """Every DuckDB exec probe starts a python process, which the 1 s default
+    timeoutSeconds does not cover: the startup probe took 1.38 s live and
+    failed at random, restarting the container and costing an 892 s deploy."""
+
+    def test_every_probe_sets_a_realistic_timeout(self, renderer: TemplateRenderer):
+        engine = _make_engine(recipe="hive-iceberg-spark-duckdb")
+        ctx = _enrich_context(engine)
+        parsed = yaml.safe_load(renderer.render("duckdb/deployment.yaml.j2", ctx))
+        container = parsed["spec"]["template"]["spec"]["containers"][0]
+        for probe in ("startupProbe", "readinessProbe", "livenessProbe"):
+            assert container[probe].get("timeoutSeconds", 1) >= 10, probe
+        startup = container["startupProbe"]
+        # The whole startup budget still covers the pip install window.
+        assert startup["periodSeconds"] * startup["failureThreshold"] >= 300
