@@ -120,6 +120,35 @@ def _stackable_hive(cfg: Any) -> str:
     return f"oci.stackable.tech/sdp/hive:{version}-stackable{sdp} (derived, not read from the pod)"
 
 
+def _c360_resolved(cfg: Any) -> dict[str, Any]:
+    """The Customer 360 parameters the generator was given.
+
+    ``unique_customers`` is the customer id space passed to datagen
+    (``datagen_customer_id_max``), the same value the c360 correctness check
+    uses. ``date_range_days`` is not recorded: datagen never reads it; the
+    event window is ``timestamp_start``/``timestamp_end`` (defaults as the
+    correctness check resolves them). A value that cannot be resolved is
+    left out, never guessed.
+    """
+    c360 = cfg.architecture.workload.customer360
+    out: dict[str, Any] = {}
+    try:
+        out["unique_customers"] = int(cfg.get_scale_dimensions().customers)
+        out["unique_customers_source"] = (
+            "customer360.unique_customers" if c360.unique_customers is not None else "scale"
+        )
+    except Exception:  # noqa: BLE001 -- recorded as absent, never guessed
+        pass
+    try:
+        from lakebench.metrics.c360_correctness import expected_context
+
+        ctx = expected_context(cfg)
+        out["event_window"] = {"start": ctx["window_start"], "end": ctx["window_end"]}
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def experiment_inputs(cfg: Any) -> dict[str, Any]:
     """The config-derived half of the experiment block."""
     arch = cfg.architecture
@@ -144,8 +173,15 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
             "retention_workload": workload.retention_workload,
             "retention_months": workload.retention_months,
         }
+        params_id = _short_hash(params)
     else:
-        params = {"customer360": workload.customer360.model_dump(mode="json")}
+        # The id hashes the declared overrides, as before, so runs recorded
+        # before the resolved values were stamped stay comparable; what they
+        # resolve to is a function of scale and the timestamp window, both
+        # already corpus identity.
+        declared = {"customer360": workload.customer360.model_dump(mode="json")}
+        params_id = _short_hash(declared)
+        params = {"customer360": _c360_resolved(cfg)}
 
     corpus = {
         "schema": schema,
@@ -161,6 +197,18 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
         "date_range_days": workload.customer360.date_range_days,
     }
     corpus["id"] = _short_hash(corpus)
+    # The id keeps hashing the declared overrides (null when unset), so ids
+    # recorded before this stay valid. The record shows what ran instead:
+    # the resolved customer id space for c360, and no date_range_days,
+    # which datagen never reads (the window is timestamp_start/_end).
+    declared_customers = corpus.pop("unique_customers", None)
+    corpus.pop("date_range_days", None)
+    if schema != "financial":
+        resolved = params["customer360"].get("unique_customers")
+        if resolved is not None:
+            corpus["unique_customers"] = resolved
+        elif declared_customers is not None:
+            corpus["unique_customers"] = declared_customers
     if seed_error:
         corpus["seed_error"] = seed_error
 
@@ -198,7 +246,7 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
             "name": schema,
             "version": WORKLOAD_VERSIONS.get(schema, f"{schema}-unversioned"),
             "generator_model_version": DATAGEN_MODEL_VERSIONS.get(schema),
-            "parameters_id": _short_hash(params),
+            "parameters_id": params_id,
             "parameters": params,
         },
         "corpus": corpus,
