@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,6 +32,7 @@ from lakebench.cli._helpers import (
 from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
+from lakebench.metrics.continuous_window import parse_events, utc_naive
 
 logger = logging.getLogger(__name__)
 
@@ -1451,9 +1452,9 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
                         _found = True
                         break
                 if not _found:
-                    health[f"{label}_{metric_name}"] = -1
-            except Exception:
-                health[f"{label}_{metric_name}"] = -1
+                    logger.warning("table health %s_%s: no count in output", label, metric_name)
+            except Exception as e:  # noqa: BLE001 -- a failed probe is absent, never -1
+                logger.warning("table health %s_%s failed: %s", label, metric_name, e)
 
     return health
 
@@ -1486,10 +1487,10 @@ def _run_benchmark_round(
     if k8s is not None:
         try:
             health = _probe_table_health(cfg, k8s)
-            round_meta.silver_data_file_count = health.get("silver_data_file_count", 0)
-            round_meta.silver_snapshot_count = health.get("silver_snapshot_count", 0)
-            round_meta.gold_data_file_count = health.get("gold_data_file_count", 0)
-            round_meta.gold_snapshot_count = health.get("gold_snapshot_count", 0)
+            round_meta.silver_data_file_count = health.get("silver_data_file_count")
+            round_meta.silver_snapshot_count = health.get("silver_snapshot_count")
+            round_meta.gold_data_file_count = health.get("gold_data_file_count")
+            round_meta.gold_snapshot_count = health.get("gold_snapshot_count")
         except Exception:
             pass  # Health probe failure should not block the benchmark
 
@@ -1593,7 +1594,7 @@ def _run_benchmark_round(
     # 7. Print inline result
     freshness_str = (
         f" | Freshness: {round_meta.gold_freshness_seconds:.1f}s"
-        if round_meta.gold_freshness_seconds > 0
+        if (round_meta.gold_freshness_seconds or 0) > 0
         else ""
     )
     q9_str = ""
@@ -1613,7 +1614,11 @@ def _run_benchmark_round(
             "qph": round(bench_result.qph, 1),
             "passed": passed,
             "total": total,
-            "freshness_seconds": round(round_meta.gold_freshness_seconds, 2),
+            "freshness_seconds": (
+                round(round_meta.gold_freshness_seconds, 2)
+                if round_meta.gold_freshness_seconds is not None
+                else None
+            ),
             "q9_contention": round_meta.q9_contention_observed,
         },
     )
@@ -1659,7 +1664,7 @@ def _print_rounds_summary(console, rounds: list) -> None:
                 row.append("-")
 
         # Freshness
-        if meta and meta.gold_freshness_seconds > 0:
+        if meta and (meta.gold_freshness_seconds or 0) > 0:
             row.append(f"{meta.gold_freshness_seconds:.1f}s")
             freshness_values.append(meta.gold_freshness_seconds)
         else:
@@ -1753,6 +1758,193 @@ def _streaming_job_env(run_id: str, run_duration: int) -> dict[str, str]:
     on the CLI's clock at submit, which precedes the driver-ready wait.
     """
     return {"LB_RUN_ID": run_id, "LB_CONTINUOUS_WINDOW_S": str(int(run_duration))}
+
+
+class StreamStartWatch:
+    """``wait_until_running`` callback for one stream: reports every
+    submission failure while the operator retries it, and a heartbeat while
+    the wait goes on, instead of waiting silently (the 2026-09-27 discovery
+    run printed nothing for 9 minutes while two streams failed five times).
+    ``failures`` is what the metrics record."""
+
+    HEARTBEAT_S = 60
+
+    def __init__(self, job_name: str, journal=None):
+        self.job_name = job_name
+        self.journal = journal
+        self.failures: list[dict] = []
+        self.running_at: str | None = None
+        self._last_key: tuple | None = None
+        self._next_beat = self.HEARTBEAT_S
+
+    def __call__(self, status, elapsed: float) -> None:
+        from lakebench.metrics.continuous_window import classify_submission_failure
+        from lakebench.modules.pipeline_engines.spark.job import SUCCESS_STATES, JobState
+
+        if status.state == JobState.RUNNING or status.state in SUCCESS_STATES:
+            if self.running_at is None:
+                self.running_at = datetime.now(timezone.utc).isoformat()
+            return
+        if status.state == JobState.SUBMISSION_FAILED:
+            key = (status.submission_attempts, status.message)
+            if key != self._last_key:
+                self._last_key = key
+                reason = classify_submission_failure(status.message)
+                attempt = status.submission_attempts or len(self.failures) + 1
+                self.failures.append(
+                    {
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "attempt": attempt,
+                        "reason": reason,
+                    }
+                )
+                print_warning(
+                    f"lakebench-{self.job_name}: submission attempt {attempt} failed: {reason}. "
+                    "The Spark Operator retries it; the window opens only when every stream runs."
+                )
+                if self.journal is not None:
+                    _journal_safe(
+                        self.journal.record,
+                        EventType.STREAMING_HEALTH,
+                        message=f"{self.job_name} submission failed",
+                        details={"job": self.job_name, "attempt": attempt, "reason": reason},
+                    )
+                return
+        if elapsed >= self._next_beat:
+            self._next_beat = elapsed + self.HEARTBEAT_S
+            console.print(
+                f"  [dim]Waiting for lakebench-{self.job_name} to start "
+                f"({status.state.value or 'NEW'}, {elapsed:.0f}s)...[/dim]"
+            )
+
+
+def _size_mb(size: str) -> float:
+    """MB in a datagen size string ("64MB", "1GB"); bare numbers are bytes."""
+    text = str(size).strip().upper()
+    for suffix, mb in (("TB", 1024.0**2), ("GB", 1024.0), ("MB", 1.0), ("KB", 1 / 1024)):
+        if text.endswith(suffix):
+            return float(text[: -len(suffix)]) * mb
+    return float(text.rstrip("B")) / (1024 * 1024)
+
+
+def continuous_arrival_advisory(cfg, run_duration: int) -> str | None:
+    """A warning when the trickle will offer the whole corpus in less time
+    than the window, so the window would measure a drained pipeline and the
+    continuous gate would fail it. An estimate from the nominal corpus size;
+    the gate decides on what the run actually did."""
+    from lakebench.metrics.continuous_window import expected_arrival_seconds
+
+    sustained = cfg.architecture.pipeline.sustained
+    try:
+        dims = cfg.get_scale_dimensions()
+        file_mb = _size_mb(cfg.architecture.workload.datagen.file_size)
+    except Exception:  # noqa: BLE001 -- advisory only
+        return None
+    trigger_s = _parse_spark_interval(sustained.bronze_trigger_interval)
+    need = expected_arrival_seconds(
+        dims.approx_bronze_gb, file_mb, sustained.max_files_per_trigger, trigger_s
+    )
+    if need is None or need >= run_duration:
+        return None
+    files = dims.approx_bronze_gb * 1024 / file_mb
+    fit = max(1, int(files * trigger_s // run_duration))
+    return (
+        f"The trickle offers this corpus (~{dims.approx_bronze_gb:.0f} GB, ~{files:.0f} files at "
+        f"{sustained.max_files_per_trigger} files per {trigger_s}s) in about {need:.0f}s, less "
+        f"than the {run_duration}s window: data would stop arriving before the window ends and "
+        f"the continuous gate fails a window with too little continuous processing. Set "
+        f"max_files_per_trigger to about {fit} (or lower) so arrival lasts the window, or "
+        f"shorten run_duration."
+    )
+
+
+def end_of_window_problems(job_manager, job_names: list[str]) -> list[str]:
+    """Streams that were not running when the window closed: a stream that
+    died mid-window did not process continuously, whatever it logged
+    before."""
+    from lakebench.spark.job import JobState
+
+    problems = []
+    for name in job_names:
+        try:
+            st = job_manager.get_job_status(f"lakebench-{name}")
+        except Exception as e:  # noqa: BLE001
+            problems.append(f"continuous gate: could not read lakebench-{name} status: {e}")
+            continue
+        if st.state != JobState.RUNNING:
+            problems.append(
+                f"continuous gate: lakebench-{name} was {st.state.value or 'NEW'} when the window "
+                f"closed, not RUNNING ({st.message})"
+            )
+    return problems
+
+
+#: Longest the CLI keeps the streams running after the window so the corpus
+#: can finish passing through for the result check. Longer corpora are not
+#: settled and the run records why its results were not checked.
+SETTLE_MAX_SECONDS = 1800
+
+
+def settle_budget_seconds(cfg, datagen_rows: int, bronze_rows: int, rows_per_s: float) -> float:
+    """Seconds the remaining corpus needs to reach gold: the rows bronze has
+    still to take in at the rate it held, plus two silver triggers and two
+    gold refreshes, plus a minute."""
+    sustained = cfg.architecture.pipeline.sustained
+    remaining = max(0, datagen_rows - bronze_rows)
+    intake = remaining / rows_per_s if rows_per_s > 0 else (0.0 if remaining == 0 else float("inf"))
+    return (
+        intake
+        + 2 * _parse_spark_interval(sustained.silver_trigger_interval)
+        + 2 * _parse_spark_interval(sustained.gold_refresh_interval)
+        + 60
+    )
+
+
+def wait_for_settle(
+    monitor, job_names: list[str], datagen_rows: int, budget_s: float, poll_s: float = 30.0
+) -> dict:
+    """Keep polling the stream logs until the whole corpus has reached gold
+    (continuous_window.settle_state) or *budget_s* runs out.
+    Returns {"settled", "seconds", "reason"}."""
+    from lakebench.metrics.continuous_window import settle_state
+
+    start = time.time()
+    reason = "not polled"
+    while True:
+        events = {}
+        for name in job_names:
+            try:
+                logs = monitor._get_driver_logs(f"lakebench-{name}", tail_lines=None)
+            except Exception:  # noqa: BLE001
+                logs = None
+            events[name] = parse_events(logs, name)
+        settled, reason = settle_state(events, datagen_rows)
+        waited = time.time() - start
+        if settled:
+            return {"settled": True, "seconds": round(waited, 1), "reason": reason}
+        if waited + poll_s > budget_s:
+            return {"settled": False, "seconds": round(waited, 1), "reason": reason}
+        time.sleep(poll_s)
+
+
+def continuous_result_check(bench_runner) -> dict:
+    """Run the query set once over the settled tables (streams stopped) and
+    fingerprint every result, as a batch run does after its benchmark.
+    Failed queries are recorded with no fingerprint."""
+    try:
+        result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=True)
+    except Exception as e:  # noqa: BLE001
+        return {"not_checked": f"the result check could not run: {e}"}
+    fps = {qr.query.name: (qr.result_fingerprint if qr.success else None) for qr in result.queries}
+    if not fps:
+        return {"not_checked": "the result check ran no queries"}
+    from lakebench.benchmark.queries import query_set_id
+
+    return {
+        "query_set_id": query_set_id(fps),
+        "fingerprints": fps,
+        "failed": sorted(n for n, f in fps.items() if f is None),
+    }
 
 
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
@@ -1892,6 +2084,25 @@ def _run_sustained(
         )
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
         monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
+
+        _advisory = continuous_arrival_advisory(cfg, run_duration)
+        if _advisory:
+            print_warning(_advisory)
+
+        # The benchmark runner serves the in-stream rounds and the end-of-run
+        # result check. A run that cannot create it cannot produce the query
+        # evidence continuous mode claims, so it fails here, before any
+        # stream starts (it used to warn and pass with no rounds).
+        bench_runner = None
+        if not skip_benchmark:
+            try:
+                from lakebench.benchmark import BenchmarkRunner
+
+                bench_runner = BenchmarkRunner(cfg)
+            except Exception as e:  # noqa: BLE001
+                print_error(f"Could not create the benchmark runner: {e}")
+                pipeline_success = False
+                raise typer.Exit(1) from None
 
         # Deploy scripts ConfigMap (includes streaming scripts) -- must succeed
         print_info("Deploying Spark scripts...")
@@ -2090,16 +2301,42 @@ def _run_sustained(
         # first; dependency-download races on the shared operator are retried.
         # One shared deadline: the streams start concurrently, so waiting
         # for each in turn with its own budget could take N times as long.
+        # Each stream's submission failures are printed, journaled and
+        # recorded as they happen (StreamStartWatch).
         _start_deadline = time.time() + 1800
-        for _job_type, job_name in submitted:
-            running = monitor.wait_until_running(
-                f"lakebench-{job_name}",
-                timeout_seconds=max(0, int(_start_deadline - time.time())),
-            )
-            if not running.success:
-                print_error(f"lakebench-{job_name} did not start: {running.message}")
-                pipeline_success = False
-                raise typer.Exit(1)
+        stream_watch = {name: StreamStartWatch(name, j) for _, name in submitted}
+        if collector.current_run is not None:
+            collector.current_run.continuous = {"streams": {}}
+        try:
+            for _job_type, job_name in submitted:
+                running = monitor.wait_until_running(
+                    f"lakebench-{job_name}",
+                    timeout_seconds=max(0, int(_start_deadline - time.time())),
+                    on_status=stream_watch[job_name],
+                )
+                if not running.success:
+                    print_error(f"lakebench-{job_name} did not start: {running.message}")
+                    pipeline_success = False
+                    raise typer.Exit(1)
+        finally:
+            if collector.current_run is not None:
+                collector.current_run.continuous["streams"] = {
+                    name: {"running_at": w.running_at, "submission_failures": w.failures}
+                    for name, w in stream_watch.items()
+                }
+        window_start = utc_naive(datetime.now(timezone.utc))
+        _first_up = min(
+            (datetime.fromisoformat(w.running_at) for w in stream_watch.values() if w.running_at),
+            default=None,
+        )
+        if _first_up is not None:
+            _skew = (window_start - utc_naive(_first_up)).total_seconds()
+            if _skew > 60:
+                print_warning(
+                    f"The first stream was running {_skew:.0f}s before the last one started. "
+                    "Rows taken in before the window opens are recorded as pre-window rows and "
+                    "left out of every window score."
+                )
 
         # Monitor for configured duration, running benchmark rounds at intervals
         console.print()
@@ -2142,19 +2379,11 @@ def _run_sustained(
                 f"No benchmark rounds will run."
             )
 
-        # Pre-create benchmark runner for in-stream rounds
-        bench_runner_instream = None
-        if can_run_rounds:
-            try:
-                from lakebench.benchmark import BenchmarkRunner
-
-                bench_runner_instream = BenchmarkRunner(cfg)
-                print_info(
-                    f"In-stream benchmarking: warmup {bench_warmup}s, then every {bench_interval}s"
-                )
-            except Exception as e:
-                print_warning(f"Could not create benchmark runner: {e}")
-                can_run_rounds = False
+        bench_runner_instream = bench_runner if can_run_rounds else None
+        if bench_runner_instream is not None:
+            print_info(
+                f"In-stream benchmarking: warmup {bench_warmup}s, then every {bench_interval}s"
+            )
 
         # Iceberg retention scheduling. --skip-maintenance disables both
         # the expire_snapshots loop and periodic compaction; without
@@ -2376,6 +2605,11 @@ def _run_sustained(
                 details={"elapsed_seconds": elapsed, "remaining_seconds": remaining},
             )
 
+        window_end = utc_naive(datetime.now(timezone.utc))
+        window_seconds = (window_end - window_start).total_seconds()
+        # A stream that died inside the window did not process continuously.
+        window_problems = end_of_window_problems(job_manager, [n for _, n in submitted])
+
         # Measure bronze bucket for datagen stats (datagen runs concurrently,
         # so we measure after the monitoring window to capture all output)
         try:
@@ -2450,6 +2684,114 @@ def _run_sustained(
                 driver_logs[job_name] = None
                 print_warning(f"{job_name}: log capture failed: {e}")
 
+        # What each stream did inside the window, and the continuous gate:
+        # data arriving during the window, several silver commits and gold
+        # refreshes on new data, gold freshness measured (invariant 3).
+        from lakebench.metrics.continuous_window import window_gate_problems
+
+        parsed: dict[str, StreamingJobMetrics] = {}
+        window_stats_by_job: dict[str, dict | None] = {}
+        for _job_type, job_name in submitted:
+            logs = driver_logs.get(job_name)
+            sm = StreamingJobMetrics(job_name=f"lakebench-{job_name}", job_type=job_name)
+            if logs:
+                try:
+                    sm = collector.parse_streaming_logs(logs, job_name)
+                except Exception as e:  # noqa: BLE001
+                    print_warning(f"{job_name}: parse failed: {e}")
+            stats = sm.apply_window(logs, window_start, window_end) if logs else None
+            # A log with no timestamped stage line cannot place anything in
+            # the window.
+            if stats is not None and not parse_events(logs, job_name):
+                stats = None
+            window_stats_by_job[job_name] = stats
+            watch = stream_watch.get(job_name)
+            if watch is not None:
+                sm.running_at = watch.running_at
+                sm.submission_failures = list(watch.failures)
+            parsed[job_name] = sm
+        window_problems.extend(window_gate_problems(window_stats_by_job))
+        for _problem in window_problems:
+            print_error(_problem)
+        if window_problems:
+            pipeline_success = False
+        else:
+            print_success(
+                "Continuous gate: data arrived during the window and silver and gold "
+                "committed continuously"
+            )
+        continuous_record = {
+            "window": {
+                "start": window_start.isoformat() + "Z",
+                "end": window_end.isoformat() + "Z",
+                "seconds": round(window_seconds, 1),
+            },
+            "gate_problems": list(window_problems),
+        }
+        if collector.current_run is not None:
+            collector.current_run.continuous.update(continuous_record)
+        _journal_safe(
+            j.record,
+            EventType.STREAMING_HEALTH,
+            message="Continuous window closed",
+            details={
+                **continuous_record,
+                "window_stats": {
+                    k: (dict(v) if v else None) for k, v in window_stats_by_job.items()
+                },
+            },
+        )
+
+        # Result check (DESIGN 4.1 for continuous): keep the streams running
+        # until the whole corpus has reached gold, stop them, and fingerprint
+        # the query set over tables that are then a function of the corpus
+        # alone. Not part of the window: nothing here is scored.
+        settle: dict = {"settled": False}
+        result_check: dict = {}
+        if bench_runner is None:
+            result_check = {"not_checked": "no benchmark (--skip-benchmark)"}
+        elif not pipeline_success:
+            result_check = {"not_checked": "the run failed its gates"}
+        elif _datagen_output_rows <= 0:
+            result_check = {"not_checked": "datagen row count not measured, so settling is unknown"}
+        else:
+            _bronze = parsed.get("bronze-ingest")
+            _rps = (
+                (_bronze.window_input_rows or 0) / window_seconds
+                if _bronze is not None and window_seconds > 0
+                else 0.0
+            )
+            _need = settle_budget_seconds(
+                cfg,
+                _datagen_output_rows,
+                _bronze.total_rows_processed if _bronze is not None else 0,
+                _rps,
+            )
+            if _need > SETTLE_MAX_SECONDS:
+                result_check = {
+                    "not_checked": (
+                        f"the rest of the corpus needs about {_need:,.0f}s to reach gold, over "
+                        f"the {SETTLE_MAX_SECONDS}s settle limit"
+                    )
+                }
+                settle = {"settled": False, "reason": result_check["not_checked"]}
+            else:
+                print_info(
+                    f"Letting the pipeline take in the rest of the corpus for the result "
+                    f"check (up to {_need:.0f}s, not scored)..."
+                )
+                settle = wait_for_settle(
+                    monitor, [n for _, n in submitted], _datagen_output_rows, _need
+                )
+                if settle["settled"]:
+                    print_success(f"Corpus settled in gold after {settle['seconds']:.0f}s")
+                else:
+                    result_check = {"not_checked": f"the corpus did not settle: {settle['reason']}"}
+                    print_warning(
+                        f"Result check skipped: {result_check['not_checked']}. The run's "
+                        "results are not established, so it cannot be compared."
+                    )
+
         # Stop streaming jobs
         console.print("[bold]Stopping continuous jobs...[/bold]")
         for _job_type, job_name in submitted:
@@ -2471,6 +2813,22 @@ def _run_sustained(
             message="Streaming pipeline stopped",
             details={"duration_seconds": run_duration},
         )
+
+        if settle.get("settled") and bench_runner is not None:
+            print_info("Result check: fingerprinting the query set over the settled tables...")
+            result_check = continuous_result_check(bench_runner)
+            if result_check.get("fingerprints"):
+                _n = len(result_check["fingerprints"])
+                _bad = result_check.get("failed") or []
+                print_success(
+                    f"Result check: {_n - len(_bad)} of {_n} query results fingerprinted"
+                    + (f" (failed: {', '.join(_bad)})" if _bad else "")
+                )
+            else:
+                print_warning(f"Result check: {result_check.get('not_checked')}")
+        if collector.current_run is not None:
+            collector.current_run.continuous["settle"] = settle
+            collector.current_run.continuous["result_check"] = result_check
 
         # LB-127 honest continuous runner (closes LB-044 for AML). A
         # continuous AML run whose gold stage produced ZERO alerts is a
@@ -2553,15 +2911,9 @@ def _run_sustained(
             _rows_by_job: dict[str, int | None] = {}
             for _jt, _jn in submitted:
                 if _jn in _C360_REQUIRED_STREAM_JOBS:
-                    _logs = driver_logs.get(_jn)
-                    try:
-                        _rows_by_job[_jn] = (
-                            collector.parse_streaming_logs(_logs, _jn).total_rows_processed
-                            if _logs
-                            else None
-                        )
-                    except Exception:  # noqa: BLE001
-                        _rows_by_job[_jn] = None
+                    _rows_by_job[_jn] = (
+                        parsed[_jn].total_rows_processed if driver_logs.get(_jn) else None
+                    )
             for _problem in _c360_continuous_gate_problems(_rows_by_job):
                 print_error(_problem)
                 pipeline_success = False
@@ -2571,45 +2923,41 @@ def _run_sustained(
         console.print("[bold]Parsing continuous-mode metrics...[/bold]")
         for _job_type, job_name in submitted:
             logs = driver_logs.get(job_name)
+            streaming_metrics = parsed[job_name]
             if logs:
-                try:
-                    streaming_metrics = collector.parse_streaming_logs(
-                        logs,
-                        job_name,
+                inside = streaming_metrics.window_input_rows
+                console.print(
+                    f"  {job_name}: {streaming_metrics.total_batches} batches, "
+                    f"{streaming_metrics.total_rows_processed:,} rows"
+                    + (
+                        f" ({streaming_metrics.window_commits} commits, "
+                        f"{inside:,} rows inside the window)"
+                        if inside is not None
+                        else (
+                            f" ({streaming_metrics.window_commits} refreshes inside the window)"
+                            if streaming_metrics.window_commits is not None
+                            else ""
+                        )
                     )
-                    # Diagnostic: report what was parsed
-                    console.print(
-                        f"  {job_name}: {streaming_metrics.total_batches} batches, "
-                        f"{streaming_metrics.total_rows_processed:,} rows"
-                    )
-                    if streaming_metrics.total_batches == 0:
-                        # Show a sample of the logs to debug pattern mismatch
-                        lines = [line for line in logs.split("\n") if line.strip()]
-                        if lines:
-                            console.print("    [dim]no batches parsed -- sample lines:[/dim]")
-                            for sample in lines[:3]:
-                                truncated = sample[:100] + "..." if len(sample) > 100 else sample
-                                console.print(f"      {truncated}")
-                except Exception as e:
-                    print_warning(f"{job_name}: parse failed: {e}")
-                    streaming_metrics = StreamingJobMetrics(
-                        job_name=f"lakebench-{job_name}",
-                        job_type=job_name,
-                    )
+                )
+                if streaming_metrics.total_batches == 0:
+                    # Show a sample of the logs to debug pattern mismatch
+                    lines = [line for line in logs.split("\n") if line.strip()]
+                    if lines:
+                        console.print("    [dim]no batches parsed -- sample lines:[/dim]")
+                        for sample in lines[:3]:
+                            truncated = sample[:100] + "..." if len(sample) > 100 else sample
+                            console.print(f"      {truncated}")
             else:
                 console.print(f"  {job_name}: no logs to parse")
-                streaming_metrics = StreamingJobMetrics(
-                    job_name=f"lakebench-{job_name}",
-                    job_type=job_name,
-                )
 
-            streaming_metrics.elapsed_seconds = run_duration
+            # The measured window, not the configured run_duration.
+            streaming_metrics.elapsed_seconds = window_seconds
             streaming_metrics.requested_executors = requested_executors.get(job_name)
             streaming_metrics.success = pipeline_success
-            if streaming_metrics.elapsed_seconds > 0 and streaming_metrics.total_rows_processed > 0:
-                streaming_metrics.throughput_rps = (
-                    streaming_metrics.total_rows_processed / streaming_metrics.elapsed_seconds
-                )
+            _rows = streaming_metrics.window_input_rows
+            if streaming_metrics.elapsed_seconds > 0 and _rows:
+                streaming_metrics.throughput_rps = _rows / streaming_metrics.elapsed_seconds
             collector.record_streaming(streaming_metrics)
 
         # Aggregate in-stream benchmark rounds
@@ -2758,11 +3106,18 @@ def _run_sustained(
                             f" | {latency_str}ms latency (b/s/g)"
                         )
                     if pb.corpus_drained:
+                        _frac = pb.window_arrival_fraction
                         print_warning(
-                            "The corpus was fully ingested before the window ended: freshness "
-                            "covers only gold cycles that saw new data, and rows/s is a lower "
-                            "bound set by corpus size. Use a longer corpus or a shorter window "
-                            "for a throughput figure (LB-145)."
+                            "The corpus was fully ingested before the window ended"
+                            + (
+                                f" (data arrived for {_frac:.0%} of it)"
+                                if _frac is not None
+                                else ""
+                            )
+                            + ": freshness covers only gold cycles that saw new data, and rows/s "
+                            "is taken over the seconds data was arriving. Lower "
+                            "max_files_per_trigger or shorten the window so arrival lasts it "
+                            "(LB-145)."
                         )
                     _trickle = pb.trickle_note()
                     if _trickle:
