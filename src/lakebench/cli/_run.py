@@ -537,9 +537,9 @@ def compaction_measurable(cfg) -> bool:
 def _data_file_total(health: dict[str, int]) -> int:
     """Data files across the probed tables; 0 (unknown) when any probe failed.
 
-    ``_probe_table_health`` reports a failed probe as -1. Summed in, it
-    shifted the total by one per failure, and a probe that failed on one
-    side only read as a file-count change.
+    ``_probe_table_health`` leaves a failed probe's key out (older code
+    wrote -1, still refused here). Summing what is left read a probe that
+    failed on one side only as a file-count change.
     """
     counts = [v for k, v in health.items() if "file_count" in k and isinstance(v, int)]
     if not counts or any(v < 0 for v in counts):
