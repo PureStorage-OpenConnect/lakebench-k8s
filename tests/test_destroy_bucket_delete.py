@@ -243,6 +243,7 @@ class TestDestroyAllBuckets:
         forget_error=None,
         table_format=None,
         delete_buckets=True,
+        catalog_type=None,
     ):
         from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
 
@@ -268,6 +269,7 @@ class TestDestroyAllBuckets:
         cfg.architecture.tables.workload_tables.return_value = ["silver.t", "gold.t"]
         if table_format:
             cfg.architecture.table_format.type.value = table_format
+        cfg.architecture.catalog.type.value = catalog_type or "hive"
         self.engine = engine
         # Default: deploy recorded all three as created (LB-159 marker).
         created_record = set(verdicts) if created is None else set(created)
@@ -959,6 +961,84 @@ class TestDestroyAllBuckets:
         )
         msg = [x for x in self._results if x.component == "table-cleanup"][-1].message
         assert "emptied next and kept" in msg
+
+    # -- Polaris via Trino: DROP always requests purge, Polaris refuses it ----
+
+    def _run_catalog(self, catalog_type, maint, on_sql, create_namespace=True):
+        boto = FakeBoto({"a-bronze": [], "a-silver": [], "a-gold": []})
+        self._on_sql = on_sql
+        try:
+            r = self._run(
+                boto,
+                dict.fromkeys(["a-bronze", "a-silver", "a-gold"], "MATCH"),
+                maint=maint,
+                table_format="iceberg",
+                catalog_type=catalog_type,
+                create_namespace=create_namespace,
+            )
+        finally:
+            self._on_sql = None
+        tables = [x for x in self._results if x.component == "table-cleanup"][-1]
+        return r, tables, boto
+
+    def test_polaris_via_trino_skips_drops_and_succeeds(self):
+        """Live lb16-aml-batch: all 17 drops failed ("Failed to drop table")
+        because Trino drops with purge and Polaris refuses it; destroy exited
+        1 although everything was removed. No statement may be sent (enabling
+        purge would delete add_files-registered datagen files)."""
+        ran: list[str] = []
+
+        def refuse(sql):
+            ran.append(sql)
+            if sql.startswith("DROP"):
+                raise RuntimeError(
+                    "exec_sql failed (rc=1): Query 20260927_043036_00175_hj3h7 failed: "
+                    "Failed to drop table 'pacs008_raw'"
+                )
+
+        _r, tables, boto = self._run_catalog(
+            "polaris", ("trino", "trino-coordinator-0", "lakehouse"), refuse
+        )
+        assert ran == []
+        assert tables.status is DeploymentStatus.SUCCESS, tables.message
+        assert "not dropped" in tables.message and "Polaris" in tables.message
+        assert boto.buckets == {}, "the bucket step still runs"
+
+    def test_polaris_kept_namespace_still_attempts_drops(self):
+        """create_namespace=false keeps the namespace and the PostgreSQL PVC,
+        so the catalog entries would outlive destroy: a refusal must fail."""
+        ran: list[str] = []
+
+        def refuse(sql):
+            ran.append(sql)
+            raise RuntimeError("exec_sql failed (rc=1): Failed to drop table 't'")
+
+        _r, tables, _b = self._run_catalog(
+            "polaris",
+            ("trino", "trino-coordinator-0", "lakehouse"),
+            refuse,
+            create_namespace=False,
+        )
+        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert tables.status is DeploymentStatus.FAILED
+
+    def test_polaris_via_spark_thrift_still_drops(self):
+        """Spark's plain DROP does not purge, so Polaris accepts it."""
+        ran: list[str] = []
+        _r, tables, _b = self._run_catalog(
+            "polaris", ("spark-thrift", "thrift-0", "lakehouse"), ran.append
+        )
+        assert ran == ["DROP lakehouse.silver.t", "DROP lakehouse.gold.t"]
+        assert tables.status is DeploymentStatus.SUCCESS
+
+    def test_hive_via_trino_drop_failures_still_fail_the_step(self):
+        def fail(sql):
+            raise RuntimeError("exec_sql failed (rc=1): Failed to drop table 't'")
+
+        _r, tables, _b = self._run_catalog(
+            "hive", ("trino", "trino-coordinator-0", "lakehouse"), fail
+        )
+        assert tables.status is DeploymentStatus.FAILED
 
     # -- LB-177: config buckets UNION recorded buckets ------------------------
 
