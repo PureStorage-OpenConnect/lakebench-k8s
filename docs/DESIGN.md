@@ -74,10 +74,11 @@ An enum value is a name the config accepts, not a promise of support;
 catalog: query engine -> catalog -> table metadata -> storage. DuckDB reads
 table metadata and storage directly, without the catalog. The access path is
 part of the architecture actually instantiated and is recorded in the
-evidence (for example `query_access_path=direct_storage`). A comparison of
-two whole compositions is valid when their workload results match; any
+evidence (for example `query_access_path=direct_storage`). Two whole
+compositions are comparable when their workload results match; any
 difference in effective execution conditions, such as maintenance policy, is
-shown alongside it and the comparison is not labelled like-for-like.
+shown alongside the comparison and it is not labelled like-for-like
+(section 6.5).
 Attributing a difference to one component in isolation is not valid when the
 access paths differ.
 
@@ -333,12 +334,34 @@ Support is judged over workload x mode x architecture, in layers:
    for that workload.
 
 A combination passing all four is **supported**. One passing 1 to 3 but not
-validated on the release tree is **unverified**: it may run, and its evidence
-says unverified. One failing
-1, 2 or 3 is **unsupported** and is rejected at config load, or clearly
-excluded and labelled in the evidence; it is never discovered as a failed job
-and never presented as comparable. Upstream limitations that change behaviour
-are recorded in `RECIPE_NOTES` and in the evidence.
+validated on the release tree is **unverified**. One failing 1, 2 or 3 is
+**unsupported** and is refused: rejected at config load, or clearly excluded
+and labelled in the evidence; it is never discovered as a failed job and never
+presented as comparable. Upstream limitations that change behaviour are
+recorded in `RECIPE_NOTES` and in the evidence.
+
+- **Supported**: correct and release-validated for this workload x
+  architecture x mode.
+- **Unverified**: structurally valid and ran correctly, but not
+  release-validated as supported.
+- **Unsupported**: known unable to preserve workload semantics, or known
+  broken. Refused.
+
+Unverified experiments may be reported and compared when their correctness
+checks pass. Their support status must be visible in the evidence and in
+comparison output, and they must not be presented as proof that the
+combination is supported. This keeps Lakebench usable for exploring a
+combination before it is supported.
+
+Support is independent of comparability, which has two levels:
+
+- **Comparable**: the workload results are equivalent.
+- **Like-for-like**: comparable, and the relevant execution conditions
+  (for example the effective maintenance policy) also match.
+
+An unverified run can therefore be unverified, comparable and not
+like-for-like at once. That is legitimate evidence when Lakebench states
+exactly which it is.
 
 ## 7. Open contradictions
 

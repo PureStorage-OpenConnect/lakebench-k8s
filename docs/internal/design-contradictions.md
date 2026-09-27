@@ -43,9 +43,11 @@ remains open only as implementation work.
    on Polaris, Thrift, DuckDB or no query engine, and AML continuous.
    Remaining work [impl]: declare workload and mode compatibility, compute
    the support state (supported / unverified / unsupported) per workload x
-   mode x architecture, and stamp it in the evidence. Open [owner]
-   proposal: whether unverified runs may appear in published comparisons
-   (recommended: allowed, labelled unverified).
+   mode x architecture, and stamp it and the comparability level
+   (comparable, like-for-like) in the evidence and compare output. Owner
+   decision 2026-09-26: unverified runs may be reported and compared when
+   their correctness checks pass, with status visible, never as proof of
+   support.
 
 4. **AML on Delta is accepted and runs Iceberg code.** [impl] The tuple list
    has no workload axis; `job.py:1774-1797` picks financial scripts before
