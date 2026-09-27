@@ -45,6 +45,9 @@ class QueryResult:
     # timed samples. None: not fingerprinted (failed query, or a benchmark
     # path that does not check results, such as in-stream rounds).
     result_fingerprint: dict[str, Any] | None = None
+    # The SQL the timed samples sent (after the engine adapter). The
+    # fingerprint run sends exactly this text. Not serialised.
+    sent_sql: str | None = field(default=None, repr=False)
 
     def sample_times(self) -> list[float]:
         """The timed samples, or [elapsed_seconds] for a single-sample result."""
@@ -592,6 +595,7 @@ class BenchmarkRunner:
             success=True,
             error_message="",
             samples=times,
+            sent_sql=last.sent_sql,
         )
 
     def _render_sql(self, query: BenchmarkQuery) -> str:
@@ -628,7 +632,7 @@ class BenchmarkRunner:
                 continue
             try:
                 out = fingerprint_query(
-                    self._render_sql(r.query),
+                    r.sent_sql or self._render_sql(r.query),
                     timeout=timeout,
                     approx_columns=r.query.fingerprint_columns(),
                 )
@@ -659,7 +663,7 @@ class BenchmarkRunner:
                     [],
                     r.query.fingerprint_columns(),
                     engine=engine,
-                    adapted_sql=self._render_sql(r.query),
+                    adapted_sql=r.sent_sql or self._render_sql(r.query),
                 )
             r.result_fingerprint = fp
 
@@ -688,4 +692,5 @@ class BenchmarkRunner:
             rows_returned=exec_result.rows_returned,
             success=exec_result.success,
             error_message=exec_result.error or "",
+            sent_sql=sql,
         )

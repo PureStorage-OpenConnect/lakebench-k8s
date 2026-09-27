@@ -550,8 +550,9 @@ class TestRunIcebergMaintenance:
             mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
             _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
 
-        # 3 tables * 2 operations = 6 exec_in_pod calls
-        assert k8s.exec_in_pod.call_count == 6
+        # Batch c360: silver + gold (no bronze table exists) x 2 operations.
+        assert k8s.exec_in_pod.call_count == 4
+        assert not any("bronze" in str(c[0][1]) for c in k8s.exec_in_pod.call_args_list)
         # Expire at the threshold; orphan removal never below 24 h + 10 min.
         for call in k8s.exec_in_pod.call_args_list:
             cmd = call[0][1]
@@ -583,8 +584,8 @@ class TestRunIcebergMaintenance:
             mock_core.CoreV1Api.return_value.list_namespaced_pod.return_value = mock_pod_list
             _run_iceberg_maintenance(cfg, k8s, console, j, "30m")
 
-        # 3 tables * 2 operations = 6 exec_in_pod calls
-        assert k8s.exec_in_pod.call_count == 6
+        # Batch c360: silver + gold (no bronze table exists) x 2 operations.
+        assert k8s.exec_in_pod.call_count == 4
         # Verify beeline invocation
         for call in k8s.exec_in_pod.call_args_list:
             cmd = call[0][1]
@@ -647,14 +648,12 @@ class TestRunIcebergMaintenance:
         mock_pod_list = MagicMock()
         mock_pod_list.items = [mock_pod]
 
-        # First two calls (bronze) fail, rest succeed
+        # First two calls (silver) fail, the gold ones still run
         k8s.exec_in_pod.side_effect = [
             Exception("table not found"),
             Exception("table not found"),
-            None,
-            None,
-            None,
-            None,
+            (0, "", ""),
+            (0, "", ""),
         ]
 
         with patch("kubernetes.client") as mock_core:
@@ -662,8 +661,8 @@ class TestRunIcebergMaintenance:
             # Should not raise
             _run_iceberg_maintenance(cfg, k8s, console, j, "1h")
 
-        # All 6 calls were attempted despite first 2 failing
-        assert k8s.exec_in_pod.call_count == 6
+        # All 4 calls were attempted despite the first 2 failing
+        assert k8s.exec_in_pod.call_count == 4
 
     def test_handles_k8s_api_failure(self):
         """Does not crash when K8s API listing fails."""
