@@ -144,9 +144,7 @@ def _print_operator_scratch(core_v1, operator_ns: str) -> bool:
     else:
         size = vol.size_limit or "unbounded"
     if diag.healthy:
-        print_success(
-            f"Spark Operator controller /tmp: {size}; no storage evictions of the current spec"
-        )
+        print_success(f"Spark Operator controller /tmp: {size}; no storage evictions at this size")
     else:
         for problem in diag.problems:
             print_error(f"Spark Operator: {problem}")
@@ -154,7 +152,7 @@ def _print_operator_scratch(core_v1, operator_ns: str) -> bool:
     if diag.past_storage_evictions:
         print_info(
             f"{diag.past_storage_evictions} earlier controller pod(s) evicted for storage under "
-            "an older spec (history; delete the Failed pods to clear it)"
+            "an earlier /tmp size (history; delete the Failed pods to clear it)"
         )
     if diag.other_evictions:
         print_warning(f"{diag.other_evictions} controller pod(s) evicted for other reasons")

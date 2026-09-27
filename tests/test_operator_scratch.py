@@ -422,31 +422,65 @@ class TestReviewFixes:
 
     def test_evictions_before_a_resize_are_history(self):
         msg = TestDiagnose._EVICT_MSG
-        old = {
-            "metadata": {
-                "name": "spark-operator-controller-79cc857c77-kmn94",
-                "ownerReferences": [{"name": "spark-operator-controller-79cc857c77"}],
-            },
+
+        def evicted(name, limit):
+            return {
+                "metadata": {"name": name},
+                "spec": {"volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": limit}}]},
+                "status": {"reason": "Evicted", "message": msg},
+            }
+
+        old = evicted("spark-operator-controller-79cc857c77-kmn94", "1Gi")
+        diag = diagnose(_deployment("8Gi"), [old], [])
+        assert diag.healthy
+        assert diag.past_storage_evictions == 1
+
+    def test_evictions_at_the_current_size_stay_current_across_replicasets(self):
+        """Every watch-list edit makes a new ReplicaSet; an eviction under
+        the current size is still a problem after one."""
+        msg = TestDiagnose._EVICT_MSG
+        pod = {
+            "metadata": {"name": "spark-operator-controller-aaa-1"},
+            "spec": {"volumes": [{"name": "tmp", "emptyDir": {"sizeLimit": "8Gi"}}]},
             "status": {"reason": "Evicted", "message": msg},
         }
         live = {
-            "metadata": {
-                "name": "spark-operator-controller-5d8f6-abcde",
-                "ownerReferences": [{"name": "spark-operator-controller-5d8f6"}],
-            },
-            "status": {"phase": "Running", "containerStatuses": [{"restartCount": 0}]},
+            "metadata": {"name": "spark-operator-controller-bbb-2"},
+            "status": {"phase": "Running"},
         }
+        diag = diagnose(_deployment("8Gi"), [pod, live], [])
+        assert not diag.healthy
+        # An eviction known only from its event counts as current.
         event = {
             "reason": "Evicted",
-            "involvedObject": {"kind": "Pod", "name": "spark-operator-controller-79cc857c77-kmn94"},
+            "involvedObject": {"kind": "Pod", "name": "spark-operator-controller-ccc-3"},
             "message": msg,
             "lastTimestamp": "2026-09-27T15:05:41Z",
         }
-        diag = diagnose(_deployment("8Gi"), [old, live], [event])
-        assert diag.healthy
-        assert diag.past_storage_evictions == 1
-        # The same eviction on the running ReplicaSet is a problem.
-        old["metadata"]["ownerReferences"] = [{"name": "spark-operator-controller-5d8f6"}]
-        event["involvedObject"]["name"] = "spark-operator-controller-5d8f6-zzzzz"
-        diag = diagnose(_deployment("8Gi"), [old, live], [event])
-        assert not diag.healthy
+        assert not diagnose(_deployment("8Gi"), [live], [event]).healthy
+
+    def test_unbounded_tmp_is_kept_on_upgrade(self):
+        fake = _FakeCluster(release=True)
+        fake.tmp_before = fake.tmp_after_upgrade = None
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager(version="2.5.1").install() is True
+        (cmd,) = fake.helm_upgrades()
+        assert not any("controller.volumes" in v for v in _set_values(cmd))
+
+    def test_recovered_operator_still_gets_the_namespace_added(self):
+        fake = _FakeCluster(release=True)
+        fake.ready = "0"
+        mgr = SparkOperatorManager(version="2.5.1", job_namespace="t")
+
+        def ready_after_wait(timeout=120):
+            fake.ready = "1"
+            return True
+
+        with (
+            patch(_RUN, side_effect=fake),
+            patch.object(mgr, "_wait_for_ready", side_effect=ready_after_wait),
+            patch.object(mgr, "_get_active_namespaces", return_value=["default"]),
+            patch.object(mgr, "_add_namespace_to_watch", return_value=True) as add,
+        ):
+            mgr.ensure_installed()
+        add.assert_called_once_with("t")

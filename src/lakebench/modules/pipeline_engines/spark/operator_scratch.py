@@ -139,10 +139,10 @@ class ScratchDiagnosis:
     """What doctor and status say about the controller's scratch space."""
 
     volume: TmpVolume
-    # Controller pods the kubelet evicted for storage from the ReplicaSet now
-    # running (the current spec): [{"pod", "at", "message"}].
+    # Controller pods the kubelet evicted for storage at the current /tmp
+    # size: [{"pod", "at", "message"}].
     storage_evictions: list[dict[str, str]] = field(default_factory=list)
-    # Storage evictions from older ReplicaSets, e.g. before a resize. Evicted
+    # Storage evictions under an earlier /tmp size (before a resize). Evicted
     # pods stay as Failed objects until deleted, so these are history.
     past_storage_evictions: int = 0
     other_evictions: int = 0
@@ -160,8 +160,8 @@ class ScratchDiagnosis:
         if self.storage_evictions:
             last = self.storage_evictions[-1]
             out.append(
-                f"{len(self.storage_evictions)} controller pod(s) of the current spec evicted "
-                f"for storage (latest {last['pod']}"
+                f"{len(self.storage_evictions)} controller pod(s) evicted for storage at "
+                f"the current /tmp size (latest {last['pod']}"
                 f"{' at ' + last['at'] if last['at'] else ''}: {last['message'].strip()[:160]})"
             )
         return out
@@ -179,11 +179,12 @@ def repair_hint(size: str = DEFAULT_CONTROLLER_TMP_SIZE) -> str:
     )
 
 
-def _replica_set(pod_name: str, owner: str | None = None) -> str:
-    """The ReplicaSet a Deployment pod belongs to (its name less the pod suffix)."""
-    if owner:
-        return owner
-    return pod_name.rsplit("-", 1)[0] if "-" in pod_name else pod_name
+def _pod_tmp_limit(pod: dict[str, Any]) -> str | None:
+    """The /tmp sizeLimit in a pod's own spec ("" when it has no limit)."""
+    for vol in (pod.get("spec") or {}).get("volumes") or []:
+        if vol.get("name") == CONTROLLER_TMP_VOLUME:
+            return str((vol.get("emptyDir") or {}).get("sizeLimit") or "")
+    return None
 
 
 def diagnose(
@@ -195,31 +196,38 @@ def diagnose(
 
     *pods* are the controller's pods (evicted ones stay as Failed pods until
     deleted); *events* are the operator namespace's Evicted events (kept
-    about an hour). An eviction seen in both is counted once. Only evictions
-    from the ReplicaSet of a pod that is not evicted count as a current
-    problem: after a resize the old ReplicaSet's evicted pods are history.
-    With no live pod every eviction counts.
+    about an hour). An eviction seen in both is counted once.
+
+    An evicted pod whose own /tmp sizeLimit differs from the Deployment's is
+    history (it was evicted under an earlier size, before a resize). Keying
+    on the size rather than the ReplicaSet matters: every watch-list edit
+    changes the controller args and so the ReplicaSet, which would file
+    evictions that keep happening as history. An eviction known only from
+    an event has no pod spec and counts as current.
     """
     volume = tmp_volume(deployment or {})
-    storage: dict[str, dict[str, str]] = {}  # pod -> record (+ "rs")
+    current_limit = volume.size_limit or ""
+    storage: dict[str, dict[str, str]] = {}  # pod -> record (+ "limit")
     other: set[str] = set()
-    live_rs: set[str] = set()
     restarts = 0
     for pod in pods:
         meta = pod.get("metadata") or {}
         status = pod.get("status") or {}
         name = str(meta.get("name") or "")
-        owners = meta.get("ownerReferences") or []
-        rs = _replica_set(name, str(owners[0].get("name")) if owners else None)
         for cs in status.get("containerStatuses") or []:
             restarts += int(cs.get("restartCount") or 0)
         if status.get("reason") != "Evicted":
-            live_rs.add(rs)
             continue
         message = str(status.get("message") or "")
         if _STORAGE_EVICTION.search(message):
             # A pod carries no eviction time; an event, when kept, supplies it.
-            storage[name] = {"pod": name, "at": "", "message": message, "rs": rs}
+            limit = _pod_tmp_limit(pod)
+            storage[name] = {
+                "pod": name,
+                "at": "",
+                "message": message,
+                "limit": current_limit if limit is None else limit,
+            }
         else:
             other.add(name)
     for ev in events:
@@ -232,14 +240,14 @@ def diagnose(
         message = str(ev.get("message") or "")
         at = str(ev.get("lastTimestamp") or ev.get("eventTime") or "")
         if _STORAGE_EVICTION.search(message):
-            rs = storage.get(name, {}).get("rs") or _replica_set(name)
-            storage[name] = {"pod": name, "at": at, "message": message, "rs": rs}
+            limit = storage.get(name, {}).get("limit", current_limit)
+            storage[name] = {"pod": name, "at": at, "message": message, "limit": limit}
             other.discard(name)
         elif name not in storage:
             other.add(name)
-    current = [r for r in storage.values() if not live_rs or r["rs"] in live_rs]
+    current = [r for r in storage.values() if r["limit"] == current_limit]
     ordered = sorted(
-        ({k: v for k, v in r.items() if k != "rs"} for r in current),
+        ({k: v for k, v in r.items() if k != "limit"} for r in current),
         key=lambda e: e["at"],
     )
     return ScratchDiagnosis(

@@ -172,7 +172,8 @@ class SparkOperatorManager:
                 "prometheus.metrics.jobSubmitLatencyBuckets="
                 f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
             ]
-        return args + controller_tmp_helm_set_args(tmp_size)
+        # "" means keep the stored /tmp volume (an unbounded one) untouched.
+        return args + (controller_tmp_helm_set_args(tmp_size) if tmp_size else [])
 
     def _watch_list_pin(self) -> list[str]:
         """``--version``/backfill args for a watch-list-only ``helm upgrade``.
@@ -1504,6 +1505,13 @@ class SparkOperatorManager:
                 current = self.controller_tmp_volume()
             except _DeploymentReadError:
                 current = None
+            if (
+                current is not None
+                and current.found
+                and current.is_empty_dir
+                and current.size_limit is None
+            ):
+                return ""  # unbounded: keep the stored volume as it is
             cur = current.limit_bytes if current is not None else None
             if current is not None and cur is not None and cur > (parse_quantity(size) or 0):
                 size = str(current.size_limit)
@@ -1823,7 +1831,11 @@ class SparkOperatorManager:
             return status
         logger.info("Spark Operator not ready, waiting for it to recover...")
         if self._wait_for_ready(timeout=120):
-            return self.check_status()
+            status = self.check_status()
+            if status.ready and self.job_namespace and status.watching_namespace is False:
+                # The ready branch above adds the namespace under the lease.
+                return self.ensure_installed()
+            return status
         status.message = (
             f"{status.message}. lakebench does not reinstall a shared operator from "
             "deploy; a cluster admin can run 'lakebench admin doctor' and "
