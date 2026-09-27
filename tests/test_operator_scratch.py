@@ -462,6 +462,7 @@ class TestReviewFixes:
     def test_unbounded_tmp_is_kept_on_upgrade(self):
         fake = _FakeCluster(release=True)
         fake.tmp_before = fake.tmp_after_upgrade = None
+        fake.stored_values = {"controller": {"volumes": [{"name": "tmp", "emptyDir": {}}]}}
         with patch(_RUN, side_effect=fake), patch("time.sleep"):
             assert SparkOperatorManager(version="2.5.1").install() is True
         (cmd,) = fake.helm_upgrades()
@@ -484,3 +485,36 @@ class TestReviewFixes:
         ):
             mgr.ensure_installed()
         add.assert_called_once_with("t")
+
+
+class TestThirdPass:
+    _MSG = 'Usage of EmptyDir volume "tmp" exceeds the limit "1Gi". '
+
+    def test_events_left_after_repair_and_pod_cleanup_are_history(self):
+        live = {
+            "metadata": {
+                "name": "spark-operator-controller-new-1",
+                "creationTimestamp": "2026-09-27T16:00:00Z",
+            },
+            "status": {"phase": "Running"},
+        }
+        event = {
+            "reason": "Evicted",
+            "involvedObject": {"kind": "Pod", "name": "spark-operator-controller-old-1"},
+            "message": self._MSG,
+            "lastTimestamp": "2026-09-27T15:17:06Z",
+        }
+        diag = diagnose(_deployment("8Gi"), [live], [event])
+        assert diag.healthy and diag.past_storage_evictions == 1
+        event["lastTimestamp"] = "2026-09-27T16:10:00Z"
+        assert not diagnose(_deployment("8Gi"), [live], [event]).healthy
+
+    def test_hand_patched_unbounded_deployment_is_not_trusted(self):
+        """Only the stored values keep an unbounded /tmp; without them the
+        upgrade sets the default rather than re-render the chart's 1Gi."""
+        fake = _FakeCluster(release=True)
+        fake.tmp_before = None
+        with patch(_RUN, side_effect=fake), patch("time.sleep"):
+            assert SparkOperatorManager(version="2.5.1").install() is True
+        (cmd,) = fake.helm_upgrades()
+        assert "controller.volumes[0].emptyDir.sizeLimit=8Gi" in _set_values(cmd)

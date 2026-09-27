@@ -203,13 +203,16 @@ def diagnose(
     on the size rather than the ReplicaSet matters: every watch-list edit
     changes the controller args and so the ReplicaSet, which would file
     evictions that keep happening as history. An eviction known only from
-    an event has no pod spec and counts as current.
+    an event has no pod spec; it counts as current when it is newer than
+    the oldest running controller pod (or there is none), so events left
+    after a resize and a cleanup of the Failed pods are history.
     """
     volume = tmp_volume(deployment or {})
     current_limit = volume.size_limit or ""
     storage: dict[str, dict[str, str]] = {}  # pod -> record (+ "limit")
     other: set[str] = set()
     restarts = 0
+    live_since = ""  # creationTimestamp of the oldest pod that is not evicted
     for pod in pods:
         meta = pod.get("metadata") or {}
         status = pod.get("status") or {}
@@ -217,6 +220,9 @@ def diagnose(
         for cs in status.get("containerStatuses") or []:
             restarts += int(cs.get("restartCount") or 0)
         if status.get("reason") != "Evicted":
+            created = str(meta.get("creationTimestamp") or "")
+            if created and (not live_since or created < live_since):
+                live_since = created
             continue
         message = str(status.get("message") or "")
         if _STORAGE_EVICTION.search(message):
@@ -240,7 +246,12 @@ def diagnose(
         message = str(ev.get("message") or "")
         at = str(ev.get("lastTimestamp") or ev.get("eventTime") or "")
         if _STORAGE_EVICTION.search(message):
-            limit = storage.get(name, {}).get("limit", current_limit)
+            if name in storage:
+                limit = storage[name]["limit"]
+            elif live_since and at and at < live_since:
+                limit = "<before the running controller>"
+            else:
+                limit = current_limit
             storage[name] = {"pod": name, "at": at, "message": message, "limit": limit}
             other.discard(name)
         elif name not in storage:

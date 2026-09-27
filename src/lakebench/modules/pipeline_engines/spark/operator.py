@@ -1505,13 +1505,16 @@ class SparkOperatorManager:
                 current = self.controller_tmp_volume()
             except _DeploymentReadError:
                 current = None
+            stored_tmp = [v for v in stored if isinstance(v, dict) and v.get("name") == "tmp"]
             if (
-                current is not None
-                and current.found
-                and current.is_empty_dir
-                and current.size_limit is None
+                stored_tmp
+                and isinstance(stored_tmp[0].get("emptyDir"), dict)
+                and not stored_tmp[0]["emptyDir"].get("sizeLimit")
             ):
-                return ""  # unbounded: keep the stored volume as it is
+                # The release itself stores an unbounded /tmp (a hand patch of
+                # the Deployment alone would be reverted by the upgrade, so
+                # only the stored values count): keep it.
+                return ""
             cur = current.limit_bytes if current is not None else None
             if current is not None and cur is not None and cur > (parse_quantity(size) or 0):
                 size = str(current.size_limit)
@@ -1554,6 +1557,12 @@ class SparkOperatorManager:
         want = parse_quantity(tmp_size) or 0
         if vol.found and vol.is_empty_dir and vol.size_limit is None:
             return True  # unbounded emptyDir
+        if not tmp_size:
+            logger.error(
+                "Controller /tmp is %s after the upgrade; the release stores an unbounded one",
+                vol.size_limit if vol.found else "missing",
+            )
+            return False
         got = vol.limit_bytes
         if not vol.found or got is None or got < want:
             logger.error(
@@ -1772,7 +1781,7 @@ class SparkOperatorManager:
         logger.error(f"Spark Operator not ready after {timeout}s")
         return False
 
-    def ensure_installed(self) -> OperatorStatus:
+    def ensure_installed(self, _after_wait: bool = False) -> OperatorStatus:
         """Ensure Spark Operator is installed and ready.
 
         If not installed, installs it automatically.
@@ -1832,9 +1841,15 @@ class SparkOperatorManager:
         logger.info("Spark Operator not ready, waiting for it to recover...")
         if self._wait_for_ready(timeout=120):
             status = self.check_status()
-            if status.ready and self.job_namespace and status.watching_namespace is False:
-                # The ready branch above adds the namespace under the lease.
-                return self.ensure_installed()
+            if (
+                not _after_wait
+                and status.ready
+                and self.job_namespace
+                and status.watching_namespace is False
+            ):
+                # The ready branch above adds the namespace under the lease;
+                # at most once, so a flapping controller cannot recurse.
+                return self.ensure_installed(_after_wait=True)
             return status
         status.message = (
             f"{status.message}. lakebench does not reinstall a shared operator from "
