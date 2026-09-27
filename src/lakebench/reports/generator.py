@@ -922,7 +922,7 @@ class ReportGenerator:
         qph_values = [r.qph for r in pb.benchmark_rounds]
         raw_freshness = [
             r.round_meta.gold_freshness_seconds
-            if r.round_meta and r.round_meta.gold_freshness_seconds > 0
+            if r.round_meta and (r.round_meta.gold_freshness_seconds or 0) > 0
             else 0.0
             for r in pb.benchmark_rounds
         ]
@@ -1056,7 +1056,9 @@ class ReportGenerator:
                 continue
             ts = meta.timestamp or "-"
             freshness = (
-                f"{meta.gold_freshness_seconds:.1f}s" if meta.gold_freshness_seconds > 0 else "-"
+                f"{meta.gold_freshness_seconds:.1f}s"
+                if (meta.gold_freshness_seconds or 0) > 0
+                else "-"
             )
             if meta.q9_retry_used:
                 status = '<span style="color: var(--warning);">retry</span>'
@@ -1710,7 +1712,7 @@ class ReportGenerator:
             total_rows += s.total_rows_processed
 
             throughput = f"{s.throughput_rps:,.0f} rows/s" if s.throughput_rps > 0 else "-"
-            freshness = f"{s.freshness_seconds:.0f}s" if s.freshness_seconds > 0 else "-"
+            freshness = f"{s.freshness_seconds:.0f}s" if s.freshness_seconds else "-"
 
             # Compute columns from stage metrics
             stage_name = _JOB_TYPE_TO_STAGE.get(s.job_type, "")
@@ -2019,7 +2021,7 @@ class ReportGenerator:
         for rnd in rounds:
             qph_values.append(rnd.qph)
             meta = rnd.round_meta
-            if meta and meta.gold_freshness_seconds > 0:
+            if meta and (meta.gold_freshness_seconds or 0) > 0:
                 freshness_values.append(meta.gold_freshness_seconds)
             if meta and meta.q9_contention_observed:
                 contention_count += 1
@@ -2193,7 +2195,7 @@ class ReportGenerator:
             in_gb = f"{stage.input_size_gb:.3f}" if stage.input_size_gb > 0 else "-"
             out_gb = f"{stage.output_size_gb:.3f}" if stage.output_size_gb > 0 else "-"
             in_rows = f"{stage.input_rows:,}" if stage.input_rows > 0 else "-"
-            out_rows = f"{stage.output_rows:,}" if stage.output_rows > 0 else "-"
+            out_rows = f"{stage.output_rows:,}" if stage.output_rows else "-"
             gb_s = (
                 f"{stage.throughput_gb_per_second:.4f}"
                 if stage.throughput_gb_per_second > 0

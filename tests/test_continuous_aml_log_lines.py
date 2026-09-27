@@ -112,7 +112,7 @@ def test_gold_tick_timing_lines_are_kept_per_cycle():
     assert first["phases"]["total"] == pytest.approx(409.5)
     # The line is not mistaken for a refresh, freshness or TTD line.
     assert g.total_batches == 2
-    assert g.freshness_seconds == 0.0
+    assert g.freshness_seconds is None
     assert g.ttd_alerts is None
     # Round trip through metrics.json.
     assert g.to_dict()["tick_timings"] == g.tick_timings

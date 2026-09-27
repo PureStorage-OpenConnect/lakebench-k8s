@@ -135,9 +135,12 @@ def test_bronze_short_by_under_one_percent_is_a_stall():
     assert pb.data_freshness_seconds == pytest.approx(655.0)
 
 
-def test_single_trailing_idle_cycle_is_not_drained():
+def test_drained_does_not_depend_on_idle_gold_cycles():
+    # Every datagen row in bronze and committed by silver leaves nothing to
+    # arrive; the discovery run read ingest_ratio 1.0 next to drained false
+    # because gold had not idled twice yet.
     pb = _pb(1_000_000, 1_000_000, 1_000_000, trailing_idle=1)
-    assert pb.corpus_drained is False
+    assert pb.corpus_drained is True
 
 
 def test_uncommitted_silver_is_a_stall():
@@ -152,10 +155,11 @@ def test_unknown_silver_commits_is_not_drained():
     assert pb.data_freshness_seconds == pytest.approx(655.0)
 
 
-def test_no_trailing_idle_is_not_drained():
+def test_no_trailing_idle_is_drained_and_keeps_every_cycle():
+    # Drained with no idle cycle: the active set is every cycle.
     pb = _pb(1_000_000, 1_000_000, 1_000_000, trailing_idle=0)
-    assert pb.corpus_drained is False
-    assert pb.data_freshness_seconds == pytest.approx(655.0)
+    assert pb.corpus_drained is True
+    assert pb.data_freshness_seconds == pytest.approx(55.0)
 
 
 def test_unknown_denominator_is_unknown():
