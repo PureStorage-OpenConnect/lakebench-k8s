@@ -59,6 +59,8 @@ def _write(tmp_path, data) -> Path:
             {"name": "t", "architecture": {"workload": {"datagen": {"scael": 10}}}},
             "architecture.workload.datagen.scael",
         ),
+        # Top-level workload: the error names the key the user wrote.
+        ({"name": "t", "workload": {"datagen": {"scael": 10}}}, "  - workload.datagen.scael"),
         ({"name": "t", "platform": {"compute": {"spark": {"image": "x"}}}}, "spark.image"),
         ({"name": "t", "architecture": {"workloads": {"excluded": []}}}, "workloads"),
     ],
@@ -91,17 +93,54 @@ def _load_warns(tmp_path, data):
         return load_config(_write(tmp_path, data))
 
 
-def test_mode_continuous_value(tmp_path):
-    cfg = _load_warns(tmp_path, {"name": "t", "architecture": {"pipeline": {"mode": "continuous"}}})
-    assert cfg.architecture.pipeline.mode == PipelineMode.SUSTAINED
+def _load_quiet(tmp_path, data):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        return load_config(_write(tmp_path, data))
 
 
-def test_pipeline_continuous_key(tmp_path):
-    cfg = _load_warns(
+def test_mode_continuous_is_canonical(tmp_path):
+    # D18: 'continuous' is the product's name and loads without a warning.
+    cfg = _load_quiet(tmp_path, {"name": "t", "architecture": {"pipeline": {"mode": "continuous"}}})
+    assert cfg.architecture.pipeline.mode == PipelineMode.CONTINUOUS
+    assert cfg.architecture.pipeline.mode.value == "continuous"
+
+
+def test_mode_sustained_is_the_deprecated_alias(tmp_path):
+    with pytest.warns(DeprecationWarning, match="use 'mode: continuous'"):
+        cfg = load_config(
+            _write(tmp_path, {"name": "t", "architecture": {"pipeline": {"mode": "sustained"}}})
+        )
+    assert cfg.architecture.pipeline.mode == PipelineMode.CONTINUOUS
+    assert PipelineMode.SUSTAINED is PipelineMode.CONTINUOUS
+
+
+def test_pipeline_continuous_key_is_canonical(tmp_path):
+    cfg = _load_quiet(
         tmp_path,
         {"name": "t", "architecture": {"pipeline": {"continuous": {"run_duration": 600}}}},
     )
     assert cfg.architecture.pipeline.sustained.run_duration == 600
+
+
+def test_pipeline_sustained_key_is_the_deprecated_alias(tmp_path):
+    with pytest.warns(DeprecationWarning, match="pipeline.continuous"):
+        cfg = load_config(
+            _write(
+                tmp_path,
+                {"name": "t", "architecture": {"pipeline": {"sustained": {"run_duration": 600}}}},
+            )
+        )
+    assert cfg.architecture.pipeline.sustained.run_duration == 600
+
+
+def test_pipeline_continuous_and_sustained_keys_together_refused(tmp_path):
+    data = {
+        "name": "t",
+        "architecture": {"pipeline": {"continuous": {}, "sustained": {"run_duration": 600}}},
+    }
+    with pytest.raises(ConfigValidationError, match="both 'pipeline.continuous'"):
+        load_config(_write(tmp_path, data))
 
 
 def test_processing_key(tmp_path):

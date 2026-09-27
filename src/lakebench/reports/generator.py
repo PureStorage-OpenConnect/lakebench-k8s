@@ -157,7 +157,9 @@ class ReportGenerator:
         reasons: list[str] = []
         warnings: list[str] = []
 
-        if not metrics.success:
+        if metrics.benchmark_error:
+            reasons.append(f"Benchmark did not complete ({metrics.benchmark_error}); no QpH")
+        elif not metrics.success:
             reasons.append("Pipeline crashed or was interrupted")
 
         pb = metrics.pipeline_benchmark
@@ -255,7 +257,7 @@ class ReportGenerator:
         from lakebench.reports.scorecard import get_scorecard_block
 
         cs = metrics.config_snapshot or {}
-        mode = "Sustained" if self._is_sustained(metrics) else "Batch"
+        mode = "Continuous" if self._is_sustained(metrics) else "Batch"
         scale = cs.get("scale", "-")
         catalog = cs.get("catalog", "-")
         table_fmt = cs.get("table_format", "-")
@@ -698,7 +700,10 @@ class ReportGenerator:
                 indicators.append(("Ingest Ratio", "status-success", f"{ratio:.2f} Healthy"))
         elif pb:
             ratio = pb.scale_ratio
-            if 0 < ratio < 0.95:
+            if not ratio:
+                # 0 means the bronze size was not measured, not a full corpus.
+                indicators.append(("Scale Ratio", "status-warning", "Unmeasured"))
+            elif ratio < 0.95:
                 indicators.append(("Scale Ratio", "status-failed", f"{ratio:.1%} INCOMPLETE"))
             else:
                 indicators.append(("Scale Ratio", "status-success", f"{ratio:.1%} Complete"))
@@ -716,6 +721,8 @@ class ReportGenerator:
             indicators.append(("Batch Jobs", cls, f"{passed}/{total} passed"))
 
         # Failed queries
+        if metrics.benchmark_error:
+            indicators.append(("Benchmark", "status-failed", "Did not complete, no QpH"))
         if metrics.benchmark:
             failed = sum(
                 1

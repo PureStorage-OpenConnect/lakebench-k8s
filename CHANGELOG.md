@@ -9,6 +9,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Draft notes for 1.6.0.
 
 ### Behaviour changes you must know
+- **Config contract (v1.6).** `workload` is a top-level key; the old
+  `architecture.workload` block still loads with a deprecation warning, and
+  setting both with different values is an error. `continuous` is the
+  canonical pipeline mode (`mode: continuous`, `pipeline.continuous`,
+  `run --continuous`); `sustained` is accepted as a deprecated alias, and
+  metrics files keep recording `pipeline_mode="sustained"`. Refused at load:
+  the financial (AML) workload on Delta (its scripts write Iceberg only),
+  workload schema `custom` (it silently ran the Customer 360 queries), and
+  Iceberg 1.11+ on a Java 11 Spark image. `images.prometheus`,
+  `images.grafana`, `observability.reports`, `table_format.iceberg.file_format`
+  and the Iceberg and Delta `properties` never did anything; a non-default
+  value now warns, and they are removed in v1.7. `pipeline.pattern` is
+  deprecated.
+- **Default bucket names are `<name>-bronze`, `<name>-silver`, `<name>-gold`.**
+  They were the fixed `lakebench-bronze/-silver/-gold`, which collide on
+  stores where bucket names are global (FlashBlade across accounts, AWS) and
+  were shared by every deployment on one store. A deployment that relied on
+  the old defaults must set `platform.storage.s3.buckets` to the old names
+  to keep using (and to destroy) its existing buckets.
+- **A benchmark that raises fails the run.** It used to print a warning and
+  leave the run successful. Now `run` exits non-zero, no QpH is recorded,
+  the journal records the benchmark as failed, and metrics.json and the
+  report carry `benchmark_error`.
+- **The observability stack is shared.** kube-prometheus-stack installs
+  cluster-wide objects, so `deploy` installs one release into the
+  `lakebench-observability` namespace only when none exists, never upgrades
+  an existing one, and `destroy` never uninstalls it (a release an older
+  lakebench put in the deployment's own namespace is still removed).
 - **Every v1.5 continuous number was measured with no snapshot expiry and
   no VACUUM (LB-172, LB-173, LB-174).** `exec_sql` discarded the exit code,
   so failed maintenance statements were reported as successes. Underneath

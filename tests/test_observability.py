@@ -647,6 +647,18 @@ class TestObservabilityDeployerAddHelmRepo:
 class TestObservabilityDeployerDeployDestroy:
     """Tests for ObservabilityDeployer deploy/destroy lifecycle."""
 
+    @pytest.fixture(autouse=True)
+    def _lease(self):
+        # deploy takes the cluster lease and waits for Prometheus; neither
+        # has a cluster here.
+        with (
+            patch("kubernetes.client.CoreV1Api"),
+            patch("lakebench.deploy.cluster_lock.cluster_lock") as lock,
+            patch("lakebench.deploy.observability._wait_for_prometheus", return_value=""),
+        ):
+            lock.return_value.__exit__.return_value = False
+            yield
+
     def test_deploy_skip_when_disabled(self):
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer
@@ -686,13 +698,14 @@ class TestObservabilityDeployerDeployDestroy:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="[]"),  # helm list: no release yet
                 MagicMock(returncode=0),  # helm repo add
                 MagicMock(returncode=0),  # helm repo update
                 MagicMock(returncode=1, stderr="stop after capturing the install call"),
             ]
             deployer.deploy()
 
-            install_call = mock_run.call_args_list[2][0][0]
+            install_call = mock_run.call_args_list[3][0][0]
             assert HELM_CHART in install_call
             assert "--version" in install_call, (
                 f"install command must pin a chart version, got {install_call}"
@@ -711,14 +724,15 @@ class TestObservabilityDeployerDeployDestroy:
         deployer = ObservabilityDeployer(engine)
 
         with patch("subprocess.run") as mock_run:
-            # First two calls for helm repo add/update, third for helm install
             mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="[]"),  # helm list: no release yet
                 MagicMock(returncode=0),  # helm repo add
                 MagicMock(returncode=0),  # helm repo update
-                MagicMock(returncode=1, stderr="chart not found"),  # helm install fails
+                MagicMock(returncode=1, stderr="chart not found", stdout=""),  # install fails
             ]
             result = deployer.deploy()
             assert result.status == DeploymentStatus.FAILED
+            assert "chart not found" in result.message
 
     def test_deploy_helm_timeout(self):
         import subprocess as sp
@@ -734,6 +748,7 @@ class TestObservabilityDeployerDeployDestroy:
 
         with patch("subprocess.run") as mock_run:
             mock_run.side_effect = [
+                MagicMock(returncode=0, stdout="[]"),  # helm list: no release yet
                 MagicMock(returncode=0),  # helm repo add
                 MagicMock(returncode=0),  # helm repo update
                 sp.TimeoutExpired(cmd="helm", timeout=360),  # helm install timeout
@@ -752,10 +767,11 @@ class TestObservabilityDeployerDeployDestroy:
         engine.dry_run = True
         deployer = ObservabilityDeployer(engine)
         result = deployer.destroy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "Would destroy" in result.message
+        # The shared stack is never removed, dry run or not.
+        assert result.status == DeploymentStatus.SKIPPED
+        assert "left in place" in result.message
 
-    def test_destroy_not_found_is_success(self):
+    def test_destroy_legacy_release_not_found_is_success(self):
         from lakebench.deploy.engine import DeploymentStatus
         from lakebench.deploy.observability import ObservabilityDeployer
 
@@ -765,7 +781,12 @@ class TestObservabilityDeployerDeployDestroy:
         engine.dry_run = False
         deployer = ObservabilityDeployer(engine)
 
+        from lakebench.deploy.observability import HELM_RELEASE_NAME
+
         with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=1, stderr="release: not found")
+            mock_run.side_effect = [
+                MagicMock(returncode=0, stdout=HELM_RELEASE_NAME, stderr=""),  # legacy release
+                MagicMock(returncode=1, stdout="", stderr="release: not found"),  # uninstall
+            ]
             result = deployer.destroy()
             assert result.status == DeploymentStatus.SUCCESS

@@ -350,8 +350,9 @@ class TestObservabilityDeployerSkip:
         engine.dry_run = True
         deployer = ObservabilityDeployer(engine)
         result = deployer.destroy()
-        assert result.status == DeploymentStatus.SUCCESS
-        assert "Would destroy" in result.message
+        # The shared stack is never removed by destroy, dry run or not.
+        assert result.status == DeploymentStatus.SKIPPED
+        assert "left in place" in result.message
 
     def test_helm_values_retention_and_storage(self):
         from lakebench.deploy.observability import ObservabilityDeployer

@@ -409,7 +409,7 @@ def _check_cluster_capacity(
         raw_mode = cfg.architecture.pipeline.mode
         mode = getattr(raw_mode, "value", raw_mode)
         if sustained is not None:
-            mode = "sustained" if sustained else "batch"
+            mode = "continuous" if sustained else "batch"
         raw_schema = getattr(cfg.architecture.workload, "schema_type", None)
         schema = getattr(raw_schema, "value", raw_schema)
         peak = compute_peak_requirements(scale, mode, schema)
@@ -436,7 +436,9 @@ def _check_cluster_capacity(
         # The pipeline peak alone understates the request: the query engine,
         # catalog/Postgres and (continuous) datagen hold their cores for the
         # whole run (LB-155).
-        is_sustained = str(mode).lower() == "sustained"
+        from lakebench.config.schema import is_continuous_mode
+
+        is_sustained = is_continuous_mode(mode)
         co_cores, co_gb, co_label = _co_resident_request(
             cfg, is_sustained, datagen_runs=datagen_runs
         )

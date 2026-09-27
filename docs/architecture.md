@@ -79,7 +79,7 @@ Iceberg compaction and table health tracking run between cycles. See
 
 ### Sustained Mode
 
-In addition to batch processing, Lakebench supports a sustained streaming
+In addition to batch processing, Lakebench supports a continuous
 pipeline using Spark Structured Streaming:
 
 - `bronze-ingest` reads new Parquet files as they appear (via `maxFilesPerTrigger`)

@@ -51,7 +51,7 @@ def _build_destroy_list(cfg) -> str:
     elif engine == "duckdb":
         items.append("DuckDB")
     if cfg.observability.enabled:
-        items.append("Prometheus + Grafana")
+        items.append("This deployment's PodMonitors (the shared Prometheus + Grafana stay)")
     items.append("All secrets, configs, and namespace")
     return "\n".join(f"  - {item}" for item in items)
 

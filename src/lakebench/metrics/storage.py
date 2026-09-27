@@ -454,6 +454,7 @@ class MetricsStorage:
             c360_correctness=data.get("c360_correctness"),
             maintenance_policy_id=recorded_policy(data),
             provenance=data.get("provenance"),
+            benchmark_error=data.get("benchmark_error"),
         )
 
         if data.get("end_time"):

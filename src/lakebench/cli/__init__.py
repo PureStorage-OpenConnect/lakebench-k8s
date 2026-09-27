@@ -42,7 +42,7 @@ from lakebench.config import (
     load_config,
     parse_spark_memory,
 )
-from lakebench.config.schema import PipelineMode
+from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import DEFAULT_JOURNAL_DIR as DEFAULT_JOURNAL_DIR
 from lakebench.journal import CommandName, EventType, Journal
 from lakebench.k8s import K8sConnectionError, PlatformType, SecurityVerifier, get_k8s_client
@@ -185,7 +185,7 @@ def _print_report_summary(metrics) -> None:
 
     # Scores
     scores: list[str] = []
-    if pb.pipeline_mode == PipelineMode.SUSTAINED.value:
+    if is_continuous_mode(pb.pipeline_mode):
         if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"Freshness:       {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
@@ -1244,11 +1244,8 @@ def status(
                 components.append(("lakebench-spark-thrift", "Deployment"))
             elif engine == "duckdb":
                 components.append(("lakebench-duckdb", "Deployment"))
-            if cfg.observability.enabled:
-                components.append(
-                    ("prometheus-lakebench-observability-ku-prometheus", "StatefulSet")
-                )
-                components.append(("lakebench-observability-grafana", "Deployment"))
+            # Observability is a shared stack in its own namespace
+            # (deploy/observability.py), not a component of this deployment.
         else:
             # Namespace-only mode (no config loaded) -- show all possible components
             components = [
@@ -1464,7 +1461,7 @@ def info(
     effective_mode = _resolve_datagen_mode(cfg)
     workload_profile = f"{workload.schema_type.value}-{effective_mode}"
 
-    is_sustained = arch.pipeline.mode == PipelineMode.SUSTAINED
+    is_sustained = is_continuous_mode(arch.pipeline.mode)
 
     # Schema-resolved profiles: what the manifests deploy (AML overrides
     # bronze-verify and bronze-ingest), so info matches the capacity check.
@@ -2174,7 +2171,7 @@ def recommend(
         str | None,
         typer.Option(
             "--mode",
-            help="Pipeline mode: batch (sequential phases) or sustained (continuous: datagen and pipeline run concurrently). Default: batch.",
+            help="Pipeline mode: batch (sequential phases) or continuous (datagen and pipeline run concurrently; 'sustained' is accepted as an alias). Default: batch.",
         ),
     ] = None,
     schema_type: Annotated[
@@ -2216,7 +2213,7 @@ def recommend(
 
     # Resolve pipeline mode
     pipeline_mode = mode or "batch"
-    is_sustained = pipeline_mode == "sustained"
+    is_sustained = is_continuous_mode(pipeline_mode)
 
     def format_data_size(gb: float) -> str:
         """Format data size in human-readable units."""
@@ -2403,7 +2400,7 @@ def recommend(
         reqs = compute_cluster_requirements(target_scale)
         dims = customer360_dimensions(target_scale)
 
-        mode_label = "sustained" if is_sustained else "batch"
+        mode_label = "continuous" if is_sustained else "batch"
         if is_sustained:
             workload_line = (
                 f"  Streaming:       {reqs['streaming_executors']} executors "
@@ -2463,7 +2460,7 @@ def recommend(
             console.print("[dim]Use --cores and --memory to specify manually[/dim]\n")
 
     if detected_cores is None or detected_mem is None:
-        mode_label = "sustained" if is_sustained else "batch"
+        mode_label = "continuous" if is_sustained else "batch"
         console.print(f"[bold]Cluster Sizing Reference[/bold] (mode: {mode_label})\n")
         console.print(
             "[dim]Tip: Connect to a cluster or use --cores/--memory for max scale calculation[/dim]\n"
@@ -2493,7 +2490,7 @@ def recommend(
     max_scale_standard = find_max_scale(detected_cores, detected_mem, use_slow_datagen=False)
     max_scale_slow = find_max_scale(detected_cores, detected_mem, use_slow_datagen=True)
 
-    mode_label = "sustained" if is_sustained else "batch"
+    mode_label = "continuous" if is_sustained else "batch"
     console.print(f"[bold]Cluster Capacity[/bold] ({cluster_source}, mode: {mode_label})")
     console.print(f"  CPU cores: [bold]{detected_cores}[/bold]")
     console.print(f"  Memory:    [bold]{detected_mem} GB[/bold]\n")

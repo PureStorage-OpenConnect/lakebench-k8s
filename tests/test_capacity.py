@@ -260,7 +260,7 @@ class TestCoResidentPodsAreCounted:
         with mock.patch("lakebench.k8s.get_k8s_client") as get_client:
             get_client.return_value.get_cluster_capacity.return_value = cap
             res = _check_cluster_capacity(cfg, sustained=True)
-        assert not res.passed and "sustained" in res.message
+        assert not res.passed and "(continuous)" in res.message
 
     def test_skip_generate_leaves_datagen_out(self):
         from lakebench.cli._prerequisites import _co_resident_request

@@ -46,15 +46,6 @@ architecture:
         format: parquet
         path_template: pacs008     # <-- datagen + bronze_verify both read here
 
-  workload:
-    schema: financial
-    retention_workload: false    # W8/W10 not exercised in local recipe
-    datagen:
-      scale: 1                   # LOCAL_SCALE_ADVISORY_MAX = 1.0
-      file_size: 32mb
-      timestamp_start: "2024-01-01"
-      timestamp_end: "2024-04-01"    # narrower range for local disk budget
-
   tables:
     bronze: default.pacs008_raw
     silver: silver.transactions
@@ -69,4 +60,13 @@ architecture:
 
   query_engine:
     type: spark-thrift
+
+workload:
+  schema: financial
+  retention_workload: false    # W8/W10 not exercised in local recipe
+  datagen:
+    scale: 1                   # LOCAL_SCALE_ADVISORY_MAX = 1.0
+    file_size: 32mb
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2024-04-01"    # narrower range for local disk budget
 

@@ -17,19 +17,10 @@ observability:
   storage: "10Gi"                    # Prometheus PVC size
   storage_class: ""                  # StorageClass (empty = cluster default)
   chart_version: "87.19.2"           # kube-prometheus-stack chart version (pins Prometheus + Grafana)
-
-  reports:
-    enabled: true                    # Enable HTML report generation
-    output_dir: "./lakebench-output/runs"
-    format: html                     # html | json | both
-    include:
-      summary: true                  # Include summary cards
-      stage_breakdown: true          # Include per-stage breakdown
-      storage_metrics: true          # Include S3 sizing data
-      resource_utilization: true     # Include CPU/memory allocation data
-      recommendations: true          # Include sizing recommendations
-      platform_metrics: true         # Include platform metrics tab
 ```
+
+`observability.reports` has no effect and is removed in v1.7: every run writes
+`report.html` into its run directory, and `lakebench report` regenerates it.
 
 `s3_metrics_enabled` and `spark_metrics_enabled` exist in the schema but nothing reads
 them; setting either prints a warning. Spark and S3 metrics are collected whenever the
@@ -41,7 +32,7 @@ Set `observability.enabled: true` to deploy the stack. All sub-flags (`prometheu
 
 Every `lakebench run` writes a `metrics.json` file to `lakebench-output/runs/run-<id>/`. No setup is needed. The file contains:
 
-- **Pipeline benchmark scores** -- time-to-value, throughput, and efficiency for batch runs; freshness, sustained throughput, and latency profile for sustained runs.
+- **Pipeline benchmark scores** -- time-to-value, throughput, and efficiency for batch runs; freshness, sustained throughput, and latency profile for continuous runs.
 - **Per-stage metrics** -- elapsed time, input/output sizes, row counts, throughput, and allocated executor resources for each pipeline stage (bronze, silver, gold, query).
 - **Query results** -- per-query elapsed time, row counts, and pass/fail status from the benchmark.
 - **Config snapshot** -- the full configuration used for the run, enabling cross-run comparison.
@@ -50,16 +41,22 @@ The `MetricsCollector` class in `metrics/collector.py` records job metrics, quer
 
 ## Prometheus
 
-When `observability.enabled` is `true`, Lakebench installs the `kube-prometheus-stack` Helm chart into the deployment namespace. This provides:
+When `observability.enabled` is `true`, Lakebench uses one shared `kube-prometheus-stack` Helm release for the whole cluster. The chart installs cluster-wide objects (CRDs, cluster roles, admission webhooks), so it is a shared cluster component, not part of a deployment:
 
-- Prometheus server with namespace-scoped scrape configuration
+- `deploy` installs it into the `lakebench-observability` namespace only when no release named `lakebench-observability` exists anywhere on the cluster, under the cluster lease. An existing release is reused and never upgraded or modified.
+- `destroy` never uninstalls it; another deployment may be using it. Each deployment's PodMonitors and dashboard ConfigMap live in its own namespace and go with it. The one exception is a release an older lakebench installed into the deployment's own namespace, which destroy removes because it served only that namespace.
+- To remove the shared stack when no deployment uses it: `helm uninstall lakebench-observability -n lakebench-observability`.
+
+The stack provides:
+
+- Prometheus server that picks up the PodMonitors of every lakebench namespace
 - Node-exporter and kube-state-metrics for cluster-level visibility
 - ServiceMonitor and PodMonitor CRDs for automatic target discovery
 
-The Helm release is named `lakebench-observability`. Prometheus is accessible in-cluster at:
+The Helm release is named `lakebench-observability`. The chart shortens service names, so list them rather than guessing:
 
-```
-http://lakebench-observability-prometheus.<namespace>.svc:9090
+```bash
+kubectl get svc -n lakebench-observability -l release=lakebench-observability
 ```
 
 To deploy the observability stack alongside infrastructure, set `observability.enabled: true` in your config YAML, or pass the `--include-observability` flag:
@@ -83,7 +80,7 @@ Three built-in dashboards are provisioned:
 Access Grafana via port-forward:
 
 ```bash
-kubectl port-forward svc/lakebench-observability-grafana 3000:80 -n <namespace>
+kubectl port-forward svc/lakebench-observability-grafana 3000:80 -n lakebench-observability
 ```
 
 ## S3 Metrics
@@ -117,16 +114,14 @@ lakebench report --list
 
 The report includes:
 
-- **Summary cards** -- total time, job pass/fail counts, data processed, throughput, QpH score, and pipeline-level scores (time-to-value for batch, data freshness for sustained).
+- **Summary cards** -- total time, job pass/fail counts, data processed, throughput, QpH score, and pipeline-level scores (time-to-value for batch, data freshness for continuous).
 - **Pipeline benchmark table** -- the stage matrix showing per-stage elapsed time, input/output sizes, throughput, executor allocation, and status.
 - **Job performance table** -- per-Spark-job duration, input size, output rows, throughput, and CPU-seconds allocated.
 - **Query breakdown** -- per-query duration, rows returned, and pass/fail status.
 - **Platform metrics** -- CPU and memory usage per pod, S3 I/O rates (when observability is enabled).
 - **Configuration snapshot** -- scale factor, S3 endpoint, executor sizing, catalog type, and image versions.
 
-The `include` block in the YAML controls which sections appear. Set any field to `false` to omit that section from the generated report. The `format` field supports `html`, `json`, or `both`.
-
-Cleanup with `lakebench destroy` removes the observability Helm release and all associated resources.
+`lakebench destroy` leaves the shared observability release in place (see [Prometheus](#prometheus)).
 
 ## See Also
 

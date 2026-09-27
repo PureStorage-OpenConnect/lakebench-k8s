@@ -214,7 +214,7 @@ submitting jobs.
 
 ### run
 
-Execute the data pipeline (batch or sustained).
+Execute the data pipeline (batch or continuous).
 
 ```
 lakebench run [CONFIG_FILE] [OPTIONS]
@@ -228,10 +228,10 @@ lakebench run [CONFIG_FILE] [OPTIONS]
 | `--skip-preflight` | `--skip-deploy` | `false` | Skip prerequisite checks and infrastructure validation |
 | `--skip-generate` | | `false` | Skip datagen even with `--generate` |
 | `--skip-maintenance` | | `false` | Skip pre-benchmark maintenance (compaction, snapshot expiry) |
-| `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --sustained` is not needed |
+| `--force-reset` | | `false` | Continuous c360 only: allow the run to drop existing bronze_raw, silver and gold tables, stream checkpoints and raw data. Without it a continuous run over existing state refuses and lists what it would delete. Raw data alone from `lakebench generate` on a deployment with no tables or checkpoints is not refused: continuous runs generate their own data, so a separate `generate` before `run --continuous` is not needed |
 | `--deploy-only` | | `false` | Deploy infrastructure and exit |
 | `--generate-only` | | `false` | Deploy + generate data and exit |
-| `--sustained` | | `false` | Run streaming pipeline instead of batch |
+| `--continuous` | | `false` | Run the continuous pipeline instead of batch. `--sustained` is a deprecated hidden alias. |
 | `--duration` | | config value | Streaming run duration in seconds |
 | `--generate` | | `false` | Run datagen before pipeline (batch mode only) |
 | `--yes` | `-y` | `false` | Skip confirmation prompts |
@@ -248,7 +248,7 @@ The run command executes 7 phases:
 6. **Benchmark** -- query benchmark with pre/post compaction QpH comparison
 7. **Results** -- scorecard with maintenance value metrics
 
-In sustained mode (`--sustained`), launches concurrent streaming jobs and
+In continuous mode (`--continuous`), launches concurrent streaming jobs and
 monitors for the configured duration before benchmarking.
 
 ### stop
@@ -547,6 +547,6 @@ lakebench run --stage silver-build --timeout 3600
 ### Sustained Streaming Pipeline
 
 ```bash
-lakebench run --sustained --duration 3600
+lakebench run --continuous --duration 3600
 lakebench stop                        # stop streaming jobs manually
 ```

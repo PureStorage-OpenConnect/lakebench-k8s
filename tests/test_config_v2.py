@@ -78,7 +78,7 @@ class TestFlatFieldMapping:
     def test_scale_promoted(self):
         data = {"name": "test", "scale": 50}
         result = _apply_flat_fields(data)
-        assert result["architecture"]["workload"]["datagen"]["scale"] == 50
+        assert result["workload"]["datagen"]["scale"] == 50
         assert "scale" not in result
 
     def test_multiple_flat_fields(self):
@@ -96,7 +96,7 @@ class TestFlatFieldMapping:
         assert result["platform"]["storage"]["s3"]["access_key"] == "minioadmin"
         assert result["platform"]["kubernetes"]["namespace"] == "lb-test"
         assert result["architecture"]["pipeline"]["mode"] == "batch"
-        assert result["architecture"]["workload"]["datagen"]["scale"] == 10
+        assert result["workload"]["datagen"]["scale"] == 10
 
     def test_flat_overrides_nested(self):
         data = {

@@ -46,6 +46,12 @@ def _make_config(**overrides) -> LakebenchConfig:
                     "endpoint": "http://minio:9000",
                     "access_key": "minioadmin",
                     "secret_key": "minioadmin",
+                    # Explicit: the default is now <name>-<layer>.
+                    "buckets": {
+                        "bronze": "lakebench-bronze",
+                        "silver": "lakebench-silver",
+                        "gold": "lakebench-gold",
+                    },
                 }
             }
         },

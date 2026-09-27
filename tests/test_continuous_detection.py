@@ -232,7 +232,7 @@ def test_sustained_success_panel_is_guarded():
     """Adversarial-review P1: the green 'completed' panel must not print on a
     failed run. It must sit under `if pipeline_success:`."""
     src = _src(_ROOT / "src/lakebench/cli/_sustained.py")
-    idx = src.index("Sustained pipeline completed!")
+    idx = src.index("Continuous pipeline completed!")
     prefix = src[:idx]
     assert "if pipeline_success:" in prefix
 

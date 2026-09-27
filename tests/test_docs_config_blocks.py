@@ -28,9 +28,9 @@ KNOWN_BAD: dict[str, str] = {}
 _TOP = {
     "name", "recipe", "platform", "architecture", "images", "observability", "spark",
     "endpoint", "access_key", "secret_key", "scale", "namespace", "mode", "cycles",
-    "spark_image", "secret_ref", "description", "version",
+    "spark_image", "secret_ref", "description", "version", "workload",
 }  # fmt: skip
-_ANCHORS = {"platform", "architecture", "recipe", "name"}
+_ANCHORS = {"platform", "architecture", "recipe", "name", "workload"}
 
 
 def _blocks():

@@ -393,12 +393,13 @@ class TestPipelineModeConfig:
         assert config.architecture.pipeline.mode == PipelineMode.BATCH
 
     def test_pipeline_mode_sustained(self):
-        """Pipeline mode can be set to 'sustained'."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"pipeline": {"mode": "sustained"}},
-        )
-        assert config.architecture.pipeline.mode.value == "sustained"
+        """'sustained' still loads, as the deprecated alias of 'continuous'."""
+        with pytest.warns(DeprecationWarning):
+            config = LakebenchConfig(
+                name="test",
+                architecture={"pipeline": {"mode": "sustained"}},
+            )
+        assert config.architecture.pipeline.mode.value == "continuous"
 
     def test_pipeline_mode_invalid_rejected(self):
         """Invalid pipeline mode is rejected by Pydantic."""

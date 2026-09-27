@@ -66,16 +66,6 @@ architecture:
         format: parquet
         path_template: pacs008     # <-- datagen + bronze_verify both read here
 
-  workload:
-    schema: financial              # <-- routes datagen + pipeline scripts
-    retention_workload: true       # <-- preserves snapshots for W8/W10
-    retention_months: 60
-    datagen:
-      scale: 1                     # ~10 GB pacs.008 baseline
-      file_size: 64mb
-      timestamp_start: "2024-01-01"
-      timestamp_end: "2025-01-01"
-
   tables:
     bronze: default.pacs008_raw
     silver: silver.transactions
@@ -90,3 +80,13 @@ architecture:
 
   query_engine:
     type: spark-thrift
+
+workload:
+  schema: financial              # <-- routes datagen + pipeline scripts
+  retention_workload: true       # <-- preserves snapshots for W8/W10
+  retention_months: 60
+  datagen:
+    scale: 1                     # ~10 GB pacs.008 baseline
+    file_size: 64mb
+    timestamp_start: "2024-01-01"
+    timestamp_end: "2025-01-01"

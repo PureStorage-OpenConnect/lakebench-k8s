@@ -170,7 +170,7 @@ self-contained module with a specific responsibility:
 ```
 src/lakebench/
   benchmark/    Query engine benchmark (QpH; 8 c360 queries, 12 AML queries)
-  cli/          CLI package (Typer commands, helpers, sustained pipeline)
+  cli/          CLI package (Typer commands, helpers, continuous pipeline)
   config/       Pydantic config schema, YAML loader, cluster autosizer
   deploy/       Deployment engine and re-export shims for deployers
   engine/       PipelineEngine protocol and get_engine() factory

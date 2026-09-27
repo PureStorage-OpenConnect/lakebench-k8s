@@ -29,7 +29,7 @@ from lakebench.cli._helpers import (
     print_warning,
     write_run_report,
 )
-from lakebench.config.schema import PipelineMode
+from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError, get_k8s_client
 
@@ -606,16 +606,26 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
         return
 
     try:
+        from lakebench.deploy.observability import (
+            ObservabilityLookupError,
+            find_observability_release,
+        )
         from lakebench.observability.platform_collector import PlatformCollector
 
         namespace = cfg.get_namespace()
-        svc_name = _find_prometheus_svc(namespace)
+        # The stack is shared and lives in its own namespace; metrics are
+        # still filtered to this deployment's namespace below.
+        try:
+            prom_ns = find_observability_release() or namespace
+        except ObservabilityLookupError:
+            prom_ns = namespace
+        svc_name = _find_prometheus_svc(prom_ns)
         if not svc_name:
             console.print("  [yellow]Could not find Prometheus service[/yellow]")
             return
 
         # Try in-cluster DNS first (fast path when running inside K8s)
-        prometheus_url = f"http://{svc_name}.{namespace}.svc:9090"
+        prometheus_url = f"http://{svc_name}.{prom_ns}.svc:9090"
         try:
             import httpx
 
@@ -633,7 +643,7 @@ def _collect_platform_metrics(cfg, run_metrics) -> None:
                     f"svc/{svc_name}",
                     f"{local_port}:9090",
                     "-n",
-                    namespace,
+                    prom_ns,
                 ],
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1709,7 +1719,7 @@ def _run_sustained(
 
     console.print(
         Panel(
-            f"Running sustained pipeline for: [bold]{cfg.name}[/bold]\n\n"
+            f"Running continuous pipeline for: [bold]{cfg.name}[/bold]\n\n"
             f"Stages: bronze-ingest + silver-stream + gold-refresh (concurrent)\n"
             f"Duration: {run_duration}s ({run_duration / 60:.0f} min)",
             expand=False,
@@ -1810,7 +1820,7 @@ def _run_sustained(
                     f"Found only raw data in {_existing[0]} (no tables, no stream "
                     "checkpoints). A continuous run generates its own data, so it "
                     "will be replaced; a separate generate is not needed before "
-                    "`run --sustained`."
+                    "`run --continuous`."
                 )
             elif _existing:
                 if _raw_problem:
@@ -1832,14 +1842,14 @@ def _run_sustained(
                 print_error(f"Failed to start datagen: {datagen_result.message}")
                 pipeline_success = False
                 raise typer.Exit(1)
-            print_success("Datagen started (sustained mode)")
+            print_success("Datagen started (continuous mode)")
         dims = cfg.get_scale_dimensions()
         console.print(f"  Scale: {dims.scale}")
         console.print(f"  Parallelism: {cfg.architecture.workload.datagen.parallelism} pods")
         _journal_safe(
             j.record,
             EventType.GENERATE_START,
-            message="Datagen started for sustained pipeline",
+            message="Datagen started for continuous pipeline",
             details={
                 "scale": dims.scale,
                 "parallelism": cfg.architecture.workload.datagen.parallelism,
@@ -2056,7 +2066,7 @@ def _run_sustained(
             from lakebench.config.loader import retention_floor_advisory
 
             floor_msg = retention_floor_advisory(cfg)
-            if floor_msg and cfg.architecture.pipeline.mode.value != "sustained":
+            if floor_msg and not is_continuous_mode(cfg.architecture.pipeline.mode):
                 # Continuous configs already warned at load.
                 print_warning(floor_msg)
 
@@ -2529,12 +2539,12 @@ def _run_sustained(
         if pipeline_success:
             console.print(
                 Panel(
-                    f"[green]Sustained pipeline completed![/green]\n\n"
+                    f"[green]Continuous pipeline completed![/green]\n\n"
                     f"  Duration: {run_duration}s ({run_duration / 60:.0f} min)\n"
                     f"  Streaming jobs: {len(submitted)}\n\n"
                     f"Query results: lakebench query --example count\n"
                     f"Report: report.html in the run directory",
-                    title="Sustained Pipeline Complete",
+                    title="Continuous Pipeline Complete",
                     expand=False,
                 )
             )
@@ -2596,7 +2606,7 @@ def _run_sustained(
                 )
                 pb.total_s3_objects = _total_s3_objects
                 run_metrics.pipeline_benchmark = pb
-                if pb.pipeline_mode == PipelineMode.SUSTAINED.value:
+                if is_continuous_mode(pb.pipeline_mode):
                     if pb.sustained_throughput_rps > 0:
                         latency_str = (
                             "/".join(f"{v:.0f}" for v in pb.stage_latency_profile)
@@ -2616,7 +2626,7 @@ def _run_sustained(
                         )
                         print_info(
                             f"Pipeline Score: {freshness_str} {freshness_label}"
-                            f" | {pb.sustained_throughput_rps:,.0f} rows/s sustained"
+                            f" | {pb.sustained_throughput_rps:,.0f} rows/s continuous"
                             f" | {latency_str}ms latency (b/s/g)"
                         )
                     if pb.corpus_drained:

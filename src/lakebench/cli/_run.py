@@ -29,7 +29,7 @@ from lakebench.config import (
     load_config,
     parse_spark_memory,
 )
-from lakebench.config.schema import PipelineMode
+from lakebench.config.schema import is_continuous_mode
 from lakebench.journal import CommandName, EventType
 from lakebench.k8s import K8sConnectionError
 
@@ -101,7 +101,7 @@ def _print_pipeline_scorecard(
 
     # Scores section
     scores: list[str] = []
-    if pb.pipeline_mode == PipelineMode.SUSTAINED.value:
+    if is_continuous_mode(pb.pipeline_mode):
         if (pb.data_freshness_seconds or 0) > 0:
             scores.append(f"  Freshness:      {pb.data_freshness_seconds:>8.1f}s")
         if pb.sustained_throughput_rps > 0:
@@ -1130,18 +1130,18 @@ def run(
             help="Skip the query benchmark after pipeline completion",
         ),
     ] = False,
-    sustained: Annotated[
-        bool,
-        typer.Option(
-            "--sustained",
-            help="Run in continuous (sustained) mode: bronze-ingest -> silver-stream -> gold-refresh",
-        ),
-    ] = False,
     continuous: Annotated[
         bool,
         typer.Option(
             "--continuous",
-            help="Deprecated alias for --sustained",
+            help="Run in continuous mode: bronze-ingest -> silver-stream -> gold-refresh",
+        ),
+    ] = False,
+    sustained: Annotated[
+        bool,
+        typer.Option(
+            "--sustained",
+            help="Deprecated alias for --continuous",
             hidden=True,
         ),
     ] = False,
@@ -1156,7 +1156,7 @@ def run(
         bool,
         typer.Option(
             "--generate",
-            help="Run datagen before pipeline stages (batch mode only; sustained always runs datagen)",
+            help="Run datagen before pipeline stages (batch mode only; continuous always runs datagen)",
         ),
     ] = False,
     skip_deploy: Annotated[
@@ -1237,9 +1237,9 @@ def run(
     Use --skip-benchmark to skip the benchmark stage.
 
     With --generate (batch mode), generates data first, then runs the full
-    pipeline. Sustained mode always runs datagen automatically.
+    pipeline. Continuous mode always runs datagen automatically.
 
-    With --sustained, runs the continuous pipeline instead:
+    With --continuous, runs the continuous pipeline instead:
     starts datagen, then launches bronze-ingest, silver-stream,
     and gold-refresh as concurrent streaming jobs. Monitors for
     the configured duration, then stops streaming and runs benchmark.
@@ -1269,6 +1269,8 @@ def run(
     )
 
     config_file = resolve_config_path(config_file, file_option)
+    if sustained:
+        print_warning("--sustained is deprecated and will be removed; use --continuous")
 
     # Load configuration
     try:
@@ -1383,7 +1385,7 @@ def run(
         # is left out only where the run itself releases its cores: under
         # --skip-generate with a finished lakebench-datagen Job (LB-158).
         _use_sustained = bool(
-            sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
+            sustained or continuous or is_continuous_mode(cfg.architecture.pipeline.mode)
         )
         _datagen_runs = True
         if _use_sustained and skip_generate:
@@ -1431,7 +1433,7 @@ def run(
         print_info("Skipping prerequisites (--skip-preflight)")
 
     # Branch: sustained streaming pipeline (CLI flag overrides config)
-    use_sustained = sustained or continuous or cfg.architecture.pipeline.mode == "sustained"
+    use_sustained = sustained or continuous or is_continuous_mode(cfg.architecture.pipeline.mode)
     if use_sustained:
         _run_sustained(
             cfg,
@@ -2250,6 +2252,7 @@ def run(
             else:
                 print_info("Skipped (--skip-benchmark)")
         if not skip_benchmark:
+            _bench_recorded = False
             try:
                 from lakebench.benchmark import BenchmarkRunner
                 from lakebench.benchmark.runner import round_spread
@@ -2362,6 +2365,7 @@ def run(
                     print_error(_p)
                 if _bench_problems:
                     pipeline_success = False
+                _bench_recorded = True
 
                 # Customer 360 benchmark row counts (reporting only, D6).
                 if (
@@ -2400,10 +2404,28 @@ def run(
                 )
 
             except Exception as e:
-                print_warning(f"Benchmark failed: {e}")
-                print_info(
-                    "Pipeline results are still valid. Run 'lakebench benchmark' separately."
-                )
+                if _bench_recorded:
+                    # The benchmark completed and is recorded; only the
+                    # bookkeeping after it raised. Keep the result.
+                    print_warning(f"Benchmark post-processing failed: {e}")
+                else:
+                    pipeline_success = False
+                    benchmark_qph = None
+                    _bench_error = f"{type(e).__name__}: {e}"
+                    if collector.current_run is not None:
+                        collector.current_run.benchmark = None
+                        collector.current_run.benchmark_error = _bench_error
+                    print_error(f"Benchmark did not complete ({_bench_error}); QpH not recorded")
+                    print_info(
+                        "The pipeline stages finished; re-run the benchmark with 'lakebench benchmark'."
+                    )
+                    _journal_safe(
+                        j.record,
+                        EventType.BENCHMARK_COMPLETE,
+                        message=f"Benchmark did not complete: {_bench_error}",
+                        success=False,
+                        details={"error": _bench_error, "qph": None},
+                    )
 
         # Summary panel is printed in the finally block (after pipeline
         # benchmark scores are computed) so it can include the full scorecard.
