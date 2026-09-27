@@ -213,7 +213,7 @@ class TestVersionConditionalResources:
 
     def test_driver_memory_spark3_silver(self):
         """Spark 3 silver-build uses 24g driver (smaller jar payload)."""
-        m = self._build("apache/spark:3.5.4-python3", JobType.SILVER_BUILD)
+        m = self._build("apache/spark:3.5.9-java17-python3", JobType.SILVER_BUILD)
         assert m["spec"]["driver"]["memory"] == "24g"
 
     def test_driver_memory_spark4_silver(self):
@@ -223,7 +223,7 @@ class TestVersionConditionalResources:
 
     def test_driver_memory_spark3_gold(self):
         """Spark 3 gold-finalize uses 24g driver."""
-        m = self._build("apache/spark:3.5.4-python3", JobType.GOLD_FINALIZE)
+        m = self._build("apache/spark:3.5.9-java17-python3", JobType.GOLD_FINALIZE)
         assert m["spec"]["driver"]["memory"] == "24g"
 
     def test_driver_memory_spark4_gold(self):
@@ -233,13 +233,13 @@ class TestVersionConditionalResources:
 
     def test_driver_memory_bronze_unchanged(self):
         """Bronze driver memory is the same for both versions."""
-        m3 = self._build("apache/spark:3.5.4-python3", JobType.BRONZE_VERIFY)
+        m3 = self._build("apache/spark:3.5.9-java17-python3", JobType.BRONZE_VERIFY)
         m4 = self._build("apache/spark:4.0.2-python3", JobType.BRONZE_VERIFY)
         assert m3["spec"]["driver"]["memory"] == m4["spec"]["driver"]["memory"]
 
     def test_max_result_size_spark3(self):
         """Spark 3 uses floor=4g formula for maxResultSize."""
-        m = self._build("apache/spark:3.5.4-python3", JobType.SILVER_BUILD)
+        m = self._build("apache/spark:3.5.9-java17-python3", JobType.SILVER_BUILD)
         conf = m["spec"]["sparkConf"]
         # Default scale=100 -> 12 executors -> max(4, 12//3) = 4g
         assert conf["spark.driver.maxResultSize"] == "4g"
@@ -305,7 +305,7 @@ class TestRecipeSystem:
         """User explicit values win over recipe defaults."""
         cfg = _make_config(
             recipe="hive-iceberg-spark-trino",
-            images={"spark": "my-registry/spark:3.5.3-python3"},
+            images={"spark": "my-registry/spark:3.5.3-java17-python3"},
         )
         # User override wins
         assert "3.5.3" in cfg.images.spark

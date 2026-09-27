@@ -571,7 +571,8 @@ def compute_peak_requirements(
 
     Args:
         scale: Scale factor from config.
-        mode: Pipeline mode, ``"batch"`` or ``"sustained"``.
+        mode: Pipeline mode, ``"batch"`` or ``"continuous"`` (``"sustained"``
+            and ``PipelineMode`` values are accepted too).
         schema_type: Workload schema (``"c360"``, ``"financial"``). Selects
             per-workload profile overrides; ``None`` uses the Customer360
             baseline. AML at scale >= 5 needs a larger bronze-verify PVC
@@ -580,7 +581,11 @@ def compute_peak_requirements(
     Returns:
         PeakRequirement describing the peak CPU, memory, and scratch request.
     """
-    streaming = str(mode).lower() == "sustained"
+    from lakebench.config.schema import is_continuous_mode
+
+    streaming = is_continuous_mode(mode)
+    # One spelling in the result, whichever alias the caller passed.
+    mode = "continuous" if streaming else "batch"
     job_types = STREAMING_JOB_TYPES if streaming else BATCH_JOB_TYPES
 
     reqs = tuple(

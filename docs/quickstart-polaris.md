@@ -93,9 +93,10 @@ platform:
 architecture:
   catalog:
     type: polaris    # <-- the only change from the default
-  workload:
-    datagen:
-      scale: 1
+
+workload:
+  datagen:
+    scale: 1
 ```
 
 ### 2. Validate

@@ -73,7 +73,7 @@ These are the Spark pipeline's requests. Data generation runs before the
 pipeline and can be the larger demand: the AML scale-100 generate in
 run-20260925-104703-c02890 ran 44 datagen pods at 8 cores, about 350 cores
 at once (measured, not derived from `compute_peak_requirements`). The pod
-count is `architecture.workload.datagen.parallelism`; set it lower on a
+count is `workload.datagen.parallelism`; set it lower on a
 smaller cluster and generation takes longer.
 
 Continuous mode runs its three streaming jobs at the same time, so the
@@ -326,10 +326,9 @@ platform:
       access_key: YOUR_ACCESS_KEY            # your S3 access key
       secret_key: YOUR_SECRET_KEY            # your S3 secret key
 
-architecture:
-  workload:
-    datagen:
-      scale: 1                               # ~10 GB bronze data
+workload:
+  datagen:
+    scale: 1                               # ~10 GB bronze data
 ```
 
 If your storage uses virtual-hosted bucket addressing (like AWS S3), set
@@ -618,9 +617,8 @@ benchmark. This is the workload the [First Deployment Walkthrough](#first-deploy
 above runs.
 
 ```yaml
-architecture:
-  workload:
-    schema: customer360   # default; can be omitted
+workload:
+  schema: customer360   # default; can be omitted
 ```
 
 ### Financial crime (AML)
@@ -632,11 +630,10 @@ joined against a scikit-learn reference detector so a
 rule cannot read high recall from a label proxy without being caught.
 
 ```yaml
-architecture:
-  workload:
-    schema: financial
-    retention_workload: true    # keeps snapshots for replay / reproduce
-    retention_months: 60
+workload:
+  schema: financial
+  retention_workload: true    # keeps snapshots for replay / reproduce
+  retention_months: 60
 ```
 
 A worked example ships at [`examples/polaris-iceberg-spark-financial.yaml`](../examples/polaris-iceberg-spark-financial.yaml).

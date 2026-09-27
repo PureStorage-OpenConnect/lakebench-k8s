@@ -118,9 +118,9 @@ time and table state evolve across cycles.
 | `--stage` | `-s` | (all) | Run a specific stage only: `bronze-verify`, `silver-build`, or `gold-finalize` |
 | `--timeout` | `-t` | auto | Timeout per job in seconds. Defaults to `max(3600, scale * 60)` when omitted. |
 | `--skip-benchmark` | | `false` | Skip the query benchmark after pipeline stages |
-| `--sustained` | | `false` | Run in sustained streaming mode. Overrides `pipeline.mode` in config. |
-| `--duration` | | config value | Streaming run duration in seconds (sustained mode only) |
-| `--generate` | | `false` | Run datagen before pipeline stages (batch mode only -- sustained mode always runs datagen automatically) |
+| `--continuous` | | `false` | Run in continuous mode. Overrides `pipeline.mode` in config. |
+| `--duration` | | config value | Streaming run duration in seconds (continuous mode only) |
+| `--generate` | | `false` | Run datagen before pipeline stages (batch mode only -- continuous mode always runs datagen automatically) |
 
 ### Examples
 
@@ -154,28 +154,28 @@ Full end-to-end run including data generation:
 lakebench run my-config.yaml --generate --timeout 7200
 ```
 
-## Sustained Mode
+## Continuous Mode
 
-Sustained mode runs a streaming pipeline instead of batch. Set it in the
-config file or activate it with the `--sustained` CLI flag:
+Continuous mode runs a streaming pipeline instead of batch. Set it in the
+config file or activate it with the `--continuous` CLI flag:
 
 ```yaml
 # In your config YAML:
 architecture:
   pipeline:
-    mode: sustained              # batch | sustained
+    mode: continuous              # batch | continuous
 ```
 
 ```bash
 # Or as a one-off override:
-lakebench run my-config.yaml --sustained
+lakebench run my-config.yaml --continuous
 ```
 
-When `pipeline.mode` is set to `sustained` in the config, `lakebench run`
+When `pipeline.mode` is set to `continuous` in the config, `lakebench run`
 uses the streaming pipeline automatically -- no CLI flag needed. The
-`--sustained` flag still works as an override for one-off runs.
+`--continuous` flag still works as an override for one-off runs.
 
-In sustained mode, three streaming Spark jobs run concurrently:
+In continuous mode, three streaming Spark jobs run concurrently:
 
 ```
 bronze-ingest + silver-stream + gold-refresh  (concurrent)
@@ -200,14 +200,14 @@ takes about 19% of the scale-100 corpus. The larger corpus is not a failure:
 the scorecard reports `intake_limit: trickle_rate` and
 `pipeline_saturated: false` when the pipeline kept pace with the trickle, and
 `corpus_drain_seconds` for the window that would drain the corpus. See
-[Scoring and Benchmarking](benchmarking.md#sustained-mode).
+[Scoring and Benchmarking](benchmarking.md#continuous-mode).
 
 The pipeline runs for the configured duration (default: 1800 seconds / 30
 minutes). During this window, Lakebench runs periodic Trino benchmark rounds
 to measure query performance while streaming is active. After the window ends,
 streaming jobs are stopped and the in-stream results are aggregated.
 
-### How Sustained Mode Works
+### How Continuous Mode Works
 
 The three streaming jobs behave differently:
 
@@ -230,12 +230,12 @@ gold table while it's being rewritten, the query fails. Lakebench handles
 this with automatic retries (30s/60s backoff). The scorecard records
 contention events per round.
 
-### Sustained Mode Configuration
+### Continuous Mode Configuration
 
 ```yaml
 architecture:
   pipeline:
-    sustained:
+    continuous:
       bronze_trigger_interval: "30 seconds"
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
@@ -249,7 +249,7 @@ architecture:
 Override the run duration on the command line:
 
 ```bash
-lakebench run my-config.yaml --sustained --duration 3600
+lakebench run my-config.yaml --continuous --duration 3600
 ```
 
 ### Tuning Reference
@@ -280,7 +280,7 @@ schedule:
 ```yaml
 architecture:
   pipeline:
-    sustained:
+    continuous:
       retention_interval: 1800     # Seconds between maintenance rounds (300-7200)
       retention_threshold: 30m     # Snapshot age to retain (e.g. 30m, 1h, 7d)
 ```
@@ -343,7 +343,7 @@ first round after 5 minutes of warmup, then every 5 minutes. Each round
 measures QpH, per-query latency, and gold-table freshness at the moment of
 query execution.
 
-The final sustained QpH is the **median** of all in-stream rounds. The
+The final continuous QpH is the **median** of all in-stream rounds. The
 terminal output shows a per-round summary table with QpH, per-query times,
 freshness, and Q9 contention status. The HTML report includes an "In-Stream
 Benchmark Rounds" section with the same data.
@@ -354,9 +354,9 @@ score is produced.
 For round count planning and the adaptive end-of-window guard, see
 [Scoring and Benchmarking](benchmarking.md).
 
-### Sustained Mode Scoring
+### Continuous Mode Scoring
 
-Sustained mode produces a different set of scores than batch:
+Continuous mode produces a different set of scores than batch:
 
 | Score | Description |
 |---|---|
@@ -389,7 +389,7 @@ Key fields in the metrics JSON:
   executor count, CPU-seconds, memory allocated.
 - `benchmark` -- Query benchmark results: QpH, per-query timing and row counts.
 - `pipeline_benchmark.scores` -- Aggregate scores: `time_to_value_seconds`
-  (batch) or `data_freshness_seconds` (sustained), pipeline throughput.
+  (batch) or `data_freshness_seconds` (continuous), pipeline throughput.
 
 ### HTML Report
 

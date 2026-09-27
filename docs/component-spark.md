@@ -6,7 +6,7 @@ on Kubernetes. Spark runs PySpark scripts that move data through three layers:
 
 - **Batch mode:** `bronze-verify`, `silver-build`, `gold-finalize` -- run sequentially,
   each job starts after the previous one completes.
-- **Sustained mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
+- **Continuous mode:** `bronze-ingest`, `silver-stream`, `gold-refresh` -- run
   concurrently as structured streaming jobs with configurable trigger intervals.
 
 All scripts are deployed as a ConfigMap (`lakebench-spark-scripts`) and mounted
@@ -239,7 +239,7 @@ The formula in `_scale_executor_count()`:
 | `silver-stream` | 4 | 8 | 20 |
 | `gold-refresh` | 2 | 4 | 10 |
 
-In sustained mode, streaming jobs share the cluster concurrently with datagen.
+In continuous mode, streaming jobs share the cluster concurrently with datagen.
 A budget calculation (`_streaming_concurrent_budget()`) proportionally caps each
 streaming job's executor count based on available cluster CPU after subtracting
 Trino, Hive, PostgreSQL, and datagen.

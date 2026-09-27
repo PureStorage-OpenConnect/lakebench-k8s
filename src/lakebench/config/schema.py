@@ -55,6 +55,31 @@ class ConfigModel(BaseModel):
             warnings.warn(msg, DeprecationWarning, stacklevel=2)
         return data
 
+    # Fields that load but that nothing in lakebench reads (D19). Setting one
+    # to anything other than its default emits a warning that it has no
+    # effect; the field is removed in v1.7. Comparing against the default
+    # rather than "was the key written" keeps a saved config that carries
+    # every field (save_config) from warning on reload. Maps field -> note.
+    _dead_fields: ClassVar[dict[str, str]] = {}
+
+    @model_validator(mode="after")
+    def _warn_dead_fields(self) -> Any:
+        dead = type(self)._dead_fields
+        if not dead:
+            return self
+        fields = type(self).model_fields
+        for name, note in dead.items():
+            default = fields[name].get_default(call_default_factory=True)
+            if getattr(self, name) == default:
+                continue
+            msg = (
+                f"'{name}' ({type(self).__name__}) has no effect: nothing in lakebench "
+                f"reads it. It will be removed in v1.7; delete it from the config. {note}"
+            ).rstrip()
+            logger.warning(msg)
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        return self
+
 
 # =============================================================================
 # Enums
@@ -166,12 +191,37 @@ class PipelineMode(str, Enum):
 
     - batch: sequential medallion jobs
       (bronze-verify -> silver-build -> gold-finalize)
-    - sustained: concurrent streaming jobs with periodic gold recomputation
-      (bronze-ingest + silver-stream + gold-refresh)
+    - continuous: concurrent jobs over a corpus that keeps arriving, with
+      periodic gold recomputation (bronze-ingest + silver-stream +
+      gold-refresh)
+
+    ``continuous`` is the canonical name (owner decision D18, v1.6).
+    ``sustained`` is the transitional alias: ``PipelineMode.SUSTAINED`` is the
+    same member as ``PipelineMode.CONTINUOUS``, ``PipelineMode("sustained")``
+    resolves to it, and a config that writes ``mode: sustained`` loads with a
+    DeprecationWarning. Metrics files still record ``pipeline_mode="sustained"``
+    for continuous runs; read either spelling with ``is_continuous_mode``.
     """
 
     BATCH = "batch"
-    SUSTAINED = "sustained"
+    CONTINUOUS = "continuous"
+    SUSTAINED = "continuous"  # alias of CONTINUOUS, not a separate member
+
+    @classmethod
+    def _missing_(cls, value: object) -> PipelineMode | None:
+        if isinstance(value, str) and value.strip().lower() == "sustained":
+            return cls.CONTINUOUS
+        return None
+
+
+def is_continuous_mode(mode: object) -> bool:
+    """True for the continuous pipeline mode under either spelling.
+
+    Accepts a ``PipelineMode``, a string (``"continuous"`` or the legacy
+    ``"sustained"`` that metrics files and old configs carry) or None.
+    """
+    value = getattr(mode, "value", mode)
+    return isinstance(value, str) and value.strip().lower() in ("continuous", "sustained")
 
 
 class ReportFormat(str, Enum):
@@ -213,6 +263,17 @@ class ImagesConfig(ConfigModel):
 
     pull_policy: ImagePullPolicy = ImagePullPolicy.ALWAYS
 
+    _dead_fields: ClassVar[dict[str, str]] = {
+        "prometheus": (
+            "Prometheus deploys from the kube-prometheus-stack chart; pin it with "
+            "observability.chart_version."
+        ),
+        "grafana": (
+            "Grafana deploys from the kube-prometheus-stack chart; pin it with "
+            "observability.chart_version."
+        ),
+    }
+
     @field_validator("spark")
     @classmethod
     def _validate_spark_image(cls, v: str) -> str:
@@ -237,7 +298,12 @@ class KubernetesConfig(ConfigModel):
 
 
 class S3BucketsConfig(ConfigModel):
-    """S3 bucket names for each data layer."""
+    """S3 bucket names for each data layer.
+
+    These defaults apply only to a bare ``S3BucketsConfig``. In a full config
+    ``LakebenchConfig.default_bucket_names`` replaces every name the user did
+    not set with ``<deployment name>-<layer>``.
+    """
 
     bronze: str = "lakebench-bronze"
     silver: str = "lakebench-silver"
@@ -549,12 +615,21 @@ class IcebergConfig(ConfigModel):
     file_format: FileFormatType = FileFormatType.PARQUET
     properties: dict[str, Any] = Field(default_factory=dict)
 
+    _dead_fields: ClassVar[dict[str, str]] = {
+        "file_format": "Tables are always written as Parquet.",
+        "properties": "No table property is applied from the config.",
+    }
+
 
 class DeltaConfig(ConfigModel):
     """Delta Lake table format configuration."""
 
     version: str = "auto"
     properties: dict[str, Any] = Field(default_factory=dict)
+
+    _dead_fields: ClassVar[dict[str, str]] = {
+        "properties": "No table property is applied from the config.",
+    }
 
 
 class TableFormatConfig(ConfigModel):
@@ -907,50 +982,70 @@ class ProcessingConfig(ConfigModel):
     @model_validator(mode="before")
     @classmethod
     def _migrate_continuous_key(cls, data: object) -> object:
-        """Accept deprecated ``continuous`` key as alias for ``sustained``."""
+        """``pipeline.continuous`` is the canonical key; ``sustained`` the alias.
+
+        The settings block is stored on the ``sustained`` field, so the
+        canonical key is renamed onto it silently and the transitional
+        spelling is accepted with a DeprecationWarning (D18).
+        """
         if not isinstance(data, dict):
             return data
-        if "continuous" in data:
-            import warnings
-
-            logger.warning("'pipeline.continuous' is deprecated, use 'pipeline.sustained' instead.")
-            warnings.warn(
-                "'pipeline.continuous' is deprecated, use 'pipeline.sustained' instead.",
-                DeprecationWarning,
-                stacklevel=2,
+        if "continuous" in data and "sustained" in data:
+            # Dropping one silently would lose settings without a trace.
+            raise ValueError(
+                "both 'pipeline.continuous' and 'pipeline.sustained' (deprecated) are "
+                "set; move the settings under 'continuous' and remove 'sustained'"
             )
-            if "sustained" in data:
-                # Dropping one silently would lose settings without a trace.
-                raise ValueError(
-                    "both 'pipeline.continuous' (deprecated) and 'pipeline.sustained' are "
-                    "set; move the settings under 'sustained' and remove 'continuous'"
-                )
+        if "continuous" in data:
             data = dict(data)
             data["sustained"] = data.pop("continuous")
+        elif "sustained" in data:
+            msg = (
+                "'pipeline.sustained' is deprecated and will be removed in a future "
+                "release; rename the block to 'pipeline.continuous'."
+            )
+            logger.warning(msg)
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
         return data
 
     @field_validator("mode", mode="before")
     @classmethod
-    def _migrate_continuous_mode(cls, v: object) -> object:
-        """Accept deprecated ``continuous`` value as alias for ``sustained``."""
-        if v == "continuous":
-            import warnings
-
-            logger.warning("pipeline mode 'continuous' is deprecated, use 'sustained' instead.")
-            warnings.warn(
-                "pipeline mode 'continuous' is deprecated, use 'sustained' instead.",
-                DeprecationWarning,
-                stacklevel=2,
+    def _migrate_sustained_mode(cls, v: object) -> object:
+        """Accept the transitional ``sustained`` value as ``continuous``."""
+        if isinstance(v, str) and v.strip().lower() == "sustained":
+            msg = (
+                "pipeline mode 'sustained' is deprecated and will be removed in a future "
+                "release; use 'mode: continuous'."
             )
-            return "sustained"
+            logger.warning(msg)
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            return PipelineMode.CONTINUOUS.value
         return v
+
+    @model_validator(mode="after")
+    def _warn_pattern(self) -> ProcessingConfig:
+        # ProcessingPattern predates pipeline.mode and is removed in v1.7
+        # (D18). Stages are chosen by the mode; the only remaining reader is
+        # the auto-sizer, which splits the CPU budget for 'streaming'.
+        if self.pattern != ProcessingPattern.MEDALLION:
+            msg = (
+                f"'pipeline.pattern: {self.pattern.value}' is deprecated and will be "
+                "removed in v1.7. The pipeline stages are chosen by 'pipeline.mode' "
+                "(batch or continuous). The pattern does not select stages: it is "
+                "recorded in the run's config snapshot, and 'streaming' makes the "
+                "auto-sizer give Spark 60% and datagen 40% of the CPU budget."
+            )
+            logger.warning(msg)
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+        return self
 
     @model_validator(mode="after")
     def _validate_cycles(self) -> ProcessingConfig:
         """Ensure cycles > 1 is only used with batch mode."""
         if self.cycles > 1 and self.mode != PipelineMode.BATCH:
             raise ValueError(
-                "cycles > 1 requires pipeline mode 'batch' (sustained mode has its own iteration model)"
+                "cycles > 1 requires pipeline mode 'batch' (continuous mode has its own "
+                "iteration model)"
             )
         return self
 
@@ -1212,6 +1307,19 @@ class WorkloadConfig(ConfigModel):
 
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
+    @field_validator("schema_type", mode="after")
+    @classmethod
+    def _reject_custom(cls, v: WorkloadSchema) -> WorkloadSchema:
+        # 'custom' had no generator, stages or correctness contract of its own
+        # and silently ran the Customer 360 query set (D13).
+        if v == WorkloadSchema.CUSTOM:
+            raise ValueError(
+                "workload schema 'custom' is not supported in this release: it has no "
+                "generator, pipeline or correctness checks of its own and would run the "
+                "Customer 360 benchmark. Use 'customer360' or 'financial'."
+            )
+        return v
+
     @model_validator(mode="after")
     def _seed_allowed(self) -> WorkloadConfig:
         # Refused at load, before anything is deployed: a spent AML seed would
@@ -1253,12 +1361,47 @@ _SUPPORTED_COMBINATIONS = [
 ]
 
 
+# What each workload can run on (DESIGN.md 6.5, layers 2 and 3). The
+# architecture tuple list above says nothing about workloads; this does. A
+# workload x format or workload x mode pair not listed here is refused at load.
+# The AML stage scripts and DDL write Iceberg tables (USING iceberg), so AML on
+# Delta used to pass validation and then run Iceberg code on a Delta
+# deployment.
+WORKLOAD_TABLE_FORMATS: dict[str, tuple[str, ...]] = {
+    "customer360": ("iceberg", "delta"),
+    "financial": ("iceberg",),
+}
+WORKLOAD_MODES: dict[str, tuple[str, ...]] = {
+    "customer360": ("batch", "continuous"),
+    "financial": ("batch", "continuous"),
+}
+_WORKLOAD_LABELS = {"customer360": "Customer 360", "financial": "financial (AML)"}
+
+
+def workload_compatibility_problem(workload: str, table_format: str, mode: str) -> str:
+    """Why a workload cannot run on this table format or mode, or ''."""
+    label = _WORKLOAD_LABELS.get(workload, workload)
+    formats = WORKLOAD_TABLE_FORMATS.get(workload)
+    if formats is not None and table_format not in formats:
+        return (
+            f"The {label} workload supports table_format {', '.join(formats)}, not "
+            f"{table_format}. Its stage scripts and table DDL are written for "
+            f"{' and '.join(formats)} only, so this combination would not run the "
+            f"workload it names. Set architecture.table_format.type to "
+            f"{formats[0]} (for example recipe: polaris-{formats[0]}-spark-trino)."
+        )
+    modes = WORKLOAD_MODES.get(workload)
+    if modes is not None and mode not in modes:
+        return f"The {label} workload supports pipeline mode {', '.join(modes)}, not {mode}."
+    return ""
+
+
 # Why a combination is unsupported, keyed by the pair that causes it.
 #
 # A rejection that only prints the valid list makes the user diff their request
 # against it to work out what they did wrong, and teaches them nothing. Every
-# entry here is a real limitation that cost someone a debugging session; the
-# gotcha numbers refer to the maintainers' internal list.
+# entry here is a real limitation that cost someone a debugging session. The
+# text is shown to users, so it explains itself and cites nothing internal.
 #
 # Keys are checked most-specific first: a full 4-tuple, then (table_format,
 # query_engine), then (catalog, table_format).
@@ -1268,8 +1411,7 @@ _COMBINATION_NOTES: dict[tuple[str, ...], str] = {
         "delta-kernel-rs, which ignores DuckDB's httpfs S3 settings and tries "
         "AWS IMDS (169.254.169.254) for credentials -- that hangs indefinitely "
         "against a non-AWS endpoint. There is no way to pass a custom endpoint "
-        "to the delta kernel. The iceberg extension has no such limitation. "
-        "(gotcha 18)"
+        "to the delta kernel. The iceberg extension has no such limitation."
     ),
     ("polaris", "delta"): (
         "Polaris is an Iceberg-native REST catalog and has no Delta Lake "
@@ -1277,13 +1419,12 @@ _COMBINATION_NOTES: dict[tuple[str, ...], str] = {
     ),
     ("unity", "iceberg"): (
         "OSS Unity Catalog's Iceberg REST API is read-only (GET only), and "
-        "UCSingleCatalog 0.4.0 cannot write Iceberg from Spark 4.0. "
-        "(gotcha 19)"
+        "UCSingleCatalog 0.4.0 cannot write Iceberg from Spark 4.0."
     ),
     ("unity", "delta", "spark", "trino"): (
         "Trino's Delta Lake connector requires a Hive Metastore "
         "(hive.metastore.uri), and Unity deployments do not include one. "
-        "Trino has no native OSS Unity integration for Delta. (gotcha 25)"
+        "Trino has no native OSS Unity integration for Delta."
     ),
 }
 
@@ -1646,11 +1787,17 @@ class ArchitectureConfig(ConfigModel):
                 setattr(t, field, value)
                 t.__pydantic_fields_set__.discard(field)
         return self
-        explicit = self.tables.model_fields_set
-        if "silver" not in explicit:
-            self.tables.silver = "silver.transactions"
-        if "gold" not in explicit:
-            self.tables.gold = self.tables.gold_alerts
+
+    @model_validator(mode="after")
+    def validate_workload_compatibility(self) -> ArchitectureConfig:
+        """Refuse a workload on a table format or mode it does not declare."""
+        problem = workload_compatibility_problem(
+            self.workload.schema_type.value,
+            self.table_format.type.value,
+            self.pipeline.mode.value,
+        )
+        if problem:
+            raise ValueError(problem)
         return self
 
     @model_validator(mode="after")
@@ -1750,6 +1897,13 @@ class ObservabilityConfig(ConfigModel):
     # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
     chart_version: str = "87.19.2"
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
+
+    _dead_fields: ClassVar[dict[str, str]] = {
+        "reports": (
+            "Every run writes report.html into its run directory under "
+            "lakebench-output/runs; 'lakebench report' regenerates it."
+        ),
+    }
 
     @model_validator(mode="after")
     def _warn_dead_metric_flags(self) -> ObservabilityConfig:
@@ -1905,6 +2059,86 @@ def derived_name_violations(cfg: LakebenchConfig) -> list[str]:
     return problems
 
 
+def _normalise_workload_block(block: object) -> object:
+    # An empty 'workload:' is None; 'schema_type' is the field name for the
+    # documented 'schema' key. Normalise both so the two locations compare.
+    if block is None:
+        return {}
+    if isinstance(block, dict) and "schema_type" in block and "schema" not in block:
+        block = dict(block)
+        block["schema"] = block.pop("schema_type")
+    return block
+
+
+def _merge_workload_blocks(top: object, nested: object, path: str, conflicts: list[str]) -> object:
+    """Merge the top-level and legacy workload blocks, recording disagreements."""
+    if isinstance(top, dict) and isinstance(nested, dict):
+        merged = dict(nested)
+        for key, value in top.items():
+            if key in nested:
+                merged[key] = _merge_workload_blocks(value, nested[key], f"{path}.{key}", conflicts)
+            else:
+                merged[key] = value
+        return merged
+    if top != nested:
+        conflicts.append(f"{path}: {top!r} at the top level, {nested!r} under architecture")
+    return top
+
+
+def resolve_workload_location(data: dict[str, Any]) -> dict[str, Any]:
+    """Move the workload block to where the model stores it.
+
+    ``workload`` is a top-level config key (D12). The model still stores it
+    at ``architecture.workload``, which every reader uses, so this is the one
+    place the two locations are reconciled: the top-level block is canonical,
+    the old location is accepted with a DeprecationWarning, and when both are
+    set any key they disagree on is an error.
+    """
+    arch = data.get("architecture")
+    has_top = "workload" in data
+    has_nested = isinstance(arch, dict) and "workload" in arch
+    if not has_top and not has_nested:
+        return data
+    data = dict(data)
+    top = _normalise_workload_block(data.pop("workload", None))
+    if has_nested:
+        assert isinstance(arch, dict)
+        arch = dict(arch)
+        nested = _normalise_workload_block(arch["workload"])
+        msg = (
+            "'architecture.workload' is deprecated and will be removed in a future "
+            "release; move the block to a top-level 'workload:' key."
+        )
+        logger.warning(msg)
+        warnings.warn(msg, DeprecationWarning, stacklevel=3)
+        if has_top:
+            conflicts: list[str] = []
+            merged = _merge_workload_blocks(top, nested, "workload", conflicts)
+            if conflicts:
+                raise ValueError(
+                    "'workload' is set both at the top level and under 'architecture' "
+                    "(deprecated), and they disagree:\n  - "
+                    + "\n  - ".join(conflicts)
+                    + "\nKeep only the top-level 'workload:' block."
+                )
+            arch["workload"] = merged
+        else:
+            arch["workload"] = nested
+    else:
+        arch = dict(arch) if isinstance(arch, dict) else {}
+        arch["workload"] = top
+    data["architecture"] = arch
+    return data
+
+
+# Namespaces that hold state shared by every deployment. A deployment may not
+# use one: destroy deletes the deployment's namespace.
+RESERVED_NAMESPACES: dict[str, str] = {
+    "lakebench-observability": "the shared kube-prometheus-stack release",
+    "lakebench-system": "the cluster lease",
+}
+
+
 class LakebenchConfig(ConfigModel):
     """Root configuration for Lakebench.
 
@@ -1947,6 +2181,7 @@ class LakebenchConfig(ConfigModel):
         """
         if not isinstance(data, dict):
             return data
+        data = resolve_workload_location(data)
         recipe_name = data.get("recipe")
         if recipe_name:
             from lakebench.config.recipes import RECIPES, _deep_setdefault
@@ -1958,11 +2193,65 @@ class LakebenchConfig(ConfigModel):
             _deep_setdefault(data, defaults)
         return data
 
+    @property
+    def workload(self) -> WorkloadConfig:
+        """The workload block (config key ``workload``; stored on architecture)."""
+        return self.architecture.workload
+
     @model_validator(mode="after")
     def validate_required_fields(self) -> LakebenchConfig:
         """Validate required fields are present."""
         if not self.name:
             raise ValueError("'name' is required")
+        return self
+
+    @model_validator(mode="after")
+    def refuse_reserved_namespace(self) -> LakebenchConfig:
+        """Refuse a deployment namespace that holds shared lakebench state.
+
+        Destroy deletes the deployment's namespace. If that namespace were
+        the shared observability namespace or the cluster-lock namespace,
+        tearing down one deployment would remove what every other deployment
+        uses (DESIGN.md invariant 6).
+        """
+        ns = self.get_namespace()
+        if ns in RESERVED_NAMESPACES:
+            raise ValueError(
+                f"namespace {ns!r} is reserved for shared lakebench state "
+                f"({RESERVED_NAMESPACES[ns]}); a deployment cannot use it because "
+                "destroy deletes the deployment's namespace. Choose another name "
+                "or set platform.kubernetes.namespace."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def default_bucket_names(self) -> LakebenchConfig:
+        """Name unset buckets after the deployment: ``<name>-bronze`` and so on.
+
+        The defaults were the fixed names ``lakebench-bronze/-silver/-gold``.
+        On a store where bucket names are global (FlashBlade across accounts,
+        AWS across everyone) a fixed name is usually taken, and HeadBucket on
+        a bucket another account owns returns 403, so the documented quick
+        start failed at deploy. Two deployments on one store also shared the
+        buckets. Deriving the name from the deployment keeps each
+        deployment's buckets its own and matches the name-prefix ownership
+        fallback in ``deploy/ownership.py``. Explicit names are kept.
+        """
+        import re as _re
+
+        buckets = self.platform.storage.s3.buckets
+        for layer in ("bronze", "silver", "gold"):
+            if layer not in buckets.model_fields_set:
+                derived = f"{self.name}-{layer}"
+                # Derived names are checked here; explicit ones are the
+                # user's (some stores accept names S3 does not).
+                if not _re.fullmatch(r"[a-z0-9][a-z0-9.-]*[a-z0-9]", derived):
+                    raise ValueError(
+                        f"default bucket name {derived!r} (from name {self.name!r}) is "
+                        "not a valid S3 bucket name: use lowercase letters, digits, "
+                        "'-' and '.', or set platform.storage.s3.buckets explicitly"
+                    )
+                setattr(buckets, layer, derived)
         return self
 
     @model_validator(mode="after")
@@ -1995,17 +2284,43 @@ class LakebenchConfig(ConfigModel):
         major.minor.  When the user *has* specified a version, this
         validates it against the compatibility matrix.
         """
-        from lakebench.spark.job import resolve_format_version
+        from lakebench.spark.job import resolve_format_version, validate_format_version
 
         spark_image = self.images.spark
         fmt = self.architecture.table_format
 
         if fmt.type == TableFormatType.ICEBERG:
+            # A version the user chose is validated as written; an unset
+            # version or 'auto' may fall back below.
+            user_chose = "version" in fmt.iceberg.model_fields_set and fmt.iceberg.version not in (
+                "",
+                "auto",
+            )
             resolved = resolve_format_version(
                 spark_image,
                 "iceberg",
                 fmt.iceberg.version,
             )
+            # Also refuses Iceberg 1.11+ on a Java 11 Spark image, which would
+            # otherwise fail inside the driver with UnsupportedClassVersionError.
+            # When the user did not choose a version, pick the newest release
+            # built for Java 11 instead of refusing the image.
+            try:
+                validate_format_version(spark_image, "iceberg", resolved)
+            except ValueError:
+                if user_chose:
+                    raise
+                fallback = "1.10.1"
+                validate_format_version(spark_image, "iceberg", fallback)
+                logger.warning(
+                    "Spark image %s ships Java 11 and Iceberg %s needs Java 17; using "
+                    "Iceberg %s. Set table_format.iceberg.version, or use a java17 image "
+                    "tag, to choose explicitly.",
+                    spark_image,
+                    resolved,
+                    fallback,
+                )
+                resolved = fallback
             if resolved != fmt.iceberg.version:
                 fmt.iceberg.version = resolved
         elif fmt.type == TableFormatType.DELTA:

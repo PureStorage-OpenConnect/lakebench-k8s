@@ -217,13 +217,24 @@ def test_delta_thrift_fitted_to_small_node():
     assert thrift.memory == "8g"
 
 
-def test_delta_thrift_financial_keeps_24g():
+def test_delta_thrift_financial_is_refused_at_load():
+    # AML declares Iceberg only (design-contradictions #4), so the Delta
+    # Thrift sizing rule can no longer meet the financial 24g heap.
+    with pytest.raises(
+        ValueError, match="financial \\(AML\\) workload supports table_format iceberg"
+    ):
+        make_config(
+            recipe="hive-delta-spark-thrift",
+            architecture={"query_engine": {"type": "spark-thrift"}},
+            workload={"schema": "financial"},
+        )
+
+
+def test_iceberg_thrift_financial_keeps_24g():
     cfg = make_config(
-        recipe="hive-delta-spark-thrift",
-        architecture={
-            "query_engine": {"type": "spark-thrift"},
-            "workload": {"schema": "financial"},
-        },
+        recipe="hive-iceberg-spark-thrift",
+        architecture={"query_engine": {"type": "spark-thrift"}},
+        workload={"schema": "financial"},
     )
     resolve_auto_sizing(cfg, None)
     assert cfg.architecture.query_engine.spark_thrift.memory == "24g"

@@ -17,8 +17,8 @@ at any scale, and get a scorecard you can compare across configurations.
   different architecture. Side-by-side scorecard comparison.
 - **Test at scale.** Run the same workload at 10 GB, 100 GB, and 1 TB to find
   where throughput plateaus or resources saturate on your hardware.
-- **Measure freshness.** Sustained mode streams data through the pipeline and
-  benchmarks query performance under sustained ingest load.
+- **Measure freshness.** Continuous mode keeps data arriving through the
+  pipeline and benchmarks query performance under ongoing ingest load.
 
 ## Workloads
 
@@ -51,11 +51,17 @@ pip install lakebench-k8s
 
 ```bash
 pip install lakebench-k8s
-lakebench init                           # quick setup (4 questions)
-lakebench run lakebench.yaml --generate  # deploy + generate + pipeline + benchmark
-lakebench results                        # view scorecard
-lakebench destroy lakebench.yaml         # tear down everything
+lakebench init                                 # quick setup (4 questions), writes lakebench.yaml
+lakebench run lakebench.yaml --generate --yes  # deploy + generate + pipeline + benchmark
+lakebench results lakebench.yaml               # view scorecard
+lakebench destroy lakebench.yaml               # tear down what this deployment owns
 ```
+
+`--yes` lets `run` deploy the namespace and components when they do not
+exist yet; without it `run` stops and asks you to run `lakebench deploy`
+first. The Spark Operator is shared cluster infrastructure: a cluster admin
+installs it once with `lakebench admin install-spark-operator` (see
+[Getting Started](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/getting-started.md)).
 
 Minimum config -- 4 lines:
 
@@ -67,7 +73,9 @@ secret_key: YOUR_SECRET
 scale: 10                          # 1 = ~10 GB, 10 = ~100 GB, 100 = ~1 TB
 ```
 
-Name is auto-generated. Recipe defaults to `hive-iceberg-spark-trino`.
+Name is auto-generated. Buckets default to `<name>-bronze`, `<name>-silver`
+and `<name>-gold`, so they are unique on stores where bucket names are
+global (FlashBlade, AWS S3). Recipe defaults to `hive-iceberg-spark-trino`.
 Override anything with flat fields or nested YAML:
 
 ```yaml
@@ -209,7 +217,7 @@ All versions are overridable in the YAML config. See
 - [Configuration](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/configuration.md) -- full YAML reference
 - [Recipes](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/recipes.md) -- catalog + format + engine combinations
 - [Compatibility Matrix](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/compatibility-matrix.md) -- Spark, Iceberg, and Delta version support
-- [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and sustained modes
+- [Running Pipelines](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/running-pipelines.md) -- batch and continuous modes
 - [Benchmarking](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/benchmarking.md) -- scorecard and query benchmark
 - [AML Scoring](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/aml-scoring.md) -- financial-crime / AML workload: rule recall, reference detector, leakage gate
 - [Architecture](https://github.com/PureStorage-OpenConnect/lakebench-k8s/blob/main/docs/architecture.md) -- system design

@@ -252,15 +252,15 @@ mode, and the shipped AML example is batch mode.
   cores and uses 2, even if they did identical work. Use it for
   release-to-release regression detection on the same config; do not
   compare against numbers from a stack sized differently.
-- **`ingest_ratio`** (sustained mode only) divides bronze row count by
+- **`ingest_ratio`** (continuous mode only) divides bronze row count by
   a scale-derived estimate of what datagen would have produced, not a
   measurement of what it did produce. The estimate is a
   Customer 360 constant, so in a sustained AML run the denominator is
   off by roughly the ratio of AML's per-scale-unit row count to
   Customer 360's; treat the number as "did the pipeline keep pace at
   all" rather than as a precise fraction.
-- **`qph_degradation_pct`** (sustained mode only) wants at least four
-  rounds to read as a trend. Typical sustained runs produce five.
+- **`qph_degradation_pct`** (continuous mode only) wants at least four
+  rounds to read as a trend. Typical continuous runs produce five.
   Interpret values from a five-round run as a signal, not a conclusion.
 - **`pattern_span_s`** (per rule, was labelled "time-to-detect") is NOT
   detection latency. It is the span from a planted typology's injection
@@ -442,22 +442,21 @@ frozen, so recomputing it reproduces every earlier decision; the
 Case activity counts are recomputed each cycle from silver.
 
 ```yaml
-architecture:
-  workload:
-    tm_operations:
-      enabled: true
-      seed: 20260924
-      analyst_accuracy: 0.90
-      investigator_accuracy: 0.95
-      qa_sample_rate: 0.05
-      alert_sla_days: 60          # policy SLA, alert to final decision
-      case_lookback_months: 12    # 6-12
-      late_filing_rate: 0.03
-      no_suspect_rate: 0.05
-      max_alerts_per_customer: 50000
-      continuous_interval_seconds: 1800
-      counterparty_scenarios: [W1_connected_components, W3_round_tripping,
-                               W4_risk_propagation, W17_layering_chain]
+workload:
+  tm_operations:
+    enabled: true
+    seed: 20260924
+    analyst_accuracy: 0.90
+    investigator_accuracy: 0.95
+    qa_sample_rate: 0.05
+    alert_sla_days: 60          # policy SLA, alert to final decision
+    case_lookback_months: 12    # 6-12
+    late_filing_rate: 0.03
+    no_suspect_rate: 0.05
+    max_alerts_per_customer: 50000
+    continuous_interval_seconds: 1800
+    counterparty_scenarios: [W1_connected_components, W3_round_tripping,
+                             W4_risk_propagation, W17_layering_chain]
 ```
 
 **Who a scenario alerts on.** The bank monitors its own customers. W2, W5,

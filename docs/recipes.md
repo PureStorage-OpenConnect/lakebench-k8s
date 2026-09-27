@@ -241,13 +241,13 @@ architecture:
     pattern: medallion  # or streaming, batch
 ```
 
-To run in sustained streaming mode:
+To run in continuous mode:
 
 ```bash
-lakebench run test-config.yaml --sustained
+lakebench run test-config.yaml --continuous
 ```
 
-The `--sustained` flag launches bronze-ingest, silver-stream, and gold-refresh as concurrent streaming jobs that run for the configured duration (default 30 minutes, configurable via `architecture.pipeline.sustained.run_duration`).
+The `--continuous` flag launches bronze-ingest, silver-stream, and gold-refresh as concurrent streaming jobs that run for the configured duration (default 30 minutes, configurable via `architecture.pipeline.continuous.run_duration`).
 
 > **Note:** The old field name `processing:` is still accepted with a deprecation warning.
 
@@ -295,11 +295,11 @@ architecture:
         memory: 32Gi
 
   pipeline:
-    mode: sustained                    # streaming instead of batch
+    mode: continuous                    # streaming instead of batch
 
-  workload:
-    datagen:
-      scale: 100                       # 1 TB test
+workload:
+  datagen:
+    scale: 100                       # 1 TB test
 
 observability:
   enabled: true                        # deploy Prometheus + Grafana

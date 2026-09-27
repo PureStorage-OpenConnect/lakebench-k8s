@@ -94,7 +94,9 @@ def config_show(
             (
                 "scale",
                 str(cfg.architecture.workload.datagen.scale),
-                _source(raw, "scale", raw_keys, "architecture.workload.datagen.scale"),
+                _source(raw, "scale", raw_keys, "workload.datagen.scale")
+                if "workload.datagen.scale" in raw_keys
+                else _source(raw, "scale", raw_keys, "architecture.workload.datagen.scale"),
             ),
             (
                 "spark_image",

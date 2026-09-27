@@ -320,7 +320,7 @@ def step_workload(console: Console, state: WizardState) -> bool:
         "    [cyan]1[/cyan]. batch      Single end-to-end run (bronze -> silver -> gold -> benchmark)"
     )
     console.print(
-        "    [cyan]2[/cyan]. sustained   Continuous streaming with periodic benchmark rounds"
+        "    [cyan]2[/cyan]. continuous Concurrent stages over arriving data, with periodic benchmark rounds"
     )
     console.print()
 
@@ -328,7 +328,7 @@ def step_workload(console: Console, state: WizardState) -> bool:
     result = _prompt_int(console, "Pipeline mode", default=current_default, min_val=1, max_val=2)
     if isinstance(result, _BackSentinel):
         return False
-    state.mode = "batch" if result == 1 else "sustained"
+    state.mode = "batch" if result == 1 else "continuous"
 
     # Cycles (batch only)
     if state.mode == "batch":
@@ -420,8 +420,10 @@ def _build_config_yaml(state: WizardState) -> str:
 
     # Pipeline mode and cycles
     mode_line = "mode: batch"
-    if state.mode == "sustained":
-        content = content.replace(mode_line, "mode: sustained", 1)
+    from lakebench.config.schema import is_continuous_mode
+
+    if is_continuous_mode(state.mode):
+        content = content.replace(mode_line, "mode: continuous", 1)
     elif state.cycles > 1:
         content = content.replace(mode_line, f"mode: batch\n    cycles: {state.cycles}", 1)
 

@@ -16,7 +16,7 @@ displays a progress bar showing pod completions and elapsed time.
 
 ## Scale Factor and Data Volume
 
-The `architecture.workload.datagen.scale` field in your config controls how
+The `workload.datagen.scale` field in your config controls how
 much data is generated. One scale unit produces approximately 10 GB of
 on-disk bronze Parquet data.
 
@@ -34,10 +34,9 @@ factor but with different domain entities.
 Set the scale in your config file:
 
 ```yaml
-architecture:
-  workload:
-    datagen:
-      scale: 100    # ~1 TB of bronze data
+workload:
+  datagen:
+    scale: 100    # ~1 TB of bronze data
 ```
 
 ## Command Flags
@@ -172,30 +171,29 @@ existing data in the bronze bucket. If you need fresh data:
 The full set of datagen-related configuration fields:
 
 ```yaml
-architecture:
-  workload:
-    schema: customer360          # Workload schema: customer360, iot, financial
-    datagen:
-      scale: 10                  # Abstract scale factor (1 unit ~ 10 GB)
-      mode: auto                 # auto | batch | continuous
-      parallelism: 4             # Number of parallel Kubernetes pods
-      file_size: 64mb            # Target Parquet file size (per-thread memory scales with it)
-      dirty_data_ratio: 0.08     # Fraction of intentionally dirty records
-      cpu: "2"                   # CPU request per pod
-      memory: 4Gi                # Memory request per pod
-      generators: 0              # Per-pod generator processes (0 = auto)
-      uploaders: 0               # Per-pod uploader threads (0 = auto)
-      # Timestamp range -- affects Iceberg partition count.
-      # Silver partitions by interaction_date (from event_timestamp).
-      # Sustained mode: use a narrow range (days/weeks) to avoid
-      # small-file proliferation across many date partitions.
-      # Batch mode: wider ranges are fine (single compaction pass).
-      # See docs/configuration.md#timestamp-range-impact for details.
-      timestamp_start: null      # Start date for timestamps (ISO format)
-      timestamp_end: null        # End date for timestamps (ISO format)
-      checkpoint:
-        enabled: true
-        path: ".lakebench_checkpoint.json"
+workload:
+  schema: customer360          # Workload schema: customer360 or financial
+  datagen:
+    scale: 10                  # Abstract scale factor (1 unit ~ 10 GB)
+    mode: auto                 # auto | batch | continuous
+    parallelism: 4             # Number of parallel Kubernetes pods
+    file_size: 64mb            # Target Parquet file size (per-thread memory scales with it)
+    dirty_data_ratio: 0.08     # Fraction of intentionally dirty records
+    cpu: "2"                   # CPU request per pod
+    memory: 4Gi                # Memory request per pod
+    generators: 0              # Per-pod generator processes (0 = auto)
+    uploaders: 0               # Per-pod uploader threads (0 = auto)
+    # Timestamp range -- affects Iceberg partition count.
+    # Silver partitions by interaction_date (from event_timestamp).
+    # Continuous mode: use a narrow range (days/weeks) to avoid
+    # small-file proliferation across many date partitions.
+    # Batch mode: wider ranges are fine (single compaction pass).
+    # See docs/configuration.md#timestamp-range-impact for details.
+    timestamp_start: null      # Start date for timestamps (ISO format)
+    timestamp_end: null        # End date for timestamps (ISO format)
+    checkpoint:
+      enabled: true
+      path: ".lakebench_checkpoint.json"
 ```
 
 The `dirty_data_ratio` field controls the fraction of records that contain
@@ -233,15 +231,13 @@ different domain dimensions:
 | Schema | Entity | Events | Description |
 |---|---|---|---|
 | `customer360` | Customers | Interactions (purchase, browse, support) | Default. Multi-channel customer analytics. |
-| `iot` | Sensors | Readings (1/min, 30 days) | IoT telemetry pipeline. |
 | `financial` | Accounts | Transactions (4/month, 12 months) | Financial transaction processing. |
 
 Set the schema in your config:
 
 ```yaml
-architecture:
-  workload:
-    schema: customer360
+workload:
+  schema: customer360
 ```
 
 All schemas produce approximately 10 GB of bronze data per scale unit. The
