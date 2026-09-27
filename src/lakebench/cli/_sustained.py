@@ -1079,6 +1079,62 @@ def _operation_outcomes(plan: list[tuple[str, str]], out: dict, retention: dict)
     return list(ops.values())
 
 
+def applied_retentions(table_format: str, retention_threshold: str, live_streams: bool) -> dict:
+    """The retentions table maintenance runs at, from the configured threshold.
+
+    Iceberg: orphan removal never below 24 h 10 min, on any engine or path
+    (build_maintenance_sql enforces it too); expire at the threshold, floored
+    at 1 h while streams are live. Delta: one VACUUM retention, never below
+    Delta's 7 d default while streams are live. The single source for what
+    runs and for what the run records (continuous.retention).
+    """
+    from lakebench.modules.table_formats.iceberg.maintenance import (
+        LIVE_EXPIRE_MIN_RETENTION_SECONDS,
+        ORPHAN_MIN_RETENTION_SECONDS,
+        _format_duration,
+        _parse_threshold_seconds,
+    )
+
+    if table_format == "delta":
+        from lakebench.deploy.delta_maintenance import parse_retention_to_hours
+
+        expire = retention_threshold
+        if live_streams and parse_retention_to_hours(retention_threshold) < (
+            _DELTA_DEFAULT_RETENTION_HOURS
+        ):
+            expire = "168h"
+        return {"expire": expire, "orphan": expire}
+    configured_s = _parse_threshold_seconds(retention_threshold)
+    expire = retention_threshold
+    if live_streams:
+        expire = _format_duration(max(configured_s, LIVE_EXPIRE_MIN_RETENTION_SECONDS))
+    return {
+        "expire": expire,
+        "orphan": _format_duration(max(configured_s, ORPHAN_MIN_RETENTION_SECONDS)),
+    }
+
+
+def continuous_retention_record(cfg) -> dict:
+    """What the continuous maintenance loop runs at, for the metrics record.
+
+    Every continuous maintenance round runs beside live streams, so the
+    applied expiry is the floored one. ``configured_by`` says whether the
+    config set retention_threshold or the default stood.
+    """
+    sustained = cfg.architecture.pipeline.sustained
+    applied = applied_retentions(
+        cfg.architecture.table_format.type.value, sustained.retention_threshold, live_streams=True
+    )
+    return {
+        "configured": sustained.retention_threshold,
+        "configured_by": (
+            "config" if "retention_threshold" in sustained.model_fields_set else "default"
+        ),
+        "applied_expire": applied["expire"],
+        "applied_orphan": applied["orphan"],
+    }
+
+
 def _run_iceberg_maintenance(
     cfg,
     k8s,
@@ -1136,15 +1192,14 @@ def _run_iceberg_maintenance(
     table_names = _rotated(all_tables, start_at)
 
     # Build SQL based on table format. Delta VACUUM has one retention.
-    orphan_retention = retention_threshold
+    applied = applied_retentions(table_format, retention_threshold, live_streams)
     if table_format == "delta":
         from lakebench.deploy.delta_maintenance import (
             build_delta_maintenance_sql,
             parse_retention_to_hours,
         )
 
-        retention_hours = parse_retention_to_hours(retention_threshold)
-        if live_streams and retention_hours < _DELTA_DEFAULT_RETENTION_HOURS:
+        if applied["expire"] != retention_threshold:
             # Policy: never VACUUM below Delta's default while streams are
             # live; no retention override is sent.
             console.print("  [dim]Delta VACUUM at default 7d retention (live streams)[/dim]")
@@ -1154,32 +1209,17 @@ def _run_iceberg_maintenance(
                 message="Delta VACUUM at default 7d retention (live streams)",
                 details={"requested_retention": retention_threshold},
             )
-            retention_hours = _DELTA_DEFAULT_RETENTION_HOURS
-            retention_threshold = "168h"
-        orphan_retention = retention_threshold
+        retention_threshold = applied["expire"]
+        orphan_retention = applied["orphan"]
+        retention_hours = parse_retention_to_hours(retention_threshold)
 
         def build_sql(tbl):
             return build_delta_maintenance_sql(engine, catalog, tbl, retention_hours)
     else:
         from lakebench.deploy.iceberg import build_maintenance_sql
-        from lakebench.modules.table_formats.iceberg.maintenance import (
-            LIVE_EXPIRE_MIN_RETENTION_SECONDS,
-            ORPHAN_MIN_RETENTION_SECONDS,
-            _format_duration,
-            _parse_threshold_seconds,
-        )
 
-        # Policy: orphan removal never below 24 h + 10 min, on any engine
-        # or path (build_maintenance_sql enforces it too). Expire at the
-        # threshold, floored at 1 h while streams are live.
-        orphan_retention = _format_duration(
-            max(_parse_threshold_seconds(retention_threshold), ORPHAN_MIN_RETENTION_SECONDS)
-        )
-        if live_streams:
-            expire_s = max(
-                _parse_threshold_seconds(retention_threshold), LIVE_EXPIRE_MIN_RETENTION_SECONDS
-            )
-            retention_threshold = _format_duration(expire_s)
+        retention_threshold = applied["expire"]
+        orphan_retention = applied["orphan"]
 
         def build_sql(tbl):
             return build_maintenance_sql(
@@ -3009,6 +3049,13 @@ def _run_sustained(
             },
             "gate_problems": list(window_problems),
             "trickle": trickle,
+            # Applied retention (expiry floored while streams are live), so a
+            # default below the floor is recorded as what ran.
+            "retention": (
+                {"skipped": "--skip-maintenance"}
+                if skip_maintenance
+                else continuous_retention_record(cfg)
+            ),
         }
         if collector.current_run is not None:
             collector.current_run.continuous.update(continuous_record)
