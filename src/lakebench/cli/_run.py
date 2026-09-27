@@ -417,7 +417,7 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
 
 # Upstream failures a benchmark may carry without failing the run, as
 # (table format, query engine, query name). Each must be a documented bug
-# outside lakebench. Delta + Thrift Q2 (CLAUDE.md gotcha 22 / LB-034) left
+# outside lakebench. Delta + Thrift Q2 (LB-034, Delta MIN/MAX on date partitions) left
 # this list with LB-148: the metadata-query rewrite that crashes it is now
 # disabled, so a Q2 failure there is a regression, not an upstream bug.
 _KNOWN_QUERY_FAILURES: set[tuple[str, str, str]] = set()

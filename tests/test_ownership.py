@@ -4,8 +4,8 @@ The invariant these tests defend is:
 
     Destroying deployment A does not affect deployment B running in parallel.
 
-Each test names the concrete failure mode from
-``dev-artifacts/DESIGN-namespace-isolation.md`` review-round F1-F9 that it
+Each test names the concrete failure mode (design-review findings F1-F9;
+the categories are in ``docs/design/namespace-isolation.md``) that it
 guards against, so future edits that regress the fix will trip a named test.
 """
 

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,3 +42,30 @@ def test_contributing_points_only_at_tracked_paths():
     assert "dev-artifacts/" not in text
     assert "CLAUDE.md" not in text
     assert "pytest tests/ -x --timeout" not in text  # pytest-timeout is not a dev dependency
+
+
+# Maintainer material that exists only in the maintainers' checkout (excluded
+# locally, not in this repository). A tracked file that points at it sends an
+# outside reader to a path they do not have.
+_LOCAL_ONLY_EVERYWHERE = ("dev-artifacts/", "CLAUDE.md")
+# Cited from code comments as decision ids; public docs must not rely on it.
+_LOCAL_ONLY_IN_DOCS = ("AML-GOALS",)
+_PUBLIC_DOCS = ("docs", "README.md", "CHANGELOG.md", "CONTRIBUTING.md")
+
+
+def _git_grep(patterns: tuple[str, ...], *pathspec: str) -> list[str]:
+    if not (ROOT / ".git").exists():
+        pytest.skip("not a git checkout")
+    args = ["git", "grep", "-nIF"]
+    for pattern in patterns:
+        args += ["-e", pattern]
+    args += ["--", *pathspec, ":!tests/test_community_files.py", ":!docs/internal/"]
+    result = subprocess.run(args, cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode in (0, 1), result.stderr  # 1 means no match
+    return result.stdout.splitlines()
+
+
+def test_tracked_files_do_not_point_at_local_only_paths():
+    hits = _git_grep(_LOCAL_ONLY_EVERYWHERE, ".")
+    hits += _git_grep(_LOCAL_ONLY_IN_DOCS, *_PUBLIC_DOCS)
+    assert not hits, "tracked files cite local-only maintainer material:\n" + "\n".join(hits)

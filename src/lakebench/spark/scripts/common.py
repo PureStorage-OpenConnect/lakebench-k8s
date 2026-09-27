@@ -744,8 +744,7 @@ def apply_silver_transformations_anchored(df_bronze, anchor_date):
     ``customer_recency_score`` is ``30 - days between the event date and
     anchor_date``: 30 for an event on the newest day of the data, 0 for one
     30 days older, negative beyond. The shared transform measures from
-    ``current_date()``, which made the score a function of the run date
-    (CLAUDE.md gotcha 17). ``anchor_date`` is a ``datetime.date``; when it is
+    ``current_date()``, which made the score a function of the run date. ``anchor_date`` is a ``datetime.date``; when it is
     None (no timestamps at all) the score is NULL rather than run-dated.
     """
     from pyspark.sql.functions import col, datediff, lit

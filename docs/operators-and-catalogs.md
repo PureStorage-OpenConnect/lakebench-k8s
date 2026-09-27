@@ -21,7 +21,7 @@ Pipeline successfully tested with 1GB data:
 |---------|--------|-------|
 | v1.1.27 | Broken | Does NOT inject volumes from `spec.volumes` into pods. Webhook mutation doesn't work. |
 | 2.4.0 | Working with workaround | Webhook mutation works for pod labels, but ConfigMap volumes are not injected through Spark's `spark.kubernetes.*.volumes.*` conf-property path (`KubernetesVolumeUtils` has no `configMap` case). Lakebench routes ConfigMap volumes through `driver.template`/`executor.template` pod templates instead. Requires privileged SCC on OpenShift. |
-| 2.5.1 | Working with workaround | Current default. Verified against the operator's own source: the volume-injection code paths relevant to this gap are unchanged from 2.4.0, so the same pod-template workaround is still required. See CLAUDE.md gotcha 3 for the current, precise mechanism. |
+| 2.5.1 | Working with workaround | Current default. Verified against the operator's own source: the volume-injection code paths relevant to this gap are unchanged from 2.4.0, so the same pod-template workaround is still required. See [component-spark.md](component-spark.md#spark-operator) for the mechanism. |
 
 ### Current Default
 - **Version:** 2.5.1
@@ -46,7 +46,7 @@ oc adm policy add-scc-to-user privileged -z spark-operator-webhook -n spark-oper
 ### Learnings
 - Spark Operator version (2.5.1) is different from Apache Spark runtime version (3.5.4 / 4.0.0 / 4.1.1)
 - `local://` URIs required for `mainApplicationFile` - scripts must be in container filesystem
-- ConfigMap volumes need the pod-template workaround, not the webhook's local-dir conf-property injection -- see CLAUDE.md gotcha 3
+- ConfigMap volumes need the pod-template workaround, not the webhook's local-dir conf-property injection -- see [component-spark.md](component-spark.md#spark-operator)
 
 ---
 
@@ -236,7 +236,7 @@ lakebench validate test-config.yaml --verbose
 
 ### Volume not mounted in Spark pods
 - **Cause:** Old Spark operator (v1.1.x) doesn't inject volumes
-- **Fix:** Upgrade to Spark operator v2.x (2.5.1 is the current default). Note: even on v2.x, ConfigMap volumes specifically still need the pod-template workaround, not raw `.spec.volumes` -- see CLAUDE.md gotcha 3.
+- **Fix:** Upgrade to Spark operator v2.x (2.5.1 is the current default). Note: even on v2.x, ConfigMap volumes specifically still need the pod-template workaround, not raw `.spec.volumes` -- see [component-spark.md](component-spark.md#spark-operator).
 
 ### S3AFileSystem not found in Hive
 - **Cause:** Raw Hive image lacks hadoop-aws JARs

@@ -15,13 +15,15 @@ at `/opt/spark/scripts` in both driver and executor pods.
 ## Spark Operator
 
 Lakebench requires **Kubeflow Spark Operator v2.x** (2.5.1 is the current
-default). The v2.x line's webhook does mutate pod specs, but ConfigMap
-volumes specifically are not injected through Spark's native
-`spark.kubernetes.*.volumes.*` conf-property path -- lakebench routes those
-through `driver.template`/`executor.template` pod templates instead (see
-CLAUDE.md gotcha 3 for the exact mechanism, verified against the operator's
-own source through 2.5.1). PVC and emptyDir mounts use the native conf-property
-path and do not need the workaround. The v1.x line has broken volume
+default). ConfigMap volumes cannot use Spark's native
+`spark.kubernetes.*.volumes.*` conf properties, because Spark's
+`KubernetesVolumeUtils` has no `configMap` volume type, so lakebench defines
+its volumes (the scripts ConfigMap and the work-dir and Ivy-cache emptyDirs)
+in `driver.template`/`executor.template` pod templates; see `_build_manifest()`
+in `modules/pipeline_engines/spark/job.py`. Only the executor scratch PVC uses
+the conf-property path. The operator's webhook injection was checked against
+its source through 2.5.1 and is unchanged from 2.4.0, so the pod-template
+route stays. The v1.x line has broken volume
 injection entirely and is not supported.
 
 Lakebench can auto-install the operator into its own namespace, or skip

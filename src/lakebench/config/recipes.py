@@ -140,7 +140,7 @@ class RecipeNote:
     A recipe name says what the components are; it says nothing about the
     trade-off. Someone comparing architectures needs both, and these are the
     facts that otherwise only surface after a failed run. ``caveats`` entries
-    cite the CLAUDE.md gotcha number where one applies.
+    carry the maintainers' gotcha number where one applies.
     """
 
     when: str

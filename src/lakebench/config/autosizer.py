@@ -297,7 +297,7 @@ def resolve_auto_sizing(
 # LB-148: Spark Thrift default for Delta tables. The Thrift server is Spark
 # local mode in one pod, so its cores are the query parallelism. Iceberg is
 # compacted before the benchmark and passes all 8 c360 queries at 2 cores /
-# 4g; Delta OPTIMIZE is skipped for Thrift (it OOMs, CLAUDE.md gotcha 21), so
+# 4g; Delta OPTIMIZE is skipped for Thrift (it OOMs), so
 # Delta queries scan the uncompacted silver table. At 2 cores / 4g, c360 scale
 # 1 Q3 took 343 s run alone against the 300 s query timeout, and Q4/Q5 also
 # timed out. 8 cores gives about 4x the scan parallelism; 16g keeps the 2g

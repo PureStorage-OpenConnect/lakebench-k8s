@@ -536,8 +536,8 @@ class TestRecordedAtTimezone:
 
 # ---------------------------------------------------------------------------
 # Regressions for adversarial-review findings (2026-09-21).
-# Each test names the finding number it defends. Do not delete without also
-# deleting the finding from dev-artifacts/CONTROL-AML-C360.md's review log.
+# Each test names the finding number it defends. Do not delete one without
+# confirming the defect it names cannot recur.
 # ---------------------------------------------------------------------------
 
 

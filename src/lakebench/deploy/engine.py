@@ -866,7 +866,7 @@ class DeploymentEngine:
         The stamp is the anchor for the "delete A does not affect B"
         invariant: destroy compares it before touching any resource, and
         a foreign stamp is a hard refuse. See
-        dev-artifacts/DESIGN-namespace-isolation.md.
+        docs/design/namespace-isolation.md.
         """
         import time
 
