@@ -16,8 +16,8 @@ that time by more than the tolerance. The second condition matters: at
 so consecutive agreement alone would have accepted the slow plateau.
 
 The bound against the pre-maintenance median widens to the probe query's
-own upward noise (slowest pre sample over the median) when the pre round
-timed it more than once; agreement between consecutive probes stays at the
+own noise (twice the median absolute deviation of the pre samples, so one
+outlier cannot set it) when the pre round timed it three or more times; agreement between consecutive probes stays at the
 configured tolerance: a query whose pre-maintenance samples spread 15%
 cannot be held to 10% (DuckDB Q1 at scale 1, run 20260927-001340-6ab705,
 waited 783 s on probes 2.8-3.1 s against a 2.6 s median). The widening is
@@ -57,18 +57,26 @@ def _median(xs: list[float]) -> float:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-def reference_spread_pct(samples: list[float] | None) -> float | None:
-    """How far the slowest pre-maintenance sample sits above their median, as
-    a percent of the median, or None with fewer than two positive samples.
+# Samples needed before the bound widens: with two, one outlier is half the
+# data and sets the spread on its own.
+MIN_SPREAD_SAMPLES = 3
 
-    One-sided on purpose: the reference check only bounds how much slower a
-    probe may be, so a fast outlier must not widen it.
+
+def reference_spread_pct(samples: list[float] | None) -> float | None:
+    """Robust spread of the pre-maintenance samples: twice their median
+    absolute deviation, as a percent of the median. None with fewer than
+    ``MIN_SPREAD_SAMPLES`` positive samples.
+
+    The median absolute deviation ignores a single outlier on either side:
+    one slow sample (a GC pause, a cold read) or one fast one cannot open
+    the bound; only noise that most samples share can.
     """
     xs = [float(x) for x in samples or [] if x is not None and x > 0]
-    if len(xs) < 2:
+    if len(xs) < MIN_SPREAD_SAMPLES:
         return None
     med = _median(xs)
-    return (max(xs) - med) / med * 100.0
+    mad = _median([abs(x - med) for x in xs])
+    return 2.0 * mad / med * 100.0
 
 
 def effective_tolerance_pct(tolerance_pct: float, samples: list[float] | None) -> float:

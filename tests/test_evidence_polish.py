@@ -64,10 +64,10 @@ def _wait(times, **kw):
 
 
 def test_noisy_probe_settles_on_its_own_noise_not_after_13_minutes():
-    """Pre samples 2.4/2.6/3.0 s (slowest 15% over the 2.6 s median); probes
+    """Pre samples 2.4/2.6/3.0 s (2 x MAD = 15% of the 2.6 s median); probes
     2.8-3.1 s as on run 20260927-001340-6ab705. Held to 10% of the median the
     pair 2.8/2.9 fails (2.9 > 2.86); with the bound widened to the query's
-    upward noise it settles."""
+    noise it settles."""
     probes = [3.1, 2.8, 2.9, 2.8] + [2.9] * 50
     r = _wait(probes, reference_seconds=2.6, reference_samples=[2.4, 2.6, 3.0])
     assert r.settled and r.verified
@@ -78,12 +78,20 @@ def test_noisy_probe_settles_on_its_own_noise_not_after_13_minutes():
     assert d["effective_tolerance_pct"] == round(r.effective_tolerance_pct, 1)
 
 
-def test_a_fast_outlier_does_not_widen_the_bound():
-    """Only upward noise counts: the reference check bounds how much slower
-    a probe may be."""
+def test_one_outlier_does_not_widen_the_bound():
+    """One fast or one slow pre sample must not open the bound. With the
+    slowest sample setting it, [2.5, 2.6, 3.15] opened it to 20% and a store
+    still recovering (3.1 s then 2.95 s against 2.6 s) settled."""
     assert effective_tolerance_pct(10.0, [2.0, 2.6, 2.65]) == 10.0
+    assert effective_tolerance_pct(10.0, [2.5, 2.6, 3.15]) == 10.0
+    r = _wait([3.1, 2.95] * 50, reference_seconds=2.6, reference_samples=[2.5, 2.6, 3.15])
+    assert not r.settled
     r = _wait([2.95] * 100, reference_seconds=2.6, reference_samples=[2.0, 2.6, 2.65])
     assert not r.settled
+
+
+def test_two_samples_do_not_widen_the_bound():
+    assert effective_tolerance_pct(10.0, [2.6, 3.2]) == 10.0
 
 
 def test_pair_agreement_stays_at_the_configured_tolerance():

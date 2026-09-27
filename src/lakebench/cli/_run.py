@@ -685,7 +685,7 @@ def _settle_after_maintenance(
 
     tol = effective_tolerance_pct(sc.tolerance_pct, reference_samples if reference else None)
     tol_note = (
-        f" (widened from {sc.tolerance_pct:g}% to the pre samples' upward spread)"
+        f" (widened from {sc.tolerance_pct:g}% to the pre samples' spread)"
         if tol > sc.tolerance_pct
         else ""
     )
