@@ -233,7 +233,13 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
         "mode": arch.pipeline.mode.value,
         "config_limits": {
             "max_files_per_trigger": sustained.max_files_per_trigger,
-            "benchmark_iterations": arch.benchmark.iterations,
+            # Continuous in-stream rounds take one sample per query whatever
+            # the benchmark block says (collector.CONTINUOUS_ROUND_BENCHMARK).
+            "benchmark_iterations": (
+                1
+                if arch.pipeline.mode.value in ("sustained", "continuous")
+                else arch.benchmark.iterations
+            ),
             "w1_max_vertices": workload.w1_max_vertices if schema == "financial" else None,
             "tm_max_alerts_per_customer": (
                 workload.tm_operations.max_alerts_per_customer if schema == "financial" else None
@@ -396,7 +402,31 @@ def _benchmark_queries(metrics: Any) -> list[dict[str, Any]]:
     return list(getattr(bench, "queries", None) or [])
 
 
+def _continuous_results(metrics: Any) -> dict[str, Any]:
+    """A continuous run's results: the fingerprints of the result check the
+    CLI runs once the whole corpus has passed through the pipeline and the
+    streams have stopped (cli/_sustained.py), when every table is a function
+    of the corpus alone. The in-stream rounds read tables still being
+    written and are never fingerprinted."""
+    check = (getattr(metrics, "continuous", None) or {}).get("result_check") or {}
+    fps = dict(check.get("fingerprints") or {})
+    if fps and not check.get("not_checked"):
+        return {
+            "query_set_id": check.get("query_set_id"),
+            "fingerprints": fps,
+            "basis": "continuous result check after the corpus settled",
+        }
+    return {
+        "query_set_id": check.get("query_set_id"),
+        "fingerprints": {},
+        "not_checked": "continuous: "
+        + str(check.get("not_checked") or "no end-of-run result check was recorded"),
+    }
+
+
 def _results(metrics: Any, mode: str) -> dict[str, Any]:
+    if mode in ("sustained", "continuous"):
+        return _continuous_results(metrics)
     bench = metrics.benchmark
     if bench is None and metrics.pipeline_benchmark is not None:
         bench = metrics.pipeline_benchmark.query_benchmark
@@ -407,18 +437,10 @@ def _results(metrics: Any, mode: str) -> dict[str, Any]:
         name = q.get("name") or q.get("query_name")
         if name:
             fps[str(name)] = q.get("result_fingerprint")
-    out: dict[str, Any] = {
+    return {
         "query_set_id": getattr(bench, "query_set_id", None),
         "fingerprints": fps,
     }
-    if mode in ("sustained", "continuous"):
-        # Unchecked by design, not by accident: see unchecked_by_design.
-        out["by_design"] = True
-        out["not_checked"] = (
-            "continuous: in-stream benchmark rounds read tables still being written, "
-            "so their results are not expected to match another run's"
-        )
-    return out
 
 
 def _datagen(metrics: Any, inputs: Mapping[str, Any]) -> dict[str, Any]:
@@ -708,15 +730,6 @@ def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
     return list(((exp or {}).get("corpus") or {}).get("problems") or [])
 
 
-def unchecked_by_design(exp: Mapping[str, Any] | None) -> bool:
-    """True for a continuous run, whose in-stream rounds read tables still
-    being written, so no result equivalence can be recorded at all. The perf
-    gate and reproduce, which compare a run with a reference of the same
-    pinned config, still gate these (with the caveat recorded); compare
-    reports the pair as comparability not established."""
-    return bool(((exp or {}).get("results") or {}).get("by_design"))
-
-
 def results_established(exp: Mapping[str, Any] | None) -> bool | str:
     """True when the run recorded benchmark results that can be checked for
     equivalence, else the reason they cannot (DESIGN 6.5: comparable means
@@ -817,7 +830,7 @@ def refusals(
 
     Provenance refusals mean the runs are different experiments. Result
     refusals mean the same experiment returned different query results.
-    Notes are caveats that do not refuse (continuous results unchecked).
+    Notes are caveats that do not refuse (results that were not checked).
     Execution conditions are not refusals: see ``like_for_like``.
     """
     ea, eb = experiment_of(record_a), experiment_of(record_b)
@@ -897,8 +910,6 @@ def stored_identity_refusals(
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
     established = results_established(actual)
     if established is not True:
-        if unchecked_by_design(actual):
-            return reasons
         # Nothing shows the run returned the reference's results.
         reasons.append(f"comparability not established (run: {established})")
         return reasons

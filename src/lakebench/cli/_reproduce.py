@@ -386,10 +386,10 @@ def _build_package(
             "experiment block, so a reproduce could not check it ran the same experiment)."
         )
     from lakebench.benchmark.fingerprint import usable
-    from lakebench.metrics.experiment import results_established, unchecked_by_design
+    from lakebench.metrics.experiment import results_established
 
     established = results_established(experiment)
-    if established is not True and not unchecked_by_design(experiment):
+    if established is not True:
         raise ReproduceError(
             f"The source run cannot be packaged: comparability not established ({established}); "
             "a reproduce could never show it returned the same results."
@@ -398,7 +398,7 @@ def _build_package(
     unfp = sorted(
         n for n, f in result_fingerprints(experiment).items() if n not in failed and not usable(f)
     )
-    if unfp and not unchecked_by_design(experiment):
+    if unfp:
         raise ReproduceError(
             "The source run cannot be packaged: queries without a usable result fingerprint "
             f"({', '.join(unfp)}) could never be shown equal to a reproduce run."

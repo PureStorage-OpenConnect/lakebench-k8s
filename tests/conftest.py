@@ -193,9 +193,8 @@ def stub_experiment(
             for n in query_names
         },
     }
-    if mode != "batch":
-        results["not_checked"] = "continuous"
-        results["by_design"] = True
+    # A continuous run carries the fingerprints of its end-of-run result
+    # check (metrics/experiment.py _continuous_results), like a batch run.
     return {
         "schema": EXPERIMENT_SCHEMA,
         "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},

@@ -56,7 +56,6 @@ from lakebench.metrics.experiment import (
     result_fingerprints,
     results_established,
     stored_identity_refusals,
-    unchecked_by_design,
 )
 from lakebench.metrics.maintenance_policy import not_current, policy_mismatch, recorded_policy
 
@@ -1183,8 +1182,6 @@ def record_baseline(
     exp = experiment_of(run.raw)
     assert exp is not None  # run_refusals refused a run without one
     established = results_established(exp)
-    if unchecked_by_design(exp):
-        established = True  # continuous: gated without a result check (experiment.py)
     problems = corpus_problems(exp)
     if established is not True or problems:
         raise PerfGateError(
@@ -1206,7 +1203,7 @@ def record_baseline(
     unfp = sorted(
         n for n, f in result_fingerprints(exp).items() if n not in failed and not usable(f)
     )
-    if unfp and not unchecked_by_design(exp):
+    if unfp:
         raise PerfGateError(
             f"run {run.run_id} cannot be a baseline for {name}: queries without a usable "
             f"result fingerprint ({', '.join(unfp)}) could never be shown equal to a later run"
