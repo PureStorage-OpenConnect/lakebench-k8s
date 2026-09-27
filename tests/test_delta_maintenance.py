@@ -188,15 +188,18 @@ class TestBuildDeltaCompactionSql:
 class TestBuildDeltaTableHealthSql:
     """Tests for Delta table health probe SQL per engine."""
 
-    def test_trino_properties(self):
+    def test_trino_has_no_count_query(self):
+        """Trino's Delta connector exposes no file count; the old
+        $properties query could never parse as one."""
+        from lakebench.deploy.delta_maintenance import DELTA_HEALTH_UNAVAILABLE
+
         result = build_delta_table_health_sql(
             engine="trino",
             catalog="lakehouse",
             table="lakehouse.silver.enriched",
         )
-        assert isinstance(result, dict)
-        assert "table_properties" in result
-        assert "$properties" in result["table_properties"]
+        assert result == {}
+        assert "trino" in DELTA_HEALTH_UNAVAILABLE
 
     def test_spark_thrift_describe_detail(self):
         result = build_delta_table_health_sql(
@@ -204,9 +207,7 @@ class TestBuildDeltaTableHealthSql:
             catalog="lakehouse",
             table="lakehouse.silver.enriched",
         )
-        assert isinstance(result, dict)
-        assert "table_detail" in result
-        assert "DESCRIBE DETAIL" in result["table_detail"]
+        assert result == {"data_file_count": "DESCRIBE DETAIL lakehouse.silver.enriched"}
 
     def test_duckdb_returns_empty(self):
         result = build_delta_table_health_sql(

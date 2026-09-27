@@ -138,6 +138,16 @@ def build_delta_compaction_sql(
     return []
 
 
+#: Engines that cannot report a Delta table's data file count, and why. The
+#: health probe says so instead of recording nothing silently.
+DELTA_HEALTH_UNAVAILABLE = {
+    "trino": (
+        "Trino's Delta connector has no metadata table with a data file count "
+        "($properties holds table properties, not counts)"
+    ),
+}
+
+
 def build_delta_table_health_sql(
     engine: str,
     catalog: str,
@@ -145,29 +155,45 @@ def build_delta_table_health_sql(
 ) -> dict[str, str]:
     """Build SQL queries to probe Delta table health metrics.
 
-    Returns a dict mapping metric name to SQL string.
+    Returns a dict mapping metric name to SQL string, with the metric names
+    the Iceberg probe uses (``data_file_count``).
 
-    - Trino exposes a ``$properties`` system table for Delta tables.
-    - Spark provides ``DESCRIBE DETAIL`` which returns table metadata
-      including ``numFiles``, ``sizeInBytes``, and ``properties``.
+    - Spark: ``DESCRIBE DETAIL`` returns one row whose ``numFiles`` column
+      is the data file count; parse it with :func:`parse_describe_detail`.
+    - Trino: nothing (see ``DELTA_HEALTH_UNAVAILABLE``). The earlier
+      ``SELECT * FROM "t$properties"`` returned property rows, which the
+      count parser could never read, so every Delta + Trino probe logged
+      "no count in output".
     """
-    if engine == "trino":
-        # Trino Delta connector: $properties system table.
-        # Input: "catalog.schema.table" -> 'catalog.schema."table$properties"'
-        parts = table.rsplit(".", 1)
-        if len(parts) == 2:
-            prefix, tbl = parts
-            props_ref = f'{prefix}."{tbl}$properties"'
-        else:
-            props_ref = f'"{table}$properties"'
-        return {
-            "table_properties": f"SELECT * FROM {props_ref}",
-        }
     if engine == "spark-thrift":
         return {
-            "table_detail": f"DESCRIBE DETAIL {table}",
+            "data_file_count": f"DESCRIBE DETAIL {table}",
         }
     return {}
+
+
+def parse_describe_detail(stdout: str, column: str = "numFiles") -> int | None:
+    """The integer *column* of beeline's ``DESCRIBE DETAIL`` table output,
+    or None when the output has no such column or value.
+
+    Beeline prints a header row of column names and one data row, both
+    ``|``-separated, between ``+---+`` rules.
+    """
+    header: list[str] | None = None
+    for line in stdout.splitlines():
+        text = line.strip()
+        if not text.startswith("|"):
+            continue
+        cells = [c.strip() for c in text.strip("|").split("|")]
+        if header is None:
+            if column in cells:
+                header = cells
+            continue
+        if len(cells) != len(header):
+            continue
+        value = cells[header.index(column)]
+        return int(value) if value.isdigit() else None
+    return None
 
 
 def build_delta_drop_table_sql(catalog: str, table: str) -> str:
