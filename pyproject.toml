@@ -155,6 +155,7 @@ module = [
     "scipy.*",
     "pyarrow",
     "pyarrow.*",
+    "threadpoolctl",
 ]
 ignore_missing_imports = true
 

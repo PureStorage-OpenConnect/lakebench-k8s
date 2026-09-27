@@ -213,6 +213,17 @@ def _prereg_dict():
     p["definitional_subset"] = []
     p["level2"] = {**p["level2"], "n": 1, "k_in_band": 1}
     p["power"] = {**p["power"], "bootstrap_iterations": 200, "min_positives": 40}
+    # The 3.6.0 D5 leakage sets must name real features (the D5 lane's
+    # fixture convention): noise_b stands in for the nuisance features, and
+    # each feature is its own ablation group.
+    p["leakage"] = {
+        **p["leakage"],
+        "nuisance_features": ["noise_b"],
+        "ablation": {
+            **p["leakage"]["ablation"],
+            "feature_groups": {"g_planted": ["planted"], "g_a": ["noise_a"], "g_b": ["noise_b"]},
+        },
+    }
     return p
 
 
