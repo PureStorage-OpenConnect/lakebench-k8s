@@ -12,7 +12,7 @@ for the full YAML schema.
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` | Pipeline processing (bronze, silver, gold stages) |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or a Spark 3.5 image (a Java 11 tag such as `3.5.4-python3` gets Iceberg 1.10.1; a java17 tag gets 1.11.0) | Pipeline processing (bronze, silver, gold stages) |
 | Spark Operator | 2.5.1 | Kubeflow Helm chart | Submits SparkApplication CRDs to Kubernetes |
 
 Spark runs all data pipeline jobs. The Spark Operator manages job lifecycle
@@ -114,8 +114,8 @@ configuration and metric details.
 
 | Requirement | Minimum | Tested On |
 |-------------|---------|-----------|
-| Kubernetes | 1.26+ | OpenShift 4.x, vanilla K8s (kubeadm, EKS, GKE, AKS) |
-| S3 storage | Any S3-compatible | Pure Storage FlashBlade, MinIO, AWS S3 |
+| Kubernetes | 1.26+ | OpenShift 4.x |
+| S3 storage | Any S3-compatible that passes `lakebench config storage` | Pure Storage FlashBlade; Garage (local mode). AWS S3 and MinIO are not yet validated; see [Storage Backends](storage-backends.md). |
 
 See [S3 Storage Reference](component-s3.md) for endpoint configuration,
 path-style vs virtual-hosted addressing, and bucket layout.

@@ -39,9 +39,12 @@ Support is judged per workload x recipe x mode, not per recipe:
 - **unsupported**: refused before a run, at config load (or by `run` when
   `--continuous` selects a mode the workload does not declare).
 
-Every run's `metrics.json` records the state in `experiment.support`, and
-`lakebench config show`, `lakebench config recipes`, the HTML report and
-`lakebench compare` show it. The table below is generated from the code.
+The state is computed when the run starts and recorded in `metrics.json` as
+`experiment.support`; rendering the record later does not re-stamp it. A run
+from a lakebench checkout with local changes is never stamped supported.
+`--local` runs Customer 360 in batch mode only and refuses anything else;
+local runs are at most unverified. `lakebench config show`,
+`lakebench config recipes`, the HTML report and `lakebench compare` show it. The table below is generated from the code.
 
 <!-- BEGIN GENERATED: support-states -->
 <!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
@@ -85,12 +88,12 @@ All of these are refused at config load.
 |-----------|----------------|--------------|-------|
 | Apache Spark | 3.5.4, 4.0.2, 4.1.1 | 4.0.2 or 4.1.1 | Delta requires Spark 4.x |
 | Spark Operator | 2.5.1 | 2.5.1 | Kubeflow Spark Operator |
-| Apache Iceberg | 1.11.0 (auto) | -- | Auto-selected based on Spark version. 1.11.0 requires Java 17 -- see below. |
+| Apache Iceberg | 1.11.0 (auto) | -- | Auto-selected based on Spark version. 1.11.0 requires Java 17, so a Java 11 Spark 3.5 image (such as `3.5.4-python3`) gets 1.10.1 with a warning -- see below. |
 | Delta Lake | -- | 4.0.0 or 4.1.0 (auto) | Auto-selected based on Spark version |
 | Hive Metastore | 3.1.3 | 3.1.3 | Stackable 25.7.0 |
 | Apache Polaris | 1.6.0 | -- | Iceberg-only |
 | Trino | 483 | 483 | Iceberg or Delta connector |
-| DuckDB | 1.5.0 | -- | Delta not supported (see above) |
+| DuckDB | 1.5.5 | -- | Delta not supported (see above) |
 | PostgreSQL | 16, 17, 18 | 16, 17, 18 | Metadata backend |
 
 ## Spark + Table Format Version Matrix

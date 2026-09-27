@@ -1,11 +1,11 @@
 # Recipe: polaris-iceberg-spark-thrift, AML workload at scale 1
 #
-# Small AML config for developer sanity on a single host. Local mode is
-# chosen on the command line, not in this file:
+# Small AML config for a scale-1 developer sanity run on a small cluster.
+# Local mode (--local) runs Customer 360 batch only, so it refuses this file:
 #
 #   lakebench config validate examples/polaris-iceberg-spark-financial-local.yaml --local
 #
-# reports whether local mode can run it. Earlier versions of this file carried
+# says so. Earlier versions of this file carried
 # platform.local, platform.garage and architecture.workloads.excluded blocks;
 # no code read them, and lakebench now rejects unknown keys. No detection rule
 # is excluded by config: the graph rules (W1-W4) run like the rest.
