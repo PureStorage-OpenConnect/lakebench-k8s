@@ -175,6 +175,14 @@ architecture:
   Thrift server and Spark jobs (LB-148), so these queries run, at the cost of scanning
   instead of answering MIN/MAX/COUNT from the Delta log. A Q2 failure on Delta + Thrift
   is now treated as a regression, not a known failure.
+- **Silver file layout**: before v1.6 the Delta silver build wrote one file per
+  day per write task (tens of thousands of small files at scale 1, where Iceberg
+  silver has one per day), and Spark Thrift then opened them one at a time: Q3
+  and Q6 exceeded the 300 s query timeout at scale 1. The silver build now
+  clusters rows by `interaction_date` before the write (a `REBALANCE` hint,
+  the Delta counterpart of Iceberg's `write.distribution-mode=hash`), and the
+  driver log reports the file count of the commit. Set
+  `spark.lb.silver.distribution_mode=none` to restore the old layout.
 
 ### Delta + Trino and Delta + Spark Thrift
 
@@ -194,8 +202,12 @@ architecture:
   VACUUM keeps Delta's 7-day default retention so a lagging stream never reads
   a vacuumed file. A continuous run shorter than 7 days therefore removes
   nothing.
-- **Delta + Spark Thrift runs no maintenance**: VACUUM is skipped because it
-  runs Spark Thrift out of memory at 4 GiB.
+- **Delta + Spark Thrift runs no maintenance**: neither VACUUM nor OPTIMIZE
+  runs on this recipe, before the benchmark or in the continuous loop, and the
+  run records both as not supported. VACUUM is skipped because it ran Spark
+  Thrift out of memory at 4 GiB. lakebench builds the Spark form
+  (`SET spark.databricks.delta.retentionDurationCheck.enabled=false; VACUUM
+  <table> RETAIN <n> HOURS` in one beeline submission) but does not execute it.
 
 ### Delta + Hive
 

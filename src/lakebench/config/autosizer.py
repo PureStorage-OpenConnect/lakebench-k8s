@@ -303,6 +303,10 @@ def resolve_auto_sizing(
 # timed out. 8 cores gives about 4x the scan parallelism; 16g keeps the 2g
 # per core that passes on Iceberg. The cost is 6 more cores held by an
 # always-on pod, which _co_resident_cpu_m subtracts from the pipeline budget.
+# Most of that gap was layout, not cores: Delta silver was written as one file
+# per day per task (about 984 Thrift scan tasks at scale 1; Iceberg has 367 files).
+# silver_build_delta now clusters by day; this default stays until a live
+# 2-core run on the clustered layout shows it can go.
 DELTA_THRIFT_CORES = 8
 DELTA_THRIFT_MEMORY_GI = 16
 # Headroom kept below the largest node for kubelet and co-scheduled pods,

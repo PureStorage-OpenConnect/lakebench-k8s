@@ -6,7 +6,7 @@ Iceberg's DataFrameWriterV2.
 
 Automatically selects the optimal processing strategy based on data size:
 - SIMPLE: < 100GB, standard processing
-- STREAMING: >= 100GB, direct write, no shuffle (column transforms only)
+- STREAMING: >= 100GB, single pass, rows clustered by day before the write
 - SALTED: High skew (>100x) on small datasets, salt hot keys
 """
 
@@ -21,7 +21,9 @@ from enum import Enum
 from common import (
     apply_silver_transformations_anchored,
     c360_bronze_path,
+    cluster_by_partition,
     env,
+    files_added_by_last_commit,
     log,
     path_size_gb,
     resolve_data_clock,
@@ -47,7 +49,7 @@ class SilverStrategy(Enum):
     """Transform strategy for silver layer, selected based on data profile."""
 
     SIMPLE = "simple"
-    STREAMING = "streaming"  # Was BROADCAST - no shuffle, direct write
+    STREAMING = "streaming"  # Was BROADCAST - single pass, no intermediate counts
     SALTED = "salted"
 
 
@@ -181,8 +183,8 @@ def select_silver_strategy(profile: DataProfile) -> SilverStrategy:
     picked for any small dataset with skew over 100x, which the Zipf
     customer distribution always has.
     """
-    # STREAMING for all datasets >= 100 GB -- single pass, no shuffle.
-    # Column transforms are row-independent; Delta handles file layout.
+    # STREAMING for all datasets >= 100 GB -- single pass, one shuffle to
+    # cluster rows by day before the write (cluster_silver).
     if profile.total_size_gb >= 100:
         return SilverStrategy.STREAMING
 
@@ -276,6 +278,25 @@ def rows_added_by_last_commit(spark, silver_tbl):
     return spark.table(silver_tbl).count()
 
 
+def cluster_silver(spark, silver_df):
+    """Cluster silver rows by interaction_date before the Delta write.
+
+    Without it every write task put a file into almost every day's partition
+    (tasks x days files). spark.lb.silver.distribution_mode=none skips it,
+    matching the Iceberg silver override.
+    """
+    dist_mode = spark.conf.get("spark.lb.silver.distribution_mode", "hash")
+    log(f"Silver write distribution: {dist_mode} (clustered by interaction_date unless none)")
+    return cluster_by_partition(spark, silver_df, ["interaction_date"], dist_mode)
+
+
+def log_silver_files(spark, silver_tbl):
+    """Log how many data files this build's commit wrote."""
+    n = files_added_by_last_commit(spark, silver_tbl)
+    if n is not None:
+        log(f"Silver data files written by this commit: {n:,}")
+
+
 def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
@@ -288,6 +309,7 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False):
 
     silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
     silver_count = silver_df.count()
+    silver_df = cluster_silver(spark, silver_df)
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
@@ -309,20 +331,21 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False):
             options=opts,
         )
 
+    log_silver_files(spark, silver_tbl)
     return silver_count
 
 
 def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=False):
-    """STREAMING strategy: Direct write, no shuffle, single pass. For >= 100GB.
+    """STREAMING strategy: single pass, no intermediate counts. For >= 100GB.
 
-    Key insight: Column transformations don't require data redistribution.
-    - No repartition() - avoid shuffle that caused OOM at 1TB+
-    - No intermediate count() - avoid extra data passes
-    - overwriteSchema=true: Delta equivalent of distribution-mode=none
-      (no extra sort/shuffle imposed by the writer)
-    - Let AQE handle partition coalescing, Delta handle file sizing
+    - No repartition(N) and no intermediate count(): one pass over bronze
+    - One shuffle, REBALANCE by interaction_date (cluster_silver), the
+      Delta counterpart of Iceberg silver's distribution-mode=hash: without
+      it each task writes a file into every day it holds (tasks x days
+      files). spark.lb.silver.distribution_mode=none restores the direct
+      write.
     """
-    log("Executing STREAMING strategy (no shuffle, single pass)...")
+    log("Executing STREAMING strategy (single pass)...")
     log(
         f"Input size: {profile.total_size_gb:.1f} GB (estimated {profile.transaction_count:,} rows)"
     )
@@ -334,6 +357,7 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
 
     # Apply transformations - all column operations, no joins
     silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
+    silver_df = cluster_silver(spark, silver_df)
 
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
@@ -357,6 +381,7 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
 
     silver_count = rows_added_by_last_commit(spark, silver_tbl)
     log(f"Wrote {silver_count:,} records")
+    log_silver_files(spark, silver_tbl)
 
     return silver_count
 

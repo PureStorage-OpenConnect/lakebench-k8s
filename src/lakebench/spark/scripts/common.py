@@ -1448,6 +1448,53 @@ def refuse_orphan_delta_log(spark, fq_table):
         )
 
 
+_CLUSTER_VIEW_SEQ = [0]
+_PLAIN_COLUMN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def cluster_by_partition(spark, df, partition_cols, mode="hash"):
+    """Group rows by their partition values before a partitioned file write.
+
+    A partitioned write without this writes one file per partition value per
+    task. c360 silver has one partition per day (366 at the default range),
+    so every input task wrote a file into almost every day: tens of
+    thousands of sub-megabyte files at scale 1, which a Spark Thrift server
+    then plans and opens one at a time. Iceberg silver avoids this with
+    write.distribution-mode=hash; this is the Delta equivalent.
+
+    REBALANCE (Spark 3.2+) hash-partitions by the columns and lets AQE split
+    a partition larger than the advisory size and merge small ones, so a
+    large day still spreads over several tasks at high scale instead of
+    landing on one. ``mode`` uses the Iceberg distribution-mode vocabulary:
+    "none" returns ``df`` unchanged (spark.lb.silver.distribution_mode=none,
+    the same escape hatch as for Iceberg); anything else clusters.
+    """
+    if not partition_cols or str(mode).strip().lower() == "none":
+        return df
+    for c in partition_cols:
+        if not _PLAIN_COLUMN.fullmatch(str(c)):
+            raise ValueError(f"cluster_by_partition: not a plain column name: {c!r}")
+    _CLUSTER_VIEW_SEQ[0] += 1
+    view = f"lb_cluster_by_partition_{_CLUSTER_VIEW_SEQ[0]}"
+    df.createOrReplaceTempView(view)
+    cols = ", ".join(partition_cols)
+    return spark.sql(f"SELECT /*+ REBALANCE({cols}) */ * FROM {view}")
+
+
+def files_added_by_last_commit(spark, fq_table):
+    """Data files the table's latest Delta commit wrote, or None if unknown.
+
+    Commit metadata only (DESCRIBE HISTORY operationMetrics.numFiles).
+    """
+    try:
+        r = spark.sql(f"DESCRIBE HISTORY {fq_table} LIMIT 1").collect()
+        n = (r[0]["operationMetrics"] or {}).get("numFiles") if r else None
+        return int(n) if n is not None else None
+    except Exception as e:  # noqa: BLE001 -- feeds a log line only; never fails the write
+        log(f"Warning: commit file count unavailable ({one_line(e)})")
+        return None
+
+
 def write_delta_table(
     spark, df, fq_table, bucket_uri, mode="append", partition_cols=None, options=None
 ):

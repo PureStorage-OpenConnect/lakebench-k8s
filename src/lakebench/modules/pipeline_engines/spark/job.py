@@ -1365,6 +1365,23 @@ class JobState(Enum):
 #: operator's own transitional state on the way to ``COMPLETED``.
 SUCCESS_STATES = frozenset({JobState.SUCCEEDING, JobState.COMPLETED})
 
+#: (connect, read) seconds for one SparkApplication status read.
+STATUS_REQUEST_TIMEOUT = (10, 30)
+#: Status reads tried per get_job_status call before a transient error is raised.
+STATUS_READ_ATTEMPTS = 3
+
+
+def is_transient_status_error(exc: BaseException) -> bool:
+    """A status read failure worth retrying: timeout, reset, 429, 5xx or status 0."""
+    from kubernetes.client.rest import ApiException
+    from urllib3.exceptions import HTTPError as Urllib3HTTPError
+
+    if isinstance(exc, ApiException):
+        # status 0: the client wrapped a transport error (e.g. a bare SSLError)
+        return exc.status in (0, None, 429) or (exc.status or 0) >= 500
+    return isinstance(exc, (Urllib3HTTPError, ConnectionError, TimeoutError))
+
+
 #: States meaning the job will not produce a result.
 FAILURE_STATES = frozenset({JobState.FAILING, JobState.FAILED, JobState.SUBMISSION_FAILED})
 
@@ -1560,13 +1577,28 @@ class SparkJobManager:
         custom_api = k8s_client.CustomObjectsApi()
 
         try:
-            obj = custom_api.get_namespaced_custom_object(
-                group="sparkoperator.k8s.io",
-                version="v1beta2",
-                namespace=self.namespace,
-                plural="sparkapplications",
-                name=job_name,
-            )
+            # Bounded: without a timeout a half-dead connection blocks the
+            # stage monitor for as long as the socket stays open.
+            # Retried here so every caller (continuous start-up and end-of-
+            # window checks included) rides out one slow read.
+            for attempt in range(STATUS_READ_ATTEMPTS):
+                try:
+                    obj = custom_api.get_namespaced_custom_object(
+                        group="sparkoperator.k8s.io",
+                        version="v1beta2",
+                        namespace=self.namespace,
+                        plural="sparkapplications",
+                        name=job_name,
+                        _request_timeout=STATUS_REQUEST_TIMEOUT,
+                    )
+                    break
+                except Exception as e:
+                    if attempt + 1 >= STATUS_READ_ATTEMPTS or not is_transient_status_error(e):
+                        raise
+                    logger.warning(
+                        "status read for %s failed (%s), retrying", job_name, type(e).__name__
+                    )
+                    time.sleep(2)
 
             status = obj.get("status", {})
             app_state = status.get("applicationState", {})
