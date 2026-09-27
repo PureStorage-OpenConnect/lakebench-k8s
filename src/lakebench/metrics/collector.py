@@ -35,6 +35,14 @@ class JobMetrics:
     # before v1.6, poll-timed.
     timing_source: str = ""
     timing_resolution_seconds: float | None = None
+    # SUBMISSION_FAILED reports the monitor saw before the job ended, each
+    # {"at", "attempt", "reason", "lost_seconds"} (reason from
+    # continuous_window.classify_submission_failure, the continuous shape plus
+    # lost_seconds). elapsed_seconds includes submission_retry_seconds, their
+    # sum: a stage slowed by operator retries (e.g. a controller eviction) is
+    # not a slower stage.
+    submission_failures: list[dict[str, Any]] = field(default_factory=list)
+    submission_retry_seconds: float = 0.0
 
     # Data metrics
     input_size_gb: float = 0.0
@@ -594,6 +602,9 @@ class StageMetrics:
     # Batch Spark stages: see JobMetrics.timing_source.
     timing_source: str = ""
     timing_resolution_seconds: float | None = None
+    # Batch Spark stages: see JobMetrics.submission_failures.
+    submission_failures: list[dict[str, Any]] = field(default_factory=list)
+    submission_retry_seconds: float = 0.0
 
     # Data volume
     input_size_gb: float = 0.0
@@ -1787,6 +1798,8 @@ def build_pipeline_benchmark(
             elapsed_seconds=job.elapsed_seconds,
             timing_source=job.timing_source,
             timing_resolution_seconds=job.timing_resolution_seconds,
+            submission_failures=list(job.submission_failures),
+            submission_retry_seconds=job.submission_retry_seconds,
             success=job.success,
             error_message=job.error_message,
             input_size_gb=input_gb,

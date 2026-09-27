@@ -8,9 +8,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from lakebench.modules.pipeline_engines.spark.job import (
     FAILURE_STATES,
@@ -62,6 +62,16 @@ class JobResult:
     # Seconds into the wait of the last poll whose status was not terminal
     # (None: none seen). The application ended after about this point.
     last_running_elapsed: float | None = None
+    # Each SUBMISSION_FAILED the operator reported before the job ended:
+    # {"at", "attempt", "reason", "lost_seconds"}. lost_seconds runs from the
+    # first poll that saw the failure to the first that saw another state,
+    # so it is good to one poll interval; the stage's elapsed includes it.
+    submission_failures: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def submission_retry_seconds(self) -> float:
+        """Seconds the stage spent waiting on operator submission retries."""
+        return round(sum(f.get("lost_seconds") or 0.0 for f in self.submission_failures), 1)
 
 
 # Stage timing sources, best first (JobMetrics.timing_source).
@@ -192,6 +202,7 @@ class SparkJobMonitor:
         timeout_seconds: int = 3600,
         poll_interval: int = 10,
         progress_callback: Callable[[JobStatus], None] | None = None,
+        on_submission_failure: Callable[[dict[str, Any]], None] | None = None,
     ) -> JobResult:
         """Wait for a Spark job to complete.
 
@@ -200,6 +211,10 @@ class SparkJobMonitor:
             timeout_seconds: Maximum wait time
             poll_interval: Seconds between status checks
             progress_callback: Optional callback for progress updates
+            on_submission_failure: Called once per SUBMISSION_FAILED the
+                operator reports (a new attempt or message), with the
+                failure record, while the operator retries it. Every
+                failure is also logged and returned in the JobResult.
 
         Returns:
             JobResult with final status
@@ -212,6 +227,20 @@ class SparkJobMonitor:
         state_since = start
         stall_warned: JobState | None = None
         failed_reads = 0
+        sub_failures: list[dict[str, Any]] = []
+        sub_open: tuple[dict[str, Any], float] | None = None  # (record, first seen)
+        sub_key: tuple | None = None
+
+        def _close_open_failure() -> None:
+            nonlocal sub_open
+            if sub_open is not None:
+                record, seen = sub_open
+                record["lost_seconds"] = round(time.time() - seen, 1)
+                sub_open = None
+
+        def _result(**kwargs: Any) -> JobResult:
+            _close_open_failure()
+            return JobResult(submission_failures=sub_failures, **kwargs)
 
         while True:
             elapsed = time.time() - start
@@ -222,7 +251,7 @@ class SparkJobMonitor:
                 # which is a very different problem from a job that is
                 # genuinely still working.
                 stuck_in = last_state.value if last_state else "no state observed"
-                return JobResult(
+                return _result(
                     job_name=job_name,
                     success=False,
                     message=(
@@ -292,7 +321,7 @@ class SparkJobMonitor:
             # Waiting for the settled state alone risks reporting a finished
             # job as a timeout.
             if status.state in SUCCESS_STATES:
-                return JobResult(
+                return _result(
                     job_name=job_name,
                     success=True,
                     message="Job completed successfully",
@@ -303,15 +332,46 @@ class SparkJobMonitor:
                 )
 
             if status.state == JobState.SUBMISSION_FAILED:
+                key = (status.submission_attempts, status.message)
+                if key != sub_key:
+                    # A new failure: the operator retried and failed again,
+                    # or failed for the first time.
+                    sub_key = key
+                    _close_open_failure()
+                    from lakebench.metrics.continuous_window import (
+                        classify_submission_failure,
+                    )
+
+                    record: dict[str, Any] = {
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "attempt": status.submission_attempts or len(sub_failures) + 1,
+                        "reason": classify_submission_failure(status.message),
+                        "lost_seconds": None,
+                    }
+                    sub_failures.append(record)
+                    sub_open = (record, time.time())
+                    logger.warning(
+                        "%s submission attempt %s failed: %s; the Spark Operator retries it",
+                        job_name,
+                        record["attempt"],
+                        record["reason"],
+                    )
+                    if on_submission_failure is not None:
+                        try:
+                            on_submission_failure(dict(record))
+                        except Exception as e:  # noqa: BLE001 -- reporting must not end the wait
+                            logger.debug("submission-failure callback failed: %s", e)
                 sub_failed_since = sub_failed_since or time.time()
                 if time.time() - sub_failed_since < _SUBMISSION_FAILED_GRACE_S:
                     time.sleep(poll_interval)
                     continue
             else:
                 sub_failed_since = None
+                sub_key = None
+                _close_open_failure()
 
             if status.state in FAILURE_STATES:
-                return JobResult(
+                return _result(
                     job_name=job_name,
                     success=False,
                     message=f"Job failed: {status.message}",

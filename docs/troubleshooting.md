@@ -154,6 +154,43 @@ any namespace another deployment added in the meantime.
 
 ---
 
+## Stages slow at random, SUBMISSION_FAILED, Spark Operator controller evicted
+
+**Symptom:** A stage that usually takes about a minute takes two or more, and
+`lakebench run` prints `submission attempt N failed` before the stage ends.
+The stage line reads `completed in 150.0s (includes 60s waiting on 1 failed
+operator submission)`, and metrics.json records each failure under the stage's
+`submission_failures` with `submission_retry_seconds` as the total. The SparkApplication's status shows `SUBMISSION_FAILED`
+with a Maven message such as `Downloaded file size (0) doesn't match expected
+Content Length`, or `driver pod already exist`. It affects every deployment on
+the cluster, not only yours.
+
+**Cause:** The Spark Operator runs spark-submit inside its controller pod, and
+spark-submit resolves `spark.jars.packages` into `spark.jars.ivy`
+(`/tmp/.ivy2`). The controller's root filesystem is read-only, so `/tmp` is
+the chart's `tmp` emptyDir, which chart 2.5.1 caps at `sizeLimit: 1Gi`. One
+Spark line's Iceberg or Delta runtime, hadoop-aws and AWS SDK bundle come to
+about 1.2 GB. The kubelet evicts the controller (`Usage of EmptyDir volume
+"tmp" exceeds the limit "1Gi"`); the next leader starts with an empty cache
+and retries any submission the old one had in flight about 60 s later.
+
+**Diagnosis:** `lakebench admin doctor` (or `lakebench admin status`) reports
+the controller's `/tmp` sizeLimit and any storage evictions still on record
+(evicted pods and events last about an hour).
+
+**Fix (cluster admin):** `lakebench admin repair-operator --dry-run`, then
+`lakebench admin repair-operator`. It raises the controller's `/tmp` to 8Gi
+under the `lakebench-cluster-lock` lease with `--reuse-values`, keeps the
+watch list and the installed chart version, and rolls the controller once.
+`lakebench admin install-spark-operator` sets the same size on install or
+upgrade (`--controller-tmp-size` to choose another). The size is stored in the
+release's values, so later watch-list edits carry it forward.
+
+Baking the jars into the Spark image, so `spark.jars.packages` is empty at
+submit, removes the controller download entirely and is the durable fix.
+
+---
+
 ## OpenShift SCC permission denied
 
 **Symptom:** Spark pods fail with `CreateContainerError` or permission denied
