@@ -7,8 +7,8 @@ for the run's workload schema is looked up via
 :func:`get_scorecard_block`, which the report generator calls once per
 render.
 
-Only ``domain_label`` is consumed today, per the ENG-2C.5 rescope in
-docs/internal/lakebench.next-spec-addendum.md A.4. The ``render_detail_html``
+Only ``domain_label`` is consumed today (the ENG-2C.5 rescope found the
+generator already domain-neutral apart from one header). The ``render_detail_html``
 hook exists so Financial can slot in Investigator-panel rows and
 Customer 360 can move its existing panels off the hardcoded generator
 path without another interface change.
