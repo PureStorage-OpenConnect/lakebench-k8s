@@ -25,6 +25,7 @@ from common import (
     env,
     log,
     path_size_gb,
+    pipeline_table,
     reset_stream_tables,
     set_utc_session,
 )
@@ -163,17 +164,15 @@ def verify_bronze(df):
 def continuous_reset_targets():
     """(tables, owned bucket URIs, raw landing zone) for the continuous reset.
 
-    Tables are named in the catalog each writer uses: bronze-ingest writes
-    through CATALOG_NAME, silver-stream and gold-refresh through
-    LB_ICEBERG_CATALOG.
+    Tables are named in the catalog every continuous writer uses
+    (common.pipeline_catalog): the recipe's catalog for Iceberg,
+    spark_catalog for Delta + Hive.
     """
     bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-    writer_catalog = env("CATALOG_NAME", "lakehouse")
-    catalog = env("LB_ICEBERG_CATALOG", "lakehouse")
     tables = [
-        f"{writer_catalog}.{env('LB_BRONZE_TABLE', 'default.bronze_raw')}",
-        f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}",
-        f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard')}",
+        pipeline_table("LB_BRONZE_TABLE", "default.bronze_raw"),
+        pipeline_table("LB_SILVER_TABLE", "silver.customer_interactions_enriched"),
+        pipeline_table("LB_GOLD_TABLE", "gold.customer_executive_dashboard"),
     ]
     owned = [
         bronze_uri,

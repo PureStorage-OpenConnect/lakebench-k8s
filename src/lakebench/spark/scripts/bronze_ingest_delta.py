@@ -21,7 +21,7 @@ bronze_raw: the new query would re-read the whole landing zone into it.
 Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
     BRONZE_BUCKET        - bucket name (for checkpoint path)
-    CATALOG_NAME         - catalog name (e.g., "lakehouse")
+    LB_ICEBERG_CATALOG   - Spark catalog: spark_catalog for Delta + Hive
     CHECKPOINT_LOCATION  - s3a://bronze-bucket/checkpoints/bronze-ingest/
     TRIGGER_INTERVAL     - e.g., "30 seconds"
 """
@@ -31,11 +31,13 @@ from __future__ import annotations
 import time
 
 from common import (
+    _s3_table_path,
     await_stream,
     delta_idempotent_options,
     delta_table_version,
     env,
     log,
+    pipeline_table,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
     set_utc_session,
@@ -48,8 +50,29 @@ _LANDING_WAIT_INTERVAL = 15  # seconds between checks
 _LANDING_WAIT_MAX = 1800  # 30 minutes
 
 
-def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket):
+def bronze_target():
+    """(catalog table name, S3 location) of the Delta bronze table.
+
+    Named in common.pipeline_catalog(), the catalog silver-stream reads it
+    from and the continuous reset drops it in (spark_catalog for Delta +
+    Hive; CATALOG_NAME, the Trino catalog, names no Spark catalog there).
+    The location is explicit, like the Iceberg bronze table's: ``default``
+    already exists in the Hive Metastore with the metastore's own local
+    warehouse (file:/stackable/warehouse), so a managed table there would be
+    written to pod-local disk. This path is the one the CLI's reset guard
+    lists (warehouse/default.db/bronze_raw in the bronze bucket).
+    """
+    bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
+    bronze_table_path = env("LB_BRONZE_TABLE", "default.bronze_raw")
+    table_name = pipeline_table("LB_BRONZE_TABLE", "default.bronze_raw")
+    return table_name, _s3_table_path(bronze_uri, bronze_table_path)
+
+
+def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket, location=None):
     """Append one micro-batch to the bronze Delta table exactly once.
+
+    ``location``: where the table is created when it does not exist yet
+    (bronze_target); None keeps the catalog's managed location.
 
     Returns the rows this call committed: 0 for an empty batch or a replay
     Delta skipped.
@@ -82,6 +105,7 @@ def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket):
                 "delta.logRetentionDuration": "interval 30 days",
                 **txn,
             },
+            location=location,
         )
     # Logged after the commit so a skipped replay is never counted as rows.
     log(f"Batch {batch_id}: writing {count:,} rows to {table_name}")
@@ -92,14 +116,12 @@ def write_bronze_batch(batch_df, batch_id, table_name, bronze_bucket):
 
 def main() -> None:
     bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-    catalog_name = env("CATALOG_NAME", "lakehouse")
     checkpoint_location = env("CHECKPOINT_LOCATION")
     trigger_interval = env("TRIGGER_INTERVAL", "30 seconds")
     max_files_per_trigger = env("MAX_FILES_PER_TRIGGER", "50")
 
     landing_zone = bronze_uri + "customer/interactions/"
-    bronze_table_path = env("LB_BRONZE_TABLE", "default.bronze_raw")
-    table_name = f"{catalog_name}.{bronze_table_path}"
+    table_name, table_location = bronze_target()
 
     spark = SparkSession.builder.appName("lb-bronze-ingest-delta").getOrCreate()
     set_utc_session(spark)
@@ -108,7 +130,7 @@ def main() -> None:
     log("Bronze Ingest - Delta Lake (Structured Streaming)")
     log("=" * 60)
     log(f"Landing zone: {landing_zone}")
-    log(f"Target table: {table_name}")
+    log(f"Target table: {table_name} at {table_location}")
     log(f"Checkpoint:   {checkpoint_location}")
     log(f"Trigger:      {trigger_interval}")
 
@@ -141,7 +163,7 @@ def main() -> None:
     )
     query = (
         stream.writeStream.foreachBatch(
-            lambda df, bid: write_bronze_batch(df, bid, table_name, bronze_uri)
+            lambda df, bid: write_bronze_batch(df, bid, table_name, bronze_uri, table_location)
         )
         .option("checkpointLocation", checkpoint_location)
         .trigger(processingTime=trigger_interval)
