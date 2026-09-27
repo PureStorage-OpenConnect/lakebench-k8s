@@ -320,9 +320,17 @@ def destroy(
                 _dg_step_start[component] = time.time()
         elif status == DeploymentStatus.SKIPPED:
             _dg_step_start.pop(component, None)
-            if component == "namespace":
-                # The namespace was kept or is still terminating: never silent.
+            if component in ("namespace", "table-cleanup"):
+                # The namespace was kept or is still terminating, or tables
+                # were left registered (LB-186): never silent.
                 console.print(f"    [yellow]![/yellow] {message}")
+                _journal_safe(
+                    j.record,
+                    EventType.DESTROY_COMPONENT,
+                    message=message,
+                    success=True,
+                    details={"component": component, "status": "skipped"},
+                )
         elif status == DeploymentStatus.SUCCESS:
             elapsed = time.time() - _dg_step_start.pop(component, time.time())
             console.print(f"    [green]+[/green] {message:<56} [dim]{elapsed:>6.1f}s[/dim]")
@@ -365,13 +373,36 @@ def destroy(
     console.print()
     passed = sum(1 for r in results if r.status == DeploymentStatus.SUCCESS)
     failed = sum(1 for r in results if r.status == DeploymentStatus.FAILED)
+    # LB-186: tables destroy left registered because their data is in buckets
+    # it does not own (or bucket cleanup was off). Never hidden by the panel.
+    left_registered = [
+        entry
+        for r in results
+        if r.component == "table-cleanup"
+        for entry in (r.details or {}).get("tables_left_registered", [])
+    ]
+    for entry in left_registered:
+        console.print(
+            f"  [yellow]![/yellow] table left registered: {entry['table']} ({entry['reason']})"
+        )
+    left_note = (
+        f"\n[yellow]{len(left_registered)} table(s) left registered[/yellow] (their data "
+        "is in buckets this deployment does not own, or bucket cleanup was off)"
+        if left_registered
+        else ""
+    )
 
     _journal_safe(
         j.record,
         EventType.DESTROY_COMPLETE,
-        message=f"{passed} destroyed, {failed} failed",
+        message=f"{passed} destroyed, {failed} failed"
+        + (f", {len(left_registered)} tables left registered" if left_registered else ""),
         success=failed == 0,
-        details={"components_destroyed": passed, "components_failed": failed},
+        details={
+            "components_destroyed": passed,
+            "components_failed": failed,
+            "tables_left_registered": left_registered,
+        },
     )
     _journal_safe(j.end_command, success=failed == 0)
     _journal_safe(j.close_session)
@@ -383,6 +414,7 @@ def destroy(
         console.print(
             Panel(
                 f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
+                f"{left_note}"
                 f"\n\n[yellow]Namespace {namespace} is still terminating.[/yellow] "
                 f"Wait until `kubectl get ns {namespace}` returns NotFound "
                 "before re-deploying under the same name.",
@@ -395,15 +427,20 @@ def destroy(
         console.print(
             Panel(
                 f"[green]{passed} components removed in {destroy_elapsed}s[/green]"
+                f"{left_note}"
                 f"\n\nTo re-deploy: [bold]lakebench deploy[/bold]",
-                title="Destroy Complete",
+                title=(
+                    f"Destroy Complete; {len(left_registered)} tables left registered"
+                    if left_registered
+                    else "Destroy Complete"
+                ),
                 expand=False,
             )
         )
     else:
         console.print(
             Panel(
-                f"[red]{failed} failed[/red], {passed} succeeded\n\n"
+                f"[red]{failed} failed[/red], {passed} succeeded{left_note}\n\n"
                 f"Some resources may need manual cleanup",
                 title="Destroy Incomplete",
                 expand=False,

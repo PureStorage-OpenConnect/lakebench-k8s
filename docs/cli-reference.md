@@ -417,11 +417,24 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |
 
 Removes everything in this order: ownership check, Spark jobs, orphaned
-pods, datagen jobs, DROP TABLEs, S3 bucket contents (then the buckets
-themselves, see below), observability, the query engine, the catalog,
-PostgreSQL, RBAC and secrets, and the namespace. Destroy runs no table
-maintenance: no Iceberg `expire_snapshots` or `remove_orphan_files` and no
-Delta `VACUUM` before the drops. The scratch StorageClass is shared
+pods, datagen jobs, table removal from the catalog, S3 bucket contents
+(then the buckets themselves, see below), observability, the query engine,
+the catalog, PostgreSQL, RBAC and secrets, and the namespace. Destroy runs no
+table maintenance: no Iceberg `expire_snapshots` or `remove_orphan_files` and
+no Delta `VACUUM` before the drops.
+
+Table removal never deletes files. On Trino it runs
+`CALL <catalog>.system.unregister_table(...)`, because Trino's `DROP TABLE`
+deletes every file an Iceberg table references (including datagen files
+registered with `add_files`) and a managed Delta table's directory. On Spark
+Thrift an Iceberg `DROP TABLE` (no `PURGE`) removes only the catalog entry. A
+Spark Thrift `DROP TABLE` of a Delta table deletes its directory, so it runs
+only when destroy is emptying every bucket of the deployment; otherwise the
+tables are left registered and reported. Files are removed only by the bucket
+step, from buckets destroy proves it owns. A later run refuses to create a
+Delta table over a `_delta_log` that is not in the catalog (for example after
+`--keep-buckets` with the namespace deleted): delete that table directory, or
+use other buckets. The scratch StorageClass is shared
 cluster-scoped infrastructure and is never deleted.
 
 S3 buckets are emptied, then deleted only if lakebench created them: deploy

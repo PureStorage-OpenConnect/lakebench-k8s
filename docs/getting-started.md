@@ -425,8 +425,8 @@ lakebench destroy lakebench.yaml
 You will be prompted to confirm. Add `--force` to skip the confirmation prompt.
 
 The destroy sequence runs in this order: kill running Spark jobs, clean up
-datagen pods, drop tables (no snapshot expiry, orphan removal, or VACUUM runs
-first), empty the S3 buckets and delete the ones lakebench created, tear down
+datagen pods, remove the tables from the catalog without deleting files (no
+snapshot expiry, orphan removal, or VACUUM runs first), empty the S3 buckets and delete the ones lakebench created, tear down
 infrastructure in reverse deploy order, and finally delete the namespace and
 wait for it to be gone. If a bucket lakebench created cannot be deleted, the
 namespace is kept so a re-run can finish. Buckets that existed before deploy
