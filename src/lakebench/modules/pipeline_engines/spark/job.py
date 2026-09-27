@@ -1389,6 +1389,8 @@ class JobStatus:
     start_time: str | None = None
     completion_time: str | None = None
     executor_count: int = 0
+    # Operator submission attempts (status.submissionAttempts); 0 when unknown.
+    submission_attempts: int = 0
 
 
 class SparkJobManager:
@@ -1598,6 +1600,7 @@ class SparkJobManager:
                 executor_count=len(status.get("executorState", {}))
                 if status.get("executorState")
                 else 0,
+                submission_attempts=int(status.get("submissionAttempts") or 0),
             )
 
         except ApiException as e:
