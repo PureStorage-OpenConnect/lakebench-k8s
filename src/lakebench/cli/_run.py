@@ -685,13 +685,14 @@ def _settle_after_maintenance(
 
     tol = effective_tolerance_pct(sc.tolerance_pct, reference_samples if reference else None)
     tol_note = (
-        f" (widened from {sc.tolerance_pct:g}% to the pre samples' spread)"
+        f" (widened from {sc.tolerance_pct:g}% to the pre samples' upward spread)"
         if tol > sc.tolerance_pct
         else ""
     )
     print_info(
         f"Waiting for storage to settle: probe {query.name} every {sc.interval_seconds}s, "
-        f"within {tol:.3g}%{tol_note}{ref_note}, cap {sc.max_seconds}s"
+        f"within {sc.tolerance_pct:g}% of each other and {tol:.3g}%{tol_note}{ref_note}, "
+        f"cap {sc.max_seconds}s"
     )
 
     def _probe(remaining: float) -> float:

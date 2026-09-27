@@ -64,24 +64,47 @@ def _wait(times, **kw):
 
 
 def test_noisy_probe_settles_on_its_own_noise_not_after_13_minutes():
-    """Pre samples 2.4-2.8 s (15% spread, median 2.6 s); probes 2.8-3.1 s as
-    on run 20260927-001340-6ab705. Held to 10% the pair 2.8/2.9 fails (2.9 >
-    2.86); with the tolerance widened to the query's spread it settles."""
+    """Pre samples 2.4/2.6/3.0 s (slowest 15% over the 2.6 s median); probes
+    2.8-3.1 s as on run 20260927-001340-6ab705. Held to 10% of the median the
+    pair 2.8/2.9 fails (2.9 > 2.86); with the bound widened to the query's
+    upward noise it settles."""
     probes = [3.1, 2.8, 2.9, 2.8] + [2.9] * 50
-    r = _wait(probes, reference_seconds=2.6, reference_samples=[2.4, 2.6, 2.8])
+    r = _wait(probes, reference_seconds=2.6, reference_samples=[2.4, 2.6, 3.0])
     assert r.settled and r.verified
-    assert len(r.probes) <= 3
+    assert len(r.probes) == 3
     assert r.effective_tolerance_pct > 10.0
     d = r.to_dict()
-    assert d["reference_samples"] == [2.4, 2.6, 2.8]
+    assert d["reference_samples"] == [2.4, 2.6, 3.0]
     assert d["effective_tolerance_pct"] == round(r.effective_tolerance_pct, 1)
+
+
+def test_a_fast_outlier_does_not_widen_the_bound():
+    """Only upward noise counts: the reference check bounds how much slower
+    a probe may be."""
+    assert effective_tolerance_pct(10.0, [2.0, 2.6, 2.65]) == 10.0
+    r = _wait([2.95] * 100, reference_seconds=2.6, reference_samples=[2.0, 2.6, 2.65])
+    assert not r.settled
+
+
+def test_pair_agreement_stays_at_the_configured_tolerance():
+    """2.9 s then 2.6 s differ 11.5%: both are inside the widened 15% bound
+    against the median, but they are not a stable pair at the configured
+    10%."""
+    r = _wait(
+        [2.9, 2.6] * 50,
+        reference_seconds=2.6,
+        reference_samples=[2.4, 2.6, 3.0],
+        max_seconds=600,
+    )
+    assert r.effective_tolerance_pct > 11.5
+    assert not r.settled
 
 
 def test_widened_tolerance_is_capped_so_a_slow_plateau_still_fails():
     """A reference with 100% spread must not accept the 33%-slow LB-150
     plateau: the widening stops at MAX_NOISE_TOLERANCE_PCT."""
     assert MAX_NOISE_TOLERANCE_PCT < 27.0
-    assert effective_tolerance_pct(10.0, [5.0, 10.0, 15.0]) == MAX_NOISE_TOLERANCE_PCT
+    assert effective_tolerance_pct(10.0, [5.0, 10.0, 15.0]) == MAX_NOISE_TOLERANCE_PCT  # 50% upward
     r = _wait([13.3] * 100, reference_seconds=10.0, reference_samples=[5.0, 10.0, 15.0])
     assert r.capped and not r.settled
 

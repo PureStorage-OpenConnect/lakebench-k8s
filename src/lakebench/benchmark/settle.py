@@ -15,8 +15,10 @@ that time by more than the tolerance. The second condition matters: at
 +2 and +15 minutes the probes above agreed within 4% while still 33% slow,
 so consecutive agreement alone would have accepted the slow plateau.
 
-The tolerance widens to the probe query's own noise when the pre round
-timed it more than once: a query whose pre-maintenance samples spread 15%
+The bound against the pre-maintenance median widens to the probe query's
+own upward noise (slowest pre sample over the median) when the pre round
+timed it more than once; agreement between consecutive probes stays at the
+configured tolerance: a query whose pre-maintenance samples spread 15%
 cannot be held to 10% (DuckDB Q1 at scale 1, run 20260927-001340-6ab705,
 waited 783 s on probes 2.8-3.1 s against a 2.6 s median). The widening is
 capped at ``MAX_NOISE_TOLERANCE_PCT``, under the 27-34% slowdown of the one
@@ -56,12 +58,17 @@ def _median(xs: list[float]) -> float:
 
 
 def reference_spread_pct(samples: list[float] | None) -> float | None:
-    """Range of the pre-maintenance samples as a percent of their median, or
-    None with fewer than two positive samples."""
+    """How far the slowest pre-maintenance sample sits above their median, as
+    a percent of the median, or None with fewer than two positive samples.
+
+    One-sided on purpose: the reference check only bounds how much slower a
+    probe may be, so a fast outlier must not widen it.
+    """
     xs = [float(x) for x in samples or [] if x is not None and x > 0]
     if len(xs) < 2:
         return None
-    return (max(xs) - min(xs)) / _median(xs) * 100.0
+    med = _median(xs)
+    return (max(xs) - med) / med * 100.0
 
 
 def effective_tolerance_pct(tolerance_pct: float, samples: list[float] | None) -> float:
@@ -250,8 +257,10 @@ def wait_for_settle(
         recent = probes[-need:]
         window = [q.seconds for q in recent if q.seconds is not None]
         if len(recent) == need and len(window) == need:
-            stable = all(_within(window[0], t, tol) for t in window[1:]) and all(
-                _within(a, b, tol) for a, b in zip(window, window[1:], strict=False)
+            # Pair agreement stays at the configured tolerance; only the
+            # bound against the pre-maintenance median widens.
+            stable = all(_within(window[0], t, tolerance_pct) for t in window[1:]) and all(
+                _within(a, b, tolerance_pct) for a, b in zip(window, window[1:], strict=False)
             )
             if stable and all(_near_reference(t) for t in window):
                 return _result(True, False, "")
