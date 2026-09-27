@@ -13,6 +13,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from lakebench.modules.pipeline_engines.spark.operator_scratch import (
+    DEFAULT_CONTROLLER_TMP_SIZE,
+    TmpVolume,
+    tmp_volume,
+)
+from lakebench.modules.pipeline_engines.spark.operator_scratch import (
+    helm_set_args as controller_tmp_helm_set_args,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -86,6 +95,7 @@ class SparkOperatorManager:
     HELM_CHART_NAME = "spark-operator/spark-operator"
     HELM_RELEASE_NAME = "spark-operator"
     DEFAULT_NAMESPACE = "spark-operator"
+    CONTROLLER_DEPLOYMENT = "spark-operator-controller"
 
     # ``spark.jobNamespaces`` is shared cluster state, so concurrent deploys
     # contend for it.  Helm rejects an upgrade while another is in flight;
@@ -142,19 +152,27 @@ class SparkOperatorManager:
     # every comma must be backslash-escaped.
     _JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT = r"0.5\,1\,2\,4\,8\,16\,32\,64\,128\,256"
 
-    def _reuse_values_backfill(self) -> list[str]:
-        """``--set`` args to append whenever an upgrade also pins a version.
+    def _reuse_values_backfill(
+        self, version: str | None, tmp_size: str = DEFAULT_CONTROLLER_TMP_SIZE
+    ) -> list[str]:
+        """``--set`` args for an admin ``--reuse-values`` upgrade of the release.
 
-        Only needed when ``target_version`` is set -- an unpinned upgrade
-        tracks whatever chart is already installed, so there is no version
-        jump for ``--reuse-values`` to be caught out by.
+        The latency buckets are only needed when the upgrade pins a version
+        (a jump from a pre-2.5.0 release). The controller /tmp size is set
+        every time: a release installed before lakebench sized it has no
+        ``controller.volumes`` in its stored values, so ``--reuse-values``
+        would keep the chart's 1Gi (see operator_scratch). The watch-list
+        edits do not call this; their ``--reuse-values`` carries the size
+        forward once an admin install or repair has stored it.
         """
-        if not self.target_version:
-            return []
-        return [
-            "--set",
-            f"prometheus.metrics.jobSubmitLatencyBuckets={self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
-        ]
+        args: list[str] = []
+        if version:
+            args += [
+                "--set",
+                "prometheus.metrics.jobSubmitLatencyBuckets="
+                f"{self._JOB_SUBMIT_LATENCY_BUCKETS_DEFAULT}",
+            ]
+        return args + controller_tmp_helm_set_args(tmp_size)
 
     def _watch_list_pin(self) -> list[str]:
         """``--version``/backfill args for a watch-list-only ``helm upgrade``.
@@ -1379,12 +1397,141 @@ class SparkOperatorManager:
             else:
                 logger.info("Patched %s for OpenShift compatibility", deploy)
 
+    def _release_exists(self) -> bool | None:
+        """Whether this manager's Helm release exists; None when unreadable."""
+        try:
+            result = self._run(
+                ["helm", "status", self.HELM_RELEASE_NAME, "-n", self.namespace],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return None
+        if result.returncode == 0:
+            return True
+        if re.search(r"release:? not found", (result.stderr or "").lower()):
+            return False
+        return None
+
+    def _controller_deployment(self) -> dict[str, Any]:
+        """The controller Deployment as JSON; raises _DeploymentReadError."""
+        import json
+
+        try:
+            result = self._run(
+                [
+                    "kubectl",
+                    "get",
+                    "deployment",
+                    self.CONTROLLER_DEPLOYMENT,
+                    "-n",
+                    self.namespace,
+                    "-o",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError as e:
+            raise _DeploymentReadError(f"kubectl not found: {e}") from e
+        if result.returncode != 0:
+            raise _DeploymentReadError((result.stderr or "").strip() or "kubectl get failed")
+        try:
+            return dict(json.loads(result.stdout))
+        except ValueError as e:
+            raise _DeploymentReadError(f"unparseable deployment JSON: {e}") from e
+
+    def controller_tmp_volume(self) -> TmpVolume:
+        """The controller's /tmp volume; raises _DeploymentReadError."""
+        return tmp_volume(self._controller_deployment())
+
+    def _wait_for_rollout(self, timeout_s: int = 180) -> bool:
+        """Wait for both operator Deployments to finish rolling out."""
+        for deploy in (self.CONTROLLER_DEPLOYMENT, "spark-operator-webhook"):
+            result = self._run(
+                [
+                    "kubectl",
+                    "rollout",
+                    "status",
+                    f"deployment/{deploy}",
+                    "-n",
+                    self.namespace,
+                    f"--timeout={timeout_s}s",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                logger.error("Rollout of %s did not complete: %s", deploy, result.stderr)
+                return False
+        return True
+
+    def _verify_tmp_size(self, tmp_size: str) -> bool:
+        """True when the controller spec carries a /tmp at least *tmp_size*."""
+        from lakebench.modules.pipeline_engines.spark.operator_scratch import parse_quantity
+
+        try:
+            vol = self.controller_tmp_volume()
+        except _DeploymentReadError as e:
+            logger.error("Cannot read the controller /tmp volume after the upgrade: %s", e)
+            return False
+        want = parse_quantity(tmp_size) or 0
+        if vol.found and vol.is_empty_dir and vol.size_limit is None:
+            return True  # unbounded emptyDir
+        got = vol.limit_bytes
+        if not vol.found or got is None or got < want:
+            logger.error(
+                "Controller /tmp volume is %s after the upgrade, wanted sizeLimit %s",
+                vol.size_limit if vol.found else "missing",
+                tmp_size,
+            )
+            return False
+        logger.info("Controller /tmp emptyDir sizeLimit is %s", vol.size_limit)
+        return True
+
+    def apply_controller_tmp_size(self, tmp_size: str = DEFAULT_CONTROLLER_TMP_SIZE) -> bool:
+        """Resize the controller's /tmp emptyDir on the installed release.
+
+        The caller must hold the ``lakebench-cluster-lock`` lease (admin
+        repair-operator does). ``--reuse-values`` keeps the watch list and
+        every other stored value, and the installed chart version is pinned
+        so the resize never upgrades the operator. Rolls the controller.
+        """
+        pin = self._get_helm_version() or self.target_version
+        cmd = [
+            "helm",
+            "upgrade",
+            self.HELM_RELEASE_NAME,
+            self.HELM_CHART_NAME,
+            "-n",
+            self.namespace,
+            "--reuse-values",
+        ]
+        if pin:
+            cmd += ["--version", pin]
+        cmd += self._reuse_values_backfill(pin, tmp_size)
+        try:
+            result = self._run(cmd, capture_output=True, text=True)
+        except FileNotFoundError:
+            logger.error("helm not found on PATH -- cannot resize the controller /tmp")
+            return False
+        if result.returncode != 0:
+            logger.error("helm upgrade failed resizing the controller /tmp: %s", result.stderr)
+            return False
+        if self._is_openshift():
+            self._assign_openshift_scc()
+            self._patch_openshift_deployments()
+        if not self._wait_for_rollout():
+            return False
+        return self._verify_tmp_size(tmp_size)
+
     def install(
         self,
         version: str | None = None,
         values: dict[str, Any] | None = None,
+        tmp_size: str = DEFAULT_CONTROLLER_TMP_SIZE,
     ) -> bool:
-        """Install Spark Operator via Helm.
+        """Install or upgrade the Spark Operator via Helm.
 
         On OpenShift, automatically:
         - Uses webhook port 9443 (non-root can't bind 443)
@@ -1393,14 +1540,34 @@ class SparkOperatorManager:
           (the Helm chart hardcodes these and they can't be overridden
           via values due to deep merge behavior)
 
+        An existing release is upgraded with ``--reuse-values`` and the
+        backfill, never re-installed from defaults: a plain ``upgrade
+        --install`` resets ``spark.jobNamespaces`` to the chart's
+        ``["default"]`` and unwatches every tenant. With no version given it
+        stays on the installed chart. The controller's /tmp emptyDir is
+        sized to *tmp_size* on both paths (operator_scratch).
+
         Args:
-            version: Specific chart version (default: latest)
+            version: Chart version (default: the manager's target version,
+                then the installed chart, then the repo's latest)
             values: Custom Helm values
+            tmp_size: Controller /tmp emptyDir sizeLimit
 
         Returns:
             True if installation succeeded
         """
         logger.info(f"Installing Spark Operator to namespace {self.namespace}")
+        version = version or self.target_version
+
+        exists = self._release_exists()
+        if exists is None:
+            logger.error(
+                "Cannot tell whether Helm release %s exists in %s; refusing to install "
+                "over it (a fresh install would reset the watch list)",
+                self.HELM_RELEASE_NAME,
+                self.namespace,
+            )
+            return False
 
         is_openshift = self._is_openshift()
         if is_openshift:
@@ -1440,12 +1607,21 @@ class SparkOperatorManager:
                 f"webhook.port={webhook_port}",
             ]
 
-            # Tell the operator which namespace(s) to watch for SparkApplications
-            if self.job_namespace:
-                cmd.extend(["--set", f"spark.jobNamespaces={{{self.job_namespace}}}"])
-
-            if version:
-                cmd.extend(["--version", version])
+            if exists:
+                # Keep the stored values (the watch list above all) and the
+                # installed chart unless a version was asked for.
+                pin = version or self._get_helm_version()
+                cmd.append("--reuse-values")
+                if pin:
+                    cmd.extend(["--version", pin])
+                cmd.extend(self._reuse_values_backfill(pin, tmp_size))
+            else:
+                # Tell the operator which namespace(s) to watch
+                if self.job_namespace:
+                    cmd.extend(["--set", f"spark.jobNamespaces={{{self.job_namespace}}}"])
+                if version:
+                    cmd.extend(["--version", version])
+                cmd.extend(controller_tmp_helm_set_args(tmp_size))
 
             # Add custom values
             if values:
@@ -1465,8 +1641,13 @@ class SparkOperatorManager:
                 self._assign_openshift_scc()
                 self._patch_openshift_deployments()
 
-            # Wait for operator to be ready
-            return self._wait_for_ready(timeout=120)
+            # readyReplicas alone can still count the old pod during an
+            # upgrade; wait for the new ReplicaSets.
+            if exists and not self._wait_for_rollout():
+                return False
+            if not self._wait_for_ready(timeout=120):
+                return False
+            return self._verify_tmp_size(tmp_size)
 
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error(f"Failed to install Spark Operator: {e}")

@@ -2068,7 +2068,16 @@ class SparkJobManager:
                 }
             )
 
-        # Ivy cache must be writable
+        # Ivy cache must be writable. Two processes resolve spark.jars.packages
+        # into this path: the driver (the spark-ivy-cache emptyDir below) and,
+        # first, spark-submit inside the Spark Operator controller, whose /tmp
+        # is the chart's 1Gi emptyDir. This job's jars (~1.2 GB) overflow that
+        # and the kubelet evicts the shared controller; `lakebench admin
+        # install-spark-operator` / `repair-operator` size it to 8Gi
+        # (operator_scratch.py). Moving the path would not help: the
+        # controller's root filesystem is read-only, so /tmp is its only
+        # writable volume. The durable fix is jars baked into the Spark image
+        # so spark.jars.packages is empty at submit.
         spark_conf["spark.jars.ivy"] = "/tmp/.ivy2"
         spark_conf["spark.files.useFetchCache"] = "false"
 

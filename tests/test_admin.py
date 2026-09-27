@@ -17,6 +17,7 @@ from lakebench.cli._admin import (
     admin_app,
 )
 from lakebench.deploy.cluster_lock import ClusterLockHeld
+from lakebench.modules.pipeline_engines.spark.operator_scratch import TmpVolume
 
 runner = CliRunner()
 
@@ -211,6 +212,7 @@ class TestStatus:
         with (
             patch("lakebench.cli._admin._get_core_v1", return_value=core),
             patch("lakebench.deploy.cluster_lock.read_cluster_lock", return_value=None),
+            patch("lakebench.cli._admin._read_operator_scratch", side_effect=RuntimeError("n/a")),
         ):
             r = runner.invoke(admin_app, ["status"])
         assert r.exit_code == 0
@@ -233,6 +235,7 @@ class TestStatus:
         with (
             patch("lakebench.cli._admin._get_core_v1", return_value=core),
             patch("lakebench.deploy.cluster_lock.read_cluster_lock", return_value=None),
+            patch("lakebench.cli._admin._read_operator_scratch", side_effect=RuntimeError("n/a")),
         ):
             r = runner.invoke(admin_app, ["status"])
         assert r.exit_code == 0
@@ -297,6 +300,7 @@ class TestRepairOperator:
         ):
             mgr_instance = mock_mgr.return_value
             mgr_instance._get_watched_namespaces.return_value = None
+            mgr_instance.controller_tmp_volume.return_value = TmpVolume(True, "8Gi")
             r = runner.invoke(admin_app, ["repair-operator"])
         assert r.exit_code == 0
         assert "watches all namespaces" in r.output
@@ -330,6 +334,7 @@ class TestRepairOperator:
             # Operator watches three: ns-a (live+annotated),
             # ns-stale (live but annotationless), ns-gone (deleted).
             mgr_instance._get_watched_namespaces.return_value = ["ns-a", "ns-stale", "ns-gone"]
+            mgr_instance.controller_tmp_volume.return_value = TmpVolume(True, "8Gi")
             r = runner.invoke(admin_app, ["repair-operator", "--dry-run"])
         assert r.exit_code == 0
         assert "before: ['ns-a', 'ns-gone', 'ns-stale']" in r.output
