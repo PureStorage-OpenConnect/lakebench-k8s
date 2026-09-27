@@ -430,6 +430,46 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
 _STAGE_POLL_S = 5
 
 
+def _submission_failure_reporter(stage_name: str, journal):
+    """Print and journal each SUBMISSION_FAILED of a batch stage as it happens.
+
+    The operator retries on its own, so the stage keeps waiting; without a
+    line here a 60-90 s retry reads as a slow stage with no reason (the
+    2026-09-27 controller evictions).
+    """
+
+    def _report(failure: dict[str, Any]) -> None:
+        print_warning(
+            f"lakebench-{stage_name}: submission attempt {failure['attempt']} failed: "
+            f"{failure['reason']}. The Spark Operator retries it; the stage time "
+            "includes the wait."
+        )
+        _journal_safe(
+            journal.record,
+            EventType.PIPELINE_STAGE,
+            message=f"{stage_name} submission failed",
+            details={
+                "stage": stage_name,
+                "event": "submission_failed",
+                "attempt": failure["attempt"],
+                "reason": failure["reason"],
+            },
+        )
+
+    return _report
+
+
+def _retry_note(job_metrics) -> str:
+    """' (includes Ns ...)' when a stage's elapsed includes submission retries."""
+    n = len(job_metrics.submission_failures)
+    if not n:
+        return ""
+    return (
+        f" (includes {job_metrics.submission_retry_seconds:.0f}s waiting on {n} failed "
+        f"operator submission{'s' if n != 1 else ''})"
+    )
+
+
 def _stage_timing(monitor, app_name: str, result, submitted_at, observed_end):
     """When a batch stage ran: submission to the Spark application's real end.
 
@@ -1997,6 +2037,7 @@ def run(
                     timeout_seconds=timeout,
                     poll_interval=_STAGE_POLL_S,
                     progress_callback=on_progress,
+                    on_submission_failure=_submission_failure_reporter(stage_name, j),
                 )
                 # The poll that saw the end, less the driver-log fetch the
                 # monitor did after it.
@@ -2020,6 +2061,8 @@ def run(
                     success=result.success,
                     error_message=result.message if not result.success else None,
                     executor_count=_max_executors,
+                    submission_failures=list(result.submission_failures),
+                    submission_retry_seconds=result.submission_retry_seconds,
                 )
                 if timing.note:
                     logger.warning("%s timed by poll: %s", stage_name, timing.note)
@@ -2116,7 +2159,10 @@ def run(
                 _cycle_jobs.append(job_metrics)
 
                 if result.success:
-                    print_success(f"{stage_name} completed in {job_metrics.elapsed_seconds:.1f}s")
+                    print_success(
+                        f"{stage_name} completed in {job_metrics.elapsed_seconds:.1f}s"
+                        f"{_retry_note(job_metrics)}"
+                    )
                     results.append((stage_name, True, job_metrics.elapsed_seconds))
                     _journal_safe(
                         j.record,
@@ -2129,10 +2175,12 @@ def run(
                             "elapsed_seconds": job_metrics.elapsed_seconds,
                             "input_gb": job_metrics.input_size_gb,
                             "output_rows": job_metrics.output_rows,
+                            "submission_failures": len(job_metrics.submission_failures),
+                            "submission_retry_seconds": job_metrics.submission_retry_seconds,
                         },
                     )
                 else:
-                    print_error(f"{stage_name} failed: {result.message}")
+                    print_error(f"{stage_name} failed: {result.message}{_retry_note(job_metrics)}")
                     if result.driver_logs:
                         console.print("[dim]Driver logs (last 20 lines):[/dim]")
                         for line in result.driver_logs.split("\n")[-20:]:

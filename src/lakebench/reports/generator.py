@@ -1580,12 +1580,21 @@ class ReportGenerator:
             execs = f"{job.executor_count}" if job.executor_count > 0 else "-"
             cores = f"{job.executor_cores}" if job.executor_cores > 0 else "-"
             cpu_s = f"{job.cpu_seconds_requested:,.0f}" if job.cpu_seconds_requested > 0 else "-"
+            elapsed = f"{job.elapsed_seconds:.1f}s"
+            n_fail = len(job.submission_failures)
+            if n_fail:
+                # The stage waited on operator submission retries; say so
+                # rather than let it read as a slower stage.
+                elapsed += (
+                    f"<br><small>incl. {job.submission_retry_seconds:.0f}s on "
+                    f"{n_fail} failed submission{'s' if n_fail != 1 else ''}</small>"
+                )
 
             rows.append(f"""
             <tr>
                 <td><code class="mono">{job.job_name}</code></td>
                 <td><span class="status {status_class}">{status_text}</span></td>
-                <td>{job.elapsed_seconds:.1f}s</td>
+                <td>{elapsed}</td>
                 <td>{job.input_size_gb:.2f} GB</td>
                 <td>{job.output_rows:,}</td>
                 <td>{job.throughput_gb_per_second:.2f} GB/s</td>

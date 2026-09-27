@@ -39,6 +39,9 @@ from lakebench.config import (
     ConfigValidationError,
     load_config,
 )
+from lakebench.modules.pipeline_engines.spark.operator_scratch import (
+    DEFAULT_CONTROLLER_TMP_SIZE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,13 +105,74 @@ def _load_cfg(config_file: Path | None, file_option: Path | None):
         raise typer.Exit(1) from e
 
 
+def _read_operator_scratch(core_v1, operator_ns: str):
+    """Diagnose the Spark Operator controller's /tmp (read-only API calls)."""
+    from kubernetes import client as k8s_client
+
+    from lakebench.modules.pipeline_engines.spark.operator_scratch import diagnose
+
+    ser = k8s_client.ApiClient().sanitize_for_serialization
+    dep = k8s_client.AppsV1Api().read_namespaced_deployment(
+        "spark-operator-controller", operator_ns
+    )
+    pods = core_v1.list_namespaced_pod(
+        operator_ns,
+        label_selector="app.kubernetes.io/name=spark-operator,app.kubernetes.io/component=controller",
+    )
+    events = core_v1.list_namespaced_event(operator_ns, field_selector="reason=Evicted")
+    return diagnose(
+        ser(dep),
+        [ser(p) for p in pods.items or []],
+        [ser(e) for e in events.items or []],
+    )
+
+
+def _print_operator_scratch(core_v1, operator_ns: str) -> bool:
+    """Print the controller /tmp diagnosis; False when it found a problem."""
+    from lakebench.modules.pipeline_engines.spark.operator_scratch import repair_hint
+
+    try:
+        diag = _read_operator_scratch(core_v1, operator_ns)
+    except Exception as e:  # noqa: BLE001 -- a report, not a gate
+        print_warning(f"cannot read the Spark Operator controller in {operator_ns!r}: {e}")
+        return True
+    vol = diag.volume
+    if not vol.found:
+        size = "no 'tmp' volume"
+    elif not vol.is_empty_dir:
+        size = "'tmp' is not an emptyDir"
+    else:
+        size = vol.size_limit or "unbounded"
+    if diag.healthy:
+        print_success(f"Spark Operator controller /tmp: {size}; no storage evictions at this size")
+    else:
+        for problem in diag.problems:
+            print_error(f"Spark Operator: {problem}")
+        print_info(repair_hint())
+    if diag.past_storage_evictions:
+        print_info(
+            f"{diag.past_storage_evictions} earlier controller pod(s) evicted for storage under "
+            "an earlier /tmp size (history; delete the Failed pods to clear it)"
+        )
+    if diag.other_evictions:
+        print_warning(f"{diag.other_evictions} controller pod(s) evicted for other reasons")
+    if diag.container_restarts:
+        print_info(f"controller container restarts: {diag.container_restarts}")
+    return diag.healthy
+
+
 # ---------------------------------------------------------------------------
 # status
 # ---------------------------------------------------------------------------
 
 
 @admin_app.command("status")
-def status() -> None:
+def status(
+    operator_namespace: Annotated[
+        str,
+        typer.Option("--operator-namespace", help="Namespace of the Spark Operator."),
+    ] = "spark-operator",
+) -> None:
     """Show installed operators, lease state, and lakebench-annotated namespaces."""
     from lakebench.deploy.cluster_lock import LOCK_NAMESPACE, read_cluster_lock
     from lakebench.deploy.ownership import ANNOTATION_DEPLOYMENT_NAME
@@ -164,6 +228,10 @@ def status() -> None:
         console.print(table)
     else:
         print_info("No lakebench-annotated namespaces on this cluster.")
+
+    console.print()
+    console.print(Panel("Spark Operator controller", expand=False))
+    _print_operator_scratch(core_v1, operator_namespace)
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +298,11 @@ def doctor(
         print_error(
             "Spark Operator CRD missing. Install with: lakebench admin install-spark-operator"
         )
+    else:
+        op_ns = "spark-operator"
+        if cfg is not None:
+            op_ns = cfg.platform.compute.spark.operator.namespace or op_ns
+        _print_operator_scratch(core_v1, op_ns)
 
     # Lease state.
     try:
@@ -416,12 +489,33 @@ def install_spark_operator(
         str,
         typer.Option("--operator-namespace", help="Namespace to install into."),
     ] = "spark-operator",
+    controller_tmp_size: Annotated[
+        str | None,
+        typer.Option(
+            "--controller-tmp-size",
+            help="sizeLimit of the controller's /tmp emptyDir, which holds "
+            "spark-submit's Ivy jar cache (chart default 1Gi is too small). "
+            f"Default {DEFAULT_CONTROLLER_TMP_SIZE}; an upgrade without the flag "
+            "keeps a larger size already set.",
+        ),
+    ] = None,
 ) -> None:
     """Install or upgrade the shared Spark Operator Helm release.
 
     Runs under the cluster lease so concurrent admins cannot race the
-    same Helm upgrade.
+    same Helm upgrade. An existing release is upgraded with
+    its stored values (the watch list is kept) and stays on its chart
+    unless ``--version`` or the config names one. The controller's /tmp
+    emptyDir is sized to ``--controller-tmp-size``.
     """
+    from lakebench.modules.pipeline_engines.spark.operator_scratch import validate_size
+
+    try:
+        if controller_tmp_size is not None:
+            validate_size(controller_tmp_size)
+    except ValueError as e:
+        print_error(f"--controller-tmp-size: {e}")
+        raise typer.Exit(2) from e
     from lakebench.deploy.cluster_lock import (
         ClusterLockError,
         ClusterLockHeld,
@@ -441,7 +535,7 @@ def install_spark_operator(
     try:
         with cluster_lock(core_v1, timeout=600):
             mgr = SparkOperatorManager(namespace=ns, version=v)
-            ok = mgr.install()
+            ok = mgr.install(version=v, tmp_size=controller_tmp_size)
     except ClusterLockHeld as e:
         print_error(str(e))
         raise typer.Exit(1) from e
@@ -452,7 +546,11 @@ def install_spark_operator(
     if not ok:
         print_error("Spark Operator install/upgrade failed. See logs above.")
         raise typer.Exit(1)
-    print_success(f"Spark Operator install/upgrade ok (namespace={ns}, version={v})")
+    print_success(
+        f"Spark Operator install/upgrade ok (namespace={ns}, "
+        f"version={v or 'installed chart'}, "
+        f"controller /tmp={controller_tmp_size or 'default or larger existing'})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -704,25 +802,51 @@ def repair_operator(
     ] = None,
     dry_run: Annotated[
         bool,
-        typer.Option("--dry-run", help="Show the reconciled watch list without applying it."),
+        typer.Option("--dry-run", help="Show the repairs without applying them."),
     ] = False,
+    controller_tmp_size: Annotated[
+        str,
+        typer.Option(
+            "--controller-tmp-size",
+            help="Raise the controller's /tmp emptyDir sizeLimit to this when it is smaller.",
+        ),
+    ] = DEFAULT_CONTROLLER_TMP_SIZE,
 ) -> None:
-    """Reconcile Spark Operator watch list against live annotated namespaces.
+    """Repair the shared Spark Operator: stale watch entries and a small /tmp.
 
     When ``destroy`` fails partway through the watch-list mutation the
     operator can be left with stale entries. This command reads the
     live watch list and the live set of namespaces, keeps only the
-    entries whose namespace exists AND carries a
-    ``lakebench.deployment/name`` annotation (plus ``default``), and
+    entries whose namespace exists and is Active (plus ``default``), and
     Helm-upgrades the operator to that reconciled list under the
     cluster lease.
+
+    It also raises the controller's /tmp emptyDir sizeLimit to
+    ``--controller-tmp-size`` when it is smaller. spark-submit runs in the
+    controller and fills /tmp with the Ivy jar cache; at the chart's 1Gi
+    the kubelet evicts the controller. The resize keeps every stored value
+    and the installed chart version, and rolls the controller once.
     """
     from lakebench.deploy.cluster_lock import (
         ClusterLockError,
         ClusterLockHeld,
         cluster_lock,
     )
-    from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+    from lakebench.modules.pipeline_engines.spark.operator import (
+        SparkOperatorManager,
+        _DeploymentReadError,
+        _WatchListReadError,
+    )
+    from lakebench.modules.pipeline_engines.spark.operator_scratch import (
+        parse_quantity,
+        validate_size,
+    )
+
+    try:
+        validate_size(controller_tmp_size)
+    except ValueError as e:
+        print_error(f"--controller-tmp-size: {e}")
+        raise typer.Exit(2) from e
 
     ns = "spark-operator"
     v: str | None = None
@@ -735,56 +859,77 @@ def repair_operator(
 
     core_v1 = _get_core_v1(context=kube_ctx)
     mgr = SparkOperatorManager(namespace=ns, version=v, kube_context=kube_ctx)
-    from lakebench.modules.pipeline_engines.spark.operator import _WatchListReadError
+
+    # Controller /tmp: resize only a bounded emptyDir smaller than asked.
+    resize_from: str | None = None
+    try:
+        vol = mgr.controller_tmp_volume()
+    except _DeploymentReadError as e:
+        print_warning(f"cannot read the controller /tmp volume, not resizing it: {e}")
+    else:
+        want = parse_quantity(controller_tmp_size) or 0
+        if not vol.found or not vol.is_empty_dir:
+            print_warning(
+                "controller has no /tmp emptyDir named 'tmp'; not resizing "
+                "(the chart layout differs from 2.5.1)"
+            )
+        elif vol.size_limit is not None and (vol.limit_bytes or 0) < want:
+            resize_from = vol.size_limit
 
     try:
         watched = mgr._get_watched_namespaces()  # noqa: SLF001 -- reconciliation needs live state
     except _WatchListReadError as e:
         print_error(f"Cannot read the Spark Operator watch list: {e}")
         raise typer.Exit(1) from e
+
+    to_drop: list[str] = []
+    reconciled: list[str] = []
     if watched is None:
-        print_info("Spark Operator watches all namespaces; nothing to reconcile")
+        print_info("Spark Operator watches all namespaces; no watch list to reconcile")
+    else:
+        # ADR-F2/F2b: keep every watch entry whose namespace still exists
+        # AND is ``Active``, annotated or not. Legacy pre-PR-1 lakebench
+        # deployments (or any third-party ns the operator happens to
+        # watch) have no lakebench annotation but ARE running Spark
+        # workloads there; pruning them would silently stall
+        # reconciliation. Only namespaces that have been deleted, or are
+        # in ``Terminating`` (about to be gone) are safe to drop -- that
+        # is exactly the crash-loop this command is written to prevent.
+        # Iterate ``list_namespace`` via ``_continue`` in case a very
+        # large multi-tenant cluster exceeds the default page size:
+        # missing a page silently unwatches its tenants.
+        live_active_names: set[str] = set()
+        cont: str | None = None
+        while True:
+            page = core_v1.list_namespace(_continue=cont) if cont else core_v1.list_namespace()
+            for n in page.items:
+                phase = getattr(n.status, "phase", None) if n.status else None
+                if phase == "Active":
+                    live_active_names.add(n.metadata.name)
+            cont = getattr(page.metadata, "_continue", None) or getattr(
+                page.metadata, "continue_", None
+            )
+            # Guard against test mocks where `_continue` is itself a
+            # MagicMock (truthy but not a real cursor). Only a non-empty
+            # string is a real continuation token.
+            if not cont or not isinstance(cont, str):
+                break
+
+        # ``default`` is preserved even when absent because the chart
+        # rejects an empty jobNamespaces list.
+        reconciled = sorted({n for n in watched if n in live_active_names} | {"default"})
+        if reconciled == sorted(watched):
+            print_info("Watch list already reconciled; no changes needed")
+        else:
+            to_drop = [n for n in watched if n not in reconciled]
+            console.print("Reconciled watch list:")
+            console.print(f"  before: {sorted(watched)}")
+            console.print(f"  after:  {reconciled}")
+
+    if resize_from is not None:
+        console.print(f"Controller /tmp emptyDir: {resize_from} -> {controller_tmp_size}")
+    elif not to_drop:
         return
-
-    # ADR-F2/F2b: keep every watch entry whose namespace still exists
-    # AND is ``Active``, annotated or not. Legacy pre-PR-1 lakebench
-    # deployments (or any third-party ns the operator happens to
-    # watch) have no lakebench annotation but ARE running Spark
-    # workloads there; pruning them would silently stall
-    # reconciliation. Only namespaces that have been deleted, or are
-    # in ``Terminating`` (about to be gone) are safe to drop -- that
-    # is exactly the crash-loop this command is written to prevent.
-    # Iterate ``list_namespace`` via ``_continue`` in case a very
-    # large multi-tenant cluster exceeds the default page size:
-    # missing a page silently unwatches its tenants.
-    live_active_names: set[str] = set()
-    cont: str | None = None
-    while True:
-        page = core_v1.list_namespace(_continue=cont) if cont else core_v1.list_namespace()
-        for n in page.items:
-            phase = getattr(n.status, "phase", None) if n.status else None
-            if phase == "Active":
-                live_active_names.add(n.metadata.name)
-        cont = getattr(page.metadata, "_continue", None) or getattr(
-            page.metadata, "continue_", None
-        )
-        # Guard against test mocks where `_continue` is itself a
-        # MagicMock (truthy but not a real cursor). Only a non-empty
-        # string is a real continuation token.
-        if not cont or not isinstance(cont, str):
-            break
-
-    # ``default`` is preserved even when absent because the chart
-    # rejects an empty jobNamespaces list.
-    reconciled = sorted({n for n in watched if n in live_active_names} | {"default"})
-
-    if reconciled == sorted(watched):
-        print_info("Watch list already reconciled; no changes needed")
-        return
-
-    console.print("Reconciled watch list:")
-    console.print(f"  before: {sorted(watched)}")
-    console.print(f"  after:  {reconciled}")
 
     if dry_run:
         print_info("--dry-run set; not applying")
@@ -797,7 +942,6 @@ def repair_operator(
     # atomic mutation.
     try:
         with cluster_lock(core_v1, timeout=600):
-            to_drop = [n for n in watched if n not in reconciled]
             for n in to_drop:
                 if not mgr._remove_namespace_from_watch_impl(n):  # noqa: SLF001
                     print_error(
@@ -806,6 +950,12 @@ def repair_operator(
                         "Helm state."
                     )
                     raise typer.Exit(1)
+            if resize_from is not None and not mgr.apply_controller_tmp_size(controller_tmp_size):
+                print_error(
+                    "could not resize the controller /tmp emptyDir; see the log above. "
+                    "The watch list repair (if any) was applied."
+                )
+                raise typer.Exit(1)
     except ClusterLockHeld as e:
         print_error(str(e))
         raise typer.Exit(1) from e
@@ -813,7 +963,10 @@ def repair_operator(
         print_error(f"could not acquire cluster lock: {e}")
         raise typer.Exit(1) from e
 
-    print_success(f"reconciled Spark Operator watch list: {reconciled}")
+    if to_drop:
+        print_success(f"reconciled Spark Operator watch list: {reconciled}")
+    if resize_from is not None:
+        print_success(f"controller /tmp emptyDir sizeLimit is now {controller_tmp_size}")
 
 
 # ---------------------------------------------------------------------------
