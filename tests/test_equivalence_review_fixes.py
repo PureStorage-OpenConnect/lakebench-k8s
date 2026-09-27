@@ -622,7 +622,7 @@ class TestQ1AverageKpi:
     def test_q1_averages_transactions_not_interactions(self):
         """Non-purchase rows carry transaction_amount 0.0 (datagen_rs
         customer360.rs); averaging them in read about 5.5x low."""
-        import duckdb
+        duckdb = pytest.importorskip("duckdb")
 
         from lakebench.benchmark.queries import get_benchmark_queries
         from lakebench.config.schema import WorkloadSchema
