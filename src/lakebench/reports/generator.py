@@ -533,6 +533,16 @@ class ReportGenerator:
             policy_rows.append(
                 f"<tr><td>Continuous maintenance</td><td>{DELTA_CONTINUOUS_NO_MAINTENANCE}</td></tr>"
             )
+        if self._is_sustained(metrics):
+            from lakebench.reports.scorecard import continuous_trend_rows
+
+            policy_rows.extend(
+                continuous_trend_rows(
+                    pb,
+                    delta_limitation=cs.get("table_format") == "delta"
+                    and metrics.maintenance_policy_id != LEGACY_MAINTENANCE_POLICY_ID,
+                )
+            )
         if not pb:
             return self._maintenance_table(policy_rows)
 
@@ -2427,6 +2437,11 @@ class ReportGenerator:
                 "Maintenance (effective, what ran)",
                 f"{eff.get('id')} [{eff.get('detail_id') or ''}; {eff.get('basis') or ''}]"
                 + (f" -- {'; '.join(eff.get('reasons') or [])}" if eff.get("reasons") else ""),
+            ),
+            *(
+                [("Maintenance known limitations", "; ".join(eff["known_limitations"]))]
+                if eff.get("known_limitations")
+                else []
             ),
             ("Maintenance settings", exp.get("maintenance_settings") or "none"),
             *(

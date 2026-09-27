@@ -84,10 +84,24 @@ def policy_mismatch(expected: str | None, actual: str | None) -> str | None:
 
 #: Coarse per-operation classes for the effective maintenance identity.
 RAN = "ran"
+#: The operation executed, but at a retention no file written inside the
+#: window can meet: continuous Delta VACUUM at Delta's 7 d default while
+#: streams are live. It ran; it had no effect on what the window measured.
+RAN_NO_EFFECT = "ran_no_effect"
 NOT_SUPPORTED = "not_supported"
 SKIPPED_BY_USER = "skipped_by_user"
 FAILED = "failed"
 NOT_RUN = "not_run"
+
+#: Owner decision #46: Delta continuous ships in v1.6 with no effective
+#: maintenance, and the evidence says so.
+DELTA_CONTINUOUS_LIMITATION = (
+    "known v1.6 limitation (owner decision #46): Delta continuous runs with no "
+    "effective table maintenance (no OPTIMIZE; VACUUM, where it runs, keeps the 7 d "
+    "default and removes nothing inside the window), so small files accumulate "
+    "and in-window QpH can decline; a composite QpH median over the rounds is not "
+    "a steady-state figure"
+)
 
 #: Operations in the identity, per table format, and the maintenance call
 #: kind that runs each (the run paths record outcomes per call kind:
@@ -101,7 +115,7 @@ OPERATION_KIND = {
     "compaction": "compaction",
 }
 # Worst first: the coarse per-kind class is the worst of its operations.
-_SEVERITY = (FAILED, NOT_RUN, SKIPPED_BY_USER, NOT_SUPPORTED, RAN)
+_SEVERITY = (FAILED, NOT_RUN, SKIPPED_BY_USER, NOT_SUPPORTED, RAN_NO_EFFECT, RAN)
 
 
 def operations_for(table_format: str | None) -> tuple[str, ...]:
@@ -134,9 +148,11 @@ def effective_maintenance(
     ``compaction``; Delta ``vacuum`` and ``compaction``. So a run whose
     orphan removal failed while expiry succeeded is not stamped the same as
     one where both ran, and the two are not like-for-like. Classes:
-    ``ran``, ``not_supported`` (the composition cannot run it: DuckDB,
-    Delta OPTIMIZE, Delta VACUUM on Spark Thrift, continuous Delta VACUUM at
-    its 7 d default), ``skipped_by_user`` (--skip-maintenance,
+    ``ran``, ``ran_no_effect`` (it executed, but at a retention nothing
+    written in the window can meet: continuous Delta VACUUM at the 7 d
+    default), ``not_supported`` (the composition cannot run it and it was
+    not executed: DuckDB, Delta OPTIMIZE, Delta VACUUM on Spark Thrift),
+    ``skipped_by_user`` (--skip-maintenance,
     pre_benchmark_maintenance off, --skip-benchmark, continuous compaction
     disabled), ``failed`` (it was attempted and no statement succeeded) or
     ``not_run`` (the run ended before the maintenance phase). Partial
@@ -157,9 +173,20 @@ def effective_maintenance(
     id matches no current id, which is right, because ``expire=ran`` there
     could hide a failed remove_orphan_files.
 
+    An operation is never ``not_supported`` when a statement for it
+    executed: an executed operation is ``ran``, ``ran_no_effect`` or (when
+    no statement succeeded) ``failed``.
+
+    ``ran_no_effect`` assumes the window is shorter than the 7 d retention;
+    a longer continuous run under-claims (it reads no effect where VACUUM
+    could have removed files), never the other way round.
+
     Returns ``{"id", "detail_id", "operations", "expire", "compaction",
-    "detail", "basis", "reasons"}``; ``expire`` and ``compaction`` are the
-    worst class over the operations of that kind.
+    "detail", "basis", "reasons", "known_limitations"}``; ``expire`` and
+    ``compaction`` are the worst class over the operations of that kind.
+    ``known_limitations`` names the documented limits of the run's
+    maintenance (Delta continuous runs with no effective maintenance in
+    v1.6, owner decision #46).
     """
     policy = policy_id or LEGACY_MAINTENANCE_POLICY_ID
     fmt = (table_format or "").lower()
@@ -167,6 +194,7 @@ def effective_maintenance(
     continuous = (mode or "batch").lower() in ("sustained", "continuous")
     reasons: list[str] = []
     cls = {"expire": RAN, "compaction": RAN}
+    live_vacuum = False
 
     def turn(kinds, value, reason):
         for k in kinds:
@@ -187,18 +215,16 @@ def effective_maintenance(
             NOT_SUPPORTED,
             "Delta OPTIMIZE is never run (it exhausts engine memory)",
         )
-        if continuous:
-            turn(
-                ("expire",),
-                NOT_SUPPORTED,
-                "continuous Delta VACUUM keeps the 7 d default: no effect in a window",
-            )
-        elif engine == "spark-thrift":
+        if engine == "spark-thrift":
             turn(
                 ("expire",),
                 NOT_SUPPORTED,
                 "Delta VACUUM is skipped on Spark Thrift (it OOMs at 4Gi)",
             )
+        elif continuous:
+            # VACUUM executes; whether it ran is for the outcomes to say.
+            # What it can remove is decided below, once it is known to have run.
+            live_vacuum = True
     elif continuous and compaction_enabled is False:
         turn(("compaction",), SKIPPED_BY_USER, "continuous compaction is disabled")
 
@@ -274,6 +300,24 @@ def effective_maintenance(
                 elif ok < total:
                     detail[op] = "partial"
                     reasons.append(f"{op}: {ok} of {total} statements succeeded")
+    if live_vacuum and op_cls.get("vacuum") == RAN:
+        retention = ", ".join((per_op.get("vacuum") or {}).get("applied_retention") or []) or (
+            ", ".join(sorted(applied)) or "the 7 d default"
+        )
+        op_cls["vacuum"] = RAN_NO_EFFECT
+        if detail.get("vacuum") == "on":
+            detail["vacuum"] = "no_effect"
+        reasons.append(
+            f"vacuum ran at {retention} retention (Delta's 7 d default while streams are "
+            "live): no file written in the window was eligible, so it removed nothing "
+            "the window measured"
+            if outcomes is not None
+            else "vacuum runs at Delta's 7 d default while streams are live: no file "
+            "written in the window is eligible"
+        )
+    limitations: list[str] = []
+    if fmt == "delta" and continuous:
+        limitations.append(DELTA_CONTINUOUS_LIMITATION)
     detail_parts = [f"{op}={detail[op]}" for op in ops]
     if stopped and RAN in op_cls.values():
         detail_parts.append("stopped")
@@ -294,4 +338,5 @@ def effective_maintenance(
         if outcomes is not None
         else "policy rules (no outcomes recorded)",
         "reasons": reasons,
+        "known_limitations": limitations,
     }

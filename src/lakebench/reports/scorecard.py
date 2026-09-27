@@ -299,6 +299,47 @@ class FinancialScorecardBlock:
         )
 
 
+def continuous_trend_rows(pb, *, delta_limitation: bool) -> list[str]:
+    """Table Maintenance rows for a continuous run: the documented Delta
+    limitation (owner decision #46) and the in-window QpH trend, so a
+    composite median over a declining series is not read as steady state.
+
+    *pb* is the run's PipelineBenchmark (or None). Returns HTML ``<tr>`` rows.
+    """
+    from html import escape
+
+    from lakebench.metrics.maintenance_policy import DELTA_CONTINUOUS_LIMITATION
+
+    rows: list[str] = []
+    if delta_limitation:
+        rows.append(
+            "<tr><td>Known limitation</td>"
+            f'<td style="color: var(--danger)">{escape(DELTA_CONTINUOUS_LIMITATION)}</td></tr>'
+        )
+    trend = pb.qph_trend() if pb is not None else None
+    if not trend:
+        return rows
+    change = trend.get("change_pct")
+    change_txt = f" ({change:+.1f}%)" if change is not None else ""
+    rows.append(
+        "<tr><td>In-window QpH trend</td>"
+        f"<td>first round {trend['first_round_qph']:.1f}, last round "
+        f"{trend['last_round_qph']:.1f}{change_txt} over {trend['rounds']} rounds</td></tr>"
+    )
+    if "silver_data_files_start" in trend:
+        rows.append(
+            "<tr><td>Silver data files</td>"
+            f"<td>{trend['silver_data_files_start']:,} at the first probed round, "
+            f"{trend['silver_data_files_end']:,} at the last</td></tr>"
+        )
+    else:
+        rows.append(
+            "<tr><td>Silver data files</td>"
+            f"<td>{escape(str(trend.get('silver_data_files_unavailable')))}</td></tr>"
+        )
+    return rows
+
+
 def _fmt_pct(v) -> str:
     return f"{float(v) * 100:.1f}%" if v is not None else "n/a"
 
