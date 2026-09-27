@@ -219,7 +219,7 @@ _HIGHER_IS_BETTER = (
 # Scores that describe the run rather than rate it. A difference here is
 # information, not a win or a loss: scale_ratio is best at 1.0 in either
 # direction, and the data volume is an input, not a result.
-_NEUTRAL = ("scale_ratio", "total_data_processed_gb", "total_s3_objects")
+_NEUTRAL = ("scale_ratio", "total_data_processed_gb", "total_s3_objects", "composite_qph_rounds")
 
 
 def _higher_is_better(metric: str) -> bool:
@@ -458,6 +458,14 @@ def _build_comparison(
             f"QpH for A is the median of {n_a} sample(s) per query and for B of {n_b}; "
             "the QpH rows compare different estimators (set the same "
             "architecture.benchmark.iterations in both configs)"
+        )
+
+    r_a, r_b = scores_a.get("composite_qph_rounds"), scores_b.get("composite_qph_rounds")
+    if r_a is not None and r_b is not None and r_a != r_b:
+        # Also a condition difference (benchmark rounds): not like-for-like.
+        warnings.append(
+            f"continuous QpH for A is the median of {r_a} in-stream round(s) and for B "
+            f"of {r_b}; the QpH rows compare medians over different numbers of rounds"
         )
 
     if "error" not in metrics_a and "error" not in metrics_b:

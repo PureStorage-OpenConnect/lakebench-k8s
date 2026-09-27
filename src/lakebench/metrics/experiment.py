@@ -699,6 +699,12 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     limits["autosize_cuts"] = list(getattr(metrics, "autosize_cuts", None) or [])
     if mode == "sustained":
         limits["intake_limit"] = getattr(pb, "intake_limit", None)
+        # Rounds behind the continuous QpH median: benchmark iterations are
+        # an execution condition (DESIGN 2.4), and a median over 4 rounds
+        # does not stand like-for-like against one over 5.
+        limits["benchmark_rounds"] = sum(
+            1 for r in getattr(pb, "benchmark_rounds", None) or [] if (r.qph or 0) > 0
+        )
     else:
         limits.pop("max_files_per_trigger", None)
     if pb is not None:
@@ -822,7 +828,7 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
     w = exp.get("workload") or {}
     c = exp.get("corpus") or {}
     dg = c.get("datagen") or {}
-    return {
+    out = {
         "workload": w.get("name"),
         "workload version": w.get("version"),
         "generator model version": w.get("generator_model_version"),
@@ -845,6 +851,11 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
         "benchmark mode": (exp.get("limits") or {}).get("benchmark_mode"),
         "Lakebench limits that bound": list((exp.get("limits") or {}).get("bound_kinds") or []),
     }
+    if exp.get("mode") == "sustained":
+        # Continuous only, so batch identities (and their baselines) keep
+        # their keys.
+        out["benchmark rounds"] = (exp.get("limits") or {}).get("benchmark_rounds")
+    return out
 
 
 #: identity() keys that are execution conditions, not experiment identity.
@@ -856,6 +867,7 @@ CONDITION_KEYS = frozenset(
         "system",
         "benchmark iterations",
         "benchmark mode",
+        "benchmark rounds",
         "Lakebench limits that bound",
     }
 )
