@@ -528,6 +528,12 @@ def _paired_qph(pre, post) -> tuple[float, float, int] | None:
     return len(common) / pre_s * 3600, len(common) / post_s * 3600, len(common)
 
 
+def compaction_measurable(cfg) -> bool:
+    """Whether pre/post data file counts can measure a compaction: not on
+    Delta, where OPTIMIZE never runs (metrics/maintenance_policy)."""
+    return cfg.architecture.table_format.type.value != "delta"
+
+
 def _data_file_total(health: dict[str, int]) -> int:
     """Data files across the probed tables; 0 (unknown) when any probe failed.
 
@@ -537,6 +543,10 @@ def _data_file_total(health: dict[str, int]) -> int:
     """
     counts = [v for k, v in health.items() if "file_count" in k and isinstance(v, int)]
     if not counts or any(v < 0 for v in counts):
+        return 0
+    # A probe that found no count leaves its key out. A total over fewer
+    # tables than the other side's reads as a compaction that never ran.
+    if not all(isinstance(health.get(f"{t}_data_file_count"), int) for t in ("silver", "gold")):
         return 0
     return sum(counts)
 
@@ -2446,6 +2456,11 @@ def run(
                     post_file_count = _data_file_total(_post_health)
                 except Exception:
                     pass
+                if not compaction_measurable(cfg):
+                    # Delta OPTIMIZE never runs: equal counts are table
+                    # health, not a compaction result, and must not publish
+                    # a compaction ratio or a maintenance value.
+                    pre_file_count = post_file_count = 0
                 if pre_file_count > 0 and post_file_count > 0:
                     # Detail, not identity: a compaction that changed no
                     # files still ran (effective maintenance reasons).
