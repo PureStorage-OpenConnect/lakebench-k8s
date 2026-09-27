@@ -59,6 +59,8 @@ def test_continuous_runs_w2w3w4_and_marks_w1w7w8_skipped():
         "W17_layering_chain",
     }
     assert skip == {
+        "W5_sanctions_match",
+        "W6_pep_counterparty",
         "W1_connected_components",
         "W7_cross_border_high_risk",
         "W8_dormant_reactivation",

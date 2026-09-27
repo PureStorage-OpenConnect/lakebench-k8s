@@ -177,6 +177,11 @@ def load_thresholds(rules_src: str, silver_src: str, prereg: dict) -> dict:
         if isinstance(v, (int, float)) and ("amount" in k or "threshold" in k)
     ] + _ge_literals(w7_fn)
     w6 = _ge_literals(_function(rules, "w6_pep_counterparty"))
+    w6_fn = _function(rules, "w6_pep_counterparty")
+    if any(isinstance(n, ast.Name) and n.id == "PEP_MIN_USD" for n in ast.walk(w6_fn)):
+        # W6's priority line (a MED/LOW split since the screening track) is
+        # the module constant, still a rule amount the cliff check covers.
+        w6.append(float(_module_constant(rules, "PEP_MIN_USD")))
     if not w6:
         raise ValueError("no '>= N' USD threshold found in w6_pep_counterparty")
     band = [
