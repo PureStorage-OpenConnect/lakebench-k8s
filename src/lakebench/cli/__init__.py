@@ -1383,6 +1383,35 @@ def stop(
     _journal_safe(j.end_command, success=True)
 
 
+# The customer360 generator's own timestamp defaults (datagen_rs generate.rs).
+_C360_TIMESTAMP_DEFAULTS = ("2024-01-01", "2025-01-01")
+
+
+def info_date_range(cfg: LakebenchConfig, scale_days: int) -> str:
+    """The event date range the generator will write, as ``info`` shows it.
+
+    For customer360 the generator spans datagen.timestamp_start to
+    timestamp_end (defaults 2024-01-01 to 2025-01-01), whatever the scale
+    table says; showing the scale's 365 days for a 14-day config misled
+    (lb16-checks2). Other schemas, and a range that does not parse, show
+    the scale dimensions' figure.
+    """
+    from datetime import date
+
+    datagen = cfg.architecture.workload.datagen
+    if cfg.architecture.workload.schema_type.value != "customer360" or not (
+        datagen.timestamp_start or datagen.timestamp_end
+    ):
+        return f"{scale_days} days"
+    start = datagen.timestamp_start or _C360_TIMESTAMP_DEFAULTS[0]
+    end = datagen.timestamp_end or _C360_TIMESTAMP_DEFAULTS[1]
+    try:
+        days = (date.fromisoformat(end) - date.fromisoformat(start)).days
+    except ValueError:
+        return f"{scale_days} days"
+    return f"{days} days ({start} to {end})"
+
+
 def info_peak_request(
     cfg: LakebenchConfig, scale: float, sustained: bool
 ) -> tuple[PeakRequirement, int, int, str]:
@@ -1457,9 +1486,12 @@ def info(
     dims = cfg.get_scale_dimensions()
     guidance = _compute_guidance(scale)
 
-    # Derive workload profile: {schema}-{mode}
+    # Workload profile: {schema}-{pipeline mode}. The datagen mode (batch or
+    # continuous generator) is its own line: a continuous pipeline at small
+    # scale runs the batch generator, and naming the workload after it read
+    # as "customer360-batch" for a continuous config (lb16-checks2).
     effective_mode = _resolve_datagen_mode(cfg)
-    workload_profile = f"{workload.schema_type.value}-{effective_mode}"
+    workload_profile = f"{workload.schema_type.value}-{arch.pipeline.mode.value}"
 
     is_sustained = is_continuous_mode(arch.pipeline.mode)
 
@@ -1510,9 +1542,10 @@ def info(
         ("Scale", f"{scale}"),
         ("Customers", f"{dims.customers:,}"),
         ("Events/customer", f"~{dims.events_per_customer}"),
-        ("Date range", f"{dims.date_range_days} days"),
+        ("Date range", info_date_range(cfg, dims.date_range_days)),
         ("Approx rows", f"{dims.approx_rows:,}"),
         ("Pipeline mode", f"{arch.pipeline.mode.value}"),
+        ("Datagen mode", effective_mode),
         ("Processing", f"{arch.pipeline.pattern.value} (bronze > silver > gold)"),
         ("Catalog", f"{arch.catalog.type.value}"),
         (

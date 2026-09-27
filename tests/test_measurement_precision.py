@@ -389,3 +389,54 @@ class TestRunStageTiming:
         assert back.jobs[0].timing_source == "driver_container"
         assert back.pipeline_benchmark.stages[0].timing_resolution_seconds == 1.0
         assert back.pipeline_benchmark.time_to_value_seconds == pytest.approx(64.25)
+
+
+# ---------------------------------------------------------------------------
+# 5. lakebench info shows the pipeline mode and the configured date range
+# ---------------------------------------------------------------------------
+
+
+def _continuous_c360(tmp_path, **datagen):
+    import yaml
+
+    from tests.conftest import make_config
+
+    base = make_config().model_dump(mode="json")
+    data = {
+        "name": "lb16-cont2",
+        "platform": base["platform"],
+        "architecture": {"pipeline": {"mode": "continuous"}},
+        "workload": {"schema": "customer360", "datagen": {"scale": 1, **datagen}},
+    }
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return path
+
+
+class TestInfoLabels:
+    def test_continuous_config_is_not_labelled_batch(self, tmp_path):
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+
+        path = _continuous_c360(tmp_path, timestamp_start="2024-12-18", timestamp_end="2025-01-01")
+        out = CliRunner().invoke(app, ["info", str(path)])
+        assert out.exit_code == 0, out.output
+        assert "customer360-continuous" in out.output
+        assert "customer360-batch" not in out.output
+        assert "14 days (2024-12-18 to 2025-01-01)" in out.output
+        assert "365 days" not in out.output
+
+    def test_date_range_defaults_and_non_c360(self):
+        from lakebench.cli import info_date_range
+        from tests.conftest import make_config
+
+        cfg = make_config()
+        assert info_date_range(cfg, 365) == "365 days"
+        cfg.architecture.workload.datagen.timestamp_end = "2024-01-15"
+        assert info_date_range(cfg, 365) == "14 days (2024-01-01 to 2024-01-15)"
+        cfg.architecture.workload.datagen.timestamp_start = "bad"
+        assert info_date_range(cfg, 365) == "365 days"
+        fin = make_config(workload={"schema": "financial"})
+        fin.architecture.workload.datagen.timestamp_start = "2024-12-18"
+        assert info_date_range(fin, 1826) == "1826 days"
