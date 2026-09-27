@@ -212,9 +212,11 @@ arriving and that silver and gold committed continuously inside the window;
 a run that passes lets the rest of the corpus settle, stops the streams, and
 runs a result check over the settled tables so the run can be compared with
 another (see "Continuous gate" and "Result check" in
-[Scoring and Benchmarking](benchmarking.md)). A window longer than the time
-the trickle needs to offer the corpus measures an idle pipeline and fails the
-gate; the run warns about this at start.
+[Scoring and Benchmarking](benchmarking.md)). A window much longer than the
+time the trickle needs to offer the corpus measures an idle pipeline: the
+gate fails it when data stopped arriving before half the window, and the run
+warns about this at start. `run_duration` must be at least 3 x
+`gold_refresh_interval`, or the run is refused before it starts.
 
 ### How Continuous Mode Works
 

@@ -114,11 +114,13 @@ A run is refused, never compared, when:
 
 Within a comparable run, some numbers are left out rather than trusted:
 
-- `sustained_throughput_rps` of a continuous run whose corpus drained before
-  the window ended (`corpus_drained: true`). The figure is taken over the
-  seconds data was arriving, which ends in a partial trigger, so it is not
-  compared with an undrained run's (LB-145). A drained run is never recorded
-  as the rows/s baseline either.
+- `sustained_throughput_rps` of a continuous run whose corpus drained while
+  data arrived for less than 90% of the window (`corpus_drained: true` and
+  `window_arrival_fraction` under 0.9), or of a drained record from before
+  the window was recorded (corpus rows over the window, a lower bound,
+  LB-145). A drained run that arrived through at least 90% of the window is
+  gated like any other. An excluded rows/s is never recorded as the baseline
+  either.
 - continuous stage seconds, which are the window length, not a measurement.
 - the datagen numbers (`datagen_*`) when the datagen metrics were written
   more than 24 hours before the run started (they came from an earlier

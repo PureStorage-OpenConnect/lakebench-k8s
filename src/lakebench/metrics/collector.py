@@ -169,9 +169,10 @@ class StreamingJobMetrics:
 
     def apply_window(self, logs: str | None, start: datetime, end: datetime) -> dict[str, Any]:
         """Restrict this stage's window-dependent fields to [start, end]
-        (naive UTC) and return the window stats. Whole-log totals
-        (total_rows_processed, committed_rows) stay as parsed: they count up
-        to the window's end and feed ingest_ratio and corpus_drained."""
+        (naive UTC) and return the window stats. The logs are read after the
+        window closes, so the totals that feed ingest_ratio and
+        corpus_drained (total_rows_processed, committed_rows) are cut at the
+        window's end too: rows that landed after it never count."""
         from lakebench.metrics.continuous_window import parse_events, window_stats
 
         stats = window_stats(parse_events(logs, self.job_type), self.job_type, start, end)
@@ -182,6 +183,12 @@ class StreamingJobMetrics:
         self.window_output_rows = stats["window_output_rows"]
         self.last_write_offset_seconds = stats["last_write_offset_seconds"]
         self.output_rows = stats["output_rows"]
+        self.total_rows_processed = stats["rows_to_end"]
+        if self.job_type == "bronze-ingest":
+            self.unique_rows_processed = self.total_rows_processed
+        elif self.job_type == "silver-stream":
+            self.unique_rows_processed = self.total_rows_processed
+            self.committed_rows = stats["committed_rows_to_end"]
         if self.job_type == "gold-refresh":
             self.freshness_seconds = stats["freshness_seconds"]
             self.freshness_active_seconds = stats["freshness_active_seconds"]
@@ -616,8 +623,11 @@ class StageMetrics:
         if self.elapsed_seconds > 0:
             if self.input_size_gb > 0:
                 self.throughput_gb_per_second = self.input_size_gb / self.elapsed_seconds
-            if self.input_rows > 0:
-                self.throughput_rows_per_second = self.input_rows / self.elapsed_seconds
+            # A continuous stage's rate is over the rows it took in inside
+            # the window, never the rows before it.
+            rows = self.window_input_rows if self.window_input_rows is not None else self.input_rows
+            if rows > 0:
+                self.throughput_rows_per_second = rows / self.elapsed_seconds
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""

@@ -518,11 +518,15 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
         for key in [k for k in numbers if _is_stage_seconds(k)]:
             del numbers[key]
 
-    if run.mode == "sustained" and run.scores.get("corpus_drained") is True:
-        numbers.pop("sustained_throughput_rps", None)
-        excluded["sustained_throughput_rps"] = (
-            "corpus drained before the window ended; rows/s is a lower bound (LB-145)"
+    if run.mode == "sustained":
+        from lakebench.metrics.continuous_window import drained_rps_excluded
+
+        why = drained_rps_excluded(
+            run.scores.get("corpus_drained"), run.scores.get("window_arrival_fraction")
         )
+        if why:
+            numbers.pop("sustained_throughput_rps", None)
+            excluded["sustained_throughput_rps"] = why
 
     if run.mode == "batch":
         recomputed = _pipeline_ttv(run)

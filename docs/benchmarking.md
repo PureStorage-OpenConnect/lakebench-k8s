@@ -44,12 +44,26 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 
 Sustained scoring answers: "How fresh is gold, and how fast are we sustaining it?"
 
-Every continuous score is measured inside the **measurement window**. The
-window opens when every stream's driver is running and closes
-`run_duration` seconds later; its UTC start and end are in `metrics.json`
+Freshness, throughput and the row counts are measured inside the
+**measurement window**. The window opens when every stream's driver is
+running and closes `run_duration` seconds later. It is kept in cluster time
+(this host's clock shifted by the API server's, so pod log timestamps line
+up with it); its UTC start and end and the offset are in `metrics.json`
 under `continuous.window`. A stream that started early (because another was
 still retrying its submission) takes rows in before the window opens; those
 are recorded as `pre_window_rows` and left out of every window score.
+`ingest_ratio` and `corpus_drained` count every row up to the window's end,
+pre-window rows included. `pipeline_throughput_gb_per_second` and
+`compute_efficiency_gb_per_core_hour` still divide the bucket sizes measured
+at the window's end by the window.
+
+Definitions changed on lane/continuous-cred (2026-09-26):
+`sustained_throughput_rps` was bronze rows / `run_duration`, pre-window rows
+included; `data_freshness_seconds` covered every gold cycle in the log;
+`corpus_drained` also needed two idle gold cycles; `total_rows_processed`
+counted whole logs. Continuous records made before this are not comparable
+with later ones on those scores (their experiment identity and results
+differ, so compare, the perf gate and reproduce refuse them).
 
 | Score | Formula | Meaning |
 |---|---|---|
@@ -495,17 +509,28 @@ a 600 s window, 8 files per 30 s). Whatever the estimate, the continuous gate
 decides on what the run did (see Continuous Gate below).
 
 **Continuous gate.** A continuous run passes only on continuous processing
-inside the measurement window. It fails when:
+inside the measurement window. It is refused before it starts when
+`run_duration` is shorter than 3 x `gold_refresh_interval` (two gold
+refreshes cannot be guaranteed inside it). It fails when:
 
-- a stream never reached RUNNING, or was not RUNNING when the window closed;
+- a stream never reached RUNNING, was not RUNNING when the window closed, or
+  restarted inside it (a new driver pod or another submission);
 - bronze ingested no rows inside the window (in particular when it drained
-  the corpus before the window opened);
-- silver committed fewer than 2 micro-batches with rows inside the window;
-- gold refreshed on new silver data fewer than 2 times inside the window (a
-  cycle tagged `(silver idle)`, or one that read no more silver rows than the
-  cycle before, does not count);
+  the corpus before the window opened), wrote fewer than 2 batches inside
+  it, or wrote its last batch before half the window had passed;
+- silver committed fewer than 2 micro-batches with rows inside the window
+  after bronze's first write in it (a backlog from before the window does
+  not count);
+- gold refreshed on new silver data fewer than 2 times inside the window
+  after that first write (a cycle tagged `(silver idle)`, one that read no
+  silver, or one that read no more silver rows than the cycle before, does
+  not count);
 - gold freshness was not measured inside the window;
 - a stream's driver log could not be read.
+
+When the corpus runs out between half and all of the window the run passes
+and says so in `window_arrival_fraction`; freshness then leaves out the gold
+cycles after silver stopped growing.
 
 Submission failures (for example a Maven download that arrived truncated)
 are printed and journaled as they happen and recorded per stream in
@@ -517,13 +542,17 @@ results are not compared. After a run that passed its gates, the CLI keeps
 the streams running until the whole corpus has reached gold (every datagen
 row in bronze, every bronze row committed by silver, and a gold refresh that
 read silver after its last commit), for at most 1800 s, then stops the
-streams and runs the query set once over the settled tables. Its result
+streams and runs the query set once over the settled tables. A query that
+fails there fails the run, as in batch. Its result
 fingerprints are the run's results (`continuous.result_check` and the
 experiment block's `results`), the same as a batch run's, so `compare`, the
 perf gate and `reproduce` hold continuous runs to "no comparison without
 equivalent results". A run whose corpus does not settle in time, or that ran
-with `--skip-benchmark`, records why in `results.not_checked` and is never
-presented as comparable. None of this time is part of the window.
+with `--skip-benchmark` or without a query engine, records why in
+`results.not_checked` and is never presented as comparable. AML continuous
+runs are not result-checked: detection and TM operations passes run on a
+timer, so their tables depend on when the passes ran relative to arrival.
+None of this time is part of the window.
 
 **Ingestion Completeness** (`ingest_ratio`) is the share of the corpus the
 window consumed. A short ratio says only that the corpus outlasted the window;

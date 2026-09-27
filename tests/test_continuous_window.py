@@ -364,7 +364,7 @@ def test_a_stream_not_running_at_window_end_fails():
 # ---------------------------------------------------------------- item 5
 
 
-def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path):
+def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path, capsys):
     from lakebench.cli import _sustained
     from tests.conftest import make_config
 
@@ -386,10 +386,18 @@ def test_benchmark_runner_failure_fails_before_any_stream(monkeypatch, tmp_path)
         raise RuntimeError("no query engine executor")
 
     monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", broken)
-    cfg = make_config()
+    cfg = make_config(
+        architecture={
+            "pipeline": {
+                "mode": "continuous",
+                "continuous": {"gold_refresh_interval": "30 seconds"},
+            }
+        }
+    )
     with pytest.raises(typer.Exit) as exc:
-        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, False, 60)
+        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, False, 120)
     assert exc.value.exit_code == 1
+    assert "Could not create the benchmark runner" in capsys.readouterr().out
     jm.submit_job.assert_not_called()
     jm.deploy_scripts_configmap.assert_not_called()
 
@@ -465,7 +473,9 @@ class _Clock:
         return (self.epoch + timedelta(seconds=self.t - 1_000_000.0)).replace(tzinfo=None)
 
 
-def _drive(monkeypatch, tmp_path, make_logs, *, duration=120):
+def _drive(
+    monkeypatch, tmp_path, make_logs, *, duration=120, clock_offset=None, runner=None, dg_rows=0
+):
     """_run_sustained on a c360 config with every cluster edge mocked and a
     fake clock. *make_logs(job, window_end)* builds each driver log when the
     CLI reads it (right after the window closes). Returns (exit code or
@@ -525,10 +535,25 @@ def _drive(monkeypatch, tmp_path, make_logs, *, duration=120):
     storage = MagicMock()
     monkeypatch.setattr("lakebench.metrics.MetricsStorage", lambda *a, **kw: storage)
     monkeypatch.setattr(_sustained, "write_run_report", lambda *a, **kw: None)
-    cfg = make_config(name="c360-window")
+    monkeypatch.setattr(_sustained, "cluster_clock_offset_seconds", lambda: clock_offset)
+    if runner is not None:
+        monkeypatch.setattr("lakebench.benchmark.BenchmarkRunner", lambda c: runner)
+    monkeypatch.setattr(
+        "lakebench.metrics.datagen_aggregator.collect_from_k8s",
+        lambda **kw: MagicMock(data_quality="complete", total_rows_written=dg_rows),
+    )
+    cfg = make_config(
+        name="c360-window",
+        architecture={
+            "pipeline": {
+                "mode": "continuous",
+                "continuous": {"gold_refresh_interval": "30 seconds"},
+            }
+        },
+    )
     code = None
     try:
-        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, True, duration)
+        _sustained._run_sustained(cfg, tmp_path / "cfg.yaml", 60, runner is None, duration)
     except typer.Exit as e:
         code = e.exit_code
     saved = storage.save_run.call_args[0][0]
@@ -609,3 +634,217 @@ def test_healthy_run_passes_with_window_scores(monkeypatch, tmp_path):
     assert saved.continuous["result_check"] == {"not_checked": "no benchmark (--skip-benchmark)"}
     gold = next(s for s in saved.streaming if s.job_type == "gold-refresh")
     assert gold.window_new_data_cycles == 3 and gold.freshness_seconds == 25
+
+
+# ------------------------------------------------------ review fixes (pinned)
+
+
+def test_one_late_bronze_batch_after_a_drained_corpus_fails():
+    # Reviewer shape: 14.7M rows before the window, one 1,000-row batch at
+    # +5 s, silver chewing its backlog, gold growing on it.
+    logs = {
+        "bronze-ingest": bronze_log([(-300, 14_700_000), (5, 1_000)]),
+        "silver-stream": silver_log([(t, 3_000_000, 2_900_000) for t in (10, 70, 130, 190)]),
+        "gold-refresh": gold_log([(100, 6_000_000, 40, False), (400, 12_000_000, 45, False)]),
+    }
+    probs = window_gate_problems(_stats(logs), 600)
+    assert any("data stopped arriving" in p for p in probs)
+    assert window_gate_problems(_stats(HEALTHY), 600) == []
+
+
+def test_silver_backlog_before_bronze_arrives_is_not_continuous():
+    logs = dict(HEALTHY)
+    logs["bronze-ingest"] = bronze_log([(t, 26_000) for t in range(400, 600, 30)])
+    logs["silver-stream"] = silver_log([(t, 52_000, 51_000) for t in (10, 70, 130, 450)])
+    probs = window_gate_problems(_stats(logs))
+    assert any("silver committed 1 micro-batch" in p for p in probs)
+
+
+def test_empty_silver_gold_ticks_do_not_count_as_new_data():
+    # AML: "Silver table is empty, skipping" logs no aggregate line but the
+    # tick still logs "refreshed".
+    lines = []
+    for i, t in enumerate((60, 360), start=1):
+        lines.append(_line(t, f"Cycle {i}: Silver table is empty, skipping"))
+        lines.append(_line(t + 2, f"Cycle {i}: refreshed gold.alerts in 2.0s"))
+    lines.append(_line(500, "Cycle 3: aggregating 5,000 Silver records"))
+    lines.append(_line(501, "Cycle 3: data freshness 30s"))
+    lines.append(_line(502, "Cycle 3: refreshed gold.alerts in 2.0s"))
+    st = window_stats(parse_events("\n".join(lines), "gold-refresh"), "gold-refresh", W0, W1)
+    assert st["window_commits"] == 3 and st["window_new_data_cycles"] == 1
+
+
+def test_aml_freshness_drops_cycles_after_silver_stops_growing():
+    # AML gold never tags "(silver idle)": the trailing cycles whose silver
+    # count did not grow are the idle tail.
+    logs = gold_log(
+        [(60, 1000, 40, False), (160, 2000, 45, False), (260, 2000, 145, False)]
+    ).replace(" (silver idle)", "")
+    st = window_stats(parse_events(logs, "gold-refresh"), "gold-refresh", W0, W1)
+    assert st["trailing_idle_cycles"] == 1
+    assert st["freshness_active_seconds"] == 45
+
+
+def test_totals_are_cut_at_the_window_end():
+    # A stall from 450 s; the last rows land after the window closed but
+    # before the logs were read. They must not make the run "drained".
+    log = bronze_log([(t, 10_000) for t in range(0, 450, 30)] + [(610, 200_000)])
+    b = StreamingJobMetrics(job_name="b", job_type="bronze-ingest")
+    b.apply_window(log, W0, W1)
+    assert b.total_rows_processed == 15 * 10_000
+    s = StreamingJobMetrics(job_name="s", job_type="silver-stream")
+    s.apply_window(silver_log([(100, 50_000, 49_000), (700, 100_000, 99_000)]), W0, W1)
+    assert s.total_rows_processed == 50_000 and s.committed_rows == 50_000
+
+
+def test_stage_rate_is_windowed_after_compute_derived():
+    st = _stage("bronze", input_rows=1_000_000, window_input_rows=600_000)
+    st.compute_derived()
+    assert st.throughput_rows_per_second == pytest.approx(1000.0)
+
+
+def test_drained_rps_is_gated_when_arrival_lasted_the_window():
+    from lakebench.metrics.continuous_window import drained_rps_excluded
+
+    assert drained_rps_excluded(True, 0.95) is None
+    assert "short arrival" in drained_rps_excluded(True, 0.5)
+    assert "lower bound" in drained_rps_excluded(True, None)  # pre-window record
+    assert drained_rps_excluded(False, 0.1) is None
+
+
+def test_a_stream_restarted_inside_the_window_fails():
+    from lakebench.cli._sustained import end_of_window_problems
+    from lakebench.spark.job import JobState, JobStatus
+
+    jm = MagicMock()
+    jm.get_job_status.side_effect = lambda name: JobStatus(
+        name=name, state=JobState.RUNNING, message="", driver_pod=f"{name}-driver-2"
+    )
+    opened = {"silver-stream": ("lakebench-silver-stream-driver-1", 1)}
+    probs = end_of_window_problems(jm, ["silver-stream"], opened)
+    assert len(probs) == 1 and "restarted inside the window" in probs[0]
+
+
+def test_a_window_too_short_for_two_gold_refreshes_is_refused():
+    from lakebench.cli._sustained import short_window_problem
+    from tests.conftest import make_config
+
+    cfg = make_config()  # gold_refresh_interval 5 minutes
+    assert "at least 900s" in short_window_problem(cfg, 600)
+    assert short_window_problem(cfg, 900) is None
+
+
+def test_aml_continuous_results_are_not_established(monkeypatch, tmp_path):
+    # Settling is not attempted for AML: detection and TM passes are timed.
+    from lakebench.cli import _sustained
+
+    src = __import__("inspect").getsource(_sustained._run_sustained)
+    assert "not a function of the corpus alone" in src
+
+
+def test_an_error_after_the_window_fails_the_run_and_stops_streams(monkeypatch, tmp_path):
+    from lakebench.cli import _sustained
+
+    def logs(job, end):
+        return _logs_relative_to(
+            end,
+            {
+                "bronze-ingest": (job, [(t, 10_000) for t in range(-115, 0, 10)]),
+                "silver-stream": (job, [(t, 20_000) for t in range(-110, 0, 20)]),
+                "gold-refresh": (
+                    job,
+                    [(-90, 40_000, 20, False), (-50, 80_000, 25, False), (-10, 110_000, 22, False)],
+                ),
+            }[job],
+        )
+
+    stopped = []
+    monkeypatch.setattr(_sustained, "_stop_streams", lambda k, ns, sub: stopped.append(len(sub)))
+
+    def boom(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("lakebench.metrics.continuous_window.window_gate_problems", boom)
+    with pytest.raises(KeyboardInterrupt):
+        _drive(monkeypatch, tmp_path, logs)
+    assert stopped == [3]
+
+
+def test_the_window_is_shifted_to_the_cluster_clock(monkeypatch, tmp_path):
+    # Pods 60 s ahead of this host. Bronze wrote 30 s before the window
+    # opened (true time), which the pod logged 30 s after the unshifted
+    # window's start: without the shift those rows would count as arriving.
+    def logs(job, end):
+        return _logs_relative_to(
+            end,
+            {
+                "bronze-ingest": (job, [(-90, 775_000), (-85, 775_000)]),
+                "silver-stream": (job, [(-100, 1_550_000)]),
+                "gold-refresh": (job, [(-60, 1_549_990, 322, False)]),
+            }[job],
+        )
+
+    code, saved = _drive(monkeypatch, tmp_path, logs, clock_offset=60.0)
+    assert code == 1
+    assert saved.continuous["window"]["cluster_clock_offset_seconds"] == 60.0
+    bronze = next(s for s in saved.streaming if s.job_type == "bronze-ingest")
+    assert bronze.window_input_rows == 0
+    _, unshifted = _drive(monkeypatch, tmp_path, logs, clock_offset=None)
+    b2 = next(s for s in unshifted.streaming if s.job_type == "bronze-ingest")
+    assert b2.window_input_rows == 1_550_000
+
+
+def _settling_logs(job, end):
+    return _logs_relative_to(
+        end,
+        {
+            "bronze-ingest": (job, [(t, 10_000) for t in range(-115, 0, 10)]),
+            "silver-stream": (job, [(t, 20_000) for t in range(-110, 0, 20)]),
+            "gold-refresh": (
+                job,
+                [(-90, 40_000, 20, False), (-50, 80_000, 25, False), (-5, 119_940, 22, False)],
+            ),
+        }[job],
+    )
+
+
+def _runner(fail=()):
+    from lakebench.benchmark.fingerprint import fingerprint_rows
+
+    queries = []
+    for name in ("Q1_a", "Q9_b"):
+        ok = name not in fail
+        q = MagicMock(success=ok, result_fingerprint=fingerprint_rows([(name, 1)]) if ok else None)
+        q.query.name = name
+        q.to_dict.return_value = {"name": name, "success": ok, "rows_returned": 1 if ok else 0}
+        queries.append(q)
+    r = MagicMock()
+    r.run_power.return_value = MagicMock(queries=queries)
+    return r
+
+
+def test_settled_run_records_fingerprinted_results(monkeypatch, tmp_path):
+    code, saved = _drive(
+        monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=12 * 10_000
+    )
+    assert code is None, saved.continuous
+    assert saved.continuous["settle"]["settled"] is True
+    fps = saved.continuous["result_check"]["fingerprints"]
+    assert set(fps) == {"Q1_a", "Q9_b"}
+    results = saved.experiment_block()["results"]
+    assert results["fingerprints"] == fps and "not_checked" not in results
+
+
+def test_a_failed_result_check_query_fails_the_run(monkeypatch, tmp_path):
+    code, saved = _drive(
+        monkeypatch, tmp_path, _settling_logs, runner=_runner(fail=("Q1_a",)), dg_rows=120_000
+    )
+    assert code == 1 and saved.success is False
+
+
+def test_an_unsettled_corpus_leaves_results_not_established(monkeypatch, tmp_path):
+    monkeypatch.setattr("lakebench.cli._sustained.SETTLE_MAX_SECONDS", 1)
+    code, saved = _drive(monkeypatch, tmp_path, _settling_logs, runner=_runner(), dg_rows=10**9)
+    assert code is None
+    assert "settle limit" in saved.continuous["result_check"]["not_checked"]
+    assert "not_checked" in saved.experiment_block()["results"]

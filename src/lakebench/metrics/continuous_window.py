@@ -152,8 +152,8 @@ def window_stats(
 
     - ``window_input_rows``: rows taken in inside the window. Bronze: rows
       written by batches that started writing inside it. Silver: input rows
-      of batches whose commit landed inside it. Gold: None (every cycle
-      re-reads silver).
+      of batches whose commit landed inside it. Gold: silver rows read by the
+      cycles that started inside it (every cycle re-reads silver).
     - ``pre_window_input_rows``: the same count before the window opened.
     - ``window_commits``: bronze and silver commits, gold refreshes, inside.
     - ``window_new_data_cycles``: gold only. Refreshes inside the window whose
@@ -182,6 +182,14 @@ def window_stats(
         "freshness_active_seconds": None,
         "trailing_idle_cycles": 0,
         "last_write_offset_seconds": None,
+        "first_write_offset_seconds": None,
+        "write_batches": 0,
+        # Totals as of the window's end (logs are read after it closes).
+        "rows_to_end": 0,
+        "committed_rows_to_end": None,
+        # Offsets (s from the window start) of silver commits with rows and
+        # of gold refreshes on new data, inside the window.
+        "commit_offsets": [],
     }
     if job_type == "bronze-ingest":
         writes = [e for e in events if e.kind == "write" and e.at <= end]
@@ -192,22 +200,38 @@ def window_stats(
             1 for e in events if e.kind == "commit" and _inside(e.at, start, end)
         )
         out["output_rows"] = sum(e.rows or 0 for e in writes) if writes else 0
+        out["rows_to_end"] = out["output_rows"]
+        out["write_batches"] = len(inside)
         if inside:
             out["last_write_offset_seconds"] = (max(e.at for e in inside) - start).total_seconds()
+            out["first_write_offset_seconds"] = (min(e.at for e in inside) - start).total_seconds()
     elif job_type == "silver-stream":
         rows_in: dict[int, int] = {}
         rows_out: dict[int, int] = {}
         committed_in, committed_before = set(), set()
+        commit_at: dict[int, datetime] = {}
+        transformed = 0
         for e in events:
             if e.at > end:
                 continue
             if e.kind == "transform":
                 rows_in[e.ident] = e.rows or 0
+                transformed += e.rows or 0
             elif e.kind == "output":
                 rows_out[e.ident] = e.rows or 0
             elif e.kind == "commit":
                 (committed_in if e.at >= start else committed_before).add(e.ident)
+                if e.at >= start:
+                    commit_at[e.ident] = e.at
         committed_before -= committed_in
+        out["rows_to_end"] = transformed
+        if committed_in or committed_before:
+            out["committed_rows_to_end"] = sum(
+                rows_in.get(b, 0) for b in committed_in | committed_before
+            )
+        out["commit_offsets"] = sorted(
+            (commit_at[b] - start).total_seconds() for b in committed_in if rows_in.get(b, 0) > 0
+        )
         out["window_input_rows"] = sum(rows_in.get(b, 0) for b in committed_in)
         out["pre_window_input_rows"] = sum(rows_in.get(b, 0) for b in committed_before)
         out["window_commits"] = sum(1 for b in committed_in if rows_in.get(b, 0) > 0)
@@ -235,20 +259,29 @@ def window_stats(
             out["output_rows"] = refreshed[-1].rows
         inside = [e for e in refreshed if e.at >= start]
         out["window_commits"] = len(inside)
+        agg_at = {e.ident: e.at for e in events if e.kind == "aggregate" and e.at <= end}
+        out["rows_to_end"] = sum(agg.values())
+        out["window_input_rows"] = sum(n for c, n in agg.items() if agg_at[c] >= start)
+        out["pre_window_input_rows"] = sum(n for c, n in agg.items() if agg_at[c] < start)
         cycles = sorted(agg)
-        new = 0
-        for e in inside:
-            if idle.get(e.ident):
-                continue
-            prev = [agg[c] for c in cycles if c < e.ident]
-            if e.ident in agg and prev and agg[e.ident] <= prev[-1]:
-                continue
-            new += 1
-        out["window_new_data_cycles"] = new
+
+        def saw_new_data(cycle: int) -> bool:
+            # A cycle that read no silver (empty or not ready), read no more
+            # rows than the cycle before, or was tagged idle saw no new data.
+            if idle.get(cycle) or not agg.get(cycle):
+                return False
+            prev = [agg[c] for c in cycles if c < cycle]
+            return not prev or agg[cycle] > prev[-1]
+
+        new_at = [e for e in inside if saw_new_data(e.ident)]
+        out["window_new_data_cycles"] = len(new_at)
+        out["commit_offsets"] = [(e.at - start).total_seconds() for e in new_at]
         if fresh:
             out["freshness_seconds"] = max(e.value or 0.0 for e in fresh)
+            # Trailing idle: the cycles after gold last saw new data, by the
+            # idle tag (c360) or by silver rows not growing (AML has no tag).
             cut = len(fresh)
-            while cut > 0 and fresh[cut - 1].idle:
+            while cut > 0 and not saw_new_data(fresh[cut - 1].ident):
                 cut -= 1
             out["trailing_idle_cycles"] = len(fresh) - cut
             if cut > 0:
@@ -256,8 +289,40 @@ def window_stats(
     return out
 
 
+#: Arrival share at or above which a drained run's rows/s is still gated: it
+#: is window rows over arrival_seconds, so only a corpus that ran out early
+#: leaves a rate set by a partial last trigger over a short arrival.
+GATED_ARRIVAL_FRACTION = 0.9
+
+
+def drained_rps_excluded(corpus_drained: Any, window_arrival_fraction: Any) -> str | None:
+    """Why a continuous run's rows/s is left out of a comparison, or None.
+
+    Left out when the corpus drained and data arrived for less than
+    GATED_ARRIVAL_FRACTION of the window (or the record predates the
+    window and carries no arrival share: then rows/s was corpus rows over
+    the window, a lower bound)."""
+    if corpus_drained is not True:
+        return None
+    if isinstance(window_arrival_fraction, (int, float)):
+        if window_arrival_fraction >= GATED_ARRIVAL_FRACTION:
+            return None
+        return (
+            f"corpus drained with data arriving for {window_arrival_fraction:.0%} of the "
+            f"window (under {GATED_ARRIVAL_FRACTION:.0%}); rows/s is over a short arrival"
+        )
+    return "corpus drained before the window ended; rows/s is a lower bound (LB-145)"
+
+
+#: Share of the window data must keep arriving for: a corpus that runs out
+#: earlier leaves a window that mostly measures an idle pipeline.
+MIN_ARRIVAL_FRACTION = 0.5
+
+
 def window_gate_problems(
-    stats_by_job: dict[str, dict[str, Any] | None], min_commits: int = MIN_WINDOW_COMMITS
+    stats_by_job: dict[str, dict[str, Any] | None],
+    window_seconds: float | None = None,
+    min_commits: int = MIN_WINDOW_COMMITS,
 ) -> list[str]:
     """Reasons a continuous run is not continuous processing (invariant 3).
 
@@ -265,7 +330,12 @@ def window_gate_problems(
     None when its driver log could not be read. A run passes only when data
     arrived during the window (bronze ingested rows inside it), silver
     committed and gold refreshed on new data at least *min_commits* times
-    inside it, and gold freshness was measured inside it.
+    inside it, and gold freshness was measured inside it. Silver commits and
+    gold refreshes count only from bronze's first write inside the window,
+    so a pipeline chewing through a pre-window backlog is not continuous.
+    With *window_seconds*, bronze must also write at least *min_commits*
+    batches inside the window, the last at or after
+    MIN_ARRIVAL_FRACTION of it.
     """
     problems: list[str] = []
     for job, stats in stats_by_job.items():
@@ -286,19 +356,42 @@ def window_gate_problems(
             )
         elif inside == 0:
             problems.append("continuous gate: bronze ingested 0 rows inside the window")
+        elif window_seconds:
+            batches = bronze.get("write_batches") or 0
+            last = bronze.get("last_write_offset_seconds") or 0.0
+            if batches < min_commits or last < MIN_ARRIVAL_FRACTION * window_seconds:
+                problems.append(
+                    f"continuous gate: data stopped arriving {last:.0f}s into the "
+                    f"{window_seconds:.0f}s window ({batches} bronze batch(es) inside it, "
+                    f"{before:,} rows before it): at least {min_commits} batches and arrival "
+                    f"through {MIN_ARRIVAL_FRACTION:.0%} of the window are needed. Lower "
+                    "max_files_per_trigger so the trickle lasts the window"
+                )
+    first = (bronze or {}).get("first_write_offset_seconds")
+
+    def after_arrival(stats: dict[str, Any]) -> int:
+        offsets = stats.get("commit_offsets")
+        if offsets is None or first is None:
+            return int(stats.get("window_new_data_cycles") or stats.get("window_commits") or 0)
+        return sum(1 for o in offsets if o >= first)
+
     silver = stats_by_job.get("silver-stream")
-    if silver is not None and silver["window_commits"] < min_commits:
-        problems.append(
-            f"continuous gate: silver committed {silver['window_commits']} micro-batch(es) "
-            f"with rows inside the window; continuous processing needs at least {min_commits}"
-        )
+    if silver is not None:
+        n = after_arrival(silver) if bronze is not None else silver["window_commits"]
+        if n < min_commits:
+            problems.append(
+                f"continuous gate: silver committed {n} micro-batch(es) with rows inside the "
+                f"window after data arrived in it; continuous processing needs at least "
+                f"{min_commits}"
+            )
     gold = stats_by_job.get("gold-refresh")
     if gold is not None:
-        new = gold["window_new_data_cycles"] or 0
+        new = after_arrival(gold) if bronze is not None else (gold["window_new_data_cycles"] or 0)
         if new < min_commits:
             problems.append(
                 f"continuous gate: gold refreshed on new silver data {new} time(s) inside the "
-                f"window ({gold['window_commits']} refresh(es) in all); continuous processing "
+                f"window after data arrived ({gold['window_commits']} refresh(es) in all); "
+                "continuous processing "
                 f"needs at least {min_commits}"
             )
         if gold["freshness_seconds"] is None:

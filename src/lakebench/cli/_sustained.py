@@ -1827,6 +1827,47 @@ def _size_mb(size: str) -> float:
     return float(text.rstrip("B")) / (1024 * 1024)
 
 
+def _stop_streams(k8s, namespace: str, submitted: list) -> None:
+    console.print("[bold]Stopping continuous jobs...[/bold]")
+    for _job_type, job_name in submitted:
+        try:
+            k8s.delete_custom_resource(
+                group="sparkoperator.k8s.io",
+                version="v1beta2",
+                plural="sparkapplications",
+                name=f"lakebench-{job_name}",
+                namespace=namespace,
+            )
+            print_success(f"Stopped: lakebench-{job_name}")
+        except Exception as e:  # noqa: BLE001
+            print_warning(f"Could not stop {job_name}: {e}")
+
+
+def _measure_bucket_sizes(cfg, collector) -> int:
+    """Record the bronze/silver/gold bucket sizes on the run; the total
+    object count, 0 when they cannot be measured."""
+    try:
+        from lakebench.s3 import S3Client
+
+        s3_cfg = cfg.platform.storage.s3
+        s3_client = S3Client(
+            endpoint=s3_cfg.endpoint,
+            access_key=s3_cfg.access_key,
+            secret_key=s3_cfg.secret_key,
+            region=s3_cfg.region,
+            path_style=s3_cfg.path_style,
+            ca_cert=s3_cfg.ca_cert,
+            verify_ssl=s3_cfg.verify_ssl,
+        )
+        print_info("Measuring actual S3 bucket sizes...")
+        return collector.record_actual_sizes(
+            s3_client, s3_cfg.buckets.bronze, s3_cfg.buckets.silver, s3_cfg.buckets.gold
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
+        return 0
+
+
 def continuous_arrival_advisory(cfg, run_duration: int) -> str | None:
     """A warning when the trickle will offer the whole corpus in less time
     than the window, so the window would measure a drained pipeline and the
@@ -1858,10 +1899,52 @@ def continuous_arrival_advisory(cfg, run_duration: int) -> str | None:
     )
 
 
-def end_of_window_problems(job_manager, job_names: list[str]) -> list[str]:
-    """Streams that were not running when the window closed: a stream that
-    died mid-window did not process continuously, whatever it logged
-    before."""
+def cluster_clock_offset_seconds(timeout_s: float = 5.0) -> float | None:
+    """Seconds the Kubernetes API server's clock is ahead of this host's,
+    from its HTTP Date header (1 s resolution). The stage log timestamps
+    come from pod clocks, which are assumed synced with the cluster; the
+    window is shifted by this offset so a workstation clock does not move
+    rows across the window's edges. None when it cannot be read."""
+    import email.utils
+
+    try:
+        from kubernetes import client as k8s_client
+
+        before = time.time()
+        _data, _status, headers = k8s_client.VersionApi().get_code_with_http_info(
+            _request_timeout=timeout_s
+        )
+        after = time.time()
+        date = (headers or {}).get("Date") or (headers or {}).get("date")
+        if not date:
+            return None
+        server = email.utils.parsedate_to_datetime(date).timestamp()
+        # The header truncates to the second: its true time is up to 1 s later.
+        return server + 0.5 - (before + after) / 2
+    except Exception:  # noqa: BLE001 -- best effort; recorded as unknown
+        return None
+
+
+def stream_identities(job_manager, job_names: list[str]) -> dict[str, tuple]:
+    """(driver pod, submission attempts) per stream, to tell at the window's
+    end whether a stream restarted inside it."""
+    out: dict[str, tuple] = {}
+    for name in job_names:
+        try:
+            st = job_manager.get_job_status(f"lakebench-{name}")
+            out[name] = (st.driver_pod, st.submission_attempts)
+        except Exception:  # noqa: BLE001
+            out[name] = (None, None)
+    return out
+
+
+def end_of_window_problems(
+    job_manager, job_names: list[str], opened: dict[str, tuple] | None = None
+) -> list[str]:
+    """Streams that were not running when the window closed, or that
+    restarted inside it (a new driver pod or another submission): a stream
+    that died mid-window did not process continuously, and its earlier
+    driver's log is gone, whatever the current one shows."""
     from lakebench.spark.job import JobState
 
     problems = []
@@ -1876,7 +1959,38 @@ def end_of_window_problems(job_manager, job_names: list[str]) -> list[str]:
                 f"continuous gate: lakebench-{name} was {st.state.value or 'NEW'} when the window "
                 f"closed, not RUNNING ({st.message})"
             )
+            continue
+        pod0, attempts0 = (opened or {}).get(name, (None, None))
+        if pod0 and st.driver_pod and st.driver_pod != pod0:
+            problems.append(
+                f"continuous gate: lakebench-{name} restarted inside the window (driver "
+                f"{pod0} replaced by {st.driver_pod}); its earlier driver's work is not in the log"
+            )
+        elif attempts0 and st.submission_attempts and st.submission_attempts != attempts0:
+            problems.append(
+                f"continuous gate: lakebench-{name} was resubmitted inside the window "
+                f"(submission attempts {attempts0} -> {st.submission_attempts})"
+            )
     return problems
+
+
+def short_window_problem(cfg, run_duration: int) -> str | None:
+    """Why *run_duration* cannot pass the continuous gate whatever the
+    pipeline does: gold refreshes every gold_refresh_interval, and the gate
+    needs MIN_WINDOW_COMMITS refreshes on new data inside the window, whose
+    phase relative to gold's timer is arbitrary."""
+    from lakebench.metrics.continuous_window import MIN_WINDOW_COMMITS
+
+    gold_s = _parse_spark_interval(cfg.architecture.pipeline.sustained.gold_refresh_interval)
+    need = (MIN_WINDOW_COMMITS + 1) * gold_s
+    if run_duration >= need:
+        return None
+    return (
+        f"run_duration {run_duration}s is too short for a continuous run: the gate needs "
+        f"{MIN_WINDOW_COMMITS} gold refreshes on new data inside the window, and with "
+        f"gold_refresh_interval {gold_s}s that needs a window of at least {need}s. Lengthen "
+        "run_duration or shorten gold_refresh_interval."
+    )
 
 
 #: Longest the CLI keeps the streams running after the window so the corpus
@@ -1927,24 +2041,26 @@ def wait_for_settle(
         time.sleep(poll_s)
 
 
-def continuous_result_check(bench_runner) -> dict:
+def continuous_result_check(bench_runner) -> tuple[dict, list[dict]]:
     """Run the query set once over the settled tables (streams stopped) and
     fingerprint every result, as a batch run does after its benchmark.
-    Failed queries are recorded with no fingerprint."""
+    Failed queries are recorded with no fingerprint. Returns the record and
+    the query results (for the benchmark gate)."""
     try:
         result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=True)
     except Exception as e:  # noqa: BLE001
-        return {"not_checked": f"the result check could not run: {e}"}
+        return {"not_checked": f"the result check could not run: {e}"}, []
+    queries = [qr.to_dict() for qr in result.queries]
     fps = {qr.query.name: (qr.result_fingerprint if qr.success else None) for qr in result.queries}
     if not fps:
-        return {"not_checked": "the result check ran no queries"}
+        return {"not_checked": "the result check ran no queries"}, []
     from lakebench.benchmark.queries import query_set_id
 
     return {
         "query_set_id": query_set_id(fps),
         "fingerprints": fps,
         "failed": sorted(n for n, f in fps.items() if f is None),
-    }
+    }, queries
 
 
 def _aml_cumulative_alerts(gold_refresh_logs: str | None) -> int | None:
@@ -2044,6 +2160,12 @@ def _run_sustained(
     pipeline_success = True
     _datagen_output_gb = 0.0
     _datagen_output_rows = 0
+    # Streams submitted and not yet stopped: the finally block stops them on
+    # any early exit, so an error or Ctrl-C never leaves them running.
+    submitted: list = []
+    streams_stopped = False
+    k8s = None
+    _total_s3_objects: int | None = None
     streaming_jobs = [
         (JobType.BRONZE_INGEST, "bronze-ingest"),
         (JobType.SILVER_STREAM, "silver-stream"),
@@ -2085,9 +2207,17 @@ def _run_sustained(
         job_manager: SparkJobManager = get_engine(cfg, k8s)  # type: ignore[assignment]
         monitor = SparkJobMonitor(cfg, k8s, job_manager=job_manager)
 
+        _short = short_window_problem(cfg, run_duration)
+        if _short:
+            print_error(_short)
+            pipeline_success = False
+            raise typer.Exit(1)
         _advisory = continuous_arrival_advisory(cfg, run_duration)
         if _advisory:
             print_warning(_advisory)
+        if not skip_benchmark and cfg.architecture.query_engine.type.value == "none":
+            print_info("No query engine in this recipe: no in-stream rounds and no result check")
+            skip_benchmark = True
 
         # The benchmark runner serves the in-stream rounds and the end-of-run
         # result check. A run that cannot create it cannot produce the query
@@ -2324,7 +2454,13 @@ def _run_sustained(
                     name: {"running_at": w.running_at, "submission_failures": w.failures}
                     for name, w in stream_watch.items()
                 }
-        window_start = utc_naive(datetime.now(timezone.utc))
+        # The window in cluster time (pod log clocks), not this host's.
+        clock_offset = cluster_clock_offset_seconds()
+        from datetime import timedelta as _td
+
+        _shift = _td(seconds=clock_offset or 0.0)
+        window_start = utc_naive(datetime.now(timezone.utc)) + _shift
+        opened_identity = stream_identities(job_manager, [n for _, n in submitted])
         _first_up = min(
             (datetime.fromisoformat(w.running_at) for w in stream_watch.values() if w.running_at),
             default=None,
@@ -2605,10 +2741,13 @@ def _run_sustained(
                 details={"elapsed_seconds": elapsed, "remaining_seconds": remaining},
             )
 
-        window_end = utc_naive(datetime.now(timezone.utc))
+        window_end = utc_naive(datetime.now(timezone.utc)) + _shift
         window_seconds = (window_end - window_start).total_seconds()
-        # A stream that died inside the window did not process continuously.
-        window_problems = end_of_window_problems(job_manager, [n for _, n in submitted])
+        # A stream that died or restarted inside the window did not process
+        # continuously.
+        window_problems = end_of_window_problems(
+            job_manager, [n for _, n in submitted], opened_identity
+        )
 
         # Measure bronze bucket for datagen stats (datagen runs concurrently,
         # so we measure after the monitoring window to capture all output)
@@ -2710,7 +2849,7 @@ def _run_sustained(
                 sm.running_at = watch.running_at
                 sm.submission_failures = list(watch.failures)
             parsed[job_name] = sm
-        window_problems.extend(window_gate_problems(window_stats_by_job))
+        window_problems.extend(window_gate_problems(window_stats_by_job, window_seconds))
         for _problem in window_problems:
             print_error(_problem)
         if window_problems:
@@ -2725,6 +2864,11 @@ def _run_sustained(
                 "start": window_start.isoformat() + "Z",
                 "end": window_end.isoformat() + "Z",
                 "seconds": round(window_seconds, 1),
+                # Cluster clock minus this host's; None: unknown, the
+                # window is on this host's clock.
+                "cluster_clock_offset_seconds": (
+                    round(clock_offset, 1) if clock_offset is not None else None
+                ),
             },
             "gate_problems": list(window_problems),
         }
@@ -2748,10 +2892,20 @@ def _run_sustained(
         # alone. Not part of the window: nothing here is scored.
         settle: dict = {"settled": False}
         result_check: dict = {}
+        # Bucket sizes and object counts as of the window, before any settle
+        # micro-batches add files.
+        _total_s3_objects = _measure_bucket_sizes(cfg, collector)
         if bench_runner is None:
             result_check = {"not_checked": "no benchmark (--skip-benchmark)"}
         elif not pipeline_success:
             result_check = {"not_checked": "the run failed its gates"}
+        elif cfg.architecture.workload.schema_type.value == "financial":
+            result_check = {
+                "not_checked": (
+                    "AML continuous results depend on when detection and TM passes ran "
+                    "relative to arrival, so they are not a function of the corpus alone"
+                )
+            }
         elif _datagen_output_rows <= 0:
             result_check = {"not_checked": "datagen row count not measured, so settling is unknown"}
         else:
@@ -2793,19 +2947,8 @@ def _run_sustained(
                     )
 
         # Stop streaming jobs
-        console.print("[bold]Stopping continuous jobs...[/bold]")
-        for _job_type, job_name in submitted:
-            try:
-                k8s.delete_custom_resource(
-                    group="sparkoperator.k8s.io",
-                    version="v1beta2",
-                    plural="sparkapplications",
-                    name=f"lakebench-{job_name}",
-                    namespace=namespace,
-                )
-                print_success(f"Stopped: lakebench-{job_name}")
-            except Exception as e:
-                print_warning(f"Could not stop {job_name}: {e}")
+        _stop_streams(k8s, namespace, submitted)
+        streams_stopped = True
 
         _journal_safe(
             j.record,
@@ -2816,7 +2959,15 @@ def _run_sustained(
 
         if settle.get("settled") and bench_runner is not None:
             print_info("Result check: fingerprinting the query set over the settled tables...")
-            result_check = continuous_result_check(bench_runner)
+            result_check, _check_queries = continuous_result_check(bench_runner)
+            if _check_queries:
+                # The settled tables answer every query; a failure here is a
+                # failed query, as in batch.
+                from lakebench.cli._run import _benchmark_gate_problems
+
+                for problem in _benchmark_gate_problems(cfg, _check_queries, check_empty=True):
+                    print_error(f"Result check: {problem}")
+                    pipeline_success = False
             if result_check.get("fingerprints"):
                 _n = len(result_check["fingerprints"])
                 _bad = result_check.get("failed") or []
@@ -3040,31 +3191,18 @@ def _run_sustained(
         pipeline_success = False
         _journal_safe(j.end_command, success=False, message=str(e))
         raise typer.Exit(1)  # noqa: B904
+    except typer.Exit:
+        raise
+    except BaseException:
+        # An error or Ctrl-C anywhere (the settle phase can last 30 min)
+        # is not a pass.
+        pipeline_success = False
+        raise
     finally:
-        # Measure actual S3 bucket sizes before saving metrics
-        try:
-            from lakebench.s3 import S3Client
-
-            s3_cfg = cfg.platform.storage.s3
-            s3_client = S3Client(
-                endpoint=s3_cfg.endpoint,
-                access_key=s3_cfg.access_key,
-                secret_key=s3_cfg.secret_key,
-                region=s3_cfg.region,
-                path_style=s3_cfg.path_style,
-                ca_cert=s3_cfg.ca_cert,
-                verify_ssl=s3_cfg.verify_ssl,
-            )
-            print_info("Measuring actual S3 bucket sizes...")
-            _total_s3_objects = collector.record_actual_sizes(
-                s3_client,
-                s3_cfg.buckets.bronze,
-                s3_cfg.buckets.silver,
-                s3_cfg.buckets.gold,
-            )
-        except Exception as e:
-            _total_s3_objects = 0
-            console.print(f"  [yellow]Could not measure S3 sizes: {e}[/yellow]")
+        if submitted and not streams_stopped and k8s is not None:
+            _stop_streams(k8s, cfg.get_namespace(), submitted)
+        if _total_s3_objects is None:
+            _total_s3_objects = _measure_bucket_sizes(cfg, collector)
 
         run_metrics = collector.end_run(success=pipeline_success)
         if run_metrics:
