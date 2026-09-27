@@ -1977,6 +1977,9 @@ class StreamStartWatch:
                 self.running_at = datetime.now(timezone.utc).isoformat()
             return
         if status.state == JobState.SUBMISSION_FAILED:
+            # A stream seen running that fails a resubmission is not running:
+            # running_at is the time it ran again, not the first sighting.
+            self.running_at = None
             key = (status.submission_attempts, status.message)
             if key != self._last_key:
                 self._last_key = key
@@ -2079,13 +2082,15 @@ def watch_all_streams(job_manager, watches: dict[str, StreamStartWatch], current
     stream whose submission failed while an earlier one was waited on was
     RUNNING again by its own turn and its failures were never seen: lb16-cf
     recorded only bronze-ingest's, while silver-stream's and gold-refresh's
-    showed only in the operator watch.
+    showed only in the operator watch. Streams already seen running stay
+    polled: one that dies and fails its resubmission before its own turn
+    would otherwise go unrecorded the same way.
     """
 
     def on_status(status, elapsed: float) -> None:
         watches[current](status, elapsed)
         for name, watch in watches.items():
-            if name == current or watch.running_at is not None:
+            if name == current:
                 continue
             try:
                 other = job_manager.get_job_status(f"lakebench-{name}")

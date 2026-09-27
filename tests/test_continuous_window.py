@@ -1021,10 +1021,18 @@ def test_every_streams_submission_failures_are_recorded_while_another_is_waited_
     assert [f["lost_seconds"] for f in gold.failures] == [10.0, 10.0]
     assert gold.submission_retry_seconds == 20.0
     assert silver.running_at and gold.running_at
-    # Once running, a stream is no longer polled.
-    jm.get_job_status.reset_mock()
+    # A stream seen running stays polled: a failed resubmission is recorded
+    # and running_at moves to when it ran again.
+    first_up = silver.running_at
+    others["lakebench-silver-stream"] = [st(failed, 2), st(JobState.RUNNING)]
+    others["lakebench-gold-refresh"] = [st(JobState.RUNNING), st(JobState.RUNNING)]
+    now[0] = 30.0
     cb(st(JobState.RUNNING), 30.0)
-    jm.get_job_status.assert_not_called()
+    assert [f["attempt"] for f in silver.failures] == [1, 2] and silver.running_at is None
+    now[0] = 40.0
+    cb(st(JobState.RUNNING), 40.0)
+    assert silver.failures[1]["lost_seconds"] == 10.0
+    assert silver.running_at is not None and silver.running_at >= first_up
 
 
 def test_a_failure_open_when_the_wait_ends_is_closed_with_its_time():
@@ -1075,6 +1083,41 @@ def test_stream_submission_failures_reach_the_stage_and_the_report(tmp_path):
         .read_text()
     )
     assert "2 failed submissions, 60s before it ran" in html
+
+
+def test_stream_failures_recorded_without_lost_seconds_say_so(tmp_path):
+    """A record from before lost_seconds was kept reads unknown, not 0s."""
+    from lakebench.metrics.collector import (
+        PipelineMetrics,
+        StreamingJobMetrics,
+        build_pipeline_benchmark,
+    )
+    from lakebench.metrics.storage import MetricsStorage
+    from lakebench.reports.generator import ReportGenerator
+
+    m = PipelineMetrics(
+        run_id="20260927-000000-eeeeee",
+        deployment_name="d",
+        start_time=datetime(2026, 9, 27),
+        success=True,
+        config_snapshot={"mode": "continuous", "table_format": "iceberg"},
+    )
+    m.streaming = [
+        StreamingJobMetrics(
+            job_name="lakebench-bronze-ingest",
+            job_type="bronze-ingest",
+            submission_failures=[{"at": "t", "attempt": 1, "reason": "r"}],
+        )
+    ]
+    m.pipeline_benchmark = build_pipeline_benchmark(m)
+    MetricsStorage(tmp_path).save_run(m)
+    html = (
+        ReportGenerator(metrics_dir=tmp_path, output_dir=tmp_path)
+        .generate_report(m.run_id)
+        .read_text()
+    )
+    assert "1 failed submission, time lost not recorded" in html
+    assert "0s before it ran" not in html
 
 
 def _header(fmt: str, engine: str, **kw) -> list[tuple[str, str]]:

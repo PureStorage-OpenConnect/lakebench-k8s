@@ -2194,9 +2194,16 @@ class ReportGenerator:
             if is_sustained and n_fail:
                 # The stream waited on operator submission retries before
                 # the window could open.
+                # Records from before lost_seconds was kept: the time is
+                # unknown, not zero.
+                lost = (
+                    f"{stage.submission_retry_seconds:.0f}s before it ran"
+                    if all("lost_seconds" in f for f in stage.submission_failures)
+                    else "time lost not recorded"
+                )
                 elapsed += (
                     f"<br><small>{n_fail} failed submission{'s' if n_fail != 1 else ''}, "
-                    f"{stage.submission_retry_seconds:.0f}s before it ran</small>"
+                    f"{lost}</small>"
                 )
 
             if is_sustained:
