@@ -868,11 +868,18 @@ class SustainedConfig(ConfigModel):
     # Iceberg retention -- periodic expire_snapshots + remove_orphan_files
     # via Trino to prevent unbounded snapshot/metadata growth during long
     # sustained runs.
-    retention_interval: int = Field(
-        default=1800,
+    retention_interval: int | None = Field(
+        default=None,
         ge=300,
         le=7200,
-        description="Seconds between Iceberg maintenance rounds (expire_snapshots + remove_orphan_files)",
+        description=(
+            "Seconds between table maintenance rounds (Iceberg expire_snapshots + "
+            "remove_orphan_files, Delta VACUUM). Unset (auto): run_duration / 3, "
+            "within 300..7200, so a default run maintains inside its window; the "
+            "old fixed 1800 equalled the default run_duration and never fired. An "
+            "explicit value too long to fire inside the window is refused at run "
+            "start unless --skip-maintenance is given."
+        ),
     )
     retention_threshold: str = Field(
         default="30m",
@@ -907,7 +914,12 @@ class SustainedConfig(ConfigModel):
     compaction_interval: int = Field(
         default=0,
         ge=0,
-        description=("Seconds between compaction rounds. 0 = auto (2x retention_interval)."),
+        description=(
+            "Seconds between compaction rounds. 0 = auto (2x the effective "
+            "retention_interval, resolved at run start). An explicit value too "
+            "long to fire inside the window is refused at run start unless "
+            "compaction_enabled is false or --skip-maintenance is given."
+        ),
     )
 
     # In-stream benchmark settings -- controls periodic benchmark
@@ -958,10 +970,21 @@ class SustainedConfig(ConfigModel):
             self.benchmark_warmup = gold_s
         if self.benchmark_interval < gold_s:
             self.benchmark_interval = gold_s
-        # Resolve compaction_interval=0 to 2x retention_interval
-        if self.compaction_interval == 0:
-            self.compaction_interval = self.retention_interval * 2
         return self
+
+    def effective_retention_interval(self, run_duration: int | None = None) -> int:
+        """retention_interval, or the auto value for *run_duration* (the
+        config's own when None): a third of the window, within 300..7200."""
+        if self.retention_interval is not None:
+            return self.retention_interval
+        window = self.run_duration if run_duration is None else run_duration
+        return min(7200, max(300, int(window) // 3))
+
+    def effective_compaction_interval(self, run_duration: int | None = None) -> int:
+        """compaction_interval, or auto: 2x the effective retention_interval."""
+        if self.compaction_interval:
+            return self.compaction_interval
+        return 2 * self.effective_retention_interval(run_duration)
 
 
 class ProcessingConfig(ConfigModel):

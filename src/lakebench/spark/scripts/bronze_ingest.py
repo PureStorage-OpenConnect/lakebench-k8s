@@ -31,7 +31,7 @@ query would re-read the whole landing zone into it.
 Environment variables (set by job.py):
     LB_BRONZE_URI        - s3a://bronze-bucket/
     BRONZE_BUCKET        - bucket name (for checkpoint path)
-    CATALOG_NAME         - Iceberg catalog name (e.g., "lakehouse")
+    LB_ICEBERG_CATALOG   - Iceberg catalog name (e.g., "lakehouse")
     CHECKPOINT_LOCATION  - s3a://bronze-bucket/checkpoints/bronze-ingest/
     TRIGGER_INTERVAL     - e.g., "30 seconds"
 """
@@ -46,6 +46,7 @@ from common import (
     await_stream,
     env,
     log,
+    pipeline_catalog,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
     set_utc_session,
@@ -138,7 +139,8 @@ def write_bronze_batch(
 
 def main() -> None:
     bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-    catalog_name = env("CATALOG_NAME", "lakehouse")
+    # The catalog silver-stream reads bronze from and the reset drops it in.
+    catalog_name = pipeline_catalog()
     checkpoint_location = env("CHECKPOINT_LOCATION")
     trigger_interval = env("TRIGGER_INTERVAL", "30 seconds")
     max_files_per_trigger = env("MAX_FILES_PER_TRIGGER", "50")

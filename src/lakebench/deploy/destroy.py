@@ -1868,7 +1868,9 @@ def destroy_all(
                 # - Trino DROP TABLE, Iceberg on REST (Polaris): purgeTable;
                 #   the server deletes the referenced files if it allows purge.
                 # - Trino DROP TABLE, Delta: the table directory when the
-                #   table is managed (all lakebench Delta tables are).
+                #   table is managed (every lakebench Delta table except the
+                #   continuous bronze_raw, which is EXTERNAL at an explicit
+                #   bucket path; DROP leaves its files).
                 # - Trino CALL system.unregister_table (Iceberg and Delta):
                 #   the catalog entry only, on every catalog type.
                 # - Spark Thrift DROP TABLE, Iceberg (no PURGE): the catalog

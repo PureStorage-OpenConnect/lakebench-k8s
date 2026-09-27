@@ -26,6 +26,25 @@ def env(name, default=None):
     return v
 
 
+def pipeline_catalog():
+    """The Spark catalog every pipeline job reads and writes c360 tables in.
+
+    LB_ICEBERG_CATALOG, which job.py sets to the recipe's named catalog for
+    Iceberg and to ``spark_catalog`` for Delta + Hive (DeltaCatalog is the
+    session catalog; no named catalog exists). CATALOG_NAME is the Trino
+    catalog name: for Delta + Hive it names no Spark catalog, and a table
+    ``lakehouse.default.bronze_raw`` resolves as the two-part namespace
+    ``lakehouse.default`` inside spark_catalog, which Spark refuses
+    (REQUIRES_SINGLE_PART_NAMESPACE).
+    """
+    return env("LB_ICEBERG_CATALOG", os.getenv("CATALOG_NAME") or "lakehouse")
+
+
+def pipeline_table(key, default):
+    """``pipeline_catalog()`` + the table name in env var *key* (or *default*)."""
+    return f"{pipeline_catalog()}.{env(key, default)}"
+
+
 def one_line(text, limit=200):
     """Collapse whitespace so a value stays on one log line.
 
@@ -1347,6 +1366,34 @@ def log_c360_check(spark, silver_tbl, gold_tbl):
 # ---------------------------------------------------------------------------
 
 
+def clear_unregistered_table_dirs(spark, targets, *, owned_uris, keep_uris):
+    """Delete the directory of each (table, location) whose table is not in
+    the catalog. Returns the locations deleted.
+
+    For tables created at an explicit path (the Delta continuous bronze
+    table): DROP leaves their files, so a reset interrupted between its DROP
+    and its directory delete, or a first commit whose catalog registration
+    failed, leaves a _delta_log that the next create refuses to adopt
+    (refuse_orphan_delta_log). reset_stream_tables skips a table that is not
+    registered, so without this the deployment stayed wedged. The same
+    ``owned_table_dir`` guard applies.
+    """
+    cleared = []
+    for fq, location in targets:
+        if table_exists(spark, fq):
+            continue
+        name = fq.rsplit(".", 1)[-1]
+        if not owned_table_dir(location, owned_uris, keep_uris, name):
+            log(f"Continuous reset: kept {location} (outside this deployment or not its own dir)")
+            continue
+        fs, path = _hadoop_fs(spark, location)
+        if fs.exists(path):
+            fs.delete(path, True)
+            cleared.append(location)
+            log(f"Continuous reset: deleted {location} ({fq} is not in the catalog)")
+    return cleared
+
+
 def _is_unity_catalog():
     """Check if the current catalog is Unity (requires EXTERNAL table writes)."""
     return os.getenv("LB_CATALOG_TYPE", "hive") == "unity"
@@ -1403,18 +1450,23 @@ def _s3_table_path(bucket_uri, fq_table):
 _REGISTERED_DELTA_TABLES: set[str] = set()
 
 
-def refuse_orphan_delta_log(spark, fq_table):
-    """Refuse to create a managed Delta table over an unregistered _delta_log.
+def refuse_orphan_delta_log(spark, fq_table, location=None):
+    """Refuse to create a Delta table over an unregistered _delta_log.
 
     Destroy unregisters tables whose files sit in a bucket it does not own
     and leaves the files (LB-186). A later run with the same names would find
-    the table missing from the catalog and create it at the same managed
-    location, appending to or adopting the old log. Stop instead.
+    the table missing from the catalog and create it at the same location,
+    appending to or adopting the old log. Stop instead. *location* is the
+    table's explicit path when it has one; otherwise the managed location
+    under the namespace is checked.
     """
     if fq_table in _REGISTERED_DELTA_TABLES:
         return  # a micro-batch loop: checked once per table and process
     if table_exists(spark, fq_table):
         _REGISTERED_DELTA_TABLES.add(fq_table)
+        return
+    if location:
+        _refuse_existing_delta_log(spark, fq_table, f"{location.rstrip('/')}/_delta_log")
         return
     parts = fq_table.split(".")
     name = parts[-1]
@@ -1435,7 +1487,10 @@ def refuse_orphan_delta_log(spark, fq_table):
             break
     if not location:
         return
-    log_dir = f"{location.rstrip('/')}/{name.lower()}/_delta_log"
+    _refuse_existing_delta_log(spark, fq_table, f"{location.rstrip('/')}/{name.lower()}/_delta_log")
+
+
+def _refuse_existing_delta_log(spark, fq_table, log_dir):
     fs, path = _hadoop_fs(spark, log_dir)
     if fs.exists(path):
         raise RuntimeError(
@@ -1496,7 +1551,7 @@ def files_added_by_last_commit(spark, fq_table):
 
 
 def write_delta_table(
-    spark, df, fq_table, bucket_uri, mode="append", partition_cols=None, options=None
+    spark, df, fq_table, bucket_uri, mode="append", partition_cols=None, options=None, location=None
 ):
     """Write a DataFrame as a Delta table, handling managed vs EXTERNAL.
 
@@ -1516,6 +1571,9 @@ def write_delta_table(
         mode: Write mode -- "append" or "overwrite"
         partition_cols: List of partition column names, or None
         options: Dict of writer options (e.g. Delta table properties)
+        location: Explicit table path for the Hive catalog (the table is then
+            EXTERNAL); None keeps the namespace's managed location. Unity
+            always writes to the _s3_table_path location.
     """
     options = options or {}
     writer = df.write.format("delta").mode(mode)
@@ -1545,6 +1603,10 @@ def write_delta_table(
         )
     else:
         # Managed table path -- saveAsTable registers via DeltaCatalog/Hive
-        refuse_orphan_delta_log(spark, fq_table)
-        log(f"Writing managed Delta table {fq_table} (mode={mode})")
+        refuse_orphan_delta_log(spark, fq_table, location)
+        if location:
+            writer = writer.option("path", location)
+            log(f"Writing Delta table {fq_table} at {location} (mode={mode})")
+        else:
+            log(f"Writing managed Delta table {fq_table} (mode={mode})")
         writer.saveAsTable(fq_table)

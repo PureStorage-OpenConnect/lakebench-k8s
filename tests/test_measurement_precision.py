@@ -427,6 +427,28 @@ class TestInfoLabels:
         assert "14 days (2024-12-18 to 2025-01-01)" in out.output
         assert "365 days" not in out.output
 
+    def test_continuous_datagen_mode_says_how_the_corpus_arrives(self, tmp_path):
+        """lb16-cs: "Datagen mode: batch" beside "Pipeline mode: continuous"."""
+        from typer.testing import CliRunner
+
+        from lakebench.cli import app
+
+        out = CliRunner().invoke(app, ["info", str(_continuous_c360(tmp_path))])
+        assert out.exit_code == 0, out.output
+        text = " ".join(out.output.replace("\u2502", " ").split())
+        assert "batch generator (auto for scale 1); corpus written up front" in text
+        assert "trickled to bronze by the pipeline" in text
+
+    def test_datagen_mode_line_batch_and_explicit(self):
+        from lakebench.cli import info_datagen_mode
+        from tests.conftest import make_config
+
+        cfg = make_config()
+        assert info_datagen_mode(cfg).startswith("batch generator (auto for scale")
+        assert "trickle" not in info_datagen_mode(cfg)
+        cfg = make_config(workload={"datagen": {"mode": "continuous"}})
+        assert info_datagen_mode(cfg) == "continuous generator (set in config)"
+
     def test_date_range_defaults_and_non_c360(self):
         from lakebench.cli import info_date_range
         from tests.conftest import make_config

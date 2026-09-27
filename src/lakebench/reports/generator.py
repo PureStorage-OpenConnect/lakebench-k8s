@@ -2420,6 +2420,11 @@ class ReportGenerator:
                 + (f" -- {'; '.join(eff.get('reasons') or [])}" if eff.get("reasons") else ""),
             ),
             ("Maintenance settings", exp.get("maintenance_settings") or "none"),
+            *(
+                [("In-stream QpH rounds", lim.get("benchmark_rounds"))]
+                if exp.get("mode") == "sustained"
+                else []
+            ),
             ("System", exp.get("system") or "unknown"),
             (
                 "Corpus observed",

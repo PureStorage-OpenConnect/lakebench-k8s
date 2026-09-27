@@ -1584,6 +1584,23 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
     return health
 
 
+def gold_event_age_sql(engine: str, fq_gold: str) -> str:
+    """Seconds from gold's newest event date to now, in *engine*'s dialect.
+
+    Trino and DuckDB take ``date_diff('second', start, end)``. Spark SQL has
+    no string-unit form: Spark Thrift rejected it on every round with
+    INVALID_PARAMETER_VALUE.DATETIME_UNIT (lb16-cs), and adapt_query only
+    rewrites the 'day' form. Spark gets the difference of unix_timestamp
+    values, which is whole seconds like date_diff.
+    """
+    newest = "CAST(MAX(interaction_date) AS TIMESTAMP)"
+    if engine == "spark-thrift":
+        expr = f"CAST(unix_timestamp(current_timestamp()) - unix_timestamp({newest}) AS BIGINT)"
+    else:
+        expr = f"date_diff('second', {newest}, current_timestamp)"
+    return f"SELECT {expr} FROM {fq_gold}"
+
+
 def _run_benchmark_round(
     cfg,
     bench_runner,
@@ -1632,9 +1649,8 @@ def _run_benchmark_round(
     try:
         catalog = bench_runner.catalog
         gold_table = bench_runner.gold_table
-        freshness_sql = (
-            f"SELECT date_diff('second', CAST(MAX(interaction_date) AS timestamp), current_timestamp) "
-            f"FROM {catalog}.{gold_table}"
+        freshness_sql = gold_event_age_sql(
+            bench_runner.executor.engine_name(), f"{catalog}.{gold_table}"
         )
         freshness_sql = bench_runner.executor.adapt_query(freshness_sql)
         freshness_result = bench_runner.executor.execute_query(freshness_sql, timeout=30)
@@ -2030,6 +2046,74 @@ AUTO_ARRIVAL_MARGIN = 1.2
 AUTO_TRICKLE_CEILING = 50
 
 
+#: Seconds of window a continuous maintenance or compaction round needs left
+#: when it comes due (continuous_round_bounds returns None below this).
+MAINTENANCE_ROUND_MIN_LEFT = _CONTINUOUS_MIN_SECONDS + _BUDGET_GRACE_SECONDS
+
+
+def _fires_in_window(interval: int, run_duration: int) -> bool:
+    """True when a round first due at *interval* seconds still gets a budget."""
+    return continuous_round_bounds(interval, run_duration - interval) is not None
+
+
+def resolve_maintenance_schedule(sustained, run_duration: int, *, skip_maintenance: bool) -> dict:
+    """The maintenance and compaction intervals this continuous run uses.
+
+    Unset intervals are derived from the window (retention: run_duration / 3,
+    within 300..7200; compaction: 2 x retention). The old fixed default,
+    retention_interval 1800 with the default run_duration 1800, never fired,
+    so a default run measured a pipeline with no table maintenance (lb16-cs).
+    An explicit interval that cannot fire inside the window is refused
+    (``problem``) unless maintenance is disabled: --skip-maintenance for both,
+    compaction_enabled false for compaction. A derived one that cannot fire
+    (a window under about six minutes) is a warning; the effective
+    maintenance record then says not run.
+    """
+    out: dict = {"problem": None, "warnings": []}
+    retention = sustained.effective_retention_interval(run_duration)
+    compaction = sustained.effective_compaction_interval(run_duration)
+    out["retention_interval"] = retention
+    out["compaction_interval"] = compaction
+    out["retention_source"] = (
+        "set in config" if sustained.retention_interval is not None else "auto: run_duration / 3"
+    )
+    out["compaction_source"] = (
+        "set in config" if sustained.compaction_interval else "auto: 2 x retention_interval"
+    )
+    if skip_maintenance:
+        return out
+    latest = run_duration - MAINTENANCE_ROUND_MIN_LEFT
+    if not _fires_in_window(retention, run_duration):
+        if sustained.retention_interval is not None:
+            out["problem"] = (
+                f"architecture.pipeline.continuous.retention_interval is {retention} s but "
+                f"the run window is {run_duration} s: no maintenance round would run inside "
+                f"it (the first is due at {retention} s and needs "
+                f"{MAINTENANCE_ROUND_MIN_LEFT} s left). Set it to at most {latest} s, remove "
+                "it (auto: run_duration / 3), or pass --skip-maintenance to run without "
+                "table maintenance."
+            )
+            return out
+        out["warnings"].append(
+            f"No table maintenance round fits in a {run_duration} s window (the shortest "
+            f"interval is 300 s); the run records maintenance as not run."
+        )
+    if sustained.compaction_enabled and not _fires_in_window(compaction, run_duration):
+        if sustained.compaction_interval:
+            out["problem"] = (
+                f"architecture.pipeline.continuous.compaction_interval is {compaction} s but "
+                f"the run window is {run_duration} s: no compaction round would run inside "
+                f"it. Set it to at most {latest} s, set it to 0 (auto), set "
+                "compaction_enabled: false, or pass --skip-maintenance."
+            )
+            return out
+        out["warnings"].append(
+            f"No compaction round fits in the {run_duration} s window (auto interval "
+            f"{compaction} s = 2 x retention_interval); set compaction_interval to run one."
+        )
+    return out
+
+
 def resolve_trickle(cfg, run_duration: int) -> dict:
     """The max_files_per_trigger this run uses, and why.
 
@@ -2335,6 +2419,21 @@ def _run_sustained(
         f"Trickle: {trickle['value']} files per bronze trigger ({trickle['source']})"
         + (f", about {_arrival:.0f}s of arrival for the {run_duration}s window" if _arrival else "")
     )
+
+    # Maintenance inside the window (DESIGN 5: continuous mode includes
+    # periodic maintenance). Resolved values are written back so the config
+    # snapshot and the experiment block record the intervals that ran.
+    sustained_cfg = cfg.architecture.pipeline.sustained
+    schedule = resolve_maintenance_schedule(
+        sustained_cfg, run_duration, skip_maintenance=skip_maintenance
+    )
+    if schedule["problem"]:
+        print_error(schedule["problem"])
+        raise typer.Exit(1)
+    for msg in schedule["warnings"]:
+        print_warning(msg)
+    sustained_cfg.retention_interval = schedule["retention_interval"]
+    sustained_cfg.compaction_interval = schedule["compaction_interval"]
 
     console.print(
         Panel(
@@ -2736,7 +2835,7 @@ def _run_sustained(
         # the expire_snapshots loop and periodic compaction; without
         # skipping, mid-run maintenance would distort a raw
         # freshness/throughput measurement.
-        retention_interval = sustained_cfg.retention_interval
+        retention_interval = sustained_cfg.effective_retention_interval(run_duration)
         retention_threshold = sustained_cfg.retention_threshold
         if skip_maintenance:
             next_maintenance_at = float("inf")
@@ -2744,7 +2843,8 @@ def _run_sustained(
         else:
             next_maintenance_at = float(retention_interval)  # first run after one interval
             print_info(
-                f"Iceberg retention: every {retention_interval}s (threshold: {retention_threshold})"
+                f"Iceberg retention: every {retention_interval}s "
+                f"({schedule['retention_source']}; threshold: {retention_threshold})"
             )
             from lakebench.config.loader import retention_floor_advisory
 
@@ -2755,10 +2855,12 @@ def _run_sustained(
 
         # Iceberg compaction scheduling (v1.1.0)
         compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
-        compaction_interval = sustained_cfg.compaction_interval
+        compaction_interval = sustained_cfg.effective_compaction_interval(run_duration)
         next_compaction_at = float(compaction_interval) if compaction_enabled else float("inf")
         if compaction_enabled:
-            print_info(f"Iceberg compaction: every {compaction_interval}s")
+            print_info(
+                f"Iceberg compaction: every {compaction_interval}s ({schedule['compaction_source']})"
+            )
         elif sustained_cfg.compaction_enabled and skip_maintenance:
             print_info("Iceberg compaction: disabled (--skip-maintenance)")
 

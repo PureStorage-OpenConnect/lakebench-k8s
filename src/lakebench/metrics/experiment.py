@@ -319,8 +319,8 @@ def experiment_inputs(
             "settings": (
                 {
                     "retention_threshold": sustained.retention_threshold,
-                    "retention_interval": sustained.retention_interval,
-                    "compaction_interval": sustained.compaction_interval,
+                    "retention_interval": sustained.effective_retention_interval(),
+                    "compaction_interval": sustained.effective_compaction_interval(),
                 }
                 if arch.pipeline.mode.value in ("sustained", "continuous")
                 else {
@@ -699,6 +699,12 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     limits["autosize_cuts"] = list(getattr(metrics, "autosize_cuts", None) or [])
     if mode == "sustained":
         limits["intake_limit"] = getattr(pb, "intake_limit", None)
+        # Rounds behind the continuous QpH median: benchmark iterations are
+        # an execution condition (DESIGN 2.4), and a median over 4 rounds
+        # does not stand like-for-like against one over 5.
+        limits["benchmark_rounds"] = sum(
+            1 for r in getattr(pb, "benchmark_rounds", None) or [] if (r.qph or 0) > 0
+        )
     else:
         limits.pop("max_files_per_trigger", None)
     if pb is not None:
@@ -822,7 +828,7 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
     w = exp.get("workload") or {}
     c = exp.get("corpus") or {}
     dg = c.get("datagen") or {}
-    return {
+    out = {
         "workload": w.get("name"),
         "workload version": w.get("version"),
         "generator model version": w.get("generator_model_version"),
@@ -845,6 +851,11 @@ def identity(exp: Mapping[str, Any]) -> dict[str, Any]:
         "benchmark mode": (exp.get("limits") or {}).get("benchmark_mode"),
         "Lakebench limits that bound": list((exp.get("limits") or {}).get("bound_kinds") or []),
     }
+    if exp.get("mode") == "sustained":
+        # Continuous only, so batch identities (and their baselines) keep
+        # their keys.
+        out["benchmark rounds"] = (exp.get("limits") or {}).get("benchmark_rounds")
+    return out
 
 
 #: identity() keys that are execution conditions, not experiment identity.
@@ -856,9 +867,18 @@ CONDITION_KEYS = frozenset(
         "system",
         "benchmark iterations",
         "benchmark mode",
+        "benchmark rounds",
         "Lakebench limits that bound",
     }
 )
+
+
+#: Conditions that are also outcomes of the run: the in-stream round count
+#: depends on how long each round took, so a slower build fits fewer rounds.
+#: compare reports a difference (not like-for-like); the perf gate and
+#: reproduce do not refuse on it, or a regression that costs a round would
+#: read as "not comparable" instead of a regression.
+OUTCOME_CONDITION_KEYS = frozenset({"benchmark rounds"})
 
 
 def corpus_problems(exp: Mapping[str, Any] | None) -> list[str]:
@@ -1026,7 +1046,8 @@ def stored_identity_refusals(
     keep only the identity and the result fingerprints. *what* names the
     reference in messages ("baseline", "package"). Every identity field
     counts here, execution conditions included: a reference is only matched
-    like-for-like.
+    like-for-like. The exception is OUTCOME_CONDITION_KEYS (the in-stream
+    round count), which the run's own speed decides.
 
     *failed* names queries that failed in the run. The caller already fails
     the run for them (a regression, not a different experiment), so they are
@@ -1036,13 +1057,28 @@ def stored_identity_refusals(
         return [f"{NO_PROVENANCE} (the run has no experiment block)"]
     if not expected_identity:
         return [f"{NO_PROVENANCE} (the {what} was recorded without an experiment identity)"]
-    missing = [k for k in identity(actual) if k not in expected_identity]
+    actual_identity = {k: v for k, v in identity(actual).items() if k not in OUTCOME_CONDITION_KEYS}
+    missing = [k for k in actual_identity if k not in expected_identity]
     if missing:
         return [
             f"not comparable: the {what} was recorded with an older experiment identity "
             f"(no {', '.join(missing)}); record it again from a current run"
         ]
-    reasons = [f"{r} from the {what}" for r in diff_identities(expected_identity, identity(actual))]
+    expected = {k: v for k, v in expected_identity.items() if k not in OUTCOME_CONDITION_KEYS}
+    reasons = [f"{r} from the {what}" for r in diff_identities(expected, actual_identity)]
+    # The count itself may differ, but not the estimator: with no in-stream
+    # round composite_qph is the post-stream benchmark (streams stopped),
+    # which must not stand against an in-stream median, or a regression that
+    # empties every round would read as a pass.
+    r_ref, r_run = (
+        expected_identity.get("benchmark rounds"),
+        identity(actual).get("benchmark rounds"),
+    )
+    if r_ref is not None and r_run is not None and (r_ref > 0) != (r_run > 0):
+        reasons.append(
+            f"continuous QpH estimator differs: the {what}'s is a median of {r_ref} in-stream "
+            f"round(s), the run's of {r_run} (0 means the post-stream benchmark)"
+        )
     reasons.extend(f"run: {p}" for p in corpus_problems(actual))
     established = results_established(actual)
     if established is not True:

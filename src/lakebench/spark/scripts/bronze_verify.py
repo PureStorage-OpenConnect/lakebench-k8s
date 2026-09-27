@@ -21,10 +21,14 @@ from __future__ import annotations
 import time
 
 from common import (
+    _s3_table_path,
     c360_bronze_run_path,
+    clear_unregistered_table_dirs,
     env,
     log,
     path_size_gb,
+    pipeline_catalog,
+    pipeline_table,
     reset_stream_tables,
     set_utc_session,
 )
@@ -163,17 +167,15 @@ def verify_bronze(df):
 def continuous_reset_targets():
     """(tables, owned bucket URIs, raw landing zone) for the continuous reset.
 
-    Tables are named in the catalog each writer uses: bronze-ingest writes
-    through CATALOG_NAME, silver-stream and gold-refresh through
-    LB_ICEBERG_CATALOG.
+    Tables are named in the catalog every continuous writer uses
+    (common.pipeline_catalog): the recipe's catalog for Iceberg,
+    spark_catalog for Delta + Hive.
     """
     bronze_uri = env("LB_BRONZE_URI", "s3a://lb-bronze/")
-    writer_catalog = env("CATALOG_NAME", "lakehouse")
-    catalog = env("LB_ICEBERG_CATALOG", "lakehouse")
     tables = [
-        f"{writer_catalog}.{env('LB_BRONZE_TABLE', 'default.bronze_raw')}",
-        f"{catalog}.{env('LB_SILVER_TABLE', 'silver.customer_interactions_enriched')}",
-        f"{catalog}.{env('LB_GOLD_TABLE', 'gold.customer_executive_dashboard')}",
+        pipeline_table("LB_BRONZE_TABLE", "default.bronze_raw"),
+        pipeline_table("LB_SILVER_TABLE", "silver.customer_interactions_enriched"),
+        pipeline_table("LB_GOLD_TABLE", "gold.customer_executive_dashboard"),
     ]
     owned = [
         bronze_uri,
@@ -181,6 +183,22 @@ def continuous_reset_targets():
         env("LB_GOLD_URI", "s3a://lb-gold/"),
     ]
     return tables, owned, bronze_uri + "customer/interactions/"
+
+
+def continuous_reset_explicit_locations():
+    """(table, location) for continuous tables created at an explicit path,
+    whose files a DROP leaves: the Delta + Hive bronze table
+    (bronze_ingest_delta.bronze_target). spark_catalog as the pipeline
+    catalog means Delta + Hive (job.py)."""
+    if pipeline_catalog() != "spark_catalog":
+        return []
+    bronze_table = env("LB_BRONZE_TABLE", "default.bronze_raw")
+    return [
+        (
+            pipeline_table("LB_BRONZE_TABLE", "default.bronze_raw"),
+            _s3_table_path(env("LB_BRONZE_URI", "s3a://lb-bronze/"), bronze_table),
+        )
+    ]
 
 
 def main() -> None:
@@ -200,6 +218,9 @@ def main() -> None:
         log("Continuous reset (no verification)")
         log("=" * 60)
         dropped = reset_stream_tables(spark, tables, owned_uris=owned, keep_uris=[raw])
+        clear_unregistered_table_dirs(
+            spark, continuous_reset_explicit_locations(), owned_uris=owned, keep_uris=[raw]
+        )
         log(f"Continuous reset complete: {len(dropped)} of {len(tables)} tables dropped")
         # No JOB METRICS block: this is not a bronze-verify stage.
         spark.stop()

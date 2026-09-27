@@ -771,6 +771,7 @@ class PipelineBenchmark:
         "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
         "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
         "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+        "composite_qph_rounds": "Continuous. In-stream benchmark rounds whose median is composite_qph (rounds with a QpH); 0 means composite_qph is the single post-stream benchmark. Runs with different counts are not like-for-like",
         # Sustained
         "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
         "sustained_throughput_rps": "Rows bronze ingested inside the measurement window per second of the window that data was arriving (arrival_seconds), higher is better. Rows ingested before the window opened are not counted. When intake_limit is trickle_rate this is the configured offered load, not a capacity",
@@ -1370,6 +1371,11 @@ class PipelineBenchmark:
         allowed_lag = self.sustained_throughput_rps * (2 * silver_trigger_s + bronze_trigger_s)
         return bronze_rows - silver_committed <= allowed_lag
 
+    def qph_rounds(self) -> int:
+        """In-stream rounds behind the continuous QpH median (rounds with a
+        QpH; a round whose every query failed has none and is not in it)."""
+        return sum(1 for r in self.benchmark_rounds if r.qph > 0)
+
     def _scores_dict(self) -> dict[str, Any]:
         """Build the mode-appropriate scores sub-dict for JSON output."""
         qph = round(self.query_benchmark.qph, 1) if self.query_benchmark else 0.0
@@ -1420,7 +1426,12 @@ class PipelineBenchmark:
                 **(
                     {}
                     if self.query_benchmark is None and not self.benchmark_rounds
-                    else {"composite_qph": composite_qph}
+                    else {
+                        "composite_qph": composite_qph,
+                        # The n behind the figure: medians over different
+                        # round counts are not like-for-like (DESIGN 2.4).
+                        "composite_qph_rounds": self.qph_rounds() if in_stream_qph > 0 else 0,
+                    }
                 ),
                 "pipeline_saturated": self.pipeline_saturated,
                 "corpus_drained": self.corpus_drained,
@@ -2054,6 +2065,7 @@ def build_config_snapshot(
     pipeline = cfg.architecture.pipeline
     s3 = cfg.platform.storage.s3
     scratch = cfg.platform.storage.scratch
+    _continuous = is_continuous_mode(pipeline.mode) or run_mode in ("continuous", "sustained")
 
     snapshot: dict[str, Any] = {
         "name": cfg.name,
@@ -2151,10 +2163,18 @@ def build_config_snapshot(
         # something else than one under the full policy.
         "maintenance": {
             "pre_benchmark_maintenance": pipeline.pre_benchmark_maintenance,
-            "retention_interval": pipeline.sustained.retention_interval,
+            # Effective values: unset intervals resolve from run_duration
+            # (a continuous run writes its resolved values back first).
+            # None in batch, which never reads them: a batch fingerprint must
+            # not move with sustained.run_duration.
+            "retention_interval": (
+                pipeline.sustained.effective_retention_interval() if _continuous else None
+            ),
             "retention_threshold": pipeline.sustained.retention_threshold,
             "compaction_enabled": pipeline.sustained.compaction_enabled,
-            "compaction_interval": pipeline.sustained.compaction_interval,
+            "compaction_interval": (
+                pipeline.sustained.effective_compaction_interval() if _continuous else None
+            ),
         },
         # Config half of the metrics.json experiment block
         # (metrics/experiment.py). Not a perf-gate fingerprint key.
