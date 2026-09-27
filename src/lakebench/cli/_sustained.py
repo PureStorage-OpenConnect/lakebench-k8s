@@ -1932,9 +1932,9 @@ def stream_identities(job_manager, job_names: list[str]) -> dict[str, tuple]:
     for name in job_names:
         try:
             st = job_manager.get_job_status(f"lakebench-{name}")
-            out[name] = (st.driver_pod, st.submission_attempts)
+            out[name] = (st.driver_pod, st.submission_attempts, st.start_time)
         except Exception:  # noqa: BLE001
-            out[name] = (None, None)
+            out[name] = (None, None, None)
     return out
 
 
@@ -1960,8 +1960,16 @@ def end_of_window_problems(
                 f"closed, not RUNNING ({st.message})"
             )
             continue
-        pod0, attempts0 = (opened or {}).get(name, (None, None))
-        if pod0 and st.driver_pod and st.driver_pod != pod0:
+        pod0, attempts0, submitted0 = ((opened or {}).get(name) or (None, None, None))[:3]
+        # The operator reuses the driver pod name and may reset the attempt
+        # count on a rerun; lastSubmissionAttemptTime moves on every one.
+        if submitted0 and st.start_time and st.start_time != submitted0:
+            problems.append(
+                f"continuous gate: lakebench-{name} was resubmitted inside the window (last "
+                f"submission {submitted0} -> {st.start_time}); its earlier driver's work is not "
+                "in the log"
+            )
+        elif pod0 and st.driver_pod and st.driver_pod != pod0:
             problems.append(
                 f"continuous gate: lakebench-{name} restarted inside the window (driver "
                 f"{pod0} replaced by {st.driver_pod}); its earlier driver's work is not in the log"
@@ -2459,14 +2467,16 @@ def _run_sustained(
         from datetime import timedelta as _td
 
         _shift = _td(seconds=clock_offset or 0.0)
-        window_start = utc_naive(datetime.now(timezone.utc)) + _shift
+        _host_window_start = utc_naive(datetime.now(timezone.utc))
+        window_start = _host_window_start + _shift
         opened_identity = stream_identities(job_manager, [n for _, n in submitted])
         _first_up = min(
             (datetime.fromisoformat(w.running_at) for w in stream_watch.values() if w.running_at),
             default=None,
         )
         if _first_up is not None:
-            _skew = (window_start - utc_naive(_first_up)).total_seconds()
+            # Both on this host's clock (running_at is stamped here).
+            _skew = (_host_window_start - utc_naive(_first_up)).total_seconds()
             if _skew > 60:
                 print_warning(
                     f"The first stream was running {_skew:.0f}s before the last one started. "

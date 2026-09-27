@@ -720,7 +720,7 @@ def test_a_stream_restarted_inside_the_window_fails():
     jm.get_job_status.side_effect = lambda name: JobStatus(
         name=name, state=JobState.RUNNING, message="", driver_pod=f"{name}-driver-2"
     )
-    opened = {"silver-stream": ("lakebench-silver-stream-driver-1", 1)}
+    opened = {"silver-stream": ("lakebench-silver-stream-driver-1", 1, None)}
     probs = end_of_window_problems(jm, ["silver-stream"], opened)
     assert len(probs) == 1 and "restarted inside the window" in probs[0]
 
@@ -848,3 +848,23 @@ def test_an_unsettled_corpus_leaves_results_not_established(monkeypatch, tmp_pat
     assert code is None
     assert "settle limit" in saved.continuous["result_check"]["not_checked"]
     assert "not_checked" in saved.experiment_block()["results"]
+
+
+def test_a_rerun_with_the_same_pod_name_is_caught_by_submission_time():
+    from lakebench.cli._sustained import end_of_window_problems
+    from lakebench.spark.job import JobState, JobStatus
+
+    jm = MagicMock()
+    jm.get_job_status.side_effect = lambda name: JobStatus(
+        name=name,
+        state=JobState.RUNNING,
+        message="",
+        driver_pod="lakebench-silver-stream-driver",
+        submission_attempts=1,
+        start_time="2026-09-27T04:14:00Z",
+    )
+    opened = {"silver-stream": ("lakebench-silver-stream-driver", 1, "2026-09-27T04:03:00Z")}
+    probs = end_of_window_problems(jm, ["silver-stream"], opened)
+    assert len(probs) == 1 and "resubmitted inside the window" in probs[0]
+    same = {"silver-stream": ("lakebench-silver-stream-driver", 1, "2026-09-27T04:14:00Z")}
+    assert end_of_window_problems(jm, ["silver-stream"], same) == []

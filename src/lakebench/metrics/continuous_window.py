@@ -372,7 +372,8 @@ def window_gate_problems(
     def after_arrival(stats: dict[str, Any]) -> int:
         offsets = stats.get("commit_offsets")
         if offsets is None or first is None:
-            return int(stats.get("window_new_data_cycles") or stats.get("window_commits") or 0)
+            new = stats.get("window_new_data_cycles")
+            return int(new if new is not None else stats.get("window_commits") or 0)
         return sum(1 for o in offsets if o >= first)
 
     silver = stats_by_job.get("silver-stream")
