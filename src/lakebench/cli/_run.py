@@ -316,15 +316,17 @@ def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
             # value stays in the config snapshot, which is what compare reads.
             scale=max(1, int(cfg.architecture.workload.datagen.scale)),
             qph=qph,
-            total_seconds=sum(elapsed for _, _, elapsed, _ in bench_results),
+            total_seconds=sum(r[2] for r in bench_results),
             queries=[
                 {
-                    "query_name": name,
-                    "elapsed_seconds": elapsed,
-                    "success": ok,
-                    "rows_returned": rows,
+                    "query_name": r[0],
+                    "elapsed_seconds": r[2],
+                    "success": r[1],
+                    "rows_returned": r[3],
+                    # (name, ok, elapsed, rows[, fingerprint]): see benchmark_local.
+                    "result_fingerprint": r[4] if len(r) > 4 else None,
                 }
-                for name, ok, elapsed, rows in bench_results
+                for r in bench_results
             ],
             iterations=1,
         )
@@ -586,7 +588,7 @@ def _warm_benchmark(runner, query_timeout: int) -> None:
     """
     try:
         # One sample: the pass exists to touch every table, not to be timed.
-        runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1)
+        runner.run_power(cache="hot", query_timeout=query_timeout, iterations=1, fingerprint=False)
     except Exception as e:  # noqa: BLE001
         logger.warning("benchmark warm-up pass failed: %s", e)
 
@@ -682,16 +684,35 @@ def _benchmark_gate_problems(cfg, queries) -> list[str]:
     def _ok(q):
         return bool(q["success"] if isinstance(q, dict) else q.success)
 
+    def _rows(q):
+        return int((q.get("rows_returned") if isinstance(q, dict) else q.rows_returned) or 0)
+
+    from lakebench.benchmark.queries import BENCHMARK_QUERIES_BY_DOMAIN
+
+    allow_empty = {
+        bq.name for qs in BENCHMARK_QUERIES_BY_DOMAIN.values() for bq in qs if bq.allow_empty
+    }
     bad = [
         q for q in queries if not _ok(q) and (fmt, engine, _name(q)) not in _KNOWN_QUERY_FAILURES
     ]
-    if not bad:
-        return []
-    names = ", ".join(_name(q) for q in bad)
-    return [
-        f"Benchmark gate: {len(bad)} of {len(queries)} queries failed ({names}); "
-        "QpH over the rest is not a valid score. Marking FAILURE."
-    ]
+    # A query that "succeeded" with no rows measured nothing (invariant 3):
+    # an empty table, a filter that matched nothing, or a reader that read
+    # nothing. Only a query declared allow_empty may return none.
+    empty = [q for q in queries if _ok(q) and _rows(q) == 0 and _name(q) not in allow_empty]
+    problems = []
+    if bad:
+        names = ", ".join(_name(q) for q in bad)
+        problems.append(
+            f"Benchmark gate: {len(bad)} of {len(queries)} queries failed ({names}); "
+            "QpH over the rest is not a valid score. Marking FAILURE."
+        )
+    if empty:
+        names = ", ".join(_name(q) for q in empty)
+        problems.append(
+            f"Benchmark gate: {len(empty)} of {len(queries)} queries returned no rows "
+            f"({names}); an empty result measures nothing. Marking FAILURE."
+        )
+    return problems
 
 
 def _aml_batch_gate_problems(
@@ -1033,7 +1054,7 @@ def _run_local_mode(
                 "queries_per_hour": qph,
                 "queries": [
                     {"name": n, "success": ok, "elapsed": e, "rows": r}
-                    for n, ok, e, r in bench_results
+                    for n, ok, e, r, *_ in bench_results
                 ],
             },
         )
@@ -1290,7 +1311,8 @@ def run(
         logger.warning("Could not get cluster capacity for auto-sizing: %s", e)
         cluster_cap = None
     # Cuts to fit the cluster are shown with their reason, never silent (LB-160).
-    for cut in resolve_auto_sizing(cfg, cluster_cap) or []:
+    autosize_cuts = [str(c) for c in resolve_auto_sizing(cfg, cluster_cap) or []]
+    for cut in autosize_cuts:
         print_warning(f"Auto-sizing: {cut}")
 
     # Auto-scale timeout if not explicitly set
@@ -1415,6 +1437,7 @@ def run(
             skip_generate=skip_generate,
             skip_maintenance=skip_maintenance,
             force_reset=force_reset,
+            autosize_cuts=autosize_cuts,
         )
         return
 
@@ -1443,6 +1466,8 @@ def run(
 
     config_snapshot = build_config_snapshot(cfg)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    if collector.current_run is not None:
+        collector.current_run.autosize_cuts = autosize_cuts
     if skip_maintenance and collector.current_run is not None:
         # No table maintenance: not comparable with runs under the policy.
         from lakebench.metrics.maintenance_policy import skipped_policy_id
@@ -2059,6 +2084,8 @@ def run(
                         iterations=cfg.architecture.benchmark.iterations,
                         progress_callback=_bench_progress,
                         query_timeout=_pre_timeout,
+                        # Results are checked on the post-maintenance benchmark.
+                        fingerprint=False,
                     )
                     pre_compaction_qph = _pre_result.qph
                     _pre_record = _pre_result.to_dict()

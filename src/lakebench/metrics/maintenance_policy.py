@@ -80,3 +80,61 @@ def policy_mismatch(expected: str | None, actual: str | None) -> str | None:
         f"maintenance policy differs ({a} vs {b}); numbers measured under different "
         "table-maintenance policies are not comparable"
     )
+
+
+def effective_maintenance(
+    policy_id: str | None,
+    *,
+    table_format: str | None,
+    query_engine: str | None,
+    mode: str | None,
+    pre_benchmark_maintenance: bool | None = True,
+    compaction_enabled: bool | None = True,
+    stopped: bool | None = False,
+) -> dict[str, Any]:
+    """The maintenance a run actually got under *policy_id*, which is not
+    always what the policy asks for: DuckDB runs none, Delta skips OPTIMIZE
+    everywhere and VACUUM on Spark Thrift, continuous Delta has none in
+    effect, and a stopped round did not finish.
+
+    Returns ``{"id", "expire", "compaction", "reasons"}``; ``id`` is
+    ``<policy>:expire=<on|off>,compaction=<on|off>[,stopped]``. Two runs with
+    different effective ids measured under different execution conditions.
+    """
+    policy = policy_id or LEGACY_MAINTENANCE_POLICY_ID
+    fmt = (table_format or "").lower()
+    engine = (query_engine or "").lower()
+    continuous = (mode or "batch").lower() in ("sustained", "continuous")
+    reasons: list[str] = []
+    expire = compaction = True
+    if policy.endswith(SKIPPED_SUFFIX):
+        expire = compaction = False
+        reasons.append("--skip-maintenance")
+    elif engine in ("duckdb", "none", ""):
+        expire = compaction = False
+        reasons.append(f"query engine {engine or 'none'} cannot run table maintenance")
+    elif not continuous and pre_benchmark_maintenance is False:
+        expire = compaction = False
+        reasons.append("pre_benchmark_maintenance is off")
+    elif fmt == "delta":
+        compaction = False
+        reasons.append("Delta OPTIMIZE is never run (it exhausts engine memory)")
+        if continuous:
+            expire = False
+            reasons.append("continuous Delta VACUUM keeps the 7 d default: no effect in a window")
+        elif engine == "spark-thrift":
+            expire = False
+            reasons.append("Delta VACUUM is skipped on Spark Thrift (it OOMs at 4Gi)")
+    elif continuous and compaction_enabled is False:
+        compaction = False
+        reasons.append("continuous compaction is disabled")
+    parts = [f"expire={'on' if expire else 'off'}", f"compaction={'on' if compaction else 'off'}"]
+    if stopped and (expire or compaction):
+        parts.append("stopped")
+        reasons.append("pre-benchmark maintenance stopped on its budget")
+    return {
+        "id": f"{policy}:" + ",".join(parts),
+        "expire": expire,
+        "compaction": compaction,
+        "reasons": reasons,
+    }

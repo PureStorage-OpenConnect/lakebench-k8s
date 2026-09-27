@@ -168,3 +168,48 @@ def mock_k8s_client():
     client.apply_manifest.return_value = True
     client.test_connectivity.return_value = (True, "Connected")
     return client
+
+
+def stub_experiment(
+    query_names=(),
+    *,
+    mode: str = "batch",
+    failed=(),
+    **identity_over,
+) -> dict:
+    """A minimal metrics.json ``experiment`` block (metrics/experiment.py) for
+    fixtures that hand-build run records: one fixed experiment identity and
+    a usable result fingerprint per query in *query_names* (None for the
+    names in *failed*, as the runner records a failed query). Keyword
+    overrides replace identity fields (seed=..., scale=...)."""
+    from lakebench.benchmark.fingerprint import fingerprint_rows
+    from lakebench.metrics.experiment import EXPERIMENT_SCHEMA
+    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
+
+    results: dict = {
+        "query_set_id": None,
+        "fingerprints": {
+            n: (None if n in failed else fingerprint_rows([(n, 1)], adapted_sql=n))
+            for n in query_names
+        },
+    }
+    if mode != "batch":
+        results["not_checked"] = "continuous"
+    return {
+        "schema": EXPERIMENT_SCHEMA,
+        "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},
+        "corpus": {
+            "id": "corpus",
+            "generator_image": "img",
+            "seed": identity_over.get("seed", 42),
+            "scale": identity_over.get("scale", 10),
+            "datagen": {"digest": None},
+        },
+        "architecture": {"query_access_path": identity_over.get("access_path", "catalog")},
+        "mode": mode,
+        "maintenance_policy_id": MAINTENANCE_POLICY_ID,
+        "effective_maintenance": {
+            "id": identity_over.get("maintenance", MAINTENANCE_POLICY_ID + ":expire=on")
+        },
+        "results": results,
+    }

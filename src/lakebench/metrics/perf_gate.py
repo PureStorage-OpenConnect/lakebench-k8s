@@ -47,6 +47,14 @@ from lakebench.cli._reproduce import (
     _extract_expected_numbers,
     _is_stage_seconds,
 )
+from lakebench.metrics.experiment import (
+    NO_PROVENANCE,
+    experiment_of,
+    failed_queries,
+    identity,
+    result_fingerprints,
+    stored_identity_refusals,
+)
 from lakebench.metrics.maintenance_policy import not_current, policy_mismatch, recorded_policy
 
 STORE_SCHEMA_VERSION = 1
@@ -645,6 +653,8 @@ def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
         reasons.append("local run (--local); only cluster runs are comparable")
     if run.mode != pinned.mode:
         reasons.append(f"run mode {run.mode} but pinned config is {pinned.mode}")
+    if experiment_of(run.raw) is None:
+        reasons.append(f"{NO_PROVENANCE} (run {run.run_id} has no experiment block)")
     run_fp = run.fingerprint
     if fingerprint_hash(run_fp) != pinned.fingerprint_hash:
         diff = fingerprint_diff(pinned.fingerprint, run_fp)
@@ -802,6 +812,11 @@ class Baseline:
     # Table-maintenance policy of the baseline run (metrics/maintenance_policy).
     # None (a baseline recorded before the field) is the legacy policy.
     maintenance_policy_id: str | None = None
+    # Experiment identity (metrics/experiment.identity) and per-query result
+    # fingerprints of the baseline run. None: recorded before provenance, so
+    # nothing can be gated against it.
+    experiment_identity: dict[str, Any] | None = None
+    result_fingerprints: dict[str, Any] | None = None
 
     @property
     def accepted(self) -> bool:
@@ -822,6 +837,8 @@ class Baseline:
             "corpus_drained",
             "ttv_basis",
             "maintenance_policy_id",
+            "experiment_identity",
+            "result_fingerprints",
         ):
             value = getattr(self, key)
             if value is not None:
@@ -919,6 +936,8 @@ def load_store(path: Path) -> BaselineStore:
             corpus_drained=entry.get("corpus_drained"),
             ttv_basis=entry.get("ttv_basis"),
             maintenance_policy_id=entry.get("maintenance_policy_id"),
+            experiment_identity=entry.get("experiment_identity"),
+            result_fingerprints=entry.get("result_fingerprints"),
         )
     return BaselineStore(path=path, baselines=baselines)
 
@@ -996,6 +1015,19 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
             "recorded (a schema default or autosizer change); record a new baseline"
         )
     result.reasons.extend(run_refusals(run, pinned))
+    run_exp = experiment_of(run.raw)
+    if run_exp is not None:
+        # Same workload, corpus, seed, scale and mode, and every benchmark
+        # query returned what the baseline's did (invariant 2).
+        result.reasons.extend(
+            stored_identity_refusals(
+                baseline.experiment_identity,
+                baseline.result_fingerprints,
+                run_exp,
+                "baseline",
+                failed=failed_queries(run.raw),
+            )
+        )
     policy_problem = policy_mismatch(baseline.maintenance_policy_id, recorded_policy(run.raw))
     if policy_problem:
         result.reasons.append(
@@ -1145,6 +1177,17 @@ def record_baseline(
         raise PerfGateError(
             f"run {run.run_id} cannot be a baseline for {name}: " + "; ".join(reasons)
         )
+    exp = experiment_of(run.raw)
+    assert exp is not None  # run_refusals refused a run without one
+    if not (exp.get("results") or {}).get("not_checked"):
+        from lakebench.benchmark.fingerprint import usable
+
+        unfp = sorted(n for n, f in result_fingerprints(exp).items() if not usable(f))
+        if unfp:
+            raise PerfGateError(
+                f"run {run.run_id} cannot be a baseline for {name}: queries without a usable "
+                f"result fingerprint ({', '.join(unfp)}) could never be shown equal to a later run"
+            )
     numbers, excluded = extract_metrics(run)
     if not numbers:
         raise PerfGateError(f"run {run.run_id} has no performance numbers")
@@ -1180,6 +1223,8 @@ def record_baseline(
         corpus_drained=(run.scores.get("corpus_drained") if run.mode == "sustained" else None),
         ttv_basis=basis,
         maintenance_policy_id=recorded_policy(run.raw),
+        experiment_identity=identity(exp),
+        result_fingerprints=result_fingerprints(exp),
     )
     store.baselines[name] = new
     return new

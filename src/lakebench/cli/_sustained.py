@@ -1402,7 +1402,8 @@ def _run_benchmark_round(
     # One sample per query: gold refreshes under the round, so repeats would
     # time different snapshots. The rounds themselves are the repeats, and
     # the scores take their median (qph_degradation_pct, composite_qph).
-    bench_result = bench_runner.run_power(cache="hot", iterations=1)
+    # No result fingerprints: each round reads tables still being written.
+    bench_result = bench_runner.run_power(cache="hot", iterations=1, fingerprint=False)
 
     # 4. Check Q9 for contention (gold-table query)
     q9_failed = False
@@ -1661,6 +1662,7 @@ def _run_sustained(
     skip_generate: bool = False,
     skip_maintenance: bool = False,
     force_reset: bool = False,
+    autosize_cuts: list[str] | None = None,
 ) -> None:
     """Run the sustained streaming pipeline.
 
@@ -1711,6 +1713,8 @@ def _run_sustained(
 
     config_snapshot = build_config_snapshot(cfg)
     collector.start_run(run_id, cfg.name, config_snapshot)
+    if collector.current_run is not None:
+        collector.current_run.autosize_cuts = autosize_cuts
     if skip_maintenance and collector.current_run is not None:
         # No table maintenance: not comparable with runs under the policy.
         from lakebench.metrics.maintenance_policy import skipped_policy_id

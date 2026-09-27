@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar
 
+from lakebench.metrics.experiment import experiment_inputs
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.provenance import run_provenance
 
@@ -309,9 +310,26 @@ class PipelineMetrics:
     # the field existed.
     provenance: dict[str, Any] | None = None
 
+    # Lakebench-imposed cuts to fit the cluster (config.autosizer), in the
+    # words printed at run start. None: not recorded.
+    autosize_cuts: list[str] | None = None
+
+    # The experiment block (metrics/experiment.py). None on a live run: built
+    # when the record is written. A loaded record keeps what it was written
+    # with; a record from before the block has none and never gets one.
+    experiment: dict[str, Any] | None = None
+
+    def experiment_block(self) -> dict[str, Any] | None:
+        """The block this record carries or, for a run being written, builds."""
+        if self.experiment is not None:
+            return self.experiment
+        from lakebench.metrics.experiment import build_experiment
+
+        return build_experiment(self)
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
-        d = {
+        d: dict[str, Any] = {
             "run_id": self.run_id,
             "deployment_name": self.deployment_name,
             "start_time": self.start_time.isoformat(),
@@ -329,6 +347,11 @@ class PipelineMetrics:
         }
         if self.provenance is not None:
             d["provenance"] = self.provenance
+        if self.autosize_cuts is not None:
+            d["autosize_cuts"] = list(self.autosize_cuts)
+        experiment = self.experiment_block()
+        if experiment is not None:
+            d["experiment"] = experiment
         if self.benchmark is not None:
             d["benchmark"] = self.benchmark.to_dict()
         if self.benchmark_rounds:
@@ -1733,6 +1756,12 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     for name, times in query_times.items():
         qd = dict(query_template[name])
         qd["elapsed_seconds"] = round(statistics.median(times), 3)
+        if "result_fingerprint" in qd:
+            # Each in-stream round read a different state of tables still
+            # being written; the first round's fingerprint is not the
+            # aggregate's.
+            qd["result_fingerprint"] = None
+            qd["result_fingerprint_note"] = "aggregated over in-stream rounds"
         aggregated_queries.append(qd)
 
     return BenchmarkMetrics(
@@ -1858,6 +1887,9 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
             "compaction_enabled": pipeline.sustained.compaction_enabled,
             "compaction_interval": pipeline.sustained.compaction_interval,
         },
+        # Config half of the metrics.json experiment block
+        # (metrics/experiment.py). Not a perf-gate fingerprint key.
+        "experiment_inputs": experiment_inputs(cfg),
     }
 
     return snapshot
