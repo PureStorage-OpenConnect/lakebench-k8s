@@ -335,11 +335,11 @@ INSERT INTO s.cases BY NAME
 CREATE TABLE s.counterparty_edges(source_entity_id BIGINT, target_entity_id BIGINT,
   txn_count BIGINT, cumulative_amount_usd DECIMAL(18,2));
 INSERT INTO s.counterparty_edges VALUES (1,2,3,100.5),(2,3,1,50);
-CREATE TABLE s.account_statements(account_id BIGINT, book_ts TIMESTAMPTZ, cdt_dbt_ind VARCHAR,
-  amt DECIMAL(18,2), bal_after DECIMAL(18,2));
+CREATE TABLE s.account_statements(account_id BIGINT, entry_seq BIGINT, book_ts TIMESTAMPTZ,
+  cdt_dbt_ind VARCHAR, amt DECIMAL(18,2), bal_after DECIMAL(18,2));
 INSERT INTO s.account_statements VALUES
-  (7,TIMESTAMPTZ '2026-01-01 00:00:00+00','CRDT',10,10),
-  (7,TIMESTAMPTZ '2026-01-02 00:00:00+00','DBIT',5,5);
+  (7,1,TIMESTAMPTZ '2026-01-01 00:00:00+00','CRDT',10,10),
+  (7,2,TIMESTAMPTZ '2026-01-02 00:00:00+00','DBIT',5,5);
 CREATE TABLE s.alerts(alert_id VARCHAR, entity_id BIGINT, rule_id VARCHAR, priority VARCHAR,
   status VARCHAR, alert_score DOUBLE, alert_ts TIMESTAMPTZ, related_txn_ids VARCHAR[]);
 INSERT INTO s.alerts VALUES

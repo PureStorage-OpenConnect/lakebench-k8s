@@ -98,7 +98,9 @@ def test_other_unmeasurable_cases():
 def test_warm_pass_runs_once_and_swallows_failure():
     runner = MagicMock()
     _warm_benchmark(runner, 300)
-    runner.run_power.assert_called_once_with(cache="hot", query_timeout=300, iterations=1)
+    runner.run_power.assert_called_once_with(
+        cache="hot", query_timeout=300, iterations=1, fingerprint=False
+    )
     runner.run_power.side_effect = RuntimeError("trino down")
     _warm_benchmark(runner, 300)  # must not raise
 

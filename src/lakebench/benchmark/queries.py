@@ -22,19 +22,32 @@ The Financial set adds an ``investigator`` class (IQ1-IQ4, GOALS P10 stage
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from lakebench.config.schema import WorkloadSchema
 
 
 @dataclass(frozen=True)
 class BenchmarkQuery:
-    """A single benchmark query definition."""
+    """A single benchmark query definition.
+
+    ``approx_columns`` maps a 0-based output column computed from a DOUBLE
+    aggregate to the quantum its values are compared at in the result
+    fingerprint (benchmark.fingerprint): summation order moves the digits a
+    ``ROUND(.., 2)`` keeps, so those columns cannot match exactly across
+    engines. ``allow_empty`` marks a query whose result may legitimately be
+    empty; any other query that returns no rows fails the benchmark gate.
+
+    Every ``ORDER BY`` feeding a ``LIMIT`` or ``ROW_NUMBER`` ends in keys that
+    make the order total, so every engine returns the same rows.
+    """
 
     name: str
     display_name: str
     query_class: str  # "scan", "analytics", "gold"
     sql: str
+    approx_columns: dict[int, float] = field(default_factory=dict, compare=False, hash=False)
+    allow_empty: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +66,7 @@ SELECT
   ROUND(SUM(transaction_amount), 2) AS total_revenue,
   ROUND(AVG(transaction_amount), 2) AS avg_transaction
 FROM {catalog}.{silver_table}""",
+    approx_columns={3: 0.01, 4: 0.01},
 )
 
 _Q2 = BenchmarkQuery(
@@ -72,6 +86,7 @@ WHERE interaction_date >= (SELECT MIN(interaction_date) FROM {catalog}.{silver_t
     (SELECT MIN(interaction_date) FROM {catalog}.{silver_table}))
 GROUP BY interaction_date, interaction_type
 ORDER BY interaction_date, revenue DESC""",
+    approx_columns={4: 0.01},
 )
 
 _Q3 = BenchmarkQuery(
@@ -90,6 +105,7 @@ FROM {catalog}.{silver_table}
 WHERE transaction_amount > 0
 GROUP BY customer_value_tier, channel_preference
 ORDER BY total_spend DESC""",
+    approx_columns={3: 0.01, 4: 0.01, 5: 0.01},
 )
 
 _Q4 = BenchmarkQuery(
@@ -109,7 +125,8 @@ FROM {catalog}.{silver_table}
 WHERE churn_risk_indicator IN ('high_risk', 'medium_risk')
 GROUP BY churn_risk_indicator, customer_journey_stage, device_category
 HAVING COUNT(DISTINCT customer_id) > 10
-ORDER BY at_risk_customers DESC""",
+ORDER BY at_risk_customers DESC, churn_risk_indicator, customer_journey_stage, device_category""",
+    approx_columns={5: 0.01, 6: 0.01},
 )
 
 # ---------------------------------------------------------------------------
@@ -146,6 +163,7 @@ SELECT
 FROM daily
 ORDER BY interaction_date DESC
 LIMIT 90""",
+    approx_columns={2: 0.01, 4: 0.01, 5: 1.0},
 )
 
 _Q6 = BenchmarkQuery(
@@ -182,6 +200,7 @@ SELECT
 FROM customer_rfm
 GROUP BY 1
 ORDER BY avg_spend DESC""",
+    approx_columns={2: 0.01, 3: 0.1, 4: 1.0},
 )
 
 _Q7 = BenchmarkQuery(
@@ -206,6 +225,7 @@ SELECT
 FROM {catalog}.{silver_table}
 GROUP BY channel
 ORDER BY channel_revenue DESC""",
+    approx_columns={6: 0.01, 7: 0.01, 8: 0.01},
 )
 
 # ---------------------------------------------------------------------------
@@ -233,6 +253,7 @@ SELECT
 FROM {catalog}.{gold_table}
 ORDER BY interaction_date DESC
 LIMIT 30""",
+    approx_columns={6: 0.01, 7: 0.1},
 )
 
 # ---------------------------------------------------------------------------
@@ -281,6 +302,7 @@ SELECT
   ROUND(SUM(txn_amount_usd), 2) AS total_volume_usd,
   ROUND(AVG(txn_amount_usd), 2) AS avg_txn_usd
 FROM {catalog}.{silver_table}""",
+    approx_columns={4: 0.01},
 )
 
 _FQ2 = BenchmarkQuery(
@@ -302,7 +324,7 @@ SELECT
 FROM {catalog}.{silver_table}
 WHERE txn_timestamp >= (SELECT MAX(txn_timestamp) FROM {catalog}.{silver_table}) - INTERVAL '30' DAY
 GROUP BY originator_bank_bic, beneficiary_bank_bic, txn_currency
-ORDER BY volume_usd DESC
+ORDER BY volume_usd DESC, originator_bank_bic, beneficiary_bank_bic, txn_currency
 LIMIT 100""",
 )
 
@@ -320,7 +342,7 @@ SELECT
 FROM {catalog}.{silver_counterparty_edges} ce
 JOIN {catalog}.{silver_entities} e ON ce.source_entity_id = e.entity_id
 GROUP BY e.entity_id, e.name, e.entity_type
-ORDER BY total_out_usd DESC
+ORDER BY total_out_usd DESC, e.entity_id
 LIMIT 200""",
 )
 
@@ -333,7 +355,7 @@ WITH top_accts AS (
   SELECT account_id
   FROM {catalog}.{silver_account_statements}
   GROUP BY account_id
-  ORDER BY COUNT(*) DESC
+  ORDER BY COUNT(*) DESC, account_id
   LIMIT 50
 )
 SELECT
@@ -342,7 +364,7 @@ SELECT
   s.cdt_dbt_ind,
   s.amt,
   s.bal_after,
-  ROW_NUMBER() OVER (PARTITION BY s.account_id ORDER BY s.book_ts) AS entry_ord
+  ROW_NUMBER() OVER (PARTITION BY s.account_id ORDER BY s.book_ts, s.entry_seq) AS entry_ord
 FROM {catalog}.{silver_account_statements} s
 JOIN top_accts t ON t.account_id = s.account_id
 ORDER BY s.account_id, entry_ord""",
@@ -363,6 +385,7 @@ SELECT
 FROM {catalog}.{gold_alerts}
 GROUP BY rule_id, priority, status
 ORDER BY alerts DESC""",
+    approx_columns={5: 0.001},
 )
 
 _FQ6 = BenchmarkQuery(
@@ -394,7 +417,7 @@ WHERE (
   )
 GROUP BY originator_id, txn_currency
 HAVING COUNT(*) >= 3
-ORDER BY txn_count DESC
+ORDER BY txn_count DESC, originator_id, txn_currency
 LIMIT 500""",
 )
 
@@ -415,8 +438,9 @@ SELECT
 FROM {catalog}.{silver_table}
 GROUP BY originator_bank_bic, beneficiary_bank_bic
 HAVING SUM(txn_amount_usd) > 0
-ORDER BY xborder_usd DESC
+ORDER BY xborder_usd DESC, originator_bank_bic, beneficiary_bank_bic
 LIMIT 100""",
+    approx_columns={4: 0.001},
 )
 
 _FQ8 = BenchmarkQuery(
@@ -427,7 +451,7 @@ _FQ8 = BenchmarkQuery(
 WITH recent_alerts AS (
   SELECT alert_id, entity_id, alert_ts, related_txn_ids
   FROM {catalog}.{gold_alerts}
-  ORDER BY alert_ts DESC
+  ORDER BY alert_ts DESC, alert_id
   LIMIT 100
 )
 SELECT
@@ -438,7 +462,7 @@ SELECT
   cardinality(a.related_txn_ids) AS txns_in_alert
 FROM recent_alerts a
 LEFT JOIN {catalog}.{silver_entities} e ON a.entity_id = e.entity_id
-ORDER BY a.alert_ts DESC""",
+ORDER BY a.alert_ts DESC, a.alert_id""",
 )
 
 
@@ -574,7 +598,7 @@ SELECT h2.via_entity_id, h2.hop2_entity_id, en.name, en.is_customer, en.country,
 FROM hop2 h2
 LEFT JOIN {catalog}.{silver_entities} en ON en.entity_id = h2.hop2_entity_id
 LEFT JOIN alerted al ON al.entity_id = h2.hop2_entity_id
-ORDER BY h2.amount_usd DESC, h2.hop2_entity_id
+ORDER BY h2.amount_usd DESC, h2.hop2_entity_id, h2.via_entity_id
 LIMIT 500""",
 )
 

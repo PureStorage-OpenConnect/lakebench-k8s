@@ -41,6 +41,10 @@ class QueryResult:
     # score (elapsed_seconds) is their median. Empty means one untracked
     # sample, which is how records written before LB-150 read.
     samples: list[float] = field(default_factory=list)
+    # benchmark.fingerprint of the rows, from one untimed execution after the
+    # timed samples. None: not fingerprinted (failed query, or a benchmark
+    # path that does not check results, such as in-stream rounds).
+    result_fingerprint: dict[str, Any] | None = None
 
     def sample_times(self) -> list[float]:
         """The timed samples, or [elapsed_seconds] for a single-sample result."""
@@ -58,6 +62,7 @@ class QueryResult:
             "rows_returned": self.rows_returned,
             "success": self.success,
             "error_message": self.error_message,
+            "result_fingerprint": self.result_fingerprint,
             "samples": [round(t, 3) for t in times],
             "min_seconds": round(lo, 3),
             "max_seconds": round(hi, 3),
@@ -263,6 +268,7 @@ class BenchmarkRunner:
         query_class: str | None = None,
         progress_callback: Any = None,
         query_timeout: int = 300,
+        fingerprint: bool = True,
     ) -> BenchmarkResult:
         """Run power benchmark (single sequential stream).
 
@@ -273,6 +279,8 @@ class BenchmarkRunner:
             progress_callback: Called with (index, total, name, phase, **kwargs)
                 before ("start") and after ("done") each query. Optional.
             query_timeout: Per-query timeout in seconds (default 300).
+            fingerprint: After the timed stream, run each successful query
+                once more, untimed, and record its result fingerprint.
 
         Returns:
             BenchmarkResult with mode="power"
@@ -295,6 +303,8 @@ class BenchmarkRunner:
             progress_callback=progress_callback,
             query_timeout=query_timeout,
         )
+        if fingerprint:
+            self.fingerprint_results(results, query_timeout)
 
         successful = [r for r in results if r.success]
         total_seconds = sum(r.elapsed_seconds for r in results)
@@ -325,6 +335,7 @@ class BenchmarkRunner:
         cache: str = "hot",
         iterations: int = 1,
         query_class: str | None = None,
+        fingerprint: bool = True,
     ) -> BenchmarkResult:
         """Run throughput benchmark (N concurrent query streams).
 
@@ -403,6 +414,9 @@ class BenchmarkRunner:
 
         # Use stream 0's results as the representative query list
         representative_queries = stream_results[0].queries if stream_results else []
+        if fingerprint:
+            # After the wall clock stopped: the fingerprint runs are untimed.
+            self.fingerprint_results(representative_queries)
 
         return BenchmarkResult(
             mode="throughput",
@@ -444,6 +458,8 @@ class BenchmarkRunner:
             cache=cache,
             iterations=iterations,
             query_class=query_class,
+            # The power phase already fingerprinted every query.
+            fingerprint=False,
         )
 
         composite_qph = (
@@ -576,6 +592,53 @@ class BenchmarkRunner:
             samples=times,
         )
 
+    def _render_sql(self, query: BenchmarkQuery) -> str:
+        """The query's SQL as sent to the engine: placeholders filled, then
+        the engine's dialect adaptation."""
+        sql = query.sql.format(
+            catalog=self.catalog,
+            silver_table=self.silver_table,
+            gold_table=self.gold_table,
+            tm_run_id=(self.tm_run_id or "").replace("'", "''"),
+            **self._extra_tables,
+        )
+        return self.executor.adapt_query(sql)
+
+    def fingerprint_results(self, results: list[QueryResult], timeout: int = 300) -> None:
+        """Set ``result_fingerprint`` on every successful result, from one
+        untimed execution of its query (benchmark.fingerprint).
+
+        A failure is recorded as a fingerprint that matches nothing, never
+        dropped: a result that could not be fingerprinted cannot be shown
+        equal to another engine's.
+        """
+        from .fingerprint import unusable
+
+        fingerprint_query = getattr(self.executor, "fingerprint_query", None)
+        engine = self.executor.engine_name()
+        for r in results:
+            if not r.success or r.result_fingerprint is not None:
+                continue
+            if fingerprint_query is None:
+                r.result_fingerprint = unusable(
+                    "unsupported", f"{engine} executor has no fingerprint path", engine
+                )
+                continue
+            try:
+                out = fingerprint_query(
+                    self._render_sql(r.query),
+                    timeout=timeout,
+                    approx_columns=r.query.approx_columns,
+                )
+                fp = out.fingerprint
+            except Exception as e:  # noqa: BLE001 -- recorded as an unusable fingerprint
+                fp = unusable("error", f"fingerprint run failed: {e}", engine)
+            r.result_fingerprint = (
+                fp
+                if isinstance(fp, dict)
+                else unusable("error", "fingerprint run returned nothing", engine)
+            )
+
     def _execute_single_query(
         self,
         query: BenchmarkQuery,
@@ -590,16 +653,8 @@ class BenchmarkRunner:
         Returns:
             QueryResult with timing and row count
         """
-        sql = query.sql.format(
-            catalog=self.catalog,
-            silver_table=self.silver_table,
-            gold_table=self.gold_table,
-            tm_run_id=(self.tm_run_id or "").replace("'", "''"),
-            **self._extra_tables,
-        )
-
-        # Adapt SQL for engine-specific dialect (e.g. DuckDB Iceberg syntax)
-        sql = self.executor.adapt_query(sql)
+        # Placeholders, then the engine's dialect (e.g. DuckDB Iceberg syntax)
+        sql = self._render_sql(query)
 
         exec_result = self.executor.execute_query(sql, timeout=timeout)
 
