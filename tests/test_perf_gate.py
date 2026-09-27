@@ -174,7 +174,8 @@ def _cont_run(
         "start_time": "2026-09-24T10:00:00",
         "success": True,
         "config_snapshot": snapshot,
-        "experiment": stub_experiment(mode="sustained"),
+        # A continuous run with its end-of-run result check (a settled corpus).
+        "experiment": stub_experiment(QUERIES, mode="sustained"),
         "maintenance_policy_id": MAINTENANCE_POLICY_ID,
         "pipeline_benchmark": {
             "run_id": run_id,
@@ -1538,3 +1539,21 @@ def test_loop_model_rejects_the_old_cadence():
     """Guards the model: retention_interval = run_duration fired nothing."""
     assert _simulate_continuous_loop(1800, 1800, 3600, 0)[0] == 0
     assert _simulate_continuous_loop(1800, 600, 900, 60)[0] < 2  # the first try
+
+
+def test_continuous_run_without_a_result_check_is_not_a_baseline(env):
+    """The continuous deviation is gone: a continuous run whose corpus never
+    settled has no checked results and cannot be a baseline."""
+    snap = env.snaps["c360-continuous-s10"]
+    data = _cont_run(snap, "20260924-100000-aaaaaa", rps=5e4, drained=False)
+    # What a continuous record carried before the result check: rounds not
+    # checked "by design", which the gate used to accept.
+    data["experiment"]["results"] = {
+        "query_set_id": None,
+        "fingerprints": {},
+        "not_checked": "continuous: in-stream benchmark rounds read tables still being written",
+        "by_design": True,
+    }
+    run = pg.load_run(env.write_run(data))
+    with pytest.raises(pg.PerfGateError, match="comparability not established"):
+        pg.record_baseline(env.store(), "c360-continuous-s10", run, "abc")

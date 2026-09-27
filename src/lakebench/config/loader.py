@@ -693,7 +693,7 @@ architecture:
   #     run_duration: 1800           # Streaming run duration in seconds
   #     checkpoint_base: checkpoints # S3 prefix for checkpoint data
   #     ## Throughput tuning
-  #     max_files_per_trigger: 50    # Max Parquet files per micro-batch
+  #     max_files_per_trigger: 10    # Files per micro-batch; unset = auto (data arrives all window)
   #     bronze_target_file_size_mb: 512
   #     silver_target_file_size_mb: 512
   #     gold_target_file_size_mb: 128

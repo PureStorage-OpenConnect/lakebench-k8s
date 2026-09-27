@@ -477,21 +477,25 @@ class TestRunLocalIds:
 
 
 class TestFixPass:
-    def test_continuous_run_with_rounds_can_be_a_baseline_and_a_package(self):
-        from lakebench.cli._reproduce import _build_package
+    def test_continuous_run_without_usable_fingerprints_is_not_a_baseline_or_package(self):
+        # The continuous deviation is removed: rounds read tables still being
+        # written, so a continuous run is comparable only through its
+        # end-of-run result check, never on aggregated round results.
+        from lakebench.cli._reproduce import ReproduceError, _build_package
         from lakebench.metrics import perf_gate as pg
         from tests.test_reproduce import _metrics
 
         exp = stub_experiment(["Q1_full_aggregation_scan"], mode="sustained")
         exp["results"]["fingerprints"] = {"Q1_full_aggregation_scan": None}  # aggregated rounds
-        run = SimpleNamespace(raw={"experiment": exp}, run_id="r")
-        with mock.patch.object(pg, "run_refusals", return_value=[]):
-            try:
-                pg.record_baseline(pg.BaselineStore(path=None, baselines={}), "x", run, "abc")
-            except pg.PerfGateError as e:
-                assert "usable result fingerprint" not in str(e), e
-            except Exception:  # noqa: BLE001 -- later steps need a full record
-                pass
+        exp["results"]["by_design"] = True  # the old deviation's marker no longer excuses it
+        run = SimpleNamespace(raw={"experiment": exp}, run_id="r", mode="sustained", scores={})
+        with (
+            mock.patch.object(pg, "run_refusals", return_value=[]),
+            mock.patch.object(pg.BaselineStore, "pinned", return_value=SimpleNamespace()),
+            pytest.raises(pg.PerfGateError, match="usable result fingerprint"),
+        ):
+            store = pg.BaselineStore(path=None, baselines={"x": SimpleNamespace(accepted=False)})
+            pg.record_baseline(store, "x", run, "abc")
         pb = SimpleNamespace(
             pipeline_mode="sustained",
             ingest_ratio=1.0,
@@ -502,10 +506,12 @@ class TestFixPass:
             query_benchmark=None,
             stages=[],
         )
-        pkg = _build_package(
-            _metrics(experiment=exp, pipeline_benchmark=pb), config_reference="c", commit_sha="a"
-        )
-        assert pkg["reproduction_metadata"]["result_fingerprints"]
+        with pytest.raises(ReproduceError, match="usable result fingerprint"):
+            _build_package(
+                _metrics(experiment=exp, pipeline_benchmark=pb),
+                config_reference="c",
+                commit_sha="a",
+            )
 
     def test_bound_condition_carries_no_counts(self):
         def run(granted):

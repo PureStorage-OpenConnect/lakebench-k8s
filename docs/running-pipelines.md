@@ -193,19 +193,32 @@ at full speed (about 2 minutes for 1 TB at scale 100). This is automatic -- no
 `--generate` flag is needed. That flag only applies to batch mode.
 
 Bronze reads that corpus as a trickle: at most `max_files_per_trigger` files
-per `bronze_trigger_interval`. That rate is the offered load, and it does not
-change with scale: at the defaults it is 50 files per 30 s (about 107 MB/s;
-25,818 rows/s for c360). A 30-minute window drains the scale-10 corpus and
-takes about 19% of the scale-100 corpus. The larger corpus is not a failure:
+per `bronze_trigger_interval`. That rate is the offered load. By default it is
+derived per run so the corpus keeps arriving for about 1.2 x the window
+(c360 scale 1: 2 files per 30 s, about 2,400 s of arrival; scale 10: 22
+files, about 2,190 s), capped at 50 files per 30 s (about 107 MB/s). At the
+cap, a 30-minute window takes about 19% of the scale-100 corpus. The larger
+corpus is not a failure:
 the scorecard reports `intake_limit: trickle_rate` and
 `pipeline_saturated: false` when the pipeline kept pace with the trickle, and
 `corpus_drain_seconds` for the window that would drain the corpus. See
 [Scoring and Benchmarking](benchmarking.md#continuous-mode).
 
-The pipeline runs for the configured duration (default: 1800 seconds / 30
-minutes). During this window, Lakebench runs periodic Trino benchmark rounds
-to measure query performance while streaming is active. After the window ends,
-streaming jobs are stopped and the in-stream results are aggregated.
+The measurement window opens when all three streams are running and lasts
+the configured duration (default: 1800 seconds / 30 minutes). A stream whose
+submission fails (for example a truncated Maven download) is reported on each
+attempt while the Spark Operator retries it. During the window, Lakebench
+runs periodic benchmark rounds to measure query performance while streaming
+is active. After the window ends the continuous gate checks that data kept
+arriving and that silver and gold committed continuously inside the window;
+a run that passes lets the rest of the corpus settle, stops the streams, and
+runs a result check over the settled tables so the run can be compared with
+another (see "Continuous gate" and "Result check" in
+[Scoring and Benchmarking](benchmarking.md)). A window much longer than the
+time the trickle needs to offer the corpus measures an idle pipeline: the
+gate fails it when data stopped arriving before half the window, and the run
+warns about this at start. `run_duration` must be at least 3 x
+`gold_refresh_interval`, or the run is refused before it starts.
 
 ### How Continuous Mode Works
 
@@ -240,7 +253,7 @@ architecture:
       silver_trigger_interval: "60 seconds"
       gold_refresh_interval: "5 minutes"
       run_duration: 1800              # 30 minutes
-      max_files_per_trigger: 50       # Files per micro-batch
+      # max_files_per_trigger: unset   # auto: arrival lasts ~1.2 x run_duration
       checkpoint_base: checkpoints
       benchmark_interval: 300         # Seconds between in-stream rounds
       benchmark_warmup: 300           # Seconds before first round
@@ -259,8 +272,8 @@ lakebench run my-config.yaml --continuous --duration 3600
 | `bronze_trigger_interval` | 30s | How often bronze checks for new files. Lower = fresher data, higher CPU. | Reduce to 10-15s if freshness is critical. Increase to 60s+ for large scales where each batch is already large. |
 | `silver_trigger_interval` | 60s | How often silver reads new bronze rows. Lower = fresher silver, more micro-batches. | Keep at 2x bronze interval. Reducing below bronze interval wastes cycles on empty batches. |
 | `gold_refresh_interval` | 5 min | How often gold re-aggregates from silver. Sets the floor for gold freshness. | Reduce for fresher dashboards, but each cycle reads all of silver -- at large scales a refresh can take 30s+, so don't set the interval below the refresh duration. |
-| `max_files_per_trigger` | 50 | Files bronze reads per trigger (c360: 15,491 rows per 64 MB file, so 50 files = ~775K rows). With `bronze_trigger_interval` it is the offered load, the same at every scale. | Increase to offer more load, and size bronze-ingest and silver-stream for it. A short `ingest_ratio` with `intake_limit: trickle_rate` is not saturation. Decrease if bronze micro-batches are too large for executor memory. |
-| `run_duration` | 1800 | Total streaming window in seconds. Minimum useful duration is `gold_refresh_interval + benchmark_interval + round_time` (~7 min at defaults). For 5 rounds: `gold_refresh_interval + 5 * (benchmark_interval + round_time)`. | See [Scoring and Benchmarking](benchmarking.md) for a planning table. |
+| `max_files_per_trigger` | auto | Files bronze reads per trigger (c360: 15,491 rows per 64 MB file). With `bronze_trigger_interval` it is the offered load. Auto derives it so data keeps arriving for about 1.2 x `run_duration`, capped at 50. | Set it to offer a fixed load across scales, and size bronze-ingest and silver-stream for it. A value that would offer the corpus before the window ends is refused at start with the value to use. A short `ingest_ratio` with `intake_limit: trickle_rate` is not saturation. |
+| `run_duration` | 1800 | Measurement window in seconds. At least 3 x `gold_refresh_interval` (900 s at defaults), or the run is refused: the continuous gate needs two gold refreshes on new data inside it. For 5 benchmark rounds: `gold_refresh_interval + 5 * (benchmark_interval + round_time)`. | Use 900 s or more for short tests (UAT included); see [Scoring and Benchmarking](benchmarking.md) for a planning table. |
 | `benchmark_warmup` | 300s | Delay before first benchmark round. **Clamped to `gold_refresh_interval`** at runtime -- gold must complete at least one full refresh before benchmark rounds produce valid QpH. | Reduce only if you also reduce `gold_refresh_interval`. |
 | `benchmark_interval` | 300s | Time between benchmark rounds (measured from completion of previous round). **Clamped to `gold_refresh_interval`** at runtime -- intervals shorter than the gold cycle cause Q9 contention as rounds overlap with gold rewrites. | To get more rounds, increase `run_duration` instead of lowering the interval. |
 | `bronze_target_file_size_mb` | 512 | Target Iceberg data file size for bronze writes. | Reduce to 128-256 MB at small scales (< 10) where 512 MB files are never reached. |
@@ -362,11 +375,12 @@ Continuous mode produces a different set of scores than batch:
 |---|---|
 | **data_freshness_seconds** | Worst-case gold table staleness from streaming logs. |
 | **query_time_freshness_seconds** | Median gold staleness at Trino query time (when in-stream rounds ran). |
-| **sustained_throughput_rps** | Aggregate sustained rows/sec across all streaming stages. |
+| **sustained_throughput_rps** | Rows/sec bronze ingested inside the window, over the seconds data was arriving (`arrival_seconds`). |
 | **composite_qph** | In-stream median QpH. |
 | **in_stream_composite_qph** | Same as composite_qph (explicit label for in-stream origin). |
 | **end_to_end_latency_ms** | Cumulative micro-batch processing latency bronze to gold. |
-| **total_rows_processed** | Total volume processed during the monitoring window. |
+| **total_rows_processed** | Total volume processed during the measurement window. |
+| **pre_window_rows** | Bronze rows taken in before the window opened; not in any score. |
 
 ## Reading Output
 

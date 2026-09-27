@@ -80,19 +80,17 @@ def _deserialize_benchmark_rounds(
                 timestamp=(
                     datetime.fromisoformat(rm["timestamp"]) if rm.get("timestamp") else None
                 ),
-                gold_freshness_seconds=rm.get("gold_freshness_seconds", 0.0),
+                gold_freshness_seconds=rm.get("gold_freshness_seconds"),
                 q9_contention_observed=rm.get("q9_contention_observed", False),
                 q9_retry_used=rm.get("q9_retry_used", False),
                 silver_data_file_count=th.get(
-                    "silver_data_file_count", rm.get("silver_data_file_count", 0)
+                    "silver_data_file_count", rm.get("silver_data_file_count")
                 ),
                 silver_snapshot_count=th.get(
-                    "silver_snapshot_count", rm.get("silver_snapshot_count", 0)
+                    "silver_snapshot_count", rm.get("silver_snapshot_count")
                 ),
-                gold_data_file_count=th.get(
-                    "gold_data_file_count", rm.get("gold_data_file_count", 0)
-                ),
-                gold_snapshot_count=th.get("gold_snapshot_count", rm.get("gold_snapshot_count", 0)),
+                gold_data_file_count=th.get("gold_data_file_count", rm.get("gold_data_file_count")),
+                gold_snapshot_count=th.get("gold_snapshot_count", rm.get("gold_snapshot_count")),
             )
         rounds.append(
             BenchmarkMetrics(
@@ -411,7 +409,7 @@ class MetricsStorage:
                     job_name=s_data.get("job_name", ""),
                     job_type=s_data.get("job_type", ""),
                     throughput_rps=s_data.get("throughput_rps", 0.0),
-                    freshness_seconds=s_data.get("freshness_seconds", 0.0),
+                    freshness_seconds=s_data.get("freshness_seconds"),
                     micro_batch_duration_ms=s_data.get("micro_batch_duration_ms", 0.0),
                     batch_size=s_data.get("batch_size", 0),
                     total_batches=s_data.get("total_batches", 0),
@@ -426,6 +424,16 @@ class MetricsStorage:
                     ttd_pass_end_p50_seconds=s_data.get("ttd_pass_end_p50_seconds"),
                     ttd_pass_end_p95_seconds=s_data.get("ttd_pass_end_p95_seconds"),
                     ttd_by_rule=dict(s_data.get("ttd_by_rule") or {}),
+                    window_input_rows=s_data.get("window_input_rows"),
+                    pre_window_input_rows=s_data.get("pre_window_input_rows"),
+                    window_commits=s_data.get("window_commits"),
+                    window_new_data_cycles=s_data.get("window_new_data_cycles"),
+                    window_output_rows=s_data.get("window_output_rows"),
+                    last_write_offset_seconds=s_data.get("last_write_offset_seconds"),
+                    trickle_start_offset_seconds=s_data.get("trickle_start_offset_seconds"),
+                    output_rows=s_data.get("output_rows"),
+                    submission_failures=list(s_data.get("submission_failures") or []),
+                    running_at=s_data.get("running_at"),
                 )
             )
 
@@ -457,6 +465,7 @@ class MetricsStorage:
             benchmark_error=data.get("benchmark_error"),
             autosize_cuts=data.get("autosize_cuts"),
             maintenance_outcomes=data.get("maintenance_outcomes"),
+            continuous=data.get("continuous"),
             # Kept as written. A record from before the block has none, and its
             # snapshot has no experiment inputs, so it never gets one.
             experiment=data.get("experiment"),
@@ -519,6 +528,12 @@ class MetricsStorage:
                     total_batches=s_data.get("total_batches", 0),
                     batch_size=s_data.get("batch_size", 0),
                     unique_rows_processed=s_data.get("unique_rows_processed"),
+                    window_input_rows=s_data.get("window_input_rows"),
+                    pre_window_input_rows=s_data.get("pre_window_input_rows"),
+                    window_commits=s_data.get("window_commits"),
+                    window_new_data_cycles=s_data.get("window_new_data_cycles"),
+                    last_write_offset_seconds=s_data.get("last_write_offset_seconds"),
+                    trickle_start_offset_seconds=s_data.get("trickle_start_offset_seconds"),
                     queries_executed=s_data.get("queries_executed", 0),
                     queries_per_hour=s_data.get("queries_per_hour", 0.0),
                 )
@@ -584,6 +599,12 @@ class MetricsStorage:
                 intake_limit=scores.get("intake_limit"),
                 bronze_busy_fraction=scores.get("bronze_busy_fraction"),
                 corpus_drain_seconds=scores.get("corpus_drain_seconds"),
+                window_seconds=scores.get("window_seconds"),
+                corpus_ingest_ratio=scores.get("corpus_ingest_ratio"),
+                released_rows=scores.get("released_rows"),
+                arrival_seconds=scores.get("arrival_seconds"),
+                window_arrival_fraction=scores.get("window_arrival_fraction"),
+                pre_window_rows=scores.get("pre_window_rows"),
                 time_to_detect_seconds=scores.get("time_to_detect_seconds"),
                 time_to_detect_p95_seconds=scores.get("time_to_detect_p95_seconds"),
                 time_to_detect_max_seconds=scores.get("time_to_detect_max_seconds"),

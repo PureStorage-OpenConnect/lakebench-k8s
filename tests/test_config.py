@@ -919,7 +919,7 @@ class TestSustainedThroughputConfig:
     def test_defaults(self):
         config = LakebenchConfig(name="test")
         c = config.architecture.pipeline.sustained
-        assert c.max_files_per_trigger == 50
+        assert c.max_files_per_trigger is None  # auto: resolved per run
         assert c.bronze_target_file_size_mb == 512
         assert c.silver_target_file_size_mb == 512
         assert c.gold_target_file_size_mb == 128

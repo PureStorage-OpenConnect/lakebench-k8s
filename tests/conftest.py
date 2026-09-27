@@ -193,9 +193,8 @@ def stub_experiment(
             for n in query_names
         },
     }
-    if mode != "batch":
-        results["not_checked"] = "continuous"
-        results["by_design"] = True
+    # A continuous run carries the fingerprints of its end-of-run result
+    # check (metrics/experiment.py _continuous_results), like a batch run.
     return {
         "schema": EXPERIMENT_SCHEMA,
         "workload": {"name": "customer360", "version": "c360-1", "parameters_id": "p"},
@@ -214,3 +213,17 @@ def stub_experiment(
         },
         "results": results,
     }
+
+
+@pytest.fixture(autouse=True)
+def _continuous_short_window_check_off(request, monkeypatch):
+    """Tests that drive _run_sustained with short windows exercise other
+    paths; the short-window refusal (cli/_sustained.short_window_problem)
+    is tested in tests/test_continuous_window.py, where it stays on."""
+    if request.module.__name__.endswith("test_continuous_window"):
+        return
+    try:
+        from lakebench.cli import _sustained
+    except Exception:  # noqa: BLE001
+        return
+    monkeypatch.setattr(_sustained, "short_window_problem", lambda cfg, run_duration: None)

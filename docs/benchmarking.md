@@ -44,17 +44,43 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 
 Sustained scoring answers: "How fresh is gold, and how fast are we sustaining it?"
 
+Freshness, throughput and the row counts are measured inside the
+**measurement window**. The window opens when every stream's driver is
+running and closes `run_duration` seconds later. It is kept in cluster time
+(this host's clock shifted by the API server's, so pod log timestamps line
+up with it); its UTC start and end and the offset are in `metrics.json`
+under `continuous.window`. A stream that started early (because another was
+still retrying its submission) takes rows in before the window opens; those
+are recorded as `pre_window_rows` and left out of every window score.
+`ingest_ratio` and `corpus_drained` count every row up to the window's end,
+pre-window rows included. `pipeline_throughput_gb_per_second` and
+`compute_efficiency_gb_per_core_hour` still divide the bucket sizes measured
+at the window's end by the window.
+
+Definitions changed on lane/continuous-cred (2026-09-26):
+`sustained_throughput_rps` was bronze rows / `run_duration`, pre-window rows
+included; `data_freshness_seconds` covered every gold cycle in the log;
+`corpus_drained` also needed two idle gold cycles; `total_rows_processed`
+counted whole logs. Continuous records made before this are not comparable
+with later ones on those scores (their experiment identity and results
+differ, so compare, the perf gate and reproduce refuse them).
+
 | Score | Formula | Meaning |
 |---|---|---|
-| `data_freshness_seconds` | `max(stage.freshness_seconds)` | Worst-case gold staleness. The primary continuous score. Lower is better. |
-| `sustained_throughput_rps` | `bronze_input_rows / run_duration` | Rows/sec entering bronze. Higher is better. When `intake_limit` is `trickle_rate` it is the configured offered load, not a capacity; when `corpus_drained` is true it is a lower bound. |
+| `data_freshness_seconds` | `max(gold cycle freshness inside the window)` | Worst-case gold staleness. The primary continuous score. Lower is better. |
+| `sustained_throughput_rps` | `bronze rows ingested inside the window / arrival_seconds` | Rows/sec entering bronze while data was arriving. Higher is better. When `intake_limit` is `trickle_rate` it is the configured offered load, not a capacity. |
+| `window_seconds` | window end - window start | Length of the measurement window. |
+| `arrival_seconds` | the whole window while corpus was left, else bronze's last write inside the window + one bronze trigger | Seconds of the window data was still arriving. Throughput is never averaged over idle time after the corpus ran out. |
+| `window_arrival_fraction` | `arrival_seconds / window_seconds` | Below 1 the corpus ran out inside the window. |
+| `pre_window_rows` | bronze rows written before the window opened | Not part of any window score. |
 | `stage_latency_profile` | `[bronze_ms, silver_ms, gold_ms]` | Per-stage micro-batch processing latency. Lower is better. |
-| `ingest_ratio` | `bronze_rows / datagen_rows` | Share of the corpus the window consumed. Below 0.95 is saturation only when the pipeline did not keep pace with the trickle (see `intake_limit`). Above 1.0 means re-reads inflate the count. |
-| `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when the pipeline could not keep pace with the load offered to it. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
+| `ingest_ratio` | `bronze_rows / released_rows` | Share of what the trickle had released that bronze took by the window's end. `released_rows` = `max_files_per_trigger` files per bronze trigger since bronze's first write, at the corpus's mean rows per file (datagen rows / files), capped at the corpus. 1.0 = bronze kept up with what arrived. Falls back to `corpus_ingest_ratio` when the corpus file count is unknown. |
+| `corpus_ingest_ratio` | `bronze_rows / datagen_rows` | Share of the whole corpus taken by the window's end. About 0.8 on a default run, whose trickle is sized to outlast the window; not a saturation signal. |
+| `pipeline_saturated` | `ingest_ratio < 0.95`, unless `intake_limit` is `trickle_rate` and silver kept up | Boolean flag, null when unmeasurable. True when bronze fell behind the rows the trickle released. Indicates a bottleneck that needs investigation (see Interpreting Scores below). |
 | `intake_limit` | bronze trigger count, batch time and busy share | What bounded intake when `ingest_ratio < 0.95`: `trickle_rate` (the configured trickle; the pipeline kept pace), `bronze_capacity` (bronze busy most of the window), `below_bronze_capacity` (idle bronze without the trickle pattern: a late start or a stall), `none` (kept up). |
 | `corpus_drain_seconds` | `datagen_rows / sustained_throughput_rps` | Set when `intake_limit` is `trickle_rate`: the window that would drain the corpus at the rate held. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Shared with batch mode. |
-| `total_rows_processed` | `sum(stage.input_rows)` | Total volume processed during the monitoring window. |
+| `total_rows_processed` | `sum(stage rows taken in inside the window)` (gold: its re-reads of silver) | Total volume processed during the measurement window. |
 | `total_s3_objects` | `sum(bucket_object_count)` | Total S3 objects across bronze/silver/gold at end of run. If this grows faster than retention can clean, metadata ops degrade. |
 | `qph_degradation_pct` | first-half vs second-half median QpH | QpH trend across in-stream rounds (requires 4+ rounds). Positive = degradation. |
 | `composite_qph` | QpH from the query engine benchmark | Query throughput against the gold layer. |
@@ -464,15 +490,80 @@ significantly higher latency, it is the bottleneck.
 **Offered load.** Continuous mode trickles a finite corpus. Datagen writes
 the whole scale's corpus at full speed (1 TB in 121 s on 44 pods at scale 100,
 run-20260924-201745-cb354f)
-and bronze reads it at a fixed rate: `max_files_per_trigger` files per
-`bronze_trigger_interval`. At the defaults that is 50 files of about 64 MB per
-30 s, about 107 MB/s, for every scale and both workloads: 25,818 rows/s for
-c360 (15,491 rows per file), about 324,000 rows/s for AML. The scale factor sets
-the corpus and table sizes, and with them the work per gold refresh; it does
-not set the rate. A run measures sustained throughput and freshness at that
-offered load. It does not try to drain the corpus: at the defaults a 30-minute
-window drains the scale-10 corpus (c360 in about 960 s) and takes 19% of the
-scale-100 corpus.
+and bronze reads it at a fixed rate: `max_files_per_trigger` files of about
+64 MB per `bronze_trigger_interval`. A run measures sustained throughput and
+freshness at that offered load.
+
+**Data must keep arriving through the window.** `max_files_per_trigger` is
+unset by default (auto): the run derives the most files per trigger, up to
+50, whose arrival still lasts 1.2 x `run_duration`, from the nominal corpus
+size, and prints the value and the arrival it gives. At the defaults (30 s
+trigger, 1800 s window):
+
+| Corpus | Files per trigger | Arrival |
+|---|---|---|
+| c360 scale 1 (~160 files) | 2 | ~2,400 s |
+| c360 scale 10 (~1,600 files) | 22 | ~2,190 s |
+| c360 scale 100 | 50 (the cap) | ~9,600 s |
+| AML scale 1 | 1 | ~4,050 s |
+| AML scale 10 | 18 | ~2,250 s |
+
+So the offered load now grows with scale up to 50 files per 30 s (about
+107 MB/s, 25,818 rows/s for c360), where it stays: at scale 100 the window
+takes about 19% of the corpus, which the scorecard reports as
+`intake_limit: trickle_rate`, not saturation. A config that sets
+`max_files_per_trigger` explicitly to a value that would offer the corpus in
+less time than the window is refused at run start, with the value to set
+(for c360 scale 1 and a 600 s window, 6 or lower). Before this change the
+default was a fixed 50, which offered the c360 scale-1 corpus in about 96 s.
+Whatever the estimate, the continuous gate decides on what the run did (see
+Continuous Gate below).
+
+**Continuous gate.** A continuous run passes only on continuous processing
+inside the measurement window. It is refused before it starts when
+`run_duration` is shorter than 3 x `gold_refresh_interval` (two gold
+refreshes cannot be guaranteed inside it). It fails when:
+
+- a stream never reached RUNNING, was not RUNNING when the window closed, or
+  restarted inside it (a new driver pod or another submission);
+- bronze ingested no rows inside the window (in particular when it drained
+  the corpus before the window opened), wrote fewer than 2 batches inside
+  it, or wrote its last batch before half the window had passed;
+- silver committed fewer than 2 micro-batches with rows inside the window
+  after bronze's first write in it (a backlog from before the window does
+  not count);
+- gold refreshed on new silver data fewer than 2 times inside the window
+  after that first write (a cycle tagged `(silver idle)`, one that read no
+  silver, or one that read no more silver rows than the cycle before, does
+  not count);
+- gold freshness was not measured inside the window;
+- a stream's driver log could not be read.
+
+When the corpus runs out between half and all of the window the run passes
+and says so in `window_arrival_fraction`; freshness then leaves out the gold
+cycles after silver stopped growing.
+
+Submission failures (for example a Maven download that arrived truncated)
+are printed and journaled as they happen and recorded per stream in
+`metrics.json` (`streaming[].submission_failures`), and the time each stream
+reached RUNNING is recorded as `running_at`.
+
+**Result check.** In-stream rounds read tables still being written, so their
+results are not compared. After a run that passed its gates, the CLI keeps
+the streams running until the whole corpus has reached gold (every datagen
+row in bronze, every bronze row committed by silver, and a gold refresh that
+read silver after its last commit), for at most 1800 s, then stops the
+streams and runs the query set once over the settled tables. A query that
+fails there fails the run, as in batch. Its result
+fingerprints are the run's results (`continuous.result_check` and the
+experiment block's `results`), the same as a batch run's, so `compare`, the
+perf gate and `reproduce` hold continuous runs to "no comparison without
+equivalent results". A run whose corpus does not settle in time, or that ran
+with `--skip-benchmark` or without a query engine, records why in
+`results.not_checked` and is never presented as comparable. AML continuous
+runs are not result-checked: detection and TM operations passes run on a
+timer, so their tables depend on when the passes ran relative to arrival.
+None of this time is part of the window.
 
 **Ingestion Completeness** (`ingest_ratio`) is the share of the corpus the
 window consumed. A short ratio says only that the corpus outlasted the window;

@@ -196,9 +196,15 @@ def _extract_expected_numbers(metrics: Any) -> dict[str, float]:
     freshness = getattr(pb, "data_freshness_seconds", None)
     if freshness is not None:
         numbers["data_freshness_seconds"] = float(freshness)
-    # A drained corpus (LB-145) caps rows/s at corpus size / window, so it is
-    # not a throughput and is left out of the comparison.
-    drained = getattr(pb, "corpus_drained", None) is True
+    # rows/s of a corpus that drained early is over a short arrival (or, on
+    # a record from before the window, corpus size / window) and is left out.
+    from lakebench.metrics.continuous_window import drained_rps_excluded
+
+    drained = bool(
+        drained_rps_excluded(
+            getattr(pb, "corpus_drained", None), getattr(pb, "window_arrival_fraction", None)
+        )
+    )
     for attr in ("sustained_throughput_rps", "ingest_ratio"):
         if drained and attr == "sustained_throughput_rps":
             continue
@@ -386,10 +392,10 @@ def _build_package(
             "experiment block, so a reproduce could not check it ran the same experiment)."
         )
     from lakebench.benchmark.fingerprint import usable
-    from lakebench.metrics.experiment import results_established, unchecked_by_design
+    from lakebench.metrics.experiment import results_established
 
     established = results_established(experiment)
-    if established is not True and not unchecked_by_design(experiment):
+    if established is not True:
         raise ReproduceError(
             f"The source run cannot be packaged: comparability not established ({established}); "
             "a reproduce could never show it returned the same results."
@@ -398,7 +404,7 @@ def _build_package(
     unfp = sorted(
         n for n, f in result_fingerprints(experiment).items() if n not in failed and not usable(f)
     )
-    if unfp and not unchecked_by_design(experiment):
+    if unfp:
         raise ReproduceError(
             "The source run cannot be packaged: queries without a usable result fingerprint "
             f"({', '.join(unfp)}) could never be shown equal to a reproduce run."

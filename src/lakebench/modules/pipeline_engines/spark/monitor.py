@@ -158,19 +158,24 @@ class SparkJobMonitor:
         job_name: str,
         timeout_seconds: int = 1800,
         poll_interval: int = 10,
+        on_status: Callable[[JobStatus, float], None] | None = None,
     ) -> JobResult:
         """Wait until a long-lived (continuous) job's driver is running.
 
         Streaming jobs never complete, so wait_for_completion does not fit.
         SUBMISSION_FAILED is waited through (the operator retries); any
         settled failure, or a timeout, is returned as unsuccessful. ``success`` means RUNNING (or already
-        finished successfully).
+        finished successfully). *on_status* is called with every polled
+        status and the seconds waited, so the caller can report submission
+        failures while the operator retries them instead of waiting silently.
         """
         start = time.time()
         sub_failed_since: float | None = None
         while True:
             elapsed = time.time() - start
             status = self.job_manager.get_job_status(job_name)
+            if on_status is not None:
+                on_status(status, elapsed)
             if status.state == JobState.RUNNING or status.state in SUCCESS_STATES:
                 return JobResult(
                     job_name=job_name,

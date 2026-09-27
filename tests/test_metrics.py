@@ -1818,14 +1818,14 @@ class TestStreamingTimingAndFreshness:
         assert metrics.micro_batch_duration_ms == pytest.approx(10850.0, abs=1.0)
 
     def test_no_freshness_when_absent(self):
-        """Freshness stays 0 when no freshness lines present."""
+        """Freshness is absent (None), not 0, when no freshness line is present."""
         c = MetricsCollector()
         logs = """\
 [lb] 2026-02-01T12:00:01.000Z - Cycle 1: aggregating 150,000 Silver records
 [lb] 2026-02-01T12:00:08.000Z - Cycle 1: refreshed ice.gold.dashboard in 8.2s (30 KPI records)
 """
         metrics = c.parse_streaming_logs(logs, "gold-refresh")
-        assert metrics.freshness_seconds == 0.0
+        assert metrics.freshness_seconds is None
 
 
 # ---------------------------------------------------------------------------
@@ -1884,7 +1884,8 @@ class TestBuildConfigSnapshot:
         assert "spark" in snapshot["images"]
         assert snapshot["trino"]["worker"]["replicas"] == 2  # default
         assert snapshot["sustained"]["run_duration"] == 1800  # default
-        assert snapshot["sustained"]["max_files_per_trigger"] == 50  # default
+        # Default is auto: the snapshot records the value a run would use.
+        assert snapshot["sustained"]["max_files_per_trigger"] >= 1
         assert snapshot["sustained"]["bronze_target_file_size_mb"] == 512
         assert snapshot["sustained"]["silver_target_file_size_mb"] == 512
         assert snapshot["sustained"]["gold_target_file_size_mb"] == 128
@@ -3478,7 +3479,7 @@ class TestBenchmarkRoundMeta:
         meta = BenchmarkRoundMeta(round_index=1)
         assert meta.round_index == 1
         assert meta.timestamp is None
-        assert meta.gold_freshness_seconds == 0.0
+        assert meta.gold_freshness_seconds is None  # unmeasured, not 0
         assert meta.q9_contention_observed is False
         assert meta.q9_retry_used is False
 
@@ -4172,10 +4173,10 @@ class TestBenchmarkRoundMetaTableHealth:
 
     def test_health_defaults(self):
         meta = BenchmarkRoundMeta(round_index=1)
-        assert meta.silver_data_file_count == 0
-        assert meta.silver_snapshot_count == 0
-        assert meta.gold_data_file_count == 0
-        assert meta.gold_snapshot_count == 0
+        assert meta.silver_data_file_count is None
+        assert meta.silver_snapshot_count is None
+        assert meta.gold_data_file_count is None
+        assert meta.gold_snapshot_count is None
 
     def test_health_to_dict(self):
         meta = BenchmarkRoundMeta(

@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, ClassVar
 
-from lakebench.metrics.experiment import experiment_inputs
+from lakebench.metrics.experiment import effective_trickle, experiment_inputs
 from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID
 from lakebench.metrics.provenance import run_provenance
 
@@ -87,14 +87,17 @@ class StreamingJobMetrics:
 
     For gold-refresh, ``total_rows_processed`` counts cumulative re-reads of
     silver (e.g. 5 cycles × 1M rows = 5M).  ``unique_rows_processed`` tracks
-    the actual distinct input volume (the silver table size).  Bronze and
-    silver stages set both fields to the same value since they don't re-read.
+    the actual distinct input volume: bronze and silver set it equal to
+    ``total_rows_processed`` since they do not re-read; gold leaves it None.
     """
 
     job_name: str
     job_type: str  # bronze-ingest, silver-stream, gold-refresh
     throughput_rps: float = 0.0
-    freshness_seconds: float = 0.0
+    # Gold only: the stage scripts measure freshness where gold reads silver.
+    # None on bronze and silver (they have no freshness), and on a gold stage
+    # that logged no freshness line.
+    freshness_seconds: float | None = None
     # LB-145. Gold cycles tagged "(silver idle)" saw no new silver data. Only
     # the TRAILING run of idle cycles (after the last cycle that saw data) can
     # be a drained corpus; an idle stretch followed by new data is a stall and
@@ -138,10 +141,61 @@ class StreamingJobMetrics:
     batch_size: int = 0
     total_batches: int = 0
     total_rows_processed: int = 0
-    unique_rows_processed: int = 0
+    # Distinct input rows: bronze and silver take each row once. None on gold,
+    # which re-reads silver every cycle (total_rows_processed amplifies).
+    unique_rows_processed: int | None = 0
     elapsed_seconds: float = 0.0
     success: bool = False
     error_message: str | None = None
+    # The measurement window (metrics/continuous_window.py window_stats).
+    # None: no window was applied (a record from before the window existed,
+    # or a log with no timestamped lines).
+    window_input_rows: int | None = None
+    pre_window_input_rows: int | None = None
+    window_commits: int | None = None
+    window_new_data_cycles: int | None = None
+    window_output_rows: int | None = None
+    last_write_offset_seconds: float | None = None
+    trickle_start_offset_seconds: float | None = None
+    # Rows the stage wrote by the window's end (bronze: rows written; silver:
+    # rows after transforms of committed batches; gold: KPI rows of the last
+    # refresh, the whole table). None when unmeasured, never a stand-in 0.
+    output_rows: int | None = None
+    # Submission attempts the operator reported as SUBMISSION_FAILED before
+    # the driver ran: [{"at", "reason"}], reason from
+    # continuous_window.classify_submission_failure.
+    submission_failures: list[dict[str, Any]] = field(default_factory=list)
+    # UTC time the CLI first saw the driver RUNNING.
+    running_at: str | None = None
+
+    def apply_window(self, logs: str | None, start: datetime, end: datetime) -> dict[str, Any]:
+        """Restrict this stage's window-dependent fields to [start, end]
+        (naive UTC) and return the window stats. The logs are read after the
+        window closes, so the totals that feed ingest_ratio and
+        corpus_drained (total_rows_processed, committed_rows) are cut at the
+        window's end too: rows that landed after it never count."""
+        from lakebench.metrics.continuous_window import parse_events, window_stats
+
+        stats = window_stats(parse_events(logs, self.job_type), self.job_type, start, end)
+        self.window_input_rows = stats["window_input_rows"]
+        self.pre_window_input_rows = stats["pre_window_input_rows"]
+        self.window_commits = stats["window_commits"]
+        self.window_new_data_cycles = stats["window_new_data_cycles"]
+        self.window_output_rows = stats["window_output_rows"]
+        self.last_write_offset_seconds = stats["last_write_offset_seconds"]
+        self.trickle_start_offset_seconds = stats["trickle_start_offset_seconds"]
+        self.output_rows = stats["output_rows"]
+        self.total_rows_processed = stats["rows_to_end"]
+        if self.job_type == "bronze-ingest":
+            self.unique_rows_processed = self.total_rows_processed
+        elif self.job_type == "silver-stream":
+            self.unique_rows_processed = self.total_rows_processed
+            self.committed_rows = stats["committed_rows_to_end"]
+        if self.job_type == "gold-refresh":
+            self.freshness_seconds = stats["freshness_seconds"]
+            self.freshness_active_seconds = stats["freshness_active_seconds"]
+            self.trailing_idle_cycles = stats["trailing_idle_cycles"]
+        return stats
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -190,32 +244,43 @@ class BenchmarkRoundMeta:
 
     round_index: int
     timestamp: datetime | None = None
-    gold_freshness_seconds: float = 0.0
+    # None: the probe failed or returned no number (never a stand-in 0).
+    gold_freshness_seconds: float | None = None
     q9_contention_observed: bool = False
     q9_retry_used: bool = False
-    # Table health metrics (v1.1.0) -- captured at benchmark time
-    silver_data_file_count: int = 0
-    silver_snapshot_count: int = 0
-    gold_data_file_count: int = 0
-    gold_snapshot_count: int = 0
+    # Table health metrics (v1.1.0) -- captured at benchmark time. None: the
+    # probe for that count failed (never a -1 or 0 stand-in).
+    silver_data_file_count: int | None = None
+    silver_snapshot_count: int | None = None
+    gold_data_file_count: int | None = None
+    gold_snapshot_count: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         d: dict[str, Any] = {
             "round_index": self.round_index,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
-            "gold_freshness_seconds": round(self.gold_freshness_seconds, 2),
+            "gold_freshness_seconds": (
+                round(self.gold_freshness_seconds, 2)
+                if self.gold_freshness_seconds is not None
+                else None
+            ),
             "q9_contention_observed": self.q9_contention_observed,
             "q9_retry_used": self.q9_retry_used,
         }
-        # Only include table health when populated (non-zero)
-        if self.silver_data_file_count or self.gold_data_file_count:
-            d["table_health"] = {
-                "silver_data_file_count": self.silver_data_file_count,
-                "silver_snapshot_count": self.silver_snapshot_count,
-                "gold_data_file_count": self.gold_data_file_count,
-                "gold_snapshot_count": self.gold_snapshot_count,
-            }
+        # Only the counts the probe measured.
+        health = {
+            k: v
+            for k, v in (
+                ("silver_data_file_count", self.silver_data_file_count),
+                ("silver_snapshot_count", self.silver_snapshot_count),
+                ("gold_data_file_count", self.gold_data_file_count),
+                ("gold_snapshot_count", self.gold_snapshot_count),
+            )
+            if v is not None and v >= 0
+        }
+        if health:
+            d["table_health"] = health
         return d
 
 
@@ -334,6 +399,16 @@ class PipelineMetrics:
     # from before the field, or a path that never reached maintenance).
     maintenance_outcomes: list[dict[str, Any]] | None = None
 
+    # Continuous runs (cli/_sustained.py): the measurement window
+    # {"start", "end", "seconds"} in UTC, each stream's start
+    # {"streams": {job: {"running_at", "submission_failures"}}}, the gate's
+    # problems, and the result check {"settle": {...}, "result_check":
+    # {"query_set_id", "fingerprints"} or {"not_checked": reason}}: gold and
+    # the query set read once the whole corpus has passed through, so two
+    # runs of the same experiment can be shown to return the same results.
+    # None on batch runs and on records from before it.
+    continuous: dict[str, Any] | None = None
+
     # The experiment block as loaded from metrics.json (metrics/experiment.py).
     # experiment_block() rebuilds it from the record when the snapshot holds
     # experiment_inputs; a record from before the block has none and never
@@ -376,6 +451,8 @@ class PipelineMetrics:
             d["autosize_cuts"] = list(self.autosize_cuts)
         if self.maintenance_outcomes is not None:
             d["maintenance_outcomes"] = list(self.maintenance_outcomes)
+        if self.continuous is not None:
+            d["continuous"] = self.continuous
         experiment = self.experiment_block()
         if experiment is not None:
             d["experiment"] = experiment
@@ -502,7 +579,8 @@ class StageMetrics:
     input_size_gb: float = 0.0
     output_size_gb: float = 0.0
     input_rows: int = 0
-    output_rows: int = 0
+    # None: not measured (a continuous stage whose log carried no count).
+    output_rows: int | None = 0
 
     # Throughput (derived)
     throughput_gb_per_second: float = 0.0
@@ -531,6 +609,14 @@ class StageMetrics:
     total_batches: int = 0
     batch_size: int = 0
     unique_rows_processed: int | None = 0  # distinct input rows; None = unknown (gold re-reads)
+    # Continuous only: the measurement window (metrics/continuous_window.py).
+    # None = no window recorded (batch, or a record from before the window).
+    window_input_rows: int | None = None  # rows taken in inside the window
+    pre_window_input_rows: int | None = None  # rows taken in before it opened
+    window_commits: int | None = None  # commits (gold: refreshes) inside it
+    window_new_data_cycles: int | None = None  # gold: refreshes that saw new silver data
+    last_write_offset_seconds: float | None = None  # bronze: window start to last write
+    trickle_start_offset_seconds: float | None = None  # bronze: first write, window-relative
 
     # Query-specific (zero for non-query)
     queries_executed: int = 0
@@ -541,8 +627,11 @@ class StageMetrics:
         if self.elapsed_seconds > 0:
             if self.input_size_gb > 0:
                 self.throughput_gb_per_second = self.input_size_gb / self.elapsed_seconds
-            if self.input_rows > 0:
-                self.throughput_rows_per_second = self.input_rows / self.elapsed_seconds
+            # A continuous stage's rate is over the rows it took in inside
+            # the window, never the rows before it.
+            rows = self.window_input_rows if self.window_input_rows is not None else self.input_rows
+            if rows > 0:
+                self.throughput_rows_per_second = rows / self.elapsed_seconds
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -599,9 +688,9 @@ class PipelineBenchmark:
         the queryable data is.  Lower is better.
 
     **sustained_throughput_rps**
-        Sum of ``throughput_rows_per_second`` across streaming stages.
-        Aggregate sustained rows/sec the pipeline can maintain.  Higher is
-        better.
+        Bronze rows ingested inside the measurement window over the seconds
+        of it data was arriving (``arrival_seconds``). Rows ingested before
+        the window opened are left out. Higher is better.
 
     **stage_latency_profile**
         List of ``[bronze_avg_ms, silver_avg_ms, gold_avg_ms]`` latencies.
@@ -664,10 +753,16 @@ class PipelineBenchmark:
         "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
         # Sustained
         "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
-        "sustained_throughput_rps": "Rows entering bronze per second (higher is better). When intake_limit is trickle_rate this is the configured offered load, not a capacity",
-        "ingest_ratio": "Bronze rows ingested / datagen rows produced: the share of the corpus the window consumed (1.0 = all data consumed). The offered load is the trickle (max_files_per_trigger per bronze trigger), so a corpus larger than trickle rate x window reads below 1 without saturation; intake_limit says which",
+        "sustained_throughput_rps": "Rows bronze ingested inside the measurement window per second of the window that data was arriving (arrival_seconds), higher is better. Rows ingested before the window opened are not counted. When intake_limit is trickle_rate this is the configured offered load, not a capacity",
+        "window_seconds": "Length of the measurement window: from the moment every stream's driver was running, run_duration seconds",
+        "arrival_seconds": "Seconds of the window data was still arriving at bronze: the whole window while corpus was left, else until one bronze trigger after its last write inside the window",
+        "window_arrival_fraction": "arrival_seconds / window_seconds. Below 1 the corpus ran out inside the window; the window after that measured an idle pipeline",
+        "pre_window_rows": "Rows bronze ingested before the window opened (a stream that started while another waited to submit). Not part of any window score",
+        "ingest_ratio": "Bronze rows ingested by the window's end / rows the trickle had released to bronze by then (released_rows: max_files_per_trigger files per bronze trigger since bronze's first write, at the corpus's mean rows per file, capped at the corpus). 1.0 = bronze kept up with what arrived. Falls back to corpus_ingest_ratio when released_rows is unknown",
+        "corpus_ingest_ratio": "Bronze rows ingested by the window's end / datagen rows produced: the share of the whole corpus taken. Below 1 on a default run, whose trickle is sized to outlast the window",
+        "released_rows": "Rows the trickle had made available to bronze by the window's end (ingest_ratio's denominator); null when the corpus file count or window is unknown",
         "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
-        "pipeline_saturated": "True when ingest_ratio < 0.95 and the pipeline did not keep pace with the offered load. False when intake_limit is trickle_rate: the configured trickle, not the pipeline, bounded intake",
+        "pipeline_saturated": "True when ingest_ratio < 0.95: bronze fell behind the rows the trickle released. False when intake_limit is trickle_rate: the configured trickle, not the pipeline, bounded intake",
         "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), trickle_rate (bronze ran a micro-batch on nearly every trigger, each inside the trigger, with corpus left: the configured max_files_per_trigger per trigger bounded intake and the pipeline kept pace), below_bronze_capacity (bronze had idle time without that pattern: a late start or a stall), none (kept up)",
         "corpus_drain_seconds": "When intake_limit is trickle_rate: seconds the trickle needs to ingest the whole corpus at the rate it held (datagen rows / sustained_throughput_rps); a window this long drains it",
         "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
@@ -677,8 +772,8 @@ class PipelineBenchmark:
         "time_to_detect_alerts": "AML continuous. Newly raised alerts the time to detect is measured over",
         "time_to_detect_late_alerts": "AML continuous. Measured alerts whose related transactions were all in silver before the previous detection pass (re-raised after a rule error, or evidence outside related_txn_ids); included in the percentiles",
         "time_to_detect_unmeasured_cycles": "AML continuous. Gold cycles that logged no time-to-detect line; their alerts are measured on the next cycle, late by one cycle",
-        "corpus_drained": "True when the finite corpus was fully ingested before the window ended: freshness covers only cycles that saw new data, and sustained_throughput_rps is a lower bound",
-        "total_rows_processed": "Cumulative rows processed across all streaming stages",
+        "corpus_drained": "True when every datagen row reached bronze and silver committed all of them before the window ended: freshness covers only gold cycles that saw new data, and arrival_seconds stops at bronze's last write",
+        "total_rows_processed": "Rows taken in across all streaming stages inside the measurement window (gold re-reads of silver included)",
         "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
         "query_time_freshness_seconds": "Diagnostic. Median gold staleness measured at benchmark query time (lower is better). Gap between this and data_freshness_seconds indicates freshness variability.",
         "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
@@ -771,6 +866,16 @@ class PipelineBenchmark:
     # When intake_limit is "trickle_rate": seconds the trickle needs to
     # ingest the whole corpus at the rate it held (datagen rows / rows/s).
     corpus_drain_seconds: float | None = None
+    # The measurement window (metrics/continuous_window.py). None on batch
+    # and on records from before the window was recorded.
+    window_seconds: float | None = None
+    arrival_seconds: float | None = None
+    # Bronze rows / datagen rows (the whole corpus), and the rows the trickle
+    # had released by the window's end (ingest_ratio's denominator when known).
+    corpus_ingest_ratio: float | None = None
+    released_rows: int | None = None
+    window_arrival_fraction: float | None = None
+    pre_window_rows: int | None = None
     # AML continuous time to detect: from the newest bronze ingest_ts of an
     # alert's related transactions to the end of the detection pass that
     # first raised it. Median (the score), p95 and max over newly raised
@@ -934,11 +1039,40 @@ class PipelineBenchmark:
         # Total data processed (shared with batch -- needed for GB/s and report)
         self.total_data_processed_gb = sum(s.input_size_gb for s in self.stages)
 
-        # Sustained throughput: unique rows entering bronze / run duration
+        # Bronze rows by the window's end (ingest_ratio, corpus_drained) and
+        # inside the window (throughput).
         bronze_stages = [s for s in streaming if s.stage_name == "bronze"]
         total_bronze_rows = sum(s.input_rows for s in bronze_stages)
         run_duration = max((s.elapsed_seconds for s in streaming), default=0.0)
-        if run_duration > 0:
+        datagen_rows = self.config_snapshot.get("datagen_output_rows", 0)
+        sustained = self.config_snapshot.get("sustained") or {}
+        windowed = bool(bronze_stages) and all(
+            s.window_input_rows is not None for s in bronze_stages
+        )
+        if windowed:
+            from lakebench.metrics.continuous_window import arrival_seconds
+
+            window_rows = sum(s.window_input_rows or 0 for s in bronze_stages)
+            offsets = [
+                s.last_write_offset_seconds
+                for s in bronze_stages
+                if s.last_write_offset_seconds is not None
+            ]
+            self.window_seconds = run_duration
+            self.pre_window_rows = sum(s.pre_window_input_rows or 0 for s in bronze_stages)
+            self.arrival_seconds = arrival_seconds(
+                run_duration,
+                max(offsets) if offsets else None,
+                datagen_rows > 0 and total_bronze_rows >= datagen_rows,
+                _interval_seconds(sustained.get("bronze_trigger_interval")),
+            )
+            if run_duration > 0:
+                self.window_arrival_fraction = self.arrival_seconds / run_duration
+            self.sustained_throughput_rps = (
+                window_rows / self.arrival_seconds if self.arrival_seconds > 0 else 0.0
+            )
+        elif run_duration > 0:
+            # A record from before the window: rows / window, as it was scored.
             self.sustained_throughput_rps = total_bronze_rows / run_duration
 
         # Pipeline throughput in GB/s (total data / wall-clock duration)
@@ -953,19 +1087,42 @@ class PipelineBenchmark:
             profile.append(val)
         self.stage_latency_profile = profile
 
-        # Total rows processed across all streaming stages
-        self.total_rows_processed = sum(s.input_rows for s in streaming)
+        # Rows taken in across the streaming stages (inside the window when
+        # it was recorded; gold's re-reads of silver included).
+        self.total_rows_processed = sum(
+            s.window_input_rows if s.window_input_rows is not None else s.input_rows
+            for s in streaming
+        )
 
-        # Ingestion completeness: bronze rows / datagen rows.
-        # Both scores stay None when the denominator is unknown -- reporting
-        # "saturated" against a missing measurement is worse than reporting
-        # "unmeasurable". See LB-044-shape regression.
-        datagen_rows = self.config_snapshot.get("datagen_output_rows", 0)
+        # Ingestion completeness. corpus_ingest_ratio: bronze rows / datagen
+        # rows, the share of the corpus taken by the window's end.
+        # ingest_ratio: bronze rows / rows the trickle had released by then,
+        # so a trickle that has not yet offered the rest of the corpus is not
+        # read as a pipeline that fell behind. Records without the window or
+        # the corpus file count keep the corpus ratio. Both stay None when
+        # the denominator is unknown (LB-044 shape).
         if datagen_rows > 0:
-            self.ingest_ratio = total_bronze_rows / datagen_rows
+            self.corpus_ingest_ratio = total_bronze_rows / datagen_rows
+            released = None
+            if windowed and bronze_stages:
+                from lakebench.metrics.continuous_window import released_rows
+
+                released = released_rows(
+                    run_duration,
+                    bronze_stages[0].trickle_start_offset_seconds,
+                    _interval_seconds(sustained.get("bronze_trigger_interval")),
+                    sustained.get("max_files_per_trigger"),
+                    datagen_rows,
+                    int(self.config_snapshot.get("datagen_output_files") or 0),
+                )
+            self.released_rows = released
+            self.ingest_ratio = (
+                total_bronze_rows / released if released else self.corpus_ingest_ratio
+            )
             self.pipeline_saturated = self.ingest_ratio < 0.95
         else:
             self.ingest_ratio = None
+            self.corpus_ingest_ratio = None
             self.pipeline_saturated = None
 
         # What bounded intake. A short ratio alone does not say where: AML
@@ -976,9 +1133,10 @@ class PipelineBenchmark:
         # slow start or a stall also leaves bronze idle), so it only says the
         # limit was not bronze's processing.
         bronze = bronze_stages[0] if bronze_stages else None
-        if bronze and bronze.latency_ms and bronze.total_batches and bronze.elapsed_seconds > 0:
+        bronze_batches = _window_batches(bronze) if bronze else 0
+        if bronze and bronze.latency_ms and bronze_batches and bronze.elapsed_seconds > 0:
             self.bronze_busy_fraction = (
-                bronze.total_batches * bronze.latency_ms / 1000.0 / bronze.elapsed_seconds
+                bronze_batches * bronze.latency_ms / 1000.0 / bronze.elapsed_seconds
             )
         if self.ingest_ratio is not None:
             if self.ingest_ratio >= 0.95:
@@ -1032,13 +1190,13 @@ class PipelineBenchmark:
             self.corpus_drained = None
         else:
             # Exact counts, no slack: a bronze stall that leaves even a few
-            # files unread is a stall. Two trailing idle cycles, so a healthy
-            # run whose window ends between two silver batches is not drained.
+            # files unread is a stall. Every datagen row in bronze and every
+            # bronze row committed by silver leaves nothing to arrive, however
+            # many idle gold cycles followed.
             self.corpus_drained = (
                 total_bronze_rows >= datagen_rows
                 and silver_committed is not None
                 and silver_committed >= total_bronze_rows
-                and any(s.trailing_idle_cycles >= 2 for s in streaming)
             )
 
         # Worst-case freshness (max = most stale stage). None means
@@ -1065,7 +1223,7 @@ class PipelineBenchmark:
             round_freshness = [
                 r.round_meta.gold_freshness_seconds
                 for r in self.benchmark_rounds
-                if r.round_meta and r.round_meta.gold_freshness_seconds > 0
+                if r.round_meta and (r.round_meta.gold_freshness_seconds or 0) > 0
             ]
             if round_freshness:
                 self.query_time_freshness_seconds = statistics.median(round_freshness)
@@ -1124,7 +1282,8 @@ class PipelineBenchmark:
         )
         return (
             f"Intake was held to the configured trickle rate{rate}, not limited by the "
-            f"pipeline: the window took {self.ingest_ratio:.0%} of the corpus, bronze and "
+            f"pipeline: the window took {(self.corpus_ingest_ratio or self.ingest_ratio):.0%} "
+            "of the corpus, bronze and "
             f"silver kept pace, so the run is not saturated and rows/s is the offered load."
             f"{drain}"
         )
@@ -1144,13 +1303,14 @@ class PipelineBenchmark:
         """
         sustained = self.config_snapshot.get("sustained") or {}
         trigger_s = _interval_seconds(sustained.get("bronze_trigger_interval"))
-        if not trigger_s or not bronze.latency_ms or not bronze.total_batches:
+        batches = _window_batches(bronze)
+        if not trigger_s or not bronze.latency_ms or not batches:
             return False
         if bronze.latency_ms / 1000.0 >= trigger_s:
             return False
         if bronze.batch_span_seconds is None:
             return False
-        if bronze.total_batches < _TRIGGER_COVERAGE * bronze.elapsed_seconds / trigger_s:
+        if batches < _TRIGGER_COVERAGE * bronze.elapsed_seconds / trigger_s:
             return False
         span_triggers = bronze.batch_span_seconds / trigger_s + 1
         # At least one missed trigger is always allowed, so a short run is
@@ -1254,6 +1414,18 @@ class PipelineBenchmark:
                 "total_elapsed_seconds": round(self.total_elapsed_seconds, 2),
                 "total_s3_objects": self.total_s3_objects,
             }
+            if self.corpus_ingest_ratio is not None:
+                scores["corpus_ingest_ratio"] = round(self.corpus_ingest_ratio, 4)
+                scores["released_rows"] = self.released_rows
+            if self.window_seconds is not None:
+                scores["window_seconds"] = round(self.window_seconds, 1)
+                scores["arrival_seconds"] = round(self.arrival_seconds or 0.0, 1)
+                scores["window_arrival_fraction"] = (
+                    round(self.window_arrival_fraction, 3)
+                    if self.window_arrival_fraction is not None
+                    else None
+                )
+                scores["pre_window_rows"] = self.pre_window_rows
             if self.query_time_freshness_seconds > 0:
                 scores["query_time_freshness_seconds"] = round(self.query_time_freshness_seconds, 2)
             # AML runs always carry the keys, None when unmeasured, so a
@@ -1464,6 +1636,7 @@ def build_pipeline_benchmark(
     datagen_elapsed: float = 0.0,
     datagen_output_gb: float = 0.0,
     datagen_output_rows: int = 0,
+    datagen_output_files: int = 0,
     datagen_fleet: dict[str, Any] | None = None,
 ) -> PipelineBenchmark:
     """Build a PipelineBenchmark from a completed PipelineMetrics.
@@ -1671,9 +1844,16 @@ def build_pipeline_benchmark(
             input_rows=sj.total_rows_processed,
             unique_rows_processed=(
                 sj.unique_rows_processed
-                if sj.unique_rows_processed > 0
+                if sj.unique_rows_processed
                 else (sj.total_rows_processed if sj.job_type != "gold-refresh" else None)
             ),
+            output_rows=sj.output_rows,
+            window_input_rows=sj.window_input_rows,
+            pre_window_input_rows=sj.pre_window_input_rows,
+            window_commits=sj.window_commits,
+            window_new_data_cycles=sj.window_new_data_cycles,
+            last_write_offset_seconds=sj.last_write_offset_seconds,
+            trickle_start_offset_seconds=sj.trickle_start_offset_seconds,
             throughput_rows_per_second=sj.throughput_rps,
             latency_ms=sj.micro_batch_duration_ms or None,
             freshness_seconds=sj.freshness_seconds or None,
@@ -1729,6 +1909,8 @@ def build_pipeline_benchmark(
     snapshot = dict(run.config_snapshot)
     if datagen_output_rows > 0:
         snapshot["datagen_output_rows"] = datagen_output_rows
+    if datagen_output_files > 0:
+        snapshot["datagen_output_files"] = datagen_output_files
 
     benchmark = PipelineBenchmark(
         run_id=run.run_id,
@@ -1807,6 +1989,18 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
     )
 
 
+#: The benchmark every continuous in-stream round (and the end-of-run result
+#: check) runs: one hot power pass with one sample per query. Gold changes
+#: under a round, so repeats would time different snapshots; the rounds
+#: themselves are the repeats (cli/_sustained.py _run_benchmark_round).
+CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
+    "mode": "power",
+    "streams": 1,
+    "cache": "hot",
+    "iterations": 1,
+}
+
+
 def build_config_snapshot(cfg: Any) -> dict[str, Any]:
     """Build a config snapshot for metrics recording.
 
@@ -1819,6 +2013,8 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
     Returns:
         Dict suitable for JSON serialization.
     """
+    from lakebench.config.schema import is_continuous_mode
+
     spark = cfg.platform.compute.spark
     datagen = cfg.architecture.workload.datagen
     pipeline = cfg.architecture.pipeline
@@ -1873,7 +2069,7 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
             "silver_trigger_interval": pipeline.sustained.silver_trigger_interval,
             "gold_refresh_interval": pipeline.sustained.gold_refresh_interval,
             "run_duration": pipeline.sustained.run_duration,
-            "max_files_per_trigger": pipeline.sustained.max_files_per_trigger,
+            "max_files_per_trigger": effective_trickle(cfg),
             "bronze_target_file_size_mb": pipeline.sustained.bronze_target_file_size_mb,
             "silver_target_file_size_mb": pipeline.sustained.silver_target_file_size_mb,
             "gold_target_file_size_mb": pipeline.sustained.gold_target_file_size_mb,
@@ -1902,12 +2098,20 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
                 "memory": cfg.architecture.query_engine.trino.worker.memory,
             },
         },
-        "benchmark": {
-            "mode": cfg.architecture.benchmark.mode.value,
-            "streams": cfg.architecture.benchmark.streams,
-            "cache": cfg.architecture.benchmark.cache,
-            "iterations": cfg.architecture.benchmark.iterations,
-        },
+        # What the benchmark runs with. Continuous mode ignores the
+        # benchmark block: its in-stream rounds are fixed (one hot power
+        # pass, one sample per query), so recording the config's iterations
+        # and streams there would claim runs that never happened.
+        "benchmark": (
+            dict(CONTINUOUS_ROUND_BENCHMARK)
+            if is_continuous_mode(pipeline.mode)
+            else {
+                "mode": cfg.architecture.benchmark.mode.value,
+                "streams": cfg.architecture.benchmark.streams,
+                "cache": cfg.architecture.benchmark.cache,
+                "iterations": cfg.architecture.benchmark.iterations,
+            }
+        ),
         # What table maintenance the config asks for. Part of the perf-gate
         # fingerprint: a run with maintenance turned down or off measures
         # something else than one under the full policy.
@@ -1948,6 +2152,14 @@ _TRIGGER_REGULARITY = 0.95
 _LOG_TS = re.compile(r"\[lb\] (\d{4}-\d\d-\d\dT[\d:.]+) - ")
 
 _INTERVAL_UNITS = {"second": 1, "minute": 60, "hour": 3600}
+
+
+def _window_batches(stage: StageMetrics) -> int:
+    """Micro-batches a stage committed inside the window, or every batch it
+    logged when no window was recorded."""
+    if stage.window_commits is not None:
+        return stage.window_commits
+    return stage.total_batches
 
 
 def _interval_seconds(interval: Any) -> float | None:
@@ -2587,6 +2799,8 @@ class MetricsCollector:
         # total_rows_processed includes amplification.
         if job_type in ("bronze-ingest", "silver-stream"):
             metrics.unique_rows_processed = metrics.total_rows_processed
+        else:
+            metrics.unique_rows_processed = None
 
         return metrics
 

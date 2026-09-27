@@ -1389,6 +1389,8 @@ class JobStatus:
     start_time: str | None = None
     completion_time: str | None = None
     executor_count: int = 0
+    # Operator submission attempts (status.submissionAttempts); 0 when unknown.
+    submission_attempts: int = 0
 
 
 class SparkJobManager:
@@ -1598,6 +1600,7 @@ class SparkJobManager:
                 executor_count=len(status.get("executorState", {}))
                 if status.get("executorState")
                 else 0,
+                submission_attempts=int(status.get("submissionAttempts") or 0),
             )
 
         except ApiException as e:
@@ -2610,7 +2613,8 @@ class SparkJobManager:
                     {"name": "CHECKPOINT_LOCATION", "value": checkpoint_location},
                     {
                         "name": "MAX_FILES_PER_TRIGGER",
-                        "value": str(sustained.max_files_per_trigger),
+                        # Resolved by cli/_sustained.resolve_trickle before submit.
+                        "value": str(sustained.max_files_per_trigger or 50),
                     },
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
@@ -2638,7 +2642,8 @@ class SparkJobManager:
                             },
                             {
                                 "name": "LB_FINANCIAL_BRONZE_MAX_FILES",
-                                "value": str(sustained.max_files_per_trigger),
+                                # Resolved by cli/_sustained.resolve_trickle before submit.
+                                "value": str(sustained.max_files_per_trigger or 50),
                             },
                             {
                                 "name": "LB_FINANCIAL_BRONZE_TRIGGER_S",

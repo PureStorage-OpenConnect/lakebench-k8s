@@ -1859,7 +1859,7 @@ def results(
             f"{stage.input_size_gb:.3f}" if stage.input_size_gb > 0 else "-",
             f"{stage.output_size_gb:.3f}" if stage.output_size_gb > 0 else "-",
             f"{stage.input_rows:,}" if stage.input_rows > 0 else "-",
-            f"{stage.output_rows:,}" if stage.output_rows > 0 else "-",
+            f"{stage.output_rows:,}" if stage.output_rows else "-",
             f"{stage.throughput_gb_per_second:.4f}" if stage.throughput_gb_per_second > 0 else "-",
             f"{stage.throughput_rows_per_second:.0f}"
             if stage.throughput_rows_per_second > 0

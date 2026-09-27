@@ -56,7 +56,6 @@ from lakebench.metrics.experiment import (
     result_fingerprints,
     results_established,
     stored_identity_refusals,
-    unchecked_by_design,
 )
 from lakebench.metrics.maintenance_policy import not_current, policy_mismatch, recorded_policy
 
@@ -519,11 +518,15 @@ def extract_metrics(run: RunRecord) -> tuple[dict[str, float], dict[str, str]]:
         for key in [k for k in numbers if _is_stage_seconds(k)]:
             del numbers[key]
 
-    if run.mode == "sustained" and run.scores.get("corpus_drained") is True:
-        numbers.pop("sustained_throughput_rps", None)
-        excluded["sustained_throughput_rps"] = (
-            "corpus drained before the window ended; rows/s is a lower bound (LB-145)"
+    if run.mode == "sustained":
+        from lakebench.metrics.continuous_window import drained_rps_excluded
+
+        why = drained_rps_excluded(
+            run.scores.get("corpus_drained"), run.scores.get("window_arrival_fraction")
         )
+        if why:
+            numbers.pop("sustained_throughput_rps", None)
+            excluded["sustained_throughput_rps"] = why
 
     if run.mode == "batch":
         recomputed = _pipeline_ttv(run)
@@ -1183,8 +1186,6 @@ def record_baseline(
     exp = experiment_of(run.raw)
     assert exp is not None  # run_refusals refused a run without one
     established = results_established(exp)
-    if unchecked_by_design(exp):
-        established = True  # continuous: gated without a result check (experiment.py)
     problems = corpus_problems(exp)
     if established is not True or problems:
         raise PerfGateError(
@@ -1206,7 +1207,7 @@ def record_baseline(
     unfp = sorted(
         n for n, f in result_fingerprints(exp).items() if n not in failed and not usable(f)
     )
-    if unfp and not unchecked_by_design(exp):
+    if unfp:
         raise PerfGateError(
             f"run {run.run_id} cannot be a baseline for {name}: queries without a usable "
             f"result fingerprint ({', '.join(unfp)}) could never be shown equal to a later run"
