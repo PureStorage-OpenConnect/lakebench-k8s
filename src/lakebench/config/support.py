@@ -227,6 +227,21 @@ def load_validation_record(path: Path | None = None) -> dict[tuple[str, str, str
     return out
 
 
+def local_problem(workload: str | None, mode: object) -> str:
+    """Why ``--local`` cannot run this workload x mode, or ''. Local mode's
+    job map, datagen arguments and benchmark tables are Customer 360 batch
+    only; anything else would run Customer 360 batch work under its label."""
+    wl, m = str(workload), canonical_mode(mode)
+    if wl != "customer360":
+        return (
+            f"Local mode runs the Customer 360 workload only, config requests {wl!r}. "
+            "Run it on a cluster instead."
+        )
+    if m != "batch":
+        return f"Local mode runs batch mode only, this run asks for {m}."
+    return ""
+
+
 def support_state(
     workload: str | None,
     catalog: str | None,
@@ -237,11 +252,13 @@ def support_state(
     *,
     system: str = "cluster",
     record: Mapping[tuple[str, str, str], Validation] | None = None,
+    provenance: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The DESIGN 6.5 support state of one workload x architecture x mode.
 
     Returns ``{"state", "basis", ...}``. ``supported`` only when the release
-    validation record lists the combination with run ids; an unreadable
+    validation record lists the combination with run ids and lakebench is not
+    running from a modified tree (*provenance* ``git_dirty``); an unreadable
     record never promotes anything.
     """
     wl, m = str(workload), canonical_mode(mode)
@@ -252,11 +269,16 @@ def support_state(
         out["mode_note"] = note
     if system == "local":
         # --local swaps in a hadoop catalog and DuckDB whatever the config
-        # names; release validation covers cluster runs only.
-        out.update(
-            state=UNVERIFIED,
-            basis="local mode: release validation covers cluster runs only",
-        )
+        # names, and runs Customer 360 batch only; release validation covers
+        # cluster runs only.
+        problem = local_problem(wl, m)
+        if problem:
+            out.update(state=UNSUPPORTED, basis=problem)
+        else:
+            out.update(
+                state=UNVERIFIED,
+                basis="local mode: release validation covers cluster runs only",
+            )
         return out
     problem = compatibility_problem(wl, *comps, m)
     if problem:
@@ -272,6 +294,15 @@ def support_state(
             return out
     v = record.get((wl, str(recipe), m))
     if v is not None and v.runs:
+        if provenance and provenance.get("git_dirty"):
+            out.update(
+                state=UNVERIFIED,
+                basis=(
+                    "listed as validated, but this lakebench ran from a modified tree "
+                    f"({provenance.get('git_sha') or 'unknown commit'} with local changes)"
+                ),
+            )
+            return out
         out.update(
             state=SUPPORTED,
             basis=f"validated on release tree {v.tree} by {', '.join(v.runs)}",
@@ -286,7 +317,13 @@ def support_state(
     return out
 
 
-def support_state_for_config(cfg: Any, mode: object = None) -> dict[str, Any]:
+def support_state_for_config(
+    cfg: Any,
+    mode: object = None,
+    *,
+    system: str = "cluster",
+    provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Support state of a loaded config. *mode* overrides the config's mode
     (``run --continuous`` does not write the mode back to the config)."""
     arch = cfg.architecture
@@ -297,16 +334,29 @@ def support_state_for_config(cfg: Any, mode: object = None) -> dict[str, Any]:
         arch.pipeline_engine.value,
         arch.query_engine.type.value,
         mode if mode is not None else arch.pipeline.mode,
+        system=system,
+        provenance=provenance,
     )
 
 
 def support_matrix(
     record: Mapping[tuple[str, str, str], Validation] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every recipe x workload x mode with its computed state."""
-    if record is None:
-        record = load_validation_record()
+    """Every recipe x workload x mode with its computed state. A record that
+    does not load leaves every row unverified with the error as its basis
+    (the same as a run's stamp), rather than failing the caller."""
     rows = []
+    if record is None:
+        try:
+            record = load_validation_record()
+        except ValidationRecordError as e:
+            record = {}
+            error = f"release validation record unreadable ({e})"
+            for row in support_matrix(record):
+                if row["state"] == UNVERIFIED:
+                    row["basis"] = error
+                rows.append(row)
+            return rows
     for recipe in recipe_names():
         comps = components_of(recipe)
         assert comps is not None

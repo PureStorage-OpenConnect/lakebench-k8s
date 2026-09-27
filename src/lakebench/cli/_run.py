@@ -1047,7 +1047,7 @@ def _run_local_mode(
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
-    snapshot = build_config_snapshot(cfg)
+    snapshot = build_config_snapshot(cfg, run_mode="batch", system="local")
     snapshot["local"] = True
     collector.start_run(run_id, cfg.name, snapshot)
     if collector.current_run is not None:
@@ -1347,12 +1347,13 @@ def run(
     # DESIGN 6.5: an unsupported workload x architecture x mode is refused
     # before anything runs. Load already checks the config's own mode;
     # --continuous and --sustained do not write the mode back, so check the
-    # mode this run will use.
+    # mode this run will use. --local runs Customer 360 batch only.
     from lakebench.config.support import UNSUPPORTED, support_state_for_config
 
-    _support = support_state_for_config(
-        cfg, "continuous" if (sustained or continuous) else cfg.architecture.pipeline.mode
-    )
+    _run_mode = "continuous" if (sustained or continuous) else cfg.architecture.pipeline.mode
+    _support = support_state_for_config(cfg, _run_mode)
+    if _support["state"] != UNSUPPORTED and local:
+        _support = support_state_for_config(cfg, _run_mode, system="local")
     if _support["state"] == UNSUPPORTED:
         print_error(f"Unsupported combination, refused: {_support['basis']}")
         raise typer.Exit(1)
@@ -1541,7 +1542,7 @@ def run(
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     from lakebench.metrics import build_config_snapshot
 
-    config_snapshot = build_config_snapshot(cfg)
+    config_snapshot = build_config_snapshot(cfg, run_mode="batch")
     collector.start_run(run_id, cfg.name, config_snapshot)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts

@@ -203,3 +203,51 @@ def test_docs_do_not_present_unity_as_working():
     text = (REPO / "docs/compatibility-matrix.md").read_text()
     unity_rows = [ln for ln in text.splitlines() if ln.startswith("| Unity")]
     assert unity_rows and all("Not supported" in ln for ln in unity_rows)
+
+
+# -- local mode -------------------------------------------------------------
+
+
+def test_local_mode_refuses_aml_and_continuous():
+    """--local runs the Customer 360 batch job map, datagen and benchmark
+    whatever the config names; anything else ran C360 under another label."""
+    from lakebench.cli._local import LocalModeError, check_local_supported
+    from tests.conftest import make_config
+
+    aml = make_config(architecture={"workload": {"schema": "financial"}})
+    with pytest.raises(LocalModeError, match="Customer 360 workload only"):
+        check_local_supported(aml)
+    cont = make_config(architecture={"pipeline": {"mode": "continuous"}})
+    with pytest.raises(LocalModeError, match="batch mode only"):
+        check_local_supported(cont)
+    c360 = make_config()
+    check_local_supported(c360)
+    with pytest.raises(LocalModeError, match="batch mode only"):
+        check_local_supported(c360, continuous=True)
+    s = support.support_state(
+        "financial", "none", "iceberg", "spark", "duckdb", "batch", system="local", record={}
+    )
+    assert s["state"] == support.UNSUPPORTED
+
+
+def test_run_local_refuses_the_continuous_flag(tmp_path, monkeypatch):
+    from lakebench.cli import app
+
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text(
+        "name: s\nplatform:\n  storage:\n    s3:\n      endpoint: http://127.0.0.1:1\n"
+        "      access_key: x\n      secret_key: y\n"
+    )
+    reached = []
+    monkeypatch.setattr("lakebench.cli._run._run_local_mode", lambda *a, **k: reached.append(1))
+    res = CliRunner().invoke(app, ["run", str(cfg), "--local", "--continuous"])
+    assert res.exit_code == 1, res.output
+    assert "batch mode only" in res.output and not reached
+
+
+def test_matrix_degrades_when_the_record_is_malformed(tmp_path):
+    bad = _record(tmp_path, "validated: {not: a list}\n")
+    with mock.patch.object(support, "VALIDATION_RECORD", bad):
+        rows = support.support_matrix()
+    assert rows and all(r["state"] != support.SUPPORTED for r in rows)
+    assert any("unreadable" in r["basis"] for r in rows)

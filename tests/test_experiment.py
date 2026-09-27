@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from lakebench.benchmark.fingerprint import fingerprint_rows
+from lakebench.config.recipes import RECIPES
 from lakebench.metrics import experiment as ex
 from lakebench.metrics.collector import (
     BenchmarkMetrics,
@@ -171,22 +172,69 @@ class TestStamping:
 
     def test_support_is_supported_only_when_the_record_lists_it(self, tmp_path):
         from lakebench.config import support
+        from lakebench.metrics import provenance
 
+        clean = {"lakebench_version": "x", "git_sha": "abc1234", "git_dirty": False}
         rec = tmp_path / "validated_combinations.yaml"
         rec.write_text(
             "validated:\n"
             "  - {workload: customer360, recipe: hive-iceberg-spark-trino, mode: batch,\n"
             "     tree: abc1234, runs: [run-1]}\n"
         )
-        with mock.patch.object(support, "VALIDATION_RECORD", rec):
-            s = _metrics(_cfg()).to_dict()["experiment"]["support"]
-        assert s["state"] == "supported"
-        assert s["validation_runs"] == ["run-1"] and "abc1234" in s["basis"]
+        with (
+            mock.patch.object(support, "VALIDATION_RECORD", rec),
+            mock.patch.object(provenance, "run_provenance", lambda: clean),
+        ):
+            run = _metrics(_cfg())
+            s = run.to_dict()["experiment"]["support"]
+            assert s["state"] == "supported"
+            assert s["validation_runs"] == ["run-1"] and "abc1234" in s["basis"]
+            # A modified tree is not the validated code.
+            dirty = dict(clean, git_dirty=True)
+            with mock.patch.object(provenance, "run_provenance", lambda: dirty):
+                s = _metrics(_cfg()).to_dict()["experiment"]["support"]
+            assert s["state"] == "unverified" and "modified tree" in s["basis"]
+        # Frozen at run start: re-rendering after the record changes keeps it.
+        assert run.to_dict()["experiment"]["support"]["state"] == "supported"
         # Listed for another mode only: still unverified.
         rec.write_text(rec.read_text().replace("mode: batch", "mode: continuous"))
-        with mock.patch.object(support, "VALIDATION_RECORD", rec):
+        with (
+            mock.patch.object(support, "VALIDATION_RECORD", rec),
+            mock.patch.object(provenance, "run_provenance", lambda: clean),
+        ):
             s = _metrics(_cfg()).to_dict()["experiment"]["support"]
-        assert s["state"] == "unverified"
+            assert s["state"] == "unverified"
+            # A record from before the state was frozen is never re-stamped
+            # supported, whatever the installed record now says.
+            rec.write_text(rec.read_text().replace("mode: continuous", "mode: batch"))
+            old = _metrics(_cfg())
+            old.config_snapshot["experiment_inputs"].pop("support")
+            s = old.to_dict()["experiment"]["support"]
+            assert s["state"] == "unverified" and "not recorded at run start" in s["basis"]
+
+    def test_run_mode_from_the_flag_is_stamped(self):
+        """run --continuous does not write the mode back; a continuous run
+        that failed before any stream was recorded is still continuous."""
+        from lakebench.metrics.collector import build_config_snapshot
+
+        cfg = _cfg()
+        run = MetricsCollector().start_run(
+            "20260926-120000-bbbbbb", cfg.name, build_config_snapshot(cfg, run_mode="continuous")
+        )
+        e = run.to_dict()["experiment"]
+        assert e["mode"] == "sustained"
+        assert e["support"]["mode"] == "continuous"
+
+    @pytest.mark.parametrize("recipe", sorted(n for n in RECIPES if n != "default"))
+    def test_stamped_recipe_is_a_recipe_name(self, recipe):
+        from lakebench.config.recipes import RECIPES as R
+
+        cfg = make_config(
+            recipe=recipe,
+            architecture={"workload": {"schema": "customer360", "datagen": {"scale": 1}}},
+        )
+        assert ex.experiment_inputs(cfg)["architecture"]["recipe"] == recipe
+        assert recipe in R
 
     def test_autosize_cuts_are_a_recorded_limit(self):
         run = _metrics(_cfg())

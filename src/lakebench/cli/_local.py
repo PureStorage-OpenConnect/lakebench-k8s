@@ -81,14 +81,28 @@ def default_workdir(config_name: str) -> Path:
     return Path.home() / ".lakebench" / "local" / (safe or "default")
 
 
-def check_local_supported(cfg: LakebenchConfig) -> None:
+def check_local_supported(cfg: LakebenchConfig, *, continuous: bool = False) -> None:
     """Raise if the config asks for something local mode cannot do.
+
+    Local mode runs Customer 360 in batch mode only: its job map, datagen
+    arguments and benchmark tables are the Customer 360 batch ones, so an AML
+    or continuous config would run different work under its own label.
+    *continuous* is the run's --continuous/--sustained flag, which is not
+    written back to the config.
 
     Local mode is Iceberg-only. DuckDB's delta extension uses delta-kernel-rs,
     which ignores DuckDB's S3 settings and hangs on AWS IMDS against a non-AWS
     endpoint (gotcha 18), and Trino would reintroduce a catalog service and
     PostgreSQL, defeating the two-container model.
     """
+    from lakebench.config.support import local_problem
+
+    problem = local_problem(
+        cfg.architecture.workload.schema_type.value,
+        "continuous" if continuous else cfg.architecture.pipeline.mode,
+    )
+    if problem:
+        raise LocalModeError(problem)
     table_format = cfg.architecture.table_format.type
     fmt = getattr(table_format, "value", str(table_format))
     if fmt != "iceberg":
