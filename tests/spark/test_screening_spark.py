@@ -229,3 +229,36 @@ def test_w6_priority_split_and_missing_watchlist(spark, tmp_path, monkeypatch):
     with pytest.raises(dr.RuleSkipped) as e:
         dr.w6_pep_counterparty(txns, silver_entities=entities, run_id="r")
     assert e.value.reason == "no-watchlist"
+
+
+def test_tm_truth_is_rule_aware_for_screening_exposures(spark):
+    """A planted PEP payment is a true hit for W6 only: a W1 alert citing it
+    is not, and a W6 alert on it is not simulated as a false positive."""
+    import datetime as dt
+
+    import tm_operations as tm
+
+    t = dt.datetime(2023, 3, 1, 9)
+    alerts = spark.createDataFrame(
+        [
+            ("a6", "W6_pep_counterparty", 4, ["p1"], t),
+            ("a1", "W1_connected_components", 4, ["p1", "x9"], t),
+            ("a2", "W2_structuring", 4, ["c1"], t),
+        ],
+        "alert_id string, rule_id string, entity_id long, related_txn_ids array<string>, "
+        "alert_ts timestamp",
+    )
+    entities = spark.createDataFrame(
+        [(4, True, "US", "low")],
+        "entity_id long, is_customer boolean, country string, crr_tier string",
+    )
+    manifest = spark.createDataFrame(
+        [("PEP_MATCH_1", "pep_match", ["p1"]), ("M1", "micro_structuring", ["c1"])],
+        "typology_id string, typology_type string, participant_uetrs array<string>",
+    )
+    params = dict(tm.params_from_env(), counterparty_scenarios=tm.DEFAULT_COUNTERPARTY_SCENARIOS)
+    truth = {
+        r["alert_id"]: r["simulated_truth"]
+        for r in tm.build_alert_inputs(spark, alerts, entities, manifest, params).collect()
+    }
+    assert truth == {"a6": True, "a1": False, "a2": True}

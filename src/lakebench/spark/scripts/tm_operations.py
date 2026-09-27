@@ -1313,18 +1313,24 @@ def build_alert_inputs(spark, alerts, entities, manifest, params, known=None):
         "coalesce(related_txn_ids, cast(array() as array<string>)), x -> xxhash64(x)))), "
         f"1, {TXN_SKETCH_K})"
     )
-    # Screening exposures (sanctions_match, pep_match) are list hits, not
-    # suspicious behaviour: a W1 or W7 alert that happens to cite a PEP
-    # payment must not become a true hit that escalates. W5/W6 are scored
-    # against them in score_financial instead.
+    # Screening exposures (sanctions_match, pep_match) are true only for the
+    # screening rule that targets them: a W1 or W7 alert that happens to
+    # cite a PEP payment must not become a true hit, and a W5/W6 hit on a
+    # planted exposure must not be simulated as a false positive.
+    screening = {"sanctions_match": "W5_sanctions_match", "pep_match": "W6_pep_counterparty"}
+    rule_of = create_map(*[lit(x) for kv in screening.items() for x in kv])
     planted = (
-        manifest.where(~col("typology_type").isin("random", "sanctions_match", "pep_match"))
-        .select(explode(col("participant_uetrs")).alias("uetr"))
+        manifest.where(col("typology_type") != lit("random"))
+        .select(
+            explode(col("participant_uetrs")).alias("uetr"),
+            rule_of[col("typology_type")].alias("_only_rule"),
+        )
         .distinct()
     )
     hits = (
-        raw.select("alert_id", explode(col("related_txn_ids")).alias("uetr"))
-        .join(planted, "uetr", "left_semi")
+        raw.select("alert_id", "rule_id", explode(col("related_txn_ids")).alias("uetr"))
+        .join(planted, "uetr", "inner")
+        .filter(col("_only_rule").isNull() | (col("_only_rule") == col("rule_id")))
         .select("alert_id")
         .distinct()
         .withColumn("_hit", lit(True))

@@ -637,16 +637,6 @@ fn pacs008_main() {
     // and uid. Originators are activity-weighted customers outside any
     // dormancy window; amounts come from a per-row stream keyed by the row's
     // uid, drawn the way a base row's amount is.
-    // Screening payers are kept apart from behavioural typology participants,
-    // so no planted typology account gains an extra send.
-    let mut in_typology = vec![false; pop + 1];
-    for inst in &instances {
-        for &p in &inst.participants {
-            if (p as usize) <= pop {
-                in_typology[p as usize] = true;
-            }
-        }
-    }
     let (planted, negative_rows) = datagen_rs::screening::plant(
         &screening,
         seed,
@@ -656,7 +646,7 @@ fn pacs008_main() {
         |rng: &mut Rng| {
             for _ in 0..64 {
                 let o = sample_orig(&cum, total_w, pop, rng);
-                if is_customer(o, seed) && !in_typology[o as usize] {
+                if is_customer(o, seed) {
                     return Some(o);
                 }
             }

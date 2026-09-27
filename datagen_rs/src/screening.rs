@@ -13,9 +13,10 @@
 //!   count is computed before they exist). Every behavioural row, typology
 //!   instance and manifest row is therefore the same at the same seed as a
 //!   generator without this module. The converse does not hold: payers are
-//!   drawn by the baseline activity weights, outside dormancy windows and
-//!   typology participants, so a change to the behavioural generator can
-//!   move the screening rows.
+//!   drawn by the baseline activity weights, outside dormancy windows, so a
+//!   change to the behavioural generator can move the screening rows. A
+//!   payer may also be a behavioural typology participant (excluding them
+//!   made "paid an external payee" a certain-negative marker).
 //! - **Listed parties are never customers** and are not in the party master.
 //!   They are external entities with ids above the population (the
 //!   counterparty accounts of another bank). `World::attach_external` gives
@@ -418,13 +419,10 @@ pub fn build(population: usize, seed: i64, start_us: i64, end_us: i64) -> Screen
             } else {
                 p.country
             };
-            let mut a = account(next, name, variant, country, seed);
-            if country == p.country {
-                // The listed address: the entry's own town.
-                a.town = p.town.clone();
-                a.street = p.street.clone();
-            }
-            rel_accounts.push(a);
+            // Its own address, like every other external account: a shared
+            // street between two relationship accounts of one party would
+            // mark them (review of 5dad4dc).
+            rel_accounts.push(account(next, name, variant, country, seed));
             next += 1;
         }
     }
