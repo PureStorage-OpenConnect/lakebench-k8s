@@ -414,23 +414,31 @@ class TestEffectiveMaintenance:
         ok = {"kind": "expire", "total": 4, "succeeded": 4}
         comp = {"kind": "compaction", "total": 2, "succeeded": 2}
         full = eff([ok, comp])
-        assert full["id"].endswith("expire=ran,compaction=ran")
+        assert full["id"].endswith("expire_snapshots=ran,remove_orphan_files=ran,compaction=ran")
         failed = eff([{**ok, "succeeded": 0}, comp])
-        assert "expire=failed" in failed["id"] and "0 of 4" in " ".join(failed["reasons"])
+        assert "expire_snapshots=failed,remove_orphan_files=failed" in failed["id"]
+        assert "0 of 4" in " ".join(failed["reasons"])
         partial = eff([{**ok, "succeeded": 3}, comp], stopped=True)
         assert partial["id"] == full["id"]
-        assert "expire=partial" in partial["detail_id"] and partial["detail_id"].endswith("stopped")
+        assert "expire_snapshots=partial" in partial["detail_id"]
+        assert partial["detail_id"].endswith("stopped")
         # The run ended before the maintenance phase.
-        assert eff([])["id"].endswith("expire=not_run,compaction=not_run")
+        assert eff([])["id"].endswith(
+            "expire_snapshots=not_run,remove_orphan_files=not_run,compaction=not_run"
+        )
         # The user turned it off (--skip-benchmark, pre_benchmark_maintenance off).
         user = [{"kind": k, "user_skip": "--skip-benchmark"} for k in ("expire", "compaction")]
-        assert eff(user)["id"].endswith("expire=skipped_by_user,compaction=skipped_by_user")
+        assert eff(user)["id"].endswith(
+            "remove_orphan_files=skipped_by_user,compaction=skipped_by_user"
+        )
         # A crash in the maintenance phase is recorded, not assumed away.
         crashed = eff([{"kind": "maintenance", "error": "boom"}])
-        assert "expire=failed" in crashed["id"] and any("boom" in r for r in crashed["reasons"])
+        assert "expire_snapshots=failed" in crashed["id"] and any(
+            "boom" in r for r in crashed["reasons"]
+        )
         # Continuous: rounds that raised count as failed attempts.
         rounds = [{"kind": "expire", "error": "x"}] * 4 + [ok, comp]
-        assert "expire=partial" in eff(rounds, mode="sustained")["detail_id"]
+        assert "remove_orphan_files=partial" in eff(rounds, mode="sustained")["detail_id"]
         # Outcomes never turn an operation up past the rules (Delta OPTIMIZE).
         assert "compaction=not_supported" in eff([ok, comp], fmt="delta")["id"]
         assert eff(None)["basis"].startswith("policy rules")
@@ -439,14 +447,14 @@ class TestEffectiveMaintenance:
         run = _metrics(_cfg())
         run.maintenance_outcomes = [{"kind": "expire", "total": 2, "succeeded": 0}]
         e = run.to_dict()["experiment"]["effective_maintenance"]
-        assert "expire=failed" in e["id"] and e["basis"] == "recorded outcomes"
+        assert "expire_snapshots=failed" in e["id"] and e["basis"] == "recorded outcomes"
 
     def test_skip_flag_and_stop_show_in_the_id(self):
         skipped = effective_maintenance(
             MAINTENANCE_POLICY_ID + "+skipped", table_format="iceberg", query_engine="trino",
             mode="batch",
         )  # fmt: skip
-        assert "expire=skipped_by_user" in skipped["id"]
+        assert "expire_snapshots=skipped_by_user" in skipped["id"]
         stopped = effective_maintenance(
             MAINTENANCE_POLICY_ID, table_format="iceberg", query_engine="trino", mode="batch",
             stopped=True,

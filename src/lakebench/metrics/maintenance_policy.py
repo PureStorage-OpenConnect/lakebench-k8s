@@ -89,6 +89,32 @@ SKIPPED_BY_USER = "skipped_by_user"
 FAILED = "failed"
 NOT_RUN = "not_run"
 
+#: Operations in the identity, per table format, and the maintenance call
+#: kind that runs each (the run paths record outcomes per call kind:
+#: ``expire`` runs expire_snapshots and remove_orphan_files, or Delta VACUUM).
+ICEBERG_OPERATIONS = ("expire_snapshots", "remove_orphan_files", "compaction")
+DELTA_OPERATIONS = ("vacuum", "compaction")
+OPERATION_KIND = {
+    "expire_snapshots": "expire",
+    "remove_orphan_files": "expire",
+    "vacuum": "expire",
+    "compaction": "compaction",
+}
+# Worst first: the coarse per-kind class is the worst of its operations.
+_SEVERITY = (FAILED, NOT_RUN, SKIPPED_BY_USER, NOT_SUPPORTED, RAN)
+
+
+def operations_for(table_format: str | None) -> tuple[str, ...]:
+    """The maintenance operations the identity names for *table_format*."""
+    return DELTA_OPERATIONS if (table_format or "").lower() == "delta" else ICEBERG_OPERATIONS
+
+
+def _worst(values: list[str]) -> str:
+    for v in _SEVERITY:
+        if v in values:
+            return v
+    return RAN
+
 
 def effective_maintenance(
     policy_id: str | None,
@@ -103,25 +129,37 @@ def effective_maintenance(
 ) -> dict[str, Any]:
     """The maintenance a run actually got under *policy_id*.
 
-    Each operation (expire, compaction) gets a coarse class, which is what
-    the identity ``id`` carries: ``ran``, ``not_supported`` (the
-    composition cannot run it: DuckDB, Delta OPTIMIZE, Delta VACUUM on
-    Spark Thrift, continuous Delta VACUUM at its 7 d default),
-    ``skipped_by_user`` (--skip-maintenance, pre_benchmark_maintenance off,
-    --skip-benchmark, continuous compaction disabled), ``failed`` (it was
-    attempted and no statement succeeded) or ``not_run`` (the run ended
-    before the maintenance phase). Partial success, per-round timeouts and a
-    stopped budget are ``detail`` and ``reasons``, not identity: one timed-out
-    round in a 24 h run does not make it a different experiment.
+    Each operation gets a coarse class, and the identity ``id`` carries one
+    per operation: Iceberg ``expire_snapshots``, ``remove_orphan_files`` and
+    ``compaction``; Delta ``vacuum`` and ``compaction``. So a run whose
+    orphan removal failed while expiry succeeded is not stamped the same as
+    one where both ran, and the two are not like-for-like. Classes:
+    ``ran``, ``not_supported`` (the composition cannot run it: DuckDB,
+    Delta OPTIMIZE, Delta VACUUM on Spark Thrift, continuous Delta VACUUM at
+    its 7 d default), ``skipped_by_user`` (--skip-maintenance,
+    pre_benchmark_maintenance off, --skip-benchmark, continuous compaction
+    disabled), ``failed`` (it was attempted and no statement succeeded) or
+    ``not_run`` (the run ended before the maintenance phase). Partial
+    success, per-round timeouts and a stopped budget are ``detail`` and
+    ``reasons``, not identity: one timed-out round in a 24 h run does not
+    make it a different experiment.
 
     *outcomes* is what the run's maintenance calls recorded (one dict per
-    call: ``kind``, statement counts, or ``skipped``, ``user_skip`` or
-    ``error``). None (a record from before outcomes, or a planned run) falls
-    back to the rules alone, labelled so in ``basis``. Outcomes only turn an
-    operation down from what the rules allow, never up.
+    call: ``kind``, statement counts and per-operation ``operations``, or
+    ``skipped``, ``user_skip`` or ``error``). A call recorded without
+    per-operation counts applies its totals to every operation it runs.
+    None (a record from before outcomes, or a planned run) falls back to the
+    rules alone, labelled so in ``basis``. Outcomes only turn an operation
+    down from what the rules allow, never up.
 
-    Returns ``{"id", "detail_id", "expire", "compaction", "detail", "basis",
-    "reasons"}``.
+    Records written before per-operation identity carry
+    ``<policy>:expire=<class>,compaction=<class>``. They still load; their
+    id matches no current id, which is right, because ``expire=ran`` there
+    could hide a failed remove_orphan_files.
+
+    Returns ``{"id", "detail_id", "operations", "expire", "compaction",
+    "detail", "basis", "reasons"}``; ``expire`` and ``compaction`` are the
+    worst class over the operations of that kind.
     """
     policy = policy_id or LEGACY_MAINTENANCE_POLICY_ID
     fmt = (table_format or "").lower()
@@ -164,7 +202,7 @@ def effective_maintenance(
     elif continuous and compaction_enabled is False:
         turn(("compaction",), SKIPPED_BY_USER, "continuous compaction is disabled")
 
-    detail = {k: ("on" if v == RAN else "off") for k, v in cls.items()}
+    ops = operations_for(fmt)
     applied: set[str] = set()
     # Per operation (expire_snapshots, remove_orphan_files, vacuum): the
     # retentions it ran at and its statement counts. The merged
@@ -193,9 +231,11 @@ def effective_maintenance(
                 applied.add(str(o["retention"]))
             if o.get("user_skip") and o.get("kind") in cls:
                 turn((o["kind"],), SKIPPED_BY_USER, f"{o['kind']} skipped: {o['user_skip']}")
+    op_cls = {op: cls[OPERATION_KIND[op]] for op in ops}
+    detail = {op: ("on" if v == RAN else "off") for op, v in op_cls.items()}
+    if outcomes is not None:
         for kind in both:
             if cls[kind] != RAN:
-                detail[kind] = "off"
                 continue
             # A phase that raised before any statement was attempted never
             # reached this operation: not an attempt.
@@ -204,34 +244,47 @@ def effective_maintenance(
                 for o in outcomes
                 if o.get("kind") in (kind, "maintenance") and not o.get("before_statements")
             ]
-            total = sum(int(o.get("total") or 0) for o in mine if o.get("kind") == kind)
-            ok = sum(int(o.get("succeeded") or 0) for o in mine if o.get("kind") == kind)
-            # A round or phase that raised counts as one failed attempt.
-            total += sum(1 for o in mine if o.get("error"))
             for o in mine:
                 if o.get("kind") == kind and o.get("skipped"):
                     reasons.append(f"{kind} skipped: {o['skipped']}")
-            attempted = bool(mine)
-            if not attempted:
-                cls[kind], detail[kind] = NOT_RUN, "off"
-                reasons.append(f"{kind}: never reached (the run ended before maintenance)")
-            elif total == 0 or ok == 0:
-                cls[kind], detail[kind] = FAILED, "off"
-                reasons.append(
-                    f"{kind}: no statement ran" if total == 0 else f"{kind}: 0 of {total} succeeded"
-                )
-            elif ok < total:
-                detail[kind] = "partial"
-                reasons.append(f"{kind}: {ok} of {total} statements succeeded")
-    detail_parts = [f"expire={detail['expire']}", f"compaction={detail['compaction']}"]
-    if stopped and RAN in cls.values():
+            for op in (x for x in ops if OPERATION_KIND[x] == kind):
+                if not mine:
+                    op_cls[op], detail[op] = NOT_RUN, "off"
+                    reasons.append(f"{op}: never reached (the run ended before maintenance)")
+                    continue
+                total = ok = 0
+                for o in mine:
+                    if o.get("kind") != kind:
+                        continue
+                    if o.get("operations") is not None and kind == "expire":
+                        for rec in o["operations"]:
+                            if rec.get("operation") == op:
+                                total += int(rec.get("total") or 0)
+                                ok += int(rec.get("succeeded") or 0)
+                    else:
+                        total += int(o.get("total") or 0)
+                        ok += int(o.get("succeeded") or 0)
+                # A round or phase that raised counts as one failed attempt.
+                total += sum(1 for o in mine if o.get("error"))
+                if total == 0 or ok == 0:
+                    op_cls[op], detail[op] = FAILED, "off"
+                    reasons.append(
+                        f"{op}: no statement ran" if total == 0 else f"{op}: 0 of {total} succeeded"
+                    )
+                elif ok < total:
+                    detail[op] = "partial"
+                    reasons.append(f"{op}: {ok} of {total} statements succeeded")
+    detail_parts = [f"{op}={detail[op]}" for op in ops]
+    if stopped and RAN in op_cls.values():
         detail_parts.append("stopped")
         reasons.append("pre-benchmark maintenance stopped on its budget")
+    coarse = {k: _worst([v for op, v in op_cls.items() if OPERATION_KIND[op] == k]) for k in both}
     return {
-        "id": f"{policy}:expire={cls['expire']},compaction={cls['compaction']}",
+        "id": f"{policy}:" + ",".join(f"{op}={op_cls[op]}" for op in ops),
         "detail_id": f"{policy}:" + ",".join(detail_parts),
-        "expire": cls["expire"],
-        "compaction": cls["compaction"],
+        "operations": dict(op_cls),
+        "expire": coarse["expire"],
+        "compaction": coarse["compaction"],
         "detail": {
             **detail,
             **({"applied_retention": sorted(applied)} if applied else {}),
