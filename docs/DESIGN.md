@@ -75,7 +75,9 @@ catalog: query engine -> catalog -> table metadata -> storage. DuckDB reads
 table metadata and storage directly, without the catalog. The access path is
 part of the architecture actually instantiated and is recorded in the
 evidence (for example `query_access_path=direct_storage`). A comparison of
-two whole compositions is valid when their workload results match.
+two whole compositions is valid when their workload results match; any
+difference in effective execution conditions, such as maintenance policy, is
+shown alongside it and the comparison is not labelled like-for-like.
 Attributing a difference to one component in isolation is not valid when the
 access paths differ.
 
@@ -151,10 +153,10 @@ config file declares the experiment; `lakebench deploy`, `generate` and
 `run` execute it; `destroy` removes what it owned.
 
 **Maintenance policy is an execution condition**, not workload semantics.
-Runs with different effective maintenance policies are not like-for-like.
-When a composition cannot execute the requested policy (DuckDB cannot run
-maintenance, for example), the effective policy is stamped in the evidence
-and the difference is visible.
+The effective policy (what actually ran) is always stamped in the
+evidence, and runs with different effective policies are not like-for-like.
+Where a composition cannot execute the requested policy (DuckDB cannot run
+maintenance, for example), the difference from the request is visible.
 
 Caps are part of the experiment, not the system: for example the executor
 ceiling `_MAX_EXECUTORS_SAFE` and per-job `max_executors` (`job.py`), the
@@ -216,9 +218,10 @@ alone changes them.
 
 1. **Correctness before comparison.** Performance results are valid only when
    the workload completed correctly, and a performance comparison is invalid
-   when the compared systems produced different workload results. An invalid
-   comparison shows its evidence, gives a NOT COMPARABLE verdict, suppresses
-   any winner or performance conclusion, and exits non-zero.
+   when the compared runs produced different workload results.
+   `lakebench compare` then shows the evidence, gives a NOT COMPARABLE
+   verdict, suppresses any winner or performance conclusion, and exits
+   non-zero.
 2. **Non-degenerate pass.** A successful exit is not evidence if the output
    is empty, degenerate, skipped or otherwise invalid. Every stage and every
    gate checks what it produced, not that it returned.
@@ -281,7 +284,8 @@ needs is owned by the workload and passes its correctness contract.
 2. Stage scripts for each mode it supports, with per-format adapters where a
    format needs one.
 3. A correctness contract: checks that fail the run on wrong or degenerate
-   output, and a statement of what correct means that the owner approves.
+   output, and a statement of what correct means that a reviewer can check
+(for Customer 360 the owner approves its meaning before it gates, D6).
 4. A query set with its own `query_set_id`, and any workload scores, declared
    so the collector and report render them without guessing.
 5. A declaration of which formats, engines and modes it is compatible with.
@@ -330,7 +334,7 @@ Support is judged over workload x mode x architecture, in layers:
 
 A combination passing all four is **supported**. One passing 1 to 3 but not
 validated on the release tree is **unverified**: it may run, and its evidence
-says unverified, but it is excluded from published comparisons. One failing
+says unverified. One failing
 1, 2 or 3 is **unsupported** and is rejected at config load, or clearly
 excluded and labelled in the evidence; it is never discovered as a failed job
 and never presented as comparable. Upstream limitations that change behaviour

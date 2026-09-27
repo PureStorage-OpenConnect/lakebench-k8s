@@ -43,8 +43,9 @@ remains open only as implementation work.
    on Polaris, Thrift, DuckDB or no query engine, and AML continuous.
    Remaining work [impl]: declare workload and mode compatibility, compute
    the support state (supported / unverified / unsupported) per workload x
-   mode x architecture, stamp it in the evidence, and exclude unverified
-   runs from published comparisons.
+   mode x architecture, and stamp it in the evidence. Open [owner]
+   proposal: whether unverified runs may appear in published comparisons
+   (recommended: allowed, labelled unverified).
 
 4. **AML on Delta is accepted and runs Iceberg code.** [impl] The tuple list
    has no workload axis; `job.py:1774-1797` picks financial scripts before
@@ -58,10 +59,10 @@ remains open only as implementation work.
    the full maintenance policy id, which marks only `--skip-maintenance`.
    The owner rejected treating maintenance as workload semantics: it is an
    execution condition, and runs with different effective policies are not
-   like-for-like. Remaining work [impl]: stamp the effective policy (what
-   actually ran, not what was requested) in the evidence whenever a
-   composition cannot execute the requested policy, and make the difference
-   visible in the report and in comparisons.
+   like-for-like. Remaining work [impl]: always stamp the effective policy
+   (what actually ran, not what was requested) in the evidence, and make any
+   difference from the request, and between compared runs, visible in the
+   report and in comparisons.
 
 6. **Customer 360 has no expected-result definition.** [decided D6] Non-empty guards exist
    (`bronze_verify.py:139`, `silver_build.py:449`, `gold_finalize.py:313`) and
