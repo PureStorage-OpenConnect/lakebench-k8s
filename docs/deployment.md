@@ -58,11 +58,12 @@ The deployment engine follows this fixed sequence:
 > (the default), it reports the fix command. Run `lakebench validate`
 > to check this before deploying.
 
-8. **Prometheus** -- Deploys Prometheus for metrics collection. Only deployed when
-   `observability.enabled` is true or the `--include-observability`
-   flag is used.
-9. **Grafana** -- Deploys Grafana with pre-configured dashboards. Same activation
-   conditions as Prometheus.
+8. **Observability** -- Only when `observability.enabled` is true or the
+   `--include-observability` flag is used. Prometheus and Grafana come from
+   one shared `kube-prometheus-stack` release in the `lakebench-observability`
+   namespace. Deploy installs it only if no such release exists on the
+   cluster, never modifies an existing one, and applies this deployment's
+   PodMonitors and dashboard in its own namespace.
 
 ### Command Flags
 
@@ -118,17 +119,13 @@ lakebench status --namespace my-lakehouse
 
 ## Accessing Monitoring (Observability Stack)
 
-When deployed with `--include-observability`, Prometheus and Grafana are
-accessible within the cluster:
-
-- Grafana: `http://lakebench-grafana.<namespace>.svc:3000` (default credentials: `admin` / `lakebench`)
-- Prometheus: `http://lakebench-prometheus.<namespace>.svc:9090`
-
-For local access, use port-forwarding:
+When deployed with `--include-observability`, Prometheus and Grafana run in
+the shared `lakebench-observability` namespace (Grafana credentials:
+`admin` / `lakebench`). The chart shortens service names, so list them:
 
 ```bash
-kubectl port-forward svc/lakebench-grafana 3000:3000 -n <namespace>
-kubectl port-forward svc/lakebench-prometheus 9090:9090 -n <namespace>
+kubectl get svc -n lakebench-observability -l release=lakebench-observability
+kubectl port-forward -n lakebench-observability svc/<grafana service> 3000:80
 ```
 
 Pre-configured dashboards include Spark job metrics, Trino query performance,
@@ -161,8 +158,9 @@ The destroy engine follows a specific sequence to ensure clean removal:
 6. **S3 buckets** -- Empties the buckets, including aborting incomplete
    multipart uploads, then deletes only the buckets this deployment created
    (see below).
-7. **Observability** -- Uninstalls the kube-prometheus-stack release if
-   observability was enabled.
+7. **Observability** -- Leaves the shared kube-prometheus-stack release in
+   place, since other deployments may use it. Only a release an older
+   lakebench installed into this deployment's own namespace is uninstalled.
 8. **Query engine** -- Removes the configured engine (Trino, Spark Thrift
    Server, or DuckDB).
 9. **Catalog** -- Removes the HiveCluster, Polaris, or Unity deployment.

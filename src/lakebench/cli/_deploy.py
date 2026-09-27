@@ -451,14 +451,13 @@ def deploy(
             None,
         )
         if obs_result and obs_result.details:
-            namespace = cfg.get_namespace()
+            # The stack is shared and lives in its own namespace.
+            obs_ns = obs_result.details.get("release_namespace") or cfg.get_namespace()
             success_msg += (
-                f"\n\n[bold]Monitoring (in-cluster):[/bold]"
-                f"\n  Grafana:    http://lakebench-grafana.{namespace}.svc:3000 (admin / lakebench)"
-                f"\n  Prometheus: http://lakebench-prometheus.{namespace}.svc:9090"
-                f"\n\n[bold]Local access via port-forward:[/bold]"
-                f"\n  [cyan]kubectl port-forward svc/lakebench-grafana 3000:3000 -n {namespace}[/cyan]"
-                f"\n  [cyan]kubectl port-forward svc/lakebench-prometheus 9090:9090 -n {namespace}[/cyan]"
+                f"\n\n[bold]Monitoring (shared stack in namespace {obs_ns}):[/bold]"
+                f"\n  Services: [cyan]kubectl get svc -n {obs_ns} -l release=lakebench-observability[/cyan]"
+                f"\n  Grafana login: admin / lakebench"
+                f"\n  Local access: [cyan]kubectl port-forward -n {obs_ns} svc/<grafana service> 3000:80[/cyan]"
             )
 
         success_msg += (
