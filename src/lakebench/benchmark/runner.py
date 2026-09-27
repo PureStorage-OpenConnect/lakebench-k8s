@@ -101,6 +101,13 @@ class StreamResult:
         }
 
 
+def benchmark_type(engine: str | None) -> str:
+    """The recorded ``benchmark_type`` for a benchmark run on *engine*:
+    ``trino_query``, ``spark_thrift_query``, ``duckdb_query``, or
+    ``unknown_query`` when the engine was not recorded."""
+    return f"{(engine or 'unknown').replace('-', '_')}_query"
+
+
 @dataclass
 class BenchmarkResult:
     """Result of a full benchmark run."""
@@ -114,6 +121,8 @@ class BenchmarkResult:
     iterations: int = 1
     streams: int = 1
     stream_results: list[StreamResult] = field(default_factory=list)
+    # The query engine that ran it (QueryExecutor.engine_name()).
+    engine: str | None = None
 
     def compute_category_qph(self) -> dict[str, float]:
         """Compute QpH per query category.
@@ -135,7 +144,8 @@ class BenchmarkResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize to dict."""
         d: dict[str, Any] = {
-            "benchmark_type": "trino_query",
+            "benchmark_type": benchmark_type(self.engine),
+            "engine": self.engine,
             "mode": self.mode,
             "cache": self.cache,
             "scale": self.scale,
@@ -196,6 +206,12 @@ class BenchmarkRunner:
             "gold_alert_dispositions": t.gold_alert_dispositions,
             "gold_cases": t.gold_cases,
         }
+
+    def _engine_name(self) -> str | None:
+        try:
+            return str(self.executor.engine_name())
+        except Exception:  # noqa: BLE001 -- a stub executor without a name
+            return None
 
     def _queries(self) -> list[BenchmarkQuery]:
         """The schema's query set. The investigator queries read this run's
@@ -294,6 +310,7 @@ class BenchmarkRunner:
 
         if not queries:
             return BenchmarkResult(
+                engine=self._engine_name(),
                 mode="power",
                 cache=cache,
                 scale=self.config.architecture.workload.datagen.get_effective_scale(),
@@ -323,6 +340,7 @@ class BenchmarkRunner:
         )
 
         return BenchmarkResult(
+            engine=self._engine_name(),
             mode="power",
             cache=cache,
             scale=self.config.architecture.workload.datagen.get_effective_scale(),
@@ -363,6 +381,7 @@ class BenchmarkRunner:
 
         if not queries:
             return BenchmarkResult(
+                engine=self._engine_name(),
                 mode="throughput",
                 cache=cache,
                 scale=self.config.architecture.workload.datagen.get_effective_scale(),
@@ -424,6 +443,7 @@ class BenchmarkRunner:
             self.fingerprint_results(representative_queries, query_timeout)
 
         return BenchmarkResult(
+            engine=self._engine_name(),
             mode="throughput",
             cache=cache,
             scale=self.config.architecture.workload.datagen.get_effective_scale(),
@@ -472,6 +492,7 @@ class BenchmarkRunner:
         )
 
         composite = BenchmarkResult(
+            engine=self._engine_name(),
             mode="composite",
             cache=cache,
             scale=self.config.architecture.workload.datagen.get_effective_scale(),

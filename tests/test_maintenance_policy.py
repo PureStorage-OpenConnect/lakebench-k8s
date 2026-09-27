@@ -223,3 +223,91 @@ def test_latest_candidate_skips_runs_not_under_the_current_policy(env):  # noqa:
     store = env.store()
     cand = pg.latest_candidate(store.pinned(NAME), env.runs)
     assert cand is not None and cand.run_id == good["run_id"]
+
+
+# -- per-operation identity (lb16 sweep: Polaris + Thrift orphan removal) ---
+
+
+def _eff_from_run(cfg, fail_orphan_on):
+    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
+    from tests.test_evidence_polish import _trino_maintenance
+
+    outcomes = _trino_maintenance(cfg, fail_orphan_on=fail_orphan_on)
+    return effective_maintenance(
+        MAINTENANCE_POLICY_ID,
+        table_format="iceberg",
+        query_engine="trino",
+        mode="batch",
+        outcomes=[*outcomes, {"kind": "compaction", "total": 2, "succeeded": 2}],
+    )
+
+
+def test_failed_orphan_removal_is_failed_in_the_identity():
+    """Orphan removal failing on every table while expiry succeeds must not
+    be stamped as maintenance that ran (the sweep recorded expire=ran)."""
+    from tests.conftest import make_config
+
+    cfg = make_config(architecture={"workload": {"schema": "customer360"}})
+    good = _eff_from_run(cfg, None)
+    bad = _eff_from_run(cfg, "lakehouse")
+    assert bad["operations"] == {
+        "expire_snapshots": "ran",
+        "remove_orphan_files": "failed",
+        "compaction": "ran",
+    }
+    assert "remove_orphan_files=failed" in bad["id"]
+    assert bad["expire"] == "failed"
+    assert any("remove_orphan_files: 0 of 2" in r for r in bad["reasons"])
+    assert good["id"] != bad["id"]
+
+
+def test_one_side_failed_orphan_removal_is_not_like_for_like():
+    from lakebench.metrics.experiment import condition_differences
+    from tests.conftest import make_config
+
+    cfg = make_config(architecture={"workload": {"schema": "customer360"}})
+    good = _eff_from_run(cfg, None)
+    bad = _eff_from_run(cfg, "lakehouse")
+    a = {"effective_maintenance": good}
+    b = {"effective_maintenance": bad}
+    diffs = condition_differences(a, b)
+    assert any("effective maintenance" in d for d in diffs)
+    assert condition_differences(a, {"effective_maintenance": dict(good)}) == []
+
+
+def test_delta_identity_names_vacuum_and_compaction():
+    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
+
+    e = effective_maintenance(
+        MAINTENANCE_POLICY_ID,
+        table_format="delta",
+        query_engine="trino",
+        mode="batch",
+        outcomes=[
+            {
+                "kind": "expire",
+                "total": 2,
+                "succeeded": 0,
+                "operations": [{"operation": "vacuum", "total": 2, "succeeded": 0}],
+            },
+            {"kind": "compaction", "skipped": "Delta OPTIMIZE is never run"},
+        ],
+    )
+    assert e["id"] == f"{MAINTENANCE_POLICY_ID}:vacuum=failed,compaction=not_supported"
+
+
+def test_legacy_coarse_id_still_loads_and_does_not_match_a_current_one():
+    """A record written before per-operation ids keeps its coarse id and
+    loads; it is not like-for-like with a current record, since its
+    expire=ran could hide a failed orphan removal."""
+    from lakebench.metrics.experiment import condition_differences, identity
+    from lakebench.metrics.maintenance_policy import MAINTENANCE_POLICY_ID, effective_maintenance
+
+    legacy = {"effective_maintenance": {"id": f"{MAINTENANCE_POLICY_ID}:expire=ran,compaction=ran"}}
+    assert identity(legacy)["effective maintenance"].endswith("expire=ran,compaction=ran")
+    current = {
+        "effective_maintenance": effective_maintenance(
+            MAINTENANCE_POLICY_ID, table_format="iceberg", query_engine="trino", mode="batch"
+        )
+    }
+    assert condition_differences(legacy, current)

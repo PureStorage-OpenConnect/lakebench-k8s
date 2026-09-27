@@ -561,7 +561,9 @@ class TestFixPass:
             mode="batch",
             outcomes=[{"kind": "maintenance", "error": "x", "before_statements": True}],
         )
-        assert e["id"].endswith("expire=not_run,compaction=not_run")
+        assert e["id"].endswith(
+            "expire_snapshots=not_run,remove_orphan_files=not_run,compaction=not_run"
+        )
 
 
 class TestLiveRun61489ab:
@@ -591,7 +593,7 @@ class TestLiveRun61489ab:
             {"kind": "expire", "total": 6, "succeeded": 0},
             {"kind": "compaction", "total": 2, "succeeded": 2},
         ]
-        assert "expire=failed" in r.to_dict()["experiment"]["effective_maintenance"]["id"]
+        assert "expire_snapshots=failed" in r.to_dict()["experiment"]["effective_maintenance"]["id"]
 
     def test_compaction_no_op_is_detail_not_identity(self):
         from lakebench.metrics.maintenance_policy import (

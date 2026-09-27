@@ -313,6 +313,8 @@ def _record_local_queries(collector, cfg, bench_results, qph: float) -> None:
         BenchmarkMetrics(
             mode="local",
             cache="cold",
+            # --local always queries through DuckDB.
+            engine="duckdb",
             # This field is int and display-only. A sub-1 local scale would
             # truncate to 0 and read as "no data", so floor at 1; the exact
             # value stays in the config snapshot, which is what compare reads.
@@ -526,15 +528,25 @@ def _paired_qph(pre, post) -> tuple[float, float, int] | None:
     return len(common) / pre_s * 3600, len(common) / post_s * 3600, len(common)
 
 
+def compaction_measurable(cfg) -> bool:
+    """Whether pre/post data file counts can measure a compaction: not on
+    Delta, where OPTIMIZE never runs (metrics/maintenance_policy)."""
+    return cfg.architecture.table_format.type.value != "delta"
+
+
 def _data_file_total(health: dict[str, int]) -> int:
     """Data files across the probed tables; 0 (unknown) when any probe failed.
 
-    ``_probe_table_health`` reports a failed probe as -1. Summed in, it
-    shifted the total by one per failure, and a probe that failed on one
-    side only read as a file-count change.
+    ``_probe_table_health`` leaves a failed probe's key out (older code
+    wrote -1, still refused here). Summing what is left read a probe that
+    failed on one side only as a file-count change.
     """
     counts = [v for k, v in health.items() if "file_count" in k and isinstance(v, int)]
     if not counts or any(v < 0 for v in counts):
+        return 0
+    # A probe that found no count leaves its key out. A total over fewer
+    # tables than the other side's reads as a compaction that never ran.
+    if not all(isinstance(health.get(f"{t}_data_file_count"), int) for t in ("silver", "gold")):
         return 0
     return sum(counts)
 
@@ -1094,6 +1106,23 @@ def _run_financial_scoring(cfg, run_id, job_manager, monitor, timeout):
         return None
 
 
+def no_query_engine_skip(cfg, skip_benchmark: bool) -> tuple[bool, bool]:
+    """(no_query_engine, skip_benchmark) for a batch run of *cfg*.
+
+    A recipe with no query engine has nothing to benchmark and no engine to
+    run table maintenance through. The run skips both and says so, instead
+    of failing a correct pipeline on "Cannot run queries without a query
+    engine" (every ``*-none`` recipe exited 1 without --skip-benchmark).
+    """
+    none = cfg.architecture.query_engine.type.value == "none"
+    if none and not skip_benchmark:
+        print_info(
+            "No query engine in this recipe (query_engine.type=none): "
+            "benchmark and table maintenance skipped"
+        )
+    return none, skip_benchmark or none
+
+
 def _run_local_mode(
     cfg,
     config_file: Path,
@@ -1622,6 +1651,8 @@ def run(
             autosize_cuts=autosize_cuts,
         )
         return
+
+    no_query_engine, skip_benchmark = no_query_engine_skip(cfg, skip_benchmark)
 
     # -- Phase 2/7: Deploy (handled by prerequisite check above) ---------------
     console.print()
@@ -2271,7 +2302,9 @@ def run(
 
         if not do_maintenance:
             why = (
-                "--skip-benchmark"
+                "no query engine"
+                if no_query_engine
+                else "--skip-benchmark"
                 if skip_benchmark
                 else "--skip-maintenance"
                 if skip_maintenance
@@ -2423,6 +2456,11 @@ def run(
                     post_file_count = _data_file_total(_post_health)
                 except Exception:
                     pass
+                if not compaction_measurable(cfg):
+                    # Delta OPTIMIZE never runs: equal counts are table
+                    # health, not a compaction result, and must not publish
+                    # a compaction ratio or a maintenance value.
+                    pre_file_count = post_file_count = 0
                 if pre_file_count > 0 and post_file_count > 0:
                     # Detail, not identity: a compaction that changed no
                     # files still ran (effective maintenance reasons).
@@ -2611,6 +2649,7 @@ def run(
                     total_seconds=bench_result.total_seconds,
                     queries=[q.to_dict() for q in bench_result.queries],
                     iterations=bench_result.iterations,
+                    engine=bench_result.engine,
                 )
                 collector.record_benchmark(bench_metrics)
 

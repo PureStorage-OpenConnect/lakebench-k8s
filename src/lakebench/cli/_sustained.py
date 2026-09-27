@@ -1507,8 +1507,23 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
     health: dict[str, int] = {}
 
     # Format-conditional health SQL builder
+    parse_detail = None
     if table_format == "delta":
-        from lakebench.deploy.delta_maintenance import build_delta_table_health_sql
+        from lakebench.deploy.delta_maintenance import (
+            DELTA_HEALTH_UNAVAILABLE,
+            build_delta_table_health_sql,
+            parse_describe_detail,
+        )
+
+        if engine in DELTA_HEALTH_UNAVAILABLE:
+            logger.warning(
+                "table health: Delta data file counts are unavailable on %s (%s); "
+                "pre/post file counts are not recorded",
+                engine,
+                DELTA_HEALTH_UNAVAILABLE[engine],
+            )
+            return {}
+        parse_detail = parse_describe_detail
 
         def _build_health(eng, tbl):
             return build_delta_table_health_sql(eng, catalog, tbl)
@@ -1525,6 +1540,19 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
                 import re as _re
 
                 stdout = query_sql(engine, k8s, pod_name, namespace, sql)
+                if parse_detail is not None:
+                    # Delta DESCRIBE DETAIL: a table, not a bare count.
+                    count = parse_detail(stdout)
+                    if count is None:
+                        logger.warning(
+                            "table health %s_%s: count unavailable (no numFiles in "
+                            "DESCRIBE DETAIL output)",
+                            label,
+                            metric_name,
+                        )
+                    else:
+                        health[f"{label}_{metric_name}"] = count
+                    continue
                 # Parse count from output.  Trino CLI prints a bare number;
                 # beeline wraps results in pipes and column headers.  Extract
                 # the first integer from any non-header line.
@@ -1545,7 +1573,11 @@ def _probe_table_health(cfg, k8s) -> dict[str, int]:
                         _found = True
                         break
                 if not _found:
-                    logger.warning("table health %s_%s: no count in output", label, metric_name)
+                    logger.warning(
+                        "table health %s_%s: count unavailable (no number in the engine output)",
+                        label,
+                        metric_name,
+                    )
             except Exception as e:  # noqa: BLE001 -- a failed probe is absent, never -1
                 logger.warning("table health %s_%s failed: %s", label, metric_name, e)
 
@@ -1682,6 +1714,7 @@ def _run_benchmark_round(
         queries=[q.to_dict() for q in bench_result.queries],
         iterations=bench_result.iterations,
         round_meta=round_meta,
+        engine=bench_result.engine,
     )
 
     # 6. Record the round

@@ -404,7 +404,7 @@ def _executor_caps(metrics: Any, snapshot: Mapping[str, Any], schema: str) -> li
     return out
 
 
-def _stages(metrics: Any, pb: Any) -> tuple[list[str], list[str]]:
+def _stages(metrics: Any, pb: Any, query_engine: str | None = None) -> tuple[list[str], list[str]]:
     executed: list[str] = []
     skipped: list[str] = []
     stages = list(getattr(pb, "stages", None) or [])
@@ -424,7 +424,11 @@ def _stages(metrics: Any, pb: Any) -> tuple[list[str], list[str]]:
             )
     has_bench = metrics.benchmark is not None or bool(metrics.benchmark_rounds)
     if not has_bench and "query" not in executed:
-        skipped.append("benchmark (not run)")
+        skipped.append(
+            "benchmark (skipped: no query engine)"
+            if (query_engine or "").lower() == "none"
+            else "benchmark (not run)"
+        )
     if str(metrics.maintenance_policy_id).endswith("+skipped"):
         skipped.append("table maintenance (--skip-maintenance)")
     return executed, skipped
@@ -687,7 +691,9 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     )
     mode = "sustained" if mode == "continuous" else mode
     schema = (inputs.get("workload") or {}).get("name") or "customer360"
-    executed, skipped = _stages(metrics, pb)
+    executed, skipped = _stages(
+        metrics, pb, ((inputs.get("architecture") or {}).get("query_engine") or {}).get("type")
+    )
     limits = dict(inputs.get("config_limits") or {})
     limits["executors"] = _executor_caps(metrics, snapshot, schema)
     limits["autosize_cuts"] = list(getattr(metrics, "autosize_cuts", None) or [])

@@ -221,8 +221,11 @@ def test_orphan_removal_is_recorded_with_its_own_retention():
     assert by_op["expire_snapshots"]["applied_retention"] == ["0s"]
     assert by_op["remove_orphan_files"]["applied_retention"] == ["1450m"]
     assert by_op["remove_orphan_files"]["succeeded"] == 1
-    # Identity is unchanged by the extra detail.
-    assert e["id"] == f"{MAINTENANCE_POLICY_ID}:expire=ran,compaction=ran"
+    # Partial success is detail, not identity.
+    assert e["id"] == (
+        f"{MAINTENANCE_POLICY_ID}:expire_snapshots=ran,remove_orphan_files=ran,compaction=ran"
+    )
+    assert "remove_orphan_files=partial" in e["detail_id"]
 
 
 # -- 3. resolved workload parameters --------------------------------------

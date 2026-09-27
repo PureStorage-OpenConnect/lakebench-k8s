@@ -515,6 +515,9 @@ class BenchmarkMetrics:
     # recorded now). Records loaded from older metrics.json get their id from
     # queries.legacy_query_set_id instead. "unknown": not comparable.
     query_set_id: str | None = None
+    # The query engine that ran it (trino, spark-thrift, duckdb). None on a
+    # record from before the field whose benchmark_type does not name one.
+    engine: str | None = None
 
     def __post_init__(self) -> None:
         if self.query_set_id is None:
@@ -530,8 +533,11 @@ class BenchmarkMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
+        from lakebench.benchmark.runner import benchmark_type
+
         d: dict[str, Any] = {
-            "benchmark_type": "trino_query",
+            "benchmark_type": benchmark_type(self.engine),
+            "engine": self.engine,
             "query_set_id": self.query_set_id,
             "mode": self.mode,
             "cache": self.cache,
@@ -1411,7 +1417,11 @@ class PipelineBenchmark:
                     self.compute_efficiency_gb_per_core_hour, 4
                 ),
                 "stage_latency_profile": slp,
-                "composite_qph": composite_qph,
+                **(
+                    {}
+                    if self.query_benchmark is None and not self.benchmark_rounds
+                    else {"composite_qph": composite_qph}
+                ),
                 "pipeline_saturated": self.pipeline_saturated,
                 "corpus_drained": self.corpus_drained,
                 "intake_limit": self.intake_limit,
@@ -1493,6 +1503,10 @@ class PipelineBenchmark:
             "composite_qph": qph,
             "scale_ratio": round(self.scale_ratio, 3),
         }
+        if self.query_benchmark is None:
+            # No benchmark ran (no query engine, --skip-benchmark, or the run
+            # ended first): there is no QpH, not a QpH of 0.
+            del batch_scores["composite_qph"]
         if self.query_benchmark and self.query_benchmark.queries:
             from lakebench.benchmark.spread import spread
 
@@ -2003,6 +2017,7 @@ def aggregate_benchmark_rounds(rounds: list[BenchmarkMetrics]) -> BenchmarkMetri
         queries=aggregated_queries,
         iterations=rounds[0].iterations,
         streams=rounds[0].streams,
+        engine=rounds[0].engine,
     )
 
 

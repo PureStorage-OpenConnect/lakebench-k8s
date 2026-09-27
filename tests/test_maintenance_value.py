@@ -110,6 +110,25 @@ def test_failed_probe_makes_the_file_count_unknown():
     assert _data_file_total({"silver_data_file_count": 1200, "gold_data_file_count": -1}) == 0
     assert _data_file_total({"silver_snapshot_count": 3}) == 0
     assert _data_file_total({}) == 0
+    # A probe that found no count on one table: no total, not a smaller one.
+    assert _data_file_total({"gold_data_file_count": 84}) == 0
+    assert _data_file_total({"silver_data_file_count": 900, "gold_snapshot_count": 2}) == 0
+
+
+def test_delta_file_counts_never_measure_a_compaction():
+    from lakebench.cli._run import compaction_measurable
+    from tests.conftest import make_config
+
+    assert compaction_measurable(make_config(recipe="hive-delta-spark-thrift")) is False
+    assert compaction_measurable(make_config(recipe="hive-iceberg-spark-thrift")) is True
+    import inspect
+
+    import lakebench.cli._run as run_mod
+
+    src = inspect.getsource(run_mod.run)
+    gate = src.index("if not compaction_measurable(cfg):")
+    assert src.index("post_file_count = _data_file_total(_post_health)") < gate
+    assert gate < src.index("if pre_file_count > 0 and post_file_count > 0:")
 
 
 def test_difference_under_the_round_drift_floor_is_within_noise():
