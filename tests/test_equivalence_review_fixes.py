@@ -601,3 +601,26 @@ class TestLiveRun61489ab:
         a = effective_maintenance(MAINTENANCE_POLICY_ID, outcomes=base, **kw)
         b = effective_maintenance(MAINTENANCE_POLICY_ID, outcomes=noop, **kw)
         assert a["id"] == b["id"] and any("no-op" in r for r in b["reasons"])
+
+
+class TestQ1AverageKpi:
+    def test_q1_averages_transactions_not_interactions(self):
+        """Non-purchase rows carry transaction_amount 0.0 (datagen_rs
+        customer360.rs); averaging them in read about 5.5x low."""
+        import duckdb
+
+        from lakebench.benchmark.queries import get_benchmark_queries
+        from lakebench.config.schema import WorkloadSchema
+
+        q1 = next(
+            q for q in get_benchmark_queries(WorkloadSchema.CUSTOMER360) if q.name.startswith("Q1")
+        )
+        con = duckdb.connect()
+        con.execute(
+            "CREATE TABLE t(customer_id BIGINT, session_id VARCHAR, transaction_amount DOUBLE)"
+        )
+        con.execute(
+            "INSERT INTO t VALUES (1,'a',100.0),(2,'b',0.0),(3,'c',0.0),(4,'d',50.0),(5,'e',0.0)"
+        )
+        row = con.execute(q1.sql.format(catalog="main", silver_table="t")).fetchone()
+        assert row[3] == 150.0 and row[4] == 75.0

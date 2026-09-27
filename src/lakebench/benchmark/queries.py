@@ -75,8 +75,12 @@ SELECT
   COUNT(DISTINCT customer_id) AS unique_customers,
   COUNT(DISTINCT session_id) AS unique_sessions,
   ROUND(SUM(transaction_amount), 2) AS total_revenue,
-  ROUND(AVG(transaction_amount), 2) AS avg_transaction
+  ROUND(AVG(CASE WHEN transaction_amount > 0 THEN transaction_amount END), 2) AS avg_transaction
 FROM {catalog}.{silver_table}""",
+    # avg_transaction is the mean value of a transaction: datagen writes
+    # transaction_amount 0.0 on every non-purchase row (82% of rows), so an
+    # average over all rows read about 5.5x low. Same definition as gold
+    # avg_transaction_value (a transaction is a row with amount > 0).
     approx_columns={3: 0.01, 4: 0.01},
 )
 
