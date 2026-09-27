@@ -468,6 +468,28 @@ def _datagen_stale(run: RunRecord) -> str | None:
     return None
 
 
+# How batch stage seconds were timed (JobMetrics.timing_source). Before v1.6
+# every stage ended on the 15 s job-monitor poll; from v1.6 at the Spark
+# application's real end. The two are not comparable (the poll rounds each
+# stage up by 0-15 s), so a baseline and a run must share a basis.
+STAGE_TIMING_POLL = "poll"
+STAGE_TIMING_CLUSTER = "cluster"
+STAGE_TIMING_MIXED = "mixed"
+
+
+def stage_timing_basis(run: RunRecord) -> str | None:
+    """The timing basis of the run's batch Spark stages, None with none."""
+    sources = {
+        str(s.get("timing_source") or "")
+        for s in run.pb_raw.get("stages") or []
+        if s.get("stage_type") == "batch"
+    }
+    if not sources:
+        return None
+    kinds = {STAGE_TIMING_POLL if src in ("", "poll") else STAGE_TIMING_CLUSTER for src in sources}
+    return kinds.pop() if len(kinds) == 1 else STAGE_TIMING_MIXED
+
+
 def ttv_basis(run: RunRecord) -> str:
     if run.mode == "batch" and _pipeline_ttv(run) is not None:
         return TTV_FROM_STAGES
@@ -815,6 +837,9 @@ class Baseline:
     corpus_drained: bool | None = None
     # Batch runs only: TTV_FROM_STAGES or TTV_FROM_SCORECARD.
     ttv_basis: str | None = None
+    # Batch runs only: STAGE_TIMING_*. None: recorded before v1.6, when every
+    # stage was poll-timed.
+    stage_timing: str | None = None
     # Table-maintenance policy of the baseline run (metrics/maintenance_policy).
     # None (a baseline recorded before the field) is the legacy policy.
     maintenance_policy_id: str | None = None
@@ -842,6 +867,7 @@ class Baseline:
             "recorded_at",
             "corpus_drained",
             "ttv_basis",
+            "stage_timing",
             "maintenance_policy_id",
             "experiment_identity",
             "result_fingerprints",
@@ -941,6 +967,7 @@ def load_store(path: Path) -> BaselineStore:
             notes=entry.get("notes"),
             corpus_drained=entry.get("corpus_drained"),
             ttv_basis=entry.get("ttv_basis"),
+            stage_timing=entry.get("stage_timing"),
             maintenance_policy_id=entry.get("maintenance_policy_id"),
             experiment_identity=entry.get("experiment_identity"),
             result_fingerprints=entry.get("result_fingerprints"),
@@ -1067,6 +1094,16 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
             result.reasons.append(
                 "time to value cannot be separated from the datagen stage (stages carry "
                 "no timestamps) and the datagen stage differs from the baseline's or is stale"
+            )
+    if run.mode == "batch":
+        run_timing = stage_timing_basis(run)
+        base_timing = baseline.stage_timing or STAGE_TIMING_POLL
+        if run_timing is not None and run_timing != base_timing:
+            result.reasons.append(
+                f"batch stage times are {run_timing}-timed in the run but "
+                f"{base_timing}-timed in the baseline (v1.6 times stages from the Spark "
+                "application's end, not the 15 s poll); stage seconds and time to value "
+                "are not like for like: record a new baseline"
             )
     want_stages = {
         k for k in baseline.metrics if _is_stage_seconds(k) and k not in _OPTIONAL_STAGE_KEYS
@@ -1246,6 +1283,7 @@ def record_baseline(
         notes=current.notes,
         corpus_drained=(run.scores.get("corpus_drained") if run.mode == "sustained" else None),
         ttv_basis=basis,
+        stage_timing=stage_timing_basis(run) if run.mode == "batch" else None,
         maintenance_policy_id=recorded_policy(run.raw),
         experiment_identity=identity(exp),
         result_fingerprints=result_fingerprints(exp),

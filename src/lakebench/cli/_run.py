@@ -448,7 +448,18 @@ def _stage_timing(monitor, app_name: str, result, submitted_at, observed_end):
     except Exception as e:  # noqa: BLE001 -- best effort; the poll time stands
         logger.debug("application end for %s not read: %s", app_name, e)
         cluster_end, source = None, ""
-    offset = cluster_clock_offset_seconds() if cluster_end is not None else None
+    offset = None
+    if cluster_end is not None:
+        # Read once per monitor (one run): it sits between stages, inside
+        # time to value, and can take up to its timeout.
+        offset = getattr(monitor, "_lb_clock_offset", None)
+        if not isinstance(offset, float):
+            offset = cluster_clock_offset_seconds()
+            if offset is not None:
+                try:
+                    monitor._lb_clock_offset = offset
+                except AttributeError:
+                    pass
     return stage_timing(
         submitted_at,
         observed_end,
@@ -2063,7 +2074,7 @@ def run(
                         details={
                             "stage": stage_name,
                             "success": True,
-                            "elapsed_seconds": result.elapsed_seconds,
+                            "elapsed_seconds": job_metrics.elapsed_seconds,
                             "input_gb": job_metrics.input_size_gb,
                             "output_rows": job_metrics.output_rows,
                         },
@@ -2074,7 +2085,7 @@ def run(
                         console.print("[dim]Driver logs (last 20 lines):[/dim]")
                         for line in result.driver_logs.split("\n")[-20:]:
                             console.print(f"  {line}")
-                    results.append((stage_name, False, result.elapsed_seconds))
+                    results.append((stage_name, False, job_metrics.elapsed_seconds))
                     _journal_safe(
                         j.record,
                         EventType.PIPELINE_STAGE,
@@ -2083,7 +2094,7 @@ def run(
                         details={
                             "stage": stage_name,
                             "success": False,
-                            "elapsed_seconds": result.elapsed_seconds,
+                            "elapsed_seconds": job_metrics.elapsed_seconds,
                         },
                     )
                     pipeline_success = False

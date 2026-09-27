@@ -60,7 +60,13 @@ TIMING_POLL = "poll"  # the monitor poll that first saw the terminal state
 # A cluster timestamp is RFC 3339 truncated to the second (its true time is up
 # to 1 s later) and the host-to-cluster offset comes from a Date header of the
 # same resolution: each is centred with +0.5 s, which leaves about +/-1 s.
-_CLUSTER_TIMING_RESOLUTION_S = 1.0
+# Node clocks (kubelet, operator) are not corrected by the offset and the
+# offset read carries half its round trip, so 2 s, not 1 s.
+_CLUSTER_TIMING_RESOLUTION_S = 2.0
+# The poll sees the end within one interval of the operator noticing it, and
+# the operator notices within its reconcile lag. An end earlier than
+# observed_end - (poll interval + this) is a slow node clock or a stale status.
+_OPERATOR_LAG_S = 30.0
 # How far a cluster end may sit outside [submitted, observed] before it is
 # taken as clock skew or a stale status rather than rounding.
 _CLUSTER_TIMING_TOLERANCE_S = 2.0
@@ -129,7 +135,10 @@ def stage_timing(
         return poll
     end = cluster_end + timedelta(seconds=0.5 - clock_offset_seconds)
     tol = timedelta(seconds=_CLUSTER_TIMING_TOLERANCE_S)
-    if end < submitted_at - tol or end > observed_end + tol:
+    earliest = max(
+        submitted_at - tol, observed_end - timedelta(seconds=poll_interval + _OPERATOR_LAG_S)
+    )
+    if end < earliest or end > observed_end + tol:
         poll.note = (
             f"{cluster_source} {cluster_end.isoformat()} is outside the observed run "
             f"({submitted_at.isoformat()} .. {observed_end.isoformat()}) after the "

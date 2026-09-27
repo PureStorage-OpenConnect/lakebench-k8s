@@ -104,6 +104,12 @@ A run is refused, never compared, when:
   or whose stages carry no timestamps while its datagen stage is stale or
   present on one side only. Without timestamps, time to value is the run's
   wall clock and may or may not include a generate;
+- its batch stages are timed on a different basis from the baseline's: from
+  v1.6 stages end at the Spark application's real end (`timing_source`
+  `driver_container` or `spark_application`), before that on the 15 s
+  job-monitor poll. A baseline recorded before v1.6 (no `stage_timing`) is
+  poll-timed; re-record it (`scripts/perf_gate.py record --replace`) from a
+  v1.6 run;
 - it is a multi-cycle batch run (`cycles` above 1). Cycles 2 onwards generate
   data between gold and the next bronze, inside the time-to-value span, and
   `cycles` is not in the snapshot for the fingerprint to catch;

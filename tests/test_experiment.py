@@ -87,7 +87,9 @@ class TestStamping:
         assert e["lakebench"]["lakebench_version"]
         assert "executors" in e["limits"]
         if schema == "financial":
-            assert e["workload"]["generator_model_version"] == ex.DATAGEN_MODEL_VERSIONS["financial"]
+            assert (
+                e["workload"]["generator_model_version"] == ex.DATAGEN_MODEL_VERSIONS["financial"]
+            )
             assert "corpus_role" in e["corpus"]
             assert e["limits"]["w1_max_vertices"] == cfg.architecture.workload.w1_max_vertices
         if mode == "sustained":

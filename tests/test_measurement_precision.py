@@ -236,7 +236,7 @@ class TestStageTiming:
         recorded = (true_end + timedelta(seconds=4.5)).replace(microsecond=0)
         t = _timing(cluster_end=recorded)
         assert t.source == "driver_container"
-        assert t.resolution_seconds == 1.0
+        assert t.resolution_seconds == 2.0
         assert abs(t.elapsed_seconds - 83.7) <= 1.0
         assert t.start == T0
 
@@ -499,3 +499,46 @@ class TestDestroyNamesTablesLeftInRefusedBuckets:
         assert "silver.t" in r.message
         tables = [x for x in h._results if x.component == "table-cleanup"][-1]
         assert "silver.t, gold.t" in tables.message
+
+
+class TestReviewFixes:
+    def test_slow_node_clock_is_not_taken_as_the_end(self):
+        """Review: a driver node 120 s slow on a 470 s stage read as 345 s."""
+        t = _timing(
+            observed_end=T0 + timedelta(seconds=470.0),
+            cluster_end=T0 + timedelta(seconds=350.0 + 4.5),
+        )
+        assert t.source == "poll" and "outside the observed run" in t.note
+
+    def test_end_within_poll_and_operator_lag_is_accepted(self):
+        t = _timing(
+            observed_end=T0 + timedelta(seconds=470.0),
+            cluster_end=T0 + timedelta(seconds=440.0 + 4.5),
+        )
+        assert t.source == "driver_container"
+
+    def test_clock_offset_is_read_once_per_monitor(self):
+        from lakebench.cli import _run
+
+        calls = []
+
+        def offset():
+            calls.append(1)
+            return 0.0
+
+        monitor = SimpleNamespace(
+            application_end=lambda _n, _s: (T0 + timedelta(seconds=60), "spark_application")
+        )
+        result = SimpleNamespace(final_status=None)
+        with patch("lakebench.cli._sustained.cluster_clock_offset_seconds", side_effect=offset):
+            for _ in range(3):
+                _run._stage_timing(monitor, "x", result, T0, T0 + timedelta(seconds=65))
+        assert len(calls) == 1
+
+    def test_compare_maps_the_old_freshness_key(self):
+        from lakebench.cli._compare import _renamed_scores
+
+        assert _renamed_scores({"query_time_freshness_seconds": 5.0, "x": 1}) == {
+            "query_time_event_age_seconds": 5.0,
+            "x": 1,
+        }

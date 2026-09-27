@@ -31,8 +31,10 @@ Batch scoring answers: "How fast do we get from raw data to queryable gold?"
 
 | Score | Formula | Meaning |
 |---|---|---|
-| `time_to_value_seconds` | `max(end_time) - min(start_time)` | Wall-clock seconds from first stage start to last stage end. The primary batch score. Lower is better. |
+| `time_to_value_seconds` | `max(end_time) - min(start_time)` | Wall-clock seconds from the first stage's submission to the moment gold is queryable (the gold Spark application's end). It includes lakebench's work between stages (noticing a stage ended, reading its driver log and output size, submitting the next). The primary batch score. Lower is better. |
 | `total_elapsed_seconds` | `sum(stage.elapsed_seconds)` | Sum of all stage durations. May exceed time-to-value if stages overlap. |
+
+Batch stage times (v1.6). A Spark stage runs from its SparkApplication's creation to the driver container's finish time (else the SparkApplication's `terminationTime`), mapped to the lakebench host's clock through the API server's clock offset. Each stage records `timing_source` (`driver_container`, `spark_application`, or `poll` when no consistent cluster time could be read) and `timing_resolution_seconds` (2 s from the cluster, the poll interval otherwise). Before v1.6 every stage ended on the 15 s job-monitor poll, so older stage seconds and time to value are rounded up by up to 15 s per stage and include the gold driver-log fetch; the perf gate refuses to compare the two (record a new baseline).
 | `total_data_processed_gb` | `sum(stage.input_size_gb)` | Total input data across all stages. |
 | `pipeline_throughput_gb_per_second` | `total_data_processed_gb / time_to_value_seconds` | Composite throughput across the whole pipeline. Higher is better. |
 | `compute_efficiency_gb_per_core_hour` | `total_data_processed_gb / total_core_hours` | GB processed per core-hour of allocated compute. Higher means better resource utilization. |
