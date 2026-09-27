@@ -303,3 +303,34 @@ def test_continuous_reset_needs_the_record_on_tagless_backends(monkeypatch, reco
     ):
         problem = _sustained._bucket_ownership_problem(cfg, MagicMock())
     assert (problem is None) is recorded
+
+
+class TestInstalledChartLookup:
+    """Review: `helm list -A -f spark-operator` took releases[0], so a
+    look-alike release elsewhere could set the watch-list --version pin."""
+
+    def _mgr(self, stdout, rc=0):
+        from unittest.mock import MagicMock
+
+        from lakebench.modules.pipeline_engines.spark.operator import SparkOperatorManager
+
+        m = SparkOperatorManager(namespace="spark-operator")
+        m._run = MagicMock(return_value=MagicMock(returncode=rc, stdout=stdout))
+        return m
+
+    def test_only_the_exact_release_in_its_namespace_counts(self):
+        m = self._mgr(
+            '[{"name":"my-spark-operator","chart":"spark-operator-9.9.9"},'
+            '{"name":"spark-operator","chart":"spark-operator-2.5.1"}]'
+        )
+        assert m._get_helm_version() == "2.5.1"
+        cmd = m._run.call_args.args[0]
+        assert cmd[cmd.index("-n") + 1] == "spark-operator"
+        assert "-A" not in cmd
+        assert cmd[cmd.index("-f") + 1] == "^spark-operator$"
+
+    def test_unparseable_chart_gives_no_pin(self):
+        assert (
+            self._mgr('[{"name":"spark-operator","chart":"mirror-chart"}]')._get_helm_version()
+            is None
+        )

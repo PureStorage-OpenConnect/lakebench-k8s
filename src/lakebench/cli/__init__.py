@@ -528,6 +528,7 @@ def can_edit_operator_release(operator_namespace: str) -> bool | None:
         api = _kc.AuthorizationV1Api()
         for group, resource, verb in (
             ("", "secrets", "list"),
+            ("", "secrets", "create"),
             ("", "secrets", "update"),
             ("apps", "deployments", "patch"),
         ):
@@ -573,7 +574,7 @@ def operator_watch_verdict(
             f"Cannot add namespace '{namespace}' to the Spark Operator watch list",
             f"Currently watching: {watched}. deploy and run add it by upgrading "
             f"the operator's Helm release in '{operator_namespace}', which "
-            "needs list/update on secrets and patch on deployments there; these "
+            "needs list/create/update on secrets and patch on deployments there; these "
             "credentials lack that, so deploy would stop at the spark-operator "
             "step after creating the namespace. Ask a cluster admin for that "
             "access, or to run the deploy.",

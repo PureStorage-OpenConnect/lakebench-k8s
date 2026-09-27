@@ -359,32 +359,39 @@ class SparkOperatorManager:
             )
 
     def _get_helm_version(self) -> str | None:
-        """Get Spark Operator version from Helm release.
+        """Chart version of this manager's Spark Operator release, or None.
 
-        Returns:
-            Version string or None if not found
+        Looks only in ``self.namespace`` and matches the release name
+        exactly: the watch-list edits pin ``--version`` to this value, so a
+        look-alike release elsewhere (``my-spark-operator``) must never be
+        read. A chart string that does not end in a version yields None,
+        and callers fall back to the configured version.
         """
+        import json
+        import re
+
         try:
             result = self._run(
                 [
                     "helm",
                     "list",
-                    "-A",
+                    "-n",
+                    self.namespace,
                     "-f",
-                    "spark-operator",
+                    f"^{self.HELM_RELEASE_NAME}$",
                     "-o",
                     "json",
                 ],
                 capture_output=True,
                 text=True,
             )
-
-            if result.returncode == 0:
-                import json
-
-                releases = json.loads(result.stdout)
-                if releases:
-                    return releases[0].get("chart", "").replace("spark-operator-", "")
+            if result.returncode != 0:
+                return None
+            for rel in json.loads(result.stdout) or []:
+                if rel.get("name") != self.HELM_RELEASE_NAME:
+                    continue
+                m = re.search(r"-(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)$", rel.get("chart", ""))
+                return m.group(1) if m else None
             return None
         except Exception:
             return None

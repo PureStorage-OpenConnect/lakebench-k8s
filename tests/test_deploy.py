@@ -1484,3 +1484,35 @@ class TestTaglessAdoptionRecord:
         assert result.status == DeploymentStatus.SUCCESS, result.message
         adopted.assert_called_once()
         assert adopted.call_args.args[2] == ["td-bronze"]
+
+
+def test_preprovisioned_empty_tagless_buckets_are_recorded():
+    """Review: with create_buckets=false nothing was recorded, so clean and
+    the continuous reset refused pre-provisioned FlashBlade buckets forever."""
+    from lakebench.deploy.ownership import IdentityReport, IdentityVerdict
+
+    config = _make_config(name="td")
+    s3c = config.platform.storage.s3
+    s3c.create_buckets = False
+    s3c.buckets.bronze, s3c.buckets.silver, s3c.buckets.gold = "td-bronze", "other", "td-gold"
+    engine = DeploymentEngine(config, k8s_client=_mock_k8s())
+    client = MagicMock()
+    client._init_error = None
+    client.raw_client.list_objects_v2.side_effect = lambda Bucket, MaxKeys: {
+        "KeyCount": 1 if Bucket == "td-gold" else 0
+    }
+    with (
+        patch("lakebench.s3.S3Client", return_value=client),
+        patch(
+            "lakebench.deploy.ownership.verify_bucket_ownership",
+            side_effect=lambda _b, name, _id: IdentityReport(
+                verdict=IdentityVerdict.UNSUPPORTED, resource_name=name, expected_deployment="td"
+            ),
+        ),
+        patch("lakebench.deploy.ownership.record_adopted_empty_buckets") as adopted,
+        patch("lakebench.k8s.get_k8s_client"),
+        patch("lakebench.deploy.ownership.list_lakebench_deployment_names", return_value=[]),
+    ):
+        result = engine._deploy_buckets()
+    assert result.status == DeploymentStatus.SKIPPED
+    assert adopted.call_args.args[2] == ["td-bronze"]
