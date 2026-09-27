@@ -151,6 +151,7 @@ spec:
                 --conf spark.sql.defaultCatalog={{ spark_thrift_catalog_name }} \
 {% endif %}
                 --conf spark.hadoop.fs.s3a.endpoint={{ s3_endpoint }} \
+                --conf spark.hadoop.fs.s3a.endpoint.region={{ s3_region }} \
                 --conf spark.hadoop.fs.s3a.access.key={{ s3_access_key }} \
                 --conf spark.hadoop.fs.s3a.secret.key={{ s3_secret_key }} \
                 --conf spark.hadoop.fs.s3a.path.style.access={{ s3_path_style | lower }} \

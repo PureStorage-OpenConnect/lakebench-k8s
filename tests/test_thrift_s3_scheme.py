@@ -47,3 +47,14 @@ def test_thrift_script_has_no_broken_continuation():
     for line in script.splitlines():
         assert "{#" not in line and "#}" not in line
         assert line.strip() != "", "blank line would end the shell continuation"
+
+
+@pytest.mark.parametrize(
+    "recipe",
+    ["polaris-iceberg-spark-thrift", "hive-iceberg-spark-thrift", "hive-delta-spark-thrift"],
+)
+def test_thrift_sets_s3a_signing_region(recipe):
+    """Region-strict backends reject S3A without it (LB-052); the jobs set it too."""
+    cfg = _thrift_cfg(recipe)
+    conf = _conf(_container(_render_thrift(cfg)))
+    assert conf["spark.hadoop.fs.s3a.endpoint.region"] == cfg.platform.storage.s3.region
