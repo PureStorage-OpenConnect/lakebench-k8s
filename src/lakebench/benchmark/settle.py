@@ -15,6 +15,15 @@ that time by more than the tolerance. The second condition matters: at
 +2 and +15 minutes the probes above agreed within 4% while still 33% slow,
 so consecutive agreement alone would have accepted the slow plateau.
 
+The tolerance widens to the probe query's own noise when the pre round
+timed it more than once: a query whose pre-maintenance samples spread 15%
+cannot be held to 10% (DuckDB Q1 at scale 1, run 20260927-001340-6ab705,
+waited 783 s on probes 2.8-3.1 s against a 2.6 s median). The widening is
+capped at ``MAX_NOISE_TOLERANCE_PCT``, under the 27-34% slowdown of the one
+measured unsettled store, and it never drops below the configured value.
+Every probe in the settling pair must still be within it of the
+pre-maintenance median.
+
 The wait is kept out of every pipeline score: it runs after maintenance
 has been timed and before the post round starts, and neither span is a
 pipeline stage.
@@ -34,6 +43,34 @@ MAX_CONSECUTIVE_PROBE_FAILURES = 3
 # two, because a slow plateau also agrees with itself; still no proof, so the
 # result is recorded as unverified.
 UNVERIFIED_STABLE_PROBES = 3
+# Ceiling on the noise-derived tolerance. The unsettled FlashBlade rounds in
+# LB-150 were 27-34% slower than before maintenance; 20% keeps them out
+# whatever the probe query's own spread.
+MAX_NOISE_TOLERANCE_PCT = 20.0
+
+
+def _median(xs: list[float]) -> float:
+    s = sorted(xs)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def reference_spread_pct(samples: list[float] | None) -> float | None:
+    """Range of the pre-maintenance samples as a percent of their median, or
+    None with fewer than two positive samples."""
+    xs = [float(x) for x in samples or [] if x is not None and x > 0]
+    if len(xs) < 2:
+        return None
+    return (max(xs) - min(xs)) / _median(xs) * 100.0
+
+
+def effective_tolerance_pct(tolerance_pct: float, samples: list[float] | None) -> float:
+    """The configured tolerance, widened to the reference samples' spread and
+    capped at ``MAX_NOISE_TOLERANCE_PCT`` (never below the configured value)."""
+    spread = reference_spread_pct(samples)
+    if spread is None:
+        return float(tolerance_pct)
+    return max(float(tolerance_pct), min(spread, MAX_NOISE_TOLERANCE_PCT))
 
 
 @dataclass
@@ -72,6 +109,12 @@ class SettleResult:
     # False when there was no pre-maintenance time to check against: the
     # probes agreed with each other, which a slow plateau also does.
     verified: bool = True
+    # The pre-maintenance samples of the probe query, and the tolerance the
+    # wait applied (tolerance_pct widened to their spread, capped).
+    reference_samples: list[float] = field(default_factory=list)
+    effective_tolerance_pct: float | None = None
+    # Why the wait ran (for example how many maintenance statements ran).
+    trigger: str = ""
 
     def value_reason(self) -> str:
         """Why the maintenance value cannot be reported, or "" when it can."""
@@ -98,6 +141,18 @@ class SettleResult:
             "probes": [p.to_dict() for p in self.probes],
             "reason": self.reason,
             "verified": self.verified,
+            "reference_samples": [round(x, 3) for x in self.reference_samples],
+            "reference_spread_pct": (
+                None
+                if (sp := reference_spread_pct(self.reference_samples)) is None
+                else round(sp, 1)
+            ),
+            "effective_tolerance_pct": (
+                self.tolerance_pct
+                if self.effective_tolerance_pct is None
+                else round(self.effective_tolerance_pct, 1)
+            ),
+            **({"trigger": self.trigger} if self.trigger else {}),
         }
 
 
@@ -115,6 +170,7 @@ def wait_for_settle(
     interval_seconds: float,
     tolerance_pct: float,
     reference_seconds: float | None = None,
+    reference_samples: list[float] | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     on_probe: Callable[[SettleProbe], None] | None = None,
@@ -135,10 +191,15 @@ def wait_for_settle(
             between a probe and ``reference_seconds``.
         reference_seconds: The same query's pre-maintenance time, or None
             when there was no pre round.
+        reference_samples: The pre-maintenance samples behind
+            ``reference_seconds``. With two or more, ``tolerance_pct`` widens
+            to their spread, capped at ``MAX_NOISE_TOLERANCE_PCT``.
     """
     probes: list[SettleProbe] = []
     failures = 0
     has_reference = reference_seconds is not None and reference_seconds > 0
+    ref_samples = list(reference_samples or []) if has_reference else []
+    tol = effective_tolerance_pct(tolerance_pct, ref_samples) if has_reference else tolerance_pct
     need = 2 if has_reference else UNVERIFIED_STABLE_PROBES
 
     def _result(settled: bool, capped: bool, reason: str) -> SettleResult:
@@ -153,6 +214,8 @@ def wait_for_settle(
             probes=probes,
             reason=reason,
             verified=has_reference,
+            reference_samples=ref_samples,
+            effective_tolerance_pct=float(tol),
         )
 
     last_reason = ""
@@ -160,7 +223,7 @@ def wait_for_settle(
     def _near_reference(t: float) -> bool:
         if reference_seconds is None or reference_seconds <= 0:
             return True
-        return t <= reference_seconds * (1 + tolerance_pct / 100.0)
+        return t <= reference_seconds * (1 + tol / 100.0)
 
     while True:
         began = clock()
@@ -187,8 +250,8 @@ def wait_for_settle(
         recent = probes[-need:]
         window = [q.seconds for q in recent if q.seconds is not None]
         if len(recent) == need and len(window) == need:
-            stable = all(_within(window[0], t, tolerance_pct) for t in window[1:]) and all(
-                _within(a, b, tolerance_pct) for a, b in zip(window, window[1:], strict=False)
+            stable = all(_within(window[0], t, tol) for t in window[1:]) and all(
+                _within(a, b, tol) for a, b in zip(window, window[1:], strict=False)
             )
             if stable and all(_near_reference(t) for t in window):
                 return _result(True, False, "")
@@ -197,7 +260,7 @@ def wait_for_settle(
                 last_reason = (
                     f"probe stable at {window[-1]:.1f} s but slower than the "
                     f"pre-maintenance {reference_seconds:.1f} s by more than "
-                    f"{tolerance_pct:g}%; settling and a maintenance regression "
+                    f"{tol:.3g}%; settling and a maintenance regression "
                     "are not separable"
                 )
 

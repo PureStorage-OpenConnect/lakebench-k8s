@@ -620,8 +620,41 @@ def _warm_benchmark(runner, query_timeout: int) -> None:
         logger.warning("benchmark warm-up pass failed: %s", e)
 
 
+def _maintenance_statements_attempted(outcomes: list | None) -> int | None:
+    """Maintenance and compaction statements the batch round attempted, or
+    None when that is not known.
+
+    A statement that failed or timed out counts: a timed-out one may still
+    be running server-side, and a failed one may have deleted or rewritten
+    files before it failed. None (unknown) when a phase raised after its
+    statements may have started, or when there are no outcomes at all; the
+    caller then waits as before.
+    """
+    if not outcomes:
+        return None
+    attempted = 0
+    for o in outcomes:
+        if o.get("error") and not o.get("before_statements"):
+            return None
+        if "total" in o:
+            attempted += (
+                int(o.get("succeeded") or 0)
+                + int(o.get("failed") or 0)
+                + int(o.get("timed_out") or 0)
+            )
+    return attempted
+
+
 def _settle_after_maintenance(
-    cfg, runner, pre_queries, query_timeout: int, started_at: float, *, clock=None, sleep=None
+    cfg,
+    runner,
+    pre_queries,
+    query_timeout: int,
+    started_at: float,
+    *,
+    clock=None,
+    sleep=None,
+    trigger: str = "",
 ):
     """Probe until storage settles after batch maintenance (LB-150).
 
@@ -640,14 +673,25 @@ def _settle_after_maintenance(
 
     # The same query's pre-maintenance median, when the pre round ran and the
     # query succeeded there.
+    # Its samples widen the tolerance to the query's own noise (capped).
     reference = None
+    reference_samples: list[float] = []
     for q in pre_queries or []:
         if q.query.name == query.name and q.success and q.elapsed_seconds > 0:
             reference = q.elapsed_seconds
+            reference_samples = [float(x) for x in q.sample_times()]
     ref_note = f", pre-maintenance {reference:.1f}s" if reference else ", no pre-maintenance time"
+    from lakebench.benchmark.settle import effective_tolerance_pct
+
+    tol = effective_tolerance_pct(sc.tolerance_pct, reference_samples if reference else None)
+    tol_note = (
+        f" (widened from {sc.tolerance_pct:g}% to the pre samples' spread)"
+        if tol > sc.tolerance_pct
+        else ""
+    )
     print_info(
         f"Waiting for storage to settle: probe {query.name} every {sc.interval_seconds}s, "
-        f"within {sc.tolerance_pct:g}%{ref_note}, cap {sc.max_seconds}s"
+        f"within {tol:.3g}%{tol_note}{ref_note}, cap {sc.max_seconds}s"
     )
 
     def _probe(remaining: float) -> float:
@@ -678,9 +722,11 @@ def _settle_after_maintenance(
         interval_seconds=sc.interval_seconds,
         tolerance_pct=sc.tolerance_pct,
         reference_seconds=reference,
+        reference_samples=reference_samples,
         on_probe=_show,
         **kwargs,
     )
+    result.trigger = trigger
     if result.settled and not result.verified:
         print_warning(
             f"Storage probes stable {result.settle_seconds:.0f}s after maintenance, "
@@ -2117,6 +2163,8 @@ def run(
         maint_live_reason = ""
         _maint_end = None
         _settle = None
+        # Set when the settle wait was skipped because no statement ran.
+        _settle_skip: dict | None = None
         pre_file_count = 0
         post_file_count = 0
         maint_elapsed = 0.0
@@ -2314,7 +2362,18 @@ def run(
             # 5. Wait for storage to settle before the post round (LB-150).
             # Runs after maint_elapsed is taken and outside every stage, so it
             # cannot move time to value or maintenance_pct_of_pipeline.
-            if maint_elapsed > 0 and _maint_end is not None:
+            # Nothing to settle when no statement ran (DuckDB, or every
+            # operation skipped): run 20260927-001340-6ab705 waited 783 s
+            # after a DuckDB round that ran none.
+            _attempted = _maintenance_statements_attempted(maint_outcomes)
+            if maint_elapsed > 0 and _maint_end is not None and _attempted == 0:
+                _settle_skip = {
+                    "skipped": True,
+                    "settle_seconds": 0.0,
+                    "reason": "no maintenance or compaction statement ran; nothing to settle",
+                }
+                print_info("Storage settle wait: skipped (no maintenance statement ran)")
+            elif maint_elapsed > 0 and _maint_end is not None:
                 console.print()
                 console.print("[bold]Storage settle wait[/bold]")
                 try:
@@ -2324,6 +2383,11 @@ def run(
                         _pre_result.queries if _pre_result is not None else None,
                         900 if cfg.architecture.workload.schema_type.value == "financial" else 300,
                         _maint_end,
+                        trigger=(
+                            f"{_attempted} maintenance and compaction statements ran"
+                            if _attempted is not None
+                            else "maintenance statement count unknown; waiting to be safe"
+                        ),
                     )
                 except Exception as e:  # noqa: BLE001
                     print_warning(f"Storage settle wait failed (non-fatal): {e}")
@@ -2423,7 +2487,8 @@ def run(
                         bench_result.queries,
                         pre_file_count,
                         post_file_count,
-                        maint_elapsed,
+                        # No statement ran: there is no maintenance to value.
+                        maint_elapsed if _settle_skip is None else 0.0,
                         _settle,
                         stopped_reason=maint_stop_reason,
                         live_streams_reason=maint_live_reason,
@@ -2623,6 +2688,8 @@ def run(
                             pb.maintenance_value_reason = _maint_value[2]
                             pb.maintenance_paired_queries = _maint_value[1]
                         pb.pre_compaction_benchmark = _pre_record
+                    if _settle_skip is not None:
+                        pb.maintenance_settle = _settle_skip
                     if _settle is not None:
                         pb.maintenance_settle_seconds = _settle.settle_seconds
                         pb.maintenance_settled = _settle.settled

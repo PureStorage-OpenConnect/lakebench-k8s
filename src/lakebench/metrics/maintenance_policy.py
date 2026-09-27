@@ -166,7 +166,24 @@ def effective_maintenance(
 
     detail = {k: ("on" if v == RAN else "off") for k, v in cls.items()}
     applied: set[str] = set()
+    # Per operation (expire_snapshots, remove_orphan_files, vacuum): the
+    # retentions it ran at and its statement counts. The merged
+    # ``applied_retention`` is the expire retention only.
+    per_op: dict[str, dict[str, Any]] = {}
     if outcomes is not None:
+        for o in outcomes:
+            for op in o.get("operations") or []:
+                name = str(op.get("operation") or "unknown")
+                rec = per_op.setdefault(
+                    name,
+                    {"kind": o.get("kind"), "applied_retention": [], "total": 0, "succeeded": 0},
+                )
+                if op.get("retention") and str(op["retention"]) not in rec["applied_retention"]:
+                    rec["applied_retention"] = sorted(
+                        [*rec["applied_retention"], str(op["retention"])]
+                    )
+                rec["total"] += int(op.get("total") or 0)
+                rec["succeeded"] += int(op.get("succeeded") or 0)
         for o in outcomes:
             if o.get("error"):
                 reasons.append(f"{o.get('kind', 'maintenance')} call failed: {o['error']}")
@@ -215,7 +232,11 @@ def effective_maintenance(
         "detail_id": f"{policy}:" + ",".join(detail_parts),
         "expire": cls["expire"],
         "compaction": cls["compaction"],
-        "detail": {**detail, **({"applied_retention": sorted(applied)} if applied else {})},
+        "detail": {
+            **detail,
+            **({"applied_retention": sorted(applied)} if applied else {}),
+            **({"operations": per_op} if per_op else {}),
+        },
         "basis": "recorded outcomes"
         if outcomes is not None
         else "policy rules (no outcomes recorded)",

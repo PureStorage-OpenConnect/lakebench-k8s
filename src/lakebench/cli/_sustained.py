@@ -914,6 +914,8 @@ def _run_statements(
         "failures": [],
         "timed_out": [],
         "not_attempted": [],
+        # Per plan entry: ok, failed, timed_out or not_attempted.
+        "status": ["not_attempted"] * len(plan),
     }
     for n, (table, sql) in enumerate(plan):
         if budget is not None and budget.exhausted():
@@ -929,8 +931,10 @@ def _run_statements(
         try:
             exec_sql(engine, k8s, pod_name, namespace, sql, timeout=stmt_timeout)
             out["succeeded"] += 1
+            out["status"][n] = "ok"
         except ExecSqlTimeout as e:
             # Not a failure: the engine may still be running it.
+            out["status"][n] = "timed_out"
             out["timed_out"].append(f"{_operative(sql)} {table}: {e}")
             logger.warning("%s timed out for %s (may still be running)", what, table)
             if budget is not None:
@@ -939,6 +943,7 @@ def _run_statements(
                 out["not_attempted"] = [f"{_operative(q)} {t}" for t, q in plan[n + 1 :]]
                 break
         except Exception as e:
+            out["status"][n] = "failed"
             out["failures"].append(f"{_operative(sql)} {table}: {e}")
             logger.warning("%s failed for %s: %s", what, table, e)
     return out
@@ -1036,6 +1041,41 @@ def _statement_outcome(out: dict, total: int, engine: str) -> dict:
         "timed_out": len(out["timed_out"]),
         "not_attempted": len(out["not_attempted"]),
     }
+
+
+def _maintenance_operation(sql: str) -> str:
+    """Which table-maintenance operation a statement runs."""
+    low = sql.lower()
+    for op in ("remove_orphan_files", "expire_snapshots", "vacuum"):
+        if op in low:
+            return op
+    return _operative(sql).lower()
+
+
+def _operation_outcomes(plan: list[tuple[str, str]], out: dict, retention: dict) -> list[dict]:
+    """Statement counts per operation kind, each with the retention it was
+    run at, in first-seen order (expire_snapshots, remove_orphan_files, or
+    Delta's vacuum)."""
+    ops: dict[str, dict] = {}
+    status = out.get("status") or []
+    for n, (_table, sql) in enumerate(plan):
+        op = _maintenance_operation(sql)
+        rec = ops.setdefault(
+            op,
+            {
+                "operation": op,
+                "retention": retention.get(op),
+                "total": 0,
+                "succeeded": 0,
+                "failed": 0,
+                "timed_out": 0,
+                "not_attempted": 0,
+            },
+        )
+        rec["total"] += 1
+        st = status[n] if n < len(status) else "not_attempted"
+        rec[{"ok": "succeeded"}.get(st, st)] += 1
+    return list(ops.values())
 
 
 def _run_iceberg_maintenance(
@@ -1160,10 +1200,22 @@ def _run_iceberg_maintenance(
         budget=budget,
     )
     elapsed = _time.monotonic() - started
+    # One row per operation with the retention it ran at: expire and orphan
+    # removal run at different retentions (orphan removal floored at
+    # 24 h 10 min), and one merged "expire" retention hid the orphan one.
     _note_outcome(
         outcomes,
         "expire",
         retention=retention_threshold,
+        operations=_operation_outcomes(
+            plan,
+            out,
+            {
+                "expire_snapshots": retention_threshold,
+                "remove_orphan_files": orphan_retention,
+                "vacuum": retention_threshold,
+            },
+        ),
         **_statement_outcome(out, len(plan), engine),
     )
     _print_outcome(
