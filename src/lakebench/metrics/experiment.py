@@ -71,11 +71,25 @@ def _short_hash(obj: Any) -> str:
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+#: Recipe names spell the query engine slot as in config/recipes.py.
+_RECIPE_SLOT_NAMES = {"spark-thrift": "thrift"}
+
+
 def _recipe(snapshot_like: Mapping[str, Any]) -> str:
-    return "-".join(
+    """The recipe name of a composition: the RECIPES key when a recipe has
+    these components, else the same naming scheme (--local's hadoop-catalog
+    composition has no recipe)."""
+    from lakebench.config.support import recipe_for
+
+    parts = [
         str(snapshot_like.get(k) or "?")
         for k in ("catalog", "table_format", "pipeline_engine", "query_engine")
-    )
+    ]
+    name = recipe_for(*parts)
+    if name:
+        return name
+    parts[3] = _RECIPE_SLOT_NAMES.get(parts[3], parts[3])
+    return "-".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -149,8 +163,33 @@ def _c360_resolved(cfg: Any) -> dict[str, Any]:
     return out
 
 
-def experiment_inputs(cfg: Any) -> dict[str, Any]:
-    """The config-derived half of the experiment block."""
+def _canonical_mode(mode: Any) -> str:
+    from lakebench.config.support import canonical_mode
+
+    return canonical_mode(mode)
+
+
+def _frozen_support(cfg: Any, run_mode: str | None, system: str) -> dict[str, Any]:
+    from lakebench.config.support import support_state_for_config
+    from lakebench.metrics.provenance import run_provenance
+
+    try:
+        return support_state_for_config(cfg, run_mode, system=system, provenance=run_provenance())
+    except Exception as e:  # noqa: BLE001 -- recorded, never raised from a snapshot
+        return {"state": "unverified", "basis": f"support state not computed: {e}"}
+
+
+def experiment_inputs(
+    cfg: Any, *, run_mode: str | None = None, system: str = "cluster"
+) -> dict[str, Any]:
+    """The config-derived half of the experiment block.
+
+    *run_mode* is the mode the run will use when the caller knows it
+    (``run --continuous`` does not write the mode back to the config). The
+    support state is computed here, at run start, and frozen: re-rendering a
+    record later with a newer validation record must not change what the run
+    was stamped with.
+    """
     arch = cfg.architecture
     workload = arch.workload
     dg = workload.datagen
@@ -295,6 +334,8 @@ def experiment_inputs(cfg: Any) -> dict[str, Any]:
             ),
         },
         "mode": arch.pipeline.mode.value,
+        **({"run_mode": _canonical_mode(run_mode)} if run_mode else {}),
+        "support": _frozen_support(cfg, run_mode, system),
         "config_limits": {
             "max_files_per_trigger": effective_trickle(cfg),
             # Continuous in-stream rounds take one sample per query whatever
@@ -573,23 +614,45 @@ def _observed_corpus(corpus: Mapping[str, Any], dg: Mapping[str, Any]) -> tuple[
     return out, problems
 
 
-#: (workload, recipe, mode) combinations validated end to end on the
-#: release tree (DESIGN 6.5 layer 4). Empty until a release records its
-#: validation runs here: every run is "unverified" until then. A config that
-#: fails layers 1-3 is refused at load, so "unsupported" is never stamped on
-#: a run that got this far.
-RELEASE_VALIDATED: frozenset[tuple[str, str, str]] = frozenset()
+def support_state(
+    workload: str | None, arch: Mapping[str, Any], mode: str | None, *, system: str = "cluster"
+) -> dict[str, Any]:
+    """The DESIGN 6.5 support state of a run's workload x architecture x mode,
+    computed by lakebench.config.support from layers 1-3 and the release
+    validation record (config/validated_combinations.yaml)."""
+    from lakebench.config.support import support_state as _state
+
+    def t(key: str) -> str | None:
+        v = arch.get(key)
+        return (v or {}).get("type") if isinstance(v, Mapping) else v
+
+    return _state(
+        workload,
+        t("catalog"),
+        t("table_format"),
+        t("pipeline_engine"),
+        t("query_engine"),
+        mode,
+        system=system,
+    )
 
 
-def support_state(workload: str | None, recipe: str | None, mode: str | None) -> dict[str, Any]:
-    """The DESIGN 6.5 support state of a run's workload x recipe x mode."""
-    key = (str(workload), str(recipe), "sustained" if mode == "continuous" else str(mode))
-    if key in RELEASE_VALIDATED:
-        return {"state": "supported", "basis": "in this release's validation list"}
-    return {
-        "state": "unverified",
-        "basis": "not in this release's validation list (metrics.experiment.RELEASE_VALIDATED)",
-    }
+def _recorded_support(
+    inputs: Mapping[str, Any], schema: str, arch: Mapping[str, Any], mode: str, local: bool
+) -> dict[str, Any]:
+    """The support state frozen at run start. A record from before it was
+    frozen is recomputed, but never as supported: the validation record in
+    force when it ran is unknown."""
+    frozen = inputs.get("support")
+    if isinstance(frozen, Mapping) and frozen.get("state"):
+        return dict(frozen)
+    out = support_state(schema, arch, mode, system="local" if local else "cluster")
+    if out.get("state") == "supported":
+        out.update(
+            state="unverified",
+            basis="support state not recorded at run start; not re-stamped as supported",
+        )
+    return out
 
 
 def _repetitions(metrics: Any) -> dict[str, Any]:
@@ -616,7 +679,12 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     if not isinstance(inputs, Mapping):
         return None
     pb = metrics.pipeline_benchmark
-    mode = getattr(pb, "pipeline_mode", None) or inputs.get("mode") or "batch"
+    mode = (
+        inputs.get("run_mode")
+        or getattr(pb, "pipeline_mode", None)
+        or inputs.get("mode")
+        or "batch"
+    )
     mode = "sustained" if mode == "continuous" else mode
     schema = (inputs.get("workload") or {}).get("name") or "customer360"
     executed, skipped = _stages(metrics, pb)
@@ -693,9 +761,7 @@ def build_experiment(metrics: Any) -> dict[str, Any] | None:
     return {
         "schema": EXPERIMENT_SCHEMA,
         "system": "local" if local else "cluster",
-        "support": support_state(
-            (inputs.get("workload") or {}).get("name"), arch.get("recipe"), mode
-        ),
+        "support": _recorded_support(inputs, schema, arch, mode, local),
         "repetitions": _repetitions(metrics),
         "workload": dict(inputs.get("workload") or {}),
         "corpus": corpus,

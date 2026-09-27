@@ -12,7 +12,7 @@ for the full YAML schema.
 
 | Component | Default Version | Image | Role |
 |-----------|----------------|-------|------|
-| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or `3.5.4-python3` | Pipeline processing (bronze, silver, gold stages) |
+| Apache Spark | 3.5.x / 4.0.x / 4.1.x | `apache/spark:4.0.2-python3` (default), `4.1.1-python3`, or a Spark 3.5 image (a Java 11 tag such as `3.5.4-python3` gets Iceberg 1.10.1; a java17 tag gets 1.11.0) | Pipeline processing (bronze, silver, gold stages) |
 | Spark Operator | 2.5.1 | Kubeflow Helm chart | Submits SparkApplication CRDs to Kubernetes |
 
 Spark runs all data pipeline jobs. The Spark Operator manages job lifecycle
@@ -30,7 +30,7 @@ tuning, executor profiles, and version compatibility.
 | Apache Polaris | 1.6.0 | `apache/polaris:1.6.0` | REST-based Iceberg catalog with OAuth2 |
 
 Each recipe uses exactly one catalog. Both Hive and Polaris support Iceberg
-tables. See
+tables; Delta tables use Hive. Unity Catalog is not supported. See
 [Recipes](recipes.md) for valid combinations.
 
 **Hive prerequisites:** Stackable operators (commons, secret, listener, hive)
@@ -51,8 +51,11 @@ and troubleshooting.
 | Component | Default Version | Delivery | Role |
 |-----------|----------------|----------|------|
 | Apache Iceberg | 1.11.0 | Spark runtime JAR (`iceberg-spark-runtime-3.5_2.12`, `4.0_2.13`, or `4.1_2.13`) | Open table format with ACID transactions |
+| Delta Lake | auto: 4.0.0 on Spark 4.0, 4.1.0 on Spark 4.1 | `io.delta:delta-spark_2.13` (4.0) or `delta-spark_4.1_2.13` (4.1) | Open table format; Spark 4.x only |
 
-Iceberg is the supported table format and works with both catalogs (Hive and Polaris).
+Iceberg works with both catalogs (Hive and Polaris). Delta works with Hive
+only, is not readable by DuckDB on non-AWS object stores, and supports the
+Customer 360 workload only: the AML workload is Iceberg-only.
 
 ---
 
@@ -111,8 +114,8 @@ configuration and metric details.
 
 | Requirement | Minimum | Tested On |
 |-------------|---------|-----------|
-| Kubernetes | 1.26+ | OpenShift 4.x, vanilla K8s (kubeadm, EKS, GKE, AKS) |
-| S3 storage | Any S3-compatible | Pure Storage FlashBlade, MinIO, AWS S3 |
+| Kubernetes | 1.26+ | OpenShift 4.x |
+| S3 storage | Any S3-compatible that passes `lakebench config storage` | Pure Storage FlashBlade; Garage (local mode). AWS S3 and MinIO are not yet validated; see [Storage Backends](storage-backends.md). |
 
 See [S3 Storage Reference](component-s3.md) for endpoint configuration,
 path-style vs virtual-hosted addressing, and bucket layout.
@@ -121,10 +124,32 @@ path-style vs virtual-hosted addressing, and bucket layout.
 
 ## Recipe Matrix
 
-Which components are deployed for each recipe:
+Every recipe deploys PostgreSQL, its catalog (Hive Metastore or Polaris), its
+query engine (none for the `-none` recipes) and runs Spark for the pipeline.
 
-| Recipe | Catalog | Format | Engine | Components Deployed |
-|--------|---------|--------|--------|---------------------|
+<!-- BEGIN GENERATED: recipe-components -->
+<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+
+| Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
+|---|---|---|---|---|
+| `hive-delta-spark-none` | Hive | Delta | Spark | None |
+| `hive-delta-spark-thrift` | Hive | Delta | Spark | Spark Thrift |
+| `hive-delta-spark-trino` | Hive | Delta | Spark | Trino |
+| `hive-iceberg-spark-duckdb` | Hive | Iceberg | Spark | DuckDB |
+| `hive-iceberg-spark-none` | Hive | Iceberg | Spark | None |
+| `hive-iceberg-spark-thrift` | Hive | Iceberg | Spark | Spark Thrift |
+| `hive-iceberg-spark-trino` | Hive | Iceberg | Spark | Trino |
+| `polaris-iceberg-spark-duckdb` | Polaris | Iceberg | Spark | DuckDB |
+| `polaris-iceberg-spark-none` | Polaris | Iceberg | Spark | None |
+| `polaris-iceberg-spark-thrift` | Polaris | Iceberg | Spark | Spark Thrift |
+| `polaris-iceberg-spark-trino` | Polaris | Iceberg | Spark | Trino |
+
+<!-- END GENERATED: recipe-components -->
+
+Which workloads and modes each recipe supports is in
+[Compatibility Matrix](compatibility-matrix.md#support-states).
+
+--------|---------|--------|--------|---------------------|
 | `hive-iceberg-spark-trino` | Hive | Iceberg | Trino | Postgres, Hive, Trino, Spark |
 | `hive-iceberg-spark-thrift` | Hive | Iceberg | Spark Thrift | Postgres, Hive, Spark Thrift, Spark |
 | `hive-iceberg-spark-duckdb` | Hive | Iceberg | DuckDB | Postgres, Hive, DuckDB, Spark |

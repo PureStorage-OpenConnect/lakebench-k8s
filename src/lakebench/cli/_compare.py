@@ -559,11 +559,18 @@ def _print_comparison_table(comparison: dict) -> None:
         )
     support = comparison.get("support") or {}
     if support:
-        console.print(
-            f"Support state: A {support.get('config_a', 'unknown')}, "
-            f"B {support.get('config_b', 'unknown')} "
-            "[dim](unverified: ran correctly but not release-validated)[/dim]"
+        a_state = support.get("config_a", "unknown")
+        b_state = support.get("config_b", "unknown")
+        meaning = {
+            "supported": "validated on the release tree",
+            "unverified": "valid, not release-validated: not proof the combination is supported",
+            "unsupported": "outside the supported set",
+            "unknown": "the record carries no support state",
+        }
+        explained = "; ".join(
+            f"{s}: {meaning.get(s, s)}" for s in dict.fromkeys((a_state, b_state))
         )
+        console.print(f"Support state: A {a_state}, B {b_state} [dim]({explained})[/dim]")
     if not_comparable:
         title = "Comparison Results -- NOT COMPARABLE"
     elif verdict == "not_established":

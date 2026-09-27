@@ -126,6 +126,19 @@ def config_show(
                 f"derived: {peak.driving_job} + {co_label}",
             )
         )
+        from lakebench.config.support import support_state_for_config
+
+        support = support_state_for_config(cfg)
+        fields.append(
+            (
+                "support",
+                f"{support['state']} ({support['workload']} x "
+                f"{support.get('recipe') or 'no recipe'} x {support['mode']})",
+                support["basis"],
+            )
+        )
+        if support.get("mode_note"):
+            fields.append(("mode_note", support["mode_note"], "workload x mode"))
 
         table = Table(show_header=True, header_style="bold")
         table.add_column("Field", style="cyan")
@@ -406,10 +419,18 @@ def config_recipes(
         console.print("[yellow]No recipes match.[/yellow]")
         return
 
+    from lakebench.config.support import MODES, support_matrix, workloads
+
+    states = {(r["recipe"], r["workload"], r["mode"]): r["state"] for r in support_matrix()}
+    cols = [(wl, m) for wl in workloads() for m in MODES]
+    short = {"customer360": "C360", "financial": "AML"}
+
     table = Table(show_header=True, header_style="bold", box=None)
     table.add_column("Recipe", style="cyan", no_wrap=True)
     table.add_column("Choose when")
     table.add_column("Local", justify="center")
+    for wl, m in cols:
+        table.add_column(f"{short.get(wl, wl)} {m}")
 
     for recipe_name in names:
         note = get_recipe_note(recipe_name)
@@ -417,14 +438,24 @@ def config_recipes(
             recipe_name,
             note.when if note else RECIPE_DESCRIPTIONS.get(recipe_name, ""),
             "[green]yes[/green]" if note and note.runs_locally else "[dim]no[/dim]",
+            *(_state_markup(states[(recipe_name, wl, m)]) for wl, m in cols),
         )
 
     console.print()
     console.print(table)
     console.print()
+    console.print(
+        "[dim]Support: supported = validated on the release tree; unverified = valid, "
+        "not release-validated; unsupported = refused at config load.[/dim]"
+    )
     console.print("[dim]lakebench config recipes <name> for caveats and detail.[/dim]")
     if not local:
         console.print("[dim]lakebench config recipes --local for what runs on a laptop.[/dim]")
+
+
+def _state_markup(state: str) -> str:
+    color = {"supported": "green", "unverified": "yellow", "unsupported": "red"}.get(state, "dim")
+    return f"[{color}]{state}[/{color}]"
 
 
 def _print_recipe_detail(name: str) -> None:
@@ -449,6 +480,21 @@ def _print_recipe_detail(name: str) -> None:
 
     console.print()
     console.print(Panel("\n".join(lines), expand=False))
+
+    from rich.markup import escape
+
+    from lakebench.config.support import WORKLOAD_LABELS, support_matrix
+
+    real = name if name != "default" else "hive-iceberg-spark-trino"
+    console.print()
+    console.print("[bold]Support[/bold]")
+    for row in support_matrix():
+        if row["recipe"] != real:
+            continue
+        label = WORKLOAD_LABELS.get(row["workload"], row["workload"])
+        console.print(
+            f"  {label} {row['mode']}: {_state_markup(row['state'])} -- {escape(row['basis'])}"
+        )
 
     if note and note.caveats:
         console.print()

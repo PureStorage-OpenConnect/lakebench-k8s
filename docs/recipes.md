@@ -1,6 +1,6 @@
 # Recipes -- Component Combinations
 
-A **recipe** (also called a **quick-recipe**) is the validated combination of catalog, table format, pipeline engine, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates recipes at config load time against a whitelist of supported combinations and rejects anything unsupported with a clear error message. There are currently 11 supported recipes.
+A **recipe** (also called a **quick-recipe**) is the validated combination of catalog, table format, pipeline engine, and query engine that defines a Lakebench deployment's data architecture. Lakebench validates the architecture at config load time and rejects anything outside the recipe list with the reason. There are 11 recipes. A recipe is architecture only: whether a workload and mode are supported on it is a separate question, answered by the support table below.
 
 ## Quick-Recipes
 
@@ -36,7 +36,8 @@ Use this decision tree to narrow down the right recipe:
 - **Need ad-hoc SQL after the pipeline runs?** Use `trino` as the query engine (Standard or Polaris).
 - **Need a REST catalog API?** Use `polaris` recipes. Polaris exposes an Iceberg REST API on port 8181, enabling multi-engine access and OAuth2 authentication.
 - **Already have the Stackable Hive Operator installed?** The `hive` recipes are simpler to reason about and use the battle-tested Thrift protocol.
-- **Only need ETL, no interactive queries?** Use a `none` query engine recipe (Standard Headless or Polaris Headless). This skips Trino deployment entirely.
+- **Only need ETL, no interactive queries?** Use a `none` query engine recipe (Standard Headless, Polaris Headless or Hive Delta Headless). This skips the query engine entirely.
+- **Running the AML (financial) workload?** Use an Iceberg recipe. AML on Delta is refused at config load.
 
 ## Recipe Details
 
@@ -223,33 +224,54 @@ architecture:
 
 ---
 
-## Pipeline Modes
+## Pipeline Modes and Support States
 
-Recipes define the data architecture (catalog + format + engine + query engine). Pipeline modes define how data flows through it. The three supported patterns are:
+Recipes define the data architecture. The pipeline mode, `batch` or
+`continuous`, defines how data flows through it:
 
-| Pattern | Config Value | Description |
-|---|---|---|
-| **Medallion** | `medallion` | Sequential batch pipeline: bronze-verify, silver-build, gold-finalize. The default. |
-| **Streaming** | `streaming` | Concurrent streaming jobs: bronze-ingest, silver-stream, gold-refresh running simultaneously. |
-| **Batch** | `batch` | Alias for medallion with batch-oriented tuning. |
-
-Pipeline mode is independent of recipe -- any recipe works with any pipeline pattern. Set the pattern in config:
+| Mode | Stages |
+|---|---|
+| `batch` | bronze-verify, silver-build, gold-finalize, then the benchmark. The default. |
+| `continuous` | bronze-ingest, silver-stream and gold-refresh run concurrently over a corpus that keeps arriving, for `architecture.pipeline.continuous.run_duration`. |
 
 ```yaml
 architecture:
   pipeline:
-    pattern: medallion  # or streaming, batch
+    mode: continuous   # or batch
 ```
 
-To run in continuous mode:
+`lakebench run <config> --continuous` runs one config in continuous mode
+without editing it. `sustained` is accepted as a deprecated alias of
+`continuous`.
 
-```bash
-lakebench run test-config.yaml --continuous
-```
+Support is judged per workload x recipe x mode: **supported** (validated on the
+release tree), **unverified** (valid, not release-validated) or
+**unsupported** (refused before a run). See
+[Compatibility Matrix](compatibility-matrix.md#support-states) for the rules.
+This table is generated from the code:
 
-The `--continuous` flag launches bronze-ingest, silver-stream, and gold-refresh as concurrent streaming jobs that run for the configured duration (default 30 minutes, configurable via `architecture.pipeline.continuous.run_duration`).
+<!-- BEGIN GENERATED: support-states -->
+<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
-> **Note:** The old field name `processing:` is still accepted with a deprecation warning.
+| Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
+|---|---|---|---|---|
+| `hive-delta-spark-none` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-thrift` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-trino` | unverified | unverified | unsupported | unsupported |
+| `hive-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
+- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
+
+<!-- END GENERATED: support-states -->
 
 ## Using `lakebench recommend`
 

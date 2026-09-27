@@ -2249,7 +2249,7 @@ def _run_sustained(
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     from lakebench.metrics import build_config_snapshot
 
-    config_snapshot = build_config_snapshot(cfg)
+    config_snapshot = build_config_snapshot(cfg, run_mode="continuous")
     collector.start_run(run_id, cfg.name, config_snapshot)
     if collector.current_run is not None:
         collector.current_run.autosize_cuts = autosize_cuts

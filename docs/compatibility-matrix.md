@@ -1,41 +1,86 @@
 # Lakebench Compatibility Matrix
 
-## Supported Recipe Combinations
+## Recipes
 
-| Catalog | Table Format | Pipeline Engine | Query Engine | Recipe Name |
-|---------|-------------|----------------|-------------|-------------|
-| Hive | Iceberg | Spark | Trino | `hive-iceberg-spark-trino` |
-| Hive | Iceberg | Spark | Spark Thrift | `hive-iceberg-spark-thrift` |
-| Hive | Iceberg | Spark | DuckDB | `hive-iceberg-spark-duckdb` |
-| Hive | Iceberg | Spark | None | `hive-iceberg-spark-none` |
-| Polaris | Iceberg | Spark | Trino | `polaris-iceberg-spark-trino` |
-| Polaris | Iceberg | Spark | Spark Thrift | `polaris-iceberg-spark-thrift` |
-| Polaris | Iceberg | Spark | DuckDB | `polaris-iceberg-spark-duckdb` |
-| Polaris | Iceberg | Spark | None | `polaris-iceberg-spark-none` |
-| Hive | Delta | Spark | Trino | `hive-delta-spark-trino` |
-| Hive | Delta | Spark | Spark Thrift | `hive-delta-spark-thrift` |
-| Hive | Delta | Spark | None | `hive-delta-spark-none` |
+Every recipe maps to one entry of the architecture list lakebench validates at
+config load. Any other catalog, table format, pipeline engine and query engine
+combination is refused at load with the reason.
 
-## Pipeline Mode Support
+<!-- BEGIN GENERATED: recipe-components -->
+<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
 
-All 11 recipes support both pipeline modes:
+| Recipe | Catalog | Table Format | Pipeline Engine | Query Engine |
+|---|---|---|---|---|
+| `hive-delta-spark-none` | Hive | Delta | Spark | None |
+| `hive-delta-spark-thrift` | Hive | Delta | Spark | Spark Thrift |
+| `hive-delta-spark-trino` | Hive | Delta | Spark | Trino |
+| `hive-iceberg-spark-duckdb` | Hive | Iceberg | Spark | DuckDB |
+| `hive-iceberg-spark-none` | Hive | Iceberg | Spark | None |
+| `hive-iceberg-spark-thrift` | Hive | Iceberg | Spark | Spark Thrift |
+| `hive-iceberg-spark-trino` | Hive | Iceberg | Spark | Trino |
+| `polaris-iceberg-spark-duckdb` | Polaris | Iceberg | Spark | DuckDB |
+| `polaris-iceberg-spark-none` | Polaris | Iceberg | Spark | None |
+| `polaris-iceberg-spark-thrift` | Polaris | Iceberg | Spark | Spark Thrift |
+| `polaris-iceberg-spark-trino` | Polaris | Iceberg | Spark | Trino |
 
-| Mode | Description | Tested With |
-|------|-------------|-------------|
-| `batch` | Single-pass: bronze-verify -> silver-build -> gold-finalize -> benchmark | All recipes |
-| `continuous` | Continuous ingest with periodic benchmarks | hive-delta-spark-trino |
+<!-- END GENERATED: recipe-components -->
+
+## Support States
+
+Support is judged per workload x recipe x mode, not per recipe:
+
+- **supported**: the release validation record
+  (`src/lakebench/config/validated_combinations.yaml`) lists run ids that
+  completed this workload x recipe x mode end to end on the release tree with
+  the correctness contract passing.
+- **unverified**: valid for the workload and mode, but no release validation
+  run is listed. It runs, and its evidence and `compare` output carry the
+  state; an unverified run is not proof that the combination is supported.
+- **unsupported**: refused before a run, at config load (or by `run` when
+  `--continuous` selects a mode the workload does not declare).
+
+The state is computed when the run starts and recorded in `metrics.json` as
+`experiment.support`; rendering the record later does not re-stamp it. A run
+from a lakebench checkout with local changes is never stamped supported.
+`--local` runs Customer 360 in batch mode only and refuses anything else;
+local runs are at most unverified. `lakebench config show`,
+`lakebench config recipes`, the HTML report and `lakebench compare` show it. The table below is generated from the code.
+
+<!-- BEGIN GENERATED: support-states -->
+<!-- Generated from the code by `python3.11 -m lakebench.config.support .`; do not edit by hand. -->
+
+| Recipe | Customer 360 batch | Customer 360 continuous | AML (financial) batch | AML (financial) continuous |
+|---|---|---|---|---|
+| `hive-delta-spark-none` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-thrift` | unverified | unverified | unsupported | unsupported |
+| `hive-delta-spark-trino` | unverified | unverified | unsupported | unsupported |
+| `hive-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `hive-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-duckdb` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-none` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-thrift` | unverified | unverified | unverified | unverified |
+| `polaris-iceberg-spark-trino` | unverified | unverified | unverified | unverified |
+
+- **unsupported**, refused at config load: AML (financial) on `hive-delta-spark-none`, `hive-delta-spark-thrift`, `hive-delta-spark-trino`. The financial (AML) workload supports table_format iceberg, not delta. Its stage scripts and table DDL are written for iceberg only, so this combination would not run the workload it names. Set architecture.table_format.type to iceberg (for example recipe: polaris-iceberg-spark-trino).
+- Any catalog, table format and query engine combination that is not a recipe above is refused at config load for every workload.
+- AML (financial) continuous: AML continuous runs detection rules W2, W3, W4, W17 each tick and records W1, W5, W6, W7, W8 as not run. Its results depend on when detection ran relative to arrival, so no end-of-run result check is recorded.
+
+<!-- END GENERATED: support-states -->
 
 Multi-cycle batch is available via the `cycles: N` field on a `batch` config; there is no separate `iterative` mode.
 
 ## Excluded Combinations
 
-| Combination | Reason | Planned |
-|------------|--------|---------|
-| **Polaris + Delta** | Polaris is an Iceberg-native REST catalog. Delta requires Hive or Unity. | No |
-| **Unity + Iceberg** | OSS Unity Catalog v0.4.0 Iceberg REST API is read-only (GET only). `UCSingleCatalog` v0.4.0 incompatible with Spark 4.0 for Iceberg writes (`ClassCastException`). | Pending Unity release |
-| **Delta + DuckDB** | DuckDB's `delta` extension uses `delta-kernel-rs` which bypasses `httpfs` S3 settings and tries AWS IMDS (169.254.169.254) for credentials. Hangs on non-AWS Kubernetes. Only works on AWS with IAM instance profiles. | No (upstream) |
-| **Unity + Delta (all engines)** | UCSingleCatalog 0.4.0 always calls `generateTemporaryTableCredentials` (STS) even for EXTERNAL tables (`CREATE TABLE ... LOCATION`). FlashBlade has no STS. Requires upstream UCSingleCatalog fix or direct REST API table registration. | Pending upstream fix |
-| **Unity + Delta + Trino** | Even with EXTERNAL tables, Trino's Delta connector requires a Hive Metastore. Unity doesn't deploy one. | No |
+All of these are refused at config load.
+
+| Combination | Reason |
+|------------|--------|
+| **AML (financial) + Delta** | The AML stage scripts and table DDL write Iceberg tables only. |
+| **Polaris + Delta** | Polaris is an Iceberg-native REST catalog. Delta requires Hive. |
+| **Delta + DuckDB** | DuckDB's `delta` extension uses `delta-kernel-rs` which bypasses `httpfs` S3 settings and tries AWS IMDS (169.254.169.254) for credentials. Hangs on non-AWS Kubernetes. |
+| **Unity (any format, any engine)** | Not supported. The `unity` catalog value is accepted by the schema but no Unity combination is in the supported list. OSS Unity Catalog 0.4.0's Iceberg REST API is read-only; `UCSingleCatalog` 0.4.0 calls `generateTemporaryTableCredentials` (STS) even for EXTERNAL Delta tables, and object stores without STS (FlashBlade) cannot serve it; Trino's Delta connector needs a Hive Metastore, which Unity deployments do not include. |
 
 ## Component Version Matrix
 
@@ -43,12 +88,12 @@ Multi-cycle batch is available via the `cycles: N` field on a `batch` config; th
 |-----------|----------------|--------------|-------|
 | Apache Spark | 3.5.4, 4.0.2, 4.1.1 | 4.0.2 or 4.1.1 | Delta requires Spark 4.x |
 | Spark Operator | 2.5.1 | 2.5.1 | Kubeflow Spark Operator |
-| Apache Iceberg | 1.11.0 (auto) | -- | Auto-selected based on Spark version. 1.11.0 requires Java 17 -- see below. |
+| Apache Iceberg | 1.11.0 (auto) | -- | Auto-selected based on Spark version. 1.11.0 requires Java 17, so a Java 11 Spark 3.5 image (such as `3.5.4-python3`) gets 1.10.1 with a warning -- see below. |
 | Delta Lake | -- | 4.0.0 or 4.1.0 (auto) | Auto-selected based on Spark version |
 | Hive Metastore | 3.1.3 | 3.1.3 | Stackable 25.7.0 |
 | Apache Polaris | 1.6.0 | -- | Iceberg-only |
 | Trino | 483 | 483 | Iceberg or Delta connector |
-| DuckDB | 1.5.0 | -- | Delta not supported (see above) |
+| DuckDB | 1.5.5 | -- | Delta not supported (see above) |
 | PostgreSQL | 16, 17, 18 | 16, 17, 18 | Metadata backend |
 
 ## Spark + Table Format Version Matrix
@@ -172,4 +217,4 @@ architecture:
 | Hive | Iceberg | SparkCatalog with Hive Thrift backend | Tables registered via Thrift. Trino reads via Iceberg connector. |
 | Hive | Delta | DeltaCatalog as session catalog extension | Tables in Hive "Spark SQL specific format". Trino reads via Delta connector. |
 | Polaris | Iceberg | SparkCatalog with REST backend | OAuth2 auth. Trino reads via Iceberg REST connector. |
-| Unity | Delta | UCSingleCatalog with EXTERNAL tables | Data written via S3A credentials. Metadata registered via Unity REST API. Trino not supported. |
+| Unity | Delta | Not supported | Refused at config load. See Excluded Combinations. |

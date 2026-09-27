@@ -35,6 +35,9 @@ a = Analysis(
         # file, not only as bytecode in the archive.
         ("src/lakebench/aml/reference_score.py", "lakebench/aml"),
         ("src/lakebench/aml/fidelity_gate.py", "lakebench/aml"),
+        # Release validation record: without it every run reads the record
+        # as unreadable and nothing is ever stamped supported.
+        ("src/lakebench/config/validated_combinations.yaml", "lakebench/config"),
     ]
     + pydantic_datas
     + pydantic_settings_datas,

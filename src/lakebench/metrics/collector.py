@@ -2001,7 +2001,9 @@ CONTINUOUS_ROUND_BENCHMARK: dict[str, Any] = {
 }
 
 
-def build_config_snapshot(cfg: Any) -> dict[str, Any]:
+def build_config_snapshot(
+    cfg: Any, *, run_mode: str | None = None, system: str = "cluster"
+) -> dict[str, Any]:
     """Build a config snapshot for metrics recording.
 
     Captures the key configuration fields that affect benchmark results,
@@ -2124,7 +2126,7 @@ def build_config_snapshot(cfg: Any) -> dict[str, Any]:
         },
         # Config half of the metrics.json experiment block
         # (metrics/experiment.py). Not a perf-gate fingerprint key.
-        "experiment_inputs": experiment_inputs(cfg),
+        "experiment_inputs": experiment_inputs(cfg, run_mode=run_mode, system=system),
     }
 
     return snapshot
