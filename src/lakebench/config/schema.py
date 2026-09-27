@@ -246,11 +246,10 @@ class ImagesConfig(ConfigModel):
 
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
     # every datagen_rs change; :latest drifted from the code it claimed to be.
-    # PLACEHOLDER until the AML generator-freeze image is built: 14c4eee
-    # predates the freeze (it writes MODEL_VERSION datagen-v2-rs-0.2, no
-    # watchlist, answer keys in the party zone). Replace with the freeze
-    # commit's tag and record its digest when the image is pushed.
-    datagen: str = "docker.io/sillidata/lb-datagen:14c4eee"
+    # 7c24641 is the AML generator-freeze commit (MODEL_VERSION
+    # datagen-v2-rs-0.3). Pushed digest:
+    # sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b
+    datagen: str = "docker.io/sillidata/lb-datagen:7c24641"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
