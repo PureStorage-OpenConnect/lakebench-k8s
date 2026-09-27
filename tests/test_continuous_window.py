@@ -1075,3 +1075,49 @@ def test_stream_submission_failures_reach_the_stage_and_the_report(tmp_path):
         .read_text()
     )
     assert "2 failed submissions, 60s before it ran" in html
+
+
+def _header(fmt: str, engine: str, **kw) -> list[tuple[str, str]]:
+    from lakebench.cli._sustained import maintenance_schedule_lines
+
+    args = {
+        "skip_maintenance": False,
+        "retention_interval": 600,
+        "retention_source": "auto",
+        "retention_threshold": "30m",
+        "compaction_configured": True,
+        "compaction_interval": 1200,
+        "compaction_source": "auto",
+        **kw,
+    }
+    return maintenance_schedule_lines(fmt, engine, **args)
+
+
+def test_delta_run_header_names_delta_maintenance_not_iceberg():
+    """lb16-cf: Delta runs printed "Iceberg retention: every 600s"."""
+    trino = _header("delta", "trino")
+    text = " | ".join(t for _, t in trino)
+    assert "Iceberg" not in text
+    assert "Delta VACUUM: every 600s (auto; retention 168h" in text
+    assert "Delta OPTIMIZE: not run" in text
+    assert trino[-1][0] == "warning" and "owner decision #46" in trino[-1][1]
+    thrift = " | ".join(t for _, t in _header("delta", "spark-thrift"))
+    assert "Delta VACUUM: not run (it OOMs Spark Thrift" in thrift and "Iceberg" not in thrift
+    skipped = _header("delta", "trino", skip_maintenance=True)
+    assert skipped[0][1] == "Delta VACUUM: disabled (--skip-maintenance)"
+    assert "DuckDB" in _header("delta", "duckdb")[0][1]
+
+
+def test_iceberg_run_header_is_unchanged():
+    assert _header("iceberg", "trino") == [
+        ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
+        ("info", "Iceberg compaction: every 1200s (auto)"),
+    ]
+    assert _header("iceberg", "trino", skip_maintenance=True) == [
+        ("info", "Iceberg retention: disabled (--skip-maintenance)"),
+        ("info", "Iceberg compaction: disabled (--skip-maintenance)"),
+    ]
+    assert _header("iceberg", "trino", compaction_configured=False) == [
+        ("info", "Iceberg retention: every 600s (auto; threshold: 30m)"),
+    ]
+    assert "not run" in _header("iceberg", "duckdb")[0][1]

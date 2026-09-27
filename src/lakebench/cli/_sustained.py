@@ -2011,6 +2011,66 @@ class StreamStartWatch:
             )
 
 
+def maintenance_schedule_lines(
+    table_format: str,
+    query_engine: str,
+    *,
+    skip_maintenance: bool,
+    retention_interval: int,
+    retention_source: str,
+    retention_threshold: str,
+    compaction_configured: bool,
+    compaction_interval: int,
+    compaction_source: str,
+) -> list[tuple[str, str]]:
+    """The run header's maintenance lines, as ``(level, text)``: what the
+    table format and query engine will actually run, not the Iceberg
+    schedule for every run (lb16-cf Delta runs printed "Iceberg retention").
+    """
+    fmt = (table_format or "").lower()
+    engine = (query_engine or "").lower()
+    if fmt != "delta":
+        if engine == "duckdb":
+            return [("info", "Iceberg maintenance: not run (DuckDB cannot run table maintenance)")]
+        lines = [
+            (
+                "info",
+                "Iceberg retention: disabled (--skip-maintenance)"
+                if skip_maintenance
+                else f"Iceberg retention: every {retention_interval}s "
+                f"({retention_source}; threshold: {retention_threshold})",
+            )
+        ]
+        if compaction_configured and not skip_maintenance:
+            lines.append(
+                ("info", f"Iceberg compaction: every {compaction_interval}s ({compaction_source})")
+            )
+        elif compaction_configured:
+            lines.append(("info", "Iceberg compaction: disabled (--skip-maintenance)"))
+        return lines
+
+    from lakebench.metrics.maintenance_policy import DELTA_CONTINUOUS_LIMITATION
+
+    if skip_maintenance:
+        vacuum = "Delta VACUUM: disabled (--skip-maintenance)"
+    elif engine == "duckdb":
+        vacuum = "Delta VACUUM: not run (DuckDB cannot run table maintenance)"
+    elif engine == "spark-thrift":
+        vacuum = "Delta VACUUM: not run (it OOMs Spark Thrift at 4Gi)"
+    else:
+        applied = applied_retentions("delta", retention_threshold, live_streams=True)["expire"]
+        vacuum = (
+            f"Delta VACUUM: every {retention_interval}s ({retention_source}; retention "
+            f"{applied}, Delta's 7 d default or longer while streams are live, so nothing "
+            "written in the window is eligible)"
+        )
+    return [
+        ("info", vacuum),
+        ("info", "Delta OPTIMIZE: not run (it exhausts engine memory)"),
+        ("warning", DELTA_CONTINUOUS_LIMITATION[0].upper() + DELTA_CONTINUOUS_LIMITATION[1:]),
+    ]
+
+
 def watch_all_streams(job_manager, watches: dict[str, StreamStartWatch], current: str):
     """``wait_until_running`` callback for the stream being waited on that
     also polls every other stream not yet running.
@@ -2890,15 +2950,24 @@ def _run_sustained(
         # freshness/throughput measurement.
         retention_interval = sustained_cfg.effective_retention_interval(run_duration)
         retention_threshold = sustained_cfg.retention_threshold
+        compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
+        compaction_interval = sustained_cfg.effective_compaction_interval(run_duration)
+        for _level, _line in maintenance_schedule_lines(
+            cfg.architecture.table_format.type.value,
+            cfg.architecture.query_engine.type.value,
+            skip_maintenance=skip_maintenance,
+            retention_interval=retention_interval,
+            retention_source=schedule["retention_source"],
+            retention_threshold=retention_threshold,
+            compaction_configured=sustained_cfg.compaction_enabled,
+            compaction_interval=compaction_interval,
+            compaction_source=schedule["compaction_source"],
+        ):
+            (print_warning if _level == "warning" else print_info)(_line)
         if skip_maintenance:
             next_maintenance_at = float("inf")
-            print_info("Iceberg retention: disabled (--skip-maintenance)")
         else:
             next_maintenance_at = float(retention_interval)  # first run after one interval
-            print_info(
-                f"Iceberg retention: every {retention_interval}s "
-                f"({schedule['retention_source']}; threshold: {retention_threshold})"
-            )
             from lakebench.config.loader import retention_floor_advisory
 
             floor_msg = retention_floor_advisory(cfg)
@@ -2906,16 +2975,8 @@ def _run_sustained(
                 # Continuous configs already warned at load.
                 print_warning(floor_msg)
 
-        # Iceberg compaction scheduling (v1.1.0)
-        compaction_enabled = sustained_cfg.compaction_enabled and not skip_maintenance
-        compaction_interval = sustained_cfg.effective_compaction_interval(run_duration)
+        # Compaction scheduling (v1.1.0); Delta OPTIMIZE never runs.
         next_compaction_at = float(compaction_interval) if compaction_enabled else float("inf")
-        if compaction_enabled:
-            print_info(
-                f"Iceberg compaction: every {compaction_interval}s ({schedule['compaction_source']})"
-            )
-        elif sustained_cfg.compaction_enabled and skip_maintenance:
-            print_info("Iceberg compaction: disabled (--skip-maintenance)")
 
         start = time.time()
         check_interval = 30
