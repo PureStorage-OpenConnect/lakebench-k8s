@@ -569,3 +569,23 @@ class TestRunOrdering:
             monkeypatch.delenv("TZ")
             time.tzset()
         assert [r["run_id"] for r in runs][0] == "20260927-110000-bbbbbb"
+
+
+class TestLagAnchor:
+    def test_end_anchored_on_the_last_running_poll_survives_a_slow_api(self):
+        """Fix pass: under API load the observed end can trail the driver by
+        more than poll + lag; the last running poll is the real bound."""
+        t = _timing(
+            observed_end=T0 + timedelta(seconds=470.0),
+            cluster_end=T0 + timedelta(seconds=380.0 + 4.5),
+            last_running=T0 + timedelta(seconds=375.0),
+        )
+        assert t.source == "driver_container"
+
+    def test_end_well_before_the_last_running_poll_is_skew(self):
+        t = _timing(
+            observed_end=T0 + timedelta(seconds=470.0),
+            cluster_end=T0 + timedelta(seconds=300.0 + 4.5),
+            last_running=T0 + timedelta(seconds=465.0),
+        )
+        assert t.source == "poll"

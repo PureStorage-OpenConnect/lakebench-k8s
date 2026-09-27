@@ -478,23 +478,31 @@ STAGE_TIMING_CLUSTER = "cluster"
 STAGE_TIMING_MIXED = "mixed"
 
 
+def _stage_basis(stage: Mapping[str, Any]) -> str:
+    src = str(stage.get("timing_source") or "")
+    if src in ("driver_container", "spark_application"):
+        return STAGE_TIMING_CLUSTER
+    if src == "":
+        return STAGE_TIMING_POLL  # pre-v1.6: the 15 s poll
+    if src == "poll":
+        # A v1.6 poll fallback, at its own interval: not the old 15 s poll.
+        res = stage.get("timing_resolution_seconds")
+        return f"poll{res:g}s" if isinstance(res, (int, float)) else STAGE_TIMING_POLL
+    return src  # local_runner, submit_failed: a basis of their own
+
+
 def stage_timing_basis(run: RunRecord) -> str | None:
-    """The timing basis of the run's batch Spark stages, None with none."""
-    sources = {
-        str(s.get("timing_source") or "")
-        for s in run.pb_raw.get("stages") or []
-        if s.get("stage_type") == "batch"
-    }
-    if not sources:
-        return None
+    """The timing basis of the run's batch Spark stages, None with none.
+
+    STAGE_TIMING_MIXED when the stages were not all timed the same way; such
+    a run is neither gated nor recorded, since a per-stage basis that differs
+    from the baseline's cannot be told apart from a change in the stage.
+    """
     kinds = {
-        STAGE_TIMING_POLL
-        if src in ("", "poll")
-        else STAGE_TIMING_CLUSTER
-        if src in ("driver_container", "spark_application")
-        else src  # local_runner, submit_failed: a basis of their own
-        for src in sources
+        _stage_basis(s) for s in run.pb_raw.get("stages") or [] if s.get("stage_type") == "batch"
     }
+    if not kinds:
+        return None
     return kinds.pop() if len(kinds) == 1 else STAGE_TIMING_MIXED
 
 
@@ -1106,7 +1114,12 @@ def compare_run(store: BaselineStore, name: str, run: RunRecord) -> Comparison:
     if run.mode == "batch":
         run_timing = stage_timing_basis(run)
         base_timing = baseline.stage_timing or STAGE_TIMING_POLL
-        if run_timing is not None and run_timing != base_timing:
+        if run_timing == STAGE_TIMING_MIXED:
+            result.reasons.append(
+                "batch stages are not all timed the same way (some fell back to the poll); "
+                "stage seconds and time to value are not like for like with any baseline"
+            )
+        elif run_timing is not None and run_timing != base_timing:
             result.reasons.append(
                 f"batch stage times are {run_timing}-timed in the run but "
                 f"{base_timing}-timed in the baseline (v1.6 times stages from the Spark "
@@ -1219,6 +1232,11 @@ def record_baseline(
     pinned = store.pinned(name)
     reasons = run_refusals(run, pinned)
     basis = ttv_basis(run) if run.mode == "batch" else None
+    if run.mode == "batch" and stage_timing_basis(run) == STAGE_TIMING_MIXED:
+        reasons.append(
+            "batch stages are not all timed the same way (some fell back to the poll); "
+            "not recordable as a baseline"
+        )
     if basis == TTV_FROM_SCORECARD and _datagen_stale(run):
         reasons.append(
             "time to value cannot be separated from a stale datagen stage (stages carry "

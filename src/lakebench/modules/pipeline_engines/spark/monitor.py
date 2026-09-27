@@ -50,6 +50,9 @@ class JobResult:
     # The SparkApplication status that ended the wait (None on a timeout
     # before any status was read).
     final_status: JobStatus | None = None
+    # Seconds into the wait of the last poll whose status was not terminal
+    # (None: none seen). The application ended after about this point.
+    last_running_elapsed: float | None = None
 
 
 # Stage timing sources, best first (JobMetrics.timing_source).
@@ -63,10 +66,11 @@ TIMING_POLL = "poll"  # the monitor poll that first saw the terminal state
 # Node clocks (kubelet, operator) are not corrected by the offset and the
 # offset read carries half its round trip, so 2 s, not 1 s.
 _CLUSTER_TIMING_RESOLUTION_S = 2.0
-# The poll sees the end within one interval of the operator noticing it, and
-# the operator notices within its reconcile lag. An end earlier than
-# observed_end - (poll interval + this) is a slow node clock or a stale status.
-_OPERATOR_LAG_S = 30.0
+# The operator reported the application still running at the last
+# non-terminal poll; its view lags the driver by its reconcile delay. An end
+# earlier than that poll minus this lag is a slow node clock or a stale
+# status. Generous: a busy shared operator can lag tens of seconds.
+_OPERATOR_LAG_S = 60.0
 # How far a cluster end may sit outside [submitted, observed] before it is
 # taken as clock skew or a stale status rather than rounding.
 _CLUSTER_TIMING_TOLERANCE_S = 2.0
@@ -111,6 +115,7 @@ def stage_timing(
     clock_offset_seconds: float | None,
     poll_interval: float,
     last_submission: datetime | None = None,
+    last_running: datetime | None = None,
 ) -> StageTiming:
     """Time a batch stage from its submission to the application's real end.
 
@@ -135,9 +140,10 @@ def stage_timing(
         return poll
     end = cluster_end + timedelta(seconds=0.5 - clock_offset_seconds)
     tol = timedelta(seconds=_CLUSTER_TIMING_TOLERANCE_S)
-    earliest = max(
-        submitted_at - tol, observed_end - timedelta(seconds=poll_interval + _OPERATOR_LAG_S)
-    )
+    # Without a running poll to anchor on, one poll interval before the
+    # observed end stands in for it.
+    anchor = last_running or observed_end - timedelta(seconds=poll_interval)
+    earliest = max(submitted_at - tol, anchor - timedelta(seconds=_OPERATOR_LAG_S))
     if end < earliest or end > observed_end + tol:
         poll.note = (
             f"{cluster_source} {cluster_end.isoformat()} is outside the observed run "
@@ -192,6 +198,7 @@ class SparkJobMonitor:
         start = time.time()
         last_state = None
         sub_failed_since: float | None = None
+        last_running: float | None = None
 
         while True:
             elapsed = time.time() - start
@@ -234,6 +241,7 @@ class SparkJobMonitor:
                     elapsed_seconds=elapsed,
                     driver_logs=self._get_driver_logs(job_name, tail_lines=None),
                     final_status=status,
+                    last_running_elapsed=last_running,
                 )
 
             if status.state == JobState.SUBMISSION_FAILED:
@@ -252,8 +260,10 @@ class SparkJobMonitor:
                     elapsed_seconds=elapsed,
                     driver_logs=self._get_driver_logs(job_name),
                     final_status=status,
+                    last_running_elapsed=last_running,
                 )
 
+            last_running = elapsed
             time.sleep(poll_interval)
 
     def application_end(

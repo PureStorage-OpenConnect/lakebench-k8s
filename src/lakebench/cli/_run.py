@@ -469,6 +469,11 @@ def _stage_timing(monitor, app_name: str, result, submitted_at, observed_end):
         offset,
         _STAGE_POLL_S,
         last_submission=parse_k8s_time(status.start_time) if status is not None else None,
+        last_running=(
+            submitted_at + timedelta(seconds=result.last_running_elapsed)
+            if isinstance(getattr(result, "last_running_elapsed", None), (int, float))
+            else None
+        ),
     )
 
 
@@ -1972,7 +1977,7 @@ def run(
                     executor_count=_max_executors,
                 )
                 if timing.note:
-                    logger.info("%s timed by poll: %s", stage_name, timing.note)
+                    logger.warning("%s timed by poll: %s", stage_name, timing.note)
 
                 # Parse driver logs for data metrics if available
                 if result.driver_logs:
