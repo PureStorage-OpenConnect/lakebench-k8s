@@ -23,9 +23,11 @@ from common import (
     log_job_metrics,
     one_line,
     path_size_gb,
+    write_bronze_data_clock,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, current_timestamp
+from pyspark.sql.functions import max as max_
 
 BRONZE_URI = env("LB_BRONZE_URI", "s3a://lb-bronze/")
 # datagen_rs is the only shipping datagen after the Python generator was
@@ -354,6 +356,18 @@ def main() -> None:
 
     partition_days = df.select("intr_bk_sttlm_dt").distinct().count()
     log(f"Partition days present: {partition_days}")
+
+    # C2 (silver-plan): compute the bronze-side data clock (newest settlement
+    # date) and write it to the ``lakebench-silver-state`` ConfigMap so
+    # job.py._build_env_vars can resolve LB_DATA_CLOCK for downstream silver
+    # jobs. ``intr_bk_sttlm_dt`` is the partition column and by definition
+    # the newest event date; a single agg pass, no extra scan.
+    try:
+        _ts_max = df.agg(max_(col("intr_bk_sttlm_dt")).alias("m")).collect()[0]["m"]
+    except Exception as e:  # noqa: BLE001
+        log(f"bronze_data_clock: skipped ({one_line(e)})")
+        _ts_max = None
+    write_bronze_data_clock(env("LAKEBENCH_NAMESPACE", ""), _ts_max)
 
     source_bytes = None
     if CONTINUOUS_RESET:

@@ -31,6 +31,7 @@ from common import (
     pipeline_table,
     reset_stream_tables,
     set_utc_session,
+    write_bronze_data_clock,
 )
 
 _INT = ("tinyint", "smallint", "int", "bigint")
@@ -283,6 +284,16 @@ def main() -> None:
 
     total_time = time.time() - start_time
     input_size_gb = path_size_gb(spark, source)
+
+    # C2 (silver-plan): record the bronze-side data clock so silver's env
+    # builder (job.py._build_env_vars) can resolve LB_DATA_CLOCK to the
+    # newest bronze event date rather than falling all the way to today.
+    # ``ts_max`` is the max(event_timestamp) verify_bronze already computed
+    # in the same aggregation pass; no extra Spark scan.
+    write_bronze_data_clock(
+        env("LAKEBENCH_NAMESPACE", ""),
+        stats.get("ts_max") if isinstance(stats, dict) else None,
+    )
 
     log("=" * 60)
     log("Bronze Verification COMPLETED")

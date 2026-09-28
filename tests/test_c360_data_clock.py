@@ -28,8 +28,38 @@ def test_data_clock_env_follows_datagen_end(job_type):
     assert _env(cfg, job_type)["LB_DATA_CLOCK"] == "2025-07-01"
 
 
-def test_data_clock_env_absent_without_configured_end():
-    assert "LB_DATA_CLOCK" not in _env(_make_config(), JobType.SILVER_BUILD)
+def test_data_clock_env_falls_back_to_today_for_silver_without_configured_end():
+    """C2 (silver-plan): silver jobs always carry LB_DATA_CLOCK. Without
+    a configured datagen end and without a bronze-verify-written value in
+    the ``lakebench-silver-state`` ConfigMap, the resolver falls back to
+    today at 00:00 UTC and labels the source ``fallback_default`` so
+    metrics.json records the choice.
+
+    This flips the pre-C2 assertion (LB_DATA_CLOCK absent) because absence
+    silently landed a NULL customer_recency_score, exactly what C2 prevents.
+    """
+    from datetime import datetime, timezone
+    from unittest.mock import patch
+
+    from kubernetes.client.exceptions import ApiException
+
+    def _raise404(*_a, **_k):
+        raise ApiException(status=404)
+
+    with patch(
+        "kubernetes.client.CoreV1Api.read_namespaced_config_map",
+        side_effect=_raise404,
+    ):
+        env = _env(_make_config(), JobType.SILVER_BUILD)
+    assert env["LB_DATA_CLOCK"] == datetime.now(timezone.utc).date().isoformat()
+    assert env["LB_DATA_CLOCK_SOURCE"] == "fallback_default"
+
+
+def test_data_clock_env_absent_from_bronze_verify_without_configured_end():
+    """C2 is silver-only: bronze-verify does not gain a fallback clock.
+    It writes ``bronze_data_clock`` after verifying; there is no reader
+    on the bronze-verify side that would consume LB_DATA_CLOCK."""
+    assert "LB_DATA_CLOCK" not in _env(_make_config(), JobType.BRONZE_VERIFY)
 
 
 def test_configured_clock_is_the_day_before_the_exclusive_end(monkeypatch):

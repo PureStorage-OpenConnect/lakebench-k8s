@@ -55,7 +55,6 @@ from common import (
     assert_progress,
     await_stream,
     check_bronze_fingerprint,
-    configured_data_clock,
     data_clock_date,
     emit_stream_scale_admission,
     ensure_column,
@@ -63,6 +62,7 @@ from common import (
     log,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
+    resolve_data_clock,
     set_utc_session,
     streaming_query_id,
     table_exists,
@@ -198,12 +198,13 @@ def main() -> None:
         ensure_column(spark, silver_tbl, "_batch_id", "BIGINT")
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, silver_tbl)
 
-    data_clock = configured_data_clock()
-    log(
-        f"Data clock (recency anchor): {data_clock} from LB_DATA_CLOCK"
-        if data_clock is not None
-        else "Data clock: LB_DATA_CLOCK unset; recency anchored per micro-batch"
-    )
+    # C1 (silver-plan): silver C360 stream mains use strict=True. C2 always
+    # exports LB_DATA_CLOCK in the silver env bundle (with a today fallback
+    # for greenfield deployments), so a missing env here is a plumbing break,
+    # not a legitimate absence -- the pre-C2 behaviour ("anchored per
+    # micro-batch") silently broke same-bronze reproducibility across
+    # restarts, exactly what recency scoring must not do.
+    data_clock = resolve_data_clock(df_fallback=None, strict=True)
 
     # Bronze-ingest creates bronze_raw on its first batch; silver-stream
     # starts concurrently and would crash with NoSuchTableException.

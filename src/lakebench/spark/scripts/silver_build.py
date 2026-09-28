@@ -370,7 +370,10 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
     bronze_count = df_bronze.count()
     log(f"Bronze records: {bronze_count:,}")
     _COUNTED["bronze_rows"] = bronze_count
-    anchor = resolve_data_clock(df_bronze)
+    # C1 (silver-plan): C360 silver mains use strict=True. C2 always exports
+    # LB_DATA_CLOCK in the silver env bundle (with a today fallback), so a
+    # missing env here is a plumbing break, not a legitimate greenfield.
+    anchor = resolve_data_clock(df_bronze, strict=True)
 
     silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
         "_batch_id", lit(int(cycle)).cast("bigint")
@@ -435,8 +438,8 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
     log(f"Bronze records: {bronze_count:,}")
     _COUNTED["bronze_rows"] = bronze_count
 
-    # LB_DATA_CLOCK when set; a one-column pass over bronze only without it.
-    anchor = resolve_data_clock(df_bronze)
+    # C1: strict=True; LB_DATA_CLOCK is always exported by C2's env builder.
+    anchor = resolve_data_clock(df_bronze, strict=True)
 
     # Apply transformations - all column operations, no joins
     silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
@@ -627,6 +630,11 @@ log(f"input_size_gb: {profile.total_size_gb:.3f}")
 # G2: source label so a downstream reader can tell an operator-asserted
 # size from a filesystem-measured one (invariant 5).
 log(f"input_size_gb_source: {input_size_gb_source}")
+# C2 (silver-plan): label which rung of the resolution ladder produced
+# LB_DATA_CLOCK, so metrics.json records `datagen_timestamp_end`,
+# `bronze_data_clock`, `datagen_timestamp_start` or `fallback_default`
+# for every silver run.
+log(f"data_clock_source: {env('LB_DATA_CLOCK_SOURCE', 'unknown')}")
 # A5 (silver-plan): unify on `bronze_rows` across SIMPLE and STREAMING; the
 # earlier `estimated_rows` emission is dropped.
 log(f"bronze_rows: {_COUNTED.get('bronze_rows', 'unknown')}")

@@ -497,9 +497,12 @@ class TestDeployBuckets:
         results = engine.deploy_all()
         components = [r.component for r in results]
         assert "s3-buckets" in components
-        # Buckets should come after secrets and before scratch-sc
+        # Buckets should come after secrets and before scratch-sc. The
+        # silver-state ConfigMap step (C2, silver-plan) also lands between
+        # secrets and s3-buckets, so bucket_idx - 1 is now silver-state.
         bucket_idx = components.index("s3-buckets")
-        assert components[bucket_idx - 1] == "secrets"
+        assert components[bucket_idx - 1] == "silver-state"
+        assert "secrets" in components[:bucket_idx]
 
 
 class TestAutoSizerIntegration:

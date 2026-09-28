@@ -33,6 +33,7 @@ from common import (
     iceberg_table_stats,
     log,
     log_job_metrics,
+    resolve_data_clock,
 )
 from pyspark.sql import SparkSession, Window
 from pyspark.sql.functions import (
@@ -46,7 +47,6 @@ from pyspark.sql.functions import (
     col,
     concat_ws,
     create_map,
-    current_timestamp,
     date_format,
     datediff,
     greatest,
@@ -870,8 +870,15 @@ def build_edges(txns_df):
     )
 
 
-def build_entity_profiles(txns_df):
+def build_entity_profiles(txns_df, data_clock):
     """Per-entity behavioural baseline (C-PROFILES, LB-130).
+
+    ``data_clock`` (I1, silver-plan): the resolved data clock anchor
+    (``datetime.date``) that stamps ``profile_updated_ts``. Passing a
+    fixed anchor rather than reading wall-clock inside the transform
+    keeps rebuilds byte-identical for the same bronze -- a rebuild that
+    differs only in ``profile_updated_ts`` cannot be diffed against an
+    earlier run to catch a real regression.
 
     One row per entity_id, aggregating the originator side and the beneficiary
     side separately then full-outer-joining, so a rule can compare an event
@@ -961,7 +968,13 @@ def build_entity_profiles(txns_df):
         )
         .otherwise(lit(None).cast("double"))
         .alias("passthrough_ratio"),
-        current_timestamp().alias("profile_updated_ts"),
+        # I1 (silver-plan): the anchor is the resolved data clock, not
+        # ``current_timestamp()``. A wall-clock stamp makes every rebuild
+        # of a fixed bronze write a different value into this per-entity
+        # column, so diffing rebuilds for regression detection is
+        # impossible. Cast the date to TIMESTAMP so the column type stays
+        # unchanged (the DDL declares it as TIMESTAMP).
+        lit(data_clock.isoformat()).cast("timestamp").alias("profile_updated_ts"),
         lit(None).cast("bigint").alias("_batch_id"),
     )
 
@@ -1144,6 +1157,29 @@ def main() -> None:
     bronze_rows = bronze.count()
     log(f"Read bronze: {CATALOG}.{BRONZE_TABLE} ({bronze_rows:,} rows)")
 
+    # I1 (silver-plan): resolve the data clock once for the run and pass it
+    # to build_entity_profiles so ``profile_updated_ts`` is deterministic
+    # across rebuilds of the same bronze. AML mains use strict=False (this
+    # module does not compute customer_recency_score, so a missing anchor
+    # is not a correctness hazard here; C2's env fallback still supplies
+    # one for silver jobs). A None fallback would leave ``data_clock`` as
+    # None and the .isoformat() call below would crash; use the bronze
+    # frame's max(txn_timestamp) day as the safety net.
+    from datetime import date as _date
+
+    _resolved = resolve_data_clock(df_fallback=None)
+    if _resolved is None:
+        # Datagen may not have written a timestamp end, bronze may be a
+        # legacy corpus without one -- fall back to today at 00:00 UTC so
+        # the timestamp cast succeeds.
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        _resolved = _dt.now(_tz.utc).date()
+        log(f"I1: data_clock unresolved; using today={_resolved} for profile_updated_ts")
+    assert isinstance(_resolved, _date), _resolved
+    data_clock = _resolved
+
     # NB: `.overwrite(lit(True))` (not `.createOrReplace()`) preserves the
     # table's partition spec and schema. The original design used
     # createOrReplace, which under the DataFrameWriterV2 semantics REPLACES
@@ -1214,7 +1250,9 @@ def main() -> None:
 
     # C-PROFILES (LB-130): per-entity behavioural baseline for relative-anomaly
     # detection (W4/W8 over-firing). Full rebuild from the transaction frame.
-    _replace_data(build_entity_profiles(txns), SILVER_PROFILES)
+    # I1: ``data_clock`` fixes ``profile_updated_ts`` so rebuilds are
+    # byte-identical for the same bronze.
+    _replace_data(build_entity_profiles(txns, data_clock), SILVER_PROFILES)
     log("Wrote silver.entity_profiles")
 
     # Guard against ruff unused-import warnings for symbols kept for clarity.
@@ -1238,12 +1276,16 @@ def main() -> None:
         "silver_edges_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_EDGES}")[0],
         "silver_profiles_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_PROFILES}")[0],
     }
+    # C2 (silver-plan): record which rung of the resolution ladder produced
+    # LB_DATA_CLOCK so metrics.json labels the run.
+    _clock_source = env("LB_DATA_CLOCK_SOURCE", "unknown")
     log_job_metrics(
         "silver-build",
         input_size_gb=bronze_gb,
         input_rows=bronze_rows,
         output_rows=silver_rows,
         elapsed_seconds=elapsed,
+        data_clock_source=_clock_source,
         **per_table,
     )
     # A1: LB-044 gate; refuse exit-0 if the primary output table is empty.
