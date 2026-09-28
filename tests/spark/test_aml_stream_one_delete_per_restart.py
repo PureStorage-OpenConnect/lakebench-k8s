@@ -214,7 +214,7 @@ def _run(jar):
         ss._KYC_LOADED = True
         ss._kyc = lambda _s: None
         ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
-        ss._maintain_statements = lambda *_a, **_kw: 0
+        ss._maintain_statements = lambda *_a, **_kw: (0, 0)
 
         def bronze(bid):
             return _bronze_row(

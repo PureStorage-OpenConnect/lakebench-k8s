@@ -80,6 +80,7 @@ import time
 
 from common import (
     SilverAbort,
+    aml_opening_balance,
     assert_progress,
     clear_stream_started_marker,
     emit_stream_scale_admission,
@@ -230,7 +231,15 @@ def _kyc(spark):
     return _KYC
 
 
-def _maintain_statements(batch_df, batch_id: int, sid: str, check_replay: bool) -> int:
+STATEMENTS_STRICT_PARITY_ENV = "LB_SILVER_STATEMENTS_STRICT_PARITY"
+
+
+def _maintain_statements(
+    batch_df,
+    batch_id: int,
+    sid: str,
+    check_replay: bool,
+) -> tuple[int, int]:
     """D-full-simple: idempotently maintain silver.account_statements +
     roll up silver.accounts.current_balance for this micro-batch.
 
@@ -243,17 +252,32 @@ def _maintain_statements(batch_df, batch_id: int, sid: str, check_replay: bool) 
     into silver.accounts.current_balance.
 
     Parity with batch build (``build_statements`` / ``update_accounts_balance``):
-    the ordering, tie-breaks, signed-amount convention, opening-balance
-    formula and per-account row_number are identical. On a bronze corpus
-    delivered as N stream micro-batches vs one batch pass, the final
-    (iban, entry_seq) rows and current_balance are byte-identical
-    (associativity of the running sum).
+    byte-identical ONLY when bronze rows arrive per-iban strictly monotone in
+    book_ts across micro-batches -- the associativity of the running sum
+    reproduces batch mode's global cumsum under the same (book_ts, txn_id,
+    _cdt_dbt_ord) tie-break. When a batch delivers a row whose book_ts is
+    earlier than the previous highest committed book_ts for that iban
+    (typical under multi-pod datagen -- files land out of write-time order
+    on the object store), the stream cannot reorder rows already committed,
+    so ``entry_seq`` picks up in arrival order and ``bal_after`` lands out
+    of book_ts order. That is silently correct as arrival-order running
+    balance, and silently WRONG as batch-mode strict parity: the two write
+    paths diverge.
 
-    Returns the number of statement entries written this batch.
+    Late arrivals are detected per batch (min this-batch book_ts per iban
+    vs silver.account_statements' max prior book_ts per iban) and reported
+    as invariant-6 labels through the caller-returned tuple:
+    ``(entries_written, late_iban_count)``. The caller emits the labels
+    per micro-batch. When ``LB_SILVER_STATEMENTS_STRICT_PARITY=1`` AND any
+    late iban is seen, ``SilverAbort`` fires so a live gate that WANTS
+    byte-identical parity refuses rather than publishes a mis-labelled
+    number.
+
+    Returns ``(entries_written, late_iban_count)``.
     """
     from pyspark.sql import Window
-    from pyspark.sql.functions import abs as abs_
     from pyspark.sql.functions import coalesce, col, expr, row_number, when, xxhash64
+    from pyspark.sql.functions import min as min_
     from pyspark.sql.functions import sum as sum_
 
     spark = batch_df.sparkSession
@@ -295,10 +319,15 @@ def _maintain_statements(batch_df, batch_id: int, sid: str, check_replay: bool) 
     try:
         n_entries = entries.count()
         if n_entries == 0:
-            return 0
+            return 0, 0
 
-        # 2. Per touched account: prior latest bal_after and prior max entry_seq.
+        # 2. Per touched account: prior latest bal_after, prior max entry_seq,
+        #    and prior max book_ts (used for the late-arrival label). Also
+        #    compute this batch's min book_ts per iban for the same reason.
         touched = entries.select("account_id", "iban").distinct().cache()
+        this_batch_min_ts = entries.groupBy("account_id").agg(
+            min_(col("book_ts")).alias("_this_min_book_ts")
+        )
         try:
             stmts_tbl = spark.table(f"{CATALOG}.{SILVER_STATEMENTS}")
             # Inner join to restrict the aggregate to touched accounts;
@@ -316,13 +345,47 @@ def _maintain_statements(batch_df, batch_id: int, sid: str, check_replay: bool) 
                     # so max_by(entry_seq) gives the latest row deterministically.
                     expr("cast(max_by(bal_after, entry_seq) as decimal(38,2)) as _prev_bal_after"),
                     expr("cast(max(entry_seq) as bigint) as _prev_max_seq"),
+                    expr("max(book_ts) as _prev_max_book_ts"),
                 )
             )
 
-            # 3. Join, fill first-touch defaults, cumulative sum per account.
-            deterministic_open = ((abs_(col("account_id")) % lit(200_000)) + lit(10_000)).cast(
-                "decimal(18,2)"
+            # Late-arrival detection: any account_id whose THIS-batch min
+            # book_ts is strictly less than the PRIOR max book_ts is a late
+            # arrival (a row landed out of write-time order). Count distinct
+            # such account_ids; one late iban is enough to label the batch.
+            late_df = (
+                this_batch_min_ts.join(
+                    prior_state.select("account_id", "_prev_max_book_ts"),
+                    on="account_id",
+                    how="inner",
+                )
+                .filter(col("_this_min_book_ts") < col("_prev_max_book_ts"))
+                .select("account_id")
+                .distinct()
             )
+            late_iban_count = int(late_df.count())
+
+            # STRICT parity opt-in: refuse to publish an arrival-order
+            # running_balance when the operator has asserted the pipeline
+            # was configured for strict-monotone bronze arrival. This is
+            # the invariant-2 gate: a batch/stream comparison is invalid
+            # under multi-pod (non-monotone) datagen, so a run that means
+            # to be compared MUST fail loud rather than emit divergent
+            # numbers.
+            if late_iban_count > 0 and os.getenv(STATEMENTS_STRICT_PARITY_ENV) == "1":
+                raise SilverAbort(
+                    f"silver.account_statements: {late_iban_count} iban(s) received "
+                    f"a late-arriving bronze row in batch {batch_id} "
+                    f"(this-batch min book_ts < prior max book_ts). "
+                    f"{STATEMENTS_STRICT_PARITY_ENV}=1 is set: refusing to "
+                    f"write an arrival-order running_balance that would "
+                    f"silently diverge from batch mode. Remedies: single-pod "
+                    f"datagen (DatagenConfig.parallelism=1), or wait for the "
+                    f"out-of-order-tolerant D-full slated for v1.7."
+                )
+
+            # 3. Join, fill first-touch defaults, cumulative sum per account.
+            deterministic_open = aml_opening_balance(col("account_id"))
             with_prior = (
                 entries.join(prior_state, on="account_id", how="left")
                 .withColumn(
@@ -426,7 +489,7 @@ WHEN MATCHED THEN UPDATE SET current_balance = src.running_balance
                 except Exception:  # noqa: BLE001
                     pass
 
-            return int(n_entries)
+            return int(n_entries), late_iban_count
         finally:
             touched.unpersist(blocking=False)
     finally:
@@ -468,7 +531,7 @@ def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
         new_accts.unpersist(blocking=False)
 
 
-def _merge_batch(batch_df, batch_id: int) -> int:
+def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
     """Idempotently write per-batch txns and edges tagged with batch_id.
 
     Caches the flattened txns so build_transactions and build_edges don't
@@ -476,9 +539,10 @@ def _merge_batch(batch_df, batch_id: int) -> int:
     decimal(38,2) matching the DDL (SUM of decimal columns widens; the
     old (18,2) would silently NULL on overflow under ANSI-off).
 
-    Returns the silver.transactions row count this batch committed
-    (0 for an empty batch). The A1 driver-side accumulator in main() sums
-    these across batches to feed assert_progress.
+    Returns ``(silver.transactions row count, late_iban_count)`` for this
+    batch. The A1 driver-side accumulator in main() sums the transactions
+    count across batches for ``assert_progress``, and accumulates the late
+    count for the run-total invariant-6 label.
     """
     spark = batch_df.sparkSession
     # B2: compose the DELETE key with the streaming query id so a fresh
@@ -512,7 +576,7 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         if n_txns == 0:
             # Collector line format (LB-136); counts the batch, adds no rows.
             log(f"Batch {batch_id}: empty, skipping")
-            return 0
+            return 0, 0
         log(f"Batch {batch_id}: transforming {n_txns:,} rows")
         t0 = time.time()
 
@@ -556,8 +620,33 @@ def _merge_batch(batch_df, batch_id: int) -> int:
 
         # PHASE 4 (D-full-simple): silver.account_statements per-batch MERGE and
         # silver.accounts.current_balance roll-up for this batch's touched IBANs.
-        n_stmts = _maintain_statements(batch_df, int(batch_id), sid, check_replay)
+        n_stmts, late_ibans = _maintain_statements(batch_df, int(batch_id), sid, check_replay)
         log(f"[batch {batch_id}] wrote {n_stmts} statement entries and updated current_balance")
+
+        # D-full-simple invariant-6 label: publish per-batch so downstream
+        # reports and the collector can lift the value into metrics.json
+        # via parse_streaming_logs' key: value regex. `strict_monotone` is
+        # the parity-with-batch mode; any late iban downgrades this batch
+        # to `arrival_order_running_balance` (silently correct as arrival
+        # order, but NOT byte-identical to batch mode).
+        parity_mode = "strict_monotone" if late_ibans == 0 else "arrival_order_running_balance"
+        log(
+            f"silver_statements_parity_mode: {parity_mode} "
+            f"silver_statements_late_arrivals_this_batch: {late_ibans}"
+        )
+        # A JOB METRICS block per batch so the collector's driver-log parser
+        # ingests these into metrics.json without a wire-not-connected step
+        # (same mechanism KYC refresh uses in _kyc above).
+        log_job_metrics(
+            "silver-stream-statements",
+            input_size_gb=0.0,
+            input_rows=int(n_txns),
+            output_rows=int(n_stmts),
+            elapsed_seconds=0.0,
+            silver_statements_parity_mode=parity_mode,
+            silver_statements_late_arrivals_this_batch=int(late_ibans),
+            silver_statements_batch_id=int(batch_id),
+        )
 
         # PHASE 5 (I10 sealed marker): must be LAST. Only after transactions,
         # edges, dimensions AND statements have committed do we write the
@@ -588,7 +677,7 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         log(f"[batch {batch_id}] sealed marker written to {SILVER_BATCH_VERSIONS}")
 
         log(f"Batch {batch_id}: committed to {SILVER_TXNS} in {time.time() - t0:.1f}s")
-        return int(n_txns)
+        return int(n_txns), int(late_ibans)
     finally:
         tagged_txns.unpersist(blocking=False)
 
@@ -748,14 +837,22 @@ def main() -> None:
     # SilverAbort after await. Spark's async ListenerBus swallows Python
     # listener exceptions, so the check runs on the main thread that blocks
     # on `query.isActive`, not inside a StreamingQueryListener.
+    #
+    # D-full-simple: also accumulate the run-total late-arrival iban count
+    # so the summary line emits `silver_statements_total_late_arrivals` for
+    # the collector to lift into metrics.json (per-batch labels above give
+    # the incremental value; this one is the cumulative that a live gate
+    # or dashboard reads).
     rows_written_total = 0
+    late_ibans_total = 0
     rows_written_lock = threading.Lock()
 
     def _foreach_batch(df, bid):
-        written = _merge_batch(df, bid)
+        written, late = _merge_batch(df, bid)
         with rows_written_lock:
-            nonlocal rows_written_total
+            nonlocal rows_written_total, late_ibans_total
             rows_written_total += int(written or 0)
+            late_ibans_total += int(late or 0)
 
     query = (
         stream.writeStream.foreachBatch(_foreach_batch)
@@ -805,7 +902,17 @@ def main() -> None:
         log(f"  processedRowsPerSecond: {query.lastProgress.get('processedRowsPerSecond')}")
     with rows_written_lock:
         total = rows_written_total
+        total_late = late_ibans_total
     log(f"Silver stream total rows written across all batches: {total}")
+    # D-full-simple: publish the run-total late-arrival count as an
+    # invariant-6 label. A run with zero late arrivals produced silver
+    # statements byte-identical to batch mode; a non-zero count means
+    # the arrival-order fallback fired on that many iban * batch touches.
+    run_parity_mode = "strict_monotone" if total_late == 0 else "arrival_order_running_balance"
+    log(
+        f"silver_statements_total_late_arrivals: {total_late} "
+        f"silver_statements_parity_mode_run: {run_parity_mode}"
+    )
     # H4: clean shutdown removes the marker. The signal handler above
     # also calls this; the double-call is idempotent (delete-if-exists).
     # Both paths matter: process exits via SIGTERM in K8s Job termination,

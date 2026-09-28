@@ -2059,6 +2059,23 @@ def _is_unity_catalog():
     return os.getenv("LB_CATALOG_TYPE", "hive") == "unity"
 
 
+def aml_opening_balance(account_id_col):
+    """Deterministic per-account opening balance for silver.account_statements.
+
+    ``abs(account_id) % 200_000 + 10_000`` in the (10000, 210000] range, cast
+    to decimal(18, 2). Shared between ``silver_build_financial.build_statements``
+    (batch) and ``silver_stream_financial._maintain_statements`` (D-full) so a
+    future formula change cannot drift between the two write paths silently.
+    Batch mode's ``xxhash64`` returns a signed BIGINT and Spark's ``%``
+    preserves sign, so ``abs()`` is required to keep the result in the
+    intended positive range.
+    """
+    from pyspark.sql.functions import abs as _abs
+    from pyspark.sql.functions import lit as _lit
+
+    return ((_abs(account_id_col) % _lit(200_000)) + _lit(10_000)).cast("decimal(18,2)")
+
+
 def ensure_namespaces(spark, catalog, tables):
     """CREATE NAMESPACE IF NOT EXISTS for every namespace in ``tables``.
 

@@ -15,9 +15,24 @@ current_balance matches. Sentinel columns (_batch_id, _stream_id) are
 excluded from the hash because batch mode writes NULL / 'batch' while
 stream writes the streaming_query_id + batchId; they compare separately.
 
-Micro-batches are constructed so that each shared iban's book_ts is
-strictly monotonic across batches (batch N > batch N-1). This is the
-only ordering assumption D-full-simple's per-batch cumsum needs to
+Byte-identical parity holds ONLY under strict-monotone bronze arrival
+(single-pod datagen: DatagenConfig.parallelism=1). Multi-pod datagen
+lets an earlier-time file from pod A land on FlashBlade AFTER a
+later-time file from pod B, so a stream batch can carry a row whose
+book_ts is earlier than a previously committed one for the same iban.
+The stream cannot rewrite past rows and therefore assigns entry_seq in
+arrival order, which diverges from batch mode's globally-sorted
+entry_seq -- silently correct as arrival-order running balance, silently
+wrong as batch-mode parity. Under LB_SILVER_STATEMENTS_STRICT_PARITY=1
+the stream refuses to publish that arrival-order state; the run fails
+loud with SilverAbort (see test_late_arrival_strict_refuses.py). Under
+the default posture the stream labels the batch as
+`silver_statements_parity_mode=arrival_order_running_balance` (see
+test_late_arrival_labelled.py).
+
+This parity test therefore constructs micro-batches with strictly
+monotonic book_ts per iban across batches (batch N > batch N-1). This
+is the ordering assumption D-full-simple's per-batch cumsum needs to
 reproduce batch mode's global cumsum by associativity of addition and
 matching Window tie-breaks (book_ts, txn_id, _cdt_dbt_ord).
 """

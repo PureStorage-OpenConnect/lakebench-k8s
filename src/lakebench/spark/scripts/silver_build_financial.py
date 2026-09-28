@@ -26,6 +26,7 @@ import time
 from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
     SilverAbort,
+    aml_opening_balance,
     assert_progress,
     ensure_column,
     ensure_namespaces_for_ddl,
@@ -38,9 +39,6 @@ from common import (
     resolve_data_clock,
 )
 from pyspark.sql import SparkSession, Window
-from pyspark.sql.functions import (
-    abs as abs_,
-)
 from pyspark.sql.functions import (
     array,
     array_distinct,
@@ -759,14 +757,10 @@ def build_statements(bronze, accounts_df):
     acc = accounts_df.select(
         col("account_id"),
         col("iban").alias("_ac_iban"),
-        # xxhash64 (used to derive account_id) returns signed BIGINT; Spark's
-        # `%` preserves sign, so negative account_ids yielded opening_balance
-        # in roughly (-190000, 10000) -- half the accounts started underwater
-        # for reasons unrelated to any transaction. abs() before modulo
-        # forces the range into (10000, 210000] as intended.
-        (((abs_(col("account_id")) % lit(200_000)) + lit(10_000)).cast("decimal(18,2)")).alias(
-            "opening_balance"
-        ),
+        # D-full-simple: shared with silver_stream_financial via
+        # common.aml_opening_balance so the two write paths cannot silently
+        # drift on the formula.
+        aml_opening_balance(col("account_id")).alias("opening_balance"),
     )
     entries = entries.join(acc, entries["iban"] == acc["_ac_iban"], "inner").drop("_ac_iban")
 
