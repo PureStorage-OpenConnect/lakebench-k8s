@@ -79,6 +79,7 @@ from common import (
     iceberg_table_stats,
     log,
     one_line,
+    sealed_txns_filter,
 )
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
@@ -90,6 +91,7 @@ GOLD_DISPOSITIONS = env("LB_FINANCIAL_GOLD_ALERT_DISPOSITIONS", "gold.alert_disp
 GOLD_CASES = env("LB_FINANCIAL_GOLD_CASES", "gold.cases")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 MANIFEST_TABLE = env("LB_FINANCIAL_MANIFEST_TABLE", "bronze.manifest")
 
@@ -2294,9 +2296,19 @@ def run_tm_operations(
         table = f"{CATALOG}.{txns_table or SILVER_TXNS}"
         sid = current_snapshot_id(spark, table)
         if sid is not None:
-            txns = read_at_snapshot(spark, table, sid)
+            # I10: filter the pinned snapshot against silver_batch_versions
+            # so a mid-batch crash window is invisible to the P10 monitoring
+            # layer. The versions read is against CURRENT state; the pinned
+            # snapshot may include txns rows whose versions row landed later
+            # -- those correctly become visible only after they seal.
+            txns = sealed_txns_filter(
+                spark, read_at_snapshot(spark, table, sid), CATALOG, SILVER_BATCH_VERSIONS
+            )
         else:
             log(f"[tm] {table} has no snapshot to pin; reading the frame as passed")
+            # I10: apply the same filter to the caller-supplied fallback
+            # frame so a caller that passed the raw table gets sealed rows only.
+            txns = sealed_txns_filter(spark, txns, CATALOG, SILVER_BATCH_VERSIONS)
         newest = txns.agg(max_(col("txn_timestamp")).alias("m")).collect()[0]["m"]
         if newest is None:
             reason = f"{table} is empty; nothing to monitor"

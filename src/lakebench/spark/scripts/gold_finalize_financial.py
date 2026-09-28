@@ -40,6 +40,7 @@ from common import (
     log,
     log_job_metrics,
     one_line,
+    sealed_txns_filter,
 )
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
@@ -62,6 +63,7 @@ from pyspark.sql.functions import (
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 GOLD_RISK = env("LB_FINANCIAL_GOLD_RISK_SCORES", "gold.risk_scores")
 GOLD_CLUSTERS = env("LB_FINANCIAL_GOLD_CLUSTERS", "gold.entity_clusters")
@@ -193,6 +195,20 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 
+def _sealed_txns(spark, txns_fq: str):
+    """Return ``silver.transactions`` semi-joined against silver_batch_versions
+    (I10). Thin wrapper over ``common.sealed_txns_filter`` that also does
+    the initial ``spark.table`` read. Callers that pin at an Iceberg
+    snapshot call ``sealed_txns_filter`` directly with their pinned frame.
+    """
+    return sealed_txns_filter(
+        spark,
+        spark.table(f"{CATALOG}.{txns_fq}"),
+        CATALOG,
+        SILVER_BATCH_VERSIONS,
+    )
+
+
 def build_baseline_dashboards(txns, run_id: str):
     """Baseline: one row per settlement day, keyed rule_id='baseline'.
 
@@ -298,7 +314,11 @@ def main() -> None:
     # Earlier runs' alerts are cleared inside run_detection_rules, after this
     # run's 'pending' status is written (see there for why the order matters).
 
-    txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
+    # I10: read silver.transactions through the sealed-batch filter so a
+    # driver crash between the stream's transactions/edges commits and the
+    # sidecar sealed marker is invisible to every downstream rule and the
+    # baseline dashboards.
+    txns = _sealed_txns(spark, SILVER_TXNS)
     baseline = build_baseline_dashboards(txns, RUN_ID)
     # Delete-only-baseline-then-append: overwrite ONLY the baseline rows,
     # not the whole table. Detection workloads write rows keyed by

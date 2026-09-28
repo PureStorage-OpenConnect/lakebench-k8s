@@ -96,6 +96,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
 from silver_build_financial import (
     DDL_ACCOUNTS,
+    DDL_BATCH_VERSIONS,
     DDL_EDGES,
     DDL_ENTITIES,
     DDL_PROFILES,
@@ -123,6 +124,7 @@ TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "30"))
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 KYC_WAIT_S = int(env("LB_FINANCIAL_KYC_WAIT_S", "900"))
 # I7: the KYC frame is reloaded on the first micro-batch after this many
 # seconds have passed since the previous successful load. Default 1 hour;
@@ -340,6 +342,33 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         # PHASE 3: dimensions this batch introduces (entities, accounts).
         n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark))
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
+
+        # PHASE 4 (I10 sealed marker): only after transactions AND edges have
+        # committed do we write the (stream_id, batch_id) row that gold-side
+        # consumers semi-join against. A driver crash between phase 1 and this
+        # phase leaves txns and edges rows visible in silver, but no matching
+        # versions row, so consumers hide the partial batch. On the retry the
+        # phase-1 DELETE (guarded by replay_possible) cleans the ghost rows
+        # before the same (sid, batch_id) is re-materialised; the MERGE below
+        # then seals the retry idempotently.
+        #
+        # MERGE (not INSERT): a crash after this write but before Structured
+        # Streaming durably records the batch id would replay the whole
+        # foreachBatch on restart; a plain INSERT would then write a second
+        # row for the same (sid, batch_id). The semi-join tolerates
+        # duplicates today, but any future COUNT(*) or per-batch join against
+        # silver_batch_versions would double-count. The MERGE keeps the
+        # sidecar at exactly one row per sealed batch.
+        spark.sql(
+            f"MERGE INTO {CATALOG}.{SILVER_BATCH_VERSIONS} v "
+            f"USING (SELECT '{sid}' AS stream_id, "
+            f"CAST({int(batch_id)} AS BIGINT) AS batch_id, "
+            f"current_timestamp() AS committed_at) s "
+            f"ON v.stream_id = s.stream_id AND v.batch_id = s.batch_id "
+            f"WHEN NOT MATCHED THEN INSERT *"
+        )
+        log(f"[batch {batch_id}] sealed marker written to {SILVER_BATCH_VERSIONS}")
+
         log(f"Batch {batch_id}: committed to {SILVER_TXNS} in {time.time() - t0:.1f}s")
         return int(n_txns)
     finally:
@@ -379,7 +408,15 @@ def main() -> None:
     ensure_namespaces_for_ddl(
         spark,
         CATALOG,
-        (DDL_TXNS, DDL_ENTITIES, DDL_ACCOUNTS, DDL_STATEMENTS, DDL_EDGES, DDL_PROFILES),
+        (
+            DDL_TXNS,
+            DDL_ENTITIES,
+            DDL_ACCOUNTS,
+            DDL_STATEMENTS,
+            DDL_EDGES,
+            DDL_PROFILES,
+            DDL_BATCH_VERSIONS,
+        ),
     )
     for _name, _ddl in (
         ("transactions", DDL_TXNS),
@@ -388,6 +425,9 @@ def main() -> None:
         ("account_statements", DDL_STATEMENTS),
         ("edges", DDL_EDGES),
         ("entity_profiles", DDL_PROFILES),
+        # I10: sidecar seals every (stream_id, batch_id) after phases 1+2
+        # commit; every gold/score reader semi-joins against it.
+        ("silver_batch_versions", DDL_BATCH_VERSIONS),
     ):
         spark.sql(_ddl)
         log(f"[startup] bootstrapped silver.{_name}")

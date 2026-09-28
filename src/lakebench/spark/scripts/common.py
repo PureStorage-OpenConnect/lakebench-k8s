@@ -2088,6 +2088,55 @@ def ensure_namespaces_for_ddl(spark, catalog, ddls):
     ensure_namespaces(spark, catalog, tables)
 
 
+def sealed_txns_filter(spark, txns_df, catalog, versions_table):
+    """Semi-join ``txns_df`` against ``silver_batch_versions`` on
+    ``(_stream_id, _batch_id)`` (I10).
+
+    A driver crash between the AML stream's transactions/edges commits and
+    the sealed-marker commit leaves rows visible in silver.transactions
+    with no matching row in ``silver_batch_versions``. The semi-join hides
+    that partial batch from every gold-side consumer, so a mid-batch crash
+    window is invisible to detection, scoring, replay, and reproduction.
+
+    Batch mode stamps rows with ``(_stream_id='batch', _batch_id=cycle)``
+    and writes a matching versions row last, so the same filter applies
+    uniformly to batch and stream reads.
+
+    ``txns_df`` is passed in as an already-materialised DataFrame: callers
+    that read via ``spark.table`` supply that; callers that pin at an
+    Iceberg snapshot (``read_at_snapshot`` / ``FOR TIMESTAMP AS OF``)
+    supply that pinned frame. The versions table is read at CURRENT state
+    (never pinned), so a batch sealed AFTER the txn snapshot but BEFORE
+    this call correctly becomes visible on a later reader; a batch not yet
+    sealed anywhere in the versions table stays hidden.
+
+    Fail-open on a missing versions table: the helper logs and returns
+    ``txns_df`` unchanged so a legacy catalog that predates I10 still
+    reads (the next silver run bootstraps the sidecar). Callers do not
+    have to catch this: the filter degrades to the pre-I10 behaviour.
+    """
+    from pyspark.sql.functions import col as _col
+
+    versions_fq = f"{catalog}.{versions_table}"
+    try:
+        versions = spark.table(versions_fq).select(
+            _col("stream_id").alias("_sv_stream_id"),
+            _col("batch_id").alias("_sv_batch_id"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log(
+            f"[i10] {versions_fq} not readable ({e}); "
+            "falling back to unfiltered read. A silver run bootstraps the sidecar."
+        )
+        return txns_df
+    return txns_df.join(
+        versions,
+        (txns_df["_stream_id"] == versions["_sv_stream_id"])
+        & (txns_df["_batch_id"] == versions["_sv_batch_id"]),
+        "left_semi",
+    )
+
+
 def _s3_table_path(bucket_uri, fq_table):
     """Build the S3 path for an EXTERNAL Delta table.
 
