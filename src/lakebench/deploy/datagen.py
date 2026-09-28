@@ -103,12 +103,12 @@ class DatagenDeployer:
             }
         )
 
-        # Duration-based generation for sustained pipelines
-        from lakebench.config.schema import PipelineMode
-
-        pipeline = cfg.architecture.pipeline
-        if pipeline.mode == PipelineMode.SUSTAINED:
-            context["datagen_duration"] = pipeline.sustained.run_duration
+        # datagen_duration context var dropped 2026-09-28 (Wave 2 D8). The
+        # entrypoint.py argparse layer silently discarded --duration; the Rust
+        # binary never read it; a continuous / sustained pipeline is driven by
+        # the pipeline side trickle-reading a pre-written finite corpus (LB-156)
+        # or, in a future release, by a producer-driven delivery mode
+        # (--delivery-mode). Passing --duration was misleading.
 
         return context
 

@@ -93,10 +93,10 @@ spec:
             - "{{ datagen_cycles }}"
             {% endif %}
             {% if datagen_resume %}- "--resume"{% endif %}
-            {% if datagen_duration is defined and datagen_duration %}
-            - "--duration"
-            - "{{ datagen_duration }}"
-            {% endif %}
+            {# --duration removed 2026-09-28 (Wave 2 D8). The Rust binary never
+               parsed it; deploy/datagen.py no longer populates the context
+               var. Continuous pipelines get their arrival window from the
+               pipeline-side trickle-read (LB-156). #}
           env:
             # JOB_COMPLETION_INDEX is automatically set by Kubernetes (0, 1, 2, ...)
             # Used as default --node-id in generate.py

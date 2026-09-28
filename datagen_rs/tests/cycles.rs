@@ -442,9 +442,11 @@ fn c360_driver_output_is_pinned() {
     // update the digest deliberately.
     let a = c360_driver_digest("2");
     assert_eq!(a, c360_driver_digest("3"), "c360 output depends on threads");
+    // Updated 2026-09-28 (LB-191 dirty-ratio fix, Wave 1 C1). Pre-fix digest
+    // was (8_993_469_679_856_816_545, 5).
     assert_eq!(
         a,
-        (8_993_469_679_856_816_545, 5),
+        (7_884_786_140_200_387_728, 5),
         "c360 driver output changed"
     );
 }

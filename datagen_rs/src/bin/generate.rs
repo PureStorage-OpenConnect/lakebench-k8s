@@ -731,11 +731,16 @@ fn pacs008_main() {
     let t_typ = t_typ0.elapsed().as_secs_f64();
 
     // Reference zones (manifest, account, party) go before this pod's bronze
-    // files: they depend only on the world and the schedule, and in
-    // continuous mode silver-stream joins each micro-batch to the party
-    // master. With one pod in --mode all that puts them ahead of every bronze
-    // file; with several pods or a dedicated reference pod, bronze from other
-    // pods can land first, and silver-stream waits for them.
+    // files: they depend only on the world and the schedule, and the pipeline
+    // side's silver-stream (PipelineMode.CONTINUOUS) joins each micro-batch to
+    // the party master, so party must be visible before bronze is trickled in.
+    // With one pod in --mode all that puts them ahead of every bronze file;
+    // with several pods or a dedicated --mode reference pod, bronze from other
+    // pods can land first, and silver-stream waits for them. Note: "continuous"
+    // here refers to the pipeline mode, NOT to a datagen delivery mode --
+    // datagen has always pre-written the corpus; a future --delivery-mode
+    // continuous streams the same corpus through MpuWriter instead of
+    // buffering whole files.
     let t_ref0 = std::time::Instant::now();
     // Track reference-zone bytes/files separately so the final summary line
     // reflects what a `--mode reference` pod produced. Previously the
