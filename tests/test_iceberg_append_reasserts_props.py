@@ -132,22 +132,30 @@ def test_silver_streaming_calls_reassert_before_append():
 
 
 def test_financial_replace_data_reasserts_props_before_overwrite():
-    """AML batch's `_replace_data` closure runs ALTER before overwrite.
+    """AML batch's ``_replace_data`` helper runs ALTER before overwrite.
 
     A drifted silver.transactions or silver.entities table would take
     the next .overwrite(lit(True)) under whichever properties the ALTER
     trail left, so the DDL's declared retention/compression can silently
     stop applying (invariant 5).
+
+    The helper lives at module scope (extracted from a main() closure in
+    the A1-atomic + F2 rework) so the pre-flight tests can spy on it
+    without a live Iceberg backend. The extraction changed its signature
+    to ``(spark, df, table)`` but its ALTER-before-overwrite contract is
+    unchanged.
     """
     src = (_SCRIPTS_DIR / "silver_build_financial.py").read_text()
-    closure = src.split("def _replace_data(df, table):", 1)[1]
-    # cut at end of the closure (the next non-indented line, i.e. txns = ...)
-    closure = closure.split("\n    txns = build_transactions", 1)[0]
-    assert "ALTER TABLE" in closure
-    assert "SET TBLPROPERTIES" in closure
-    assert "ICEBERG_V2_SNAPPY_PROPS_SQL" in closure
+    body = src.split("def _replace_data(spark, df, table):", 1)[1]
+    # Cut at the end of the helper body (blank line + next `def` at column 0).
+    body = body.split("\n\n\ndef ", 1)[0]
+    assert "ALTER TABLE" in body
+    assert "SET TBLPROPERTIES" in body
+    assert "ICEBERG_V2_SNAPPY_PROPS_SQL" in body
     # The ALTER must run BEFORE the overwrite so a drifted table takes
-    # the DDL properties before this cycle's write commits.
-    alter_idx = closure.index("ALTER TABLE")
-    write_idx = closure.index(".overwrite(lit(True))")
+    # the DDL properties before this cycle's write commits. The docstring
+    # also mentions .overwrite(lit(True)); anchor on the executable call
+    # sequence to avoid matching prose.
+    alter_idx = body.index('spark.sql(f"ALTER TABLE')
+    write_idx = body.index("df.writeTo(fq).overwrite(lit(True))")
     assert alter_idx < write_idx

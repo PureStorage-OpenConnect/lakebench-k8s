@@ -58,6 +58,36 @@ def assert_progress(rows_written, job_type):
     raise SilverAbort(f"{job_type}: zero rows written; refusing exit-0 pass (LB-044 gate)")
 
 
+def assert_preflight_rows(df, name, minimum=1):
+    """A1-atomic + F2: assert a silver DataFrame has at least ``minimum`` rows
+    BEFORE any silver table has been written for the cycle.
+
+    ``df`` is a lazily-built Spark DataFrame; ``name`` is the target silver
+    table (used verbatim in the abort message). ``minimum`` defaults to 1 so
+    the assertion enforces the F2 ">= 1 rows per silver frame" contract; a
+    caller with a known lower bound (e.g. entities >= unique parties count
+    from bronze) may pass a tighter minimum.
+
+    Raises ``SilverAbort`` if the row count is below ``minimum``. The caller
+    is expected to run this against every bronze-derived silver frame in a
+    pre-flight pass so that any failure aborts the run before the first
+    ``_replace_data`` write -- the whole point of A1-atomic is that a run
+    that would produce an empty silver table for any frame refuses to
+    write ANY silver table, so downstream consumers never see a partial
+    silver set.
+
+    Returns the observed row count so the caller can log a per-table
+    "staged N rows" line before the writes begin.
+    """
+    rows = int(df.count())
+    if rows < minimum:
+        raise SilverAbort(
+            f"pre-flight row-count check failed for {name}: "
+            f"{rows} rows, expected >= {minimum} (A1-atomic + F2 gate)"
+        )
+    return rows
+
+
 def emit_stream_scale_admission(measured_envelope_scale=10):
     """Emit the G5 scale cap and admission labels (invariant 6).
 

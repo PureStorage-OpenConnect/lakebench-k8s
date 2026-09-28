@@ -27,6 +27,7 @@ from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
     SilverAbort,
     aml_opening_balance,
+    assert_preflight_rows,
     assert_progress,
     ensure_column,
     ensure_namespaces_for_ddl,
@@ -1141,6 +1142,32 @@ def _corpus_predates_kyc(spark) -> bool:
     return bool(versions) and all(predates_kyc(v) for v in versions)
 
 
+def _replace_data(spark, df, table):
+    """Overwrite ``silver.<table>`` with ``df``, re-asserting TBLPROPERTIES first.
+
+    ``.overwrite(lit(True))`` (not ``.createOrReplace()``) preserves the
+    table's partition spec and schema. The original design used
+    createOrReplace, which under the DataFrameWriterV2 semantics REPLACES
+    the table -- destroying any PARTITIONED BY established at CREATE and
+    reverting the table to unpartitioned on every silver-build re-run.
+    Downstream Trino/Spark scans then degraded from partition pruning to
+    full scans (per-run silent regression, invisible to unit tests).
+
+    G4: re-assert TBLPROPERTIES before the overwrite so a table whose
+    properties drifted (in-place ALTER, older CREATE) writes with the
+    DDL's declared retention and codec every cycle (invariant 5). The
+    property set matches ICEBERG_V2_SNAPPY_PROPS_SQL, which every silver
+    DDL sets at CREATE.
+
+    Module-scope (not a main() closure) so the A1-atomic + F2 tests can
+    monkeypatch the helper to observe when a write would have happened
+    without needing a live Iceberg backend.
+    """
+    fq = f"{CATALOG}.{table}"
+    spark.sql(f"ALTER TABLE {fq} SET TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})")
+    df.writeTo(fq).overwrite(lit(True))
+
+
 def main() -> None:
     spark = SparkSession.builder.appName("lb-silver-build-financial").getOrCreate()
     start = time.time()
@@ -1279,37 +1306,31 @@ def main() -> None:
     assert isinstance(_resolved, _date), _resolved
     data_clock = _resolved
 
-    # NB: `.overwrite(lit(True))` (not `.createOrReplace()`) preserves the
-    # table's partition spec and schema. The original design used
-    # createOrReplace, which under the DataFrameWriterV2 semantics REPLACES
-    # the table -- destroying any PARTITIONED BY established at CREATE and
-    # reverting the table to unpartitioned on every silver-build re-run.
-    # Downstream Trino/Spark scans then degraded from partition pruning to
-    # full scans (per-run silent regression, invisible to unit tests).
-    #
-    # G4: re-assert TBLPROPERTIES before the overwrite so a table whose
-    # properties drifted (in-place ALTER, older CREATE) writes with the
-    # DDL's declared retention and codec every cycle (invariant 5). The
-    # property set matches ICEBERG_V2_SNAPPY_PROPS_SQL, which every silver
-    # DDL above sets at CREATE.
-    def _replace_data(df, table):
-        fq = f"{CATALOG}.{table}"
-        spark.sql(f"ALTER TABLE {fq} SET TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})")
-        df.writeTo(fq).overwrite(lit(True))
-
     # I10: stamp batch-mode rows with (_stream_id='batch', _batch_id=cycle) so
     # the same versions-table semi-join that guards the stream's mid-batch
     # crash window also guards a batch run that crashes between the
     # transactions overwrite and the versions-row insert below. Downstream
     # consumers apply exactly one filter rule (semi-join against
     # silver_batch_versions on _stream_id + _batch_id) across both modes.
-    import os as _os
+    _cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
+    _batch_stamp = lit(int(_cycle)).cast("bigint")
 
-    _cycle = int(_os.environ.get("LB_BRONZE_CYCLE", "0"))
-    txns = build_transactions(bronze).withColumn("_batch_id", lit(int(_cycle)).cast("bigint"))
-    _replace_data(txns, SILVER_TRANSACTIONS)
-    log("Wrote silver.transactions")
-
+    # ---- A1-atomic + F2: pre-flight validation pass. ---------------------
+    # Build EVERY bronze-derived silver frame first, run row-count assertions
+    # on each, and only then start the writes. A frame that fails the >= 1
+    # rows check raises ``SilverAbort`` here -- no ``_replace_data`` runs,
+    # so a run that would produce empty silver.entities (or any other
+    # bronze-derived table) refuses to write a partial silver set. Downstream
+    # readers filtered by the I10 sealed_txns semi-join therefore never see
+    # a mid-set inconsistency: the sealed marker is only written after the
+    # writes below all succeed.
+    #
+    # build_statements and update_accounts_balance CANNOT be pre-flighted:
+    # they read durable silver tables (silver.accounts and
+    # silver.account_statements). Their row-count assertion runs immediately
+    # after their write, and a failure there truncates silver.transactions
+    # so the partial set is minimally observable to a reader that ignores
+    # the sealed_txns filter.
     kyc = build_kyc(*_read_reference(spark))
     if kyc is None:
         log(
@@ -1317,7 +1338,30 @@ def main() -> None:
             f"{PARTY_PATH} / {ACCOUNT_PATH}; silver.entities and silver.accounts "
             "KYC columns are NULL"
         )
-    _replace_data(build_entities(txns, bronze, kyc), SILVER_ENTITIES)
+
+    txns = build_transactions(bronze).withColumn("_batch_id", _batch_stamp).persist()
+    entities = build_entities(txns, bronze, kyc).persist()
+    accounts_placeholder = build_accounts(bronze, kyc).persist()
+    edges = build_edges(txns).withColumn("_batch_id", _batch_stamp).persist()
+    profiles = build_entity_profiles(txns, data_clock).persist()
+
+    log("Pre-flight: staging bronze-derived silver frames for row-count checks")
+    _n_txns = assert_preflight_rows(txns, "silver.transactions")
+    _n_entities = assert_preflight_rows(entities, "silver.entities")
+    _n_accounts_pre = assert_preflight_rows(accounts_placeholder, "silver.accounts")
+    _n_edges = assert_preflight_rows(edges, "silver.counterparty_edges")
+    _n_profiles = assert_preflight_rows(profiles, "silver.entity_profiles")
+    log(
+        "Pre-flight OK: "
+        f"transactions={_n_txns:,} entities={_n_entities:,} "
+        f"accounts={_n_accounts_pre:,} edges={_n_edges:,} profiles={_n_profiles:,}"
+    )
+
+    # ---- Writes in the original order (all frames validated above). ------
+    _replace_data(spark, txns, SILVER_TRANSACTIONS)
+    log("Wrote silver.transactions")
+
+    _replace_data(spark, entities, SILVER_ENTITIES)
     log("Wrote silver.entities")
 
     # Build silver.accounts first (placeholder current_balance = NULL) so we
@@ -1325,20 +1369,52 @@ def main() -> None:
     # rescanning bronze twice (build_accounts is a bronze->distinct-IBAN pass)
     # and gives update_accounts_balance a durable input independent of cache
     # eviction between the two writes.
-    _replace_data(build_accounts(bronze, kyc), SILVER_ACCOUNTS)
+    _replace_data(spark, accounts_placeholder, SILVER_ACCOUNTS)
     log("Wrote silver.accounts (placeholder current_balance)")
 
-    accounts = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
-    statements = build_statements(bronze, accounts)
-    _replace_data(statements, SILVER_STATEMENTS)
-    log("Wrote silver.account_statements")
+    # In-sequence stage: statements + balance-update read silver tables
+    # written above, so they cannot be pre-flighted. Assert row counts
+    # immediately after each write; on failure, truncate silver.transactions
+    # so the partial set is empty for this cycle (defence-in-depth on top
+    # of the sealed_txns semi-join -- readers that ignore the filter still
+    # see a cleanly-empty transactions table rather than a half-built set).
+    try:
+        accounts = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
+        statements = build_statements(bronze, accounts)
+        _replace_data(spark, statements, SILVER_STATEMENTS)
+        log("Wrote silver.account_statements")
+        _stmt_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_STATEMENTS}")
+        if int(_stmt_rows) < 1:
+            raise SilverAbort(
+                f"in-sequence row-count check failed for silver.account_statements: "
+                f"{_stmt_rows} rows written, expected >= 1 (A1-atomic + F2 gate)"
+            )
 
-    # Read the just-written statements back rather than reusing the cached
-    # DataFrame: eviction between writes silently re-triggers the entire
-    # window computation, which is the most expensive stage in the job.
-    stmts_read = spark.table(f"{CATALOG}.{SILVER_STATEMENTS}")
-    _replace_data(update_accounts_balance(accounts, stmts_read), SILVER_ACCOUNTS)
-    log("Wrote silver.accounts (current_balance rolled up from statements)")
+        # Read the just-written statements back rather than reusing the cached
+        # DataFrame: eviction between writes silently re-triggers the entire
+        # window computation, which is the most expensive stage in the job.
+        stmts_read = spark.table(f"{CATALOG}.{SILVER_STATEMENTS}")
+        _replace_data(spark, update_accounts_balance(accounts, stmts_read), SILVER_ACCOUNTS)
+        log("Wrote silver.accounts (current_balance rolled up from statements)")
+        _acct_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_ACCOUNTS}")
+        if int(_acct_rows) < 1:
+            raise SilverAbort(
+                f"in-sequence row-count check failed for silver.accounts "
+                f"post-balance: {_acct_rows} rows written, expected >= 1 "
+                f"(A1-atomic + F2 gate)"
+            )
+    except SilverAbort:
+        log(
+            "A1-atomic: cleanup after in-sequence assertion failure -- "
+            "truncating silver.transactions so the cycle leaves an empty "
+            "(not partial) silver set."
+        )
+        _replace_data(
+            spark,
+            spark.table(f"{CATALOG}.{SILVER_TRANSACTIONS}").limit(0),
+            SILVER_TRANSACTIONS,
+        )
+        raise
 
     # I3: enforce one row per iban post-write. build_accounts uses a
     # row_number filter to pick a single winning row per iban; this
@@ -1354,25 +1430,24 @@ def main() -> None:
         )
 
     # I10: mirror the batch-mode stamp on counterparty_edges so the same
-    # semi-join guards edges as well as transactions.
-    _replace_data(
-        build_edges(txns).withColumn("_batch_id", lit(int(_cycle)).cast("bigint")),
-        SILVER_EDGES,
-    )
+    # semi-join guards edges as well as transactions. edges was staged and
+    # row-counted in the pre-flight pass above.
+    _replace_data(spark, edges, SILVER_EDGES)
     log("Wrote silver.counterparty_edges")
 
     # C-PROFILES (LB-130): per-entity behavioural baseline for relative-anomaly
     # detection (W4/W8 over-firing). Full rebuild from the transaction frame.
     # I1: ``data_clock`` fixes ``profile_updated_ts`` so rebuilds are
     # byte-identical for the same bronze.
-    _replace_data(build_entity_profiles(txns, data_clock), SILVER_PROFILES)
+    _replace_data(spark, profiles, SILVER_PROFILES)
     log("Wrote silver.entity_profiles")
 
     # I10 sealed marker: after every silver table for this cycle is written,
     # seal the ('batch', cycle) row so downstream consumers' semi-join on
     # (_stream_id, _batch_id) sees the cycle. A crash before this row lands
-    # leaves the cycle's transactions hidden from gold + score. _cycle was
-    # resolved once above and stamped on every batch-written silver row.
+    # -- or an A1-atomic pre-flight abort above -- leaves the cycle's
+    # transactions hidden from gold + score. _cycle was resolved once above
+    # and stamped on every batch-written silver row.
     #
     # MERGE (not INSERT): silver_build's rebuild-cycle semantics allow the
     # same cycle to be re-driven (a re-run of the same cycle overwrites the
@@ -1388,6 +1463,15 @@ def main() -> None:
         f"WHEN NOT MATCHED THEN INSERT *"
     )
     log(f"Wrote silver.silver_batch_versions sealed marker for cycle {_cycle}")
+
+    # Release cached frames now that every write has committed. Best-effort:
+    # the Spark session terminates below, so any missed unpersist is not a
+    # correctness hazard.
+    for _df in (txns, entities, accounts_placeholder, edges, profiles):
+        try:
+            _df.unpersist()
+        except Exception:
+            pass
 
     # Guard against ruff unused-import warnings for symbols kept for clarity.
     _ = (date_format,)
