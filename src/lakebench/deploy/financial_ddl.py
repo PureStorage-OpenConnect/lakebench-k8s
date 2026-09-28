@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     rptd_beneficiary_address STRING,
     source_message_ref      STRING,
     _batch_id               BIGINT,
+    _stream_id              STRING,
     ingest_ts               TIMESTAMP
 )
 USING iceberg
@@ -159,6 +160,10 @@ TBLPROPERTIES (
     'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
+# `_stream_id` scopes `_batch_id` to one streaming query (B2). A fresh
+# streaming checkpoint restarts batch ids at 0, so a bare `_batch_id`
+# predicate would DELETE a previous stream's batch 0. Batch-mode writes
+# stamp `_stream_id = 'batch'`.
 
 
 SILVER_ENTITIES_DDL = """
@@ -269,7 +274,8 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     last_seen_ts           TIMESTAMP NOT NULL,
     cumulative_amount_usd  DECIMAL(38, 2) NOT NULL,
     txn_count              BIGINT NOT NULL,
-    _batch_id              BIGINT
+    _batch_id              BIGINT,
+    _stream_id             STRING
 )
 USING iceberg
 PARTITIONED BY (bucket(64, source_entity_id))

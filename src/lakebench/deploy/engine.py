@@ -733,6 +733,7 @@ class DeploymentEngine:
                 lambda: self._deploy_namespace(force_legacy=force_legacy),
             ),
             ("secrets", "Creating secrets", self._deploy_secrets),
+            ("silver-state", "Creating silver-state ConfigMap", self._deploy_silver_state),
             (
                 "s3-buckets",
                 "Creating S3 buckets",
@@ -1106,6 +1107,96 @@ class DeploymentEngine:
             elapsed_seconds=time.time() - start,
             label="Secrets",
             detail="S3 + PostgreSQL",
+        )
+
+    # B1: names of the rebuild-epoch ConfigMap and its keys. The ConfigMap
+    # is per-deployment; job.py._build_env_vars reads the workload+format key
+    # into LB_REBUILD_EPOCH, and the CLI --force-rebuild atomically bumps it
+    # before submitting silver.
+    SILVER_STATE_CONFIGMAP = "lakebench-silver-state"
+    _SILVER_STATE_KEYS = (
+        "rebuild_epoch_c360_delta",
+        "rebuild_epoch_c360_iceberg",
+        "rebuild_epoch_aml_iceberg",
+    )
+
+    def _deploy_silver_state(self) -> DeploymentResult:
+        """Create the per-deployment silver-state ConfigMap on a greenfield deploy.
+
+        Holds the B1 rebuild-epoch counters (one per workload x format) that
+        job.py exports to silver jobs as ``LB_REBUILD_EPOCH``. Deltas' batch
+        cycle-append idempotency and Iceberg's cycle-0 rebuild guard both key
+        off it. If the ConfigMap already exists (redeploy or a prior create),
+        its values are left alone -- this method never resets a counter, so a
+        redeploy cannot silently make an old ``(txnAppId, txnVersion)`` look
+        fresh to Delta.
+        """
+        import time
+
+        start = time.time()
+        if self.dry_run:
+            return DeploymentResult(
+                component="silver-state",
+                status=DeploymentStatus.SUCCESS,
+                message=f"Would create ConfigMap {self.SILVER_STATE_CONFIGMAP}",
+                elapsed_seconds=0,
+            )
+
+        namespace = self.config.get_namespace()
+        try:
+            from kubernetes import client as _kclient
+            from kubernetes.client.exceptions import ApiException
+
+            core_v1 = _kclient.CoreV1Api()
+            try:
+                existing = core_v1.read_namespaced_config_map(
+                    self.SILVER_STATE_CONFIGMAP, namespace
+                )
+                data = dict(existing.data or {})
+                changed = False
+                for k in self._SILVER_STATE_KEYS:
+                    if k not in data:
+                        data[k] = "0"
+                        changed = True
+                if changed:
+                    existing.data = data
+                    core_v1.replace_namespaced_config_map(
+                        self.SILVER_STATE_CONFIGMAP, namespace, existing
+                    )
+                    msg = f"Updated {self.SILVER_STATE_CONFIGMAP} with missing rebuild-epoch keys"
+                else:
+                    msg = f"{self.SILVER_STATE_CONFIGMAP} already present; kept existing values"
+            except ApiException as e:
+                if e.status != 404:
+                    raise
+                manifest = {
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {
+                        "name": self.SILVER_STATE_CONFIGMAP,
+                        "namespace": namespace,
+                    },
+                    "data": dict.fromkeys(self._SILVER_STATE_KEYS, "0"),
+                }
+                self.k8s.apply_manifest(manifest, namespace=namespace)
+                msg = (
+                    f"Created {self.SILVER_STATE_CONFIGMAP} with rebuild-epoch keys "
+                    f"({', '.join(self._SILVER_STATE_KEYS)})"
+                )
+        except Exception as e:  # noqa: BLE001
+            return DeploymentResult(
+                component="silver-state",
+                status=DeploymentStatus.FAILED,
+                message=f"Failed to create {self.SILVER_STATE_CONFIGMAP}: {e}",
+                elapsed_seconds=time.time() - start,
+            )
+        return DeploymentResult(
+            component="silver-state",
+            status=DeploymentStatus.SUCCESS,
+            message=msg,
+            elapsed_seconds=time.time() - start,
+            label="silver-state",
+            detail=self.SILVER_STATE_CONFIGMAP,
         )
 
     def _record_preprovisioned_empty_buckets(self) -> None:

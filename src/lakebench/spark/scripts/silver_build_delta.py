@@ -24,6 +24,7 @@ from common import (
     assert_progress,
     c360_bronze_path,
     cluster_by_partition,
+    delta_batch_txn_options,
     env,
     files_added_by_last_commit,
     log,
@@ -318,8 +319,15 @@ def log_silver_files(spark, silver_tbl):
         log(f"Silver data files written by this commit: {n:,}")
 
 
-def silver_simple(spark, source, silver_tbl, catalog, appending=False):
-    """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
+def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0, rebuild_epoch=0):
+    """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB.
+
+    B1: every append carries a (txnAppId, txnVersion) via
+    ``delta_batch_txn_options`` so Delta short-circuits a re-submission of
+    the same (rebuild_epoch, cycle) at the transaction log. The full
+    rebuild (cycle 0, non-append) does not use it: overwriteSchema/writes-
+    from-scratch semantically defeat idempotency-on-a-committed-log.
+    """
     log("Executing SIMPLE strategy...")
 
     df_bronze = spark.read.parquet(source)
@@ -335,8 +343,11 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     log(f"Writing {silver_count:,} records to {silver_tbl}")
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     if appending:
-        log("Appending to existing table (incremental mode)")
-        write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
+        log(f"Appending to existing table (incremental mode, cycle={cycle})")
+        txn_opts = delta_batch_txn_options("lb-silver-build", rebuild_epoch, cycle)
+        write_delta_table(
+            spark, silver_df, silver_tbl, silver_bucket, mode="append", options=txn_opts
+        )
     else:
         table_exists = _table_exists(spark, silver_tbl)
         write_mode = "overwrite" if table_exists else "append"
@@ -356,7 +367,9 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     return silver_count
 
 
-def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=False):
+def silver_streaming(
+    spark, source, silver_tbl, catalog, profile, appending=False, cycle=0, rebuild_epoch=0
+):
     """STREAMING strategy: single pass, no intermediate counts. For >= 100GB.
 
     - No repartition(N) and no intermediate count(): one pass over bronze
@@ -387,8 +400,11 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
     silver_bucket = env("LB_SILVER_URI", "s3a://lb-silver/")
     log(f"Writing to {silver_tbl} (single pass, no intermediate counts)...")
     if appending:
-        log("Appending to existing table (incremental mode)")
-        write_delta_table(spark, silver_df, silver_tbl, silver_bucket, mode="append")
+        log(f"Appending to existing table (incremental mode, cycle={cycle})")
+        txn_opts = delta_batch_txn_options("lb-silver-build", rebuild_epoch, cycle)
+        write_delta_table(
+            spark, silver_df, silver_tbl, silver_bucket, mode="append", options=txn_opts
+        )
     else:
         table_exists = _table_exists(spark, silver_tbl)
         write_mode = "overwrite" if table_exists else "append"
@@ -459,11 +475,35 @@ incremental_mode = os.environ.get("LB_SILVER_INCREMENTAL", "false").lower() == "
 if incremental_mode:
     log("INCREMENTAL MODE: will append to existing table")
 
+# B1: cycle number (0-based) and rebuild epoch (bumped by --force-rebuild
+# via the lakebench-silver-state ConfigMap). Both are threaded into
+# delta_batch_txn_options so Delta short-circuits duplicate commits at the
+# transaction log for the same (rebuild_epoch, cycle).
+_cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
+_rebuild_epoch = int(os.environ.get("LB_REBUILD_EPOCH", "0"))
+
 # Cycles 2+ of a multi-cycle run append only their own bronze files; a full
 # build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
 bronze_source = c360_bronze_path(bronze_uri, appending)
 log(f"Bronze source: {bronze_source}")
+
+# B1 full-rebuild epoch guard: cycle 0 with an already-populated silver
+# table is an unintended rebuild that would drop rows this deployment has
+# already written. --force-rebuild (LB_FORCE_REBUILD=1) opts in explicitly,
+# and job.py bumps LB_REBUILD_EPOCH before submitting so downstream idempotency
+# keys move to a new namespace. Without it, refuse.
+_force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
+if not appending and _table_exists(spark, silver_tbl):
+    try:
+        _has_rows = spark.table(silver_tbl).limit(1).count() > 0
+    except Exception:  # noqa: BLE001
+        _has_rows = False
+    if _has_rows and not _force_rebuild:
+        raise SilverAbort(
+            f"silver-build: refusing full rebuild of populated {silver_tbl}; "
+            "re-run with --force-rebuild to opt in"
+        )
 
 # Check for size override first (skip profiling entirely for faster startup)
 size_override = get_size_override(spark)
@@ -502,10 +542,25 @@ apply_dynamic_config(spark, profile)
 
 # Execute selected strategy
 if strategy == SilverStrategy.SIMPLE:
-    silver_count = silver_simple(spark, bronze_source, silver_tbl, catalog, appending=appending)
+    silver_count = silver_simple(
+        spark,
+        bronze_source,
+        silver_tbl,
+        catalog,
+        appending=appending,
+        cycle=_cycle,
+        rebuild_epoch=_rebuild_epoch,
+    )
 elif strategy == SilverStrategy.STREAMING:
     silver_count = silver_streaming(
-        spark, bronze_source, silver_tbl, catalog, profile, appending=appending
+        spark,
+        bronze_source,
+        silver_tbl,
+        catalog,
+        profile,
+        appending=appending,
+        cycle=_cycle,
+        rebuild_epoch=_rebuild_epoch,
     )
 elif strategy == SilverStrategy.SALTED:
     # G1: SALTED is deferred to v1.7 (plan Block J). `get_strategy_override`

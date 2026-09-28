@@ -44,6 +44,98 @@ PRE_BENCHMARK_MAINTENANCE_TIMEOUT = 1800
 PRE_BENCHMARK_MAINTENANCE_CAP = 1800
 
 
+def _bump_silver_rebuild_epoch(cfg) -> None:
+    """Atomically increment this deployment's silver rebuild-epoch counter (B1).
+
+    Called by --force-rebuild before submitting the silver job so Delta's
+    (txnAppId, txnVersion) commits from the previous epoch cannot short-
+    circuit the fresh rebuild's cycle 0. The key is one of the three names
+    on ``lakebench-silver-state``; job.py reads the same key back into
+    ``LB_REBUILD_EPOCH`` for the silver pod.
+
+    Raises RuntimeError on any error the caller cannot recover from; the CLI
+    downgrades to a warning and passes LB_FORCE_REBUILD=1 anyway, because
+    the Iceberg cycle-0 guard is orthogonal to Delta idempotency.
+    """
+    from kubernetes import client as _kclient
+    from kubernetes.client.exceptions import ApiException
+
+    from lakebench.deploy.engine import DeploymentEngine
+    from lakebench.k8s import get_k8s_client as _get_k8s
+
+    _get_k8s(
+        context=cfg.platform.kubernetes.context or "",
+        namespace=cfg.get_namespace(),
+    )
+    core_v1 = _kclient.CoreV1Api()
+    namespace = cfg.get_namespace()
+
+    # Same key resolution as job.py._rebuild_epoch_key.
+    schema_type = cfg.architecture.workload.schema_type.value
+    table_format = cfg.architecture.table_format.type.value
+    if schema_type == "financial":
+        key = "rebuild_epoch_aml_iceberg" if table_format == "iceberg" else None
+    else:
+        key = {
+            "delta": "rebuild_epoch_c360_delta",
+            "iceberg": "rebuild_epoch_c360_iceberg",
+        }.get(table_format)
+    if key is None:
+        raise RuntimeError(f"no rebuild-epoch key for schema={schema_type} format={table_format}")
+
+    # Best-effort optimistic-concurrency bump: read, +1, replace under the
+    # same resourceVersion. On a concurrent write, the API server rejects
+    # with 409 and we retry from the current version.
+    for _ in range(5):
+        try:
+            cm = core_v1.read_namespaced_config_map(
+                DeploymentEngine.SILVER_STATE_CONFIGMAP, namespace
+            )
+        except ApiException as e:
+            if e.status != 404:
+                raise
+            # ConfigMap missing (older deployment): create with a fresh set
+            # and the target key at 1 (the bump itself).
+            manifest = {
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": DeploymentEngine.SILVER_STATE_CONFIGMAP,
+                    "namespace": namespace,
+                },
+                "data": {
+                    k: ("1" if k == key else "0") for k in DeploymentEngine._SILVER_STATE_KEYS
+                },
+            }
+            try:
+                core_v1.create_namespaced_config_map(namespace, manifest)
+                return
+            except ApiException as e2:
+                if e2.status == 409:
+                    continue
+                raise
+        data = dict(cm.data or {})
+        try:
+            current = int(data.get(key, "0"))
+        except ValueError:
+            current = 0
+        data[key] = str(current + 1)
+        cm.data = data
+        try:
+            core_v1.replace_namespaced_config_map(
+                DeploymentEngine.SILVER_STATE_CONFIGMAP, namespace, cm
+            )
+            return
+        except ApiException as e:
+            if e.status == 409:
+                continue
+            raise
+    raise RuntimeError(
+        f"could not bump {key} in {DeploymentEngine.SILVER_STATE_CONFIGMAP} "
+        "after 5 concurrent-write retries"
+    )
+
+
 def _load_latest_datagen_fleet(namespace: str | None = None) -> dict | None:
     """Load the per-pod datagen metrics sidecar written by `lakebench generate`.
 
@@ -1410,6 +1502,17 @@ def run(
             help="Skip pre-benchmark maintenance (compaction, snapshot expiry)",
         ),
     ] = False,
+    force_rebuild: Annotated[
+        bool,
+        typer.Option(
+            "--force-rebuild",
+            help=(
+                "Silver batch only: opt in to a full rebuild that would drop an existing "
+                "populated silver table. Atomically bumps the deployment's silver rebuild "
+                "epoch so downstream Delta idempotency keys move to a new namespace."
+            ),
+        ),
+    ] = False,
     force_reset: Annotated[
         bool,
         typer.Option(
@@ -1910,6 +2013,37 @@ def run(
 
             _stop_leftover_streams(job_manager, cfg.get_namespace())
 
+        # B1 --force-rebuild: bump the deployment's rebuild-epoch counter
+        # ONCE per `lakebench run` invocation, before the cycle loop, so
+        # all cycles in this run share one (txnAppId, txnVersion) namespace
+        # keyed on the new epoch. Bumping per-cycle would give each cycle
+        # its own appId, defeating the invariant that a single rebuild is
+        # one epoch.
+        #
+        # Any bump failure is a hard exit. The previous behaviour of "print
+        # a warning and still submit with LB_FORCE_REBUILD=1" left Delta
+        # reading the un-bumped epoch from the ConfigMap and short-
+        # circuiting cycle 0 against the previous rebuild's cycle 0 --
+        # silent zero-row write, exit 0, silver missing all of cycle 2
+        # (invariant 3: exit 0 is not a pass).
+        if force_rebuild:
+            schema_type = cfg.architecture.workload.schema_type.value
+            table_format = cfg.architecture.table_format.type.value
+            # AML+delta has no rebuild-epoch key; the CLI flag on that
+            # combination is a no-op, not a bumped epoch.
+            if schema_type != "financial" or table_format == "iceberg":
+                try:
+                    _bump_silver_rebuild_epoch(cfg)
+                except Exception as e:
+                    print_error(
+                        f"Could not bump silver rebuild-epoch: {e}\n"
+                        "Refusing to submit silver: without a bumped epoch, "
+                        "Delta's SetTransaction log short-circuits the "
+                        "rebuild's cycle 0 as a duplicate of the previous "
+                        "epoch, silently writing zero rows (invariant 3)."
+                    )
+                    raise typer.Exit(1) from e
+
         for cycle_idx in range(total_cycles):
             # Track per-cycle metrics (v1.1.0)
             _cycle_start = datetime.now()
@@ -1990,8 +2124,18 @@ def run(
 
                 job_start = utc_now()
 
+                # B1 --force-rebuild: the epoch bump ran once above this
+                # cycle loop. The Iceberg cycle-0 guard (silver already
+                # populated + no --force-rebuild) is orthogonal to the
+                # Delta epoch, and the flag is safely ignored by Delta
+                # after cycle 0, so setting it on every silver_build stage
+                # for this run is correct.
+                stage_env = dict(cycle_env)
+                if force_rebuild and job_type == JobType.SILVER_BUILD:
+                    stage_env["LB_FORCE_REBUILD"] = "1"
+
                 # Submit job
-                job_status = job_manager.submit_job(job_type, cycle_env=cycle_env)
+                job_status = job_manager.submit_job(job_type, cycle_env=stage_env)
                 if job_status.state == JobState.FAILED:
                     print_error(f"Failed to submit job: {job_status.message}")
                     collector.record_job(

@@ -216,7 +216,7 @@ def main():
 
     set_utc_session(spark)
     out = {}
-    from common import refuse_fresh_checkpoint_over_data
+    from common import SilverAbort, refuse_fresh_checkpoint_over_data
 
     # 3 files x 10 rows; silver drops id % 10 == 9, so 9 per file survive.
     out["bronze_rows"] = 30
@@ -269,7 +269,7 @@ def main():
     try:
         refuse_fresh_checkpoint_over_data(spark, f"{work}/ckpt-never-used", tbl)
         out["refuse_fresh"] = False
-    except SystemExit:
+    except SilverAbort:
         out["refuse_fresh"] = True
     refuse_fresh_checkpoint_over_data(spark, ckpt_fresh, tbl)
     spark.sql("CREATE TABLE ice.silver.empty_t (id BIGINT) USING iceberg")

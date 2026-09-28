@@ -1009,6 +1009,70 @@ def _lakebench_git_sha() -> str:
         return "unknown"
 
 
+def _rebuild_epoch_key(cfg) -> str | None:
+    """The lakebench-silver-state ConfigMap key for this deployment.
+
+    Delta and Iceberg silver builds each carry their own rebuild-epoch
+    counter so a --force-rebuild on one deployment cannot silently disturb
+    the other. AML is Iceberg-only per the plan; a financial+delta config
+    returns None (Delta AML is out of v1.6 scope) and no LB_REBUILD_EPOCH
+    is exported for it.
+    """
+    try:
+        schema_type = cfg.architecture.workload.schema_type.value
+        table_format = cfg.architecture.table_format.type.value
+    except AttributeError:
+        return None
+    if schema_type == "financial":
+        if table_format == "iceberg":
+            return "rebuild_epoch_aml_iceberg"
+        return None
+    # c360 (or any other workload today) keys per format.
+    if table_format == "delta":
+        return "rebuild_epoch_c360_delta"
+    if table_format == "iceberg":
+        return "rebuild_epoch_c360_iceberg"
+    return None
+
+
+def _read_silver_state_epoch(namespace: str, key: str) -> int:
+    """Read a rebuild-epoch counter from ``lakebench-silver-state``.
+
+    Falls back to 0 on any read failure -- the ConfigMap is per-deployment
+    and pre-B1 deployments do not have it. A missing key inside an existing
+    ConfigMap also returns 0. Log level is WARNING so a real ops issue is
+    visible even when the fallback is taken (e.g. unit tests running
+    without a live cluster context, or a manifest built out-of-cluster).
+
+    The CLI-side ``_bump_silver_rebuild_epoch`` is the load-bearing
+    defense against the collision surface this cache-line would otherwise
+    open: a failed bump refuses to submit silver (``cli/_run.py`` raises
+    ``typer.Exit(1)`` before the cycle loop), so the submit path only
+    runs after a bump the same process just observed to succeed. A
+    transient read failure here at submit-time (post-bump) is a very
+    narrow window against a cluster the CLI just talked to successfully.
+    """
+    try:
+        from kubernetes import client as _kclient
+        from kubernetes.client.exceptions import ApiException
+
+        core_v1 = _kclient.CoreV1Api()
+        try:
+            cm = core_v1.read_namespaced_config_map("lakebench-silver-state", namespace)
+        except ApiException as e:
+            if e.status == 404:
+                return 0
+            raise
+        data = cm.data or {}
+        try:
+            return int(data.get(key, "0"))
+        except (TypeError, ValueError):
+            return 0
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, e)
+        return 0
+
+
 def _spark_interval_to_seconds(interval: str) -> int:
     """Parse a Spark-style interval string (``"20 seconds"``, ``"5 minutes"``,
     ``"1 hour"``) to an integer seconds value. Returns 10 on unparseable
@@ -2604,6 +2668,22 @@ class SparkJobManager:
             )
             _lb_seed = 0
         env.append({"name": "LB_SEED", "value": str(_lb_seed)})
+
+        # B1 rebuild-epoch: the per-deployment lakebench-silver-state ConfigMap
+        # stores one counter per (workload x format). The counter bumps on a
+        # user-triggered --force-rebuild via the CLI so Delta's (txnAppId,
+        # txnVersion) commits from earlier epochs do not short-circuit the
+        # fresh rebuild's cycle 0. Iceberg silver reads the same counter to
+        # guard against unintended full rebuilds. A missing ConfigMap on an
+        # older deployment falls back to 0 (behavioural no-op vs the previous
+        # release).
+        _rebuild_key = _rebuild_epoch_key(cfg)
+        if _rebuild_key is not None and job_type in (
+            JobType.SILVER_BUILD,
+            JobType.SILVER_STREAM,
+        ):
+            _epoch = _read_silver_state_epoch(self.namespace, _rebuild_key)
+            env.append({"name": "LB_REBUILD_EPOCH", "value": str(_epoch)})
 
         # G5: silver streams label their admission decision against the
         # measured scale envelope (invariant 6). The stream mains compute
