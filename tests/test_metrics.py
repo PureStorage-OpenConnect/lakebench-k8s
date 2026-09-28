@@ -524,6 +524,8 @@ class TestMetricsStorage:
             alerts_by_rule={"W2_structuring": 12},
             rule_errors={"W7_cross_border_high_risk": "boom"},
             rules_skipped={"W1_connected_components": "vertex-cap"},
+            silver_tables={"silver_transactions_rows": 26671846, "silver_entities_rows": 113713},
+            extra_metrics={"data_clock_source": "datagen_timestamp_end"},
         )
         target = JobMetrics(job_name="lakebench-gold-finalize", job_type="gold-finalize")
         _apply_parsed_job_metrics(target, parsed)
@@ -536,6 +538,15 @@ class TestMetricsStorage:
         assert target.alerts_by_rule == {"W2_structuring": 12}
         assert target.rule_errors == {"W7_cross_border_high_risk": "boom"}
         assert target.rules_skipped == {"W1_connected_components": "vertex-cap"}
+        # A2 (silver-plan): live-validated regression -- lb-silver-live-v16 batch
+        # driver-log had silver_transactions_rows etc. but metrics.json showed
+        # silver_tables={} because the hand-copy here omitted them. Same shape
+        # as the LB-123 detection-dict defect the docstring warns about.
+        assert target.silver_tables == {
+            "silver_transactions_rows": 26671846,
+            "silver_entities_rows": 113713,
+        }
+        assert target.extra_metrics == {"data_clock_source": "datagen_timestamp_end"}
 
     def test_detection_dicts_parse_record_and_roundtrip(self, tmp_path):
         """LB-123 re-review F1 guard: the detection dicts must survive the

@@ -514,6 +514,14 @@ def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
     # Customer 360 expected-result facts (reporting only, D6).
     job_metrics.c360_check = parsed.c360_check
     job_metrics.c360_bronze = parsed.c360_bronze
+    # A2 (silver-plan): per-silver-table row counts and the catch-all label
+    # bag. Same shape as the alert dicts above: the collector's parse_driver_logs
+    # populates them via _apply_metric, but only if the field-by-field copy
+    # here also carries them. Live validation on lb-silver-live-v16 caught
+    # this omission: driver logs had silver_transactions_rows etc. but
+    # metrics.json showed silver_tables={} and extra_metrics={}.
+    job_metrics.silver_tables = parsed.silver_tables
+    job_metrics.extra_metrics = parsed.extra_metrics
 
 
 # Batch stage status poll. Stage times come from the cluster (_stage_timing),
