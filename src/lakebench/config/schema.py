@@ -262,19 +262,22 @@ class ImagesConfig(ConfigModel):
 
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
     # every datagen_rs change; :latest drifted from the code it claimed to be.
-    # 0a83acd is the datagen v1.6 sprint merge into integrate (2026-09-28):
+    # 25f1aa8 is the datagen v1.6 sprint tip on integrate (2026-09-28):
     # LB-191 dirty-ratio semantics, screening rates in prereg 3.6.1,
     # calibration-replicate seed refusal in perturbation_for_seed,
     # multi-writer guard on --mode reference, S3Sink::put_multipart retry,
-    # and --delivery-mode {batch|continuous} MpuWriter switch (continuous is
-    # the default). AML corpus bytes unchanged, MODEL_VERSION stays
+    # --delivery-mode {batch|continuous} MpuWriter switch with continuous as
+    # the Rust binary default, and the #52 registered_looks_open freeze
+    # wiring. AML corpus bytes unchanged, MODEL_VERSION stays
     # datagen-v2-rs-0.3. c360 corpus bytes moved with the LB-191 fix.
     # Live smoke on FlashBlade 2026-09-28 (namespace ds-0928, scale 1, 4
-    # parallel Jobs): all 16 pods complete in 10-12s; batch and continuous
-    # produce byte-identical S3 output for both schemas. Pushed digest:
-    # sha256:acdf3925e3eb9863974a5ba28255bd8d94c0143246cf0fd1546f16884fb10bf1
-    # Prior freeze: 7c24641 / sha256:c5a6bc80...
-    datagen: str = "docker.io/sillidata/lb-datagen:0a83acd"
+    # parallel Jobs at image 0a83acd): all 16 pods complete in 10-12s;
+    # batch and continuous produce byte-identical S3 output for both
+    # schemas. This image (25f1aa8) is the continuous-default rebuild.
+    # Pushed digest:
+    # sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7
+    # Prior tags: 0a83acd (sha256:acdf3925...), 7c24641 (sha256:c5a6bc80...).
+    datagen: str = "docker.io/sillidata/lb-datagen:25f1aa8"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
