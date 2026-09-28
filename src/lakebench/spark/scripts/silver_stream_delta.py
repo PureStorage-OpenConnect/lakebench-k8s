@@ -33,10 +33,12 @@ Environment variables (set by job.py):
 
 from __future__ import annotations
 
+import threading
 import time
 
 from common import (
     apply_silver_transformations_anchored,
+    assert_progress,
     await_stream,
     configured_data_clock,
     data_clock_date,
@@ -167,11 +169,19 @@ def main() -> None:
         waited += _TABLE_WAIT_INTERVAL
     log(f"Bronze table {bronze_tbl} exists (waited {waited}s)")
 
+    # A1: driver-side accumulator; see silver_stream.py for the rationale.
+    rows_written_total = 0
+    rows_written_lock = threading.Lock()
+
+    def _foreach_batch(df, bid):
+        written = write_silver_batch(df, bid, silver_tbl, silver_uri, data_clock)
+        with rows_written_lock:
+            nonlocal rows_written_total
+            rows_written_total += int(written or 0)
+
     stream = spark.readStream.format("delta").table(bronze_tbl)
     query = (
-        stream.writeStream.foreachBatch(
-            lambda df, bid: write_silver_batch(df, bid, silver_tbl, silver_uri, data_clock)
-        )
+        stream.writeStream.foreachBatch(_foreach_batch)
         .option("checkpointLocation", checkpoint_location)
         .trigger(processingTime=trigger_interval)
         .start()
@@ -179,6 +189,10 @@ def main() -> None:
 
     log("Streaming query started, awaiting termination...")
     await_stream(spark, query)
+    with rows_written_lock:
+        total = rows_written_total
+    log(f"Silver stream stopped; total rows written across all batches: {total}")
+    assert_progress(total, "silver-stream")
     spark.stop()
 
 

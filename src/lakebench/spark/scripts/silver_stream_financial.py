@@ -74,9 +74,16 @@ limited to opened_date (first date the stream saw).
 from __future__ import annotations
 
 import signal
+import threading
 import time
 
-from common import ensure_column, ensure_namespaces_for_ddl, env, log
+from common import (
+    assert_progress,
+    ensure_column,
+    ensure_namespaces_for_ddl,
+    env,
+    log,
+)
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
 from silver_build_financial import (
@@ -177,13 +184,17 @@ def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
         new_accts.unpersist(blocking=False)
 
 
-def _merge_batch(batch_df, batch_id: int) -> None:
+def _merge_batch(batch_df, batch_id: int) -> int:
     """Idempotently write per-batch txns and edges tagged with batch_id.
 
     Caches the flattened txns so build_transactions and build_edges don't
     scan the bronze rows twice. Casts the per-batch aggregate to
     decimal(38,2) matching the DDL (SUM of decimal columns widens; the
     old (18,2) would silently NULL on overflow under ANSI-off).
+
+    Returns the silver.transactions row count this batch committed
+    (0 for an empty batch). The A1 driver-side accumulator in main() sums
+    these across batches to feed assert_progress.
     """
     spark = batch_df.sparkSession
     tagged_txns = (
@@ -200,7 +211,7 @@ def _merge_batch(batch_df, batch_id: int) -> None:
         if n_txns == 0:
             # Collector line format (LB-136); counts the batch, adds no rows.
             log(f"Batch {batch_id}: empty, skipping")
-            return
+            return 0
         log(f"Batch {batch_id}: transforming {n_txns:,} rows")
         t0 = time.time()
 
@@ -228,6 +239,7 @@ def _merge_batch(batch_df, batch_id: int) -> None:
         n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark))
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
         log(f"Batch {batch_id}: committed to {SILVER_TXNS} in {time.time() - t0:.1f}s")
+        return int(n_txns)
     finally:
         tagged_txns.unpersist(blocking=False)
 
@@ -291,8 +303,23 @@ def main() -> None:
         .option("streaming-skip-delete-snapshots", "true")
         .load(f"{CATALOG}.{BRONZE_TABLE}")
     )
+    # A1: driver-side accumulator. _merge_batch returns the silver.transactions
+    # rows committed for the batch; the wrapper folds each into a
+    # lock-protected counter so a stream that saw only empty batches raises
+    # SilverAbort after await. Spark's async ListenerBus swallows Python
+    # listener exceptions, so the check runs on the main thread that blocks
+    # on `query.isActive`, not inside a StreamingQueryListener.
+    rows_written_total = 0
+    rows_written_lock = threading.Lock()
+
+    def _foreach_batch(df, bid):
+        written = _merge_batch(df, bid)
+        with rows_written_lock:
+            nonlocal rows_written_total
+            rows_written_total += int(written or 0)
+
     query = (
-        stream.writeStream.foreachBatch(_merge_batch)
+        stream.writeStream.foreachBatch(_foreach_batch)
         .option("checkpointLocation", CHECKPOINT_URI)
         .trigger(processingTime=f"{TRIGGER_S} seconds")
         .start()
@@ -326,6 +353,10 @@ def main() -> None:
     if query.lastProgress:
         log(f"  batchId: {query.lastProgress.get('batchId')}")
         log(f"  processedRowsPerSecond: {query.lastProgress.get('processedRowsPerSecond')}")
+    with rows_written_lock:
+        total = rows_written_total
+    log(f"Silver stream total rows written across all batches: {total}")
+    assert_progress(total, "silver-stream")
     spark.stop()
 
 

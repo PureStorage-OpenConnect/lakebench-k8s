@@ -20,6 +20,7 @@ from enum import Enum
 
 from common import (
     apply_silver_transformations_anchored,
+    assert_progress,
     c360_bronze_path,
     cluster_by_partition,
     env,
@@ -502,4 +503,6 @@ else:
 log(f"output_rows: {silver_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
 log("=" * 60)
+# A1: LB-044 gate; see silver_build.py for the rationale.
+assert_progress(silver_count, "silver-build")
 spark.stop()

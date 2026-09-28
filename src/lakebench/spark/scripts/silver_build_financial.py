@@ -24,6 +24,7 @@ import time
 
 from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
+    assert_progress,
     ensure_column,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
@@ -1136,14 +1137,30 @@ def main() -> None:
     log(f"Silver build complete in {elapsed:.1f}s")
     log("=" * 60)
     _, bronze_gb = iceberg_table_stats(spark, f"{CATALOG}.{BRONZE_TABLE}")
+    # A2: per-table row counts so `metrics.json` records what silver-build
+    # actually wrote across the six tables, not just silver.transactions.
+    # An unmaintained continuous-mode table (D-safe) returns 0 here; the
+    # A1 gate reads silver_transactions_rows, not the sum.
     silver_rows, _ = iceberg_table_stats(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}")
+    per_table = {
+        "silver_transactions_rows": silver_rows,
+        "silver_entities_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_ENTITIES}")[0],
+        "silver_accounts_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_ACCOUNTS}")[0],
+        "silver_statements_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_STATEMENTS}")[0],
+        "silver_edges_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_EDGES}")[0],
+        "silver_profiles_rows": iceberg_table_stats(spark, f"{CATALOG}.{SILVER_PROFILES}")[0],
+    }
     log_job_metrics(
         "silver-build",
         input_size_gb=bronze_gb,
         input_rows=bronze_rows,
         output_rows=silver_rows,
         elapsed_seconds=elapsed,
+        **per_table,
     )
+    # A1: LB-044 gate; refuse exit-0 if the primary output table is empty.
+    # Emitted after metrics so a failed run still leaves the block on stdout.
+    assert_progress(silver_rows, "silver-build")
     spark.stop()
 
 

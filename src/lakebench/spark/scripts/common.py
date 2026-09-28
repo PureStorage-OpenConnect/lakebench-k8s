@@ -13,6 +13,17 @@ import re
 from datetime import datetime
 
 
+class SilverAbort(RuntimeError):
+    """A silver-stage run refused to succeed for a defined reason.
+
+    Raised in silver mains (batch or stream) when a hard invariant fails
+    that would otherwise let a zero-row or corrupted run exit 0 -- the
+    LB-044 class. The message names the invariant and, where useful, the
+    remediation. Callers (job.py, the K8s driver wrapper) surface the
+    exception verbatim: exit 0 is not a pass.
+    """
+
+
 def log(msg):
     """Timestamped log line."""
     print(f"[lb] {datetime.utcnow().isoformat()} - {msg}", flush=True)
@@ -24,6 +35,27 @@ def env(name, default=None):
     if v is None:
         raise SystemExit(f"Missing env var: {name}")
     return v
+
+
+def assert_progress(rows_written, job_type):
+    """Refuse an exit-0 pass when a silver job wrote zero rows (LB-044).
+
+    ``rows_written`` is the primary output-row count the caller tracked
+    (silver.transactions rows for AML; the sole silver table for c360;
+    the accumulated micro-batch total for streams). The escape hatch
+    LB_SILVER_TEST_ALLOW_EMPTY=1 is honoured only when LB_TESTING=1 is
+    also set -- both must come from a test harness, never from job.py.
+    Any other zero-row silver run raises SilverAbort so the K8s Job
+    ends non-zero and the collector records the failure.
+    """
+    if int(rows_written) >= 1:
+        return
+    bypass = os.getenv("LB_SILVER_TEST_ALLOW_EMPTY") == "1"
+    testing = os.getenv("LB_TESTING") == "1"
+    if bypass and testing:
+        log(f"{job_type}: zero rows written; bypassed by LB_SILVER_TEST_ALLOW_EMPTY (test-only)")
+        return
+    raise SilverAbort(f"{job_type}: zero rows written; refusing exit-0 pass (LB-044 gate)")
 
 
 def pipeline_catalog():
@@ -404,13 +436,29 @@ def iceberg_table_stats(spark, fq_table):
         return 0, 0.0
 
 
-def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seconds):
-    """Emit the ``=== JOB METRICS ===`` block the metrics collector parses."""
+def log_job_metrics(job, *, input_size_gb, input_rows, output_rows, elapsed_seconds, **extra):
+    """Emit the ``=== JOB METRICS ===`` block the metrics collector parses.
+
+    ``extra`` carries per-table row counts (A2) and other numeric metrics
+    silver writes alongside the standard four. Keys land in JobMetrics
+    via `_apply_metric`'s `silver_*_rows` allowlist; other keys are stored
+    on JobMetrics.extra_metrics. Integer values are emitted as integers,
+    floats as three-decimal, strings are passed verbatim.
+    """
     log(f"=== JOB METRICS: {job} ===")
     log(f"input_size_gb: {input_size_gb:.3f}")
     log(f"input_rows: {int(input_rows)}")
     log(f"output_rows: {int(output_rows)}")
     log(f"elapsed_seconds: {elapsed_seconds:.1f}")
+    for key, value in extra.items():
+        if isinstance(value, bool):
+            log(f"{key}: {'true' if value else 'false'}")
+        elif isinstance(value, int):
+            log(f"{key}: {value}")
+        elif isinstance(value, float):
+            log(f"{key}: {value:.3f}")
+        else:
+            log(f"{key}: {value}")
     log("=" * 60)
 
 
