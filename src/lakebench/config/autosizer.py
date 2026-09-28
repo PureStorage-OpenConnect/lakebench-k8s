@@ -141,11 +141,15 @@ def _datagen_memory_default(config: LakebenchConfig, cpu: str) -> str:
 
 
 def _resolve_datagen_mode(config: LakebenchConfig) -> str:
-    """Resolve the effective datagen mode from config.
+    """Resolve the effective datagen delivery mode from config.
 
-    If mode is 'auto', selects based on scale:
-      scale <= 10 (~100 GB) -> DatagenMode.BATCH
-      scale > 10            -> DatagenMode.CONTINUOUS
+    DatagenMode is a delivery pattern since 2026-09-28 (Wave 2 D1). AUTO
+    resolves to CONTINUOUS at every scale: the choice affects per-worker
+    write pipeline (streaming MPU vs buffered PUT), not correctness. Owner
+    D18 (PipelineMode.CONTINUOUS canonical) also names continuous as the
+    default. Pre-2026-09-28 semantics resolved AUTO by scale for the
+    resource-profile tier; that split has moved into scale-based sizing
+    elsewhere in this file and is independent of delivery mode.
 
     Returns:
         DatagenMode.BATCH.value or DatagenMode.CONTINUOUS.value
@@ -156,7 +160,7 @@ def _resolve_datagen_mode(config: LakebenchConfig) -> str:
     mode = datagen.mode
 
     if mode == DatagenMode.AUTO:
-        return DatagenMode.BATCH.value if datagen.scale <= 10 else DatagenMode.CONTINUOUS.value
+        return DatagenMode.CONTINUOUS.value
     return mode.value
 
 

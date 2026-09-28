@@ -141,37 +141,20 @@ class TestFullComputeGuidance:
 class TestDatagenModeResolution:
     """Tests for mode resolution logic."""
 
-    def test_auto_mode_small_scale_resolves_batch(self):
-        """Auto mode with scale <= 10 -> batch."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 5}}},
-        )
-        assert _resolve_datagen_mode(config) == "batch"
-
-    def test_auto_mode_large_scale_resolves_continuous(self):
-        """Auto mode with scale > 10 -> continuous."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 50}}},
-        )
-        assert _resolve_datagen_mode(config) == "continuous"
-
-    def test_auto_mode_boundary_scale_10(self):
-        """Auto mode with scale=10 -> batch (boundary)."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 10}}},
-        )
-        assert _resolve_datagen_mode(config) == "batch"
-
-    def test_auto_mode_boundary_scale_11(self):
-        """Auto mode with scale=11 -> continuous (just above boundary)."""
-        config = LakebenchConfig(
-            name="test",
-            architecture={"workload": {"datagen": {"scale": 11}}},
-        )
-        assert _resolve_datagen_mode(config) == "continuous"
+    def test_auto_mode_resolves_continuous_at_every_scale(self):
+        """AUTO resolves to CONTINUOUS unconditionally (Wave 2 D-wave adv-review
+        fix, 2026-09-28). Pre-fix rule was scale<=10 -> batch, scale>10 ->
+        continuous, which contradicted the delivery-mode docstring and the
+        template default. The choice is now delivery pattern, not resource
+        profile; resource sizing is scale-based elsewhere in this module."""
+        for s in (1, 5, 10, 11, 50, 1000):
+            config = LakebenchConfig(
+                name="test",
+                architecture={"workload": {"datagen": {"scale": s}}},
+            )
+            assert _resolve_datagen_mode(config) == "continuous", (
+                f"AUTO at scale={s} did not resolve to continuous"
+            )
 
     def test_explicit_batch_mode(self):
         """Explicit batch mode preserved regardless of scale."""

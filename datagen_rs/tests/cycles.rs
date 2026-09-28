@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -199,6 +200,86 @@ fn cycle_arguments_are_strict() {
     }
 }
 
+/// Wave 1 A3 (2026-09-28): `--mode reference` with `--total-nodes > 1` must
+/// refuse to start, because the reference zone is a single-writer artefact
+/// and running two reference pods races the same S3 keys (manifest.parquet,
+/// party.parquet, account.parquet, watchlist.parquet).
+#[test]
+fn reference_mode_refuses_multi_writer() {
+    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env(
+            "DG_LOCAL_DIR",
+            std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-race"),
+        )
+        .args([
+            "--bucket",
+            "b",
+            "--seed",
+            "7777",
+            "--scale",
+            SCALE,
+            "--mode",
+            "reference",
+            "--total-nodes",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        st.status.code(),
+        Some(2),
+        "--mode reference with --total-nodes 2 was accepted (would race)"
+    );
+    let err = String::from_utf8_lossy(&st.stderr);
+    assert!(
+        err.contains("race the reference S3 keys"),
+        "wrong refusal message: {err}"
+    );
+}
+
+/// `--mode reference` with a single node still runs (the guard is on multi-
+/// writer, not on the reference role itself).
+#[test]
+fn reference_mode_with_one_node_runs() {
+    let d = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-ok");
+    let _ = std::fs::remove_dir_all(&d);
+    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", &d)
+        .args([
+            "--bucket",
+            "b",
+            "--seed",
+            "7777",
+            "--scale",
+            SCALE,
+            "--threads",
+            "2",
+            "--mode",
+            "reference",
+            "--total-nodes",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "--mode reference --total-nodes 1 failed: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    // Reference-only pod writes manifest + account + party + watchlist and
+    // nothing under bronze/pacs008/.
+    let root = d.join("b");
+    assert!(root.join("manifest/manifest.parquet").exists());
+    assert!(root.join("bronze/account.parquet").exists());
+    assert!(root.join("bronze/party.parquet").exists());
+    assert!(root.join("bronze/watchlist.parquet").exists());
+    let pacs = root.join("bronze/pacs008");
+    assert!(
+        !pacs.exists() || std::fs::read_dir(&pacs).unwrap().next().is_none(),
+        "--mode reference wrote pacs008 bronze files"
+    );
+}
+
 #[test]
 fn financial_seed_is_required_strict_and_never_spent() {
     for bad in [
@@ -362,9 +443,193 @@ fn c360_driver_output_is_pinned() {
     // update the digest deliberately.
     let a = c360_driver_digest("2");
     assert_eq!(a, c360_driver_digest("3"), "c360 output depends on threads");
+    // Updated 2026-09-28 (LB-191 dirty-ratio fix, Wave 1 C1). Pre-fix digest
+    // was (8_993_469_679_856_816_545, 5).
     assert_eq!(
         a,
-        (8_993_469_679_856_816_545, 5),
+        (7_884_786_140_200_387_728, 5),
         "c360 driver output changed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2 D3/D4 (2026-09-28): --delivery-mode {batch|continuous} switch.
+// Both modes must produce the same corpus at a fixed seed. Batch is the
+// current (buffered whole-file PUT) path; continuous streams each parquet
+// file through MpuWriter as row-groups close. Test asserts multiset-equality
+// on all rows across the two runs: rows may be identical or the ordering
+// may differ (parquet's row-group layout is unchanged, so byte-identity
+// often holds; we assert the weaker, more robust row-identity so a future
+// row-group tuning does not silently red-CI this).
+// ---------------------------------------------------------------------------
+
+fn run_c360_mode(dir: &Path, delivery: &str) {
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", dir)
+        // DG_ROW_GROUP forces multiple row-groups per file so continuous
+        // mode actually flushes mid-file via MpuWriter (parquet default is
+        // ~1M rows/group which produces one group per file in every shipping
+        // config, so a naive test would prove nothing about the streaming
+        // path). 100 rows/group means every c360 file has dozens of groups.
+        .env("DG_ROW_GROUP", "100")
+        .args([
+            "--schema",
+            "customer360",
+            "--bucket",
+            "b",
+            "--seed",
+            "42",
+            "--target-tb",
+            "0.00001",
+            "--file-size-mb",
+            "1",
+            "--threads",
+            "2",
+            "--delivery-mode",
+            delivery,
+        ])
+        .output()
+        .expect("run generate");
+    assert!(
+        out.status.success(),
+        "c360 generate --delivery-mode {} failed: {}",
+        delivery,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn c360_files(dir: &Path) -> Vec<PathBuf> {
+    let d = dir.join("b").join("customer").join("interactions");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&d)
+        .map(|it| {
+            it.map(|e| e.unwrap().path())
+                .filter(|p| {
+                    let n = p.file_name().unwrap().to_string_lossy();
+                    n.starts_with("part-") && n.ends_with(".parquet")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// c360-specific row renderer: `array_value_to_string` on a
+/// Timestamp(us, UTC) column fails without arrow's chrono-tz feature.
+/// Render every column via its Debug (via TypedArray) which is TZ-agnostic,
+/// then join. Sorted for multiset equality across modes.
+fn c360_rows(paths: &[PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in paths {
+        for b in batches(p) {
+            for r in 0..b.num_rows() {
+                let mut cols: Vec<String> = Vec::with_capacity(b.num_columns());
+                for c in 0..b.num_columns() {
+                    let arr = b.column(c);
+                    // Timestamps: render raw i64 microseconds (TZ-invariant).
+                    let s = if let Some(ts) = arr
+                        .as_any()
+                        .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    {
+                        if ts.is_null(r) {
+                            "null".to_string()
+                        } else {
+                            ts.value(r).to_string()
+                        }
+                    } else {
+                        array_value_to_string(arr, r).unwrap()
+                    };
+                    cols.push(s);
+                }
+                out.push(cols.join("\u{1f}"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn c360_row_identity_across_delivery_modes() {
+    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-delivery-{}", std::process::id()));
+    let batch_dir = base.join("batch");
+    let continuous_dir = base.join("continuous");
+    let _ = std::fs::remove_dir_all(&batch_dir);
+    let _ = std::fs::remove_dir_all(&continuous_dir);
+    run_c360_mode(&batch_dir, "batch");
+    run_c360_mode(&continuous_dir, "continuous");
+    let batch_rows = c360_rows(&c360_files(&batch_dir));
+    let cont_rows = c360_rows(&c360_files(&continuous_dir));
+    assert_eq!(
+        batch_rows.len(),
+        cont_rows.len(),
+        "row count differs: batch={} continuous={}",
+        batch_rows.len(),
+        cont_rows.len()
+    );
+    assert_eq!(
+        batch_rows, cont_rows,
+        "c360 row content differs between --delivery-mode batch and continuous"
+    );
+}
+
+fn run_aml_mode(dir: &Path, delivery: &str) {
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", dir)
+        // See run_c360_mode: DG_ROW_GROUP forces multi-row-group per file so
+        // continuous mode actually flushes to S3 multipart mid-file. 100 rows
+        // per group gives dozens of groups per AML bronze file.
+        .env("DG_ROW_GROUP", "100")
+        .args([
+            "--bucket",
+            "b",
+            "--seed",
+            "7777",
+            "--scale",
+            SCALE,
+            "--threads",
+            "2",
+            "--mode",
+            "all",
+            "--delivery-mode",
+            delivery,
+        ])
+        .output()
+        .expect("run generate");
+    assert!(
+        out.status.success(),
+        "aml generate --delivery-mode {} failed: {}",
+        delivery,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn aml_bronze_files(dir: &Path) -> Vec<PathBuf> {
+    files(dir, "bronze/pacs008", "part-")
+}
+
+#[test]
+fn aml_row_identity_across_delivery_modes() {
+    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-delivery-aml-{}", std::process::id()));
+    let batch_dir = base.join("batch");
+    let continuous_dir = base.join("continuous");
+    let _ = std::fs::remove_dir_all(&batch_dir);
+    let _ = std::fs::remove_dir_all(&continuous_dir);
+    run_aml_mode(&batch_dir, "batch");
+    run_aml_mode(&continuous_dir, "continuous");
+    let batch_rows = rows(&aml_bronze_files(&batch_dir));
+    let cont_rows = rows(&aml_bronze_files(&continuous_dir));
+    assert_eq!(
+        batch_rows.len(),
+        cont_rows.len(),
+        "aml pacs008 row count differs: batch={} continuous={}",
+        batch_rows.len(),
+        cont_rows.len()
+    );
+    assert_eq!(
+        batch_rows, cont_rows,
+        "aml pacs008 row content differs between --delivery-mode batch and continuous"
     );
 }

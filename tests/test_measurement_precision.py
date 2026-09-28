@@ -428,7 +428,7 @@ class TestInfoLabels:
         assert "365 days" not in out.output
 
     def test_continuous_datagen_mode_says_how_the_corpus_arrives(self, tmp_path):
-        """lb16-cs: "Datagen mode: batch" beside "Pipeline mode: continuous"."""
+        """lb16-cs: what "Datagen mode" says beside "Pipeline mode: continuous"."""
         from typer.testing import CliRunner
 
         from lakebench.cli import app
@@ -436,7 +436,10 @@ class TestInfoLabels:
         out = CliRunner().invoke(app, ["info", str(_continuous_c360(tmp_path))])
         assert out.exit_code == 0, out.output
         text = " ".join(out.output.replace("\u2502", " ").split())
-        assert "batch generator (auto for scale 1); corpus written up front" in text
+        # Wave 2 D-wave (2026-09-28): AUTO resolves to continuous at every
+        # scale (delivery pattern, not resource tier). Trickle sentence is
+        # kept for the continuous pipeline.
+        assert "continuous delivery (auto); corpus written up front" in text
         assert "trickled to bronze by the pipeline" in text
 
     def test_datagen_mode_line_batch_and_explicit(self):
@@ -444,10 +447,11 @@ class TestInfoLabels:
         from tests.conftest import make_config
 
         cfg = make_config()
-        assert info_datagen_mode(cfg).startswith("batch generator (auto for scale")
+        # AUTO -> continuous everywhere (Wave 2 D-wave, 2026-09-28).
+        assert info_datagen_mode(cfg) == "continuous delivery (auto)"
         assert "trickle" not in info_datagen_mode(cfg)
-        cfg = make_config(workload={"datagen": {"mode": "continuous"}})
-        assert info_datagen_mode(cfg) == "continuous generator (set in config)"
+        cfg = make_config(workload={"datagen": {"mode": "batch"}})
+        assert info_datagen_mode(cfg) == "batch delivery (set in config)"
 
     def test_date_range_defaults_and_non_c360(self):
         from lakebench.cli import info_date_range

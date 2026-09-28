@@ -22,7 +22,6 @@ import argparse
 import os
 import sys
 
-
 SUPPORTED_SCHEMAS = ("financial", "customer360")
 
 
@@ -125,8 +124,12 @@ def main() -> int:
     ap.add_argument("--prefix", default=os.environ.get("PREFIX", ""))
     ap.add_argument("--node-id", type=int, default=None)
     ap.add_argument("--total-nodes", type=int, default=1)
-    # Financial-only args -- ignored on the customer360 path.
-    ap.add_argument("--scale", type=float, default=1.0)
+    # --scale is required on the financial path (drives typology counts + world
+    # size). For c360 it is only accepted for back-compat with old templates
+    # that render it unconditionally; --customer-id-max wins when both are set
+    # and a stderr note names the drop. Default is None so we can tell "user
+    # supplied 1.0" from "not set".
+    ap.add_argument("--scale", type=float, default=None)
     ap.add_argument("--corpus-months", type=int, default=60)
     # `batch` accepted as a synonym for `all` because the K8s Job template
     # in `src/lakebench/templates/datagen/job.yaml.j2` unconditionally
@@ -143,12 +146,28 @@ def main() -> int:
         default="all",
         choices=["all", "bronze", "reference", "batch", "continuous"],
     )
+    # Delivery mode (Wave 2 D3, 2026-09-28): how the datagen writes bronze
+    # files to S3. `batch` (default) buffers the whole file then does one
+    # PUT; `continuous` streams parquet row-groups through S3 multipart as
+    # they close. Corpus content is byte-for-byte identical at a fixed seed;
+    # only the write pipeline differs. Forwarded to the Rust binary as
+    # --delivery-mode. `auto` resolves to `continuous` (the K8s template
+    # default), matching PipelineMode.CONTINUOUS naming (owner D18).
+    ap.add_argument(
+        "--delivery-mode",
+        default="auto",
+        choices=["auto", "batch", "continuous"],
+    )
     # customer360-only args -- ignored on the financial path.
     ap.add_argument("--target-tb", type=float, default=0.1)
     # None: the Rust binary derives the id space from --scale (100K
     # customers per scale unit). It used to default to 500K at every scale.
     ap.add_argument("--customer-id-max", type=int, default=None)
-    ap.add_argument("--payload-kb", type=int, default=2)
+    # --payload-kb was a CLI knob that had only ever been calibrated at 2 KiB;
+    # the Rust binary refused any other value, and no shipped template passed
+    # anything else. Dropped 2026-09-28 (LB-191 companion). Accepted here as
+    # a silently-ignored back-compat arg so older K8s Job templates still parse.
+    ap.add_argument("--payload-kb", type=int, default=None)
     ap.add_argument("--dirty-ratio", type=float, default=0.08)
     ap.add_argument("--duplicate-email-pct", type=float, default=0.10)
     ap.add_argument("--timestamp-start", default="2024-01-01")
@@ -178,6 +197,24 @@ def main() -> int:
             )
             return 2
         args.seed = 42
+
+    # --scale default. `None` from argparse means "not user-set". Financial
+    # needs a scale (drives typology counts, world size); c360 uses it only if
+    # --customer-id-max is also absent, and if both are set we warn and use
+    # --customer-id-max. Fill in 1.0 as the historical default so downstream
+    # (memory cap, forwarding) has a concrete number, and record whether the
+    # user supplied it explicitly for the c360 "both set" note.
+    scale_user_set = args.scale is not None
+    if args.scale is None:
+        args.scale = 1.0
+    if args.schema == "customer360" and scale_user_set and args.customer_id_max is not None:
+        print(
+            f"[entrypoint] c360: both --scale ({args.scale}) and --customer-id-max "
+            f"({args.customer_id_max}) were set; --customer-id-max wins, --scale is "
+            "recorded in provenance only. (Template renders one; a raw-CLI caller "
+            "hit both.)",
+            file=sys.stderr,
+        )
 
     if not args.bucket:
         print("[entrypoint] --bucket is required (or set BRONZE_BUCKET env)", file=sys.stderr)
@@ -245,6 +282,17 @@ def main() -> int:
         common += ["--cycle", str(args.cycle)]
     if args.cycles != 1:
         common += ["--cycles", str(args.cycles)]
+    # Delivery-mode resolution and forwarding (Wave 2 D3, 2026-09-28). `auto`
+    # picks continuous unconditionally; there is no scale threshold today
+    # because the choice affects per-worker RSS, not correctness. If a future
+    # scale-based split is needed, it goes here.
+    delivery = args.delivery_mode
+    if delivery == "auto":
+        delivery = "continuous"
+    if delivery != "batch":
+        # Only forward when non-default from the Rust binary's perspective
+        # (batch), so an older image without --delivery-mode still parses.
+        common += ["--delivery-mode", delivery]
 
     if args.robustness_perturbation and args.schema != "financial":
         print(
@@ -272,6 +320,9 @@ def main() -> int:
         if args.robustness_perturbation:
             summary += " robustness_perturbation=on"
     else:  # customer360
+        # --payload-kb dropped 2026-09-28 (LB-191 companion); Rust hardcodes 2.
+        # Any --payload-kb from an older template arrives on args.payload_kb
+        # (default None here) and is silently discarded when we do not forward it.
         cmd = common + [
             "--target-tb",
             str(args.target_tb),
@@ -280,8 +331,6 @@ def main() -> int:
                 if args.customer_id_max
                 else ["--scale", str(args.scale)]
             ),
-            "--payload-kb",
-            str(args.payload_kb),
             "--dirty-ratio",
             str(args.dirty_ratio),
             "--duplicate-email-pct",
@@ -294,7 +343,7 @@ def main() -> int:
         summary = (
             f"target_tb={args.target_tb} "
             f"customer_id_max={args.customer_id_max or f'scale({args.scale})'} "
-            f"payload_kb={args.payload_kb} dirty_ratio={args.dirty_ratio} "
+            f"payload_kb=2(fixed) dirty_ratio={args.dirty_ratio} "
             f"ts=[{args.timestamp_start},{args.timestamp_end})"
         )
 

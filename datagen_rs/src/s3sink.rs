@@ -192,16 +192,47 @@ impl S3Sink {
     /// LB-107: party.parquet and account.parquet at scale >= 1000 exceed
     /// the 5 GiB S3 single-PUT ceiling; this path removes that limit
     /// (S3 multipart supports up to 5 TiB per object across 10k parts).
+    ///
+    /// Retry (Wave 2 D5, 2026-09-28): the begin call now retries three
+    /// times with exponential backoff on transient errors, matching
+    /// `put`'s 3-attempt loop. Continuous mode issues ~1 MPU per bronze
+    /// file, so at scale 100 (~10k files per pod) a transient 5xx is a
+    /// certainty; without the retry every failure crashed the pod.
     pub fn put_multipart(&self, key: &str) -> MpuWriter {
         let full = self.full_key(key);
         let path = Path::from(full.as_str());
-        let store = self.store.clone();
-        let path_c = path.clone();
-        let upload = self
-            .handle
-            .block_on(async move { store.put_multipart(&path_c).await })
-            .unwrap_or_else(|e| panic!("s3 put_multipart begin key={} err={}", full, e));
-        MpuWriter::from_upload(upload, self.handle.clone(), full)
+        let mut last_err: Option<String> = None;
+        for attempt in 0..3 {
+            let store = self.store.clone();
+            let path_c = path.clone();
+            let res = self
+                .handle
+                .block_on(async move { store.put_multipart(&path_c).await });
+            match res {
+                Ok(upload) => return MpuWriter::from_upload(upload, self.handle.clone(), full),
+                Err(e) => {
+                    if is_fatal(&e) {
+                        panic!(
+                            "s3 put_multipart begin fatal (no retry): key={} err={}",
+                            full, e
+                        );
+                    }
+                    last_err = Some(format!("{}", e));
+                    eprintln!(
+                        "[s3sink] mpu begin retry {} for {}: {}",
+                        attempt + 1,
+                        full,
+                        last_err.as_deref().unwrap_or("")
+                    );
+                    std::thread::sleep(Duration::from_millis(200 * (attempt as u64 + 1)));
+                }
+            }
+        }
+        panic!(
+            "s3 put_multipart begin failed after 3 attempts: key={} err={}",
+            full,
+            last_err.unwrap_or_default()
+        );
     }
 
     pub fn put(&self, key: &str, bytes: Vec<u8>) {
@@ -310,6 +341,16 @@ impl MpuWriter {
     /// we don't need to duplicate the abort here -- but we do surface
     /// the failure to the caller (currently by panic in `generate.rs`
     /// to match the single-PUT path's fail-loud semantics).
+    ///
+    /// Note (Wave 2 D5, 2026-09-28): finish() does NOT retry. The reason
+    /// is that WriteMultipart consumes itself into finish(), and on error
+    /// it internally aborts the upload -- there is no live upload state
+    /// left to retry against. A transient 5xx on the final
+    /// CompleteMultipartUpload call still surfaces to the caller (which
+    /// panics), and the retryable moments in the MPU life-cycle are
+    /// (a) begin (in `S3Sink::put_multipart`, retried) and (b) each part
+    /// upload (`WriteMultipart` handles its own part-level retries via
+    /// object_store's RetryConfig).
     pub fn finish(mut self) -> Result<(), String> {
         let Some(w) = self.inner.take() else {
             return Err(format!("mpu writer key={} already finalized", self.key));

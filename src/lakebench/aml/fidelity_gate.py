@@ -821,8 +821,8 @@ def corpus_role(seed, prereg: dict) -> str:
     for role in ("calibration", "evaluation", "robustness"):
         if str(prereg["corpora"].get(f"{role}_seed")) == str(seed):
             return role
-    # D8's scale-2 replicates of the calibration corpus (v3.6.0) are
-    # calibration corpora: tuning may look at them.
+    # D8's scale-2 replicates of the calibration corpus (registered in v3.6.0,
+    # unchanged through v3.6.1) are calibration corpora: tuning may look at them.
     if str(seed) in {str(s) for s in prereg["corpora"].get("calibration_replicate_seeds") or []}:
         return "calibration"
     return "other"

@@ -231,6 +231,70 @@ fn encode_parquet(batch: &arrow::record_batch::RecordBatch, cap_hint: usize) -> 
     buf
 }
 
+/// Delivery mode for a bronze parquet file (Wave 2 D3, 2026-09-28). Batch
+/// (default) buffers the whole file in memory then does one S3 PUT; matches
+/// pre-existing behaviour and keeps regression pins stable. Continuous
+/// streams the file through an S3 multipart upload (MpuWriter): ArrowWriter
+/// row-groups flush into 5 MiB parts as they close, bounding per-worker RSS
+/// at roughly MPU_MAX_CONCURRENT_PARTS * chunk_size + one row-group buffer.
+/// Row content is identical across modes at a fixed seed; only the write
+/// pipeline differs. Verified by the row-identity test in tests/cycles.rs.
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum DeliveryMode {
+    Batch,
+    Continuous,
+}
+
+fn parse_delivery_mode() -> DeliveryMode {
+    let s: String = arg("--delivery-mode", "batch".to_string());
+    match s.as_str() {
+        "batch" => DeliveryMode::Batch,
+        "continuous" => DeliveryMode::Continuous,
+        other => {
+            eprintln!(
+                "--delivery-mode must be one of: batch | continuous; got {:?}",
+                other
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Emit `batch` as parquet under `key`, choosing the write pipeline by
+/// delivery mode. Returns the object size in bytes. Uses `writer_properties`
+/// so codec choice is uniform across every parquet emitted; row-group size
+/// is the parquet-crate default (~1M rows). Continuous mode reuses the
+/// S3Sink::put_multipart path proven for party/account since LB-107.
+fn write_bronze_file(
+    sink: &S3Sink,
+    key: &str,
+    batch: &arrow::record_batch::RecordBatch,
+    cap_hint: usize,
+    delivery: DeliveryMode,
+) -> u64 {
+    match delivery {
+        DeliveryMode::Batch => {
+            let buf = encode_parquet(batch, cap_hint);
+            let sz = buf.len() as u64;
+            sink.put(key, buf);
+            sz
+        }
+        DeliveryMode::Continuous => {
+            let props = writer_properties();
+            let mut mpu = sink.put_multipart(key);
+            {
+                let mut w = ArrowWriter::try_new(&mut mpu, batch.schema(), Some(props)).unwrap();
+                w.write(batch).unwrap();
+                w.close().unwrap();
+            }
+            let sz = mpu.bytes_written();
+            mpu.finish()
+                .unwrap_or_else(|e| panic!("continuous mpu finish key={} err={}", key, e));
+            sz
+        }
+    }
+}
+
 fn main() {
     // Schema dispatch: default "financial" for back-compat with any K8s Job
     // manifest that predates the c360 branch. `entrypoint.py` gates schema
@@ -324,6 +388,11 @@ fn pacs008_main() {
     // manifest only, on a dedicated pod). Offloading reference removes the
     // node-0 straggler so bronze pods finish together.
     let mode: String = arg("--mode", "all".to_string());
+    // Delivery mode is orthogonal to work split (Wave 2 D3, 2026-09-28):
+    // batch (default) writes each bronze file as one S3 PUT; continuous
+    // streams parquet row-groups through S3 multipart. Corpus content is
+    // identical at fixed seed; verified by row-identity test in cycles.rs.
+    let delivery = parse_delivery_mode();
     // Reject typos explicitly so an operator's `--mode brozne` does not
     // silently succeed with zero files written (previously it fell through
     // to do_bronze=false, do_reference=false and exit 0 -- caught by an
@@ -337,6 +406,22 @@ fn pacs008_main() {
     }
     let do_bronze = mode == "all" || mode == "bronze";
     let do_reference = mode == "reference" || (mode == "all" && node_id == 0);
+    // Multi-writer guard (Wave 1 A3, 2026-09-28). Reference files
+    // (manifest.parquet, party.parquet, account.parquet, watchlist.parquet)
+    // are single-writer artefacts. A `--mode reference` pod is the whole
+    // reference writer; running more than one races the same S3 keys and
+    // leaves the corpus corrupt under last-writer-wins. Refuse >1 pod when
+    // the role is reference-only. `--mode all` is fine because only node 0
+    // ever writes reference on that path (see do_reference above).
+    if mode == "reference" && total_nodes > 1 {
+        eprintln!(
+            "--mode reference with --total-nodes {} > 1 would race the reference S3 keys; \
+             run --mode reference from exactly one pod (or use --mode all where only \
+             node 0 writes reference).",
+            total_nodes
+        );
+        std::process::exit(2);
+    }
     // Validate --corpus-months FIRST, before rayon pool init and before the
     // ~11M-entity world build, so a misconfigured pod exits in milliseconds
     // rather than after minutes of setup times backoffLimit retries. Use
@@ -715,11 +800,16 @@ fn pacs008_main() {
     let t_typ = t_typ0.elapsed().as_secs_f64();
 
     // Reference zones (manifest, account, party) go before this pod's bronze
-    // files: they depend only on the world and the schedule, and in
-    // continuous mode silver-stream joins each micro-batch to the party
-    // master. With one pod in --mode all that puts them ahead of every bronze
-    // file; with several pods or a dedicated reference pod, bronze from other
-    // pods can land first, and silver-stream waits for them.
+    // files: they depend only on the world and the schedule, and the pipeline
+    // side's silver-stream (PipelineMode.CONTINUOUS) joins each micro-batch to
+    // the party master, so party must be visible before bronze is trickled in.
+    // With one pod in --mode all that puts them ahead of every bronze file;
+    // with several pods or a dedicated --mode reference pod, bronze from other
+    // pods can land first, and silver-stream waits for them. Note: "continuous"
+    // here refers to the pipeline mode, NOT to a datagen delivery mode --
+    // datagen has always pre-written the corpus; a future --delivery-mode
+    // continuous streams the same corpus through MpuWriter instead of
+    // buffering whole files.
     let t_ref0 = std::time::Instant::now();
     // Track reference-zone bytes/files separately so the final summary line
     // reflects what a `--mode reference` pod produced. Previously the
@@ -1025,14 +1115,16 @@ fn pacs008_main() {
         );
         build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let tw = std::time::Instant::now();
-        // Slight overshoot on the pre-alloc so ArrowWriter rarely reallocs.
+        // Slight overshoot on the pre-alloc so ArrowWriter rarely reallocs
+        // (only used by DeliveryMode::Batch; continuous streams via MpuWriter).
         let cap_hint = (file_size as usize + file_size as usize / 8).max(1024 * 1024);
-        let buf = encode_parquet(&batch, cap_hint);
-        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let sz = buf.len() as u64;
         let key = cycle::pacs_key(fid, cycle_n);
         let tu = std::time::Instant::now();
-        sink.put(&key, buf);
+        let sz = write_bronze_file(&sink, &key, &batch, cap_hint, delivery);
+        // upload_ns counts write + upload for continuous; write_ns is 0 for
+        // continuous because the streaming write IS the upload. Keep the
+        // interpretation clear in the summary line below.
+        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
         total_bytes.fetch_add(sz, Ordering::Relaxed);
         files_written.fetch_add(1, Ordering::Relaxed);
@@ -1200,19 +1292,15 @@ fn customer360_main() {
         eprintln!("customer id space: {}", e);
         std::process::exit(2);
     });
-    // `customer360_bytes_per_row_default()` is measured at payload_kb=2. Any
-    // other value silently mis-sizes rows_per_file (files 1/N or Nx too
-    // large). Refuse until per-payload measurements are folded in.
-    let payload_kb: usize = arg("--payload-kb", 2usize);
-    if payload_kb != 2 {
-        eprintln!(
-            "--payload-kb {} is not supported (bytes/row measurements are for payload_kb=2 only); \
-             either pass --payload-kb 2 or extend customer360_bytes_per_row_default to be \
-             payload-aware",
-            payload_kb
-        );
-        std::process::exit(2);
-    }
+    // payload_kb was a CLI knob (--payload-kb) that had only ever been
+    // calibrated at 2, so any other value silently mis-sized rows_per_file
+    // and the refuse path exited 2. Dropped 2026-09-28 (LB-191 companion,
+    // Wave 1 C3): no shipped template ever passed a different value, and a
+    // future need for variable payload comes back with real per-payload
+    // calibration in customer360_bytes_per_row_default(). Config::payload_kb
+    // stays as a Rust-visible field so unit tests can build small_cfg with
+    // payload_kb=1. The old --payload-kb CLI value (if any) is ignored.
+    let payload_kb: usize = 2;
     let dirty_ratio: f64 = arg("--dirty-ratio", 0.08);
     let duplicate_email_pct: f64 = arg("--duplicate-email-pct", 0.10);
     // Timestamp range as YYYY-MM-DD; default 2024-01-01..2025-01-01 matching
@@ -1253,6 +1341,9 @@ fn customer360_main() {
             .build_global()
             .expect("failed to size rayon pool");
     }
+    // Delivery mode (Wave 2 D3, 2026-09-28); see the pacs008 branch for the
+    // full semantic. Default batch preserves the current pinned-digest tests.
+    let delivery = parse_delivery_mode();
 
     let sink = S3Sink::from_env(&bucket, &prefix);
 
@@ -1323,14 +1414,11 @@ fn customer360_main() {
 
         let tw = std::time::Instant::now();
         let cap_hint = (file_size_bytes + file_size_bytes / 8).max(1024 * 1024);
-        let buf = encode_parquet(&batch, cap_hint);
-        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let sz = buf.len() as u64;
-
         // key is relative to S3Sink.prefix (set from --prefix). Sink prepends.
         let key = cycle::c360_key(fid, cycle_n);
         let tu = std::time::Instant::now();
-        sink.put(&key, buf);
+        let sz = write_bronze_file(&sink, &key, &batch, cap_hint, delivery);
+        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
         total_bytes.fetch_add(sz, Ordering::Relaxed);
         files_written.fetch_add(1, Ordering::Relaxed);

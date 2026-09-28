@@ -31,7 +31,10 @@ class DatagenDeployer:
         self.renderer = engine.renderer
         self.context = engine.context
 
-    _PAYLOAD_SIZE_BYTES = 2048  # 2KB hex payloads for compression profiling
+    # Payload size was a template context knob feeding --payload-kb; dropped
+    # with the CLI arg 2026-09-28 (LB-191 companion). The Rust binary now
+    # hardcodes 2 KiB. Kept here as documentation of what the fixed value is.
+    _PAYLOAD_SIZE_BYTES = 2048  # 2 KiB hex payloads for compression profiling
 
     def _build_datagen_context(self) -> dict[str, Any]:
         """Build context for datagen template."""
@@ -78,7 +81,8 @@ class DatagenDeployer:
                 # every multi-cycle cycle draws from the same customers.
                 "datagen_customer_id_max": dims.customers,
                 "datagen_file_size_mb": file_size_mb,
-                "datagen_payload_kb": self._PAYLOAD_SIZE_BYTES // 1024,
+                # datagen_payload_kb context var dropped 2026-09-28; template
+                # no longer renders --payload-kb; Rust hardcodes 2 KiB.
                 "datagen_path_prefix": path_prefix,
                 "datagen_schema": schema_value,
                 # From config, or the pre-registration's calibration seed for
@@ -99,12 +103,12 @@ class DatagenDeployer:
             }
         )
 
-        # Duration-based generation for sustained pipelines
-        from lakebench.config.schema import PipelineMode
-
-        pipeline = cfg.architecture.pipeline
-        if pipeline.mode == PipelineMode.SUSTAINED:
-            context["datagen_duration"] = pipeline.sustained.run_duration
+        # datagen_duration context var dropped 2026-09-28 (Wave 2 D8). The
+        # entrypoint.py argparse layer silently discarded --duration; the Rust
+        # binary never read it; a continuous / sustained pipeline is driven by
+        # the pipeline side trickle-reading a pre-written finite corpus (LB-156)
+        # or, in a future release, by a producer-driven delivery mode
+        # (--delivery-mode). Passing --duration was misleading.
 
         return context
 

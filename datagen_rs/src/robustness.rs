@@ -44,6 +44,17 @@ pub const ROBUSTNESS_SEED: i64 = 90_000_042;
 /// refuses it with the perturbation.
 pub const EVALUATION_SEED: i64 = 50_000_043;
 
+/// Pre-registered calibration replicate seeds
+/// (`corpora.calibration_replicate_seeds`). These are used for D8 shard
+/// replicates against the calibration seed. Refused with
+/// `--robustness-perturbation` so a replicate run cannot silently ship a
+/// perturbed s2 leg that D8 would then average into an unperturbed baseline.
+/// Mirrored in Python (`src/lakebench/config/datagen_seed.py`); Rust regression
+/// test in tests/robustness.rs pins the (seed, flag) truth table so it stays
+/// aligned. Added 2026-09-28 (Wave 1 A1).
+pub const CALIBRATION_REPLICATE_SEEDS: &[i64] =
+    &[123_456_832, 246_913_621, 370_370_410, 493_827_199];
+
 /// Manifest stamp (injection_parameters map keys). A perturbed corpus carries
 /// these on every manifest row; an unperturbed one carries none, so its
 /// manifest bytes are unchanged. The scorer and scripts/aml_gate.py require
@@ -119,6 +130,13 @@ pub fn perturbation_for_seed(seed: i64, on: bool) -> Result<Perturbation, String
     if seed == EVALUATION_SEED && on {
         return Err(format!(
             "--seed {seed} is the pre-registered evaluation seed: it is never perturbed"
+        ));
+    }
+    if CALIBRATION_REPLICATE_SEEDS.contains(&seed) && on {
+        return Err(format!(
+            "--seed {seed} is a pre-registered calibration replicate seed \
+             (corpora.calibration_replicate_seeds): it is never perturbed. \
+             A perturbed replicate would silently ship an s2 leg into D8."
         ));
     }
     Ok(if on {
