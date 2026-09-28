@@ -50,6 +50,9 @@ def test_stream_main_invokes_ensure_partition_transform(monkeypatch):
     import common  # noqa: F401
     import silver_stream_financial as ss
 
+    # D-safe residual (entity_profiles not maintained in continuous mode).
+    monkeypatch.setenv("LB_ALLOW_PARTIAL_SILVER", "1")
+
     # Capture every call to ensure_partition_transform (imported into
     # silver_stream_financial via `from common import ensure_partition_transform`,
     # so patch the local binding).

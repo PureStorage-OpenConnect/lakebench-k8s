@@ -206,12 +206,15 @@ def _run(jar):
         spark.sql(_EDGES_DDL)
 
         # Bypass KYC and dimension writes: the test isolates the DELETE gate
-        # on the two batch-keyed tables. append_new_dimensions writes to
-        # tables the test does not create; skip it entirely.
+        # on the two batch-keyed tables. append_new_dimensions and D-full's
+        # _maintain_statements both write to tables the test does not create;
+        # skip them entirely so the assertions can focus on the DELETE calls
+        # against silver.transactions and silver.counterparty_edges.
         ss._KYC = None
         ss._KYC_LOADED = True
         ss._kyc = lambda _s: None
         ss.append_new_dimensions = lambda *_a, **_kw: (0, 0)
+        ss._maintain_statements = lambda *_a, **_kw: (0, 0)
 
         def bronze(bid):
             return _bronze_row(

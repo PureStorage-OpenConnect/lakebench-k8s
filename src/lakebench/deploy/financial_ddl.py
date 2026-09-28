@@ -245,7 +245,9 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     bal_after      DECIMAL(38, 2) NOT NULL,
     txn_id         STRING NOT NULL,
     uetr           STRING NOT NULL,
-    bk_tx_cd       STRING NOT NULL
+    bk_tx_cd       STRING NOT NULL,
+    _batch_id      BIGINT,
+    _stream_id     STRING
 )
 USING iceberg
 PARTITIONED BY (months(book_ts))
@@ -256,6 +258,11 @@ TBLPROPERTIES (
     'write.metadata.previous-versions-max' = '50'
 )
 """.strip()
+# D-full-simple: _batch_id + _stream_id let silver_stream_financial maintain
+# per-iban running balances idempotently. The stream tags every row with
+# (_stream_id, _batch_id); DELETE + INSERT on the same key makes a retried
+# batch a no-op. Batch mode writes _stream_id='batch' and _batch_id=NULL so
+# the two never collide (a stream never DELETEs batch rows).
 # bal_before / bal_after are DECIMAL(38,2), not (18,2). Spark widens
 # SUM(decimal(18,2)) OVER (..) to decimal(38,2); casting the running sum back
 # to (18,2) silently returns NULL on overflow (ANSI off by default), which
