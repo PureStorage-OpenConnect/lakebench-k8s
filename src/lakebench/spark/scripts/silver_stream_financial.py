@@ -73,11 +73,13 @@ limited to opened_date (first date the stream saw).
 
 from __future__ import annotations
 
+import os
 import signal
 import threading
 import time
 
 from common import (
+    SilverAbort,
     assert_progress,
     clear_stream_started_marker,
     emit_stream_scale_admission,
@@ -228,6 +230,215 @@ def _kyc(spark):
     return _KYC
 
 
+def _maintain_statements(batch_df, batch_id: int, sid: str, check_replay: bool) -> int:
+    """D-full-simple: idempotently maintain silver.account_statements +
+    roll up silver.accounts.current_balance for this micro-batch.
+
+    Reads the batch's touched iban set from bronze, looks up each iban's
+    latest ``bal_after`` from silver.account_statements (or the deterministic
+    opening_balance formula for a first-touch account), computes new
+    statement rows with ``bal_after = prior + cumsum(signed_amt)``, tags
+    each row with ``(_stream_id, _batch_id)`` for replay idempotency,
+    DELETE+INSERTs into the table, and MERGEs the latest per-iban bal_after
+    into silver.accounts.current_balance.
+
+    Parity with batch build (``build_statements`` / ``update_accounts_balance``):
+    the ordering, tie-breaks, signed-amount convention, opening-balance
+    formula and per-account row_number are identical. On a bronze corpus
+    delivered as N stream micro-batches vs one batch pass, the final
+    (iban, entry_seq) rows and current_balance are byte-identical
+    (associativity of the running sum).
+
+    Returns the number of statement entries written this batch.
+    """
+    from pyspark.sql import Window
+    from pyspark.sql.functions import abs as abs_
+    from pyspark.sql.functions import coalesce, col, expr, row_number, when, xxhash64
+    from pyspark.sql.functions import sum as sum_
+
+    spark = batch_df.sparkSession
+
+    # 1. Explode bronze -> two statement lines per pacs.008 (DBIT + CRDT),
+    #    filter iban NULLs, derive account_id + signed_amt + tie-break helper.
+    common_cols = [
+        col("cre_dt_tm").alias("book_ts"),
+        col("cre_dt_tm").alias("val_ts"),
+        col("intr_bk_sttlm_amt").cast("decimal(18,2)").alias("amt"),
+        col("intr_bk_sttlm_ccy").alias("ccy"),
+        col("txn_id"),
+        col("uetr"),
+    ]
+    dbit = batch_df.select(
+        col("dbtr_acct.iban").alias("iban"),
+        lit("DBIT").alias("cdt_dbt_ind"),
+        *common_cols,
+    )
+    crdt = batch_df.select(
+        col("cdtr_acct.iban").alias("iban"),
+        lit("CRDT").alias("cdt_dbt_ind"),
+        *common_cols,
+    )
+    entries = (
+        dbit.unionByName(crdt)
+        .filter(col("iban").isNotNull())
+        .withColumn("account_id", xxhash64(col("iban")))
+        .withColumn(
+            "signed_amt",
+            when(col("cdt_dbt_ind") == lit("CRDT"), col("amt")).otherwise(-col("amt")),
+        )
+        .withColumn(
+            "_cdt_dbt_ord",
+            when(col("cdt_dbt_ind") == lit("DBIT"), lit(0)).otherwise(lit(1)),
+        )
+        .cache()
+    )
+    try:
+        n_entries = entries.count()
+        if n_entries == 0:
+            return 0
+
+        # 2. Per touched account: prior latest bal_after and prior max entry_seq.
+        touched = entries.select("account_id", "iban").distinct().cache()
+        try:
+            stmts_tbl = spark.table(f"{CATALOG}.{SILVER_STATEMENTS}")
+            # Inner join to restrict the aggregate to touched accounts;
+            # groupBy + max/max_by is one shuffle vs a full-table window.
+            prior_state = (
+                stmts_tbl.join(
+                    touched.select("account_id"),
+                    on="account_id",
+                    how="inner",
+                )
+                .groupBy("account_id")
+                .agg(
+                    # Spark 3.5+ max_by: bal_after at the maximum entry_seq per
+                    # account. entry_seq is monotone per (account_id, book_ts),
+                    # so max_by(entry_seq) gives the latest row deterministically.
+                    expr("cast(max_by(bal_after, entry_seq) as decimal(38,2)) as _prev_bal_after"),
+                    expr("cast(max(entry_seq) as bigint) as _prev_max_seq"),
+                )
+            )
+
+            # 3. Join, fill first-touch defaults, cumulative sum per account.
+            deterministic_open = ((abs_(col("account_id")) % lit(200_000)) + lit(10_000)).cast(
+                "decimal(18,2)"
+            )
+            with_prior = (
+                entries.join(prior_state, on="account_id", how="left")
+                .withColumn(
+                    "_opening",
+                    deterministic_open,
+                )
+                .withColumn(
+                    "_prev_bal_after",
+                    coalesce(
+                        col("_prev_bal_after"),
+                        col("_opening").cast("decimal(38,2)"),
+                    ),
+                )
+                .withColumn(
+                    "_prev_max_seq",
+                    coalesce(col("_prev_max_seq"), lit(0).cast("bigint")),
+                )
+            )
+
+            w = Window.partitionBy("account_id").orderBy(
+                col("book_ts"),
+                col("txn_id"),
+                col("_cdt_dbt_ord"),
+            )
+            with_prior = (
+                with_prior.withColumn(
+                    "_batch_cumsum",
+                    sum_(col("signed_amt")).over(w).cast("decimal(38,2)"),
+                )
+                .withColumn(
+                    "bal_after",
+                    (col("_prev_bal_after") + col("_batch_cumsum")).cast("decimal(38,2)"),
+                )
+                .withColumn(
+                    "bal_before",
+                    (col("bal_after") - col("signed_amt")).cast("decimal(38,2)"),
+                )
+                .withColumn(
+                    "entry_seq",
+                    (col("_prev_max_seq") + row_number().over(w)).cast("bigint"),
+                )
+            )
+
+            out = with_prior.select(
+                col("account_id"),
+                col("iban"),
+                col("entry_seq"),
+                col("book_ts"),
+                col("val_ts"),
+                col("cdt_dbt_ind"),
+                col("amt"),
+                col("ccy"),
+                col("bal_before"),
+                col("bal_after"),
+                col("txn_id"),
+                col("uetr"),
+                lit("PMNT-ICDT").alias("bk_tx_cd"),
+                lit(int(batch_id)).cast("bigint").alias("_batch_id"),
+                lit(sid).alias("_stream_id"),
+            )
+
+            # 4. DELETE-INSERT idempotency. Same protocol as silver.transactions.
+            if check_replay:
+                spark.sql(
+                    f"DELETE FROM {CATALOG}.{SILVER_STATEMENTS} "
+                    f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
+                )
+            out.writeTo(f"{CATALOG}.{SILVER_STATEMENTS}").append()
+
+            # 5. Roll up silver.accounts.current_balance for touched IBANs only.
+            # A separate temp-view keeps the merge source narrow to the
+            # batch's touched IBANs (typically << the accounts table).
+            safe_sid = _sanitize_for_view(sid)
+            view_name = f"_d_full_touched_ibans_{safe_sid}_{int(batch_id)}"
+            touched.select("iban").createOrReplaceTempView(view_name)
+            try:
+                spark.sql(
+                    f"""
+MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
+USING (
+    SELECT iban, running_balance
+    FROM (
+        SELECT s.iban,
+               s.bal_after AS running_balance,
+               row_number() OVER (
+                   PARTITION BY s.iban
+                   ORDER BY s.book_ts DESC, s.entry_seq DESC
+               ) AS rn
+        FROM {CATALOG}.{SILVER_STATEMENTS} s
+        JOIN {view_name} touched ON s.iban = touched.iban
+    ) ranked
+    WHERE rn = 1
+) src
+ON t.iban = src.iban
+WHEN MATCHED THEN UPDATE SET current_balance = src.running_balance
+""".strip()
+                )
+            finally:
+                try:
+                    spark.catalog.dropTempView(view_name)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            return int(n_entries)
+        finally:
+            touched.unpersist(blocking=False)
+    finally:
+        entries.unpersist(blocking=False)
+
+
+def _sanitize_for_view(text: str) -> str:
+    """Streaming query ids include hyphens (UUID form); Spark temp view names
+    disallow them, so map to identifier-safe underscores. Idempotent."""
+    return "".join(c if c.isalnum() else "_" for c in text)
+
+
 def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
     """Append the entities and accounts this batch introduces. Anti-join on
     the key against the table, so a replayed batch writes nothing twice."""
@@ -343,14 +554,21 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark))
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
 
-        # PHASE 4 (I10 sealed marker): only after transactions AND edges have
-        # committed do we write the (stream_id, batch_id) row that gold-side
-        # consumers semi-join against. A driver crash between phase 1 and this
-        # phase leaves txns and edges rows visible in silver, but no matching
-        # versions row, so consumers hide the partial batch. On the retry the
-        # phase-1 DELETE (guarded by replay_possible) cleans the ghost rows
-        # before the same (sid, batch_id) is re-materialised; the MERGE below
-        # then seals the retry idempotently.
+        # PHASE 4 (D-full-simple): silver.account_statements per-batch MERGE and
+        # silver.accounts.current_balance roll-up for this batch's touched IBANs.
+        n_stmts = _maintain_statements(batch_df, int(batch_id), sid, check_replay)
+        log(f"[batch {batch_id}] wrote {n_stmts} statement entries and updated current_balance")
+
+        # PHASE 5 (I10 sealed marker): must be LAST. Only after transactions,
+        # edges, dimensions AND statements have committed do we write the
+        # (stream_id, batch_id) row that gold-side consumers semi-join against.
+        # A driver crash between any earlier phase and this one leaves partial
+        # silver rows visible but no matching versions row, so consumers hide
+        # the partial batch. On retry, the phase-1 DELETE (guarded by
+        # replay_possible) cleans ghost txns/edges rows and the phase-4 MERGE
+        # on statements is idempotent by (_stream_id, _batch_id) key, so the
+        # retry re-materialises the same (sid, batch_id) and the MERGE below
+        # seals it idempotently.
         #
         # MERGE (not INSERT): a crash after this write but before Structured
         # Streaming durably records the batch id would replay the whole
@@ -375,7 +593,41 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         tagged_txns.unpersist(blocking=False)
 
 
+def _refuse_unless_partial_silver_allowed() -> None:
+    """D-safe (residual): silver.entity_profiles is not yet maintained by
+    silver_stream_financial (D-full-profiles is a separate lane). Refuse
+    to run continuous AML unless the operator explicitly opts in to a
+    partial silver set via ``LB_ALLOW_PARTIAL_SILVER=1``.
+
+    Previously the same refusal named silver.account_statements and
+    silver.accounts.current_balance too; D-full-simple maintains both, so
+    the refusal now cites only silver.entity_profiles. When D-full-profiles
+    lands the refusal is removed entirely.
+
+    Emits ``silver_stream_partial_silver=true`` (invariant-6 label) when
+    the flag is set so downstream reports never present a Lakebench-imposed
+    scope reduction as full-fidelity output.
+    """
+    if os.getenv("LB_ALLOW_PARTIAL_SILVER") != "1":
+        raise SilverAbort(
+            "silver-stream-financial refuses AML continuous mode: "
+            "silver.entity_profiles is not maintained by the continuous "
+            "pipeline in this release. Set LB_ALLOW_PARTIAL_SILVER=1 to "
+            "run with the partial silver set (silver.account_statements "
+            "and silver.accounts.current_balance ARE maintained by D-full "
+            "simple; only entity_profiles remains until D-full-profiles "
+            "lands). This is a Lakebench-imposed scope cap, labelled as "
+            "such in metrics."
+        )
+    log("silver_stream_partial_silver: true")
+
+
 def main() -> None:
+    # D-safe residual: refuse before any Spark work when the operator has not
+    # opted in. Keeping this at the top means a mis-configured deployment
+    # fails within a second, not after a full stream startup.
+    _refuse_unless_partial_silver_allowed()
+
     spark = SparkSession.builder.appName("lb-silver-stream-financial").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
@@ -441,6 +693,11 @@ def main() -> None:
     # Idempotent on re-runs; adds the column on a reused catalog.
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_stream_id", "STRING")
+    # D-full-simple: silver.account_statements gains the same idempotency-key
+    # columns. Batch and stream both write them; a reused catalog whose
+    # statements table predates the columns receives them here.
+    ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_batch_id", "BIGINT")
+    ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
 
     # B3: refuse a fresh checkpoint over populated silver -- the source

@@ -264,10 +264,15 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_STATEMENTS} (
     bal_after      DECIMAL(38, 2) NOT NULL,
     txn_id         STRING NOT NULL,
     uetr           STRING NOT NULL,
-    bk_tx_cd       STRING NOT NULL      -- ISO 20022 bank txn code, e.g. PMNT-ICDT
+    bk_tx_cd       STRING NOT NULL,     -- ISO 20022 bank txn code, e.g. PMNT-ICDT
+    _batch_id      BIGINT,
+    _stream_id     STRING
 ) USING iceberg PARTITIONED BY (months(book_ts))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
+# D-full-simple: _batch_id + _stream_id key silver_stream_financial's per-batch
+# statements MERGE. Batch mode writes NULL / 'batch' so streams never DELETE
+# batch-written rows. Keep in lock-step with financial_ddl.SILVER_ACCOUNT_STATEMENTS_DDL.
 
 DDL_EDGES = f"""
 CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_EDGES} (
@@ -803,6 +808,10 @@ def build_statements(bronze, accounts_df):
     )
 
     # Drop the internal ordering helper before writing to Iceberg.
+    # D-full-simple: batch mode writes _batch_id=NULL and _stream_id='batch'
+    # so a stream that starts later never DELETEs these rows (streams key on
+    # (_stream_id, _batch_id) where _stream_id is the streaming query id,
+    # never the 'batch' sentinel).
     return entries.select(
         col("account_id"),
         col("iban"),
@@ -817,6 +826,8 @@ def build_statements(bronze, accounts_df):
         col("txn_id"),
         col("uetr"),
         lit("PMNT-ICDT").alias("bk_tx_cd"),
+        lit(None).cast("bigint").alias("_batch_id"),
+        lit("batch").alias("_stream_id"),
     )
 
 
@@ -1181,6 +1192,11 @@ def main() -> None:
         # writes 'batch'; streams write streaming_query_id. Old catalogs
         # predate the column, so add it before the first write below.
         ensure_column(spark, f"{CATALOG}.{table}", "_stream_id", "STRING")
+    # D-full-simple: silver.account_statements gains the same idempotency-key
+    # columns as transactions and edges; silver_stream_financial writes them
+    # every micro-batch, batch mode writes NULL/'batch' sentinel values.
+    ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_batch_id", "BIGINT")
+    ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "ingest_ts", "TIMESTAMP")
     ensure_partition_transform(
         spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "days(txn_timestamp)", "months(txn_timestamp)"
