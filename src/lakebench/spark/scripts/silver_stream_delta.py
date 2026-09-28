@@ -85,7 +85,7 @@ _TABLE_WAIT_MAX = int(os.environ.get("LB_SILVER_BRONZE_WAIT_SECONDS", "1800"))
 
 def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
     """Rows THIS write attempt committed, read from its own row in
-    ``DeltaTable.forName(spark, silver_tbl).history(20)``.
+    ``DeltaTable.forName(spark, silver_tbl).history(100)``.
 
     ``attempt_tag`` is a per-attempt unique string, set as the write's
     ``userMetadata``. Uniqueness matters: two attempts of the same
@@ -96,17 +96,25 @@ def _rows_from_own_commit(spark, silver_tbl, attempt_tag):
 
     Returns:
       - ``int(operationMetrics.numOutputRows)`` when the matching row is
-        found in the last 20 commits (this attempt committed rows).
+        found in the last 100 commits (this attempt committed rows).
       - ``None`` when no matching row is found: either Delta short-circuited
         this attempt via its ``(appId, version)`` dedup, or the write did
         not reach the log; either way, this attempt committed nothing.
+
+    Window is 100 rather than 20: concurrent OPTIMIZE / VACUUM / a second
+    writer to the same table can push our commit past a small window
+    between our write and our history read, and returning ``None`` on a
+    real commit would silently under-count against A1's LB-044 accumulator
+    (invariant 5 label drift, not corruption -- rows are still written).
+    100 is a cheap Delta metadata scan and covers realistic maintenance
+    burst rates.
 
     Immune to interleaved compaction/vacuum commits that would displace the
     write from the head of history and break a before/after-version bracket.
     """
     from delta.tables import DeltaTable
 
-    hist = DeltaTable.forName(spark, silver_tbl).history(20)
+    hist = DeltaTable.forName(spark, silver_tbl).history(100)
     if "userMetadata" not in set(hist.columns):
         # Older Delta build without userMetadata in history; the caller
         # cannot distinguish a replay from a real commit, so refuse.
