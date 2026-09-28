@@ -2660,6 +2660,16 @@ class SparkJobManager:
                     {"name": "TARGET_FILE_SIZE_BYTES", "value": target_file_size_bytes},
                 ]
             )
+            # A3 (silver-plan): silver-stream reads this cap so its bronze
+            # wait loop cannot spend the whole window before the LB-044 gate
+            # fires. See SustainedConfig.effective_silver_bronze_wait_seconds.
+            if job_type == JobType.SILVER_STREAM:
+                env.append(
+                    {
+                        "name": "LB_SILVER_BRONZE_WAIT_SECONDS",
+                        "value": str(sustained.effective_silver_bronze_wait_seconds()),
+                    }
+                )
             # LB-090: AML sustained scripts read a different set of env
             # var names than the schema-agnostic C360 scripts do.
             # Rather than rename either side (both have callers), set

@@ -889,6 +889,18 @@ class SustainedConfig(ConfigModel):
         ge=32,
         description="Target Iceberg file size for silver writes (MB)",
     )
+    silver_bronze_wait_seconds: int | None = Field(
+        default=None,
+        ge=10,
+        description=(
+            "Seconds silver-stream waits for the bronze table to appear before "
+            "raising SilverAbort (A3, silver-plan). Unset (auto): run_duration / "
+            "4, floored at 10 s, so a short run cannot spend its whole window on "
+            "the wait. The old fixed 1800 was longer than a default run_duration "
+            "and prevented the LB-044 gate from ever firing on a stalled "
+            "bronze-ingest."
+        ),
+    )
     gold_target_file_size_mb: int = Field(
         default=128,
         ge=32,
@@ -1015,6 +1027,18 @@ class SustainedConfig(ConfigModel):
         if self.compaction_interval:
             return self.compaction_interval
         return 2 * self.effective_retention_interval(run_duration)
+
+    def effective_silver_bronze_wait_seconds(self, run_duration: int | None = None) -> int:
+        """silver_bronze_wait_seconds, or auto: run_duration // 4 floored at 10.
+
+        A3 (silver-plan): caps the wait for the bronze table so a stream
+        cannot burn its whole window on the wait. The floor keeps the value
+        positive even for a minimum-length run.
+        """
+        if self.silver_bronze_wait_seconds is not None:
+            return self.silver_bronze_wait_seconds
+        window = self.run_duration if run_duration is None else run_duration
+        return max(10, int(window) // 4)
 
 
 class ProcessingConfig(ConfigModel):

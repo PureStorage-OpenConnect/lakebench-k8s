@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 
 from common import (
+    SilverAbort,
     apply_silver_transformations_anchored,
     assert_progress,
     c360_bronze_path,
@@ -26,7 +27,7 @@ from common import (
     env,
     files_added_by_last_commit,
     log,
-    path_size_gb,
+    path_size_gb_strict,
     resolve_data_clock,
     sample_key_profile,
     set_utc_session,
@@ -74,8 +75,12 @@ _COUNTED: dict[str, int] = {}
 
 
 def get_path_size_gb(spark, path: str) -> float:
-    """Size of a path or glob in GB (common.path_size_gb)."""
-    return path_size_gb(spark, path)
+    """Size of a path or glob in GB (common.path_size_gb_strict).
+
+    A6 (silver-plan): the strict variant re-raises listing errors so an S3
+    outage cannot silently look like an empty bronze path.
+    """
+    return path_size_gb_strict(spark, path)
 
 
 def profile_bronze_data(spark, txn_path: str) -> DataProfile:
@@ -98,13 +103,12 @@ def profile_bronze_data(spark, txn_path: str) -> DataProfile:
     # 2. Read schema only - lazy, no data scan
     transactions = spark.read.parquet(txn_path)
 
-    # 3. Estimate row count from size (avoid full count)
-    # ~4KB per row based on schema analysis of customer/interactions data
-    estimated_row_count = int(txn_size_gb * 1024 * 1024 * 1024 / 4096)
-    log(f"  Estimated rows: {estimated_row_count:,}")
+    # 3. Sample sizing needs an approximate row count; see silver_build.py
+    # for the A5 rationale for dropping the published `estimated_rows`.
+    sample_estimate = int(txn_size_gb * 250_000)
 
     # 4. Sample: 0.1% or enough for 10M rows, whichever is smaller
-    sample_fraction = min(0.001, 10_000_000 / max(estimated_row_count, 1))
+    sample_fraction = min(0.001, 10_000_000 / max(sample_estimate, 1))
     sample_df = transactions.sample(sample_fraction)
 
     sample_stats = sample_df.agg(
@@ -117,7 +121,7 @@ def profile_bronze_data(spark, txn_path: str) -> DataProfile:
     # customer as unique to the sample and reported 14.7M customers at
     # scale 10, where there are 1M (LB-144).
     approx_customer_count, skew_factor = sample_key_profile(
-        sample_df, "customer_id", estimated_row_count
+        sample_df, "customer_id", sample_estimate
     )
     min_date = sample_stats.min_date
     max_date = sample_stats.max_date
@@ -130,7 +134,7 @@ def profile_bronze_data(spark, txn_path: str) -> DataProfile:
 
     profile = DataProfile(
         total_size_gb=txn_size_gb,
-        transaction_count=estimated_row_count,  # Estimated, not counted
+        transaction_count=0,  # A5: no longer estimated; bronze_rows is counted downstream.
         customer_count=approx_customer_count,
         customers_size_gb=0.0,
         skew_factor=skew_factor,
@@ -265,9 +269,12 @@ def _delta_write_props() -> dict[str, str]:
 def rows_added_by_last_commit(spark, silver_tbl):
     """Rows the table's latest Delta commit wrote (this cycle's write).
 
-    Commit metadata only; falls back to a full count when the metric is
-    missing. In incremental mode the table count is every cycle so far,
-    which overstated output_rows.
+    Commit metadata only; returns None when the metric is missing.
+
+    A4 (silver-plan): the previous fallback ``spark.table(silver_tbl).count()``
+    returned the cumulative table row count, which masked a zero-write cycle
+    in incremental mode (LB-044 class). Callers now treat None as "unknown"
+    and refuse to publish it as ``output_rows``.
     """
     try:
         r = spark.sql(f"DESCRIBE HISTORY {silver_tbl} LIMIT 1").collect()
@@ -275,8 +282,8 @@ def rows_added_by_last_commit(spark, silver_tbl):
         if n is not None:
             return int(n)
     except Exception as e:  # noqa: BLE001
-        log(f"Warning: commit metrics unavailable ({e}); counting the table")
-    return spark.table(silver_tbl).count()
+        log(f"Warning: commit metrics unavailable ({e}); output_rows will be unknown")
+    return None
 
 
 def cluster_silver(spark, silver_df):
@@ -347,11 +354,15 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
       write.
     """
     log("Executing STREAMING strategy (single pass)...")
-    log(
-        f"Input size: {profile.total_size_gb:.1f} GB (estimated {profile.transaction_count:,} rows)"
-    )
+    log(f"Input size: {profile.total_size_gb:.1f} GB")
 
     df_bronze = spark.read.parquet(source)
+
+    # A5 (silver-plan): count bronze rows before the transform so the metrics
+    # block emits a real `bronze_rows` for STREAMING, matching SIMPLE.
+    bronze_count = df_bronze.count()
+    log(f"Bronze records: {bronze_count:,}")
+    _COUNTED["bronze_rows"] = bronze_count
 
     # LB_DATA_CLOCK when set; a one-column pass over bronze only without it.
     anchor = resolve_data_clock(df_bronze)
@@ -381,7 +392,11 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
         )
 
     silver_count = rows_added_by_last_commit(spark, silver_tbl)
-    log(f"Wrote {silver_count:,} records")
+    log(
+        f"Wrote {silver_count:,} records"
+        if silver_count is not None
+        else "Wrote unknown records (commit metrics unavailable)"
+    )
     log_silver_files(spark, silver_tbl)
 
     return silver_count
@@ -456,7 +471,10 @@ if size_override and size_override > 0:
 else:
     profile = profile_bronze_data(spark, bronze_source)
 
-if profile.transaction_count == 0:
+# A5/A6 (silver-plan): the size comes from path_size_gb_strict, which
+# raises on listing failures rather than returning 0.0 on error; a zero size
+# now really means empty bronze.
+if profile.total_size_gb == 0 and size_override is None:
     log("ERROR: Bronze dataset is empty - run Bronze job first")
     spark.stop()
     sys.exit(1)
@@ -489,20 +507,30 @@ log("=" * 60)
 log("Customer 360 Silver Build (Delta) COMPLETED")
 log("=" * 60)
 log(f"Strategy: {strategy.value}")
-log(f"Records written: {silver_count:,}")
+log(f"Records written: {silver_count if silver_count is not None else 'unknown'}")
 log(f"Table: {silver_tbl}")
 log("Partitioned by: interaction_date")
 log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
 log("=== JOB METRICS: silver-build ===")
 log(f"input_size_gb: {profile.total_size_gb:.3f}")
-if "bronze_rows" in _COUNTED:
-    log(f"input_rows: {_COUNTED['bronze_rows']}")
+# A5 (silver-plan): unify on `bronze_rows` across SIMPLE and STREAMING; the
+# earlier `estimated_rows` emission is dropped.
+log(f"bronze_rows: {_COUNTED.get('bronze_rows', 'unknown')}")
+# A4 (silver-plan): output_rows is `unknown` when the commit-metrics
+# fallback fired; the LB-044 gate below then refuses the run rather than
+# publishing a cumulative table count as this cycle's output.
+if silver_count is None:
+    log("output_rows: unknown")
 else:
-    # STREAMING path: no full count is taken; this is the profile's estimate.
-    log(f"estimated_rows: {profile.transaction_count}")
-log(f"output_rows: {silver_count}")
+    log(f"output_rows: {silver_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
 log("=" * 60)
+# A4 (silver-plan): see silver_build.py for the rationale.
+if silver_count is None:
+    spark.stop()
+    raise SilverAbort(
+        "silver-build: output_rows unknown (commit metrics unavailable); refusing exit-0 pass"
+    )
 # A1: LB-044 gate; see silver_build.py for the rationale.
 assert_progress(silver_count, "silver-build")
 spark.stop()
