@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     txn_type                STRING NOT NULL,          -- wire, ach, rtp, internal, card
     purpose_code            STRING,
     correspondent_chain     ARRAY<STRING>,
-    cross_border            BOOLEAN NOT NULL,
+    cross_border            BOOLEAN,
     regulatory_reported     BOOLEAN NOT NULL,
     rptd_originator_name    STRING,
     rptd_originator_address STRING,

@@ -82,6 +82,7 @@ from common import (
     emit_stream_scale_admission,
     ensure_column,
     ensure_namespaces_for_ddl,
+    ensure_partition_transform,
     env,
     log,
 )
@@ -91,6 +92,7 @@ from silver_build_financial import (
     DDL_ACCOUNTS,
     DDL_EDGES,
     DDL_ENTITIES,
+    DDL_PROFILES,
     DDL_STATEMENTS,
     DDL_TXNS,
     KYC_ACCOUNT_COLUMNS,
@@ -114,6 +116,7 @@ CHECKPOINT_URI = env(
 TRIGGER_S = int(env("LB_FINANCIAL_SILVER_TRIGGER_S", "30"))
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
+SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
 KYC_WAIT_S = int(env("LB_FINANCIAL_KYC_WAIT_S", "900"))
 
 # Party/account masters joined into the dimensions: loaded once (see
@@ -270,8 +273,15 @@ def main() -> None:
     # stage with nothing to scan. Mirrors silver_build_financial.main()'s
     # bootstrap loop (same DDL constants) so both modes converge on one
     # schema. All CREATE TABLE IF NOT EXISTS -- idempotent on restart.
+    # H3: bootstrap entity_profiles too, even though D-safe stream does not
+    # write to it. A mixed batch+stream deployment (or a continuous-only
+    # deployment on a fresh catalog) that never runs silver_build_financial
+    # would otherwise leave silver.entity_profiles absent, and any gold-side
+    # consumer that reads it fails with "table not found".
     ensure_namespaces_for_ddl(
-        spark, CATALOG, (DDL_TXNS, DDL_ENTITIES, DDL_ACCOUNTS, DDL_STATEMENTS, DDL_EDGES)
+        spark,
+        CATALOG,
+        (DDL_TXNS, DDL_ENTITIES, DDL_ACCOUNTS, DDL_STATEMENTS, DDL_EDGES, DDL_PROFILES),
     )
     for _name, _ddl in (
         ("transactions", DDL_TXNS),
@@ -279,6 +289,7 @@ def main() -> None:
         ("accounts", DDL_ACCOUNTS),
         ("account_statements", DDL_STATEMENTS),
         ("edges", DDL_EDGES),
+        ("entity_profiles", DDL_PROFILES),
     ):
         spark.sql(_ddl)
         log(f"[startup] bootstrapped silver.{_name}")
@@ -288,6 +299,19 @@ def main() -> None:
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
+    # H2: match silver_build_financial's partition evolution so a
+    # continuous-only deployment on a reused catalog does not drift on the
+    # old days() spec. Iceberg partition evolution is metadata-only (~1s)
+    # and idempotent; safe to run at every startup.
+    ensure_partition_transform(
+        spark, f"{CATALOG}.{SILVER_TXNS}", "days(txn_timestamp)", "months(txn_timestamp)"
+    )
+    ensure_partition_transform(
+        spark,
+        f"{CATALOG}.{SILVER_STATEMENTS}",
+        "days(book_ts)",
+        "months(book_ts)",
+    )
     # P10 stage 0/2 columns on a reused catalog (same list as silver_build).
     for table, columns in (
         (SILVER_ENTITIES, KYC_ENTITY_COLUMNS),

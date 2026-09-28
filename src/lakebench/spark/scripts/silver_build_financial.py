@@ -24,6 +24,7 @@ import time
 
 from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
+    SilverAbort,
     assert_progress,
     ensure_column,
     ensure_namespaces_for_ddl,
@@ -178,7 +179,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
     txn_type                STRING NOT NULL,
     purpose_code            STRING,
     correspondent_chain     ARRAY<STRING>,
-    cross_border            BOOLEAN NOT NULL,
+    cross_border            BOOLEAN,
     regulatory_reported     BOOLEAN NOT NULL,
     rptd_originator_name    STRING,
     rptd_originator_address STRING,
@@ -376,9 +377,9 @@ def build_transactions(bronze):
       settlement-to-instructed rate in pacs.008, not a USD rate, so it is not
       used here. Fixed rates are fine for a benchmark; a bank would use a
       dated FX table.
-    - `cross_border` defaults to False when either country column is NULL,
-      matching the DDL NOT NULL constraint (a NULL country is more likely a
-      data-quality issue than a signal of cross-border-ness).
+    - `cross_border` is NULL when either party's country is NULL: the answer
+      is genuinely unknown and coalescing to False silently claimed "same
+      country" for missing-country corpora (I2). The DDL column is nullable.
     - `regulatory_reported` uses `size(rgltry_rptg) > 0`, not `isNotNull`,
       because an empty array is still a non-null value under pyspark
       semantics and would flip this to True for every row.
@@ -420,10 +421,18 @@ def build_transactions(bronze):
                 None,
             )
         ).alias("correspondent_chain"),
-        coalesce(
-            col("dbtr.ctry_of_res") != col("cdtr.ctry_of_res"),
-            lit(False),
-        ).alias("cross_border"),
+        # I2: preserve NULL when either party's country is unknown. Coalescing
+        # a NULL != NULL to False silently wrote "same country" for corpora
+        # where one side's country was missing, hiding the DQ signal for any
+        # reader that would want to `WHERE cross_border IS NULL`. Existing
+        # readers (`cross_border = TRUE` / `SUM(CASE WHEN cross_border ...)`)
+        # keep their behaviour: NULL is treated as False by those forms.
+        when(
+            col("dbtr.ctry_of_res").isNull() | col("cdtr.ctry_of_res").isNull(),
+            lit(None).cast("boolean"),
+        )
+        .otherwise(col("dbtr.ctry_of_res") != col("cdtr.ctry_of_res"))
+        .alias("cross_border"),
         (size(coalesce(col("rgltry_rptg"), array())) > 0).alias("regulatory_reported"),
         col("dbtr.nm").alias("rptd_originator_name"),
         col("dbtr.pstl_adr.strt_nm").alias("rptd_originator_address"),
@@ -598,13 +607,17 @@ def build_entities(txns_df, bronze=None, kyc=None):
 def build_accounts(bronze, kyc=None):
     """Distinct IBAN -> holder_entity from the pacs.008 payload.
 
-    Fixes LB-104-shape non-determinism: an IBAN that appears both as a
-    debtor account (with dbtr's entity as holder) and as a creditor account
-    (with cdtr's entity as holder) previously had holder_entity_id chosen
-    coin-flip by dropDuplicates. Now: group by iban and take the min
-    holder_entity_id (deterministic across runs). This still doesn't tell
-    us WHICH entity really holds the account -- pacs.008 does not carry
-    that -- but at least the assignment is stable.
+    Fixes LB-104-shape non-determinism and the follow-up cross-side blending
+    hazard (I3). An IBAN that appears both as a debtor account (with dbtr's
+    entity as holder) and as a creditor account (with cdtr's entity as holder)
+    previously had holder_entity_id chosen coin-flip by dropDuplicates, and
+    then per-column min mixed the debtor's holder_entity_id with the
+    creditor's bank_bic on the same iban. Now: a row_number over
+    (holder_entity_id, bank_bic, opened_date) picks one deterministic winning
+    row per iban, so every field on the row belongs to the same observation.
+    This still doesn't tell us WHICH entity really holds the account --
+    pacs.008 does not carry that -- but at least the assignment is stable
+    and internally consistent.
     """
     dbtr = bronze.select(
         col("dbtr_acct.iban").alias("iban"),
@@ -630,18 +643,27 @@ def build_accounts(bronze, kyc=None):
         col("cdtr_acct.ccy").alias("currency"),
         to_date(col("cre_dt_tm")).alias("opened_date"),
     )
-    from pyspark.sql.functions import min as _min
-
+    # I3: pick one deterministic winning row per iban. The prior per-column
+    # min mixed field values across the debtor and creditor sides for the same
+    # iban (e.g. holder_entity_id from the debtor row, bank_bic from the
+    # creditor row), which produced a synthetic row no side actually observed.
+    # row_number over (holder_entity_id, bank_bic, opened_date) gives a
+    # single, reproducible winning row without cross-side blending.
+    # NULLS LAST on bank_bic and opened_date preserves the prior _min behaviour
+    # of preferring rows whose non-key fields are all populated: silver.accounts
+    # declares those columns NOT NULL, so a NULL row winning rn=1 would abort
+    # the write.
+    _winner_window = Window.partitionBy("iban").orderBy(
+        col("holder_entity_id").asc_nulls_last(),
+        col("bank_bic").asc_nulls_last(),
+        col("opened_date").asc_nulls_last(),
+    )
     all_accts = (
         dbtr.unionByName(cdtr)
         .filter(col("iban").isNotNull())
-        .groupBy("iban")
-        .agg(
-            _min("holder_entity_id").alias("holder_entity_id"),
-            _min("bank_bic").alias("bank_bic"),
-            _min("currency").alias("currency"),
-            _min("opened_date").alias("opened_date"),
-        )
+        .withColumn("_rn", row_number().over(_winner_window))
+        .filter(col("_rn") == 1)
+        .drop("_rn")
     )
     if kyc is not None:
         all_accts = all_accts.join(
@@ -950,6 +972,25 @@ def reference_frames(spark):
     return frames[0], frames[1]
 
 
+# F1: schema-drift check inputs. `build_kyc` reads these columns from the
+# reference frames; a silent drop of any one would silently NULL out KYC for
+# every customer and every downstream customer-scoped rule. Kept in step with
+# the KYC_ENTITY_COLUMNS / KYC_ACCOUNT_COLUMNS constants and `build_kyc`.
+_EXPECTED_PARTY_COLUMNS: tuple[str, ...] = ("entity_id", "home_fi") + tuple(
+    name for name, _ in KYC_ENTITY_COLUMNS if name != "home_fi"
+)
+_EXPECTED_ACCOUNT_COLUMNS: tuple[str, ...] = ("iban", "holder_entity_id", "home_fi")
+
+
+def _assert_reference_schema(df, path, expected):
+    """Raise ``SilverAbort`` on KYC schema drift: the reference file exists
+    but is missing one or more of the columns silver reads from it."""
+    have = set(df.columns)
+    missing = [c for c in expected if c not in have]
+    if missing:
+        raise SilverAbort(f"KYC schema drift: missing column(s) {', '.join(missing)} from {path}")
+
+
 def _read_reference(spark):
     """(party, account) DataFrames, or (None, None) for a corpus that
     provably predates KYC.
@@ -974,6 +1015,17 @@ def _read_reference(spark):
             f"KYC reference files missing ({PARTY_PATH}, {ACCOUNT_PATH}) and the "
             f"manifest ({MANIFEST_GLOB}) does not show a pre-KYC datagen"
         )
+    # F1: schema-drift check. If the reference files are present but a KYC
+    # column silently disappears (a datagen bump that drops a field, a
+    # migration that never replayed it), build_kyc's guard returned None and
+    # the silver run continued with NULL KYC for every entity, which turns
+    # every customer-scoped rule into "ran, 0 alerts". Fail loud instead:
+    # a schema drift on a present corpus is never "old corpus" and never
+    # tolerable.
+    if party is not None:
+        _assert_reference_schema(party, PARTY_PATH, _EXPECTED_PARTY_COLUMNS)
+    if account is not None:
+        _assert_reference_schema(account, ACCOUNT_PATH, _EXPECTED_ACCOUNT_COLUMNS)
     return party, account
 
 
@@ -1128,6 +1180,19 @@ def main() -> None:
     stmts_read = spark.table(f"{CATALOG}.{SILVER_STATEMENTS}")
     _replace_data(update_accounts_balance(accounts, stmts_read), SILVER_ACCOUNTS)
     log("Wrote silver.accounts (current_balance rolled up from statements)")
+
+    # I3: enforce one row per iban post-write. build_accounts uses a
+    # row_number filter to pick a single winning row per iban; this
+    # assertion catches any regression that reintroduces duplicates
+    # (e.g. an overlooked dropDuplicates or a per-column min).
+    accounts_final = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
+    total_rows = accounts_final.count()
+    distinct_ibans = accounts_final.select(col("iban")).distinct().count()
+    if total_rows != distinct_ibans:
+        raise SilverAbort(
+            f"silver.accounts iban uniqueness violated: {total_rows} rows, "
+            f"{distinct_ibans} distinct iban values"
+        )
 
     _replace_data(build_edges(txns), SILVER_EDGES)
     log("Wrote silver.counterparty_edges")
