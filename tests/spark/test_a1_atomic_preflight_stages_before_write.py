@@ -60,42 +60,55 @@ def spark(tmp_path):
     s.stop()
 
 
+# Positional tuple + explicit DDL, the pattern every passing spark test in
+# this dir uses (e.g. test_aml_batch_stream_profiles_parity.py). A bare
+# Row(**kwargs) with rgltry_rptg=[] has no inferable element type, so
+# createDataFrame raised CANNOT_DETERMINE_TYPE and these A1 tests were red
+# in CI from the day the lane merged (3fb1259). The schema names the empty
+# array as array<string>; ccy is on the accounts because
+# silver_build_financial reads dbtr_acct.ccy / cdtr_acct.ccy.
+_BRONZE_SCHEMA = (
+    "txn_id string, uetr string, "
+    "dbtr struct<nm:string, ctry_of_res:string, "
+    "pstl_adr:struct<twn_nm:string, strt_nm:string>, id:struct<lei:string>>, "
+    "cdtr struct<nm:string, ctry_of_res:string, "
+    "pstl_adr:struct<twn_nm:string, strt_nm:string>, id:struct<lei:string>>, "
+    "dbtr_agt struct<bicfi:string>, cdtr_agt struct<bicfi:string>, "
+    "dbtr_acct struct<iban:string, ccy:string>, "
+    "cdtr_acct struct<iban:string, ccy:string>, "
+    "intrmy_agt_1 struct<bicfi:string>, "
+    "intrmy_agt_2 struct<bicfi:string>, "
+    "intrmy_agt_3 struct<bicfi:string>, "
+    "intr_bk_sttlm_amt decimal(18,2), intr_bk_sttlm_ccy string, "
+    "cre_dt_tm timestamp, purp_cd string, "
+    "rgltry_rptg array<string>, msg_id string"
+)
+
+
 def _make_bronze_df(spark):
     """One-row bronze DataFrame with the columns build_transactions reads."""
     from decimal import Decimal
 
-    from pyspark.sql import Row
-
-    row = Row(
-        txn_id="T1",
-        uetr="U1",
-        dbtr=Row(
-            nm="ACME LTD",
-            ctry_of_res="US",
-            pstl_adr=Row(twn_nm="NYC", strt_nm="MAIN ST"),
-            id=Row(lei="L-ACME"),
-        ),
-        cdtr=Row(
-            nm="BETA INC",
-            ctry_of_res="GB",
-            pstl_adr=Row(twn_nm="LON", strt_nm="OXFORD ST"),
-            id=Row(lei="L-BETA"),
-        ),
-        dbtr_agt=Row(bicfi="MERIUS2L"),
-        cdtr_agt=Row(bicfi="NRTHGB3X"),
-        dbtr_acct=Row(iban="US01", ccy="USD"),
-        cdtr_acct=Row(iban="GB02", ccy="GBP"),
-        intrmy_agt_1=Row(bicfi=None),
-        intrmy_agt_2=Row(bicfi=None),
-        intrmy_agt_3=Row(bicfi=None),
-        intr_bk_sttlm_amt=Decimal("100.00"),
-        intr_bk_sttlm_ccy="USD",
-        cre_dt_tm=None,
-        purp_cd="SALA",
-        rgltry_rptg=[],
-        msg_id="MSG-1",
+    row = (
+        "T1",
+        "U1",
+        ("ACME LTD", "US", ("NYC", "MAIN ST"), ("L-ACME",)),
+        ("BETA INC", "GB", ("LON", "OXFORD ST"), ("L-BETA",)),
+        ("MERIUS2L",),
+        ("NRTHGB3X",),
+        ("US01", "USD"),
+        ("GB02", "GBP"),
+        (None,),
+        (None,),
+        (None,),
+        Decimal("100.00"),
+        "USD",
+        None,
+        "SALA",
+        [],
+        "MSG-1",
     )
-    return spark.createDataFrame([row])
+    return spark.createDataFrame([row], _BRONZE_SCHEMA)
 
 
 def _install_mocks(monkeypatch, spark, *, entities_rows):
