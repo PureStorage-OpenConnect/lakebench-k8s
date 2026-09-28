@@ -86,6 +86,18 @@ class JobMetrics:
     # from bronze-verify. None on other jobs and workloads.
     c360_check: dict[str, Any] | None = None
     c360_bronze: dict[str, int] | None = None
+    # A2 (LB-044 gate metrics): per-silver-table row counts a silver-build
+    # job wrote (`silver_transactions_rows`, `silver_entities_rows`,
+    # `silver_accounts_rows`, `silver_statements_rows`, `silver_edges_rows`,
+    # `silver_profiles_rows`). Empty on non-silver jobs; empty on c360 silver
+    # (single silver table, tracked as `output_rows` already). The keys are
+    # emitted by silver_build_financial.main() via log_job_metrics.
+    silver_tables: dict[str, int] = field(default_factory=dict)
+    # Any additional numeric/string metric a silver job emits via
+    # log_job_metrics(**extra) that is not otherwise recognised. Used for
+    # A5 (bronze_rows in STREAMING), G2 (input_size_gb_source label),
+    # G5 (silver_stream_scale_admission), and future one-off labels.
+    extra_metrics: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -2757,6 +2769,18 @@ class MetricsCollector:
                 metrics.output_rows = int(float(value))
             elif key_lower in ("elapsed_seconds",):
                 metrics.elapsed_seconds = float(value)
+            elif key_lower.startswith("silver_") and key_lower.endswith("_rows"):
+                # A2: per-silver-table row counts from silver_build_financial.
+                # Keys like `silver_transactions_rows`, `silver_entities_rows`.
+                # Refuse to silently coerce a non-numeric here -- a garbled
+                # emit is more useful visible than as a zero.
+                metrics.silver_tables[key_lower] = int(float(value))
+            else:
+                # Any other emitted metric is stashed as a string so it
+                # survives to `metrics.json` for future readers (labels,
+                # source-of-value tags, admission decisions) rather than
+                # silently dropping. Numeric readers must convert.
+                metrics.extra_metrics[key_lower] = value.strip()
         except (ValueError, TypeError) as e:
             logger.debug("Could not parse metric value %s=%s: %s", key_lower, value, e)
 

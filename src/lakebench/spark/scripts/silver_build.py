@@ -19,6 +19,7 @@ from common import (
     METADATA_DELETE_AFTER_COMMIT,
     METADATA_PREVIOUS_VERSIONS_MAX,
     apply_silver_transformations_anchored,
+    assert_progress,
     c360_bronze_path,
     env,
     log,
@@ -498,4 +499,8 @@ else:
 log(f"output_rows: {silver_count}")
 log(f"elapsed_seconds: {total_time:.1f}")
 log("=" * 60)
+# A1: LB-044 gate. A zero-row silver run refuses to exit 0 so the K8s Job
+# reports failure and the collector records it. Runs after metrics emission
+# so a failing gate still leaves the metrics block on stdout.
+assert_progress(silver_count, "silver-build")
 spark.stop()
