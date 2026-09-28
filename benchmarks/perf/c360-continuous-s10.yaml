@@ -108,7 +108,6 @@ architecture:
       parallelism: 4
       cpu: "8"
       generators: 0
-      uploaders: 0
       file_size: 64mb
       # Two weeks, not a year: each micro-batch writes into every date
       # partition its rows touch, so a wide range multiplies small files.
