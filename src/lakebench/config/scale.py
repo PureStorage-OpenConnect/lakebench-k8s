@@ -91,7 +91,7 @@ class DatagenGuidance:
     parallelism: int
     cpu: str
     memory: str
-    mode: str = "batch"  # datagen mode: "batch" or "continuous"
+    mode: str = "batch"
     generators: int = 1  # per-pod generator processes
 
 

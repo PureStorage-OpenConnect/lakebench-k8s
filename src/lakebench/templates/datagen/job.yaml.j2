@@ -99,9 +99,9 @@ spec:
             - "--cycles"
             - "{{ datagen_cycles }}"
             {% endif %}
-            {# --resume + checkpoint config removed 2026-09-28 (Wave B).
-               The Rust generator never implemented checkpoint-resume;
-               interrupted runs re-run from the start. #}
+            {# --resume + checkpoint config removed 2026-09-28. The Rust
+               generator never implemented checkpoint-resume; interrupted
+               runs re-run from the start. #}
             {# --duration removed 2026-09-28 (Wave 2 D8). The Rust binary never
                parsed it; deploy/datagen.py no longer populates the context
                var. Continuous pipelines get their arrival window from the

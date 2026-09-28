@@ -560,13 +560,14 @@ with 1.6; the first section lists why.
 - `platform.storage.scratch.create_storage_class` (see Changed).
 - Checkpoint resume for data generation. The Rust generator does not
   implement it. The `--resume` CLI flag and the `workload.datagen.checkpoint.*`
-  block are removed; old configs with `datagen.checkpoint:` load with a
-  `DeprecationWarning` via `DatagenConfig._removed_keys` and the key is
-  dropped silently. Interrupted `lakebench generate` runs re-run from the
+  config block are removed. Old configs that carry `datagen.checkpoint:`
+  load with a `DeprecationWarning` and the block is dropped from the
+  loaded config. Interrupted `lakebench generate` runs re-run from the
   start.
 - `workload.datagen.uploaders`. Never forwarded to the Rust generator;
-  uploader concurrency is fixed inside the S3 sink. Old configs load with
-  a `DeprecationWarning` and the key is dropped.
+  uploader concurrency is fixed inside the S3 sink. Old configs that
+  carry the field load with a `DeprecationWarning` and the field is
+  dropped from the loaded config.
 - The Python datagen (`datagen/`) and its image.
 - Packaged `sanctions_list.json` and `pep_list.json` (replaced by the
   per-corpus watchlist).

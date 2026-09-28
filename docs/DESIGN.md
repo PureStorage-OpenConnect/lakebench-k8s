@@ -266,11 +266,12 @@ alone changes them.
   continuous.
 - **Datagen mode** (`DatagenMode`: batch, continuous, auto) is the S3
   delivery pattern for the corpus: `batch` = one PUT per Parquet file,
-  `continuous` = multipart streaming as row-groups close, `auto` =
-  continuous (owner D18, 2026-09-28). Row content is byte-identical across
-  modes at fixed seed. Pod CPU and memory are sized by scale via the
-  autosizer independently of delivery mode; the pre-2026-09-28 role of this
-  enum as a resource-profile tier has moved into scale-based sizing.
+  `continuous` = S3 multipart upload as row-groups close, `auto` =
+  `continuous` at every scale (owner D18, 2026-09-28). Row content is
+  byte-identical across modes at a fixed seed. Pod CPU and memory are
+  sized by scale via the autosizer independently of delivery mode; the
+  pre-2026-09-28 role of this enum as a resource-profile tier was
+  removed in v1.6 and moved into scale-based sizing.
 - **Workload schema** is the config name (`customer360`, `financial`);
   "financial" and "AML" name the same workload.
 - **Support states**: supported, unverified, unsupported (section 6.5).

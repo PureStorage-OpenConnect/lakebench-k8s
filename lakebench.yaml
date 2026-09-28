@@ -269,8 +269,8 @@ architecture:
       scale: 10                    # Interpreted per-schema; see above
       # mode: auto                    # S3 delivery pattern: auto | batch | continuous
       ##   batch:      one PUT per Parquet file (bursty upload, higher peak RSS)
-      ##   continuous: streams each file through S3 multipart as row-groups close
-      ##   auto:       continuous (owner D18, 2026-09-28; no scale threshold)
+      ##   continuous: S3 multipart upload as row-groups close
+      ##   auto:       continuous at every scale (owner D18, 2026-09-28)
       ## Row content is byte-identical across modes at fixed seed. CPU/memory
       ## are sized by scale via the autosizer independently of mode, and any
       ## cpu/memory you set are honoured.

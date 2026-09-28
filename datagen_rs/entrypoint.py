@@ -119,9 +119,9 @@ def main() -> int:
     # Default 64 matches DatagenConfig.file_size ("64mb"), the template's
     # default(64), and the Rust binary's default (aligned 2026-09-28), so
     # raw-CLI reproducers and pod runs pick the same file size when the
-    # flag is omitted. The old 32-MB default (pre-M6) was a transitional
-    # value for financial K8s YAMLs before deploy/datagen.py started
-    # rendering --file-size-mb from config unconditionally.
+    # flag is omitted. The historical pre-M6 default was 32 for the
+    # financial K8s YAMLs, before deploy/datagen.py started rendering
+    # --file-size-mb from config unconditionally.
     ap.add_argument("--file-size-mb", type=int, default=64)
     ap.add_argument("--bucket", default=os.environ.get("BRONZE_BUCKET", ""))
     ap.add_argument("--prefix", default=os.environ.get("PREFIX", ""))

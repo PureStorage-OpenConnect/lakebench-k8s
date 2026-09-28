@@ -81,56 +81,53 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    `customer/interactions`; the financial schema writes under `pacs008`).
 4. Reports completion status back to Kubernetes.
 
-The datagen mode (`auto`, `batch`, or `continuous`) is the S3 **delivery
-pattern**, not a content or resource tier. Row content is byte-for-byte
+The datagen mode (`auto`, `batch`, or `continuous`) is the S3 delivery
+pattern, not a content or resource tier. Row content is byte-for-byte
 identical across modes at a fixed seed. `batch` buffers each Parquet file
-in memory and issues one S3 PUT per file; `continuous` streams each file
-through S3 multipart as row-groups close, so files arrive progressively
-rather than in bursts. `auto` resolves to `continuous` unconditionally
-(owner D18, 2026-09-28); the pre-v1.6 scale-threshold behaviour is gone.
+in memory and issues one S3 PUT per file; `continuous` uploads each file
+via S3 multipart as row-groups close, so files arrive progressively rather
+than in bursts. `auto` resolves to `continuous` at every scale (owner D18,
+2026-09-28); the pre-v1.6 scale-threshold behaviour was removed in v1.6.
 Pod CPU and memory are sized by scale via the autosizer, independently of
 delivery mode.
 
 ### Delivery mode vs pipeline mode
 
-Lakebench has two independent enums that both spell their values
-`batch` / `continuous`. They control different things and read against
-different clocks. If you take away one thing from this section, take
-this: **content = seed, layout = delivery mode, stage graph = pipeline
-mode.** They do not constrain each other.
+Two independent config fields spell their values `batch` / `continuous`.
+Content is set by seed, S3 layout by delivery mode, and stage graph by
+pipeline mode. The two mode fields do not constrain each other.
 
 | Concern | Config field | Type | What it controls |
 |---|---|---|---|
-| S3 delivery layout | `workload.datagen.mode` | `DatagenMode` | How the corpus lands in S3: `batch` = one PUT per Parquet file; `continuous` = multipart streaming as row-groups close. Row content is byte-identical at a fixed seed. |
-| Stage graph | `architecture.pipeline.mode` | `PipelineMode` | How the medallion stages run: `batch` = sequential (bronze -> silver -> gold once); `continuous` = concurrent streaming jobs over a corpus that keeps arriving (`sustained` is a deprecated alias). |
+| S3 delivery layout | `workload.datagen.mode` | `DatagenMode` | How the corpus lands in S3: `batch` = one PUT per Parquet file; `continuous` = S3 multipart upload as row-groups close. Row content is byte-identical at a fixed seed. |
+| Stage graph | `architecture.pipeline.mode` | `PipelineMode` | How the medallion stages run: `batch` = sequential (bronze -> silver -> gold once); `continuous` = concurrent jobs over a corpus that keeps arriving. `sustained` is a deprecated alias for `continuous`. |
 
-The two modes compose freely: `datagen.mode: batch` and
-`pipeline.mode: continuous` is a real config that produces all bronze
-files in one burst, then lets the continuous pipeline trickle-read
-them. Neither Lakebench nor the code use the word **streaming** as a
-mode name; the continuous pipeline uses Spark Structured Streaming
-internally, but the operator-facing name is `continuous`.
+The composition `datagen.mode: batch` with `pipeline.mode: continuous` is
+a valid config: all bronze files land in one burst, then the continuous
+pipeline trickle-reads them. Lakebench does not use `streaming` as a mode
+name; the continuous pipeline uses Spark Structured Streaming internally,
+but the operator-facing name is `continuous`.
 
-### Changelog: 2026-09-28 default delivery flip
+### 2026-09-28: default delivery mode changed to continuous
 
-The default for `datagen.mode: auto` flipped from `batch` (at
-scale <= 10) to `continuous` (at every scale). Same-seed corpora remain
-byte-identical, so this is not a corpus change; only the S3 upload
-pattern changed. If your run tuning depended on batch-style bursty
-uploads (bandwidth ceilings, RSS profile), set `mode: batch`
-explicitly. `continuous` is faster at scale 1 for c360 (upload-gen
-overlap) and slower at scale 10 by 10-16% because per-file multipart
-overhead grows with file count; pick with your file count and network
-in mind, not from the default.
+The default for `datagen.mode: auto` moved from `batch` (at scale <= 10)
+to `continuous` (at every scale). Same-seed corpora remain byte-identical;
+only the S3 upload pattern changed. If a run depended on batch-style
+bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`
+explicitly. Measured 2026-09-28: `continuous` is faster than `batch` at
+scale 1 for `customer360` (upload-generation overlap) and 10-16% slower
+at scale 10 because per-file multipart overhead grows with file count.
+Choose the mode from file count and network profile rather than accepting
+the default.
 
 ### `--delivery-mode` (internal render arg)
 
 `deploy/datagen.py` translates `datagen.mode` into a `--delivery-mode`
 argv on the datagen container (see `templates/datagen/job.yaml.j2`).
-Operators do not set this directly; it appears in rendered Job
-manifests for debuggers. The Rust binary accepts the same three values
-(`auto`, `batch`, `continuous`) so a manifest can be replayed by
-hand.
+Operators do not set it directly; it appears in rendered Job manifests
+as an aid when troubleshooting a job. The Rust binary accepts the same
+three values (`auto`, `batch`, `continuous`), so a rendered manifest can
+be replayed by hand.
 
 ### Per-pod resources
 

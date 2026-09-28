@@ -80,9 +80,8 @@ def generate(
     """Generate synthetic data to bronze bucket.
 
     Runs the datagen job to populate the bronze bucket with synthetic data.
-    Uses parallel Kubernetes Jobs for efficient generation. Interrupted
-    runs are re-run from the start; the Rust generator has no
-    checkpoint-resume.
+    Uses parallel Kubernetes Jobs. Interrupted runs are re-run from the
+    start; the Rust generator has no checkpoint-resume.
     """
     from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
