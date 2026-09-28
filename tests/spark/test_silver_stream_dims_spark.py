@@ -111,6 +111,10 @@ if __name__ == "__main__":
             .config("spark.ui.enabled", "false")
             .config("spark.sql.shuffle.partitions", "2")
             .config("spark.jars", sys.argv[1])
+            .config(
+                "spark.sql.extensions",
+                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+            )
             .config("spark.sql.catalog.lh", "org.apache.iceberg.spark.SparkCatalog")
             .config("spark.sql.catalog.lh.type", "hadoop")
             .config("spark.sql.catalog.lh.warehouse", str(Path(d) / "wh"))

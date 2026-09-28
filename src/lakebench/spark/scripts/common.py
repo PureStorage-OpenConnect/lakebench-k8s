@@ -122,6 +122,64 @@ def emit_stream_scale_admission(measured_envelope_scale=10):
         log("silver_stream_scale_admission: labelled_beyond_measured_envelope")
 
 
+# ---------------------------------------------------------------------------
+# E1: shared entity_type derivation used by both batch and stream silver.
+# ---------------------------------------------------------------------------
+#
+# The regex is a corporate-suffix heuristic applied to the END of the upper-
+# cased name only (via $). Short two-letter tokens (AG, BV, SA) must not
+# false-positive anywhere in the middle: "MARIA SA" is a person, "ACME SA" a
+# company. Corporate names put the suffix at the end by convention. "L.L.C."
+# is intentionally not detected -- the dotted form is rare in pacs.008
+# dbtr/cdtr fields.
+#
+# One constant, two call sites: ``derive_entity_type`` returns a pyspark
+# Column expression (batch ``build_entities``); ``entity_type_from_name_sql``
+# returns a SQL fragment (the stream MERGE that re-derives entity_type from
+# ``LEAST(target.name, source.name)``). Sharing the constant is what E1's
+# unit test asserts, so batch and stream cannot drift.
+_ENTITY_TYPE_COMPANY_SUFFIX_REGEX = (
+    r"(LTD|LIMITED|INC|CORP|LLC|GMBH|AG|PLC|SA|SARL|BV|BANK|CAPITAL|"
+    r"HOLDINGS|GROUP|INTERNATIONAL|COMPANY|CO)$"
+)
+
+
+def derive_entity_type(name_col):
+    """Person-vs-Company entity_type Column, derived from the reported name.
+
+    A common heuristic: a name whose upper-cased form ends with a corporate
+    suffix (LTD/INC/GMBH/PLC etc.) is Company, else Person. Callers pass a
+    Column that evaluates to the entity's reported name. Both silver_build
+    (batch) and silver_stream (per-batch MERGE re-derivation) must call this
+    helper, not inline the regex, so the two paths cannot drift.
+    """
+    from pyspark.sql.functions import lit as _lit
+    from pyspark.sql.functions import upper as _upper
+    from pyspark.sql.functions import when as _when
+
+    return (
+        _when(
+            _upper(name_col).rlike(_ENTITY_TYPE_COMPANY_SUFFIX_REGEX),
+            _lit("Company"),
+        )
+        .otherwise(_lit("Person"))
+        .alias("entity_type")
+    )
+
+
+def entity_type_from_name_sql(name_sql_expr):
+    """SQL fragment: entity_type from a name expression, shared regex.
+
+    ``name_sql_expr`` is any SQL expression that evaluates to the entity's
+    name (e.g. ``LEAST(t.name, s.name)`` inside a MERGE UPDATE). The
+    returned string is a CASE expression that reduces to 'Company' or
+    'Person' using the same regex ``derive_entity_type`` applies. E1's
+    unit test asserts both helpers reference ``_ENTITY_TYPE_COMPANY_SUFFIX_REGEX``.
+    """
+    regex = _ENTITY_TYPE_COMPANY_SUFFIX_REGEX
+    return f"CASE WHEN upper({name_sql_expr}) RLIKE '{regex}' THEN 'Company' ELSE 'Person' END"
+
+
 def pipeline_catalog():
     """The Spark catalog every pipeline job reads and writes c360 tables in.
 
