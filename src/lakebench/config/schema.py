@@ -1179,7 +1179,13 @@ class DatagenConfig(ConfigModel):
     )
     timestamp_end: str | None = Field(
         default=None,
-        description="End date for generated timestamps (ISO format, e.g. '2025-12-31'). Default: datagen built-in (2025-12-31).",
+        description=(
+            "End date for generated timestamps (ISO format, exclusive, e.g. "
+            "'2025-01-01'). Default: Rust generator built-in '2025-01-01' for "
+            "single-cycle runs; a multi-cycle run (cycles > 1) instead splits "
+            "a wider '2024-01-01' to '2025-12-31' window across cycles "
+            "(deploy/datagen.py fallback, matched by metrics.c360_correctness)."
+        ),
     )
 
     @field_validator("dirty_data_ratio")

@@ -511,7 +511,7 @@ name: my-lakehouse
 # Container images for all components. Override for private registries.
 # See docs/datagen-custom-images.md for building custom datagen images.
 # images:
-#   datagen: docker.io/sillidata/lb-datagen:7c24641 # Customizable (see docs/datagen-custom-images.md)
+#   datagen: docker.io/sillidata/lb-datagen:25f1aa8 # Customizable (see docs/datagen-custom-images.md)
 #   spark: apache/spark:4.0.2-python3
 #   postgres: postgres:17
 #   hive: apache/hive:3.1.3
@@ -597,7 +597,7 @@ platform:
   #     # bronze_executors: null
   #     # silver_executors: null
   #     # gold_executors: null
-  #     ## Streaming job executor overrides (sustained mode)
+  #     ## Streaming job executor overrides (continuous mode)
   #     # bronze_ingest_executors: null
   #     # silver_stream_executors: null
   #     # gold_refresh_executors: null
@@ -737,21 +737,24 @@ workload:
   # schema: customer360            # customer360 | financial
   datagen:
     # Image: configured via images.datagen (see docs/datagen-custom-images.md)
-    scale: 10                    # 1 unit ~ 10 GB bronze (10 = ~100 GB)
-    # mode: auto                    # auto | batch | continuous
+    ## Scale is per-schema:
+    ##   customer360: ~10 GB bronze / unit (~100,000 customers)
+    ##   financial:   ~8.4 GB bronze / unit (~111,111 entities and their
+    ##                accounts + 60 months of pacs.008 transactions)
+    scale: 10                    # Interpreted per-schema; see above
+    # mode: auto                    # S3 delivery pattern: auto | batch | continuous
+    ##   batch:      one PUT per Parquet file (bursty upload, higher peak RSS)
+    ##   continuous: streams each file through S3 multipart as row-groups close
+    ##   auto:       continuous (owner D18, 2026-09-28; no scale threshold)
+    ## Row content is byte-identical across modes at fixed seed. CPU/memory
+    ## are sized by scale via the autosizer independently of mode, and any
+    ## cpu/memory you set are honoured.
     parallelism: 1                 # Number of datagen pods
     # file_size: 64mb
-    # dirty_data_ratio: 0.08
-    ## CPU and memory are hard-locked per mode (cannot be overridden):
-    ##   batch:      4 CPU, 4Gi   (scale <= 10)
-    ##   continuous: 8 CPU, 24Gi  (scale > 10)
-    # generators: 0                # Per-pod generator processes (0 = auto)
-    # uploaders: 0                 # Per-pod uploader threads (0 = auto)
+    # dirty_data_ratio: 0.08         # customer360 only; financial ignores it
+    # generators: 0                # Per-pod generator threads (0 = auto: follow pod CPU)
     # timestamp_start: "2024-01-01"
-    # timestamp_end: "2025-12-31"
-    # checkpoint:
-    #   enabled: true
-    #   path: .lakebench_checkpoint.json
+    # timestamp_end: "2025-01-01"    # exclusive
   ## Customer360 workload overrides
   # customer360:
   #   unique_customers: null       # Override: derived from scale if null

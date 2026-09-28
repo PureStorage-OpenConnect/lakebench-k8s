@@ -82,10 +82,15 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    `customer/interactions`; the financial schema writes under `pacs008`).
 4. Reports completion status back to Kubernetes.
 
-The datagen mode (`auto`, `batch`, or `continuous`; `auto` resolves to
-`batch` at scale <= 10 and `continuous` above) does not change what the Rust
-generator writes or how it is sized: the corpus is always written in full
-before the pipeline reads it, and the entrypoint treats both modes the same.
+The datagen mode (`auto`, `batch`, or `continuous`) is the S3 **delivery
+pattern**, not a content or resource tier. Row content is byte-for-byte
+identical across modes at a fixed seed. `batch` buffers each Parquet file
+in memory and issues one S3 PUT per file; `continuous` streams each file
+through S3 multipart as row-groups close, so files arrive progressively
+rather than in bursts. `auto` resolves to `continuous` unconditionally
+(owner D18, 2026-09-28); the pre-v1.6 scale-threshold behaviour is gone.
+Pod CPU and memory are sized by scale via the autosizer, independently of
+delivery mode.
 
 ### Per-pod resources
 
@@ -194,9 +199,10 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:7c24641`, the AML
-generator-freeze commit, generator version `datagen-v2-rs-0.3`) is built from
-the `datagen_rs/` directory in this repository. To build and push a custom
+The default image (`docker.io/sillidata/lb-datagen:25f1aa8`, digest
+`sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7`;
+the v1.6 AML generator-freeze commit, generator version `datagen-v2-rs-0.3`)
+is built from the `datagen_rs/` directory in this repository. To build and push a custom
 image:
 
 ```bash

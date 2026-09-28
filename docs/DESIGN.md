@@ -264,9 +264,13 @@ alone changes them.
   that the code still uses (`PipelineMode.SUSTAINED`, `pipeline.sustained`,
   `--sustained`, `pipeline_mode="sustained"` in metrics); read it as
   continuous.
-- **Datagen mode** (`DatagenMode`: batch, continuous, auto) is a different
-  concept: the generator's process model and resource profile, not the
-  pipeline mode.
+- **Datagen mode** (`DatagenMode`: batch, continuous, auto) is the S3
+  delivery pattern for the corpus: `batch` = one PUT per Parquet file,
+  `continuous` = multipart streaming as row-groups close, `auto` =
+  continuous (owner D18, 2026-09-28). Row content is byte-identical across
+  modes at fixed seed. Pod CPU and memory are sized by scale via the
+  autosizer independently of delivery mode; the pre-2026-09-28 role of this
+  enum as a resource-profile tier has moved into scale-based sizing.
 - **Workload schema** is the config name (`customer360`, `financial`);
   "financial" and "AML" name the same workload.
 - **Support states**: supported, unverified, unsupported (section 6.5).
