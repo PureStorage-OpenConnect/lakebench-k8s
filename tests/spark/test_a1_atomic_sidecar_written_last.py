@@ -125,10 +125,20 @@ def _install_common_mocks(monkeypatch, spark):
     monkeypatch.setattr(sbf, "log_job_metrics", lambda *_a, **_kw: None)
 
     empty_df = spark.range(0)
+    # main() reads silver.accounts back via spark.table (line ~1372) and passes
+    # it to build_statements, which selects account_id + iban. A bare
+    # spark.range(0) only exposes `id`, so build_statements raised
+    # UNRESOLVED_COLUMN(account_id). Return a schema-correct empty accounts
+    # frame for that read; every other non-bronze table keeps the bare empty.
+    empty_accounts = spark.createDataFrame(
+        [], "account_id bigint, iban string, current_balance decimal(18,2)"
+    )
 
     def _fake_table(name):
         if str(name).endswith(sbf.BRONZE_TABLE):
             return bronze
+        if str(name).endswith(sbf.SILVER_ACCOUNTS):
+            return empty_accounts
         return empty_df
 
     monkeypatch.setattr(spark, "table", _fake_table)
