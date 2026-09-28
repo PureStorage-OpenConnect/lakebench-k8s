@@ -146,6 +146,18 @@ def main() -> int:
         default="all",
         choices=["all", "bronze", "reference", "batch", "continuous"],
     )
+    # Delivery mode (Wave 2 D3, 2026-09-28): how the datagen writes bronze
+    # files to S3. `batch` (default) buffers the whole file then does one
+    # PUT; `continuous` streams parquet row-groups through S3 multipart as
+    # they close. Corpus content is byte-for-byte identical at a fixed seed;
+    # only the write pipeline differs. Forwarded to the Rust binary as
+    # --delivery-mode. `auto` resolves to `continuous` (the K8s template
+    # default), matching PipelineMode.CONTINUOUS naming (owner D18).
+    ap.add_argument(
+        "--delivery-mode",
+        default="auto",
+        choices=["auto", "batch", "continuous"],
+    )
     # customer360-only args -- ignored on the financial path.
     ap.add_argument("--target-tb", type=float, default=0.1)
     # None: the Rust binary derives the id space from --scale (100K
@@ -270,6 +282,17 @@ def main() -> int:
         common += ["--cycle", str(args.cycle)]
     if args.cycles != 1:
         common += ["--cycles", str(args.cycles)]
+    # Delivery-mode resolution and forwarding (Wave 2 D3, 2026-09-28). `auto`
+    # picks continuous unconditionally; there is no scale threshold today
+    # because the choice affects per-worker RSS, not correctness. If a future
+    # scale-based split is needed, it goes here.
+    delivery = args.delivery_mode
+    if delivery == "auto":
+        delivery = "continuous"
+    if delivery != "batch":
+        # Only forward when non-default from the Rust binary's perspective
+        # (batch), so an older image without --delivery-mode still parses.
+        common += ["--delivery-mode", delivery]
 
     if args.robustness_perturbation and args.schema != "financial":
         print(

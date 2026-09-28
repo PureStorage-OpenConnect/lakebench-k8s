@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use arrow::util::display::array_value_to_string;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -448,5 +449,177 @@ fn c360_driver_output_is_pinned() {
         a,
         (7_884_786_140_200_387_728, 5),
         "c360 driver output changed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Wave 2 D3/D4 (2026-09-28): --delivery-mode {batch|continuous} switch.
+// Both modes must produce the same corpus at a fixed seed. Batch is the
+// current (buffered whole-file PUT) path; continuous streams each parquet
+// file through MpuWriter as row-groups close. Test asserts multiset-equality
+// on all rows across the two runs: rows may be identical or the ordering
+// may differ (parquet's row-group layout is unchanged, so byte-identity
+// often holds; we assert the weaker, more robust row-identity so a future
+// row-group tuning does not silently red-CI this).
+// ---------------------------------------------------------------------------
+
+fn run_c360_mode(dir: &Path, delivery: &str) {
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", dir)
+        .args([
+            "--schema",
+            "customer360",
+            "--bucket",
+            "b",
+            "--seed",
+            "42",
+            "--target-tb",
+            "0.00001",
+            "--file-size-mb",
+            "1",
+            "--threads",
+            "2",
+            "--delivery-mode",
+            delivery,
+        ])
+        .output()
+        .expect("run generate");
+    assert!(
+        out.status.success(),
+        "c360 generate --delivery-mode {} failed: {}",
+        delivery,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn c360_files(dir: &Path) -> Vec<PathBuf> {
+    let d = dir.join("b").join("customer").join("interactions");
+    let mut v: Vec<PathBuf> = std::fs::read_dir(&d)
+        .map(|it| {
+            it.map(|e| e.unwrap().path())
+                .filter(|p| {
+                    let n = p.file_name().unwrap().to_string_lossy();
+                    n.starts_with("part-") && n.ends_with(".parquet")
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// c360-specific row renderer: `array_value_to_string` on a
+/// Timestamp(us, UTC) column fails without arrow's chrono-tz feature.
+/// Render every column via its Debug (via TypedArray) which is TZ-agnostic,
+/// then join. Sorted for multiset equality across modes.
+fn c360_rows(paths: &[PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in paths {
+        for b in batches(p) {
+            for r in 0..b.num_rows() {
+                let mut cols: Vec<String> = Vec::with_capacity(b.num_columns());
+                for c in 0..b.num_columns() {
+                    let arr = b.column(c);
+                    // Timestamps: render raw i64 microseconds (TZ-invariant).
+                    let s = if let Some(ts) = arr
+                        .as_any()
+                        .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                    {
+                        if ts.is_null(r) {
+                            "null".to_string()
+                        } else {
+                            ts.value(r).to_string()
+                        }
+                    } else {
+                        array_value_to_string(arr, r).unwrap()
+                    };
+                    cols.push(s);
+                }
+                out.push(cols.join("\u{1f}"));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn c360_row_identity_across_delivery_modes() {
+    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-delivery-{}", std::process::id()));
+    let batch_dir = base.join("batch");
+    let continuous_dir = base.join("continuous");
+    let _ = std::fs::remove_dir_all(&batch_dir);
+    let _ = std::fs::remove_dir_all(&continuous_dir);
+    run_c360_mode(&batch_dir, "batch");
+    run_c360_mode(&continuous_dir, "continuous");
+    let batch_rows = c360_rows(&c360_files(&batch_dir));
+    let cont_rows = c360_rows(&c360_files(&continuous_dir));
+    assert_eq!(
+        batch_rows.len(),
+        cont_rows.len(),
+        "row count differs: batch={} continuous={}",
+        batch_rows.len(),
+        cont_rows.len()
+    );
+    assert_eq!(
+        batch_rows, cont_rows,
+        "c360 row content differs between --delivery-mode batch and continuous"
+    );
+}
+
+fn run_aml_mode(dir: &Path, delivery: &str) {
+    let out = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", dir)
+        .args([
+            "--bucket",
+            "b",
+            "--seed",
+            "7777",
+            "--scale",
+            SCALE,
+            "--threads",
+            "2",
+            "--mode",
+            "all",
+            "--delivery-mode",
+            delivery,
+        ])
+        .output()
+        .expect("run generate");
+    assert!(
+        out.status.success(),
+        "aml generate --delivery-mode {} failed: {}",
+        delivery,
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn aml_bronze_files(dir: &Path) -> Vec<PathBuf> {
+    files(dir, "bronze/pacs008", "part-")
+}
+
+#[test]
+fn aml_row_identity_across_delivery_modes() {
+    let base = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("lb-delivery-aml-{}", std::process::id()));
+    let batch_dir = base.join("batch");
+    let continuous_dir = base.join("continuous");
+    let _ = std::fs::remove_dir_all(&batch_dir);
+    let _ = std::fs::remove_dir_all(&continuous_dir);
+    run_aml_mode(&batch_dir, "batch");
+    run_aml_mode(&continuous_dir, "continuous");
+    let batch_rows = rows(&aml_bronze_files(&batch_dir));
+    let cont_rows = rows(&aml_bronze_files(&continuous_dir));
+    assert_eq!(
+        batch_rows.len(),
+        cont_rows.len(),
+        "aml pacs008 row count differs: batch={} continuous={}",
+        batch_rows.len(),
+        cont_rows.len()
+    );
+    assert_eq!(
+        batch_rows, cont_rows,
+        "aml pacs008 row content differs between --delivery-mode batch and continuous"
     );
 }

@@ -231,6 +231,70 @@ fn encode_parquet(batch: &arrow::record_batch::RecordBatch, cap_hint: usize) -> 
     buf
 }
 
+/// Delivery mode for a bronze parquet file (Wave 2 D3, 2026-09-28). Batch
+/// (default) buffers the whole file in memory then does one S3 PUT; matches
+/// pre-existing behaviour and keeps regression pins stable. Continuous
+/// streams the file through an S3 multipart upload (MpuWriter): ArrowWriter
+/// row-groups flush into 5 MiB parts as they close, bounding per-worker RSS
+/// at roughly MPU_MAX_CONCURRENT_PARTS * chunk_size + one row-group buffer.
+/// Row content is identical across modes at a fixed seed; only the write
+/// pipeline differs. Verified by the row-identity test in tests/cycles.rs.
+#[derive(Copy, Clone, PartialEq, Debug)]
+enum DeliveryMode {
+    Batch,
+    Continuous,
+}
+
+fn parse_delivery_mode() -> DeliveryMode {
+    let s: String = arg("--delivery-mode", "batch".to_string());
+    match s.as_str() {
+        "batch" => DeliveryMode::Batch,
+        "continuous" => DeliveryMode::Continuous,
+        other => {
+            eprintln!(
+                "--delivery-mode must be one of: batch | continuous; got {:?}",
+                other
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Emit `batch` as parquet under `key`, choosing the write pipeline by
+/// delivery mode. Returns the object size in bytes. Uses `writer_properties`
+/// so codec choice is uniform across every parquet emitted; row-group size
+/// is the parquet-crate default (~1M rows). Continuous mode reuses the
+/// S3Sink::put_multipart path proven for party/account since LB-107.
+fn write_bronze_file(
+    sink: &S3Sink,
+    key: &str,
+    batch: &arrow::record_batch::RecordBatch,
+    cap_hint: usize,
+    delivery: DeliveryMode,
+) -> u64 {
+    match delivery {
+        DeliveryMode::Batch => {
+            let buf = encode_parquet(batch, cap_hint);
+            let sz = buf.len() as u64;
+            sink.put(key, buf);
+            sz
+        }
+        DeliveryMode::Continuous => {
+            let props = writer_properties();
+            let mut mpu = sink.put_multipart(key);
+            {
+                let mut w = ArrowWriter::try_new(&mut mpu, batch.schema(), Some(props)).unwrap();
+                w.write(batch).unwrap();
+                w.close().unwrap();
+            }
+            let sz = mpu.bytes_written();
+            mpu.finish()
+                .unwrap_or_else(|e| panic!("continuous mpu finish key={} err={}", key, e));
+            sz
+        }
+    }
+}
+
 fn main() {
     // Schema dispatch: default "financial" for back-compat with any K8s Job
     // manifest that predates the c360 branch. `entrypoint.py` gates schema
@@ -324,6 +388,11 @@ fn pacs008_main() {
     // manifest only, on a dedicated pod). Offloading reference removes the
     // node-0 straggler so bronze pods finish together.
     let mode: String = arg("--mode", "all".to_string());
+    // Delivery mode is orthogonal to work split (Wave 2 D3, 2026-09-28):
+    // batch (default) writes each bronze file as one S3 PUT; continuous
+    // streams parquet row-groups through S3 multipart. Corpus content is
+    // identical at fixed seed; verified by row-identity test in cycles.rs.
+    let delivery = parse_delivery_mode();
     // Reject typos explicitly so an operator's `--mode brozne` does not
     // silently succeed with zero files written (previously it fell through
     // to do_bronze=false, do_reference=false and exit 0 -- caught by an
@@ -1046,14 +1115,16 @@ fn pacs008_main() {
         );
         build_ns.fetch_add(tb.elapsed().as_nanos() as u64, Ordering::Relaxed);
         let tw = std::time::Instant::now();
-        // Slight overshoot on the pre-alloc so ArrowWriter rarely reallocs.
+        // Slight overshoot on the pre-alloc so ArrowWriter rarely reallocs
+        // (only used by DeliveryMode::Batch; continuous streams via MpuWriter).
         let cap_hint = (file_size as usize + file_size as usize / 8).max(1024 * 1024);
-        let buf = encode_parquet(&batch, cap_hint);
-        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let sz = buf.len() as u64;
         let key = cycle::pacs_key(fid, cycle_n);
         let tu = std::time::Instant::now();
-        sink.put(&key, buf);
+        let sz = write_bronze_file(&sink, &key, &batch, cap_hint, delivery);
+        // upload_ns counts write + upload for continuous; write_ns is 0 for
+        // continuous because the streaming write IS the upload. Keep the
+        // interpretation clear in the summary line below.
+        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
         total_bytes.fetch_add(sz, Ordering::Relaxed);
         files_written.fetch_add(1, Ordering::Relaxed);
@@ -1270,6 +1341,9 @@ fn customer360_main() {
             .build_global()
             .expect("failed to size rayon pool");
     }
+    // Delivery mode (Wave 2 D3, 2026-09-28); see the pacs008 branch for the
+    // full semantic. Default batch preserves the current pinned-digest tests.
+    let delivery = parse_delivery_mode();
 
     let sink = S3Sink::from_env(&bucket, &prefix);
 
@@ -1340,14 +1414,11 @@ fn customer360_main() {
 
         let tw = std::time::Instant::now();
         let cap_hint = (file_size_bytes + file_size_bytes / 8).max(1024 * 1024);
-        let buf = encode_parquet(&batch, cap_hint);
-        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        let sz = buf.len() as u64;
-
         // key is relative to S3Sink.prefix (set from --prefix). Sink prepends.
         let key = cycle::c360_key(fid, cycle_n);
         let tu = std::time::Instant::now();
-        sink.put(&key, buf);
+        let sz = write_bronze_file(&sink, &key, &batch, cap_hint, delivery);
+        write_ns.fetch_add(tw.elapsed().as_nanos() as u64, Ordering::Relaxed);
         upload_ns.fetch_add(tu.elapsed().as_nanos() as u64, Ordering::Relaxed);
         total_bytes.fetch_add(sz, Ordering::Relaxed);
         files_written.fetch_add(1, Ordering::Relaxed);

@@ -57,7 +57,14 @@ spec:
             - "{{ datagen_customer_id_max }}"
             {% endif %}
             - "--mode"
-            - "{{ datagen_mode | default('batch') }}"
+            - "all"
+            {# Wave 2 D3/D7 (2026-09-28): DatagenMode now controls DELIVERY
+               pattern (batch vs continuous stream via S3 multipart), not
+               the internal work-split which stays at `all`. Default is
+               continuous per owner D18 (PipelineMode.CONTINUOUS is
+               canonical). #}
+            - "--delivery-mode"
+            - "{{ datagen_mode | default('continuous') }}"
             - "--file-size-mb"
             - "{{ datagen_file_size_mb | default(512) }}"
             {# --payload-kb dropped 2026-09-28 (LB-191 companion). Rust hardcodes 2 KiB.

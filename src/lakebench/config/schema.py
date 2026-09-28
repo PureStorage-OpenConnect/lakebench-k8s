@@ -166,19 +166,30 @@ class WorkloadSchema(str, Enum):
 
 
 class DatagenMode(str, Enum):
-    """Datagen execution mode.
+    """Datagen delivery mode (redefined 2026-09-28, Wave 2 D1).
 
-    Distinguished between:
-    - batch: single generator thread per pod, low resource profile (4 CPU / 4Gi).
-      Best for small datasets (< 100 GB).
-    - continuous: multi-process pipeline with multiple generator workers and
-      dedicated uploader threads, higher resource profile (8 CPU / 24Gi).
-      Best for large datasets (>= 100 GB) where sustained throughput matters.
-    - auto: automatically selects batch or continuous based on scale factor.
-      scale <= 10 (~100 GB) -> batch, scale > 10 -> continuous.
+    One corpus per (workload, seed) -- deterministic and layout-invariant;
+    mode is how the same corpus is DELIVERED to S3, not what it contains.
+    Row content is byte-for-byte identical across modes at fixed seed
+    (verified by tests/cycles.rs::c360_row_identity_across_delivery_modes
+    and aml_row_identity_across_delivery_modes).
 
-    CPU and memory are hard-locked per mode and cannot be overridden by the
-    user.  The autosizer always sets them to the mode-correct values.
+    - continuous (default per owner D18, matches PipelineMode.CONTINUOUS):
+      streams each bronze parquet file through S3 multipart as row-groups
+      close. Peak RSS is bounded by MPU_MAX_CONCURRENT_PARTS x 5 MiB plus
+      one row-group buffer per worker; files arrive in S3 progressively
+      rather than in bursts.
+    - batch: buffers the whole file in memory then does one S3 PUT per
+      file. Higher peak RSS (whole file per worker), bursty network,
+      simpler failure semantics (single-PUT retry loop). Kept for stress
+      tests, whole-file atomicity, and to preserve the pre-2026-09-28
+      regression pins.
+    - auto: resolves to continuous. No scale-based split today; the choice
+      affects per-worker RSS, not correctness.
+
+    CPU and memory are sized by scale via the autosizer, independently of
+    delivery mode. Pre-2026-09-28 semantics used this enum for a
+    resource-profile tier; that role has moved into scale-based sizing.
     """
 
     BATCH = "batch"
