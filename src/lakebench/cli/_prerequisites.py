@@ -246,8 +246,11 @@ def _check_spark_operator(cfg) -> PrereqResult:
             passed=False,
             message="Spark Operator not installed",
             hint=(
-                "Install: helm install spark-operator oci://ghcr.io/kubeflow/helm-charts/spark-operator "
-                "--version 2.5.1 --namespace spark-operator --create-namespace\n"
+                "Install: lakebench admin install-spark-operator\n"
+                "(The managed path holds the cluster lease and rewrites the "
+                "operator watch list under a read-modify-write; a raw helm "
+                "install bypasses both and can crash-loop the shared operator "
+                "for every other running deployment.)\n"
                 "Or set platform.compute.spark.operator.install: true"
             ),
         )
@@ -335,7 +338,16 @@ def _check_namespace(cfg) -> PrereqResult:
             name="namespace",
             passed=False,
             message=f"Namespace '{ns}' does not exist",
-            hint=f"Create it: kubectl create namespace {ns}\nOr set create_namespace: true",
+            hint=(
+                f"Create it: lakebench deploy <config> creates namespace {ns!r} "
+                "automatically; ensure your config sets "
+                "platform.kubernetes.context to this cluster first. "
+                "(Do not pre-create the namespace with kubectl: the operator "
+                "watch list is mutated under a cluster lease, and a "
+                "pre-created namespace has caused a destroy cascade that "
+                "crash-looped the shared Spark Operator.)\n"
+                "Or set create_namespace: true"
+            ),
         )
     except Exception as e:
         return PrereqResult(

@@ -380,8 +380,13 @@ def stamp_namespace(
                 found_deployment=None,
                 hint=(
                     f"namespace {namespace!r} exists without lakebench "
-                    "identity annotations. Pass --force-legacy on deploy "
-                    "to claim it (destroy still refuses without migration)."
+                    "identity annotations. FIRST verify your cluster "
+                    "context with `oc whoami && kubectl config "
+                    "current-context` and confirm it matches this "
+                    "deployment's expected cluster. Only after that "
+                    "check, and only as a last resort, pass "
+                    "--force-legacy on deploy to claim it (destroy "
+                    "still refuses without migration)."
                 ),
             )
 
@@ -846,8 +851,12 @@ def verify_bucket_ownership(
             expected_deployment=expected_deployment,
             hint=(
                 f"bucket {bucket!r} has no lakebench.deployment tag. "
-                "Legacy bucket. Pass --force-legacy on deploy to claim "
-                "it (destroy always refuses without migration)."
+                "Legacy bucket. FIRST verify your cluster context with "
+                "`oc whoami && kubectl config current-context` and "
+                "confirm it matches the expected cluster for this "
+                "deployment. Only after that check, and only as a last "
+                "resort, pass --force-legacy on deploy to claim it "
+                "(destroy always refuses without migration)."
             ),
         )
 
@@ -1164,9 +1173,13 @@ def check_data_ownership(
                 f"{ctx}, so ownership of the tables and buckets it names cannot be "
                 "proven: with a stale or wrong context they may belong to a live "
                 "deployment on another cluster that shares the object store. They "
-                "were left untouched. If you have confirmed they are yours (for "
-                "example a previous destroy removed the namespace but not the "
-                "buckets), re-run with --force-legacy."
+                "were left untouched. FIRST verify your cluster context: run "
+                "`oc whoami && kubectl config current-context` and confirm the "
+                "output matches the cluster this deployment is expected to live "
+                "on. Only after confirming your kubeconfig context is the "
+                "expected cluster, and the buckets are genuinely yours (for "
+                "example an earlier destroy removed the namespace but not "
+                "the buckets), re-run with --force-legacy as a last resort."
             ),
         )
     if not namespace_verified:

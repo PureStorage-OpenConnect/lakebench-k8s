@@ -23,6 +23,7 @@ from lakebench.k8s import K8sConnectionError
 
 from ._helpers import (
     DEPRECATED_SHORT_F_HELP,
+    EXIT_DECLINED,
     _journal_safe,
     console,
     deprecated_short_f_force,
@@ -82,7 +83,7 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
         )
         if not typer.confirm("Proceed?"):
             print_info("Destruction cancelled")
-            raise typer.Exit(0)
+            raise typer.Exit(EXIT_DECLINED)
 
     try:
         removed, used_workdir = destroy_local(cfg, workdir=resolved, remove_data=remove_data)
@@ -264,7 +265,7 @@ def destroy(
             confirm = typer.confirm("Are you sure you want to proceed?")
             if not confirm:
                 print_info("Destruction cancelled")
-                raise typer.Exit(0)
+                raise typer.Exit(EXIT_DECLINED)
         else:
             print_error(
                 "Refusing to destroy without --force in non-interactive mode. "

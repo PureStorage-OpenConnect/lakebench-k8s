@@ -20,6 +20,7 @@ from lakebench.cli._helpers import (
 )
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
+    EXIT_DECLINED,
     _journal_safe,
     _strip_ansi,
     console,
@@ -412,7 +413,7 @@ def init(
         console.print()
         if not _typer.confirm(f"  Write configuration to {output}?", default=True):
             console.print("[yellow]Cancelled.[/yellow]")
-            raise typer.Exit(0)
+            raise typer.Exit(EXIT_DECLINED)
 
         output.write_text(result.config_yaml)
         console.print()

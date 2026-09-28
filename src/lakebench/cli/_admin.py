@@ -364,7 +364,15 @@ def release_lock(
     except ClusterLockHeld as e:
         print_error(
             f"lease is held by {e.holder!r} and still within TTL "
-            f"(expires {e.expires_at}). Pass --force to release anyway."
+            f"(expires {e.expires_at}). Refusing to release. "
+            "First check who the holder is (namespace, session, or lane) "
+            "and whether they are still running: releasing a live holder "
+            "can corrupt a concurrent deploy or destroy. "
+            "If the lease is expired, run: "
+            "lakebench admin release-lock --expired-only. "
+            "Only if you have confirmed the holder crashed and cannot "
+            "release itself, re-run with --force as a last resort and "
+            "type y/N to confirm."
         )
         raise typer.Exit(1) from e
     except ClusterLockError as e:
@@ -1098,8 +1106,11 @@ def reclaim_bucket(
                         "created-buckets record lists it (deploy "
                         "created it), and empties it without deleting "
                         "if deploy recorded adopting it empty; otherwise "
-                        "destroy leaves it in place unless --force-legacy "
-                        "is passed."
+                        "destroy leaves it in place. Before considering "
+                        "--force-legacy as a last resort, first check "
+                        "your cluster context with `oc whoami && kubectl "
+                        "config current-context` and confirm it matches "
+                        "the deployment's expected cluster."
                     )
                     raise typer.Exit(0) from None
                 print_error(
@@ -1108,9 +1119,11 @@ def reclaim_bucket(
                     f"deployment {cfg.name!r} a longest-prefix claim "
                     "(name mismatch, or a sibling deployment on the "
                     "cluster has a longer prefix). Rename the bucket "
-                    f"to start with {cfg.name}- to get destroy safety, "
-                    "or pass --force-legacy on destroy (last-resort "
-                    "operator assertion)."
+                    f"to start with {cfg.name}- to get destroy safety. "
+                    "Only as a last resort, and only after verifying "
+                    "your cluster context with `oc whoami && kubectl "
+                    "config current-context`, pass --force-legacy on "
+                    "destroy (operator assertion)."
                 )
                 raise typer.Exit(1) from None
     except ClusterLockHeld as e:

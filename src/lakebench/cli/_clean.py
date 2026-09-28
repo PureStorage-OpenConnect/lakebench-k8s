@@ -11,6 +11,7 @@ from rich.panel import Panel
 from lakebench._constants import DEFAULT_OUTPUT_DIR
 from lakebench.cli._helpers import (
     DEPRECATED_SHORT_F_HELP,
+    EXIT_DECLINED,
     _journal_safe,
     console,
     deprecated_short_f_force,
@@ -174,7 +175,7 @@ def clean(
         confirm = typer.confirm("Are you sure you want to proceed?")
         if not confirm:
             print_info("Clean cancelled")
-            raise typer.Exit(0)
+            raise typer.Exit(EXIT_DECLINED)
 
     console.print(Panel(f"Cleaning: [bold]{target}[/bold]", expand=False))
 
@@ -366,8 +367,14 @@ def clean(
                         print_error(
                             f"Refusing to clean {layer}: bucket "
                             f"{bucket!r} has no lakebench ownership tag. "
-                            "Pass --force-legacy to clean (caution: this "
-                            "may collide with another team's data)."
+                            "FIRST verify your cluster context: run "
+                            "`oc whoami && kubectl config current-context` "
+                            "and confirm the output matches this "
+                            "deployment's expected cluster. Only after "
+                            "that check, if you have confirmed this is "
+                            "yours, pass --force-legacy to clean as a "
+                            "last resort (caution: this may collide with "
+                            "another team's data)."
                         )
                         continue
                     if v.verdict is IdentityVerdict.NOT_FOUND:
