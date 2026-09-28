@@ -91,6 +91,47 @@ rather than in bursts. `auto` resolves to `continuous` unconditionally
 Pod CPU and memory are sized by scale via the autosizer, independently of
 delivery mode.
 
+### Delivery mode vs pipeline mode
+
+Lakebench has two independent enums that both spell their values
+`batch` / `continuous`. They control different things and read against
+different clocks. If you take away one thing from this section, take
+this: **content = seed, layout = delivery mode, stage graph = pipeline
+mode.** They do not constrain each other.
+
+| Concern | Config field | Type | What it controls |
+|---|---|---|---|
+| S3 delivery layout | `workload.datagen.mode` | `DatagenMode` | How the corpus lands in S3: `batch` = one PUT per Parquet file; `continuous` = multipart streaming as row-groups close. Row content is byte-identical at a fixed seed. |
+| Stage graph | `architecture.pipeline.mode` | `PipelineMode` | How the medallion stages run: `batch` = sequential (bronze -> silver -> gold once); `continuous` = concurrent streaming jobs over a corpus that keeps arriving (`sustained` is a deprecated alias). |
+
+The two modes compose freely: `datagen.mode: batch` and
+`pipeline.mode: continuous` is a real config that produces all bronze
+files in one burst, then lets the continuous pipeline trickle-read
+them. Neither Lakebench nor the code use the word **streaming** as a
+mode name; the continuous pipeline uses Spark Structured Streaming
+internally, but the operator-facing name is `continuous`.
+
+### Changelog: 2026-09-28 default delivery flip
+
+The default for `datagen.mode: auto` flipped from `batch` (at
+scale <= 10) to `continuous` (at every scale). Same-seed corpora remain
+byte-identical, so this is not a corpus change; only the S3 upload
+pattern changed. If your run tuning depended on batch-style bursty
+uploads (bandwidth ceilings, RSS profile), set `mode: batch`
+explicitly. `continuous` is faster at scale 1 for c360 (upload-gen
+overlap) and slower at scale 10 by 10-16% because per-file multipart
+overhead grows with file count; pick with your file count and network
+in mind, not from the default.
+
+### `--delivery-mode` (internal render arg)
+
+`deploy/datagen.py` translates `datagen.mode` into a `--delivery-mode`
+argv on the datagen container (see `templates/datagen/job.yaml.j2`).
+Operators do not set this directly; it appears in rendered Job
+manifests for debuggers. The Rust binary accepts the same three values
+(`auto`, `batch`, `continuous`) so a manifest can be replayed by
+hand.
+
 ### Per-pod resources
 
 The autosizer sizes datagen pods the same way in both modes, and honours
