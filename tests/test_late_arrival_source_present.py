@@ -60,8 +60,7 @@ def test_strict_parity_env_gate_present():
         "longer refuse the run in strict mode"
     )
     assert "STATEMENTS_STRICT_PARITY_ENV" in src, (
-        "the module-level env-var constant was removed; the strict gate "
-        "check has no anchor"
+        "the module-level env-var constant was removed; the strict gate check has no anchor"
     )
     # The gate composes: strict env var AND non-zero late count.
     assert "late_iban_count > 0" in src and "STATEMENTS_STRICT_PARITY_ENV" in src, (
@@ -88,8 +87,7 @@ def test_parity_mode_label_emission_present():
         "the run-total late-arrival counter is no longer emitted at stream stop"
     )
     assert "strict_monotone" in src and "arrival_order_running_balance" in src, (
-        "the two parity-mode values were removed; the label carries no "
-        "meaning without them"
+        "the two parity-mode values were removed; the label carries no meaning without them"
     )
 
 
@@ -114,9 +112,6 @@ def test_shared_opening_balance_helper_is_used():
         "the batch's opening_balance formula can drift from stream"
     )
     common = (
-        Path(__file__).resolve().parent.parent
-        / "src/lakebench/spark/scripts/common.py"
+        Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts/common.py"
     ).read_text()
-    assert "def aml_opening_balance" in common, (
-        "common.aml_opening_balance was removed"
-    )
+    assert "def aml_opening_balance" in common, "common.aml_opening_balance was removed"
