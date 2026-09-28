@@ -268,11 +268,10 @@ release was only ever published with `-incubating`. Polaris graduated from
 the Apache incubator at 1.4.0, so 1.4.0 and later (including the 1.6.0
 default) drop the suffix entirely; there is no `1.6.0-incubating` tag.
 
-The STS skip itself is per catalog: the bootstrap Job creates the catalog
+The STS skip is per catalog: the bootstrap Job creates the catalog
 with `stsUnavailable: true` and `pathStyleAccess: true` in its storage
-config, so no server-wide setting is needed. Do not set
-`POLARIS_FEATURES__SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION=true` (or the
-older `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION`). It drops the endpoint and
+config. No server-wide feature flag is needed, and none should be added --
+any server-wide credential-subscoping override drops the endpoint and
 path-style settings from the storage access config, and Polaris's
 server-side S3FileIO then falls back to `s3.amazonaws.com`.
 

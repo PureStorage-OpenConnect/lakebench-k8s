@@ -98,10 +98,11 @@ architecture:
   attempt STS even when told not to, causing S3 failures on non-AWS storage.
   Lakebench defaults to 1.6.0, well past this floor.
 - **STS skip**: lakebench creates the catalog with `stsUnavailable: true`
-  and `pathStyleAccess: true` in the bootstrap payload. Do not set the
-  server-wide `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION` feature flag: it drops
-  the endpoint and path-style settings, and server-side S3FileIO falls back
-  to `s3.amazonaws.com`.
+  and `pathStyleAccess: true` in the bootstrap payload. This is the only
+  supported way to skip STS on FlashBlade or other non-AWS S3. Do not add
+  any server-wide credential-subscoping override to Polaris; it drops the
+  endpoint and path-style settings, and server-side S3FileIO falls back to
+  `s3.amazonaws.com`.
 - **Minimum Trino version**: 454 (for `oauth2.scope` support). Default is 483.
 - **Image tag suffix**: only the 1.3.0 release carries `-incubating`.
   Polaris graduated from the Apache incubator at 1.4.0, so 1.4.0 and later
