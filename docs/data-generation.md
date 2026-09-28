@@ -48,7 +48,6 @@ workload:
 | `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--resume` | | `false` | Not implemented for the Rust generator: accepted, but it has no effect and generation starts from the beginning |
 
 Without `--yes`, the command prompts for confirmation before submitting
 the datagen job. Use `--yes` for scripts and CI/CD pipelines.
@@ -170,7 +169,6 @@ workload:
     cpu: "8"                   # CPU per pod (autosizer default when unset)
     memory: 4Gi                # Memory per pod (autosizer derives it when unset)
     generators: 0              # Per-pod generator threads (0 = follow pod CPU)
-    uploaders: 0               # Accepted, but not passed to the generator
     # Timestamp range -- affects Iceberg partition count.
     # Silver partitions by interaction_date (from event_timestamp).
     # Continuous mode: use a narrow range (days/weeks) to avoid
@@ -178,10 +176,7 @@ workload:
     # Batch mode: wider ranges are fine (single compaction pass).
     # See docs/configuration.md#timestamp-range-impact for details.
     timestamp_start: null      # Start date for timestamps (ISO format)
-    timestamp_end: null        # End date for timestamps (ISO format)
-    checkpoint:                # Accepted, but read by nothing (see --resume)
-      enabled: true
-      path: ".lakebench_checkpoint.json"
+    timestamp_end: null        # End date for timestamps (ISO format, exclusive)
 ```
 
 The `dirty_data_ratio` field controls the fraction of records that contain

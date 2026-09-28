@@ -348,9 +348,9 @@ class TestScaleConfig:
         assert config.architecture.workload.datagen.memory == "16Gi"
 
     def test_datagen_image_default(self):
-        """Default datagen image uses :latest tag."""
+        """Default datagen image pins the v1.6 AML generator-freeze commit."""
         config = LakebenchConfig(name="test")
-        assert config.images.datagen == "docker.io/sillidata/lb-datagen:7c24641"
+        assert config.images.datagen == "docker.io/sillidata/lb-datagen:25f1aa8"
 
     def test_datagen_mode_defaults_auto(self):
         """Datagen mode defaults to 'auto'."""
@@ -375,11 +375,10 @@ class TestScaleConfig:
         )
         assert config.architecture.workload.datagen.mode.value == "continuous"
 
-    def test_datagen_generators_uploaders_defaults(self):
-        """Datagen generators/uploaders default to 0 (auto-resolved)."""
+    def test_datagen_generators_default(self):
+        """Datagen generators defaults to 0 (auto-resolved from pod CPU)."""
         config = LakebenchConfig(name="test")
         assert config.architecture.workload.datagen.generators == 0
-        assert config.architecture.workload.datagen.uploaders == 0
 
 
 class TestPipelineModeConfig:
@@ -879,14 +878,19 @@ class TestComponentValidation:
 class TestRecipeName:
     """Tests for recipe name derivation."""
 
-    def test_recipe_customer360_batch(self):
-        """Default recipe is customer360-batch (scale <= 10, mode auto -> batch)."""
+    def test_recipe_customer360_auto_defaults_continuous(self):
+        """Default recipe is customer360-continuous.
+
+        Post-D-wave (2026-09-28), DatagenMode.AUTO resolves to CONTINUOUS
+        unconditionally (owner D18). The pre-v1.6 scale-threshold behaviour
+        (auto -> batch at scale <= 10) is gone.
+        """
         from lakebench.config.autosizer import _resolve_datagen_mode
 
         config = LakebenchConfig(name="test")
         mode = _resolve_datagen_mode(config)
         recipe = f"{config.architecture.workload.schema_type.value}-{mode}"
-        assert recipe == "customer360-batch"
+        assert recipe == "customer360-continuous"
 
     def test_recipe_customer360_continuous(self):
         """Scale > 10 with auto mode -> customer360-continuous."""

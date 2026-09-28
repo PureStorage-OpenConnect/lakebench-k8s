@@ -550,9 +550,6 @@ Scratch PVCs for Spark shuffle data. Only needed with Portworx or similar CSI.
 | `workload.datagen.cpu` | string | `8` (auto) | CPU per datagen pod. A value you set is used as given; unset, the auto-sizer sets 8 in both modes. |
 | `workload.datagen.memory` | string | auto | Memory per datagen pod. A value you set is used as given; unset, the auto-sizer derives it from the measured peak RSS model for the schema, scale, pod CPU (thread count) and `file_size`, with a 4Gi floor. |
 | `workload.datagen.generators` | int | `0` | Generator threads per pod. 0 = auto: the entrypoint sizes threads from the pod's CPU request. |
-| `workload.datagen.uploaders` | int | `0` | Uploader threads per pod. 0 = auto (1 batch, 2 continuous). |
-| `workload.datagen.checkpoint.enabled` | bool | `true` | **No effect.** Nothing reads it: the Rust generator does not implement checkpoint resume, and `generate --resume` has no effect. |
-| `workload.datagen.checkpoint.path` | string | `.lakebench_checkpoint.json` | **No effect.** Nothing reads it (see `checkpoint.enabled`). |
 | `workload.datagen.timestamp_start` | string or null | `null` | Start date for generated timestamps (ISO format). Default: `2024-01-01`. See [Timestamp Range Impact](#timestamp-range-impact). |
 | `workload.datagen.timestamp_end` | string or null | `null` | End date for generated timestamps (ISO format, exclusive). Default: `2025-01-01` for single-cycle runs (Rust generator built-in). Multi-cycle runs (`cycles > 1`) split a wider `2024-01-01` to `2025-12-31` default window across cycles (`deploy/datagen.py` fallback, matched by `metrics/c360_correctness.py`). See [Timestamp Range Impact](#timestamp-range-impact). |
 

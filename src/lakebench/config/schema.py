@@ -1107,13 +1107,6 @@ class ProcessingConfig(ConfigModel):
         return self
 
 
-class DatagenCheckpointConfig(ConfigModel):
-    """Data generation checkpoint configuration."""
-
-    enabled: bool = True
-    path: str = ".lakebench_checkpoint.json"
-
-
 class DatagenConfig(ConfigModel):
     """Data generation configuration.
 
@@ -1127,6 +1120,17 @@ class DatagenConfig(ConfigModel):
         datagen:
           scale: 10   # ~100 GB bronze, 1M customers for Customer360
     """
+
+    _removed_keys: ClassVar[dict[str, str]] = {
+        "checkpoint": (
+            "The Rust generator never implemented checkpoint-resume; "
+            "removed 2026-09-28. Re-run generation from the start on failure."
+        ),
+        "uploaders": (
+            "Never forwarded to the Rust generator; removed 2026-09-28. "
+            "Uploader concurrency is fixed inside the S3 sink."
+        ),
+    }
 
     scale: float = Field(
         default=10,
@@ -1171,8 +1175,6 @@ class DatagenConfig(ConfigModel):
     cpu: str = "2"
     memory: str = "4Gi"
     generators: int = 0  # generator threads per pod (0 = auto: follow the pod CPU)
-    uploaders: int = 0  # per-pod uploader threads   (0 = auto: 1 for batch, 2 for continuous)
-    checkpoint: DatagenCheckpointConfig = Field(default_factory=DatagenCheckpointConfig)
     timestamp_start: str | None = Field(
         default=None,
         description="Start date for generated timestamps (ISO format, e.g. '2024-01-01'). Default: datagen built-in (2024-01-01).",

@@ -116,10 +116,12 @@ def main() -> int:
     # bronze accumulates. The defaults (0 of 1) are a single run.
     ap.add_argument("--cycle", type=int, default=0)
     ap.add_argument("--cycles", type=int, default=1)
-    # NOTE: default is 32 to match the pre-M6 entrypoint (existing financial
-    # K8s Job YAMLs assume 32). c360 K8s Job templates that want a different
-    # file size pass --file-size-mb explicitly.
-    ap.add_argument("--file-size-mb", type=int, default=32)
+    # Default 64 matches DatagenConfig.file_size ("64mb") and the template's
+    # default(64), so raw-CLI reproducers and pod runs pick the same file
+    # size when the flag is omitted. The old 32-MB default (pre-M6) was a
+    # transitional value for financial K8s YAMLs before deploy/datagen.py
+    # started rendering --file-size-mb from config unconditionally.
+    ap.add_argument("--file-size-mb", type=int, default=64)
     ap.add_argument("--bucket", default=os.environ.get("BRONZE_BUCKET", ""))
     ap.add_argument("--prefix", default=os.environ.get("PREFIX", ""))
     ap.add_argument("--node-id", type=int, default=None)

@@ -444,8 +444,8 @@ that; one that already held data is left alone and reported, and
 idempotent -- components that already exist are skipped.
 
 **Generate fails or times out:** Increase the timeout with `--timeout 14400`
-(4 hours). A re-run regenerates the corpus from the start. `generate
---resume` is accepted, but the current generator ignores it.
+(4 hours). A re-run regenerates the corpus from the start; the Rust
+generator has no checkpoint-resume.
 
 **A pipeline stage fails:** Re-run just that stage:
 

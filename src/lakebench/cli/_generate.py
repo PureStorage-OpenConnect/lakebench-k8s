@@ -68,16 +68,6 @@ def generate(
             ),
         ),
     ] = 0,
-    resume: Annotated[
-        bool,
-        typer.Option(
-            "--resume",
-            help=(
-                "Not implemented for the Rust generator: accepted, but it has "
-                "no effect and generation starts from the beginning"
-            ),
-        ),
-    ] = False,
     yes: Annotated[
         bool,
         typer.Option(
@@ -90,10 +80,9 @@ def generate(
     """Generate synthetic data to bronze bucket.
 
     Runs the datagen job to populate the bronze bucket with synthetic data.
-    Uses parallel Kubernetes Jobs for efficient generation.
-
-    --resume is not implemented for the Rust generator: the flag is
-    accepted but has no effect.
+    Uses parallel Kubernetes Jobs for efficient generation. Interrupted
+    runs are re-run from the start; the Rust generator has no
+    checkpoint-resume.
     """
     from lakebench.deploy import DatagenDeployer, DeploymentEngine, DeploymentStatus
 
@@ -197,7 +186,6 @@ def generate(
         {
             "wait": wait,
             "timeout": timeout,
-            "resume": resume,
         },
     )
 
@@ -206,11 +194,8 @@ def generate(
         datagen = DatagenDeployer(engine)
 
         # Submit job
-        if resume:
-            print_info("Submitting datagen job with checkpoint resume...")
-        else:
-            print_info("Submitting datagen job...")
-        result = datagen.deploy(resume=resume)
+        print_info("Submitting datagen job...")
+        result = datagen.deploy()
 
         if result.status != DeploymentStatus.SUCCESS:
             print_error(f"Failed to submit job: {result.message}")
