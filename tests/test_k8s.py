@@ -202,6 +202,39 @@ class TestK8sClientApplyManifest:
         assert result is True
         k._apps_v1.create_namespaced_deployment.assert_called_once()
 
+    def test_apply_pvc_create(self):
+        # LB obs-pushgateway: apply_manifest must dispatch PVC (apiVersion v1, no
+        # "/") to a real handler, not the unsupported-kind raise.
+        from kubernetes.client.rest import ApiException
+
+        k = self._make_client()
+        k._core_v1.read_namespaced_persistent_volume_claim.side_effect = ApiException(
+            status=404, reason="Not Found"
+        )
+        manifest = {
+            "kind": "PersistentVolumeClaim",
+            "apiVersion": "v1",
+            "metadata": {"name": "lakebench-pushgateway"},
+            "spec": {"accessModes": ["ReadWriteOnce"]},
+        }
+        result = k.apply_manifest(manifest, namespace="test-ns")
+        assert result is True
+        k._core_v1.create_namespaced_persistent_volume_claim.assert_called_once()
+
+    def test_apply_pvc_exists_not_replaced(self):
+        # PVC spec is immutable: an existing claim is left as-is, never replaced.
+        k = self._make_client()
+        k._core_v1.read_namespaced_persistent_volume_claim.return_value = MagicMock()
+        manifest = {
+            "kind": "PersistentVolumeClaim",
+            "apiVersion": "v1",
+            "metadata": {"name": "lakebench-pushgateway"},
+            "spec": {"accessModes": ["ReadWriteOnce"]},
+        }
+        result = k.apply_manifest(manifest, namespace="test-ns")
+        assert result is True
+        k._core_v1.create_namespaced_persistent_volume_claim.assert_not_called()
+
     def test_apply_unsupported_kind(self):
         from lakebench.k8s.client import K8sResourceError
 

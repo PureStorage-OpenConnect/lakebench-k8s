@@ -1994,6 +1994,15 @@ class ObservabilityConfig(ConfigModel):
     # silently tracked whatever the Helm repo served at install time. That
     # currently resolves to Prometheus v3.13.1 + Grafana v13.1.x.
     chart_version: str = "87.19.2"
+    # Per-deployment Prometheus Pushgateway for live datagen + bronze->silver
+    # metrics (batch jobs Prometheus pull cannot catch). Deployed only when
+    # observability is enabled; a best-effort live view, never a published
+    # source (metrics.json stays authoritative). See
+    # docs/internal/observability-pushgateway.md.
+    pushgateway_enabled: bool = True
+    pushgateway_image: str = "prom/pushgateway:v1.11.1"
+    pushgateway_storage: str = "1Gi"
+    pushgateway_storage_class: str = "px-csi-scratch"
     reports: ReportsConfig = Field(default_factory=ReportsConfig)
 
     _dead_fields: ClassVar[dict[str, str]] = {
