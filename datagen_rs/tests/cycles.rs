@@ -199,6 +199,86 @@ fn cycle_arguments_are_strict() {
     }
 }
 
+/// Wave 1 A3 (2026-09-28): `--mode reference` with `--total-nodes > 1` must
+/// refuse to start, because the reference zone is a single-writer artefact
+/// and running two reference pods races the same S3 keys (manifest.parquet,
+/// party.parquet, account.parquet, watchlist.parquet).
+#[test]
+fn reference_mode_refuses_multi_writer() {
+    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env(
+            "DG_LOCAL_DIR",
+            std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-race"),
+        )
+        .args([
+            "--bucket",
+            "b",
+            "--seed",
+            "7777",
+            "--scale",
+            SCALE,
+            "--mode",
+            "reference",
+            "--total-nodes",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        st.status.code(),
+        Some(2),
+        "--mode reference with --total-nodes 2 was accepted (would race)"
+    );
+    let err = String::from_utf8_lossy(&st.stderr);
+    assert!(
+        err.contains("race the reference S3 keys"),
+        "wrong refusal message: {err}"
+    );
+}
+
+/// `--mode reference` with a single node still runs (the guard is on multi-
+/// writer, not on the reference role itself).
+#[test]
+fn reference_mode_with_one_node_runs() {
+    let d = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("lb-mode-ref-ok");
+    let _ = std::fs::remove_dir_all(&d);
+    let st = Command::new(env!("CARGO_BIN_EXE_generate"))
+        .env("DG_LOCAL_DIR", &d)
+        .args([
+            "--bucket",
+            "b",
+            "--seed",
+            "7777",
+            "--scale",
+            SCALE,
+            "--threads",
+            "2",
+            "--mode",
+            "reference",
+            "--total-nodes",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        st.status.success(),
+        "--mode reference --total-nodes 1 failed: {}",
+        String::from_utf8_lossy(&st.stderr)
+    );
+    // Reference-only pod writes manifest + account + party + watchlist and
+    // nothing under bronze/pacs008/.
+    let root = d.join("b");
+    assert!(root.join("manifest/manifest.parquet").exists());
+    assert!(root.join("bronze/account.parquet").exists());
+    assert!(root.join("bronze/party.parquet").exists());
+    assert!(root.join("bronze/watchlist.parquet").exists());
+    let pacs = root.join("bronze/pacs008");
+    assert!(
+        !pacs.exists() || std::fs::read_dir(&pacs).unwrap().next().is_none(),
+        "--mode reference wrote pacs008 bronze files"
+    );
+}
+
 #[test]
 fn financial_seed_is_required_strict_and_never_spent() {
     for bad in [

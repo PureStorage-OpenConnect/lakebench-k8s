@@ -59,24 +59,29 @@ pub const PEP_TYPOLOGY: &str = "pep_match";
 /// Listed parties per entity of population (self-chosen; enough instances for
 /// a recall estimate at scale 1, rare next to the corpus: at scale 2 about 90
 /// sanctions and 130 PEP entries against 222,222 entities).
-const SANCTIONS_V1_RATE: f64 = 4.0e-4;
-const SANCTIONS_V1_MIN: usize = 24;
-const SANCTIONS_V2_MIN: usize = 8;
-const PEP_RATE: f64 = 6.0e-4;
-const PEP_MIN: usize = 24;
+///
+/// These constants are pinned in prereg 3.6.1+ under the `screening` block
+/// (Wave 1 A2, 2026-09-28). Any change here must also update
+/// aml_preregistration.json; the Rust test `screening_rates_match_prereg`
+/// in tests/regression.rs pins the values so the two stay aligned.
+pub const SANCTIONS_V1_RATE: f64 = 4.0e-4;
+pub const SANCTIONS_V1_MIN: usize = 24;
+pub const SANCTIONS_V2_MIN: usize = 8;
+pub const PEP_RATE: f64 = 6.0e-4;
+pub const PEP_MIN: usize = 24;
 /// Share of listed parties a customer pays, and of listed parties with a
 /// namesake decoy.
-const PAID_RATE: f64 = 0.7;
-const DECOY_RATE: f64 = 0.5;
+pub const PAID_RATE: f64 = 0.7;
+pub const DECOY_RATE: f64 = 0.5;
 /// Share of relationship accounts outside the list entry's country.
-const FOREIGN_ACCOUNT_RATE: f64 = 0.2;
+pub const FOREIGN_ACCOUNT_RATE: f64 = 0.2;
 /// Background external counterparties per list entry.
-const BACKGROUND_PER_PARTY: usize = 20;
+pub const BACKGROUND_PER_PARTY: usize = 20;
 /// Relationship accounts reserved per list entry (a party is paid by one or
 /// two customers).
-const MAX_REL: usize = 2;
+pub const MAX_REL: usize = 2;
 /// Where in the corpus list version 2 is published (share of the span).
-const V2_AT: f64 = 0.75;
+pub const V2_AT: f64 = 0.75;
 
 const PROGRAMS: [&str; 6] = ["SDGT", "IRAN", "RUSSIA-EO14024", "DPRK3", "SDNTK", "GLOMAG"];
 const POSITIONS: [&str; 7] = [

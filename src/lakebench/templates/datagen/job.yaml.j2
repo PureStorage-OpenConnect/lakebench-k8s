@@ -40,7 +40,13 @@ spec:
           args:
             - "--schema"
             - "{{ datagen_schema | default('customer360') }}"
-            {% if datagen_scale_factor is defined %}
+            {# --scale and --customer-id-max are exclusive: --scale drives the
+               financial corpus (typology counts, world size); --customer-id-max
+               drives the c360 customer id space. Rendering both on c360 made
+               --scale silently dead there and dropped `scale` from provenance.
+               Now schema-gated: financial gets --scale only, c360 gets
+               --customer-id-max only. LB-191 companion fix, 2026-09-28. #}
+            {% if datagen_scale_factor is defined and datagen_schema | default('customer360') == 'financial' %}
             - "--scale"
             - "{{ datagen_scale_factor }}"
             {% endif %}
@@ -54,8 +60,9 @@ spec:
             - "{{ datagen_mode | default('batch') }}"
             - "--file-size-mb"
             - "{{ datagen_file_size_mb | default(512) }}"
-            - "--payload-kb"
-            - "{{ datagen_payload_kb | default(0) }}"
+            {# --payload-kb dropped 2026-09-28 (LB-191 companion). Rust hardcodes 2 KiB.
+               No shipped template ever used anything else; a future variable payload
+               comes back with per-payload bytes/row calibration. #}
             - "--bucket"
             - "{{ bucket_bronze }}"
             - "--prefix"

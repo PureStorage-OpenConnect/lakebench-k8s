@@ -116,7 +116,7 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     # Datagen deployer injects these (see datagen.py _build_datagen_context)
     ctx.setdefault("datagen_target_tb", "0.010000")
     ctx.setdefault("datagen_file_size_mb", 512)
-    ctx.setdefault("datagen_payload_kb", 2)
+    # datagen_payload_kb removed 2026-09-28; template no longer renders it.
     ctx.setdefault("datagen_path_prefix", "customer/interactions/")
     ctx.setdefault("datagen_seed", 42)
     ctx.setdefault("datagen_resume", False)

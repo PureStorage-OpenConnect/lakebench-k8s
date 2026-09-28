@@ -344,14 +344,17 @@ def test_high_risk_countries_match_generator_corridor_pool():
 
 def test_prereg_version_and_model_blocks():
     p = json.loads(PREREG.read_text())
-    assert p["version"] == "3.6.0"
-    assert "#37/#38" in p["_doc"] and p["changelog"][0]["version"] == "3.6.0"
-    # 3.6.0 has two entries: the D8 rule (#45/#45a) and the D5 strengthening.
-    assert [(c["version"], c.get("part")) for c in p["changelog"][:2]] == [
+    # 3.6.1 (Wave 1 A2, 2026-09-28) adds the screening block. Content of D5/D8
+    # blocks is unchanged; only the version string, changelog head and
+    # prereg_sha256 moved.
+    assert p["version"] == "3.6.1"
+    assert "#37/#38" in p["_doc"] and p["changelog"][0]["version"] == "3.6.1"
+    assert [(c["version"], c.get("part")) for c in p["changelog"][:3]] == [
+        ("3.6.1", None),
         ("3.6.0", "D8"),
         ("3.6.0", "D5"),
     ]
-    assert [c["version"] for c in p["changelog"][2:5]] == ["3.5.2", "3.5.1", "3.5.0"]
+    assert [c["version"] for c in p["changelog"][3:6]] == ["3.5.2", "3.5.1", "3.5.0"]
     assert p["corpora"]["registered_looks_open"] is False
     assert {42, 50000042} <= set(p["corpora"]["spent_seeds"])
     u = p["unit_of_scoring"]

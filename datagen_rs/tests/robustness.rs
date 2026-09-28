@@ -281,7 +281,9 @@ fn dormancy_scales_each_episode_and_nothing_else_in_the_schedule() {
 
 #[test]
 fn registered_seeds_get_the_right_corpus_only() {
-    use datagen_rs::robustness::{perturbation_for_seed, EVALUATION_SEED, ROBUSTNESS_SEED};
+    use datagen_rs::robustness::{
+        perturbation_for_seed, CALIBRATION_REPLICATE_SEEDS, EVALUATION_SEED, ROBUSTNESS_SEED,
+    };
     // Pure decision function only: the registered seeds are never generated
     // here.
     assert!(perturbation_for_seed(ROBUSTNESS_SEED, false).is_err());
@@ -294,6 +296,20 @@ fn registered_seeds_get_the_right_corpus_only() {
         perturbation_for_seed(EVALUATION_SEED, false),
         Ok(Perturbation::NONE)
     );
+    // Calibration replicate seeds (added 2026-09-28, Wave 1 A1) must refuse
+    // --robustness-perturbation the same way EVALUATION_SEED does; without
+    // the flag they run as an ordinary calibration corpus.
+    for &s in CALIBRATION_REPLICATE_SEEDS {
+        assert!(
+            perturbation_for_seed(s, true).is_err(),
+            "calibration replicate seed {s} accepted --robustness-perturbation"
+        );
+        assert_eq!(
+            perturbation_for_seed(s, false),
+            Ok(Perturbation::NONE),
+            "calibration replicate seed {s} did not accept the unperturbed path"
+        );
+    }
     assert_eq!(
         perturbation_for_seed(DEV_SEED, false),
         Ok(Perturbation::NONE)
@@ -301,6 +317,19 @@ fn registered_seeds_get_the_right_corpus_only() {
     assert_eq!(
         perturbation_for_seed(DEV_SEED, true),
         Ok(Perturbation::REGISTERED)
+    );
+}
+
+/// The Rust CALIBRATION_REPLICATE_SEEDS list must equal the Python-side
+/// pre-registration `corpora.calibration_replicate_seeds`. This test hard-
+/// codes the expected values (also present in `aml_preregistration.json`);
+/// a drift here is a defence-in-depth bug, not a legitimate freeze change.
+#[test]
+fn calibration_replicate_seeds_match_prereg() {
+    use datagen_rs::robustness::CALIBRATION_REPLICATE_SEEDS;
+    assert_eq!(
+        CALIBRATION_REPLICATE_SEEDS,
+        &[123_456_832, 246_913_621, 370_370_410, 493_827_199]
     );
 }
 

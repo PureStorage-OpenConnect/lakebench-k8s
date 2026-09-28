@@ -337,6 +337,22 @@ fn pacs008_main() {
     }
     let do_bronze = mode == "all" || mode == "bronze";
     let do_reference = mode == "reference" || (mode == "all" && node_id == 0);
+    // Multi-writer guard (Wave 1 A3, 2026-09-28). Reference files
+    // (manifest.parquet, party.parquet, account.parquet, watchlist.parquet)
+    // are single-writer artefacts. A `--mode reference` pod is the whole
+    // reference writer; running more than one races the same S3 keys and
+    // leaves the corpus corrupt under last-writer-wins. Refuse >1 pod when
+    // the role is reference-only. `--mode all` is fine because only node 0
+    // ever writes reference on that path (see do_reference above).
+    if mode == "reference" && total_nodes > 1 {
+        eprintln!(
+            "--mode reference with --total-nodes {} > 1 would race the reference S3 keys; \
+             run --mode reference from exactly one pod (or use --mode all where only \
+             node 0 writes reference).",
+            total_nodes
+        );
+        std::process::exit(2);
+    }
     // Validate --corpus-months FIRST, before rayon pool init and before the
     // ~11M-entity world build, so a misconfigured pod exits in milliseconds
     // rather than after minutes of setup times backoffLimit retries. Use
@@ -1200,19 +1216,15 @@ fn customer360_main() {
         eprintln!("customer id space: {}", e);
         std::process::exit(2);
     });
-    // `customer360_bytes_per_row_default()` is measured at payload_kb=2. Any
-    // other value silently mis-sizes rows_per_file (files 1/N or Nx too
-    // large). Refuse until per-payload measurements are folded in.
-    let payload_kb: usize = arg("--payload-kb", 2usize);
-    if payload_kb != 2 {
-        eprintln!(
-            "--payload-kb {} is not supported (bytes/row measurements are for payload_kb=2 only); \
-             either pass --payload-kb 2 or extend customer360_bytes_per_row_default to be \
-             payload-aware",
-            payload_kb
-        );
-        std::process::exit(2);
-    }
+    // payload_kb was a CLI knob (--payload-kb) that had only ever been
+    // calibrated at 2, so any other value silently mis-sized rows_per_file
+    // and the refuse path exited 2. Dropped 2026-09-28 (LB-191 companion,
+    // Wave 1 C3): no shipped template ever passed a different value, and a
+    // future need for variable payload comes back with real per-payload
+    // calibration in customer360_bytes_per_row_default(). Config::payload_kb
+    // stays as a Rust-visible field so unit tests can build small_cfg with
+    // payload_kb=1. The old --payload-kb CLI value (if any) is ignored.
+    let payload_kb: usize = 2;
     let dirty_ratio: f64 = arg("--dirty-ratio", 0.08);
     let duplicate_email_pct: f64 = arg("--duplicate-email-pct", 0.10);
     // Timestamp range as YYYY-MM-DD; default 2024-01-01..2025-01-01 matching

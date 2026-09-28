@@ -530,14 +530,31 @@ pub fn build_batch(
 
     // Source-aware per-row dirty probability. Real pipelines don't corrupt
     // uniformly -- legacy_import rows are ~70x more dirty than primary_system
-    // rows. We compute per-row rate = cfg.dirty_ratio * DIRTY_RATE_BY_SOURCE[src],
-    // then Bernoulli-sample per column. This is a deliberate break from the
-    // Python's 4x fixed-count uniform sampling; the total dirty count now
-    // varies with the data_source mix but the *shape* matches real production.
+    // rows. We keep the source-weighted SHAPE from DIRTY_RATE_BY_SOURCE but
+    // rescale so cfg.dirty_ratio is the operator-visible AGGREGATE dirty rate
+    // (LB-191, 2026-09-28): per-row rate = cfg.dirty_ratio *
+    // DIRTY_RATE_BY_SOURCE[src] / weighted_mean, where weighted_mean is the
+    // DATA_SOURCE_WEIGHTS-weighted average of DIRTY_RATE_BY_SOURCE. This makes
+    // cfg.dirty_ratio == 0.08 produce ~8% aggregate dirty rows on the pass,
+    // not ~0.6% (the pre-fix bug where the input was multiplied by the
+    // weighted mean itself). Per-source rates are clamped at 1.0 for
+    // pathological cfg.dirty_ratio settings.
     let per_row_dirty_rate: Vec<f64> = if cfg.dirty_ratio > 0.0 {
+        let weighted_mean: f64 = r::DATA_SOURCE_WEIGHTS
+            .iter()
+            .zip(r::DIRTY_RATE_BY_SOURCE.iter())
+            .map(|(w, r)| w * r)
+            .sum();
+        // weighted_mean is a constant ~0.0735; guard against divide-by-zero if
+        // both arrays ever change to all-zero.
+        let scale = if weighted_mean > 0.0 {
+            cfg.dirty_ratio / weighted_mean
+        } else {
+            0.0
+        };
         data_source_idx
             .iter()
-            .map(|&s| cfg.dirty_ratio * r::DIRTY_RATE_BY_SOURCE[s as usize])
+            .map(|&s| (scale * r::DIRTY_RATE_BY_SOURCE[s as usize]).min(1.0))
             .collect()
     } else {
         Vec::new()
@@ -1455,16 +1472,18 @@ mod tests {
                 dirty += 1;
             }
         }
-        // With source-weighted dirty rates (M-R2, 2026-09-20) the overall
-        // dirty rate is `dirty_ratio * avg(DIRTY_RATE_BY_SOURCE weighted by
-        // DATA_SOURCE_WEIGHTS)` = 0.08 * 0.0735 ≈ 0.6% per row on average.
-        // Only ~half of dirty picks land on a corruptible city (10 of 22
-        // CITIES entries have variants), so observed share is ~0.3%. Test
-        // bounds allow noise from the small (5000-row) sample.
+        // Post LB-191 fix (2026-09-28): cfg.dirty_ratio is now the aggregate
+        // per-row dirty probability across the pass; source-weighted shape is
+        // preserved by rescaling to the DATA_SOURCE_WEIGHTS-weighted mean of
+        // DIRTY_RATE_BY_SOURCE. At cfg.dirty_ratio = 0.08 (small_cfg default),
+        // aggregate per-row rate = 0.08. Only ~10 of 22 CITIES entries have
+        // dirty variants (city_variant returns None otherwise), so observed
+        // city-not-clean share = 0.08 * 10/22 ≈ 3.6%. Bounds allow noise on
+        // the 5000-row sample.
         let share = dirty as f64 / batch.num_rows() as f64;
         assert!(
-            (0.001..=0.02).contains(&share),
-            "dirty share {} outside [0.001, 0.02] band for source-weighted rates",
+            (0.02..=0.06).contains(&share),
+            "dirty share {} outside [0.02, 0.06] band at cfg.dirty_ratio=0.08 (LB-191)",
             share
         );
     }
@@ -1516,11 +1535,13 @@ mod tests {
                 _ => {}
             }
         }
-        // At n=20k rows with 15% legacy_import share = 3000 legacy rows and
-        // 70% primary_system share = 14000 primary rows. Legacy dirty rate
-        // ~0.08*0.35*(~0.5 corruptible) = 1.4%; primary dirty rate
-        // ~0.08*0.005*(~0.5 corruptible) = 0.02%. Assert legacy rate is at
-        // least 10x primary -- that's the whole source-weighting shape.
+        // Post LB-191 rescale: aggregate per-row rate == cfg.dirty_ratio, per-
+        // source rate = cfg.dirty_ratio * DIRTY_RATE_BY_SOURCE[s] / 0.0735.
+        // At cfg.dirty_ratio=0.08: legacy per-row = 0.381, primary per-row =
+        // 0.00544. After corruptibility (~10/22 cities have variants):
+        // legacy observed ~17%, primary observed ~0.25%. Ratio ~70x, well
+        // above the 10x lower bound this test asserts. Shape unchanged from
+        // the pre-fix code; only the absolute magnitudes moved up.
         let legacy_rate = legacy_dirty as f64 / legacy_total.max(1) as f64;
         let primary_rate = primary_dirty as f64 / primary_total.max(1) as f64;
         // Primary might be zero at this sample size -- guard for the ratio.

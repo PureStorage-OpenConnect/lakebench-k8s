@@ -1944,10 +1944,40 @@ fn c360_output_is_pinned() {
             batch_digest(&build_batch(&cfg, &loyalty, &sampler))
         })
         .collect();
+    // Updated 2026-09-28 (LB-191 dirty-ratio semantics fix, Wave 1 C1). The
+    // per_row_dirty_rate is now rescaled to make cfg.dirty_ratio the aggregate
+    // dirty rate; that changes which rows the dirty_pass Bernoulli selects,
+    // which changes the batch content deterministically. Pre-fix digests were
+    // [17_364_953_605_523_935_220, 12_687_529_150_934_121_339,
+    // 12_107_885_961_841_994_623].
     let want: Vec<u64> = vec![
-        17_364_953_605_523_935_220,
-        12_687_529_150_934_121_339,
-        12_107_885_961_841_994_623,
+        17_845_385_644_415_820_156,
+        12_362_792_818_977_062_453,
+        9_014_473_235_985_742_097,
     ];
     assert_eq!(got, want, "c360 generator output changed");
+}
+
+#[test]
+fn screening_rates_match_prereg() {
+    // Pins the screening block in aml_preregistration.json (added in 3.6.1,
+    // Wave 1 A2, 2026-09-28) to the Rust constants in datagen_rs::screening.
+    // A drift here is a defence-in-depth bug: any change to a screening
+    // constant must update both. Values are hard-coded (also present in the
+    // JSON); the Python side has its own prereg-load check.
+    use datagen_rs::screening::{
+        BACKGROUND_PER_PARTY, DECOY_RATE, FOREIGN_ACCOUNT_RATE, MAX_REL, PAID_RATE, PEP_MIN,
+        PEP_RATE, SANCTIONS_V1_MIN, SANCTIONS_V1_RATE, SANCTIONS_V2_MIN, V2_AT,
+    };
+    assert_eq!(SANCTIONS_V1_RATE, 4.0e-4);
+    assert_eq!(SANCTIONS_V1_MIN, 24);
+    assert_eq!(SANCTIONS_V2_MIN, 8);
+    assert_eq!(PEP_RATE, 6.0e-4);
+    assert_eq!(PEP_MIN, 24);
+    assert_eq!(PAID_RATE, 0.7);
+    assert_eq!(DECOY_RATE, 0.5);
+    assert_eq!(FOREIGN_ACCOUNT_RATE, 0.2);
+    assert_eq!(BACKGROUND_PER_PARTY, 20);
+    assert_eq!(MAX_REL, 2);
+    assert_eq!(V2_AT, 0.75);
 }
