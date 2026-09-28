@@ -82,8 +82,8 @@ class DatagenGuidance:
     """Datagen resource recommendation for a given scale.
 
     Proven defaults (updated 2026-09-20 after Rust c360 port perf sweep):
-    - batch mode: 1 generator, 1 uploader, 4 CPU / 4Gi per pod
-    - continuous mode: 8 generators, 2 uploaders, 8 CPU / 8Gi per pod
+    - batch mode: 1 generator, 4 CPU / 4Gi per pod
+    - continuous mode: 8 generators, 8 CPU / 8Gi per pod
       (Rust generator uses <2 GiB per pod; 8 GiB gives 4x safety headroom.
       Was 24 GiB for the Python image with per-worker process overhead.)
     """
@@ -91,9 +91,8 @@ class DatagenGuidance:
     parallelism: int
     cpu: str
     memory: str
-    mode: str = "batch"  # datagen mode: "batch" or "continuous"
+    mode: str = "batch"
     generators: int = 1  # per-pod generator processes
-    uploaders: int = 1  # per-pod uploader threads
 
 
 @dataclass(frozen=True)
@@ -331,7 +330,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     Derives recommended resources from scale factor using four tiers.
     Datagen mode selection:
     - scale <= 10 (~100 GB): batch mode (1 generator, low resources)
-    - scale > 10: continuous mode (8 generators + 2 uploaders, high resources)
+    - scale > 10: continuous mode (8 generators, high resources)
 
     Args:
         scale: Scale factor (>= 1)
@@ -344,7 +343,7 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
     # Datagen: CPU and memory are hard-locked per mode. Sizing updated
     # 2026-09-20 after the Rust c360 port perf sweep:
     #   batch:      4 CPU, 4Gi per pod, 1 generator, 1 uploader
-    #   continuous: 8 CPU, 8Gi per pod, 8 generators, 2 uploaders
+    #   continuous: 8 CPU, 8Gi per pod, 8 generators
     # Measured Rust-image steady-state peak: ~1.5-2 GiB per pod. 8 GiB gives
     # ~4x safety headroom. The pre-Rust-port sizing was 24 GiB, calibrated for
     # the Python image's per-worker process overhead.
@@ -365,7 +364,6 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             memory="4Gi",
             mode="batch",
             generators=1,
-            uploaders=1,
         )
     elif scale <= SCALE_TIER_BALANCED:
         # Balanced: ~60-500 GB
@@ -377,7 +375,6 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
                 memory="4Gi",
                 mode="batch",
                 generators=1,
-                uploaders=1,
             )
         else:
             datagen = DatagenGuidance(
@@ -386,7 +383,6 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
                 memory="8Gi",
                 mode="continuous",
                 generators=8,
-                uploaders=2,
             )
         trino = TrinoGuidance(
             worker_replicas=2,
@@ -396,14 +392,13 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             coordinator_memory="8Gi",
         )
     elif scale <= SCALE_TIER_PERFORMANCE:
-        # Performance: ~510 GB - 5 TB, sustained mode
+        # Performance: ~510 GB - 5 TB, continuous mode
         datagen = DatagenGuidance(
             parallelism=max(8, int(scale // 10)),
             cpu="8",
             memory="8Gi",
             mode="continuous",
             generators=8,
-            uploaders=2,
         )
         trino = TrinoGuidance(
             worker_replicas=max(4, int(scale // 25)),
@@ -413,14 +408,13 @@ def full_compute_guidance(scale: float) -> FullComputeGuidance:
             coordinator_memory="16Gi",
         )
     else:
-        # Extreme: > 5 TB, sustained mode
+        # Extreme: > 5 TB, continuous mode
         datagen = DatagenGuidance(
             parallelism=max(16, int(scale // 30)),
             cpu="8",
             memory="8Gi",
             mode="continuous",
             generators=8,
-            uploaders=2,
         )
         trino = TrinoGuidance(
             worker_replicas=max(10, int(scale // 50)),

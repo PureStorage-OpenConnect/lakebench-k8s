@@ -91,7 +91,6 @@ class DatagenDeployer:
                 # Robustness corpus flag (financial only), checked against
                 # the declared corpus role (config/datagen_seed.py).
                 "datagen_robustness_perturbation": config_perturbation(cfg),
-                "datagen_resume": False,  # Can be overridden
                 "datagen_cpu": datagen.cpu,
                 "datagen_memory": datagen.memory,
                 "datagen_mode": effective_mode,
@@ -167,7 +166,6 @@ class DatagenDeployer:
         self,
         cycle_index: int,
         total_cycles: int,
-        resume: bool = False,
     ) -> DeploymentResult:
         """Deploy datagen for a specific batch cycle.
 
@@ -187,7 +185,6 @@ class DatagenDeployer:
 
         try:
             context = self._build_datagen_context()
-            context["datagen_resume"] = resume
 
             # Per-cycle timestamp window
             datagen = self.config.architecture.workload.datagen
@@ -245,11 +242,8 @@ class DatagenDeployer:
                 elapsed_seconds=time.time() - start,
             )
 
-    def deploy(self, resume: bool = False) -> DeploymentResult:
+    def deploy(self) -> DeploymentResult:
         """Deploy the datagen job.
-
-        Args:
-            resume: If True, enable checkpoint resume
 
         Returns:
             DeploymentResult with status
@@ -267,7 +261,6 @@ class DatagenDeployer:
 
         try:
             context = self._build_datagen_context()
-            context["datagen_resume"] = resume
 
             self._delete_existing_job(namespace)
 

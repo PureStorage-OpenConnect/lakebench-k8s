@@ -119,7 +119,6 @@ def _enrich_context(engine: DeploymentEngine) -> dict:
     # datagen_payload_kb removed 2026-09-28; template no longer renders it.
     ctx.setdefault("datagen_path_prefix", "customer/interactions/")
     ctx.setdefault("datagen_seed", 42)
-    ctx.setdefault("datagen_resume", False)
     ctx.setdefault("datagen_cpu", "2")
     ctx.setdefault("datagen_memory", "4Gi")
     ctx.setdefault("datagen_mode", "batch")

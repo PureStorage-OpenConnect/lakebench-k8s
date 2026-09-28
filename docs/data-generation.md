@@ -48,7 +48,6 @@ workload:
 | `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting. `0` auto-computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--resume` | | `false` | Not implemented for the Rust generator: accepted, but it has no effect and generation starts from the beginning |
 
 Without `--yes`, the command prompts for confirmation before submitting
 the datagen job. Use `--yes` for scripts and CI/CD pipelines.
@@ -82,10 +81,53 @@ with `parallelism` set from the config (default: 4). Each pod in the Job:
    `customer/interactions`; the financial schema writes under `pacs008`).
 4. Reports completion status back to Kubernetes.
 
-The datagen mode (`auto`, `batch`, or `continuous`; `auto` resolves to
-`batch` at scale <= 10 and `continuous` above) does not change what the Rust
-generator writes or how it is sized: the corpus is always written in full
-before the pipeline reads it, and the entrypoint treats both modes the same.
+The datagen mode (`auto`, `batch`, or `continuous`) is the S3 delivery
+pattern, not a content or resource tier. Row content is byte-for-byte
+identical across modes at a fixed seed. `batch` buffers each Parquet file
+in memory and issues one S3 PUT per file; `continuous` uploads each file
+via S3 multipart as row-groups close, so files arrive progressively rather
+than in bursts. `auto` resolves to `continuous` at every scale (owner D18,
+2026-09-28); the pre-v1.6 scale-threshold behaviour was removed in v1.6.
+Pod CPU and memory are sized by scale via the autosizer, independently of
+delivery mode.
+
+### Delivery mode vs pipeline mode
+
+Two independent config fields spell their values `batch` / `continuous`.
+Content is set by seed, S3 layout by delivery mode, and stage graph by
+pipeline mode. The two mode fields do not constrain each other.
+
+| Concern | Config field | Type | What it controls |
+|---|---|---|---|
+| S3 delivery layout | `workload.datagen.mode` | `DatagenMode` | How the corpus lands in S3: `batch` = one PUT per Parquet file; `continuous` = S3 multipart upload as row-groups close. Row content is byte-identical at a fixed seed. |
+| Stage graph | `architecture.pipeline.mode` | `PipelineMode` | How the medallion stages run: `batch` = sequential (bronze -> silver -> gold once); `continuous` = concurrent jobs over a corpus that keeps arriving. `sustained` is a deprecated alias for `continuous`. |
+
+The composition `datagen.mode: batch` with `pipeline.mode: continuous` is
+a valid config: all bronze files land in one burst, then the continuous
+pipeline trickle-reads them. Lakebench does not use `streaming` as a mode
+name; the continuous pipeline uses Spark Structured Streaming internally,
+but the operator-facing name is `continuous`.
+
+### 2026-09-28: default delivery mode changed to continuous
+
+The default for `datagen.mode: auto` moved from `batch` (at scale <= 10)
+to `continuous` (at every scale). Same-seed corpora remain byte-identical;
+only the S3 upload pattern changed. If a run depended on batch-style
+bursty uploads (bandwidth ceilings, RSS profile), set `mode: batch`
+explicitly. Measured 2026-09-28: `continuous` is faster than `batch` at
+scale 1 for `customer360` (upload-generation overlap) and 10-16% slower
+at scale 10 because per-file multipart overhead grows with file count.
+Choose the mode from file count and network profile rather than accepting
+the default.
+
+### `--delivery-mode` (internal render arg)
+
+`deploy/datagen.py` translates `datagen.mode` into a `--delivery-mode`
+argv on the datagen container (see `templates/datagen/job.yaml.j2`).
+Operators do not set it directly; it appears in rendered Job manifests
+as an aid when troubleshooting a job. The Rust binary accepts the same
+three values (`auto`, `batch`, `continuous`), so a rendered manifest can
+be replayed by hand.
 
 ### Per-pod resources
 
@@ -165,7 +207,6 @@ workload:
     cpu: "8"                   # CPU per pod (autosizer default when unset)
     memory: 4Gi                # Memory per pod (autosizer derives it when unset)
     generators: 0              # Per-pod generator threads (0 = follow pod CPU)
-    uploaders: 0               # Accepted, but not passed to the generator
     # Timestamp range -- affects Iceberg partition count.
     # Silver partitions by interaction_date (from event_timestamp).
     # Continuous mode: use a narrow range (days/weeks) to avoid
@@ -173,10 +214,7 @@ workload:
     # Batch mode: wider ranges are fine (single compaction pass).
     # See docs/configuration.md#timestamp-range-impact for details.
     timestamp_start: null      # Start date for timestamps (ISO format)
-    timestamp_end: null        # End date for timestamps (ISO format)
-    checkpoint:                # Accepted, but read by nothing (see --resume)
-      enabled: true
-      path: ".lakebench_checkpoint.json"
+    timestamp_end: null        # End date for timestamps (ISO format, exclusive)
 ```
 
 The `dirty_data_ratio` field controls the fraction of records that contain
@@ -194,9 +232,10 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:7c24641`, the AML
-generator-freeze commit, generator version `datagen-v2-rs-0.3`) is built from
-the `datagen_rs/` directory in this repository. To build and push a custom
+The default image (`docker.io/sillidata/lb-datagen:25f1aa8`, digest
+`sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7`;
+the v1.6 AML generator-freeze commit, generator version `datagen-v2-rs-0.3`)
+is built from the `datagen_rs/` directory in this repository. To build and push a custom
 image:
 
 ```bash

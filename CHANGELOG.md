@@ -118,11 +118,14 @@ with 1.6; the first section lists why.
   which of them bound, so a bound figure is not read as infrastructure
   performance.
 - **Frozen AML generator image.** `images.datagen` defaults to
-  `docker.io/sillidata/lb-datagen:7c24641` (digest
-  `sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b`),
+  `docker.io/sillidata/lb-datagen:25f1aa8` (digest
+  `sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7`),
   generator `MODEL_VERSION` `datagen-v2-rs-0.3`. The pinned image is the
   reproducibility unit; bit-exact output holds within one build environment.
-  A corpus from an earlier image is pre-freeze.
+  A corpus from an earlier image is pre-freeze. The prior tag `7c24641`
+  (digest `sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b`)
+  and `0a83acd` (digest `sha256:acdf3925...`) are recorded in
+  `src/lakebench/config/schema.py::ImagesConfig.datagen` for provenance.
 - **Config contract (v1.6).** `workload` is a top-level key; the old
   `architecture.workload` block still loads with a deprecation warning, and
   setting both with different values is an error. `continuous` is the
@@ -556,8 +559,15 @@ with 1.6; the first section lists why.
 ### Removed
 - `platform.storage.scratch.create_storage_class` (see Changed).
 - Checkpoint resume for data generation. The Rust generator does not
-  implement it: `generate --resume` is still accepted but has no effect, and
-  `workload.datagen.checkpoint.*` is read by nothing.
+  implement it. The `--resume` CLI flag and the `workload.datagen.checkpoint.*`
+  config block are removed. Old configs that carry `datagen.checkpoint:`
+  load with a `DeprecationWarning` and the block is dropped from the
+  loaded config. Interrupted `lakebench generate` runs re-run from the
+  start.
+- `workload.datagen.uploaders`. Never forwarded to the Rust generator;
+  uploader concurrency is fixed inside the S3 sink. Old configs that
+  carry the field load with a `DeprecationWarning` and the field is
+  dropped from the loaded config.
 - The Python datagen (`datagen/`) and its image.
 - Packaged `sanctions_list.json` and `pep_list.json` (replaced by the
   per-corpus watchlist).

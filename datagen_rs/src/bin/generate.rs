@@ -343,7 +343,12 @@ fn pacs008_main() {
     let in_slice = move |m: f64| m >= slice_lo && m < slice_hi;
     let scale: f64 = arg("--scale", 0.01);
     let corpus_months: i64 = arg("--corpus-months", 60);
-    let file_size_mb: i64 = arg("--file-size-mb", 32);
+    // Default 64 matches DatagenConfig.file_size ("64mb"), the template's
+    // default(64) fallback, and entrypoint.py's default, so raw-CLI
+    // reproducers and pod runs pick the same file size when
+    // --file-size-mb is omitted. The historical pre-M6 default was 32
+    // for the financial K8s YAMLs; aligned to 64 on 2026-09-28.
+    let file_size_mb: i64 = arg("--file-size-mb", 64);
     // Bytes/row is used only to size total_files from total_txns. If the flag
     // is not passed we pick a codec-aware default from writer::pacs008_bytes_per_row_default
     // (a single scalar was wrong under any codec other than the one it was

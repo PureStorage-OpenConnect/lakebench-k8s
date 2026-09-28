@@ -105,7 +105,6 @@ class TestFullComputeGuidance:
         g = full_compute_guidance(1)
         assert g.datagen.mode == "batch"
         assert g.datagen.generators == 1
-        assert g.datagen.uploaders == 1
 
     def test_datagen_mode_batch_at_boundary(self):
         """scale=10 should still get batch mode."""
@@ -113,12 +112,11 @@ class TestFullComputeGuidance:
         assert g.datagen.mode == "batch"
         assert g.datagen.generators == 1
 
-    def test_datagen_mode_sustained_above_boundary(self):
-        """scale > 10 should get sustained mode."""
+    def test_datagen_mode_continuous_above_boundary(self):
+        """scale > 10 should get continuous mode."""
         g = full_compute_guidance(20)
         assert g.datagen.mode == "continuous"
         assert g.datagen.generators == 8
-        assert g.datagen.uploaders == 2
 
     def test_datagen_fixed_cpu_batch(self):
         """Batch mode: fixed 4 CPU per pod."""

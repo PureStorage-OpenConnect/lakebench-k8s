@@ -664,7 +664,6 @@ _ALWAYS = [
     "architecture.workload.datagen.cpu",
     "architecture.workload.datagen.file_size",
     "architecture.workload.datagen.generators",
-    "architecture.workload.datagen.uploaders",
     "architecture.workload.datagen.timestamp_start",
     "architecture.workload.datagen.timestamp_end",
     "architecture.query_engine.type",

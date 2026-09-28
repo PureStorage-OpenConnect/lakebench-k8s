@@ -192,9 +192,8 @@ When running as a Kubernetes Indexed Job, each pod receives a
 interleaved across nodes (file `N` goes to node `N % total_nodes`), ensuring
 even distribution regardless of pod count.
 
-The Rust generator does not implement checkpoint-resume. `lakebench generate
---resume` is accepted but has no effect: an interrupted run starts again from
-the beginning.
+The Rust generator does not implement checkpoint-resume: an interrupted run
+starts again from the beginning.
 
 ## Scale Factor
 

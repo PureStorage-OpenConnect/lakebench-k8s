@@ -35,7 +35,7 @@ spec:
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:7c24641') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:25f1aa8') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--schema"
@@ -66,7 +66,7 @@ spec:
             - "--delivery-mode"
             - "{{ datagen_mode | default('continuous') }}"
             - "--file-size-mb"
-            - "{{ datagen_file_size_mb | default(512) }}"
+            - "{{ datagen_file_size_mb | default(64) }}"
             {# --payload-kb dropped 2026-09-28 (LB-191 companion). Rust hardcodes 2 KiB.
                No shipped template ever used anything else; a future variable payload
                comes back with per-payload bytes/row calibration. #}
@@ -99,7 +99,9 @@ spec:
             - "--cycles"
             - "{{ datagen_cycles }}"
             {% endif %}
-            {% if datagen_resume %}- "--resume"{% endif %}
+            {# --resume + checkpoint config removed 2026-09-28. The Rust
+               generator never implemented checkpoint-resume; interrupted
+               runs re-run from the start. #}
             {# --duration removed 2026-09-28 (Wave 2 D8). The Rust binary never
                parsed it; deploy/datagen.py no longer populates the context
                var. Continuous pipelines get their arrival window from the

@@ -239,12 +239,12 @@ lakebench generate [CONFIG_FILE] [OPTIONS]
 | `--wait` | `-w` | `true` | Wait for data generation to complete |
 | `--timeout` | `-t` | `0` | Timeout in seconds when waiting; `0` computes it from scale, parallelism and a conservative per-pod throughput |
 | `--yes` | `-y` | `false` | Skip confirmation prompt |
-| `--resume` | | `false` | Not implemented for the Rust generator: the flag is accepted but has no effect, and every datagen pod writes its files from the start |
 
 Runs parallel Kubernetes Jobs to produce Parquet files. At scale 100 this
 generates approximately 1 TB of data. Use `--timeout` for large scales that
 may take hours. Without `--yes`, the command prompts for confirmation before
-submitting jobs.
+submitting jobs. The Rust generator has no checkpoint-resume; an interrupted
+run is re-run from the start.
 
 ### run
 

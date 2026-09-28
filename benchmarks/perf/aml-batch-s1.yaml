@@ -92,7 +92,6 @@ architecture:
       parallelism: 2
       cpu: "8"
       generators: 0
-      uploaders: 0
       file_size: 64mb
       timestamp_start: "2024-01-01"
       timestamp_end: "2025-01-01"
