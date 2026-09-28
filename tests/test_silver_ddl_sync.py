@@ -124,6 +124,7 @@ def _load_str_assignments(pyfile: Path) -> dict[str, str]:
         "SILVER_STATEMENTS": "silver.account_statements",
         "SILVER_EDGES": "silver.counterparty_edges",
         "SILVER_PROFILES": "silver.entity_profiles",
+        "SILVER_BATCH_VERSIONS": "silver.silver_batch_versions",
         "ICEBERG_V2_SNAPPY_PROPS_SQL": "'format-version' = '2'",
     }
     for node in tree.body:
@@ -180,6 +181,7 @@ _TABLES = [
     ("silver_statements", "SILVER_ACCOUNT_STATEMENTS_DDL", "DDL_STATEMENTS"),
     ("silver_edges", "SILVER_COUNTERPARTY_EDGES_DDL", "DDL_EDGES"),
     ("silver_profiles", "SILVER_ENTITY_PROFILES_DDL", "DDL_PROFILES"),
+    ("silver_batch_versions", "SILVER_BATCH_VERSIONS_DDL", "DDL_BATCH_VERSIONS"),
 ]
 
 

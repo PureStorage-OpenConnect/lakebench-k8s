@@ -92,6 +92,7 @@ SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
 SILVER_EDGES = env("LB_FINANCIAL_SILVER_EDGES", "silver.counterparty_edges")
 SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 STRATEGY = env("spark.lb.silver.strategy", "simple")
 
 # Reference zones the datagen writes next to pacs.008 (party = the reporting
@@ -310,6 +311,19 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 # built -- silver_stream does not refresh profiles today; C-PROFILES continuous
 # MERGE is the follow-up before W4/W8 read this table in continuous mode).
 # Batch silver_build writes one row per entity with _batch_id = NULL.
+
+# I10 sidecar: keep in lock-step with deploy/financial_ddl.py:SILVER_BATCH_VERSIONS_DDL.
+# A single-row insert after every successful micro-batch (stream) or cycle
+# (batch) makes (stream_id, batch_id) the "sealed" key downstream consumers
+# semi-join against. Missing row => partial batch, must be hidden.
+DDL_BATCH_VERSIONS = f"""
+CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_BATCH_VERSIONS} (
+    stream_id      STRING NOT NULL,
+    batch_id       BIGINT NOT NULL,
+    committed_at   TIMESTAMP NOT NULL
+) USING iceberg
+TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -1136,7 +1150,15 @@ def main() -> None:
     ensure_namespaces_for_ddl(
         spark,
         CATALOG,
-        (DDL_TXNS, DDL_ENTITIES, DDL_ACCOUNTS, DDL_STATEMENTS, DDL_EDGES, DDL_PROFILES),
+        (
+            DDL_TXNS,
+            DDL_ENTITIES,
+            DDL_ACCOUNTS,
+            DDL_STATEMENTS,
+            DDL_EDGES,
+            DDL_PROFILES,
+            DDL_BATCH_VERSIONS,
+        ),
     )
     for name, ddl in (
         ("transactions", DDL_TXNS),
@@ -1145,6 +1167,7 @@ def main() -> None:
         ("account_statements", DDL_STATEMENTS),
         ("edges", DDL_EDGES),
         ("entity_profiles", DDL_PROFILES),
+        ("silver_batch_versions", DDL_BATCH_VERSIONS),
     ):
         spark.sql(ddl)
         log(f"Bootstrapped silver.{name}")
@@ -1217,7 +1240,16 @@ def main() -> None:
         spark.sql(f"ALTER TABLE {fq} SET TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})")
         df.writeTo(fq).overwrite(lit(True))
 
-    txns = build_transactions(bronze)
+    # I10: stamp batch-mode rows with (_stream_id='batch', _batch_id=cycle) so
+    # the same versions-table semi-join that guards the stream's mid-batch
+    # crash window also guards a batch run that crashes between the
+    # transactions overwrite and the versions-row insert below. Downstream
+    # consumers apply exactly one filter rule (semi-join against
+    # silver_batch_versions on _stream_id + _batch_id) across both modes.
+    import os as _os
+
+    _cycle = int(_os.environ.get("LB_BRONZE_CYCLE", "0"))
+    txns = build_transactions(bronze).withColumn("_batch_id", lit(int(_cycle)).cast("bigint"))
     _replace_data(txns, SILVER_TRANSACTIONS)
     log("Wrote silver.transactions")
 
@@ -1264,7 +1296,12 @@ def main() -> None:
             f"{distinct_ibans} distinct iban values"
         )
 
-    _replace_data(build_edges(txns), SILVER_EDGES)
+    # I10: mirror the batch-mode stamp on counterparty_edges so the same
+    # semi-join guards edges as well as transactions.
+    _replace_data(
+        build_edges(txns).withColumn("_batch_id", lit(int(_cycle)).cast("bigint")),
+        SILVER_EDGES,
+    )
     log("Wrote silver.counterparty_edges")
 
     # C-PROFILES (LB-130): per-entity behavioural baseline for relative-anomaly
@@ -1273,6 +1310,18 @@ def main() -> None:
     # byte-identical for the same bronze.
     _replace_data(build_entity_profiles(txns, data_clock), SILVER_PROFILES)
     log("Wrote silver.entity_profiles")
+
+    # I10 sealed marker: after every silver table for this cycle is written,
+    # append one row to silver_batch_versions with stream_id='batch' and
+    # batch_id=cycle. Downstream consumers semi-join on (_stream_id,
+    # _batch_id) against this table, so a crash before this row lands leaves
+    # the cycle's transactions hidden from gold + score. _cycle was resolved
+    # once above and stamped on every batch-written silver row.
+    spark.sql(
+        f"INSERT INTO {CATALOG}.{SILVER_BATCH_VERSIONS} "
+        f"VALUES ('batch', {int(_cycle)}, current_timestamp())"
+    )
+    log(f"Wrote silver.silver_batch_versions sealed marker for cycle {_cycle}")
 
     # Guard against ruff unused-import warnings for symbols kept for clarity.
     _ = (date_format,)

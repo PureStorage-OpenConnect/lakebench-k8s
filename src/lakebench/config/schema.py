@@ -1621,6 +1621,10 @@ class TableNamesConfig(ConfigModel):
         default="silver.entity_profiles",
         description="Silver per-entity behavioural baseline table (Financial, C-PROFILES): namespace.table",
     )
+    silver_batch_versions: str = Field(
+        default="silver.silver_batch_versions",
+        description="Silver sealed-batch marker sidecar (I10, Financial): one row per (stream_id, batch_id) written last so downstream consumers hide mid-batch crashes",
+    )
     gold_alerts: str = Field(
         default="gold.alerts",
         description="Gold alerts table (Financial): namespace.table",
@@ -1671,6 +1675,7 @@ class TableNamesConfig(ConfigModel):
             "LB_FINANCIAL_SILVER_STATEMENTS": self.silver_account_statements,
             "LB_FINANCIAL_SILVER_EDGES": self.silver_counterparty_edges,
             "LB_FINANCIAL_SILVER_PROFILES": self.silver_entity_profiles,
+            "LB_FINANCIAL_SILVER_BATCH_VERSIONS": self.silver_batch_versions,
             "LB_FINANCIAL_GOLD_ALERTS": self.gold_alerts,
             "LB_FINANCIAL_GOLD_RISK_SCORES": self.gold_risk_scores,
             "LB_FINANCIAL_GOLD_CLUSTERS": self.gold_entity_clusters,
@@ -1702,6 +1707,7 @@ class TableNamesConfig(ConfigModel):
                     self.silver_account_statements,
                     self.silver_counterparty_edges,
                     self.silver_entity_profiles,
+                    self.silver_batch_versions,
                 ],
                 "gold": [
                     self.gold_alerts,

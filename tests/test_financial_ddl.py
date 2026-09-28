@@ -125,6 +125,7 @@ class TestRegistry:
             "silver_account_statements",
             "silver_counterparty_edges",
             "silver_entity_profiles",
+            "silver_batch_versions",
             "gold_alerts",
             "gold_risk_scores",
             "gold_entity_clusters",

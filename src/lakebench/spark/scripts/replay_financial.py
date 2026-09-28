@@ -28,6 +28,7 @@ from pyspark.sql import SparkSession
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 # Same W1 vertex cap the batch gold_finalize path honours (LB-119). Threaded
 # into rules that accept it so replaying W1 uses the configured cap, not the
 # rule's hard-coded default -- otherwise replay and gold_finalize disagree on
@@ -131,7 +132,33 @@ def main() -> None:
     snap = resolve_snapshot_id(spark, CATALOG, SILVER_TXNS, args.depth_months)
     log(f"Resolved snapshot: {snap}")
 
-    historical = spark.read.option("snapshot-id", snap).table(f"{CATALOG}.{SILVER_TXNS}")
+    historical_raw = spark.read.option("snapshot-id", snap).table(f"{CATALOG}.{SILVER_TXNS}")
+    # I10: hide mid-batch crash rows from the historical replay too. A batch
+    # whose transactions committed but whose versions row never landed must
+    # not surface as a "detectable" window during a later replay. The
+    # versions table is joined at CURRENT state -- by the time replay runs
+    # (months back), the crashed batch is either sealed later or never; if
+    # never, we correctly hide those rows from the rule. A missing sidecar
+    # (legacy catalog) is fail-open: log and pass through.
+    from pyspark.sql.functions import col as _col
+
+    try:
+        versions = spark.table(f"{CATALOG}.{SILVER_BATCH_VERSIONS}").select(
+            _col("stream_id").alias("_sv_stream_id"),
+            _col("batch_id").alias("_sv_batch_id"),
+        )
+        historical = historical_raw.join(
+            versions,
+            (historical_raw["_stream_id"] == versions["_sv_stream_id"])
+            & (historical_raw["_batch_id"] == versions["_sv_batch_id"]),
+            "left_semi",
+        )
+    except Exception as e:  # noqa: BLE001
+        log(
+            f"[i10] {CATALOG}.{SILVER_BATCH_VERSIONS} not readable ({e}); "
+            "replay proceeds without sealed-batch filter."
+        )
+        historical = historical_raw
     historical_count = historical.count()
     log(f"Historical silver rows: {historical_count:,}")
 

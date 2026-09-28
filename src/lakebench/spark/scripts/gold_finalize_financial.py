@@ -62,6 +62,7 @@ from pyspark.sql.functions import (
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
 SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 GOLD_RISK = env("LB_FINANCIAL_GOLD_RISK_SCORES", "gold.risk_scores")
 GOLD_CLUSTERS = env("LB_FINANCIAL_GOLD_CLUSTERS", "gold.entity_clusters")
@@ -193,6 +194,47 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
 
 
+def _sealed_txns(spark, txns_fq: str):
+    """Return silver.transactions rows semi-joined against silver_batch_versions
+    on ``(_stream_id, _batch_id)`` (I10).
+
+    A driver crash between the transactions/edges commits and the versions
+    commit leaves txn rows visible in silver.transactions but no matching
+    row in silver_batch_versions. The semi-join hides that partial batch
+    from every gold-side consumer. Batch-mode silver_build stamps rows with
+    (_stream_id='batch', _batch_id=cycle) and writes a matching versions
+    row last, so this filter is uniform across batch and stream modes.
+
+    If silver_batch_versions is absent (a legacy catalog that predates I10)
+    the filter falls back to returning the raw table -- the operator sees a
+    log line and the run continues; the operator then bootstraps the table
+    (silver_build/silver_stream both create it on next run). A missing
+    sidecar is a fail-open, not a fail-closed, choice: we prefer visible
+    downstream compute to a hard error, and the sidecar is idempotent to
+    add.
+    """
+    fq_txns = f"{CATALOG}.{txns_fq}"
+    txns = spark.table(fq_txns)
+    versions_fq = f"{CATALOG}.{SILVER_BATCH_VERSIONS}"
+    try:
+        versions = spark.table(versions_fq).select(
+            col("stream_id").alias("_sv_stream_id"),
+            col("batch_id").alias("_sv_batch_id"),
+        )
+    except Exception as e:  # noqa: BLE001
+        log(
+            f"[i10] {versions_fq} not readable ({e}); falling back to unfiltered "
+            f"{fq_txns} read. A silver run bootstraps the sidecar on next start."
+        )
+        return txns
+    return txns.join(
+        versions,
+        (txns["_stream_id"] == versions["_sv_stream_id"])
+        & (txns["_batch_id"] == versions["_sv_batch_id"]),
+        "left_semi",
+    )
+
+
 def build_baseline_dashboards(txns, run_id: str):
     """Baseline: one row per settlement day, keyed rule_id='baseline'.
 
@@ -298,7 +340,11 @@ def main() -> None:
     # Earlier runs' alerts are cleared inside run_detection_rules, after this
     # run's 'pending' status is written (see there for why the order matters).
 
-    txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
+    # I10: read silver.transactions through the sealed-batch filter so a
+    # driver crash between the stream's transactions/edges commits and the
+    # sidecar sealed marker is invisible to every downstream rule and the
+    # baseline dashboards.
+    txns = _sealed_txns(spark, SILVER_TXNS)
     baseline = build_baseline_dashboards(txns, RUN_ID)
     # Delete-only-baseline-then-append: overwrite ONLY the baseline rows,
     # not the whole table. Detection workloads write rows keyed by

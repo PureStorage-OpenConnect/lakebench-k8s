@@ -40,6 +40,8 @@ _PAIRS = (
     ("SILVER_ACCOUNT_STATEMENTS_DDL", "DDL_STATEMENTS"),
     ("SILVER_COUNTERPARTY_EDGES_DDL", "DDL_EDGES"),
     ("SILVER_ENTITY_PROFILES_DDL", "DDL_PROFILES"),
+    # I10 sealed-batch sidecar: keeps deploy + inline DDLs in lock-step.
+    ("SILVER_BATCH_VERSIONS_DDL", "DDL_BATCH_VERSIONS"),
 )
 
 

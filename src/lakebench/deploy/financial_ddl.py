@@ -347,6 +347,31 @@ TBLPROPERTIES (
 #   idempotency protocol.
 
 
+# Silver batch-versions sidecar (I10): "sealed" marker table written as
+# commit 3 of the AML stream's per-micro-batch protocol (transactions,
+# then edges, then this row). A driver crash between commits 1/2 and this
+# row leaves transactions rows visible in silver.transactions but no
+# matching row here; every downstream consumer semi-joins against this
+# table on ``(_stream_id, _batch_id)`` so a mid-batch crash window is
+# invisible to gold and to scoring. Batch mode writes a single row per
+# cycle with ``stream_id='batch'`` and ``batch_id=cycle`` so the same
+# filter applies uniformly to batch and stream reads.
+SILVER_BATCH_VERSIONS_DDL = """
+CREATE TABLE IF NOT EXISTS {catalog}.{table} (
+    stream_id      STRING NOT NULL,
+    batch_id       BIGINT NOT NULL,
+    committed_at   TIMESTAMP NOT NULL
+)
+USING iceberg
+TBLPROPERTIES (
+    'format-version' = '2',
+    'write.parquet.compression-codec' = 'snappy',
+    'write.metadata.delete-after-commit.enabled' = 'true',
+    'write.metadata.previous-versions-max' = '50'
+)
+""".strip()
+
+
 # ---------------------------------------------------------------------------
 # Gold
 # ---------------------------------------------------------------------------
@@ -656,6 +681,7 @@ FINANCIAL_TABLE_DDLS: dict[str, str] = {
     "silver_account_statements": SILVER_ACCOUNT_STATEMENTS_DDL,
     "silver_counterparty_edges": SILVER_COUNTERPARTY_EDGES_DDL,
     "silver_entity_profiles": SILVER_ENTITY_PROFILES_DDL,
+    "silver_batch_versions": SILVER_BATCH_VERSIONS_DDL,
     "gold_alerts": GOLD_ALERTS_DDL,
     "gold_risk_scores": GOLD_RISK_SCORES_DDL,
     "gold_entity_clusters": GOLD_ENTITY_CLUSTERS_DDL,
