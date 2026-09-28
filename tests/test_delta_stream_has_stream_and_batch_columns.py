@@ -22,8 +22,7 @@ sys.path.insert(0, str(_SCRIPTS_DIR))
 
 
 _SRC = (
-    Path(__file__).resolve().parent.parent
-    / "src/lakebench/spark/scripts/silver_stream_delta.py"
+    Path(__file__).resolve().parent.parent / "src/lakebench/spark/scripts/silver_stream_delta.py"
 ).read_text()
 
 
@@ -92,7 +91,7 @@ def test_stream_delta_create_if_not_exists_replaces_overwrite():
     # The old overwrite branch had ``mode="overwrite"`` and
     # ``partition_cols=["interaction_date"]`` on the same call. Both must go.
     assert 'mode="overwrite"' not in _SRC, (
-        "silver_stream_delta.py still has a mode=\"overwrite\" write -- the B4 split "
+        'silver_stream_delta.py still has a mode="overwrite" write -- the B4 split '
         "must replace it with CREATE-IF-NOT-EXISTS + append"
     )
 
