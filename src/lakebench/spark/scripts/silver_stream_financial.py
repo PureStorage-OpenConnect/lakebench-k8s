@@ -85,7 +85,9 @@ from common import (
     ensure_partition_transform,
     env,
     log,
+    log_job_metrics,
     refuse_fresh_checkpoint_over_data,
+    replay_possible,
     streaming_query_id,
 )
 from pyspark.sql import SparkSession
@@ -120,44 +122,105 @@ SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
 KYC_WAIT_S = int(env("LB_FINANCIAL_KYC_WAIT_S", "900"))
+# I7: the KYC frame is reloaded on the first micro-batch after this many
+# seconds have passed since the previous successful load. Default 1 hour;
+# 0 disables the refresh (the frame is loaded once per process).
+KYC_REFRESH_S = int(env("LB_STREAM_KYC_REFRESH_SECONDS", "3600"))
 
 # Party/account masters joined into the dimensions: loaded once (see
 # _kyc), None until then. _KYC_LOADED marks a completed attempt, since a
-# pre-KYC corpus legitimately has no masters.
+# pre-KYC corpus legitimately has no masters. _KYC_LOADED_AT is the unix
+# time of the last successful load (0.0 while _KYC_LOADED is False) so a
+# micro-batch after KYC_REFRESH_S has elapsed re-reads the masters.
 _KYC = None
 _KYC_LOADED = False
+_KYC_LOADED_AT = 0.0
 
 
 def _kyc(spark):
-    """The KYC-by-IBAN frame, read once. Waits up to KYC_WAIT_S for both
-    masters to be visible (a dedicated reference pod, or other pods' bronze,
-    can beat them; the datagen writes party last, so a visible party means
-    the rest is there). After the wait _read_reference decides, and raises
-    unless the manifest proves a pre-KYC corpus: the stream fails loudly
-    rather than write a run's dimensions with NULL KYC."""
-    global _KYC, _KYC_LOADED
-    if _KYC_LOADED:
+    """The KYC-by-IBAN frame. Loaded on the first call and re-read when
+    KYC_REFRESH_S seconds have elapsed since the previous load, so a stream
+    that runs for days picks up party/account master updates without a
+    restart. Waits up to KYC_WAIT_S for both masters to be visible on the
+    first load (a dedicated reference pod, or other pods' bronze, can beat
+    them; the datagen writes party last, so a visible party means the rest
+    is there). After the wait _read_reference decides, and raises unless
+    the manifest proves a pre-KYC corpus: the stream fails loudly rather
+    than write a run's dimensions with NULL KYC. A refresh reload skips
+    the wait loop and keeps the previous cached frame on any transient
+    read failure so a stream never stalls a micro-batch on KYC
+    availability after the initial load succeeded; the next micro-batch
+    retries."""
+    global _KYC, _KYC_LOADED, _KYC_LOADED_AT
+    now = time.time()
+    if _KYC_LOADED and (KYC_REFRESH_S <= 0 or (now - _KYC_LOADED_AT) < KYC_REFRESH_S):
         return _KYC
-    deadline = time.time() + KYC_WAIT_S
-    extended = False
-    while True:
-        party, account = reference_frames(spark)
-        if party is not None and account is not None:
-            break
-        if time.time() >= deadline:
-            if account is not None and not extended:
-                # Account is written before party: party is still uploading
-                # (5-10 GB at scale 1000). Give it one more wait.
-                deadline, extended = time.time() + KYC_WAIT_S, True
-                continue
-            party, account = _read_reference(spark)
-            break
-        log(f"[kyc] party/account masters not there yet; waiting (up to {KYC_WAIT_S}s)")
-        time.sleep(10)
+    is_refresh = _KYC_LOADED
+    if is_refresh:
+        # I7 refresh: read once, keep the current cache on any failure
+        # so the micro-batch is not blocked on a transient reference-file
+        # read. _KYC_LOADED_AT is left unchanged so the next batch retries.
+        try:
+            party, account = reference_frames(spark)
+        except Exception as e:  # noqa: BLE001
+            log(f"[kyc] refresh read failed: {type(e).__name__}: {e}; keeping cached KYC")
+            return _KYC
+        if party is None or account is None:
+            log("[kyc] refresh read incomplete (party or account missing); keeping cached KYC")
+            return _KYC
+    else:
+        deadline = now + KYC_WAIT_S
+        extended = False
+        while True:
+            party, account = reference_frames(spark)
+            if party is not None and account is not None:
+                break
+            if time.time() >= deadline:
+                if account is not None and not extended:
+                    # Account is written before party: party is still uploading
+                    # (5-10 GB at scale 1000). Give it one more wait.
+                    deadline, extended = time.time() + KYC_WAIT_S, True
+                    continue
+                party, account = _read_reference(spark)
+                break
+            log(f"[kyc] party/account masters not there yet; waiting (up to {KYC_WAIT_S}s)")
+            time.sleep(10)
+    previous_kyc = _KYC
     kyc = build_kyc(party, account)
+    # Drop the previous cached frame's blocks before the new load takes its
+    # place; a leaked cache accumulates over hours of stream uptime.
+    if is_refresh and previous_kyc is not None:
+        try:
+            previous_kyc.unpersist(blocking=False)
+        except Exception as e:  # noqa: BLE001
+            log(f"[kyc] previous frame unpersist failed: {type(e).__name__}: {e}")
     _KYC = kyc.cache() if kyc is not None else None
     _KYC_LOADED = True
-    log(f"[kyc] masters {'loaded' if _KYC is not None else 'absent (pre-KYC corpus): KYC NULL'}")
+    _KYC_LOADED_AT = now
+    action = "reloaded" if is_refresh else "loaded"
+    log(f"[kyc] masters {action if _KYC is not None else 'absent (pre-KYC corpus): KYC NULL'}")
+    # Publish a per-refresh timestamp so operators see when the stream
+    # last picked up KYC updates. Emitted twice: (i) as a plain labelled
+    # `[lb] ... - kyc_refreshed_at: <unix>` line so a follow-on collector
+    # regex extension in parse_streaming_logs can lift the value into
+    # metrics.json without any wire-not-connected step; (ii) as a
+    # `=== JOB METRICS: silver-stream-kyc-refresh ===` block for symmetry
+    # with the plan's stated emit path and the extra_metrics allowlist in
+    # parse_driver_logs. silver_stream_financial does not emit any other
+    # JOB METRICS block today, so no shadowing risk on the current
+    # streaming path; a future author adding a final-metrics block must
+    # place it before the first refresh or key it under a distinct job
+    # name (parse_driver_logs' regex is first-match).
+    log(f"kyc_refreshed_at: {int(now)} kyc_refresh_kind: {'refresh' if is_refresh else 'initial'}")
+    log_job_metrics(
+        "silver-stream-kyc-refresh",
+        input_size_gb=0.0,
+        input_rows=0,
+        output_rows=0,
+        elapsed_seconds=0.0,
+        kyc_refreshed_at=int(now),
+        kyc_refresh_kind=("refresh" if is_refresh else "initial"),
+    )
     return _KYC
 
 
@@ -208,6 +271,14 @@ def _merge_batch(batch_df, batch_id: int) -> int:
     # streaming_query_id() must be read inside foreachBatch: Spark sets
     # it as a local property on the micro-batch thread.
     sid = streaming_query_id(spark)
+    # I5: only the first micro-batch of a query run can be a replay of a
+    # batch a previous run committed (a failed batch stops its query and
+    # the driver exits), so the DELETE that cleans a partial replay runs
+    # only then. Post-first batches skip it and the Iceberg snapshot log
+    # gets one delete per restart instead of one per trigger. Called
+    # before the empty-batch short-circuit so the run is registered even
+    # when its first micro-batch reads zero rows -- mirrors silver_stream.
+    check_replay = replay_possible(spark)
     tagged_txns = (
         build_transactions(batch_df)
         # Overwrite the batch column with the real batchId. Cheaper than
@@ -235,11 +306,14 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         # ghost rows behind; INSERT then re-materializes the batch. On a
         # first attempt DELETE is a no-op (nothing matches). Iceberg V2
         # supports row-level DELETE; both COW and MoR configurations work.
-        # B2: predicate is (stream, batch), never bare batch id.
-        spark.sql(
-            f"DELETE FROM {CATALOG}.{SILVER_TXNS} "
-            f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
-        )
+        # B2 + I5: predicate is (stream, batch), never bare batch id; the
+        # DELETE only runs on the first micro-batch after a restart so the
+        # Iceberg snapshot log stays at one delete per restart.
+        if check_replay:
+            spark.sql(
+                f"DELETE FROM {CATALOG}.{SILVER_TXNS} "
+                f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
+            )
         tagged_txns.writeTo(f"{CATALOG}.{SILVER_TXNS}").append()
 
         # PHASE 2: silver.counterparty_edges.
@@ -251,10 +325,12 @@ def _merge_batch(batch_df, batch_id: int) -> int:
             .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
             .withColumn("_stream_id", lit(sid))
         )
-        spark.sql(
-            f"DELETE FROM {CATALOG}.{SILVER_EDGES} "
-            f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
-        )
+        # B2 + I5: same shape as the transactions DELETE above.
+        if check_replay:
+            spark.sql(
+                f"DELETE FROM {CATALOG}.{SILVER_EDGES} "
+                f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
+            )
         edges_batch.writeTo(f"{CATALOG}.{SILVER_EDGES}").append()
 
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
