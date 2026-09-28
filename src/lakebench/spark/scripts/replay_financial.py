@@ -23,6 +23,7 @@ from common import (
     ICEBERG_V2_SNAPPY_PROPS_SQL,
     env,
     log,
+    sealed_txns_filter,
 )
 from pyspark.sql import SparkSession
 
@@ -138,27 +139,8 @@ def main() -> None:
     # not surface as a "detectable" window during a later replay. The
     # versions table is joined at CURRENT state -- by the time replay runs
     # (months back), the crashed batch is either sealed later or never; if
-    # never, we correctly hide those rows from the rule. A missing sidecar
-    # (legacy catalog) is fail-open: log and pass through.
-    from pyspark.sql.functions import col as _col
-
-    try:
-        versions = spark.table(f"{CATALOG}.{SILVER_BATCH_VERSIONS}").select(
-            _col("stream_id").alias("_sv_stream_id"),
-            _col("batch_id").alias("_sv_batch_id"),
-        )
-        historical = historical_raw.join(
-            versions,
-            (historical_raw["_stream_id"] == versions["_sv_stream_id"])
-            & (historical_raw["_batch_id"] == versions["_sv_batch_id"]),
-            "left_semi",
-        )
-    except Exception as e:  # noqa: BLE001
-        log(
-            f"[i10] {CATALOG}.{SILVER_BATCH_VERSIONS} not readable ({e}); "
-            "replay proceeds without sealed-batch filter."
-        )
-        historical = historical_raw
+    # never, we correctly hide those rows from the rule.
+    historical = sealed_txns_filter(spark, historical_raw, CATALOG, SILVER_BATCH_VERSIONS)
     historical_count = historical.count()
     log(f"Historical silver rows: {historical_count:,}")
 

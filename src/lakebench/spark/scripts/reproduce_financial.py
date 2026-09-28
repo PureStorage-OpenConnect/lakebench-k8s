@@ -16,11 +16,12 @@ from __future__ import annotations
 import argparse
 import sys
 
-from common import env, log
+from common import env, log, sealed_txns_filter
 from pyspark.sql import SparkSession
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
 
 # Whitelist of alert_id characters. UUIDs and short prefixes with digits,
@@ -76,9 +77,16 @@ def main() -> None:
     # TIMESTAMP without the 'T' separator or timezone offset.
     ts_sql = row.alert_ts.strftime("%Y-%m-%d %H:%M:%S")
     log(f"Reading silver at TIMESTAMP AS OF '{ts_sql}'")
-    historical = spark.sql(
+    historical_raw = spark.sql(
         f"SELECT * FROM {CATALOG}.{SILVER_TXNS} FOR TIMESTAMP AS OF TIMESTAMP '{ts_sql}'"
     )
+    # I10: hide mid-batch crash rows from the historical replay too. A
+    # batch whose transactions committed but whose versions row never
+    # landed must not surface as a "reproducible" alert. The versions
+    # table is joined at CURRENT state -- if a crashed batch was never
+    # sealed, its txns rows are invisible here even at the historical
+    # timestamp.
+    historical = sealed_txns_filter(spark, historical_raw, CATALOG, SILVER_BATCH_VERSIONS)
     hist_count = historical.count()
     log(f"Historical silver rows: {hist_count:,}")
 

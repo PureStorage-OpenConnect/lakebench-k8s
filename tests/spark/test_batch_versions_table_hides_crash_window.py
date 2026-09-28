@@ -55,13 +55,23 @@ def test_crash_window_is_invisible_to_semi_join():
     out = json.loads(res.stdout.strip().splitlines()[-1])
     # Batch 0 sealed cleanly -- txns rows visible under the filter.
     assert out["sealed_visible_rows"] == 1, out
-    # Batch 1 crashed (INSERT into versions raised) -- txns rows exist in
+    # Batch 1 crashed (MERGE into versions raised) -- txns rows exist in
     # the raw table but the semi-join hides them.
-    assert out["unfiltered_rows"] == 2, out
-    assert out["filtered_rows"] == 1, out
-    # Ghosts row count: sanity check that the (sid, batch=1) rows exist raw.
     assert out["ghost_rows_batch_1"] == 1, out
-    assert out["versions_row_count"] == 1, out
+    # After the crashed batch 1 and the sealed retry of batch 1 (batch 2 in
+    # the test's numbering) the versions table shows one row per sealed
+    # (sid, batch) key. This is the MERGE-idempotency check: the crashed
+    # batch's Structured-Streaming-style replay would run through phase 4
+    # twice on a plain INSERT and leave 2 rows for (sid, 1); the MERGE
+    # keeps exactly one.
+    assert out["versions_row_count_after_retry"] == 3, out
+    assert out["versions_rows_for_batch_1_after_retry"] == 1, out
+    # After batch-1 retry the filter now shows: batch 0 (1 row), batch 1
+    # sealed (1 row), batch 2 sealed (1 row) = 3 rows visible.
+    assert out["filtered_rows_after_retry"] == 3, out
+    # Idempotent double-seal of the SAME (sid, batch) key: re-driving
+    # _merge_batch for batch 0 must not add a second versions row.
+    assert out["versions_row_count_after_replay_of_batch_0"] == 3, out
 
 
 # ---------------------------------------------------------------------------
@@ -211,13 +221,14 @@ def _run(jar):
         ss._merge_batch(bronze(0), 0)
 
         # ---- Batch 1: crash between phase-2 (edges commit) and phase-4
-        # (sealed-marker insert). Intercept spark.sql: allow every phase-1/2
-        # DELETE/INSERT to run, but raise on the sealed-marker INSERT to
+        # (sealed marker). Intercept spark.sql: allow every phase-1/2
+        # DELETE/INSERT to run, but raise on the sealed-marker MERGE to
         # silver_batch_versions.
         real_sql = spark.sql
 
         def _sql(stmt, *a, **kw):
-            if "silver_batch_versions" in stmt and stmt.strip().upper().startswith("INSERT"):
+            up = stmt.strip().upper()
+            if "SILVER_BATCH_VERSIONS" in up and up.startswith(("MERGE", "INSERT")):
                 raise RuntimeError("simulated driver crash before sealed marker")
             return real_sql(stmt, *a, **kw)
 
@@ -252,11 +263,37 @@ def _run(jar):
         ghost_rows_batch_1 = txns.where(col("_batch_id") == 1).count()
         versions_row_count = spark.table("lh.silver.silver_batch_versions").count()
 
+        # ---- Structured Streaming replays foreachBatch on failure with the
+        # SAME batchId, but this test simulates a crash-then-restart cycle
+        # where the driver process died; we drive a re-run of batch 1 (with
+        # the crash injector off) and a fresh batch 2 on top.
+        ss._merge_batch(bronze(1), 1)  # sealed retry of the crashed batch
+        ss._merge_batch(bronze(2), 2)  # new batch on top
+
+        versions_row_count_after_retry = spark.table("lh.silver.silver_batch_versions").count()
+        versions_rows_for_batch_1_after_retry = (
+            spark.table("lh.silver.silver_batch_versions").where(col("batch_id") == 1).count()
+        )
+        filtered_rows_after_retry = filtered.count()
+
+        # ---- MERGE-idempotency direct check: re-drive batch 0 again with
+        # the SAME (sid, batch_id). Row count in versions must not grow.
+        ss._merge_batch(bronze(0), 0)
+        versions_row_count_after_replay_of_batch_0 = spark.table(
+            "lh.silver.silver_batch_versions"
+        ).count()
+
         out = {
             "unfiltered_rows": int(unfiltered_rows),
             "filtered_rows": int(filtered_rows),
             "sealed_visible_rows": int(sealed_visible_rows),
             "ghost_rows_batch_1": int(ghost_rows_batch_1),
+            "versions_row_count_after_retry": int(versions_row_count_after_retry),
+            "versions_rows_for_batch_1_after_retry": int(versions_rows_for_batch_1_after_retry),
+            "filtered_rows_after_retry": int(filtered_rows_after_retry),
+            "versions_row_count_after_replay_of_batch_0": int(
+                versions_row_count_after_replay_of_batch_0
+            ),
             "versions_row_count": int(versions_row_count),
         }
         print(json.dumps(out))

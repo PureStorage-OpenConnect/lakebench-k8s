@@ -40,6 +40,7 @@ from common import (
     log,
     log_job_metrics,
     one_line,
+    sealed_txns_filter,
 )
 from pyspark import StorageLevel
 from pyspark.sql import SparkSession
@@ -195,43 +196,16 @@ TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 
 
 def _sealed_txns(spark, txns_fq: str):
-    """Return silver.transactions rows semi-joined against silver_batch_versions
-    on ``(_stream_id, _batch_id)`` (I10).
-
-    A driver crash between the transactions/edges commits and the versions
-    commit leaves txn rows visible in silver.transactions but no matching
-    row in silver_batch_versions. The semi-join hides that partial batch
-    from every gold-side consumer. Batch-mode silver_build stamps rows with
-    (_stream_id='batch', _batch_id=cycle) and writes a matching versions
-    row last, so this filter is uniform across batch and stream modes.
-
-    If silver_batch_versions is absent (a legacy catalog that predates I10)
-    the filter falls back to returning the raw table -- the operator sees a
-    log line and the run continues; the operator then bootstraps the table
-    (silver_build/silver_stream both create it on next run). A missing
-    sidecar is a fail-open, not a fail-closed, choice: we prefer visible
-    downstream compute to a hard error, and the sidecar is idempotent to
-    add.
+    """Return ``silver.transactions`` semi-joined against silver_batch_versions
+    (I10). Thin wrapper over ``common.sealed_txns_filter`` that also does
+    the initial ``spark.table`` read. Callers that pin at an Iceberg
+    snapshot call ``sealed_txns_filter`` directly with their pinned frame.
     """
-    fq_txns = f"{CATALOG}.{txns_fq}"
-    txns = spark.table(fq_txns)
-    versions_fq = f"{CATALOG}.{SILVER_BATCH_VERSIONS}"
-    try:
-        versions = spark.table(versions_fq).select(
-            col("stream_id").alias("_sv_stream_id"),
-            col("batch_id").alias("_sv_batch_id"),
-        )
-    except Exception as e:  # noqa: BLE001
-        log(
-            f"[i10] {versions_fq} not readable ({e}); falling back to unfiltered "
-            f"{fq_txns} read. A silver run bootstraps the sidecar on next start."
-        )
-        return txns
-    return txns.join(
-        versions,
-        (txns["_stream_id"] == versions["_sv_stream_id"])
-        & (txns["_batch_id"] == versions["_sv_batch_id"]),
-        "left_semi",
+    return sealed_txns_filter(
+        spark,
+        spark.table(f"{CATALOG}.{txns_fq}"),
+        CATALOG,
+        SILVER_BATCH_VERSIONS,
     )
 
 

@@ -1312,14 +1312,23 @@ def main() -> None:
     log("Wrote silver.entity_profiles")
 
     # I10 sealed marker: after every silver table for this cycle is written,
-    # append one row to silver_batch_versions with stream_id='batch' and
-    # batch_id=cycle. Downstream consumers semi-join on (_stream_id,
-    # _batch_id) against this table, so a crash before this row lands leaves
-    # the cycle's transactions hidden from gold + score. _cycle was resolved
-    # once above and stamped on every batch-written silver row.
+    # seal the ('batch', cycle) row so downstream consumers' semi-join on
+    # (_stream_id, _batch_id) sees the cycle. A crash before this row lands
+    # leaves the cycle's transactions hidden from gold + score. _cycle was
+    # resolved once above and stamped on every batch-written silver row.
+    #
+    # MERGE (not INSERT): silver_build's rebuild-cycle semantics allow the
+    # same cycle to be re-driven (a re-run of the same cycle overwrites the
+    # silver tables). A plain INSERT on rerun would leave two rows for the
+    # same ('batch', cycle) key, which is harmless for the semi-join but
+    # bad for any future COUNT(*) over silver_batch_versions.
     spark.sql(
-        f"INSERT INTO {CATALOG}.{SILVER_BATCH_VERSIONS} "
-        f"VALUES ('batch', {int(_cycle)}, current_timestamp())"
+        f"MERGE INTO {CATALOG}.{SILVER_BATCH_VERSIONS} v "
+        f"USING (SELECT 'batch' AS stream_id, "
+        f"CAST({int(_cycle)} AS BIGINT) AS batch_id, "
+        f"current_timestamp() AS committed_at) s "
+        f"ON v.stream_id = s.stream_id AND v.batch_id = s.batch_id "
+        f"WHEN NOT MATCHED THEN INSERT *"
     )
     log(f"Wrote silver.silver_batch_versions sealed marker for cycle {_cycle}")
 

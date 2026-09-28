@@ -105,6 +105,7 @@ from common import (
     iceberg_table_stats,
     log,
     one_line,
+    sealed_txns_filter,
     table_exists,
     ttd_line,
 )
@@ -148,6 +149,7 @@ from tm_operations import (
 
 CATALOG = env("LB_ICEBERG_CATALOG", "lakehouse")
 SILVER_TXNS = env("LB_FINANCIAL_SILVER_TRANSACTIONS", "silver.transactions")
+SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
 BRONZE_TABLE = env("LB_FINANCIAL_BRONZE_TABLE", "default.pacs008_raw")
 GOLD_DASH = env("LB_FINANCIAL_GOLD_DASHBOARDS", "gold.daily_dashboards")
 GOLD_ALERTS = env("LB_FINANCIAL_GOLD_ALERTS", "gold.alerts")
@@ -464,8 +466,20 @@ def _pin_silver(spark):
     sid = _current_snapshot(spark, fq)
     if sid is None or sid == TTD_SNAPSHOT_UNKNOWN:
         rows, _ = iceberg_table_stats(spark, fq)
-        return spark.table(fq), None, rows, _newest_ingest_epoch_s(spark, fq)
-    txns = read_at_snapshot(spark, fq, sid)
+        # I10: hide mid-batch crash rows from every rule that reads this
+        # frame. Fallback path (no pinned snapshot) still filters.
+        return (
+            sealed_txns_filter(spark, spark.table(fq), CATALOG, SILVER_BATCH_VERSIONS),
+            None,
+            rows,
+            _newest_ingest_epoch_s(spark, fq),
+        )
+    # I10: filter the pinned snapshot the same way. The versions read is
+    # against CURRENT state; a batch sealed after this pin but before the
+    # filter runs correctly becomes visible on the next tick.
+    txns = sealed_txns_filter(
+        spark, read_at_snapshot(spark, fq, sid), CATALOG, SILVER_BATCH_VERSIONS
+    )
     rows = None
     try:
         r = spark.sql(
@@ -510,7 +524,18 @@ def _log_time_to_detect(spark, cycle, base, detected_s, silver=None, detected_by
             if n == 0:
                 stats = _empty_ttd_stats()
             else:
-                txns = silver if silver is not None else spark.table(f"{CATALOG}.{SILVER_TXNS}")
+                # I10: the pinned frame (silver) is already filtered by
+                # _pin_silver; the fallback live read needs the same filter.
+                txns = (
+                    silver
+                    if silver is not None
+                    else sealed_txns_filter(
+                        spark,
+                        spark.table(f"{CATALOG}.{SILVER_TXNS}"),
+                        CATALOG,
+                        SILVER_BATCH_VERSIONS,
+                    )
+                )
                 arrivals = new_alert_arrivals(new_txns, txns, small=n <= TTD_BROADCAST_ROWS)
                 stats = ttd_stats(
                     arrivals, detected_s, late_before_s, detected_by_rule=detected_by_rule

@@ -344,17 +344,28 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
 
         # PHASE 4 (I10 sealed marker): only after transactions AND edges have
-        # committed do we insert the (stream_id, batch_id) row that gold-side
+        # committed do we write the (stream_id, batch_id) row that gold-side
         # consumers semi-join against. A driver crash between phase 1 and this
         # phase leaves txns and edges rows visible in silver, but no matching
         # versions row, so consumers hide the partial batch. On the retry the
         # phase-1 DELETE (guarded by replay_possible) cleans the ghost rows
-        # before the same (sid, batch_id) is re-materialised; then this INSERT
-        # seals the retry. A duplicate versions row on a between-INSERT-retry
-        # replay is harmless: the semi-join tolerates it (still matches).
+        # before the same (sid, batch_id) is re-materialised; the MERGE below
+        # then seals the retry idempotently.
+        #
+        # MERGE (not INSERT): a crash after this write but before Structured
+        # Streaming durably records the batch id would replay the whole
+        # foreachBatch on restart; a plain INSERT would then write a second
+        # row for the same (sid, batch_id). The semi-join tolerates
+        # duplicates today, but any future COUNT(*) or per-batch join against
+        # silver_batch_versions would double-count. The MERGE keeps the
+        # sidecar at exactly one row per sealed batch.
         spark.sql(
-            f"INSERT INTO {CATALOG}.{SILVER_BATCH_VERSIONS} "
-            f"VALUES ('{sid}', {int(batch_id)}, current_timestamp())"
+            f"MERGE INTO {CATALOG}.{SILVER_BATCH_VERSIONS} v "
+            f"USING (SELECT '{sid}' AS stream_id, "
+            f"CAST({int(batch_id)} AS BIGINT) AS batch_id, "
+            f"current_timestamp() AS committed_at) s "
+            f"ON v.stream_id = s.stream_id AND v.batch_id = s.batch_id "
+            f"WHEN NOT MATCHED THEN INSERT *"
         )
         log(f"[batch {batch_id}] sealed marker written to {SILVER_BATCH_VERSIONS}")
 
