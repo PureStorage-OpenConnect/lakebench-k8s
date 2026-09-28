@@ -354,8 +354,11 @@ def test_prereg_version_and_model_blocks():
         ("3.6.0", "D8"),
         ("3.6.0", "D5"),
     ]
+    # 3.6.1 head sits above 3.6.0's two entries, so 3.5.x lineage is at 3-5.
     assert [c["version"] for c in p["changelog"][3:6]] == ["3.5.2", "3.5.1", "3.5.0"]
-    assert p["corpora"]["registered_looks_open"] is False
+    # registered_looks_open flipped to True 2026-09-27 (owner-approved
+    # AML-GOALS #52); stays true through 3.6.1.
+    assert p["corpora"]["registered_looks_open"] is True
     assert {42, 50000042} <= set(p["corpora"]["spent_seeds"])
     u = p["unit_of_scoring"]
     assert (u["window"], u["label_role"]) == ("utc_calendar_month", "subject")

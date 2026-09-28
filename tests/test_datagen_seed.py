@@ -128,8 +128,11 @@ def looks_open(monkeypatch):
     monkeypatch.setattr(ds, "_corpora", lambda: opened)
 
 
-def test_registered_looks_are_closed_until_the_freeze():
-    assert _CORPORA.get("registered_looks_open") is False
+def test_registered_looks_are_closed_until_the_freeze(monkeypatch):
+    # Open since the freeze (AML-GOALS #52); a closed pre-registration still refuses.
+    assert _CORPORA.get("registered_looks_open") is True
+    closed = {**ds._corpora(), "registered_looks_open": False}
+    monkeypatch.setattr(ds, "_corpora", lambda: closed)
     with pytest.raises(ValidationError, match="closed"):
         _cfg_role(EVAL, "evaluation")
 

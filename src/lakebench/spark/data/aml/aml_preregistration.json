@@ -67,7 +67,7 @@
       42,
       50000042
     ],
-    "registered_looks_open": false,
+    "registered_looks_open": true,
     "registered_looks_note": "The evaluation and robustness seeds may be generated and scored only as the registered run for their role (datagen.corpus_role, scripts/aml_gate.py --registered), and only while this is true. It is set true with the datagen freeze; after a registered look its seed is appended to spent_seeds, which refuses any second look.",
     "spent_seeds_note": "Seeds retired by seed_rule: 42 was looked at by the voided D0 at v3.4.1 (AML-GOALS section 9 #38), 50000042 was the evaluation seed before v3.5.0 moved it. The cluster datagen refuses a spent seed for the financial schema (lakebench/config/datagen_seed.py). Append a seed here when a look at it is voided or burned.",
     "calibration_seed": 43,
