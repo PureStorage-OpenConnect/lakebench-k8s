@@ -9,7 +9,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release --locked --bin generate
 
-FROM python:3.13-slim
+# Python 3.14-slim, digest-pinned for freeze reproducibility. Bumped from
+# 3.13-slim on 2026-09-28: 3.13's floating minor tag could drift under a
+# rebuild, and 3.14 (released Oct 2025) has support until 2030-10-31.
+# Corpus bytes are Python-independent (the Rust binary owns generation and
+# S3 multipart upload); Python only runs the argparse entrypoint and boto3.
+FROM python:3.14-slim@sha256:7bf6c3111fe094f8ee1a1cbcdc63c4cfb345b0e3df42d5aa9a90b3b4b022ab6d
 WORKDIR /app
 RUN pip install --no-cache-dir boto3
 COPY --from=build /build/target/release/generate /app/datagen_rs
