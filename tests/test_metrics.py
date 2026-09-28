@@ -1330,6 +1330,38 @@ class TestStreamingLogParsing:
         assert metrics.total_batches == 2
         assert metrics.total_rows_processed == 350_000
 
+    def test_parse_streaming_logs_captures_per_batch_silver_labels(self):
+        """D-full-simple + E1 + I7 labels emitted per micro-batch land in
+        StreamingJobMetrics.extra_metrics. Live validation on
+        lb-silver-live-v16c showed these labels in driver logs but the
+        narrow silver_stream_scale_(cap|admission) regex would have
+        dropped them, so metrics.json would ship without the per-batch
+        parity_mode / dim_merge_elapsed / kyc_refresh evidence."""
+        c = MetricsCollector()
+        logs = """
+[lb] 2026-09-28T15:54:53.883921 - silver_stream_scale_cap: measured_up_to_scale_10
+[lb] 2026-09-28T15:54:53.883921 - silver_stream_scale_admission: ok
+[lb] 2026-09-28T15:55:13.041566 - [batch 0] 189335 txns
+[lb] 2026-09-28T15:56:14.522310 - silver_statements_parity_mode: strict_monotone
+[lb] 2026-09-28T15:56:14.522514 - silver_statements_late_arrivals_this_batch: 0
+[lb] 2026-09-28T15:56:14.522514 - silver_statements_batch_id: 0
+[lb] 2026-09-28T15:55:53.790921 - dim_merge_elapsed_ms_entities: 12345
+[lb] 2026-09-28T15:55:53.790921 - dim_merge_elapsed_ms_accounts: 6789
+[lb] 2026-09-28T15:55:25.028644 - kyc_refreshed_at: 1717029325
+[lb] 2026-09-28T15:55:25.028644 - kyc_refresh_kind: initial
+"""
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        assert e.get("silver_stream_scale_cap") == "measured_up_to_scale_10"
+        assert e.get("silver_stream_scale_admission") == "ok"
+        assert e.get("silver_statements_parity_mode") == "strict_monotone"
+        assert e.get("silver_statements_late_arrivals_this_batch") == "0"
+        assert e.get("silver_statements_batch_id") == "0"
+        assert e.get("dim_merge_elapsed_ms_entities") == "12345"
+        assert e.get("dim_merge_elapsed_ms_accounts") == "6789"
+        assert e.get("kyc_refreshed_at") == "1717029325"
+        assert e.get("kyc_refresh_kind") == "initial"
+
     def test_parse_streaming_logs_gold(self):
         c = MetricsCollector()
         logs = """

@@ -2839,13 +2839,28 @@ class MetricsCollector:
         ttd_lines: list[re.Match[str]] = []
         ttd_detail: list[re.Match[str]] = []
 
-        # G5: labelled scale envelope. Matches a bare "key: value" pair
-        # optionally after the [lb] timestamp prefix. Keys are anchored so
-        # only silver_stream_scale_* is picked up here; other extra_metrics
-        # from silver streams can be added to _STREAM_LABEL_KEYS below.
+        # G5 + per-batch labels: silver_stream_scale_(cap|admission) from
+        # main() startup, plus per-micro-batch labels every JOB METRICS
+        # block emits from _merge_batch (D-full-simple:
+        # silver_statements_parity_mode / silver_statements_late_arrivals_*
+        # / silver_statements_batch_id, E1: dim_merge_elapsed_ms_*, I7:
+        # kyc_refreshed_at). Per-batch values LAST-write-wins so the run's
+        # extra_metrics reflect the most recent micro-batch's state and
+        # a run-total emit at stream stop replaces the per-batch value.
         _stream_label_re = re.compile(
             r"^(?:\[lb\]\s+\S+\s+-\s+)?"
-            r"(?P<key>silver_stream_scale_(?:cap|admission)):\s*(?P<val>\S.*)$"
+            r"(?P<key>silver_stream_scale_(?:cap|admission)"
+            r"|silver_statements_parity_mode"
+            r"|silver_statements_parity_mode_run"
+            r"|silver_statements_late_arrivals_this_batch"
+            r"|silver_statements_total_late_arrivals"
+            r"|silver_statements_batch_id"
+            r"|dim_merge_elapsed_ms_entities"
+            r"|dim_merge_elapsed_ms_accounts"
+            r"|kyc_refreshed_at"
+            r"|kyc_refresh_kind"
+            r"|data_clock_source"
+            r"):\s*(?P<val>\S.*)$"
         )
 
         for line in logs.split("\n"):
