@@ -109,7 +109,12 @@ def profile_bronze_data(spark, txn_path: str) -> DataProfile:
 
     # 4. Sample: 0.1% or enough for 10M rows, whichever is smaller
     sample_fraction = min(0.001, 10_000_000 / max(sample_estimate, 1))
-    sample_df = transactions.sample(sample_fraction)
+    # G3: seed the sampler so re-runs at the same LB_SEED produce identical
+    # profile numbers. LB_SEED is exported by job.py:_build_env_vars alongside
+    # LB_DATA_CLOCK; the default of 0 keeps the historical behaviour when the
+    # env var is not set.
+    sample_seed = int(os.getenv("LB_SEED", "0"))
+    sample_df = transactions.sample(sample_fraction, seed=sample_seed)
 
     sample_stats = sample_df.agg(
         min_(to_date(col("event_timestamp"))).alias("min_date"),
@@ -149,12 +154,20 @@ def profile_bronze_data(spark, txn_path: str) -> DataProfile:
 
 
 def get_strategy_override(spark) -> SilverStrategy | None:
-    """Check for user-specified strategy override."""
+    """Check for user-specified strategy override.
+
+    G1: SALTED is deferred to v1.7 (see plan Block J). Accepting it silently
+    dispatched to SIMPLE while metrics claimed `Strategy: salted`, violating
+    invariant 5 (published evidence identifies what produced it). Refuse
+    at parse time before any log line names the strategy.
+    """
     override = spark.conf.get("spark.lb.silver.strategy", None)
     if override is None:
         override = os.environ.get("LB_SILVER_STRATEGY", None)
 
     if override and override.lower() != "auto":
+        if override.lower() == SilverStrategy.SALTED.value:
+            raise SilverAbort("SALTED strategy is deferred to v1.7; see plan Block J")
         try:
             return SilverStrategy(override.lower())
         except ValueError:
@@ -300,6 +313,47 @@ def rows_added_by_last_commit(spark, silver_tbl):
     return None
 
 
+# G4: shared property set for the Iceberg C360 silver table. CREATE below sets
+# these on cycle 0; cycles 1+ (append path) re-assert them before the write so
+# an in-place ALTER (or an older table missing a property) does not silently
+# fall back to defaults. Cheap; metadata only, no data touched. Excludes
+# `write.distribution-mode` and `write.spark.fanout.enabled` because those are
+# operator-overridable per Spark conf (LB-049) -- the helper reads them at
+# call time so a scale-5TB+ deployment that set
+# `spark.lb.silver.distribution_mode=none` on cycle 0 keeps that setting on
+# cycle 1+ instead of being silently reverted to `hash`.
+_SILVER_ICEBERG_STATIC_PROPS: tuple[tuple[str, str], ...] = (
+    ("write.format.default", "parquet"),
+    ("write.parquet.compression-codec", "snappy"),
+    METADATA_DELETE_AFTER_COMMIT,
+    METADATA_PREVIOUS_VERSIONS_MAX,
+    ("write.target-file-size-bytes", "134217728"),  # 128MB target
+)
+
+
+def reassert_silver_iceberg_props(spark, silver_tbl) -> None:
+    """G4: re-run the create-time TBLPROPERTIES before an append cycle.
+
+    Iceberg's ``writeTo(...).append()`` does not carry TBLPROPERTIES, so a
+    table that lost a property (via an ALTER, a fresh CREATE by an older
+    script, or a schema evolution) would keep the wrong defaults for the
+    lifetime of the deployment. This ALTER is idempotent and cheap.
+
+    Distribution mode and fanout are honoured from ``spark.conf`` (LB-049
+    escape hatch), so a cycle-1+ append cannot silently overwrite an
+    operator's scale-5TB+ ``distribution_mode=none`` choice with the
+    ``hash`` default.
+    """
+    dist_mode = spark.conf.get("spark.lb.silver.distribution_mode", "hash")
+    fanout = spark.conf.get("spark.lb.silver.fanout_enabled", "false")
+    props: list[tuple[str, str]] = list(_SILVER_ICEBERG_STATIC_PROPS)
+    props.append(("write.distribution-mode", dist_mode))
+    if str(fanout).lower() == "true":
+        props.append(("write.spark.fanout.enabled", "true"))
+    props_sql = ", ".join(f"'{k}' = '{v}'" for k, v in props)
+    spark.sql(f"ALTER TABLE {silver_tbl} SET TBLPROPERTIES ({props_sql})")
+
+
 def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
     log("Executing SIMPLE strategy...")
@@ -316,6 +370,9 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     log(f"Writing {silver_count:,} records to {silver_tbl}")
     if appending:
         log("Appending to existing table (incremental mode)")
+        # G4: re-assert table properties before the append so a stale table
+        # cannot silently degrade the write (invariant 5).
+        reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
         (
@@ -378,6 +435,10 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
 
     if appending:
         log("Appending to existing table (incremental mode)")
+        # G4: re-assert table properties before the append. STREAMING is only
+        # picked when incremental is fresh in practice, but the append path
+        # still needs the same guarantee as SIMPLE.
+        reassert_silver_iceberg_props(spark, silver_tbl)
         silver_df.writeTo(silver_tbl).append()
     else:
         writer = (
@@ -458,6 +519,9 @@ log(f"Bronze source: {bronze_source}")
 size_override = get_size_override(spark)
 if size_override and size_override > 0:
     log(f"Using size override: {size_override:.1f} GB (skipping profiling)")
+    # G2: label the emitted input_size_gb as an operator override so
+    # downstream reports never present it as a measured value (invariant 5).
+    input_size_gb_source = "operator_override"
     # Create minimal profile with overridden size
     profile = DataProfile(
         total_size_gb=size_override,
@@ -471,6 +535,7 @@ if size_override and size_override > 0:
         hot_keys=[],
     )
 else:
+    input_size_gb_source = "filesystem"
     profile = profile_bronze_data(spark, bronze_source)
 
 # A5/A6 (silver-plan): the size comes from path_size_gb_strict, which
@@ -493,12 +558,10 @@ elif strategy == SilverStrategy.STREAMING:
         spark, bronze_source, silver_tbl, catalog, profile, appending=appending
     )
 elif strategy == SilverStrategy.SALTED:
-    # SALTED is retired: silver-build is row-independent column transforms,
-    # and the salt column was dropped before repartitioning by customer_id,
-    # so salting did nothing. It also wrote with createOrReplace regardless of
-    # incremental mode, wiping earlier cycles' silver in multi-cycle runs.
-    log("SALTED strategy is a no-op for row transforms; running SIMPLE")
-    silver_count = silver_simple(spark, bronze_source, silver_tbl, catalog, appending=appending)
+    # G1: SALTED is deferred to v1.7 (plan Block J). `get_strategy_override`
+    # refuses the override at parse time; this branch is a defense-in-depth
+    # trap if any future auto-selector reaches SALTED.
+    raise SilverAbort("SALTED strategy is deferred to v1.7; see plan Block J")
 else:
     log(f"ERROR: Unknown strategy {strategy}")
     spark.stop()
@@ -516,6 +579,9 @@ log("Partitioned by: interaction_date")
 log(f"Duration: {total_time:.1f}s ({total_time / 60:.1f} min)")
 log("=== JOB METRICS: silver-build ===")
 log(f"input_size_gb: {profile.total_size_gb:.3f}")
+# G2: source label so a downstream reader can tell an operator-asserted
+# size from a filesystem-measured one (invariant 5).
+log(f"input_size_gb_source: {input_size_gb_source}")
 # A5 (silver-plan): unify on `bronze_rows` across SIMPLE and STREAMING; the
 # earlier `estimated_rows` emission is dropped.
 log(f"bronze_rows: {_COUNTED.get('bronze_rows', 'unknown')}")

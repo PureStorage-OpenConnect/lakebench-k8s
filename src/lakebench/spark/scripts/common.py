@@ -58,6 +58,40 @@ def assert_progress(rows_written, job_type):
     raise SilverAbort(f"{job_type}: zero rows written; refusing exit-0 pass (LB-044 gate)")
 
 
+def emit_stream_scale_admission(measured_envelope_scale=10):
+    """Emit the G5 scale cap and admission labels (invariant 6).
+
+    ``silver_stream_scale_cap`` names the measured envelope this profile
+    was tuned against (v1.6: scale 10 for all three silver streams, see
+    the ``_JOB_PROFILES["silver-stream"]`` docstring in
+    ``modules/pipeline_engines/spark/job.py``). ``silver_stream_scale_admission``
+    is a decision, not a static string:
+
+    - ``ok`` when the deployment scale (LB_SCALE, threaded from
+      job.py._build_env_vars) is <= the measured envelope;
+    - ``labelled_beyond_measured_envelope`` when it exceeds it. The stream
+      still runs -- refusal is the responsibility of D-safe (AML) or a
+      future config gate -- but downstream reports MUST NOT read the
+      numbers as infrastructure performance without the label.
+
+    A parse error on LB_SCALE (unset, non-numeric) falls to ``labelled``
+    on the safe side: an unknown scale should not silently look like an
+    in-envelope run.
+    """
+    raw_scale = os.getenv("LB_SCALE")
+    try:
+        scale = float(raw_scale) if raw_scale is not None else None
+    except ValueError:
+        scale = None
+    log(f"silver_stream_scale_cap: measured_up_to_scale_{int(measured_envelope_scale)}")
+    if scale is None:
+        log("silver_stream_scale_admission: labelled_scale_unknown")
+    elif scale <= measured_envelope_scale:
+        log("silver_stream_scale_admission: ok")
+    else:
+        log("silver_stream_scale_admission: labelled_beyond_measured_envelope")
+
+
 def pipeline_catalog():
     """The Spark catalog every pipeline job reads and writes c360 tables in.
 

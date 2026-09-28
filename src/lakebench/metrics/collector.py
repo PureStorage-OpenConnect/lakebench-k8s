@@ -195,6 +195,12 @@ class StreamingJobMetrics:
     submission_failures: list[dict[str, Any]] = field(default_factory=list)
     # UTC time the CLI first saw the driver RUNNING.
     running_at: str | None = None
+    # G5: labelled Lakebench-imposed scale envelope for silver streams
+    # (invariant 6). Populated by parse_streaming_logs from the
+    # `silver_stream_scale_cap` / `silver_stream_scale_admission` lines
+    # every silver_stream* main() emits at startup, and from any other
+    # stream-side label a future block adds.
+    extra_metrics: dict[str, str] = field(default_factory=dict)
 
     def apply_window(self, logs: str | None, start: datetime, end: datetime) -> dict[str, Any]:
         """Restrict this stage's window-dependent fields to [start, end]
@@ -2833,7 +2839,21 @@ class MetricsCollector:
         ttd_lines: list[re.Match[str]] = []
         ttd_detail: list[re.Match[str]] = []
 
+        # G5: labelled scale envelope. Matches a bare "key: value" pair
+        # optionally after the [lb] timestamp prefix. Keys are anchored so
+        # only silver_stream_scale_* is picked up here; other extra_metrics
+        # from silver streams can be added to _STREAM_LABEL_KEYS below.
+        _stream_label_re = re.compile(
+            r"^(?:\[lb\]\s+\S+\s+-\s+)?"
+            r"(?P<key>silver_stream_scale_(?:cap|admission)):\s*(?P<val>\S.*)$"
+        )
+
         for line in logs.split("\n"):
+            m = _stream_label_re.match(line.strip())
+            if m:
+                metrics.extra_metrics[m.group("key")] = m.group("val").strip()
+                continue
+
             # Bronze: "Batch N: writing X rows to ..."
             m = re.search(r"Batch (\d+): writing ([\d,]+) rows", line)
             if m:

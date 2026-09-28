@@ -2579,6 +2579,43 @@ class SparkJobManager:
         if _ts_end:
             env.append({"name": "LB_DATA_CLOCK", "value": str(_ts_end)})
 
+        # G3: reproducibility seed for silver-build profile sampling
+        # (silver_build.py, silver_build_delta.py). Exported so re-runs at
+        # the same seed produce the same profile numbers. Uses the resolved
+        # datagen seed (config/datagen_seed.py) so the sampler sees the same
+        # deterministic value the generator was run with.
+        # Narrow catch: config_seed raises AttributeError when the workload
+        # block lacks a datagen slot (e.g. legacy fixture configs) and
+        # ValueError from resolve_seed on a spent seed the schema validator
+        # already refused. Anything else -- an import failure, an IO error
+        # reading the prereg JSON on the pod -- is a real problem and should
+        # surface, not be silently downgraded to seed 0 (evidence-mislabel:
+        # metrics would then claim reproducibility from a seed the datagen
+        # never ran with).
+        try:
+            from lakebench.config.datagen_seed import config_seed
+
+            _lb_seed = config_seed(cfg)
+        except (AttributeError, ValueError) as e:
+            logger.info(
+                "LB_SEED fallback to 0 for silver-build sampler: %s: %s",
+                type(e).__name__,
+                e,
+            )
+            _lb_seed = 0
+        env.append({"name": "LB_SEED", "value": str(_lb_seed)})
+
+        # G5: silver streams label their admission decision against the
+        # measured scale envelope (invariant 6). The stream mains compute
+        # `admission = "ok"` when scale <= measured envelope, else
+        # `labelled_beyond_measured_envelope`. Export the deployment scale
+        # so a running stream can decide, not just recite a hardcoded string.
+        try:
+            _scale = float(cfg.architecture.workload.datagen.scale)
+        except (AttributeError, TypeError, ValueError):
+            _scale = 1.0
+        env.append({"name": "LB_SCALE", "value": str(_scale)})
+
         # Financial workload: point bronze_verify_financial / silver_build_financial
         # at the same S3 prefix the datagen K8s Job wrote to. Datagen picks
         # `pacs008` when path_template is at its C360 default; mirror that here.
