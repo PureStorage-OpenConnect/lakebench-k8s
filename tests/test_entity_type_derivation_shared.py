@@ -18,6 +18,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
+# The batch mains import pyspark at module load time; the assertions here
+# reach through that import to compare the shared regex helper, so skip
+# cleanly on the general-suite host that CI runs without pyspark.
+pytest.importorskip("pyspark")
+
 _HERE = Path(__file__).resolve().parent
 _SCRIPTS = _HERE.parent / "src/lakebench/spark/scripts"
 sys.path.insert(0, str(_SCRIPTS))
