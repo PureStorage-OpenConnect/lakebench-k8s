@@ -117,7 +117,11 @@ _ENTITIES = [
 _IBANS = [f"IBAN-{i:03d}" for i in range(len(_ENTITIES))]
 
 
-def _row(spark, txn_id, ts, dbtr_i, cdtr_i):
+def _row(spark, txn_id, ts, dbtr_i, cdtr_i, iban_dbtr=None, iban_cdtr=None):
+    """One pacs.008 row. ``iban_dbtr`` / ``iban_cdtr`` override the default
+    entity-index iban so the corpus can carry the same iban across dbtr and
+    cdtr sides on different entities (E1 BLOCKER 2 cross-side blending
+    fixture)."""
     d_name, d_ctry, d_city, d_lei = _ENTITIES[dbtr_i]
     c_name, c_ctry, c_city, c_lei = _ENTITIES[cdtr_i]
     dbtr = (d_name, d_ctry, (d_city, "MAIN ST"), (d_lei,))
@@ -129,8 +133,8 @@ def _row(spark, txn_id, ts, dbtr_i, cdtr_i):
         cdtr,
         ("MERIUS2L",),
         ("NRTHGB3X",),
-        (_IBANS[dbtr_i], "USD"),
-        (_IBANS[cdtr_i], "USD"),
+        (iban_dbtr or _IBANS[dbtr_i], "USD"),
+        (iban_cdtr or _IBANS[cdtr_i], "USD"),
         (None,),
         (None,),
         (None,),
@@ -143,30 +147,50 @@ def _row(spark, txn_id, ts, dbtr_i, cdtr_i):
     )
 
 
-# 20 payments across the 10 entities. Pairs cycle so each entity appears in
-# both roles and multiple chunks (batch's per-column min() is meaningful only
-# when an entity_id appears multiple times).
+# 20 payments across the 10 entities, plus 4 cross-side-blending fixtures.
+# Pairs cycle so each entity appears in both roles and multiple chunks
+# (batch's per-column min() is meaningful only when an entity_id appears
+# multiple times). Format: (dbtr_i, cdtr_i, iban_dbtr_override,
+# iban_cdtr_override). None overrides use the entity-index default iban.
 _PAIRS = [
-    (0, 3),
-    (1, 4),  # ACME (name variant) -> BETA (variant)
-    (2, 3),  # ACME AG -> BETA GMBH
-    (0, 5),
-    (5, 0),
-    (3, 6),
-    (6, 3),
-    (7, 8),
-    (8, 7),
-    (9, 0),
-    (0, 9),
-    (4, 5),
-    (5, 4),
-    (6, 7),
-    (7, 6),
-    (2, 5),
-    (5, 2),
-    (1, 3),
-    (3, 1),
-    (8, 9),
+    (0, 3, None, None),
+    (1, 4, None, None),  # ACME (name variant) -> BETA (variant)
+    (2, 3, None, None),  # ACME AG -> BETA GMBH
+    (0, 5, None, None),
+    (5, 0, None, None),
+    (3, 6, None, None),
+    (6, 3, None, None),
+    (7, 8, None, None),
+    (8, 7, None, None),
+    (9, 0, None, None),
+    (0, 9, None, None),
+    (4, 5, None, None),
+    (5, 4, None, None),
+    (6, 7, None, None),
+    (7, 6, None, None),
+    (2, 5, None, None),
+    (5, 2, None, None),
+    (1, 3, None, None),
+    (3, 1, None, None),
+    (8, 9, None, None),
+    # BLOCKER 2 fixture (E1 review). Two ibans (SHARED-A, SHARED-B)
+    # appear on BOTH dbtr and cdtr sides across DIFFERENT entities, so
+    # each iban's target row is a genuine tiebreak between two observed
+    # rows with DIFFERENT holder_entity_id AND different bank_bic. Per-
+    # column LEAST would synthesise a row that appears on neither side
+    # (debtor's holder + creditor's bank_bic + a third row's opened_date);
+    # row_number-1 by (holder, bic, opened_date) asc_nulls_last picks
+    # exactly one actual observed row, which is what batch does.
+    #
+    # For SHARED-A: dbtr=0 (LEI-ACME) with bank_bic MERIUS2L; then
+    # cdtr=8 (name-hash of JOSE PEREZ) with bank_bic NRTHGB3X. The two
+    # rows differ on ALL four dimension columns.
+    (0, 3, "SHARED-A", None),
+    (7, 8, None, "SHARED-A"),
+    # SHARED-B: cdtr=0 first, dbtr=5 (LEI-CHARLIE) later; different
+    # holder, different bank_bic, different opened_date.
+    (5, 0, None, "SHARED-B"),
+    (5, 3, "SHARED-B", None),
 ]
 
 
@@ -174,17 +198,20 @@ def _full_bronze(spark):
     from pyspark.sql import Row  # noqa: F401 -- readability
 
     ts0 = datetime(2024, 6, 1)
-    rows = [
-        _row(spark, f"T{ix}", ts0 + timedelta(hours=ix), a, b) for ix, (a, b) in enumerate(_PAIRS)
-    ]
+    rows = [_row(spark, f"T{ix}", ts0 + timedelta(hours=ix), *tup) for ix, tup in enumerate(_PAIRS)]
     return spark.createDataFrame(rows, _PACS_SCHEMA)
 
 
 def _chunks(bronze, n=5):
-    """Split by cre_dt_tm hour into n contiguous groups."""
+    """Split by cre_dt_tm hour into n contiguous groups. ``per`` is rounded
+    UP so the last chunk absorbs any remainder -- otherwise a corpus of 24
+    rows with n=5 would drop the last 4 rows and silently skip the E1
+    BLOCKER 2 fixture."""
+    import math
+
     rows = bronze.collect()
-    per = max(1, len(rows) // n)
-    return [rows[i : i + per] for i in range(0, len(rows), per)][:n]
+    per = max(1, math.ceil(len(rows) / n))
+    return [rows[i : i + per] for i in range(0, len(rows), per)]
 
 
 def _run(jar):

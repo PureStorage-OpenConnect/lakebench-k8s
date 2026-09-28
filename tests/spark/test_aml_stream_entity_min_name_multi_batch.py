@@ -73,6 +73,12 @@ def test_min_name_across_batches_in_a_fresh_jvm():
         "ACME AG",  # batch 3 update: LEAST(ACME CORP, ACME AG)  = ACME AG
         "ACME AG",  # batch 4 update: LEAST(ACME AG,   ACME BV)  = ACME AG
     ], payload
+    # BLOCKER 3 regression guard: batch enforces ``legal_name = name`` at
+    # build_entities. The MERGE must set legal_name to the SAME expression
+    # as name, not an independent LEAST -- otherwise a target whose two
+    # columns disagreed for any reason would drift further apart on each
+    # update. Assert both after every batch, not just the last one.
+    assert payload["legal_name_progression"] == payload["progression"], payload
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +183,7 @@ def _run(jar):
         # WHEN MATCHED path on batches 2..4.
         names = ["ACME LTD", "ACME CORP", "ACME AG", "ACME BV"]
         progression: list[str] = []
+        legal_name_progression: list[str] = []
         for bid, dbtr_name in enumerate(names):
             bronze = _bronze_row(
                 spark,
@@ -204,9 +211,10 @@ def _run(jar):
             )
             target_id = target_id_df.collect()[0]["entity_id"]
             row = spark.sql(
-                f"SELECT name FROM lh.silver.entities WHERE entity_id = {target_id}"
+                f"SELECT name, legal_name FROM lh.silver.entities WHERE entity_id = {target_id}"
             ).collect()[0]
             progression.append(row["name"])
+            legal_name_progression.append(row["legal_name"])
 
         # Count rows the pinned entity_id owns (must be exactly 1: MERGE
         # UPDATE, not INSERT, for batches 2..4).
@@ -214,14 +222,17 @@ def _run(jar):
             f"SELECT COUNT(*) AS n FROM lh.silver.entities WHERE entity_id = {target_id}"
         ).collect()[0]["n"]
         final_row = spark.sql(
-            f"SELECT name, entity_type FROM lh.silver.entities WHERE entity_id = {target_id}"
+            f"SELECT name, entity_type, legal_name FROM lh.silver.entities "
+            f"WHERE entity_id = {target_id}"
         ).collect()[0]
 
         out = {
             "entities_rows": int(entity_rows),
             "final_name": final_row["name"],
             "final_entity_type": final_row["entity_type"],
+            "final_legal_name": final_row["legal_name"],
             "progression": progression,
+            "legal_name_progression": legal_name_progression,
         }
         print(json.dumps(out))
         spark.stop()
