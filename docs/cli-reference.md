@@ -471,7 +471,7 @@ lakebench destroy [CONFIG_FILE] [OPTIONS]
 | `--local` | | `false` | Tear down the local stack instead of Kubernetes |
 | `--workdir` | | `~/.lakebench/local/<name>` | Host directory for local mode state (only used with `--local`) |
 | `--remove-data` | | `false` | Local mode only: also delete generated data and the Ivy cache |
-| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 3 unless the namespace is already gone |
+| `--namespace-timeout` | | `600` | Seconds to wait for the namespace to finish terminating after the delete; `0` skips the wait, so destroy exits 4 unless the namespace is already gone |
 | `--keep-buckets` | | `false` | Empty the S3 buckets but do not delete them |
 | `--force-legacy` | | `false` | Proceed on a namespace or bucket with no lakebench ownership annotation or tag. Foreign-owned namespaces and buckets are refused regardless |
 | `--allow-unverified-cluster` | | `false` | Bypass the API-server fingerprint match when it cannot be computed |
@@ -512,7 +512,8 @@ concurrent destroy of the same deployment finished first and a redeploy has
 re-created the name, destroy stops and leaves the new deployment alone.
 
 Exit codes: `0` everything removed; `1` a step failed (see the summary);
-`3` everything else succeeded but the namespace was still terminating at
+`3` the user declined the confirmation prompt (no side effects); `4`
+everything else succeeded but the namespace was still terminating at
 `--namespace-timeout` (usually a PVC or pod finalizer; check with
 `kubectl get ns <namespace>` before re-deploying under the same name).
 

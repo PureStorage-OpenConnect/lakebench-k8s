@@ -169,10 +169,14 @@ _CONTEXT_CHECK_PHRASES = (
 )
 
 
-def _has_context_check_nearby(text: str, occurrence_offset: int, window: int = 200) -> bool:
-    lo = max(0, occurrence_offset - window)
-    hi = min(len(text), occurrence_offset + window)
-    slab = text[lo:hi].lower()
+def _has_context_check_in_block(block: str) -> bool:
+    """True when the hint BLOCK contains a cluster-context check phrase.
+
+    Scoped to the hint block only. A docstring or unrelated code near the
+    hint in the source file must not satisfy the guard; only wording the
+    user actually reads counts.
+    """
+    slab = block.lower()
     return any(p in slab for p in _CONTEXT_CHECK_PHRASES)
 
 
@@ -205,15 +209,14 @@ def test_no_kubectl_create_namespace_in_hints(path: Path) -> None:
     """
     text = path.read_text(encoding="utf-8")
     for start, block in _extract_hint_blocks(text):
-        assert "kubectl create namespace" not in block, (
-            f"{path}: hint block at offset {start} recommends `kubectl create "
-            "namespace`. Never suggest pre-creating a namespace: `lakebench "
-            "deploy` creates it under the cluster lease. Pre-creation has "
-            "crash-looped the shared Spark Operator."
-        )
-        assert "kubectl create ns" not in block, (
-            f"{path}: hint block at offset {start} recommends `kubectl create "
-            "ns`. Never suggest pre-creating a namespace."
+        # ``kubectl`` and ``oc`` are the same operation on this OpenShift
+        # cluster; the guard must cover both.
+        m = re.search(r"(?:kubectl|oc)\s+create\s+n(?:s|amespace)\b", block)
+        assert m is None, (
+            f"{path}: hint block at offset {start} recommends "
+            f"`{m.group(0) if m else ''}`. Never suggest pre-creating a "
+            "namespace: `lakebench deploy` creates it under the cluster "
+            "lease. Pre-creation has crash-looped the shared Spark Operator."
         )
 
 
@@ -230,10 +233,11 @@ def test_no_kubectl_delete_ns_in_hints(path: Path) -> None:
         # Exclude descriptive uses that say what it *looks like* (comments
         # about a kubectl-delete-ns being indistinguishable): those are not
         # user-facing hints, so they never appear inside a hint block.
-        assert not re.search(r"kubectl\s+delete\s+n(?:s|amespace)\b", block), (
-            f"{path}: hint block at offset {start} suggests `kubectl delete "
-            "ns/namespace`. Use `lakebench destroy <config>` instead: raw "
-            "delete bypasses ownership records and can leave orphan buckets."
+        assert not re.search(r"(?:kubectl|oc)\s+delete\s+n(?:s|amespace)\b", block), (
+            f"{path}: hint block at offset {start} suggests `kubectl/oc "
+            "delete ns/namespace`. Use `lakebench destroy <config>` "
+            "instead: raw delete bypasses ownership records and can leave "
+            "orphan buckets."
         )
 
 
@@ -307,26 +311,27 @@ def test_force_legacy_hints_include_context_check(path: Path) -> None:
         "--force-legacy if you",
     )
     for start, block in _extract_hint_blocks(text):
-        # Find every --force-legacy in this block; check context nearby.
-        for m in re.finditer(r"--force-legacy\b", block):
-            occ = start + m.start()
-            # Skip if the block is documenting a restriction on the flag.
-            around = text[max(0, occ - 200) : min(len(text), occ + 200)].lower()
-            if any(p in around for p in _restriction_phrases):
-                continue
-            # Skip if the mention is not a recommendation (a status label,
-            # a diagnostic, a warning about what --force-legacy does).
-            if not any(v in around for v in _recommendation_verbs):
-                continue
-            if _has_context_check_nearby(text, occ, window=200):
-                continue
-            pytest.fail(
-                f"{path}: hint block at offset {start} recommends "
-                "`--force-legacy` without a cluster-context check within "
-                "200 characters. Add wording that steers the user to run "
-                "`oc whoami && kubectl config current-context` first, or "
-                "assert the buckets/namespace are theirs."
-            )
+        # Skip blocks that don't contain --force-legacy at all.
+        if not re.search(r"--force-legacy\b", block):
+            continue
+        block_lower = block.lower()
+        # All three scans (restriction, recommendation-verb, context-check)
+        # look at the hint BLOCK only. A docstring or adjacent code in the
+        # same file must not satisfy any of them; only wording the user
+        # actually reads inside this hint counts.
+        if any(p in block_lower for p in _restriction_phrases):
+            continue
+        if not any(v in block_lower for v in _recommendation_verbs):
+            continue
+        if _has_context_check_in_block(block):
+            continue
+        pytest.fail(
+            f"{path}: hint block at offset {start} recommends "
+            "`--force-legacy` without a cluster-context check inside "
+            "the same hint block. Add wording that steers the user to "
+            "run `oc whoami && kubectl config current-context` first, "
+            "or assert the buckets/namespace are theirs."
+        )
 
 
 def test_prerequisites_recommends_managed_spark_operator_install() -> None:
