@@ -54,6 +54,7 @@ from common import (
     apply_silver_transformations_anchored,
     assert_progress,
     await_stream,
+    check_bronze_fingerprint,
     configured_data_clock,
     data_clock_date,
     emit_stream_scale_admission,
@@ -218,6 +219,13 @@ def main() -> None:
         time.sleep(_TABLE_WAIT_INTERVAL)
         waited += _TABLE_WAIT_INTERVAL
     log(f"Bronze table {bronze_tbl} exists (waited {waited}s)")
+
+    # B5: refuse resume when bronze snapshot lineage was replaced under the
+    # old checkpoint. First start fails open and writes the sidecar; every
+    # subsequent start compares and raises SilverAbort on a mismatch. Runs
+    # only after the wait above so the snapshot lookup is not defeated by
+    # the "bronze not created yet" race.
+    check_bronze_fingerprint(spark, bronze_tbl, checkpoint_location, source_format="iceberg")
 
     # A1: driver-side accumulator. write_silver_batch returns the rows the
     # micro-batch committed; the foreachBatch wrapper folds each return into
