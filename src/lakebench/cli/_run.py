@@ -2013,6 +2013,37 @@ def run(
 
             _stop_leftover_streams(job_manager, cfg.get_namespace())
 
+        # B1 --force-rebuild: bump the deployment's rebuild-epoch counter
+        # ONCE per `lakebench run` invocation, before the cycle loop, so
+        # all cycles in this run share one (txnAppId, txnVersion) namespace
+        # keyed on the new epoch. Bumping per-cycle would give each cycle
+        # its own appId, defeating the invariant that a single rebuild is
+        # one epoch.
+        #
+        # Any bump failure is a hard exit. The previous behaviour of "print
+        # a warning and still submit with LB_FORCE_REBUILD=1" left Delta
+        # reading the un-bumped epoch from the ConfigMap and short-
+        # circuiting cycle 0 against the previous rebuild's cycle 0 --
+        # silent zero-row write, exit 0, silver missing all of cycle 2
+        # (invariant 3: exit 0 is not a pass).
+        if force_rebuild:
+            schema_type = cfg.architecture.workload.schema_type.value
+            table_format = cfg.architecture.table_format.type.value
+            # AML+delta has no rebuild-epoch key; the CLI flag on that
+            # combination is a no-op, not a bumped epoch.
+            if schema_type != "financial" or table_format == "iceberg":
+                try:
+                    _bump_silver_rebuild_epoch(cfg)
+                except Exception as e:
+                    print_error(
+                        f"Could not bump silver rebuild-epoch: {e}\n"
+                        "Refusing to submit silver: without a bumped epoch, "
+                        "Delta's SetTransaction log short-circuits the "
+                        "rebuild's cycle 0 as a duplicate of the previous "
+                        "epoch, silently writing zero rows (invariant 3)."
+                    )
+                    raise typer.Exit(1) from e
+
         for cycle_idx in range(total_cycles):
             # Track per-cycle metrics (v1.1.0)
             _cycle_start = datetime.now()
@@ -2093,23 +2124,15 @@ def run(
 
                 job_start = utc_now()
 
-                # B1 --force-rebuild: bump the deployment's rebuild-epoch
-                # counter atomically before submitting silver, then pass
-                # LB_FORCE_REBUILD=1 to the silver main. The counter bump
-                # partitions Delta's (txnAppId, txnVersion) namespace so
-                # the rebuilt cycle 0 does not short-circuit against the
-                # previous epoch's cycle 0. Only applies to batch silver.
+                # B1 --force-rebuild: the epoch bump ran once above this
+                # cycle loop. The Iceberg cycle-0 guard (silver already
+                # populated + no --force-rebuild) is orthogonal to the
+                # Delta epoch, and the flag is safely ignored by Delta
+                # after cycle 0, so setting it on every silver_build stage
+                # for this run is correct.
                 stage_env = dict(cycle_env)
                 if force_rebuild and job_type == JobType.SILVER_BUILD:
-                    try:
-                        _bump_silver_rebuild_epoch(cfg)
-                        stage_env["LB_FORCE_REBUILD"] = "1"
-                    except Exception as e:
-                        print_warning(
-                            f"Could not bump silver rebuild-epoch: {e}; "
-                            "proceeding with --force-rebuild flag only"
-                        )
-                        stage_env["LB_FORCE_REBUILD"] = "1"
+                    stage_env["LB_FORCE_REBUILD"] = "1"
 
                 # Submit job
                 job_status = job_manager.submit_job(job_type, cycle_env=stage_env)

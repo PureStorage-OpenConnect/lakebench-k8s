@@ -1040,8 +1040,17 @@ def _read_silver_state_epoch(namespace: str, key: str) -> int:
 
     Falls back to 0 on any read failure -- the ConfigMap is per-deployment
     and pre-B1 deployments do not have it. A missing key inside an existing
-    ConfigMap also returns 0. The caller (job._build_env_vars) only reads;
-    the counter is only incremented by CLI --force-rebuild.
+    ConfigMap also returns 0. Log level is WARNING so a real ops issue is
+    visible even when the fallback is taken (e.g. unit tests running
+    without a live cluster context, or a manifest built out-of-cluster).
+
+    The CLI-side ``_bump_silver_rebuild_epoch`` is the load-bearing
+    defense against the collision surface this cache-line would otherwise
+    open: a failed bump refuses to submit silver (``cli/_run.py`` raises
+    ``typer.Exit(1)`` before the cycle loop), so the submit path only
+    runs after a bump the same process just observed to succeed. A
+    transient read failure here at submit-time (post-bump) is a very
+    narrow window against a cluster the CLI just talked to successfully.
     """
     try:
         from kubernetes import client as _kclient
@@ -1060,7 +1069,7 @@ def _read_silver_state_epoch(namespace: str, key: str) -> int:
         except (TypeError, ValueError):
             return 0
     except Exception as e:  # noqa: BLE001
-        logger.info("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, e)
+        logger.warning("LB_REBUILD_EPOCH fallback to 0 for key %s: %s", key, e)
         return 0
 
 
