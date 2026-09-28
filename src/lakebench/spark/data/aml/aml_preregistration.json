@@ -238,7 +238,7 @@
     },
     "power_sim": {
       "script": "scripts/aml_d8_power_sim.py",
-      "stdout_sha256": "a2372a4b5dd22a6bbdfe752d5b8b39b9cf65f013f4b15e24afc748d69604880c",
+      "stdout_sha256": "0a01738f00afac4c45829a19e4db67251a9b8e52f255a2916fb20d521b63a784",
       "produced_with": {
         "python": "3.11",
         "numpy": "2.4.6",

@@ -680,7 +680,16 @@ def test_prereg_registers_the_d8_rule():
 
 def test_power_sim_output_hash_is_recorded():
     """The pre-registration records the sha256 of the power simulation's
-    stdout; rerunning it must reproduce the hash (or the record is stale)."""
+    stdout; rerunning it must reproduce the hash (or its numerics are stale).
+
+    The script echoes the mutable prereg version into its first line for human
+    provenance, so a pure version-label bump (e.g. 3.6.0 -> 3.6.1) would other-
+    wise trip this guard with a false alarm even though every simulated number
+    is byte-identical. We normalize only that version token before hashing; the
+    s2/s10 run counts on that same line and the whole numeric body stay in the
+    hash, so any real change to the operating characteristics still trips it.
+    The version's own correctness is guarded by test_prereg_registers_the_d8_rule."""
+    import re
     import subprocess
     import sys
 
@@ -696,7 +705,8 @@ def test_power_sim_output_hash_is_recorded():
         check=True,
         timeout=600,
     ).stdout
-    assert hashlib.sha256(out).hexdigest() == rec["stdout_sha256"]
+    normalized = re.sub(rb"^prereg \S+:", b"prereg <version>:", out, count=1)
+    assert hashlib.sha256(normalized).hexdigest() == rec["stdout_sha256"]
 
 
 # ---------------------------------------------------------------------------
