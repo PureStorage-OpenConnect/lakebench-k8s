@@ -118,12 +118,13 @@ with 1.6; the first section lists why.
   which of them bound, so a bound figure is not read as infrastructure
   performance.
 - **Frozen AML generator image.** `images.datagen` defaults to
-  `docker.io/sillidata/lb-datagen:25f1aa8` (digest
-  `sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7`),
+  `docker.io/sillidata/lb-datagen:b6f2905` (digest
+  `sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6`),
   generator `MODEL_VERSION` `datagen-v2-rs-0.3`. The pinned image is the
   reproducibility unit; bit-exact output holds within one build environment.
-  A corpus from an earlier image is pre-freeze. The prior tag `7c24641`
-  (digest `sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b`)
+  A corpus from an earlier image is pre-freeze. Prior tags `25f1aa8`
+  (digest `sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7`),
+  `7c24641` (digest `sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b`)
   and `0a83acd` (digest `sha256:acdf3925...`) are recorded in
   `src/lakebench/config/schema.py::ImagesConfig.datagen` for provenance.
 - **Config contract (v1.6).** `workload` is a top-level key; the old

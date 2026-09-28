@@ -262,22 +262,25 @@ class ImagesConfig(ConfigModel):
 
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
     # every datagen_rs change; :latest drifted from the code it claimed to be.
-    # 25f1aa8 is the datagen v1.6 sprint tip on integrate (2026-09-28):
-    # LB-191 dirty-ratio semantics, screening rates in prereg 3.6.1,
-    # calibration-replicate seed refusal in perturbation_for_seed,
+    # b6f2905 is the datagen v1.6 sprint tip on integrate (2026-09-28) with
+    # the Python base bumped from the floating python:3.13-slim tag to
+    # python:3.14-slim, digest-pinned so a rebuild reproduces the same
+    # Python layer bytes. Rust source unchanged from 25f1aa8, so corpus
+    # bytes at a fixed seed are unchanged; MODEL_VERSION stays
+    # datagen-v2-rs-0.3. Datagen_rs freeze wiring carried forward from
+    # 25f1aa8: LB-191 dirty-ratio semantics, screening rates in prereg
+    # 3.6.1, calibration-replicate seed refusal in perturbation_for_seed,
     # multi-writer guard on --mode reference, S3Sink::put_multipart retry,
-    # --delivery-mode {batch|continuous} MpuWriter switch with continuous as
-    # the Rust binary default, and the #52 registered_looks_open freeze
-    # wiring. AML corpus bytes unchanged, MODEL_VERSION stays
-    # datagen-v2-rs-0.3. c360 corpus bytes moved with the LB-191 fix.
-    # Live smoke on FlashBlade 2026-09-28 (namespace ds-0928, scale 1, 4
-    # parallel Jobs at image 0a83acd): all 16 pods complete in 10-12s;
-    # batch and continuous produce byte-identical S3 output for both
-    # schemas. This image (25f1aa8) is the continuous-default rebuild.
+    # --delivery-mode {batch|continuous} MpuWriter switch with continuous
+    # as the Rust binary default, and the #52 registered_looks_open freeze
+    # wiring.
     # Pushed digest:
-    # sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7
-    # Prior tags: 0a83acd (sha256:acdf3925...), 7c24641 (sha256:c5a6bc80...).
-    datagen: str = "docker.io/sillidata/lb-datagen:25f1aa8"
+    # sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6
+    # Prior tags:
+    #   25f1aa8 (sha256:8dbc2705c6d95dbc3a259b3d9e3007e5cd951db3df2655afc66d357fd1fed5f7)
+    #   0a83acd (sha256:acdf3925...)
+    #   7c24641 (sha256:c5a6bc80...)
+    datagen: str = "docker.io/sillidata/lb-datagen:b6f2905"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"
