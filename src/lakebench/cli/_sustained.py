@@ -6,6 +6,7 @@ Extracted from cli/__init__.py to reduce file size.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -2562,6 +2563,9 @@ def _run_sustained(
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    # Share the run id with datagen pods and Spark drivers (live observability
+    # grouping label) via the orchestrator process env.
+    os.environ["LB_RUN_ID"] = run_id
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="continuous")

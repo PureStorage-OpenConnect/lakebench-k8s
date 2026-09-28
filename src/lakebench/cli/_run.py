@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1335,6 +1336,9 @@ def _run_local_mode(
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
+    # Share the run id with datagen pods and Spark drivers (live observability
+    # grouping label) via the orchestrator process env.
+    os.environ["LB_RUN_ID"] = run_id
     snapshot = build_config_snapshot(cfg, run_mode="batch", system="local")
     snapshot["local"] = True
     collector.start_run(run_id, cfg.name, snapshot)
@@ -1842,6 +1846,9 @@ def run(
     collector = MetricsCollector()
     metrics_storage = MetricsStorage()
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+    # Share the run id with datagen pods and Spark drivers (live observability
+    # grouping label) via the orchestrator process env.
+    os.environ["LB_RUN_ID"] = run_id
     from lakebench.metrics import build_config_snapshot
 
     config_snapshot = build_config_snapshot(cfg, run_mode="batch")
