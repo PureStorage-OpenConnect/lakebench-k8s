@@ -79,6 +79,7 @@ import time
 
 from common import (
     assert_progress,
+    emit_stream_scale_admission,
     ensure_column,
     ensure_namespaces_for_ddl,
     env,
@@ -255,6 +256,11 @@ def main() -> None:
     log(f"Checkpoint: {CHECKPOINT_URI}")
     log(f"triggerSeconds={TRIGGER_S}")
     log("=" * 60)
+    # G5: label the imposed scale envelope so downstream reports never
+    # present a Lakebench-bounded number as infrastructure performance
+    # (invariant 6). v1.6 profile: measured up to scale 10; larger scales
+    # run but the cap is labelled, not hidden.
+    emit_stream_scale_admission(measured_envelope_scale=10)
 
     # LB-127: create the silver tables if absent. In CONTINUOUS mode
     # silver_build never runs, so nothing else creates silver.transactions /

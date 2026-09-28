@@ -46,6 +46,7 @@ from common import (
     data_clock_date,
     delta_idempotent_options,
     delta_table_version,
+    emit_stream_scale_admission,
     env,
     log,
     refuse_fresh_checkpoint_over_data,
@@ -142,6 +143,11 @@ def main() -> None:
     log(f"Target table: {silver_tbl}")
     log(f"Checkpoint:   {checkpoint_location}")
     log(f"Trigger:      {trigger_interval}")
+    # G5: label the imposed scale envelope so downstream reports never
+    # present a Lakebench-bounded number as infrastructure performance
+    # (invariant 6). v1.6 profile: measured up to scale 10; larger scales
+    # run but the cap is labelled, not hidden.
+    emit_stream_scale_admission(measured_envelope_scale=10)
 
     log("Creating namespace...")
     try:

@@ -1084,8 +1084,16 @@ def main() -> None:
     # reverting the table to unpartitioned on every silver-build re-run.
     # Downstream Trino/Spark scans then degraded from partition pruning to
     # full scans (per-run silent regression, invisible to unit tests).
+    #
+    # G4: re-assert TBLPROPERTIES before the overwrite so a table whose
+    # properties drifted (in-place ALTER, older CREATE) writes with the
+    # DDL's declared retention and codec every cycle (invariant 5). The
+    # property set matches ICEBERG_V2_SNAPPY_PROPS_SQL, which every silver
+    # DDL above sets at CREATE.
     def _replace_data(df, table):
-        df.writeTo(f"{CATALOG}.{table}").overwrite(lit(True))
+        fq = f"{CATALOG}.{table}"
+        spark.sql(f"ALTER TABLE {fq} SET TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})")
+        df.writeTo(fq).overwrite(lit(True))
 
     txns = build_transactions(bronze)
     _replace_data(txns, SILVER_TRANSACTIONS)
