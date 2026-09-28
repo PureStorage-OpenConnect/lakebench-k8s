@@ -108,6 +108,78 @@ def test_reloads_when_interval_elapses(spark, monkeypatch):
     assert ss._KYC_LOADED_AT == 6.0
 
 
+def test_refresh_keeps_cache_on_transient_read_failure(spark, monkeypatch):
+    """A mid-stream reference read that returns None or raises must not stall
+    the micro-batch on the KYC_WAIT_S wait loop: the initial load already
+    succeeded, so the cached frame is served and the next micro-batch retries."""
+    import silver_stream_financial as ss
+
+    _reset_state(ss)
+    monkeypatch.setattr(ss, "KYC_REFRESH_S", 5)
+
+    clock = {"now": 0.0}
+    monkeypatch.setattr(ss.time, "time", lambda: clock["now"])
+
+    party = spark.createDataFrame([(1,)], "entity_id long")
+    account = spark.createDataFrame(
+        [(11, "US01", 1)], "account_id long, iban string, holder_entity_id long"
+    )
+    kyc_stub = spark.createDataFrame([(1,)], "entity_id long")
+    monkeypatch.setattr(ss, "build_kyc", lambda _p, _a: kyc_stub)
+
+    calls: list[str] = []
+
+    def _refs_ok(_spark):
+        calls.append("ok")
+        return party, account
+
+    def _refs_none(_spark):
+        calls.append("none")
+        return None, None
+
+    def _refs_raise(_spark):
+        calls.append("raise")
+        raise RuntimeError("s3 transient")
+
+    # Sleep must not be called during a refresh path (would block the batch).
+    slept: list[float] = []
+    monkeypatch.setattr(ss.time, "sleep", lambda s: slept.append(s))
+
+    # Initial load succeeds.
+    monkeypatch.setattr(ss, "reference_frames", _refs_ok)
+    clock["now"] = 0.0
+    first = ss._kyc(spark)
+    assert first is kyc_stub
+
+    # Refresh due, but reference_frames returns (None, None): keep cache.
+    monkeypatch.setattr(ss, "reference_frames", _refs_none)
+    clock["now"] = 10.0
+    got = ss._kyc(spark)
+    assert got is kyc_stub  # same cached frame
+    # _KYC_LOADED_AT unchanged so the next batch retries.
+    assert ss._KYC_LOADED_AT == 0.0
+    # No sleep (no wait loop entered on refresh).
+    assert slept == []
+
+    # Refresh due, reference_frames raises: keep cache.
+    monkeypatch.setattr(ss, "reference_frames", _refs_raise)
+    clock["now"] = 20.0
+    got = ss._kyc(spark)
+    assert got is kyc_stub
+    assert ss._KYC_LOADED_AT == 0.0
+    assert slept == []
+
+    # Refresh due, reference_frames recovers: reload succeeds.
+    monkeypatch.setattr(ss, "reference_frames", _refs_ok)
+    clock["now"] = 30.0
+    got = ss._kyc(spark)
+    assert got is kyc_stub
+    assert ss._KYC_LOADED_AT == 30.0
+    assert slept == []
+
+    assert calls == ["ok", "none", "raise", "ok"]
+
+
 def test_refresh_interval_env_default(monkeypatch):
     """Default LB_STREAM_KYC_REFRESH_SECONDS is 3600.
 

@@ -146,29 +146,45 @@ def _kyc(spark):
     them; the datagen writes party last, so a visible party means the rest
     is there). After the wait _read_reference decides, and raises unless
     the manifest proves a pre-KYC corpus: the stream fails loudly rather
-    than write a run's dimensions with NULL KYC. Refresh reloads reuse the
-    cached frame on any transient read failure so a stream stays warm."""
+    than write a run's dimensions with NULL KYC. A refresh reload skips
+    the wait loop and keeps the previous cached frame on any transient
+    read failure so a stream never stalls a micro-batch on KYC
+    availability after the initial load succeeded; the next micro-batch
+    retries."""
     global _KYC, _KYC_LOADED, _KYC_LOADED_AT
     now = time.time()
     if _KYC_LOADED and (KYC_REFRESH_S <= 0 or (now - _KYC_LOADED_AT) < KYC_REFRESH_S):
         return _KYC
     is_refresh = _KYC_LOADED
-    deadline = now + KYC_WAIT_S
-    extended = False
-    while True:
-        party, account = reference_frames(spark)
-        if party is not None and account is not None:
-            break
-        if time.time() >= deadline:
-            if account is not None and not extended:
-                # Account is written before party: party is still uploading
-                # (5-10 GB at scale 1000). Give it one more wait.
-                deadline, extended = time.time() + KYC_WAIT_S, True
-                continue
-            party, account = _read_reference(spark)
-            break
-        log(f"[kyc] party/account masters not there yet; waiting (up to {KYC_WAIT_S}s)")
-        time.sleep(10)
+    if is_refresh:
+        # I7 refresh: read once, keep the current cache on any failure
+        # so the micro-batch is not blocked on a transient reference-file
+        # read. _KYC_LOADED_AT is left unchanged so the next batch retries.
+        try:
+            party, account = reference_frames(spark)
+        except Exception as e:  # noqa: BLE001
+            log(f"[kyc] refresh read failed: {type(e).__name__}: {e}; keeping cached KYC")
+            return _KYC
+        if party is None or account is None:
+            log("[kyc] refresh read incomplete (party or account missing); keeping cached KYC")
+            return _KYC
+    else:
+        deadline = now + KYC_WAIT_S
+        extended = False
+        while True:
+            party, account = reference_frames(spark)
+            if party is not None and account is not None:
+                break
+            if time.time() >= deadline:
+                if account is not None and not extended:
+                    # Account is written before party: party is still uploading
+                    # (5-10 GB at scale 1000). Give it one more wait.
+                    deadline, extended = time.time() + KYC_WAIT_S, True
+                    continue
+                party, account = _read_reference(spark)
+                break
+            log(f"[kyc] party/account masters not there yet; waiting (up to {KYC_WAIT_S}s)")
+            time.sleep(10)
     previous_kyc = _KYC
     kyc = build_kyc(party, account)
     # Drop the previous cached frame's blocks before the new load takes its
@@ -183,9 +199,19 @@ def _kyc(spark):
     _KYC_LOADED_AT = now
     action = "reloaded" if is_refresh else "loaded"
     log(f"[kyc] masters {action if _KYC is not None else 'absent (pre-KYC corpus): KYC NULL'}")
-    # Publish a per-refresh timestamp so metrics.json shows the last time
-    # the stream picked up KYC updates. Keys other than the standard four
-    # land in JobMetrics.extra_metrics via _apply_metric.
+    # Publish a per-refresh timestamp so operators see when the stream
+    # last picked up KYC updates. Emitted twice: (i) as a plain labelled
+    # `[lb] ... - kyc_refreshed_at: <unix>` line so a follow-on collector
+    # regex extension in parse_streaming_logs can lift the value into
+    # metrics.json without any wire-not-connected step; (ii) as a
+    # `=== JOB METRICS: silver-stream-kyc-refresh ===` block for symmetry
+    # with the plan's stated emit path and the extra_metrics allowlist in
+    # parse_driver_logs. silver_stream_financial does not emit any other
+    # JOB METRICS block today, so no shadowing risk on the current
+    # streaming path; a future author adding a final-metrics block must
+    # place it before the first refresh or key it under a distinct job
+    # name (parse_driver_logs' regex is first-match).
+    log(f"kyc_refreshed_at: {int(now)} kyc_refresh_kind: {'refresh' if is_refresh else 'initial'}")
     log_job_metrics(
         "silver-stream-kyc-refresh",
         input_size_gb=0.0,
