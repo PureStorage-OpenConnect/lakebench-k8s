@@ -93,10 +93,38 @@ from common import (
     mark_stream_started,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
+    sealed_txns_filter,
     streaming_query_id,
 )
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import lit
+from pyspark.sql.functions import (
+    avg as avg_,
+)
+from pyspark.sql.functions import (
+    broadcast,
+    coalesce,
+    col,
+    greatest,
+    lit,
+)
+from pyspark.sql.functions import (
+    count as count_,
+)
+from pyspark.sql.functions import (
+    countDistinct as count_distinct_,
+)
+from pyspark.sql.functions import (
+    max as max_,
+)
+from pyspark.sql.functions import (
+    min as min_,
+)
+from pyspark.sql.functions import (
+    sum as sum_,
+)
+from pyspark.sql.functions import (
+    variance as variance_,
+)
 from silver_build_financial import (
     DDL_ACCOUNTS,
     DDL_BATCH_VERSIONS,
@@ -128,6 +156,13 @@ SILVER_ENTITIES = env("LB_FINANCIAL_SILVER_ENTITIES", "silver.entities")
 SILVER_ACCOUNTS = env("LB_FINANCIAL_SILVER_ACCOUNTS", "silver.accounts")
 SILVER_STATEMENTS = env("LB_FINANCIAL_SILVER_STATEMENTS", "silver.account_statements")
 SILVER_BATCH_VERSIONS = env("LB_FINANCIAL_SILVER_BATCH_VERSIONS", "silver.silver_batch_versions")
+# D-full-profiles: silver.entity_profiles is now maintained by the stream via
+# an Iceberg MERGE with Welford + additive updates (see _merge_profiles). The
+# MERGE is self-idempotent on (t._stream_id, t._batch_id) so a retry after a
+# post-MERGE crash does not double-apply the additive deltas; the versions
+# sidecar is I10's (silver.silver_batch_versions), owned there and consumed
+# here for the sealed-txns filter in the distinct-counterparty recompute.
+SILVER_PROFILES = env("LB_FINANCIAL_SILVER_PROFILES", "silver.entity_profiles")
 KYC_WAIT_S = int(env("LB_FINANCIAL_KYC_WAIT_S", "900"))
 # I7: the KYC frame is reloaded on the first micro-batch after this many
 # seconds have passed since the previous successful load. Default 1 hour;
@@ -531,6 +566,270 @@ def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
         new_accts.unpersist(blocking=False)
 
 
+def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
+    """Maintain silver.entity_profiles incrementally for the touched entities.
+
+    Aggregate strategies per column:
+
+    - Additive (txn_count_out/in, total_sent/received_usd): MERGE UPDATE
+      SET target = target + batch_delta. Iceberg MERGE evaluates every
+      UPDATE SET RHS against the pre-update row, so composing several
+      counters in one statement is safe.
+    - LEAST / GREATEST (first/last_seen_ts, _first_out_ts, _last_out_ts,
+      profile_updated_ts): Spark LEAST/GREATEST skip NULLs, so an
+      entity that appears on only one side of the batch still resolves.
+    - Welford parallel merge (avg_amount_usd, stddev_amount_usd via _m2):
+      combines the target block (n, mean, _m2) with the batch block
+      (batch_n_out, batch_mean_out, batch_m2_out). Sample stddev is
+      SQRT(_m2 / (n - 1)); NULL when n < 2.
+    - Derived on write (txn_count_total, active_span_days, avg_gap_days,
+      passthrough_ratio): recomputed from the freshly merged base columns
+      using the merged LEAST/GREATEST/SUM values.
+    - Per-batch recompute (distinct_counterparties_out/in): exact
+      count_distinct cannot be maintained incrementally without a
+      per-entity seen-set (a stream-safe HLL sketch would be additive but
+      is not what the DDL declares). The merge reads silver.transactions
+      through I10's common.sealed_txns_filter (semi-joined against
+      silver.silver_batch_versions) so a mid-crash batch's ghost txns
+      cannot inflate the count; the current batch's own tagged_txns are
+      UNIONed in because PHASE 5's sealed marker has not yet been
+      written when this MERGE runs.
+
+    Self-idempotent MERGE (blocker fix): the WHEN MATCHED branch is
+    guarded by ``(t._stream_id, t._batch_id) = (s.batch_stream_id,
+    s.batch_batch_id)`` -- a re-apply on the same (sid, batch_id) is a
+    no-op (UPDATE SET entity_id = entity_id). This keeps the MERGE
+    self-contained: a driver crash between the profiles commit and
+    PHASE 5's sealed-marker commit does NOT double-apply the additive
+    deltas when the batch is retried on restart. The prior version
+    guarded only via a cross-table probe of silver_batch_versions,
+    which loses to the crash window between phase 4 (this MERGE) and
+    phase 5 (I10 marker); the self-idempotent branch closes that gap.
+    """
+    amt_d = col("txn_amount_usd").cast("double")
+
+    # Out-side per-entity batch aggregates. batch_m2_out = variance * (n-1),
+    # NULL when n <= 1 -> coalesce to 0.0 (Welford identity).
+    out_delta = tagged_txns.groupBy(col("originator_id").alias("entity_id")).agg(
+        min_(col("txn_timestamp")).alias("batch_first_out_ts"),
+        max_(col("txn_timestamp")).alias("batch_last_out_ts"),
+        count_(lit(1)).alias("batch_n_out"),
+        sum_(col("txn_amount_usd")).cast("decimal(38,2)").alias("batch_sum_sent"),
+        avg_(amt_d).alias("batch_mean_out"),
+        coalesce(variance_(amt_d) * (count_(lit(1)) - lit(1)), lit(0.0)).alias("batch_m2_out"),
+    )
+    in_delta = tagged_txns.groupBy(col("beneficiary_id").alias("entity_id")).agg(
+        min_(col("txn_timestamp")).alias("batch_first_in_ts"),
+        max_(col("txn_timestamp")).alias("batch_last_in_ts"),
+        count_(lit(1)).alias("batch_n_in"),
+        sum_(col("txn_amount_usd")).cast("decimal(38,2)").alias("batch_sum_recv"),
+    )
+    delta = out_delta.join(in_delta, on="entity_id", how="fullouter").cache()
+    try:
+        touched = delta.select(col("entity_id"))
+        # Per-batch recompute of distinct counterparties. Reads
+        # silver.transactions through I10's sealed_txns_filter so a
+        # partial batch's ghost rows (committed to silver.transactions
+        # but not yet sealed in silver_batch_versions after a mid-crash
+        # window) cannot inflate the count. sealed_txns_filter DOES NOT
+        # include the current batch's rows because PHASE 5's sealed
+        # marker MERGE runs AFTER this function returns; the UNION with
+        # tagged_txns adds them back so the count reflects the current
+        # batch's contribution. Both frames project the (originator_id,
+        # beneficiary_id) pair used by count_distinct; unionByName
+        # aligns on those two columns.
+        silver_txns = spark.table(f"{CATALOG}.{SILVER_TXNS}")
+        sealed = sealed_txns_filter(spark, silver_txns, CATALOG, SILVER_BATCH_VERSIONS)
+        pairs_sealed = sealed.select(col("originator_id"), col("beneficiary_id"))
+        pairs_current = tagged_txns.select(col("originator_id"), col("beneficiary_id"))
+        pairs = pairs_sealed.unionByName(pairs_current, allowMissingColumns=False)
+        touched_l = broadcast(touched.withColumnRenamed("entity_id", "_t"))
+        touched_r = broadcast(touched.withColumnRenamed("entity_id", "_t2"))
+        recomputed_out = (
+            pairs.join(touched_l, pairs["originator_id"] == col("_t"), "inner")
+            .groupBy(pairs["originator_id"].alias("entity_id"))
+            .agg(count_distinct_(pairs["beneficiary_id"]).alias("recomputed_dco"))
+        )
+        recomputed_in = (
+            pairs.join(touched_r, pairs["beneficiary_id"] == col("_t2"), "inner")
+            .groupBy(pairs["beneficiary_id"].alias("entity_id"))
+            .agg(count_distinct_(pairs["originator_id"]).alias("recomputed_dci"))
+        )
+        # Assemble the source frame for the MERGE, filling counts with 0
+        # for entities only present on one side and computing batch-wide
+        # profile min / max (for LEAST/GREATEST against the target).
+        final_delta = (
+            delta.join(recomputed_out, on="entity_id", how="left")
+            .join(recomputed_in, on="entity_id", how="left")
+            .select(
+                col("entity_id"),
+                coalesce(col("batch_first_out_ts"), col("batch_first_in_ts")).alias(
+                    "batch_first_seen_ts"
+                ),
+                greatest(col("batch_last_out_ts"), col("batch_last_in_ts")).alias(
+                    "batch_last_seen_ts"
+                ),
+                col("batch_first_out_ts"),
+                col("batch_last_out_ts"),
+                coalesce(col("batch_n_out"), lit(0)).cast("bigint").alias("batch_n_out"),
+                coalesce(col("batch_n_in"), lit(0)).cast("bigint").alias("batch_n_in"),
+                coalesce(col("batch_sum_sent"), lit(0).cast("decimal(38,2)")).alias(
+                    "batch_sum_sent"
+                ),
+                coalesce(col("batch_sum_recv"), lit(0).cast("decimal(38,2)")).alias(
+                    "batch_sum_recv"
+                ),
+                col("batch_mean_out"),
+                coalesce(col("batch_m2_out"), lit(0.0)).alias("batch_m2_out"),
+                coalesce(col("recomputed_dco"), lit(0)).cast("bigint").alias("recomputed_dco"),
+                coalesce(col("recomputed_dci"), lit(0)).cast("bigint").alias("recomputed_dci"),
+                greatest(col("batch_last_out_ts"), col("batch_last_in_ts")).alias(
+                    "batch_profile_updated_ts"
+                ),
+                lit(sid).alias("batch_stream_id"),
+                lit(int(batch_id)).cast("bigint").alias("batch_batch_id"),
+            )
+        )
+        final_delta.createOrReplaceTempView("_lb_profiles_delta")
+
+        # SQL block below: MERGE UPDATE SET evaluates every RHS against
+        # the pre-update target, so composing several counter and Welford
+        # expressions in one statement is safe. Sample stddev is derived
+        # from the newly-merged _m2 in the SAME statement, using the
+        # inlined Welford expression (not a reference to t._m2 which is
+        # still the pre-update value at RHS eval time).
+        # Self-idempotent MERGE (blocker fix): the first WHEN MATCHED
+        # branch catches an already-applied (stream_id, batch_id) and
+        # emits a no-op UPDATE (entity_id -> entity_id). This closes
+        # the crash window between phase 4 (this MERGE commits) and
+        # phase 5 (the sealed-marker MERGE commits): a restart-replay
+        # of the same batch cannot double-apply the additive deltas
+        # because the guarded branch fires first and the substantive
+        # branch is short-circuited by MERGE's first-match semantics.
+        merge_sql = f"""
+        MERGE INTO {CATALOG}.{SILVER_PROFILES} t
+        USING _lb_profiles_delta s
+        ON t.entity_id = s.entity_id
+        WHEN MATCHED AND (t._stream_id = s.batch_stream_id
+                          AND t._batch_id = s.batch_batch_id) THEN UPDATE SET
+            t.entity_id = t.entity_id
+        WHEN MATCHED THEN UPDATE SET
+            t.first_seen_ts = LEAST(t.first_seen_ts, s.batch_first_seen_ts),
+            t.last_seen_ts = GREATEST(t.last_seen_ts, s.batch_last_seen_ts),
+            t.active_span_days = CAST(DATEDIFF(
+                GREATEST(t.last_seen_ts, s.batch_last_seen_ts),
+                LEAST(t.first_seen_ts, s.batch_first_seen_ts)
+            ) AS DOUBLE),
+            t.txn_count_out = t.txn_count_out + s.batch_n_out,
+            t.txn_count_in = t.txn_count_in + s.batch_n_in,
+            t.txn_count_total =
+                t.txn_count_out + s.batch_n_out + t.txn_count_in + s.batch_n_in,
+            t.total_sent_usd =
+                COALESCE(t.total_sent_usd, CAST(0 AS DECIMAL(38,2))) + s.batch_sum_sent,
+            t.total_received_usd =
+                COALESCE(t.total_received_usd, CAST(0 AS DECIMAL(38,2)))
+                + s.batch_sum_recv,
+            t.avg_amount_usd = CASE
+                WHEN (t.txn_count_out + s.batch_n_out) = 0 THEN NULL
+                WHEN t.txn_count_out = 0 THEN s.batch_mean_out
+                WHEN s.batch_n_out = 0 THEN t.avg_amount_usd
+                ELSE t.avg_amount_usd
+                     + (s.batch_mean_out - t.avg_amount_usd)
+                       * CAST(s.batch_n_out AS DOUBLE)
+                       / CAST(t.txn_count_out + s.batch_n_out AS DOUBLE)
+            END,
+            t._m2 = CASE
+                WHEN (t.txn_count_out + s.batch_n_out) = 0 THEN 0.0
+                WHEN t.txn_count_out = 0 THEN s.batch_m2_out
+                WHEN s.batch_n_out = 0 THEN COALESCE(t._m2, 0.0)
+                ELSE COALESCE(t._m2, 0.0) + s.batch_m2_out
+                     + POWER(s.batch_mean_out - t.avg_amount_usd, 2.0)
+                       * CAST(t.txn_count_out AS DOUBLE)
+                       * CAST(s.batch_n_out AS DOUBLE)
+                       / CAST(t.txn_count_out + s.batch_n_out AS DOUBLE)
+            END,
+            t.stddev_amount_usd = CASE
+                WHEN (t.txn_count_out + s.batch_n_out) < 2 THEN NULL
+                ELSE SQRT(
+                    (CASE
+                        WHEN (t.txn_count_out + s.batch_n_out) = 0 THEN 0.0
+                        WHEN t.txn_count_out = 0 THEN s.batch_m2_out
+                        WHEN s.batch_n_out = 0 THEN COALESCE(t._m2, 0.0)
+                        ELSE COALESCE(t._m2, 0.0) + s.batch_m2_out
+                             + POWER(s.batch_mean_out - t.avg_amount_usd, 2.0)
+                               * CAST(t.txn_count_out AS DOUBLE)
+                               * CAST(s.batch_n_out AS DOUBLE)
+                               / CAST(t.txn_count_out + s.batch_n_out AS DOUBLE)
+                     END)
+                    / CAST(t.txn_count_out + s.batch_n_out - 1 AS DOUBLE)
+                )
+            END,
+            t._first_out_ts = LEAST(t._first_out_ts, s.batch_first_out_ts),
+            t._last_out_ts = GREATEST(t._last_out_ts, s.batch_last_out_ts),
+            t.avg_gap_days = CASE
+                WHEN (t.txn_count_out + s.batch_n_out) < 2 THEN NULL
+                ELSE CAST(DATEDIFF(
+                    GREATEST(t._last_out_ts, s.batch_last_out_ts),
+                    LEAST(t._first_out_ts, s.batch_first_out_ts)
+                ) AS DOUBLE)
+                / CAST(t.txn_count_out + s.batch_n_out - 1 AS DOUBLE)
+            END,
+            t.distinct_counterparties_out = s.recomputed_dco,
+            t.distinct_counterparties_in = s.recomputed_dci,
+            t.passthrough_ratio = CASE
+                WHEN (COALESCE(t.total_received_usd, CAST(0 AS DECIMAL(38,2)))
+                      + s.batch_sum_recv) > 0
+                THEN CAST(
+                    COALESCE(t.total_sent_usd, CAST(0 AS DECIMAL(38,2))) + s.batch_sum_sent
+                    AS DOUBLE)
+                    / CAST(
+                    COALESCE(t.total_received_usd, CAST(0 AS DECIMAL(38,2)))
+                    + s.batch_sum_recv AS DOUBLE)
+                ELSE NULL
+            END,
+            t.profile_updated_ts = GREATEST(
+                COALESCE(t.profile_updated_ts, s.batch_profile_updated_ts),
+                s.batch_profile_updated_ts
+            ),
+            t._stream_id = s.batch_stream_id,
+            t._batch_id = s.batch_batch_id
+        WHEN NOT MATCHED THEN INSERT (
+            entity_id, first_seen_ts, last_seen_ts, active_span_days,
+            txn_count_out, txn_count_in, txn_count_total,
+            total_sent_usd, total_received_usd,
+            avg_amount_usd, stddev_amount_usd, avg_gap_days,
+            distinct_counterparties_out, distinct_counterparties_in,
+            passthrough_ratio, profile_updated_ts,
+            _m2, _first_out_ts, _last_out_ts, _stream_id, _batch_id
+        ) VALUES (
+            s.entity_id, s.batch_first_seen_ts, s.batch_last_seen_ts,
+            CAST(DATEDIFF(s.batch_last_seen_ts, s.batch_first_seen_ts) AS DOUBLE),
+            s.batch_n_out, s.batch_n_in, s.batch_n_out + s.batch_n_in,
+            s.batch_sum_sent, s.batch_sum_recv,
+            CASE WHEN s.batch_n_out = 0 THEN NULL ELSE s.batch_mean_out END,
+            CASE WHEN s.batch_n_out < 2 THEN NULL
+                 ELSE SQRT(s.batch_m2_out / CAST(s.batch_n_out - 1 AS DOUBLE))
+            END,
+            CASE
+                WHEN s.batch_n_out < 2 THEN NULL
+                ELSE CAST(DATEDIFF(s.batch_last_out_ts, s.batch_first_out_ts) AS DOUBLE)
+                     / CAST(s.batch_n_out - 1 AS DOUBLE)
+            END,
+            s.recomputed_dco, s.recomputed_dci,
+            CASE WHEN s.batch_sum_recv > 0
+                 THEN CAST(s.batch_sum_sent AS DOUBLE) / CAST(s.batch_sum_recv AS DOUBLE)
+                 ELSE NULL
+            END,
+            s.batch_profile_updated_ts,
+            s.batch_m2_out, s.batch_first_out_ts, s.batch_last_out_ts,
+            s.batch_stream_id, s.batch_batch_id
+        )
+        """
+        spark.sql(merge_sql)
+    finally:
+        delta.unpersist(blocking=False)
+
+
 def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
     """Idempotently write per-batch txns and edges tagged with batch_id.
 
@@ -648,24 +947,39 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
             silver_statements_batch_id=int(batch_id),
         )
 
-        # PHASE 5 (I10 sealed marker): must be LAST. Only after transactions,
-        # edges, dimensions AND statements have committed do we write the
-        # (stream_id, batch_id) row that gold-side consumers semi-join against.
-        # A driver crash between any earlier phase and this one leaves partial
-        # silver rows visible but no matching versions row, so consumers hide
-        # the partial batch. On retry, the phase-1 DELETE (guarded by
-        # replay_possible) cleans ghost txns/edges rows and the phase-4 MERGE
-        # on statements is idempotent by (_stream_id, _batch_id) key, so the
-        # retry re-materialises the same (sid, batch_id) and the MERGE below
-        # seals it idempotently.
+        # PHASE 5 (D-full-profiles): incremental MERGE into
+        # silver.entity_profiles. The MERGE is self-idempotent via a
+        # WHEN MATCHED AND (t._stream_id = s.batch_stream_id AND
+        # t._batch_id = s.batch_batch_id) THEN no-op branch, so a retry
+        # after a post-MERGE crash does not double-apply the additive
+        # deltas. The distinct-counterparty recompute inside _merge_profiles
+        # reads silver.transactions through common.sealed_txns_filter
+        # (I10), UNIONed with the current batch's tagged_txns so the
+        # current batch's contribution is included (its versions row is
+        # not written until PHASE 6 below).
+        _merge_profiles(spark, tagged_txns, sid, batch_id)
+        log(f"[batch {batch_id}] merged entity_profiles")
+
+        # PHASE 6 (I10 sealed marker): must be LAST. Only after
+        # transactions, edges, dimensions, statements AND profiles have
+        # committed do we write the (stream_id, batch_id) row that
+        # gold-side consumers semi-join against. A driver crash between
+        # any earlier phase and this phase leaves partial silver rows
+        # visible but no matching versions row, so consumers hide the
+        # partial batch. On retry, the phase-1 DELETE (guarded by
+        # replay_possible) cleans ghost txns/edges rows; phase-4 MERGE
+        # on statements is idempotent by (_stream_id, _batch_id) key;
+        # phase-5 profiles MERGE is self-idempotent via the same key;
+        # this MERGE seals the retry idempotently.
         #
-        # MERGE (not INSERT): a crash after this write but before Structured
-        # Streaming durably records the batch id would replay the whole
-        # foreachBatch on restart; a plain INSERT would then write a second
-        # row for the same (sid, batch_id). The semi-join tolerates
-        # duplicates today, but any future COUNT(*) or per-batch join against
-        # silver_batch_versions would double-count. The MERGE keeps the
-        # sidecar at exactly one row per sealed batch.
+        # MERGE (not INSERT): a crash after this write but before
+        # Structured Streaming durably records the batch id would replay
+        # the whole foreachBatch on restart; a plain INSERT would then
+        # write a second row for the same (sid, batch_id). The semi-join
+        # tolerates duplicates today, but any future COUNT(*) or
+        # per-batch join against silver_batch_versions would
+        # double-count. The MERGE keeps the sidecar at exactly one row
+        # per sealed batch.
         spark.sql(
             f"MERGE INTO {CATALOG}.{SILVER_BATCH_VERSIONS} v "
             f"USING (SELECT '{sid}' AS stream_id, "
@@ -682,41 +996,12 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         tagged_txns.unpersist(blocking=False)
 
 
-def _refuse_unless_partial_silver_allowed() -> None:
-    """D-safe (residual): silver.entity_profiles is not yet maintained by
-    silver_stream_financial (D-full-profiles is a separate lane). Refuse
-    to run continuous AML unless the operator explicitly opts in to a
-    partial silver set via ``LB_ALLOW_PARTIAL_SILVER=1``.
-
-    Previously the same refusal named silver.account_statements and
-    silver.accounts.current_balance too; D-full-simple maintains both, so
-    the refusal now cites only silver.entity_profiles. When D-full-profiles
-    lands the refusal is removed entirely.
-
-    Emits ``silver_stream_partial_silver=true`` (invariant-6 label) when
-    the flag is set so downstream reports never present a Lakebench-imposed
-    scope reduction as full-fidelity output.
-    """
-    if os.getenv("LB_ALLOW_PARTIAL_SILVER") != "1":
-        raise SilverAbort(
-            "silver-stream-financial refuses AML continuous mode: "
-            "silver.entity_profiles is not maintained by the continuous "
-            "pipeline in this release. Set LB_ALLOW_PARTIAL_SILVER=1 to "
-            "run with the partial silver set (silver.account_statements "
-            "and silver.accounts.current_balance ARE maintained by D-full "
-            "simple; only entity_profiles remains until D-full-profiles "
-            "lands). This is a Lakebench-imposed scope cap, labelled as "
-            "such in metrics."
-        )
-    log("silver_stream_partial_silver: true")
-
-
 def main() -> None:
-    # D-safe residual: refuse before any Spark work when the operator has not
-    # opted in. Keeping this at the top means a mis-configured deployment
-    # fails within a second, not after a full stream startup.
-    _refuse_unless_partial_silver_allowed()
-
+    # D-full complete: silver.transactions, silver.counterparty_edges,
+    # silver.entities, silver.accounts, silver.account_statements,
+    # silver.accounts.current_balance and silver.entity_profiles are all
+    # maintained by the continuous pipeline. The previous D-safe
+    # residual refusal (LB_ALLOW_PARTIAL_SILVER=1 opt-in) is removed.
     spark = SparkSession.builder.appName("lb-silver-stream-financial").getOrCreate()
     spark.conf.set("spark.sql.session.timeZone", "UTC")
 
@@ -766,8 +1051,10 @@ def main() -> None:
         ("account_statements", DDL_STATEMENTS),
         ("edges", DDL_EDGES),
         ("entity_profiles", DDL_PROFILES),
-        # I10: sidecar seals every (stream_id, batch_id) after phases 1+2
-        # commit; every gold/score reader semi-joins against it.
+        # I10: sidecar seals every (stream_id, batch_id) after phases 1+2+3+4
+        # commit; every gold/score reader semi-joins against it. D-full-profiles
+        # consumes it read-only for the sealed-txns filter in the
+        # distinct-counterparty recompute.
         ("silver_batch_versions", DDL_BATCH_VERSIONS),
     ):
         spark.sql(_ddl)
@@ -788,6 +1075,19 @@ def main() -> None:
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_STATEMENTS}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
+    # D-full-profiles: bring silver.entity_profiles forward on a reused
+    # catalog whose DDL predates the internal Welford / originator-side
+    # accumulators. Idempotent on re-runs.
+    ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_m2", "DOUBLE")
+    ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_first_out_ts", "TIMESTAMP")
+    ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_last_out_ts", "TIMESTAMP")
+    ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_stream_id", "STRING")
+    # BLOCKER 6: the MERGE writes t._batch_id = s.batch_batch_id; a
+    # legacy catalog whose entity_profiles DDL predates the _batch_id
+    # column would fail the MERGE with column-not-found. Idempotent on
+    # re-runs; matches the ensure_column pattern used above for
+    # silver.transactions and silver.counterparty_edges.
+    ensure_column(spark, f"{CATALOG}.{SILVER_PROFILES}", "_batch_id", "BIGINT")
 
     # B3: refuse a fresh checkpoint over populated silver -- the source
     # would start from the beginning and every existing row would be
