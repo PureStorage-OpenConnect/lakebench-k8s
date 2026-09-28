@@ -373,6 +373,12 @@ class _HadoopSidecarFS:
         finally:
             out.close()
 
+    def delete(self, uri):
+        fs, path = _hadoop_fs(self._spark, uri)
+        if not fs.exists(path):
+            return False
+        return bool(fs.delete(path, False))  # recursive=False
+
 
 def check_bronze_fingerprint(
     spark,
@@ -458,6 +464,138 @@ def check_bronze_fingerprint(
         )
     except Exception as e:  # noqa: BLE001
         log(f"[b5] sidecar write failed at {sidecar_path}: {one_line(e)}; fail-open")
+
+
+# H4: silver-batch fat-finger guard.
+#
+# silver_build_financial's batch overwrite of silver.transactions et al. wipes
+# every row silver_stream_financial has written so far (docstring warning at
+# ``silver_stream_financial.py:46-53``). H4 converts that warning into a
+# runtime refusal: the stream writes a ``_STARTED`` marker into its
+# checkpoint directory on start-up and removes it on clean shutdown; the
+# batch main checks for the marker at start-up and raises ``SilverAbort``
+# when it is present, unless ``--force-rebuild`` (LB_FORCE_REBUILD=1) is
+# passed.
+#
+# Design choice: a plain marker file, not an extension of the B5 sidecar
+# with a ``last_batch_at`` heartbeat. Reasoning:
+#
+# * A heartbeat needs a threshold, per-micro-batch writes into a JSON
+#   sidecar shared with B5's fingerprint contract, and separate reader
+#   logic that reasons about "still running vs. crashed a while ago".
+#   Three moving parts (writer + threshold + reader) instead of one.
+# * The marker file is a single existence probe. Stream writes on
+#   startup, removes on clean shutdown; anything else (crash, kill -9,
+#   pod eviction) leaves it in place, which is the desired semantics --
+#   the batch operator should not silently overwrite tables the stream
+#   was in the middle of writing. ``--force-rebuild`` is the escape
+#   hatch after the operator has cleaned up.
+# * Independent of B5's semantics: extending the sidecar would couple
+#   the fingerprint check (whether bronze was reset) with the fat-finger
+#   check (whether a stream is live) in one file, and every change to
+#   either would touch the other.
+#
+# Fail-open policy (mirrors B5):
+#
+# * marker present -> ``SilverAbort`` naming the checkpoint path.
+# * marker absent, or checkpoint directory absent -> proceed. Fresh
+#   deployment, or the stream shut down cleanly.
+# * probe raises (transient FS failure) -> log a warning and proceed.
+#   H4 is defense-in-depth, not the only guard; a broken S3 listing
+#   during startup MUST NOT convert a batch outage into a chain of
+#   batch outages.
+
+
+def _stream_started_marker_path(checkpoint_location):
+    """Absolute path of the marker file next to a streaming checkpoint."""
+    return checkpoint_location.rstrip("/") + "/_STARTED"
+
+
+def mark_stream_started(spark, checkpoint_location, *, fs=None, payload=None):
+    """Write the ``_STARTED`` marker on stream start-up. Fail-open on error.
+
+    Called from the stream main after the Structured Streaming query has
+    started so a subsequent ``silver_build_financial`` refuses to run
+    against the same deployment. Any FS failure is logged and swallowed:
+    the stream must not fail to start because the marker could not be
+    written.
+    """
+    if not checkpoint_location:
+        return
+    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
+    marker_path = _stream_started_marker_path(checkpoint_location)
+    body = payload if payload is not None else b"lakebench-silver-stream-financial"
+    try:
+        sidecar_fs.write(marker_path, body)
+        log(f"[h4] wrote stream-started marker at {marker_path}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[h4] marker write failed at {marker_path}: {one_line(e)}; continuing")
+
+
+def clear_stream_started_marker(spark, checkpoint_location, *, fs=None):
+    """Remove the ``_STARTED`` marker on clean shutdown. Fail-open on error.
+
+    Called from the stream main's shutdown path (SIGTERM / SIGINT handler
+    or the normal exit after ``query.stop()``). A crash or kill -9 skips
+    this call, leaving the marker in place -- that is the intended
+    semantics: batch must not silently overwrite tables a crashed stream
+    was mid-writing.
+    """
+    if not checkpoint_location:
+        return
+    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
+    marker_path = _stream_started_marker_path(checkpoint_location)
+    try:
+        removed = sidecar_fs.delete(marker_path)
+        if removed:
+            log(f"[h4] cleared stream-started marker at {marker_path}")
+    except Exception as e:  # noqa: BLE001
+        log(f"[h4] marker delete failed at {marker_path}: {one_line(e)}; continuing")
+
+
+def refuse_batch_while_stream_active(
+    *,
+    spark,
+    checkpoint_location,
+    force_rebuild,
+    fs=None,
+):
+    """H4 fat-finger guard called from ``silver_build_financial.main()``.
+
+    Raises ``SilverAbort`` when the AML stream's ``_STARTED`` marker is
+    present at ``checkpoint_location`` and ``force_rebuild`` is False.
+    Fails open on a missing checkpoint / missing marker / transient FS
+    error so a fresh batch-only deployment is never blocked.
+    """
+    if not checkpoint_location:
+        return
+    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
+    marker_path = _stream_started_marker_path(checkpoint_location)
+    try:
+        exists = sidecar_fs.exists(marker_path)
+    except Exception as e:  # noqa: BLE001
+        log(
+            f"[h4] WARNING: marker probe failed at {marker_path}: "
+            f"{one_line(e)}; fail-open (batch proceeds)"
+        )
+        return
+    if not exists:
+        return
+    if force_rebuild:
+        log(
+            f"[h4] stream-started marker present at {marker_path}; "
+            "LB_FORCE_REBUILD=1 -> operator opted in, batch proceeds"
+        )
+        return
+    raise SilverAbort(
+        "H4: refusing silver_build_financial while an AML stream appears "
+        f"active. Streaming checkpoint carries a _STARTED marker at "
+        f"{marker_path}. Overwriting silver.transactions et al. now would "
+        "wipe every row the stream has written. Stop the continuous "
+        "deployment first, delete the marker if the stream is genuinely "
+        "gone (kill -9 / pod eviction leaves it), or re-run with "
+        "--force-rebuild (LB_FORCE_REBUILD=1) to opt in explicitly."
+    )
 
 
 def _partition_transforms(spark, fq_table):

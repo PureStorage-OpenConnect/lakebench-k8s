@@ -20,6 +20,7 @@ surfaces skew.
 
 from __future__ import annotations
 
+import os
 import time
 
 from common import (
@@ -33,6 +34,7 @@ from common import (
     iceberg_table_stats,
     log,
     log_job_metrics,
+    refuse_batch_while_stream_active,
     resolve_data_clock,
 )
 from pyspark.sql import SparkSession, Window
@@ -1076,6 +1078,23 @@ def _corpus_predates_kyc(spark) -> bool:
 def main() -> None:
     spark = SparkSession.builder.appName("lb-silver-build-financial").getOrCreate()
     start = time.time()
+
+    # H4 fat-finger guard: refuse to run while an AML stream is active on
+    # this deployment. silver_build_financial.main() overwrites every
+    # silver table via .overwrite(lit(True)); doing that while
+    # silver_stream_financial is writing wipes every streamed row (see the
+    # docstring at silver_stream_financial.py:46-53). The stream writes a
+    # ``_STARTED`` marker file at its checkpoint on start-up and removes
+    # it on clean shutdown; the guard reads it here. LB_FORCE_REBUILD=1
+    # bypasses the check for the deliberate rebuild path (job.py already
+    # bumps LB_REBUILD_EPOCH before setting this).
+    _stream_checkpoint = os.environ.get("LB_FINANCIAL_SILVER_CHECKPOINT")
+    _force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
+    refuse_batch_while_stream_active(
+        spark=spark,
+        checkpoint_location=_stream_checkpoint,
+        force_rebuild=_force_rebuild,
+    )
 
     # Pin the session timezone to UTC. `to_date(cre_dt_tm)` and `days(...)`
     # partitioning use session tz for the day boundary; a non-UTC executor

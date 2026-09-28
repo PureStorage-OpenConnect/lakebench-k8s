@@ -2810,6 +2810,26 @@ class SparkJobManager:
                 {"name": k, "value": v}
                 for k, v in cfg.architecture.workload.tm_operations.env().items()
             )
+            # H4 fat-finger guard: AML batch silver refuses to overwrite while
+            # continuous silver is active. silver_build_financial.main() probes
+            # for ``_STARTED`` under this deployment's known silver-stream
+            # checkpoint path -- the same URI job.py builds for the SILVER_STREAM
+            # trigger_map (streaming-specific env block below). We export it
+            # for SILVER_BUILD too so the guard's env-var read is not None in
+            # a batch pod; without this, the guard is a silent no-op and a
+            # concurrent batch run wipes silver.transactions the stream just
+            # committed. Any current-behaviour SILVER_STREAM setter still fires
+            # in the streaming block: this only adds the SILVER_BUILD case.
+            if job_type == JobType.SILVER_BUILD:
+                _sustained = cfg.architecture.pipeline.sustained
+                env.append(
+                    {
+                        "name": "LB_FINANCIAL_SILVER_CHECKPOINT",
+                        "value": (
+                            f"s3a://{s3.buckets.silver}/{_sustained.checkpoint_base}/silver-stream/"
+                        ),
+                    }
+                )
 
         # Streaming-specific env vars
         if job_type is not None and job_type in _STREAMING_JOB_TYPES:

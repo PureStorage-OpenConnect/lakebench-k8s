@@ -79,6 +79,7 @@ import time
 
 from common import (
     assert_progress,
+    clear_stream_started_marker,
     emit_stream_scale_admission,
     ensure_column,
     ensure_namespaces_for_ddl,
@@ -86,6 +87,7 @@ from common import (
     env,
     log,
     log_job_metrics,
+    mark_stream_started,
     refuse_fresh_checkpoint_over_data,
     replay_possible,
     streaming_query_id,
@@ -465,12 +467,23 @@ def main() -> None:
         .start()
     )
 
+    # H4: write the stream-started marker after the query has actually
+    # started so silver_build_financial refuses to run against this
+    # deployment. The marker is cleared on clean shutdown below; a crash
+    # or kill -9 leaves it in place, which is what we want (batch must
+    # not silently overwrite a mid-flight stream's tables).
+    mark_stream_started(spark, CHECKPOINT_URI)
+
     def _shutdown_handler(signum, frame):  # noqa: ARG001
         log(f"Signal {signum} received; stopping stream cleanly")
         try:
             query.stop()
         except Exception as e:  # noqa: BLE001
             log(f"query.stop failed: {e}")
+        # H4: clean shutdown removes the marker so a subsequent batch
+        # run against a decommissioned continuous deployment is not
+        # blocked. A crash bypasses this handler entirely.
+        clear_stream_started_marker(spark, CHECKPOINT_URI)
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         try:
@@ -496,6 +509,11 @@ def main() -> None:
     with rows_written_lock:
         total = rows_written_total
     log(f"Silver stream total rows written across all batches: {total}")
+    # H4: clean shutdown removes the marker. The signal handler above
+    # also calls this; the double-call is idempotent (delete-if-exists).
+    # Both paths matter: process exits via SIGTERM in K8s Job termination,
+    # but the query can also drain naturally at end of run_duration.
+    clear_stream_started_marker(spark, CHECKPOINT_URI)
     assert_progress(total, "silver-stream")
     spark.stop()
 
