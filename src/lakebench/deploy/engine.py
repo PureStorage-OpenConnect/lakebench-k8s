@@ -1028,9 +1028,14 @@ class DeploymentEngine:
                 status=DeploymentStatus.FAILED,
                 message=(
                     f"Namespace '{namespace}' exists without lakebench "
-                    "identity annotations. Pass --force-legacy on `lakebench "
-                    "deploy` to claim it (destroy still refuses until "
-                    "the admin migrate-deployment command ships)."
+                    "identity annotations. FIRST verify your cluster "
+                    "context with `oc whoami && kubectl config "
+                    "current-context` and confirm it matches the "
+                    "expected cluster for this deployment. Only after "
+                    "that check, and only as a last resort, pass "
+                    "--force-legacy on `lakebench deploy` to claim it "
+                    "(destroy still refuses until the admin "
+                    "migrate-deployment command ships)."
                 ),
                 elapsed_seconds=time.time() - start,
             )
@@ -1329,10 +1334,15 @@ class DeploymentEngine:
                         status=DeploymentStatus.FAILED,
                         message=(
                             f"Bucket {name!r} exists without a lakebench "
-                            "ownership tag. Refusing to claim it. Pass "
-                            "--force-legacy on deploy to take ownership "
-                            "(caution: this may collide with another "
-                            "team's storage). " + (v.hint or "")
+                            "ownership tag. Refusing to claim it. FIRST "
+                            "verify your cluster context with "
+                            "`oc whoami && kubectl config "
+                            "current-context` and confirm it matches "
+                            "this deployment's expected cluster. Only "
+                            "after that check, and only as a last "
+                            "resort, pass --force-legacy on deploy to "
+                            "take ownership (caution: this may collide "
+                            "with another team's storage). " + (v.hint or "")
                         ),
                         elapsed_seconds=time.time() - start,
                     )

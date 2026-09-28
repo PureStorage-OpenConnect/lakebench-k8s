@@ -18,6 +18,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from lakebench._constants import DEFAULT_OUTPUT_DIR
+from lakebench.cli._helpers import EXIT_DECLINED
 from lakebench.config import load_config
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,7 @@ def compare(
     if not yes:
         confirm = typer.confirm("Proceed with comparison?")
         if not confirm:
-            raise typer.Exit(0)
+            raise typer.Exit(EXIT_DECLINED)
 
     if local and cfg_a.name == cfg_b.name:
         # Local stacks are keyed by config name: same name means the same

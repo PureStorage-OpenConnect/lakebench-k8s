@@ -687,7 +687,7 @@ class TestCliExitCode:
         with patch("lakebench.deploy.DeploymentEngine", return_value=engine):
             return CliRunner().invoke(app, ["destroy", str(fixture), "--force"])
 
-    def test_still_terminating_exits_3(self, monkeypatch, tmp_path):
+    def test_still_terminating_exits_4(self, monkeypatch, tmp_path):
         from lakebench.cli._destroy import EXIT_NAMESPACE_STILL_TERMINATING
         from lakebench.deploy.engine import DeploymentResult
 
@@ -701,8 +701,8 @@ class TestCliExitCode:
             ),
         ]
         out = self._invoke(results, monkeypatch, tmp_path)
-        assert EXIT_NAMESPACE_STILL_TERMINATING == 3
-        assert out.exit_code == 3, out.output
+        assert EXIT_NAMESPACE_STILL_TERMINATING == 4
+        assert out.exit_code == 4, out.output
         assert "Destroy Complete\n" not in out.output
 
     def test_clean_destroy_exits_0(self, monkeypatch, tmp_path):

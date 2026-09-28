@@ -20,6 +20,12 @@ logger = logging.getLogger(__name__)
 # Default config file name for auto-discovery
 DEFAULT_CONFIG = "lakebench.yaml"
 
+# Exit code for a declined interactive confirmation prompt (C3, v1.6).
+# Distinct from 0 (success) and 1 (failure) so wrapper scripts can tell a
+# "user said no" apart from either. Every CLI site that reaches a
+# ``typer.confirm`` and takes the "no" branch exits with this code.
+EXIT_DECLINED = 3
+
 # ANSI escape code stripper for log output
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 

@@ -23,6 +23,7 @@ from lakebench.k8s import K8sConnectionError
 
 from ._helpers import (
     DEPRECATED_SHORT_F_HELP,
+    EXIT_DECLINED,
     _journal_safe,
     console,
     deprecated_short_f_force,
@@ -82,7 +83,7 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
         )
         if not typer.confirm("Proceed?"):
             print_info("Destruction cancelled")
-            raise typer.Exit(0)
+            raise typer.Exit(EXIT_DECLINED)
 
     try:
         removed, used_workdir = destroy_local(cfg, workdir=resolved, remove_data=remove_data)
@@ -100,7 +101,10 @@ def _destroy_local_mode(cfg, workdir, remove_data: bool, force: bool) -> None:
 # Exit code when everything else succeeded but the namespace was still
 # Terminating at --namespace-timeout (LB-157). Distinct from 1 (a step
 # failed) so scripts can wait and re-check instead of treating it as broken.
-EXIT_NAMESPACE_STILL_TERMINATING = 3
+# 3 is reserved for EXIT_DECLINED (a declined confirmation prompt), which
+# destroy also returns; a wrapper that retries destroy on exit 3 would
+# otherwise loop when a human answers `n` under a TTY.
+EXIT_NAMESPACE_STILL_TERMINATING = 4
 
 
 def destroy(
@@ -193,7 +197,8 @@ def destroy(
                 "hold it for minutes). A namespace still terminating at "
                 "the deadline is not reported as deleted and destroy exits "
                 f"{EXIT_NAMESPACE_STILL_TERMINATING}. 0 skips the wait, so "
-                "destroy exits 3 unless the namespace is already gone."
+                f"destroy exits {EXIT_NAMESPACE_STILL_TERMINATING} unless "
+                "the namespace is already gone."
             ),
         ),
     ] = 600,
@@ -264,7 +269,7 @@ def destroy(
             confirm = typer.confirm("Are you sure you want to proceed?")
             if not confirm:
                 print_info("Destruction cancelled")
-                raise typer.Exit(0)
+                raise typer.Exit(EXIT_DECLINED)
         else:
             print_error(
                 "Refusing to destroy without --force in non-interactive mode. "
