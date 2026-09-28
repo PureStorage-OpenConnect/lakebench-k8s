@@ -1,13 +1,16 @@
-"""Guard against re-introducing hazardous Polaris guidance.
+"""Guard against re-introducing a hazardous Polaris feature flag.
 
-The server-wide `SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION` feature flag is
-not a supported STS-skip fix on FlashBlade. It drops endpoint and
-path-style settings from Polaris's StorageAccessConfig, so server-side
-S3FileIO falls back to `s3.amazonaws.com` and every request 404s.
+A server-wide Polaris credential-subscoping-skip flag is not a supported
+STS-skip fix on FlashBlade. Setting it drops endpoint and path-style
+settings from Polaris's StorageAccessConfig, so server-side S3FileIO
+falls back to `s3.amazonaws.com` and every request 404s.
 
 The real fix is per-catalog `stsUnavailable: true` in the bootstrap
 payload. This test asserts that the hazardous env-var name does not
 appear anywhere in the tree, so no reader can grep it up and try it.
+The token itself is assembled at runtime from three parts so this file
+does not itself contain the phrase (which would trip the DoD grep and
+recursively trip this test).
 """
 
 from __future__ import annotations
@@ -16,7 +19,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-FORBIDDEN = "SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION"
+# Assembled at runtime so this source file does not contain the phrase.
+# ``SKIP_CREDENTIAL_SUBSCOPING`` is a stable substring even if a future
+# Polaris version adds another suffix (e.g. ``_INDIRECTION_V2``).
+FORBIDDEN = "SKIP_CREDENTIAL" + "_SUBSCOPING"
 
 # Directories that either belong to another tool's cache or are not tracked
 # in git. Skip them so a stale build artefact does not fail this test.
