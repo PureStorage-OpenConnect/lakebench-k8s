@@ -1,0 +1,29 @@
+{# PodMonitor so the shared Prometheus scrapes this deployment's pushgateway. #}
+{# honorLabels: true keeps the pushed job/instance/run_id labels instead of   #}
+{# renaming them to exported_* (review F2), so the Grafana panels' job=        #}
+{# filters match. Requires the release label the shared podMonitorSelector     #}
+{# matches, exactly like the Trino/Spark PodMonitors.                          #}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: lakebench-pushgateway
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: lakebench
+    app.kubernetes.io/component: pushgateway-metrics
+    release: {{ prometheus_release | default('lakebench-observability') }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lakebench
+      app.kubernetes.io/component: pushgateway
+  namespaceSelector:
+    matchNames:
+      - {{ namespace }}
+  podMetricsEndpoints:
+    - targetPort: 9091
+      interval: 15s
+      path: /metrics
+      scheme: http
+      honorLabels: true

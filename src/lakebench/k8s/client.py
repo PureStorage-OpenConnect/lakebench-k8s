@@ -446,6 +446,8 @@ class K8sClient:
                 return self._apply_secret(manifest, ns)
             elif kind == "ConfigMap":
                 return self._apply_configmap(manifest, ns)
+            elif kind == "PersistentVolumeClaim":
+                return self._apply_pvc(manifest, ns)
             elif kind == "ServiceAccount":
                 return self._apply_serviceaccount(manifest, ns)
             elif kind == "Role":
@@ -517,6 +519,24 @@ class K8sClient:
             else:
                 raise
         return True
+
+    def _apply_pvc(self, manifest: dict[str, Any], namespace: str) -> bool:
+        """Apply a PersistentVolumeClaim.
+
+        A PVC's spec (storageClassName, accessModes, requested size) is largely
+        immutable, so a replace on an existing claim fails on immutable fields.
+        Create it when absent; leave an existing claim untouched.
+        """
+        name = manifest["metadata"]["name"]
+        manifest["metadata"]["namespace"] = namespace
+        try:
+            self._core_v1.read_namespaced_persistent_volume_claim(name, namespace)
+            return True
+        except ApiException as e:
+            if e.status == 404:
+                self._core_v1.create_namespaced_persistent_volume_claim(namespace, manifest)
+                return True
+            raise
 
     def _apply_serviceaccount(self, manifest: dict[str, Any], namespace: str) -> bool:
         """Apply a ServiceAccount manifest."""

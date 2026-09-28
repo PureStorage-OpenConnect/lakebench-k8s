@@ -1,11 +1,13 @@
-{# Grafana dashboard provisioned via sidecar ConfigMap #}
-{# The kube-prometheus-stack Grafana sidecar watches for ConfigMaps with #}
-{# the label grafana_dashboard: "1" and auto-imports them as dashboards. #}
+{# Grafana dashboard provisioned via sidecar ConfigMap. #}
+{# LB-192: rendered ONCE cluster-wide into the shared observability namespace,  #}
+{# NOT per-deployment -- a fixed uid rendered per-namespace collides in the     #}
+{# shared Grafana (last writer wins). A `namespace` + `run_id` template         #}
+{# variable lets one dashboard serve every deployment/run.                      #}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: lakebench-grafana-dashboard
-  namespace: {{ namespace }}
+  namespace: {{ observability_namespace | default('lakebench-observability') }}
   labels:
     app.kubernetes.io/name: lakebench
     app.kubernetes.io/component: grafana-dashboard
@@ -18,160 +20,185 @@ data:
       "fiscalYearStartMonth": 0,
       "graphTooltip": 1,
       "links": [],
+      "templating": {"list": [
+        {
+          "name": "datasource",
+          "type": "datasource",
+          "query": "prometheus",
+          "hide": 0,
+          "current": {},
+          "refresh": 1
+        },
+        {
+          "name": "namespace",
+          "type": "query",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "query": "label_values(lakebench_stage_elapsed_seconds, namespace)",
+          "refresh": 2,
+          "includeAll": true,
+          "multi": true,
+          "current": {},
+          "sort": 1
+        },
+        {
+          "name": "run_id",
+          "type": "query",
+          "datasource": {"type": "prometheus", "uid": "${datasource}"},
+          "query": "label_values(lakebench_stage_elapsed_seconds{namespace=~\"$namespace\"}, run_id)",
+          "refresh": 2,
+          "includeAll": true,
+          "multi": true,
+          "current": {},
+          "sort": 1
+        }
+      ]},
       "panels": [
         {
-          "title": "Trino: Running Queries",
+          "title": "Datagen: throughput MB/s (CAPPED -- 4 CPU / 4Gi per pod, not infra perf)",
+          "description": "Generator rate is bounded by the hard-locked datagen pod resources (batch 4Gi, continuous 24Gi). A Lakebench-imposed cap, not backend throughput (invariant 6).",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
           "targets": [
             {
-              "expr": "trino_execution_querymanager_RunningQueries",
-              "legendFormat": "Running Queries",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "lakebench_datagen_throughput_mbps{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
+              "legendFormat": "pod {{ "{{" }}node_id{{ "}}" }}",
               "refId": "A"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "MBs"}}
         },
         {
-          "title": "Trino: Query Throughput (queries/min)",
+          "title": "Datagen: rows written by pod (capped rate)",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
           "targets": [
             {
-              "expr": "rate(trino_execution_querymanager_CompletedQueries_TotalCount[5m]) * 60",
-              "legendFormat": "Completed/min",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "lakebench_datagen_rows_written{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
+              "legendFormat": "pod {{ "{{" }}node_id{{ "}}" }}",
               "refId": "A"
-            },
-            {
-              "expr": "rate(trino_execution_querymanager_FailedQueries_TotalCount[5m]) * 60",
-              "legendFormat": "Failed/min",
-              "refId": "B"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
         },
         {
-          "title": "Trino: Query Wall Time (p50/p95/p99)",
+          "title": "Datagen: phase seconds (stacked)",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
           "targets": [
             {
-              "expr": "trino_execution_querymanager_WallTime_P50",
-              "legendFormat": "p50",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "sum(lakebench_datagen_phase_seconds{namespace=~\"$namespace\", run_id=~\"$run_id\"}) by (phase)",
+              "legendFormat": "{{ "{{" }}phase{{ "}}" }}",
               "refId": "A"
-            },
-            {
-              "expr": "trino_execution_querymanager_WallTime_P95",
-              "legendFormat": "p95",
-              "refId": "B"
-            },
-            {
-              "expr": "trino_execution_querymanager_WallTime_P99",
-              "legendFormat": "p99",
-              "refId": "C"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "ms"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "s", "custom": {"stacking": {"mode": "normal"}}}}
         },
         {
-          "title": "Trino: Worker Memory Usage",
+          "title": "Bronze/Silver: stage rows (input vs output)",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
           "targets": [
             {
-              "expr": "trino_memory_ClusterTotalMemoryReservation",
-              "legendFormat": "Total Reserved",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "lakebench_stage_input_rows{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}stage{{ "}}" }} in",
               "refId": "A"
             },
             {
-              "expr": "trino_memory_ClusterMemoryPoolFreeBytes",
-              "legendFormat": "Free",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "lakebench_stage_output_rows{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}stage{{ "}}" }} out",
               "refId": "B"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "bytes"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
         },
         {
-          "title": "Spark: Active Executors",
+          "title": "Silver: per-table row counts",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
           "targets": [
             {
-              "expr": "spark_app_executor_count",
-              "legendFormat": "{{ "{{" }}app_name{{ "}}" }}",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "lakebench_silver_table_rows{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}table{{ "}}" }}",
               "refId": "A"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
         },
         {
-          "title": "Spark: Task Throughput (tasks/sec)",
+          "title": "Pipeline: stage elapsed seconds",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
           "targets": [
             {
-              "expr": "rate(spark_app_completed_tasks_total[1m])",
-              "legendFormat": "{{ "{{" }}app_name{{ "}}" }}",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "lakebench_stage_elapsed_seconds{namespace=~\"$namespace\", run_id=~\"$run_id\"}",
+              "legendFormat": "{{ "{{" }}stage{{ "}}" }}",
               "refId": "A"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "ops"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "s"}}
         },
         {
-          "title": "Spark: JVM Heap Memory",
+          "title": "Trino: Running Queries",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
           "targets": [
             {
-              "expr": "spark_driver_jvm_heap_used",
-              "legendFormat": "Driver Heap Used",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "trino_execution_querymanager_RunningQueries{namespace=~\"$namespace\"}",
+              "legendFormat": "Running Queries",
               "refId": "A"
-            },
-            {
-              "expr": "spark_driver_jvm_heap_max",
-              "legendFormat": "Driver Heap Max",
-              "refId": "B"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "bytes"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
         },
         {
-          "title": "Node CPU Usage",
+          "title": "Trino: Query Throughput (queries/min)",
           "type": "timeseries",
           "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
           "targets": [
             {
-              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"{{ namespace }}\"}[5m])) by (pod)",
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "rate(trino_execution_querymanager_CompletedQueries_TotalCount{namespace=~\"$namespace\"}[5m]) * 60",
+              "legendFormat": "Completed/min",
+              "refId": "A"
+            },
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "rate(trino_execution_querymanager_FailedQueries_TotalCount{namespace=~\"$namespace\"}[5m]) * 60",
+              "legendFormat": "Failed/min",
+              "refId": "B"
+            }
+          ],
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
+        },
+        {
+          "title": "Node CPU Usage (by pod)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+          "targets": [
+            {
+              "datasource": {"type": "prometheus", "uid": "${datasource}"},
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\"}[5m])) by (pod)",
               "legendFormat": "{{ "{{" }}pod{{ "}}" }}",
               "refId": "A"
             }
           ],
-          "fieldConfig": {
-            "defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}
-          }
+          "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}}
         }
       ],
       "schemaVersion": 39,
       "tags": ["lakebench"],
-      "templating": {"list": []},
       "time": {"from": "now-1h", "to": "now"},
       "timepicker": {},
       "timezone": "browser",
       "title": "Lakebench Overview",
       "uid": "lakebench-overview",
-      "version": 1
+      "version": 2
     }

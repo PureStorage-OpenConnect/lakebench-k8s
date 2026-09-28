@@ -216,7 +216,21 @@ PODMONITOR_TEMPLATES = [
     "prometheus/podmonitor-trino.yaml.j2",
     "prometheus/podmonitor-spark.yaml.j2",
     "prometheus/configmap.yaml.j2",
-    "grafana/dashboard-configmap.yaml.j2",
+]
+
+# The Grafana dashboard is rendered ONCE into the shared observability namespace,
+# not per-deployment (LB-192: a fixed uid rendered per-namespace collides in the
+# shared Grafana). A namespace + run_id template variable makes the single
+# dashboard serve every deployment/run.
+DASHBOARD_TEMPLATE = "grafana/dashboard-configmap.yaml.j2"
+
+# Per-deployment Prometheus Pushgateway (Deployment + Service + PVC) and the
+# PodMonitor that scrapes it. Applied into the deployment namespace alongside
+# the PodMonitors, only when observability.pushgateway_enabled. Ownership
+# category 1: torn down with the namespace by `destroy`.
+PUSHGATEWAY_TEMPLATES = [
+    "pushgateway/pushgateway.yaml.j2",
+    "pushgateway/podmonitor-pushgateway.yaml.j2",
 ]
 
 
@@ -340,6 +354,7 @@ class ObservabilityDeployer:
                     elapsed_seconds=time.time() - start,
                 )
             self._apply_podmonitor_templates(namespace)
+            self._apply_dashboard()
             if existing_ns == OBSERVABILITY_NAMESPACE:
                 message = (
                     f"Using the shared observability stack in namespace '{existing_ns}' "
@@ -436,6 +451,7 @@ class ObservabilityDeployer:
 
         # Apply PodMonitor and Prometheus ConfigMap templates
         self._apply_podmonitor_templates(namespace)
+        self._apply_dashboard()
 
         prom_svc = _find_helm_service(release_ns, "kube-prometheus-stack-prometheus")
         grafana_svc = _find_helm_service(release_ns, "grafana")
@@ -577,17 +593,62 @@ class ObservabilityDeployer:
             )
 
     def _apply_podmonitor_templates(self, namespace: str) -> None:
-        """Render and apply PodMonitor CRDs for Trino and Spark scraping."""
-        for template_name in PODMONITOR_TEMPLATES:
+        """Render and apply this deployment's per-namespace monitors.
+
+        Always the Trino/Spark PodMonitors + the Prometheus configmap. Plus the
+        per-deployment Pushgateway (Deployment + Service + PVC) and its PodMonitor
+        when observability.pushgateway_enabled -- category 1, torn down with the
+        namespace. All best-effort: a monitor that fails to apply must not fail
+        the deploy (metrics.json stays authoritative).
+        """
+        obs = self.config.observability
+        templates = list(PODMONITOR_TEMPLATES)
+        context = dict(self.context)
+        if obs.pushgateway_enabled:
+            templates += PUSHGATEWAY_TEMPLATES
+            context.update(
+                pushgateway_image=obs.pushgateway_image,
+                pushgateway_storage=obs.pushgateway_storage,
+                pushgateway_storage_class=obs.pushgateway_storage_class,
+            )
+        for template_name in templates:
             try:
-                yaml_content = self.renderer.render(template_name, self.context)
-                if not isinstance(yaml_content, str):
-                    continue
-                for doc in yaml.safe_load_all(yaml_content):
-                    if doc:
-                        self.k8s.apply_manifest(doc, namespace=namespace)
+                yaml_content = self.renderer.render(template_name, context)
             except Exception as e:
-                logger.warning("Failed to apply %s: %s", template_name, e)
+                logger.warning("Failed to render %s: %s", template_name, e)
+                continue
+            if not isinstance(yaml_content, str):
+                continue
+            # Apply doc-by-doc: one failing doc must not suppress its siblings in
+            # the same file (e.g. a PVC failure must not skip the Deployment).
+            for doc in yaml.safe_load_all(yaml_content):
+                if not doc:
+                    continue
+                try:
+                    self.k8s.apply_manifest(doc, namespace=namespace)
+                except Exception as e:
+                    logger.warning("Failed to apply %s/%s: %s", template_name, doc.get("kind"), e)
+
+    def _apply_dashboard(self) -> None:
+        """Apply the single cluster-wide Grafana dashboard (LB-192).
+
+        Rendered once into OBSERVABILITY_NAMESPACE with a namespace + run_id
+        template variable, idempotently on every deploy. Best-effort: a dashboard
+        apply failure never fails the deploy.
+        """
+        if not self.config.observability.dashboards_enabled:
+            return
+        context = dict(self.context)
+        context["observability_namespace"] = OBSERVABILITY_NAMESPACE
+        try:
+            yaml_content = self.renderer.render(DASHBOARD_TEMPLATE, context)
+            if not isinstance(yaml_content, str):
+                return
+            for doc in yaml.safe_load_all(yaml_content):
+                if doc:
+                    self.k8s.apply_manifest(doc, namespace=OBSERVABILITY_NAMESPACE)
+        except Exception as e:
+            logger.warning("Failed to apply %s: %s", DASHBOARD_TEMPLATE, e)
 
     def _add_helm_repo(self) -> None:
         """Add the prometheus-community Helm repo if not present."""
