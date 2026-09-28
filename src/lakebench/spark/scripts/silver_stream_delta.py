@@ -62,6 +62,7 @@ from common import (
     apply_silver_transformations_anchored,
     assert_progress,
     await_stream,
+    check_bronze_fingerprint,
     configured_data_clock,
     data_clock_date,
     delta_idempotent_options,
@@ -301,6 +302,13 @@ def main() -> None:
         time.sleep(_TABLE_WAIT_INTERVAL)
         waited += _TABLE_WAIT_INTERVAL
     log(f"Bronze table {bronze_tbl} exists (waited {waited}s)")
+
+    # B5: bronze-checkpoint-reset guard. See common.check_bronze_fingerprint
+    # for the failure this defends against; ``source_format="delta"`` reads
+    # the bronze commit version from Delta history instead of an Iceberg
+    # snapshot id, and the sidecar JSON records the format so the guard
+    # never confuses the two formats' fingerprints on a mixed-catalog upgrade.
+    check_bronze_fingerprint(spark, bronze_tbl, checkpoint_location, source_format="delta")
 
     # A1: driver-side accumulator; see silver_stream.py for the rationale.
     rows_written_total = 0

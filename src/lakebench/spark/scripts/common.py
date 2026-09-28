@@ -176,6 +176,82 @@ def table_exists(spark, table_name):
         raise
 
 
+def _is_concurrent_modification(exc):
+    """Recognise the Iceberg/Delta concurrent-schema-modification error surface.
+
+    Both engines wrap the underlying commit conflict in a Py4J/Java exception
+    class whose string form carries a stable substring. ``ensure_column`` is
+    the only in-process caller that races on ``ALTER TABLE``, so scoping the
+    match tightly (either the JVM class name or the well-known message
+    substring) avoids treating unrelated ``AnalysisException``/parse errors as
+    retryable.
+    """
+    text = f"{type(exc).__name__}: {exc}"
+    return (
+        "ConcurrentModificationException" in text
+        or "CommitFailedException" in text
+        or "ConcurrentAppendException" in text
+        or "ConcurrentDeleteReadException" in text
+        or "MetadataChangedException" in text
+    )
+
+
+def ensure_column_with_retry(
+    spark, fq_table, name, sql_type, *, max_attempts=3, backoff_seconds=0.5
+):
+    """I9: ``ensure_column`` with bounded retry across concurrent writers.
+
+    Multiple silver drivers (batch + stream, or several stream instances on a
+    reused catalog) race on ``ALTER TABLE ... ADD COLUMNS`` at startup. The
+    loser's commit fails with a Java ``ConcurrentModificationException``
+    (Iceberg) or a Delta metadata-conflict exception, and the whole silver run
+    then crashes before it processes a batch.
+
+    Retries up to ``max_attempts`` times on that error surface only, with
+    ``backoff_seconds`` (linear) between attempts. Between attempts we re-read
+    the schema: if the concurrent writer already added the column, we return
+    ``False`` (column-already-present branch) rather than re-issuing the
+    ``ALTER``. Any other exception surfaces immediately -- a wrong-type ALTER
+    is a code bug, not a race.
+    """
+    import time as _time
+
+    if name in spark.table(fq_table).columns:
+        return False
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            spark.sql(f"ALTER TABLE {fq_table} ADD COLUMNS ({name} {sql_type})")
+            log(f"[startup] added {name} to {fq_table} (reused-catalog upgrade)")
+            return True
+        except Exception as e:  # noqa: BLE001
+            if not _is_concurrent_modification(e):
+                raise
+            last_exc = e
+            # Re-check the schema: the concurrent writer may have added the
+            # column for us, in which case we are done -- no further ALTER.
+            try:
+                if name in spark.table(fq_table).columns:
+                    log(
+                        f"[startup] {name} on {fq_table}: concurrent writer added it "
+                        f"(attempt {attempt}); continuing"
+                    )
+                    return False
+            except Exception as reread_exc:  # noqa: BLE001
+                log(f"[startup] {name} on {fq_table}: schema re-read failed: {reread_exc}")
+            if attempt < max_attempts:
+                log(
+                    f"[startup] {name} on {fq_table}: ALTER conflict "
+                    f"(attempt {attempt}/{max_attempts}); retrying"
+                )
+                if backoff_seconds > 0:
+                    _time.sleep(backoff_seconds)
+    # Bounded retries exhausted; propagate the last conflict so the caller
+    # sees a real failure instead of a silent no-op.
+    assert last_exc is not None
+    raise last_exc
+
+
 def ensure_column(spark, fq_table, name, sql_type):
     """Add a nullable column to an existing table when it is missing.
 
@@ -184,12 +260,204 @@ def ensure_column(spark, fq_table, name, sql_type):
     failed with a parse error on every run and was silently swallowed. For a
     reused catalog whose table predates the column, that left the next write
     to fail on a schema mismatch. Returns True when the column was added.
+
+    Delegates to ``ensure_column_with_retry`` so every runtime caller inherits
+    the I9 race guard: two silver drivers starting against the same catalog
+    (batch + stream, or two streams post-restart) can both call this and only
+    one issues the ``ALTER``. The retry is bounded (3 attempts, 0.5s backoff),
+    then propagates.
     """
-    if name in spark.table(fq_table).columns:
-        return False
-    spark.sql(f"ALTER TABLE {fq_table} ADD COLUMNS ({name} {sql_type})")
-    log(f"[startup] added {name} to {fq_table} (reused-catalog upgrade)")
-    return True
+    return ensure_column_with_retry(spark, fq_table, name, sql_type)
+
+
+# ---------------------------------------------------------------------------
+# B5: bronze-checkpoint-reset guard (C360 silver streams)
+# ---------------------------------------------------------------------------
+#
+# A Structured Streaming checkpoint stores the source-side snapshot id of every
+# committed micro-batch. When an operator wipes bronze and re-populates it
+# (DROP + re-ingest, or truncate-and-re-ingest), a brand-new snapshot lineage
+# appears under the same table name, and the OLD checkpoint's saved snapshot
+# id is no longer on the current ancestor chain. Iceberg then either fails
+# with "Cannot find snapshot" or, worse in the Delta case, silently starts
+# from version 0 and re-writes every row silver already wrote. Upstream
+# Iceberg PR #17599 tracks the same class of bug; no native helper today.
+#
+# The guard writes a small JSON sidecar next to the checkpoint on first start
+# with the current bronze snapshot fingerprint (Iceberg snapshot_id or Delta
+# commit version); on every subsequent start it re-reads the fingerprint and
+# compares:
+#
+# * MATCH -> continue silently. The stream is resuming from the same lineage.
+# * MISMATCH -> raise SilverAbort telling the operator to also reset silver.
+#   A checkpoint whose bronze source snapshot no longer exists cannot resume
+#   safely, and continuing would double-write or crash.
+# * SIDECAR MISSING -> fail-open (write it, log a warning, continue). This is
+#   the upgrade path from an older release. Refusing here would break every
+#   running deployment on first restart; the operator can rely on the guard
+#   from the next start onward.
+#
+# The helper is shared across silver_stream.py (Iceberg) and
+# silver_stream_delta.py (Delta) so one bug fix covers both formats.
+
+
+def _bronze_fingerprint_sidecar_path(checkpoint_location):
+    """Absolute path of the sidecar JSON file next to a streaming checkpoint."""
+    return checkpoint_location.rstrip("/") + "/bronze_fingerprint.json"
+
+
+def _read_bronze_snapshot_fingerprint(spark, bronze_tbl, source_format):
+    """Current bronze snapshot fingerprint as a string, or None if unavailable.
+
+    * Iceberg: current-ancestor snapshot id from ``<table>.history``.
+    * Delta: latest commit version from ``DESCRIBE HISTORY``.
+    Any catalog error returns None -- the caller falls back to the fail-open
+    policy (no sidecar written, warning logged) so a transient catalog failure
+    never crashes a running stream.
+    """
+    try:
+        if source_format == "delta":
+            rows = spark.sql(f"DESCRIBE HISTORY {bronze_tbl} LIMIT 1").collect()
+            if not rows:
+                return None
+            r = rows[0]
+            # Delta history row exposes ``version``; support both index and key.
+            try:
+                v = r["version"]
+            except Exception:  # noqa: BLE001
+                v = r[0]
+            return None if v is None else str(v)
+        # Default: Iceberg.
+        rows = spark.sql(
+            f"SELECT snapshot_id FROM {bronze_tbl}.history "
+            "WHERE is_current_ancestor ORDER BY made_current_at DESC LIMIT 1"
+        ).collect()
+        if not rows:
+            return None
+        v = rows[0][0]
+        return None if v is None else str(v)
+    except Exception as e:  # noqa: BLE001
+        log(f"[b5] bronze snapshot lookup failed on {bronze_tbl}: {one_line(e)}")
+        return None
+
+
+class _HadoopSidecarFS:
+    """Read/write/exists over a Hadoop-FS path, wrapping ``_hadoop_fs``."""
+
+    def __init__(self, spark):
+        self._spark = spark
+
+    def exists(self, uri):
+        fs, path = _hadoop_fs(self._spark, uri)
+        return bool(fs.exists(path))
+
+    def read(self, uri):
+        fs, path = _hadoop_fs(self._spark, uri)
+        in_ = fs.open(path)
+        try:
+            jvm = self._spark._jvm
+            baos = jvm.java.io.ByteArrayOutputStream()
+            jvm.org.apache.hadoop.io.IOUtils.copyBytes(in_, baos, 4096, False)
+            return bytes(baos.toByteArray())
+        finally:
+            try:
+                in_.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def write(self, uri, data):
+        fs, path = _hadoop_fs(self._spark, uri)
+        out = fs.create(path, True)  # overwrite=True
+        try:
+            out.write(bytearray(data))
+        finally:
+            out.close()
+
+
+def check_bronze_fingerprint(
+    spark,
+    bronze_tbl,
+    checkpoint_location,
+    *,
+    source_format="iceberg",
+    fs=None,
+):
+    """B5 guard: refuse to resume a silver stream when bronze was reset.
+
+    ``source_format`` is ``"iceberg"`` or ``"delta"`` -- the format of the
+    bronze streaming source, not silver's own format. ``fs`` is a sidecar
+    filesystem stub (used by tests); the default writes the JSON next to the
+    Spark checkpoint through the same Hadoop-FS the checkpoint uses. Raises
+    ``SilverAbort`` on a real fingerprint mismatch; every other failure mode
+    is fail-open with a warning so a transient catalog error never crashes
+    a running stream.
+    """
+    import json as _json
+
+    sidecar_path = _bronze_fingerprint_sidecar_path(checkpoint_location)
+    sidecar_fs = fs if fs is not None else _HadoopSidecarFS(spark)
+
+    current = _read_bronze_snapshot_fingerprint(spark, bronze_tbl, source_format)
+
+    exists = False
+    try:
+        exists = sidecar_fs.exists(sidecar_path)
+    except Exception as e:  # noqa: BLE001
+        log(f"[b5] sidecar existence probe failed at {sidecar_path}: {one_line(e)}")
+        return  # fail-open
+
+    if exists:
+        try:
+            payload = _json.loads(sidecar_fs.read(sidecar_path).decode("utf-8"))
+        except Exception as e:  # noqa: BLE001
+            log(f"[b5] sidecar unreadable at {sidecar_path}: {one_line(e)}; fail-open")
+            return
+        saved = payload.get("bronze_snapshot_fingerprint")
+        saved_s = None if saved is None else str(saved)
+        if current is None:
+            # Cannot compute a fingerprint right now; do not condemn the
+            # stream on an incomplete comparison.
+            log(
+                f"[b5] bronze fingerprint currently unavailable for {bronze_tbl}; "
+                "keeping sidecar untouched"
+            )
+            return
+        if saved_s != current:
+            raise SilverAbort(
+                "B5: bronze snapshot fingerprint mismatch at "
+                f"{sidecar_path}: sidecar={saved_s!r} vs current={current!r} "
+                f"(source_format={source_format}, bronze={bronze_tbl}). Bronze was "
+                "reset while this checkpoint retained the old lineage; also reset "
+                "silver (drop the silver table and this checkpoint) before restarting."
+            )
+        log(
+            f"[b5] bronze fingerprint match on {bronze_tbl} "
+            f"(fingerprint={current}); resuming stream"
+        )
+        return
+
+    # Sidecar missing: fail-open. Only write it when we have a real
+    # fingerprint; a None-sidecar would poison the next comparison.
+    if current is None:
+        log(
+            f"[b5] no bronze fingerprint sidecar at {sidecar_path} and no snapshot "
+            f"yet on {bronze_tbl}; deferring sidecar write"
+        )
+        return
+    try:
+        payload = {
+            "bronze_table": bronze_tbl,
+            "source_format": source_format,
+            "bronze_snapshot_fingerprint": current,
+            "written_by": "check_bronze_fingerprint",
+        }
+        sidecar_fs.write(sidecar_path, _json.dumps(payload).encode("utf-8"))
+        log(
+            f"[b5] WARNING: sidecar {sidecar_path} was missing; wrote current "
+            f"fingerprint ({current}). Guard is active from next start onward."
+        )
+    except Exception as e:  # noqa: BLE001
+        log(f"[b5] sidecar write failed at {sidecar_path}: {one_line(e)}; fail-open")
 
 
 def _partition_transforms(spark, fq_table):
