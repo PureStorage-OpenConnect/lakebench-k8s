@@ -331,3 +331,82 @@ def test_strictest_does_not_alias_input() -> None:
     assert v.gates == {"pipeline": "PASS"}
     assert v.reasons == ["r1"]
     assert v.qualifiers == {"n_runs": 1}
+
+
+# ---------------------------------------------------------------------------
+# Strict gate-outcome vocabulary. A past-tense value like "FAILED" is a
+# common miswrite; it must raise, not silently PASS.
+# ---------------------------------------------------------------------------
+
+
+def test_strictest_rejects_unknown_gate_vocabulary() -> None:
+    import pytest
+
+    # Past-tense misfire from a hypothetical future caller.
+    with pytest.raises(ValueError, match="Unknown gate outcome"):
+        Verdict.strictest(
+            exit_ok=True,
+            badge_ok=True,
+            success_flag=True,
+            gate_outcomes={"pipeline": "FAILED"},
+            reasons=[],
+            qualifiers={},
+        )
+    # Other typos should also raise.
+    with pytest.raises(ValueError, match="Unknown gate outcome"):
+        Verdict.strictest(
+            exit_ok=True,
+            badge_ok=True,
+            success_flag=True,
+            gate_outcomes={"pipeline": "ok"},
+            reasons=[],
+            qualifiers={},
+        )
+    # PASS/FAIL/REFUSED/INTERRUPTED all remain accepted.
+    for value in ("PASS", "FAIL", "REFUSED", "INTERRUPTED"):
+        Verdict.strictest(
+            exit_ok=True,
+            badge_ok=True,
+            success_flag=True,
+            gate_outcomes={"pipeline": value},
+            reasons=[],
+            qualifiers={},
+        )
+
+
+# ---------------------------------------------------------------------------
+# Deep copy on ingress and on to_dict: a frozen value object must not be
+# mutable-by-reference through nested containers.
+# ---------------------------------------------------------------------------
+
+
+def test_strictest_deep_copies_nested_qualifier_values() -> None:
+    inner_list: list[str] = ["a"]
+    qualifiers: dict[str, Any] = {"tags": inner_list}
+    v = Verdict.strictest(
+        exit_ok=True,
+        badge_ok=True,
+        success_flag=True,
+        gate_outcomes={},
+        reasons=[],
+        qualifiers=qualifiers,
+    )
+    # Mutating the nested list the caller still holds must not leak through.
+    inner_list.append("b")
+    qualifiers["tags"].append("c")
+    assert v.qualifiers == {"tags": ["a"]}
+
+
+def test_to_dict_deep_copies_nested_values() -> None:
+    v = Verdict.strictest(
+        exit_ok=True,
+        badge_ok=True,
+        success_flag=True,
+        gate_outcomes={},
+        reasons=[],
+        qualifiers={"tags": ["a"]},
+    )
+    d = v.to_dict()
+    # Mutating the dict returned by to_dict must not change the Verdict.
+    d["qualifiers"]["tags"].append("b")
+    assert v.qualifiers == {"tags": ["a"]}

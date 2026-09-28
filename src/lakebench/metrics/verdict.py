@@ -14,6 +14,7 @@ badge rules.
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -22,6 +23,12 @@ if TYPE_CHECKING:
 
 
 VerdictStatus = Literal["PASSED", "FAILED", "REFUSED", "INTERRUPTED"]
+
+# Gate outcomes use present-tense vocab (PASS/FAIL/REFUSED/INTERRUPTED) so
+# that only ``Verdict.status`` carries the past tense. A caller that hands us
+# a past-tense outcome like ``"FAILED"`` in ``gate_outcomes`` is not silently
+# treated as PASS; ``Verdict.strictest`` raises ``ValueError`` instead.
+_VALID_GATE_OUTCOMES: frozenset[str] = frozenset({"PASS", "FAIL", "REFUSED", "INTERRUPTED"})
 
 
 @dataclass(frozen=True)
@@ -62,7 +69,17 @@ class Verdict:
         REFUSED wins over PASSED. Order: FAILED > INTERRUPTED > REFUSED >
         PASSED.
         """
-        gate_values = [v.upper() for v in gate_outcomes.values()]
+        # Validate gate vocab strictly: an unknown value (for example the
+        # past-tense ``"FAILED"``) must raise, not silently be treated as
+        # PASS. Callers today emit PASS or FAIL; new callers see the failure
+        # immediately.
+        for name, value in gate_outcomes.items():
+            if value not in _VALID_GATE_OUTCOMES:
+                raise ValueError(
+                    f"Unknown gate outcome for {name!r}: {value!r}. "
+                    f"Expected one of {sorted(_VALID_GATE_OUTCOMES)}."
+                )
+        gate_values = list(gate_outcomes.values())
 
         failed = (
             (not exit_ok)
@@ -86,20 +103,29 @@ class Verdict:
         # explanatory list, but reasons only make sense when something failed.
         kept_reasons: list[str] = list(reasons) if status != "PASSED" else []
 
+        # Deep copy on ingress so a caller cannot mutate a nested list inside
+        # ``qualifiers`` after this Verdict is constructed (the dataclass is
+        # frozen, but ``dict(other)`` would only shallow-copy). Callers today
+        # pass scalars, so no behaviour change; the invariant holds for
+        # future callers.
         return cls(
             status=status,
             reasons=kept_reasons,
-            gates=dict(gate_outcomes),
-            qualifiers=dict(qualifiers),
+            gates=copy.deepcopy(gate_outcomes),
+            qualifiers=copy.deepcopy(qualifiers),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-safe dict representation."""
+        """Return a JSON-safe dict representation.
+
+        The returned dict is deep-copied so a caller mutating it does not
+        change the underlying Verdict (relevant for nested values).
+        """
         return {
             "status": self.status,
             "reasons": list(self.reasons),
-            "gates": dict(self.gates),
-            "qualifiers": dict(self.qualifiers),
+            "gates": copy.deepcopy(self.gates),
+            "qualifiers": copy.deepcopy(self.qualifiers),
         }
 
 
