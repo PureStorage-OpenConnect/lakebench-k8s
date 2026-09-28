@@ -484,44 +484,59 @@ def _save_local_metrics(
         return None
 
 
-def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
-    """Copy the data + AML detection fields parsed from driver logs onto the
-    stage's JobMetrics.
+# Fields the cluster run path owns authoritatively; parse_driver_logs may
+# fill them for local runs but must not overwrite them here. Anything not
+# in this set is copied from parsed onto job_metrics automatically, so a
+# new parsed field never silently disappears in the cluster path.
+#
+# Repeatable-fix contract: adding a field to JobMetrics does not need a
+# corresponding edit to _apply_parsed_job_metrics. The only decision the
+# author has to make is "is this field cluster-owned or parser-owned"
+# and if cluster-owned, add it here.
+#
+# The original LB-123 defect (three detection dicts silently dropped)
+# and the two live-caught silver-plan-r3 omissions (silver_tables +
+# extra_metrics at 87feefd, streaming per-batch labels at e31514d) were
+# all the same shape: a hand-written field-by-field copy that lagged
+# behind the dataclass. Iterating fields removes that shape.
+_CLUSTER_OWNED_JOB_METRICS_FIELDS: frozenset[str] = frozenset(
+    {
+        "job_name",
+        "job_type",
+        "start_time",
+        "end_time",
+        "elapsed_seconds",
+        "success",
+        "error_message",
+        "timing_source",
+        "timing_resolution_seconds",
+        "submission_failures",
+        "submission_retry_seconds",
+        "executor_count",
+        "executor_cores",
+        "executor_memory_gb",
+        "cpu_seconds_requested",
+        "memory_gb_requested",
+    }
+)
 
-    Kept as one function, unit-tested, so a field that parse_driver_logs
-    populates can never again be silently dropped by the cluster run path. The
-    original LB-123 defect was exactly that: a hand-written field-by-field copy
-    omitted the three detection dicts, so the disk-saved scorecard showed 0
-    alerts and lost skip reasons on every real cluster run.
+
+def _apply_parsed_job_metrics(job_metrics, parsed) -> None:
+    """Copy every parser-owned field from parsed onto job_metrics.
+
+    Iterates the dataclass so a new field lands automatically as long as
+    it is not in _CLUSTER_OWNED_JOB_METRICS_FIELDS. See the set docstring
+    for the rationale; the LB-123 detection-dict defect and the two
+    silver-plan-r3 live-caught omissions (silver_tables + extra_metrics,
+    streaming per-batch labels) were three instances of the same
+    hand-copy drift.
     """
-    job_metrics.input_size_gb = parsed.input_size_gb
-    job_metrics.output_size_gb = parsed.output_size_gb
-    job_metrics.input_rows = parsed.input_rows
-    job_metrics.output_rows = parsed.output_rows
-    job_metrics.throughput_gb_per_second = parsed.throughput_gb_per_second
-    job_metrics.throughput_rows_per_second = parsed.throughput_rows_per_second
-    # AML per-rule detection metrics (LB-116). The ONLY source of alert counts
-    # + skip reasons for the scorecard; must be carried or the report shows
-    # every rule "0 alerts" and drops skips (defeating the LB-119
-    # never-misreport-a-skip invariant).
-    job_metrics.alerts_by_rule = parsed.alerts_by_rule
-    job_metrics.rule_errors = parsed.rule_errors
-    job_metrics.rules_skipped = parsed.rules_skipped
-    # P10 TM operations invariants and summary; the batch gate reads them.
-    job_metrics.tm_invariants = parsed.tm_invariants
-    job_metrics.tm_ops = parsed.tm_ops
-    job_metrics.tm_status = parsed.tm_status
-    # Customer 360 expected-result facts (reporting only, D6).
-    job_metrics.c360_check = parsed.c360_check
-    job_metrics.c360_bronze = parsed.c360_bronze
-    # A2 (silver-plan): per-silver-table row counts and the catch-all label
-    # bag. Same shape as the alert dicts above: the collector's parse_driver_logs
-    # populates them via _apply_metric, but only if the field-by-field copy
-    # here also carries them. Live validation on lb-silver-live-v16 caught
-    # this omission: driver logs had silver_transactions_rows etc. but
-    # metrics.json showed silver_tables={} and extra_metrics={}.
-    job_metrics.silver_tables = parsed.silver_tables
-    job_metrics.extra_metrics = parsed.extra_metrics
+    import dataclasses
+
+    for f in dataclasses.fields(parsed):
+        if f.name in _CLUSTER_OWNED_JOB_METRICS_FIELDS:
+            continue
+        setattr(job_metrics, f.name, getattr(parsed, f.name))
 
 
 # Batch stage status poll. Stage times come from the cluster (_stage_timing),

@@ -2839,28 +2839,42 @@ class MetricsCollector:
         ttd_lines: list[re.Match[str]] = []
         ttd_detail: list[re.Match[str]] = []
 
-        # G5 + per-batch labels: silver_stream_scale_(cap|admission) from
-        # main() startup, plus per-micro-batch labels every JOB METRICS
-        # block emits from _merge_batch (D-full-simple:
-        # silver_statements_parity_mode / silver_statements_late_arrivals_*
-        # / silver_statements_batch_id, E1: dim_merge_elapsed_ms_*, I7:
-        # kyc_refreshed_at). Per-batch values LAST-write-wins so the run's
-        # extra_metrics reflect the most recent micro-batch's state and
-        # a run-total emit at stream stop replaces the per-batch value.
+        # Per-batch and per-run streaming labels lakebench silver jobs
+        # emit through log() as `<key>: <val>`. Accepted key families:
+        #   silver_*        per-layer counters and mode labels
+        #   dim_merge_*     E1 dimension MERGE metrics
+        #   kyc_*           I7 KYC refresh state
+        #   data_clock_*    C2 data-clock source
+        #
+        # Prefix families instead of enumerated names: a new label under
+        # an accepted prefix lands automatically. Adding a NEW subsystem
+        # (say ``tm_*``) is the only edit that requires touching this
+        # regex, and adding it is a review-visible signal.
+        #
+        # Contract with emitters (silver_stream* scripts):
+        #   * One label per log() call.  Two labels on one line means
+        #     the second one is silently dropped -- the value pattern
+        #     below is `\S+` (single non-whitespace token), refusing to
+        #     swallow the next key. Reviewer-caught silent-drop shape
+        #     (2026-09-28): the four multi-label emissions in
+        #     silver_stream_financial.py have been split to one-per-line.
+        #   * Value is a single non-whitespace token. A value that would
+        #     contain a space needs to be sanitised or split into two
+        #     labels; a value with a colon is accepted as a token.
+        #   * Key tail is lowercase snake_case ([a-z0-9_]+); uppercase or
+        #     hyphen keys are rejected by design so lane-specific typos
+        #     do not become metric names.
+        #
+        # The [lb] timestamp prefix is optional because our log() helper
+        # emits with the prefix but raw print() in scripts emits without.
+        # No job-type gate: any streaming job can emit any prefix-family
+        # label; extra_metrics is a shared bag, disambiguated by the key.
+        # Per-batch labels are LAST-write-wins so extra_metrics carries
+        # the most recent micro-batch's value.
         _stream_label_re = re.compile(
             r"^(?:\[lb\]\s+\S+\s+-\s+)?"
-            r"(?P<key>silver_stream_scale_(?:cap|admission)"
-            r"|silver_statements_parity_mode"
-            r"|silver_statements_parity_mode_run"
-            r"|silver_statements_late_arrivals_this_batch"
-            r"|silver_statements_total_late_arrivals"
-            r"|silver_statements_batch_id"
-            r"|dim_merge_elapsed_ms_entities"
-            r"|dim_merge_elapsed_ms_accounts"
-            r"|kyc_refreshed_at"
-            r"|kyc_refresh_kind"
-            r"|data_clock_source"
-            r"):\s*(?P<val>\S.*)$"
+            r"(?P<key>(?:silver|dim_merge|kyc|data_clock)_[a-z0-9_]+)"
+            r":\s*(?P<val>\S+)\s*$"
         )
 
         for line in logs.split("\n"):

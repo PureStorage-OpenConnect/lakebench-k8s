@@ -47,6 +47,70 @@ logger = logging.getLogger(__name__)
 _DEFAULT_RUNS_DIR = str(Path(DEFAULT_OUTPUT_DIR) / "runs")
 
 
+# Backward-compat aliases for renamed JobMetrics fields. Read tries the
+# canonical name first, then falls back through the alias list. Any
+# renamed field lists its OLD names here so runs recorded before the
+# rename still load correctly.
+_JOB_ALIASES: dict[str, tuple[str, ...]] = {
+    "cpu_seconds_requested": ("total_cpu_seconds_allocated", "total_cpu_time_seconds"),
+    "memory_gb_requested": ("peak_memory_gb_allocated", "peak_memory_gb"),
+}
+
+
+def _dataclass_from_dict(
+    cls: type, data: dict[str, Any], aliases: dict[str, tuple[str, ...]] | None = None
+):
+    """Reconstruct a dataclass instance from a JSON-dict, iterating fields.
+
+    Class-level fix for the LB-123 defect shape on the LOAD side. Two
+    live-caught instances (silver-plan r3 silver_tables + extra_metrics on
+    JobMetrics; extra_metrics on StreamingJobMetrics) reached metrics.json
+    via asdict() but reverted to defaults on load because the hand-written
+    kwargs list at each ctor site drifted behind the dataclass. Iterating
+    dataclasses.fields() removes that shape: a new field on the dataclass
+    flows automatically on both save (asdict) and load (this helper).
+
+    * datetime fields (start_time / end_time on JobMetrics) are handled by
+      the caller AFTER construction, since the dict carries ISO strings.
+      This helper skips them.
+    * aliases maps canonical -> tuple of legacy names; used for renamed
+      fields so pre-rename metrics.json still loads correctly.
+    * A missing key falls back to the dataclass default (default value
+      or default_factory), matching the behaviour of an omitted kwarg.
+    """
+    import dataclasses
+
+    kwargs: dict[str, Any] = {}
+    field_aliases = aliases or {}
+    _DATETIME_FIELDS = frozenset({"start_time", "end_time"})
+
+    for f in dataclasses.fields(cls):
+        if f.name in _DATETIME_FIELDS:
+            continue  # caller sets these post-construction via fromisoformat
+        # Try canonical name, then each alias in turn.
+        value = data.get(f.name)
+        if value is None:
+            for legacy in field_aliases.get(f.name, ()):
+                if data.get(legacy) is not None:
+                    value = data[legacy]
+                    break
+        if value is None:
+            # Missing on disk. Use the dataclass default so the loaded
+            # instance matches what a bare `cls()` would produce.
+            if f.default is not dataclasses.MISSING:
+                kwargs[f.name] = f.default
+            elif f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+                kwargs[f.name] = f.default_factory()
+            else:
+                # No default; construction would fail with kwarg omitted,
+                # so pass None and let the dataclass complain loudly.
+                kwargs[f.name] = None
+        else:
+            kwargs[f.name] = value
+
+    return cls(**kwargs)
+
+
 def _sort_instant(value: Any) -> float:
     """A start_time as epoch seconds for ordering runs.
 
@@ -380,49 +444,13 @@ class MetricsStorage:
         recorded_at = data.get("start_time")
         jobs = []
         for job_data in data.get("jobs", []):
-            job = JobMetrics(
-                job_name=job_data.get("job_name", ""),
-                job_type=job_data.get("job_type", ""),
-                elapsed_seconds=job_data.get("elapsed_seconds", 0),
-                timing_source=job_data.get("timing_source") or "",
-                timing_resolution_seconds=job_data.get("timing_resolution_seconds"),
-                submission_failures=list(job_data.get("submission_failures") or []),
-                submission_retry_seconds=job_data.get("submission_retry_seconds") or 0.0,
-                success=job_data.get("success", False),
-                error_message=job_data.get("error_message"),
-                input_size_gb=job_data.get("input_size_gb", 0),
-                output_size_gb=job_data.get("output_size_gb", 0),
-                input_rows=job_data.get("input_rows", 0),
-                output_rows=job_data.get("output_rows", 0),
-                executor_count=job_data.get("executor_count", 0),
-                executor_cores=job_data.get("executor_cores", 0),
-                executor_memory_gb=job_data.get("executor_memory_gb", 0.0),
-                cpu_seconds_requested=job_data.get(
-                    "cpu_seconds_requested",
-                    job_data.get(
-                        "total_cpu_seconds_allocated", job_data.get("total_cpu_time_seconds", 0.0)
-                    ),
-                ),
-                memory_gb_requested=job_data.get(
-                    "memory_gb_requested",
-                    job_data.get("peak_memory_gb_allocated", job_data.get("peak_memory_gb", 0.0)),
-                ),
-                throughput_gb_per_second=job_data.get("throughput_gb_per_second", 0),
-                throughput_rows_per_second=job_data.get("throughput_rows_per_second", 0),
-                # AML detection metrics (LB-116/117). Serialized by asdict()
-                # but previously dropped on reload, so the disk-loaded report
-                # (the only path users see) showed zero alerts and lost skip
-                # reasons -- defeating the LB-119 "never misreport a skip"
-                # invariant the scorecard depends on (LB-123 review).
-                alerts_by_rule=job_data.get("alerts_by_rule") or {},
-                rule_errors=job_data.get("rule_errors") or {},
-                rules_skipped=job_data.get("rules_skipped") or {},
-                tm_invariants=job_data.get("tm_invariants") or {},
-                tm_ops=job_data.get("tm_ops"),
-                tm_status=job_data.get("tm_status") or {},
-                c360_check=job_data.get("c360_check"),
-                c360_bronze=job_data.get("c360_bronze"),
-            )
+            # Class-level reload: iterate dataclass fields so every JobMetrics
+            # field flows automatically. The hand-written kwargs list here
+            # previously omitted silver_tables + extra_metrics -- disk showed
+            # them via asdict() but load reverted to defaults (LB-123 shape on
+            # the READ side, adversarial-review finding 2026-09-28). Same
+            # mirror defect on StreamingJobMetrics.extra_metrics, fixed below.
+            job = _dataclass_from_dict(JobMetrics, job_data, aliases=_JOB_ALIASES)
 
             if job_data.get("start_time"):
                 job.start_time = datetime.fromisoformat(job_data["start_time"])
@@ -446,38 +474,7 @@ class MetricsStorage:
 
         streaming = []
         for s_data in data.get("streaming", []):
-            streaming.append(
-                StreamingJobMetrics(
-                    job_name=s_data.get("job_name", ""),
-                    job_type=s_data.get("job_type", ""),
-                    throughput_rps=s_data.get("throughput_rps", 0.0),
-                    freshness_seconds=s_data.get("freshness_seconds"),
-                    micro_batch_duration_ms=s_data.get("micro_batch_duration_ms", 0.0),
-                    batch_size=s_data.get("batch_size", 0),
-                    total_batches=s_data.get("total_batches", 0),
-                    total_rows_processed=s_data.get("total_rows_processed", 0),
-                    unique_rows_processed=s_data.get("unique_rows_processed", 0),
-                    elapsed_seconds=s_data.get("elapsed_seconds", 0.0),
-                    success=s_data.get("success", False),
-                    error_message=s_data.get("error_message"),
-                    requested_executors=s_data.get("requested_executors"),
-                    batch_span_seconds=s_data.get("batch_span_seconds"),
-                    tick_timings=list(s_data.get("tick_timings") or []),
-                    ttd_pass_end_p50_seconds=s_data.get("ttd_pass_end_p50_seconds"),
-                    ttd_pass_end_p95_seconds=s_data.get("ttd_pass_end_p95_seconds"),
-                    ttd_by_rule=dict(s_data.get("ttd_by_rule") or {}),
-                    window_input_rows=s_data.get("window_input_rows"),
-                    pre_window_input_rows=s_data.get("pre_window_input_rows"),
-                    window_commits=s_data.get("window_commits"),
-                    window_new_data_cycles=s_data.get("window_new_data_cycles"),
-                    window_output_rows=s_data.get("window_output_rows"),
-                    last_write_offset_seconds=s_data.get("last_write_offset_seconds"),
-                    trickle_start_offset_seconds=s_data.get("trickle_start_offset_seconds"),
-                    output_rows=s_data.get("output_rows"),
-                    submission_failures=list(s_data.get("submission_failures") or []),
-                    running_at=s_data.get("running_at"),
-                )
-            )
+            streaming.append(_dataclass_from_dict(StreamingJobMetrics, s_data))
 
         # Deserialize top-level benchmark rounds
         top_rounds = _deserialize_benchmark_rounds(data.get("benchmark_rounds", []), recorded_at)

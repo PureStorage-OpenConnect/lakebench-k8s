@@ -263,7 +263,12 @@ def _kyc(spark):
     # streaming path; a future author adding a final-metrics block must
     # place it before the first refresh or key it under a distinct job
     # name (parse_driver_logs' regex is first-match).
-    log(f"kyc_refreshed_at: {int(now)} kyc_refresh_kind: {'refresh' if is_refresh else 'initial'}")
+    # One label per log() call so the collector's per-line regex does not
+    # swallow the second key into the first key's value. Reviewer-caught
+    # silent-drop shape (2026-09-28): `<k1>: <v1> <k2>: <v2>` matched only
+    # k1 because the value pattern was greedy; k2's rows were lost.
+    log(f"kyc_refreshed_at: {int(now)}")
+    log(f"kyc_refresh_kind: {'refresh' if is_refresh else 'initial'}")
     log_job_metrics(
         "silver-stream-kyc-refresh",
         input_size_gb=0.0,
@@ -782,10 +787,10 @@ def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[i
             f"[dim-merge] accounts: total={n_accts_total} inserted={n_new_accts} "
             f"updated={n_accts_total - n_new_accts} elapsed_ms={acct_elapsed_ms}"
         )
-        log(
-            f"dim_merge_elapsed_ms_entities: {ent_elapsed_ms} "
-            f"dim_merge_elapsed_ms_accounts: {acct_elapsed_ms}"
-        )
+        # One label per log() call so the collector's per-line regex does not
+        # swallow the second key into the first key's value.
+        log(f"dim_merge_elapsed_ms_entities: {ent_elapsed_ms}")
+        log(f"dim_merge_elapsed_ms_accounts: {acct_elapsed_ms}")
         log_job_metrics(
             "silver-stream-dim-merge",
             input_size_gb=0.0,
@@ -1170,10 +1175,10 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         # to `arrival_order_running_balance` (silently correct as arrival
         # order, but NOT byte-identical to batch mode).
         parity_mode = "strict_monotone" if late_ibans == 0 else "arrival_order_running_balance"
-        log(
-            f"silver_statements_parity_mode: {parity_mode} "
-            f"silver_statements_late_arrivals_this_batch: {late_ibans}"
-        )
+        # One label per log() call so the collector's per-line regex does not
+        # swallow the second key into the first key's value.
+        log(f"silver_statements_parity_mode: {parity_mode}")
+        log(f"silver_statements_late_arrivals_this_batch: {late_ibans}")
         # A JOB METRICS block per batch so the collector's driver-log parser
         # ingests these into metrics.json without a wire-not-connected step
         # (same mechanism KYC refresh uses in _kyc above).
@@ -1450,10 +1455,10 @@ def main() -> None:
     # statements byte-identical to batch mode; a non-zero count means
     # the arrival-order fallback fired on that many iban * batch touches.
     run_parity_mode = "strict_monotone" if total_late == 0 else "arrival_order_running_balance"
-    log(
-        f"silver_statements_total_late_arrivals: {total_late} "
-        f"silver_statements_parity_mode_run: {run_parity_mode}"
-    )
+    # One label per log() call so the collector's per-line regex does not
+    # swallow the second key into the first key's value.
+    log(f"silver_statements_total_late_arrivals: {total_late}")
+    log(f"silver_statements_parity_mode_run: {run_parity_mode}")
     # H4: clean shutdown removes the marker. The signal handler above
     # also calls this; the double-call is idempotent (delete-if-exists).
     # Both paths matter: process exits via SIGTERM in K8s Job termination,

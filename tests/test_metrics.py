@@ -548,6 +548,214 @@ class TestMetricsStorage:
         }
         assert target.extra_metrics == {"data_clock_source": "datagen_timestamp_end"}
 
+    def test_storage_roundtrip_class_level_no_field_drops(self, tmp_path):
+        """Class-level guarantee on the STORAGE READ path. Adversarial-review
+        finding (2026-09-28): the write side (asdict) auto-includes every
+        dataclass field, but the read side (_data_to_metrics) hand-listed
+        ctor kwargs and silently dropped silver_tables + extra_metrics on
+        reload. Users of `lakebench report --regenerate` and any downstream
+        consumer of load_run saw empty dicts even though metrics.json on
+        disk was correct.
+
+        This test writes a JobMetrics + StreamingJobMetrics with EVERY
+        field populated by a distinctive probe value, round-trips through
+        save_run/load_run, and asserts the loaded values match the
+        pre-write values. Adding a new field to either dataclass without
+        updating _dataclass_from_dict cannot silently drop it any more.
+        """
+        import dataclasses
+
+        from lakebench.metrics import MetricsCollector
+
+        # Build a probe with a distinctive non-default value for every
+        # parser/data field. Cluster-owned fields also get probe values
+        # so we prove they survive round-trip.
+        def _probe_value(f: dataclasses.Field):
+            base = hash(f.name) & 0xFFFF
+            # Read the default so we can pick a distinctive but shape-
+            # compatible probe value. Positional fields (no default at
+            # all) get treated as string-shape.
+            if f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+                default = f.default_factory()  # type: ignore[misc]
+            elif f.default is not dataclasses.MISSING:
+                default = f.default
+            else:
+                default = None
+            if isinstance(default, dict):
+                return {f.name + "_k": base}
+            if isinstance(default, list):
+                return [f.name + "_item"]
+            if isinstance(default, bool):
+                return True
+            if isinstance(default, int) and not isinstance(default, bool):
+                return base
+            if isinstance(default, float):
+                return float(base)
+            # str / None / positional -- use a string probe. JSON-safe.
+            return f.name + "_probe"
+
+        job = JobMetrics(job_name="probe-job", job_type="silver-build")
+        for f in dataclasses.fields(JobMetrics):
+            if f.name in ("start_time", "end_time"):
+                continue  # datetime probing handled below
+            setattr(job, f.name, _probe_value(f))
+        job.start_time = datetime(2026, 9, 28, 15, 0, 0)
+        job.end_time = datetime(2026, 9, 28, 15, 1, 0)
+
+        stream = StreamingJobMetrics(job_name="probe-stream", job_type="silver-stream")
+        for f in dataclasses.fields(StreamingJobMetrics):
+            setattr(stream, f.name, _probe_value(f))
+
+        run = PipelineMetrics(
+            run_id="probe-roundtrip",
+            deployment_name="probe",
+            start_time=datetime(2026, 9, 28, 14, 0, 0),
+            jobs=[job],
+            streaming=[stream],
+        )
+        storage = MetricsStorage(tmp_path / "runs")
+        collector = MetricsCollector()
+        collector.current_run = run
+        path = storage.save_run(run)
+        assert path is not None
+
+        loaded = storage.load_run("probe-roundtrip")
+        assert loaded is not None
+        assert len(loaded.jobs) == 1
+        assert len(loaded.streaming) == 1
+        lj = loaded.jobs[0]
+        ls = loaded.streaming[0]
+
+        # Every JobMetrics field survives the round-trip.
+        for f in dataclasses.fields(JobMetrics):
+            if f.name in ("start_time", "end_time"):
+                assert getattr(lj, f.name) == getattr(job, f.name), (
+                    f"JobMetrics.{f.name} lost through save_run/load_run"
+                )
+                continue
+            assert getattr(lj, f.name) == getattr(job, f.name), (
+                f"JobMetrics.{f.name} lost through save_run/load_run; "
+                f"either write (asdict) or read (_dataclass_from_dict) "
+                f"dropped it. This is the LB-123 defect shape -- fix the "
+                f"missing side."
+            )
+
+        # Every StreamingJobMetrics field survives.
+        for f in dataclasses.fields(StreamingJobMetrics):
+            assert getattr(ls, f.name) == getattr(stream, f.name), (
+                f"StreamingJobMetrics.{f.name} lost through save_run/load_run"
+            )
+
+    def test_apply_parsed_job_metrics_class_level_no_field_drops(self):
+        """Class-level guarantee: EVERY JobMetrics field is either declared
+        cluster-owned (never overwritten by parsed) or auto-copied from
+        parsed. Adding a new field to JobMetrics without categorising it
+        would slip through the existing per-field test above; this test
+        forces the choice.
+
+        Three live-caught defects (LB-123 detection dicts, silver-plan r3
+        silver_tables at 87feefd, silver-plan r3 streaming extra_metrics
+        at e31514d) were three instances of the same drift. This test
+        makes a fourth instance impossible without a new field escaping
+        both the cluster-owned set and the auto-copy.
+        """
+        import dataclasses
+
+        from lakebench.cli._run import (
+            _CLUSTER_OWNED_JOB_METRICS_FIELDS,
+            _apply_parsed_job_metrics,
+        )
+
+        # A distinctive value per JobMetrics field, so we can tell "auto-copy
+        # actually ran" from "default value happens to equal the parsed
+        # default". Every field name in JobMetrics must appear in one of
+        # the two branches; a new field forces a test update, which forces
+        # the categorisation decision.
+        parser_owned_probe = {
+            "input_size_gb": 3.14,
+            "output_size_gb": 6.28,
+            "input_rows": 111,
+            "output_rows": 222,
+            "throughput_gb_per_second": 0.5,
+            "throughput_rows_per_second": 50.0,
+            "alerts_by_rule": {"R": 7},
+            "rule_errors": {"R": "e"},
+            "rules_skipped": {"R": "s"},
+            "tm_invariants": {"1": {"x": {"status": "ok", "detail": "d"}}},
+            "tm_ops": {"k": "v"},
+            "tm_status": {"1": {"status": "ok", "reason": "r"}},
+            "c360_check": {"passed": 3},
+            "c360_bronze": {"rows": 4},
+            "silver_tables": {"silver_x_rows": 5},
+            "extra_metrics": {"data_clock_source": "z"},
+        }
+
+        parsed = JobMetrics(job_name="p", job_type="silver-build", **parser_owned_probe)
+        target = JobMetrics(job_name="t", job_type="silver-build")
+        _apply_parsed_job_metrics(target, parsed)
+
+        # Every parser-owned probe value must land on the target.
+        for name, value in parser_owned_probe.items():
+            assert getattr(target, name) == value, (
+                f"field {name!r} was not carried by _apply_parsed_job_metrics; "
+                f"either add it to _CLUSTER_OWNED_JOB_METRICS_FIELDS or "
+                f"extend the auto-copy path"
+            )
+
+        # Every JobMetrics field is either cluster-owned or parser-owned.
+        # A new field that is neither would slip past both this test and
+        # the field-by-field test above; force the author to categorise.
+        all_fields = {f.name for f in dataclasses.fields(JobMetrics)}
+        parser_owned = set(parser_owned_probe)
+        uncategorised = all_fields - _CLUSTER_OWNED_JOB_METRICS_FIELDS - parser_owned
+        assert not uncategorised, (
+            f"JobMetrics fields not categorised: {sorted(uncategorised)}. "
+            f"Add each to _CLUSTER_OWNED_JOB_METRICS_FIELDS (cluster path "
+            f"sets it authoritatively, parsed value ignored) or extend "
+            f"parser_owned_probe in this test (auto-copied from parsed)."
+        )
+
+        # H2 guard (2026-09-28 adversarial-review): _CLUSTER_OWNED accepts
+        # arbitrary strings, so a typo like "cpu_seconds_requesteed" would
+        # silently make the real field parser-owned and overwrite the
+        # cluster's authoritative value on every run. Require every name
+        # in the frozenset to be a real JobMetrics field.
+        misspelt = _CLUSTER_OWNED_JOB_METRICS_FIELDS - all_fields
+        assert not misspelt, (
+            f"_CLUSTER_OWNED_JOB_METRICS_FIELDS contains names not on "
+            f"JobMetrics: {sorted(misspelt)}. A typo here silently disables "
+            f"the cluster-owned guard for the real field it was meant to "
+            f"cover."
+        )
+
+        # H1 guard (2026-09-28 adversarial-review): dataclasses.fields()
+        # skips any class attribute without a PEP 526 annotation. A lane
+        # that added `reference_model_scores = field(default_factory=dict)`
+        # WITHOUT a type annotation would slip past both the auto-copy in
+        # _apply_parsed_job_metrics AND this test's `all_fields` set. Guard
+        # by asserting the public attribute surface of JobMetrics equals
+        # the dataclass field set. Attributes starting with `_` and
+        # methods are allowed off the field set; everything else must be
+        # annotated so `fields()` sees it.
+        public_attrs = {
+            name
+            for name in vars(JobMetrics)
+            if not name.startswith("_") and not callable(getattr(JobMetrics, name))
+        }
+        # Dataclass fields set defaults on the class; those show up in
+        # vars(). But a field WITH an annotation is also in all_fields.
+        # An unannotated attribute would appear in public_attrs and NOT
+        # in all_fields. That is the drift shape we refuse.
+        unannotated = public_attrs - all_fields
+        assert not unannotated, (
+            f"JobMetrics has public class attributes not seen by "
+            f"dataclasses.fields(): {sorted(unannotated)}. Add a type "
+            f"annotation so the field is real, or make the attribute "
+            f"private (leading underscore) if it is not part of the "
+            f"metrics surface. Without an annotation, "
+            f"_apply_parsed_job_metrics silently drops it."
+        )
+
     def test_detection_dicts_parse_record_and_roundtrip(self, tmp_path):
         """LB-123 re-review F1 guard: the detection dicts must survive the
         FULL cluster path shape -- parse_driver_logs (the only producer) ->
@@ -1361,6 +1569,79 @@ class TestStreamingLogParsing:
         assert e.get("dim_merge_elapsed_ms_accounts") == "6789"
         assert e.get("kyc_refreshed_at") == "1717029325"
         assert e.get("kyc_refresh_kind") == "initial"
+
+    def test_parse_streaming_logs_captures_new_labels_under_accepted_prefixes(self):
+        """Class-level guarantee: any new label under an accepted prefix
+        family (silver_/dim_merge_/kyc_/data_clock_) is picked up without
+        editing the regex. Two live-caught omissions in silver-plan r3
+        (silver_tables adapter + narrow streaming regex) were both the
+        same shape: a hand-enumerated list drifting behind the code that
+        emits into it. A hypothetical future label with any of these
+        prefixes must land in extra_metrics with no code change here."""
+        c = MetricsCollector()
+        logs = """
+[lb] 2026-09-28T15:00:00.000000 - silver_frobnicate_rows: 42
+[lb] 2026-09-28T15:00:00.000000 - silver_stream_backpressure_ms: 137
+[lb] 2026-09-28T15:00:00.000000 - dim_merge_conflicts: 3
+[lb] 2026-09-28T15:00:00.000000 - kyc_pending_refreshes: 11
+[lb] 2026-09-28T15:00:00.000000 - data_clock_skew_ms: -250
+26/09/28 15:00:00 INFO SparkContext: unrelated_something: should_not_match
+"""
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        assert e.get("silver_frobnicate_rows") == "42"
+        assert e.get("silver_stream_backpressure_ms") == "137"
+        assert e.get("dim_merge_conflicts") == "3"
+        assert e.get("kyc_pending_refreshes") == "11"
+        assert e.get("data_clock_skew_ms") == "-250"
+        # Spark's own log lines never match; they carry the timestamp
+        # prefix before any word, so the anchored regex ignores them.
+        assert "unrelated_something" not in e
+
+    def test_parse_streaming_logs_rejects_multi_label_per_line(self):
+        """Reviewer-caught (2026-09-28): pre-fix, greedy `\\S.*` value
+        pattern silently swallowed the second label on lines like
+        `silver_statements_parity_mode: X silver_statements_late_arrivals_this_batch: Y`.
+        The four emitter sites in silver_stream_financial.py have been
+        split to one-per-line, and the regex value pattern (single token,
+        `\\S+\\s*$`) refuses to swallow. A multi-label line now matches
+        the regex NOT AT ALL -- so both labels are dropped, but LOUDLY:
+        the user notices the intended metric is missing rather than
+        seeing a garbage value they might trust. Loud loss is better
+        than silent corruption.
+        """
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-28T15:00:00 - silver_statements_parity_mode: "
+            "strict_monotone silver_statements_late_arrivals_this_batch: 0\n"
+        )
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        # The whole line is refused: neither label lands. That is the
+        # loud failure mode; a regression in the emitter now shows up
+        # as a missing metric rather than a garbage-valued metric.
+        assert "silver_statements_parity_mode" not in e
+        assert "silver_statements_late_arrivals_this_batch" not in e
+
+    def test_parse_streaming_logs_rejects_uppercase_and_hyphen_keys(self):
+        """Design choice locked in (2026-09-28 adversarial-review):
+        key tail is lowercase snake_case ([a-z0-9_]+). An emitter that
+        used `silver_TxScale` or `dim_merge_ok-count` would fail the
+        prefix-family match and never land, by design -- lane-specific
+        typos should not become metric names. This test documents that
+        so the rejection is intentional, not accidental."""
+        c = MetricsCollector()
+        logs = (
+            "[lb] 2026-09-28T15:00:00 - silver_TxScale: 5\n"
+            "[lb] 2026-09-28T15:00:00 - dim_merge_ok-count: 3\n"
+            "[lb] 2026-09-28T15:00:00 - silver_valid_lowercase: 7\n"
+        )
+        metrics = c.parse_streaming_logs(logs, "silver-stream")
+        e = metrics.extra_metrics
+        assert "silver_TxScale" not in e
+        assert "dim_merge_ok-count" not in e
+        # Only the strictly-lowercase key is captured.
+        assert e.get("silver_valid_lowercase") == "7"
 
     def test_parse_streaming_logs_gold(self):
         c = MetricsCollector()
