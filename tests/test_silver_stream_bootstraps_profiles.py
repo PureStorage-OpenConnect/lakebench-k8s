@@ -36,7 +36,6 @@ def test_stream_main_executes_ddl_profiles(monkeypatch):
 
     # D-safe residual: allow the partial-silver path (entity_profiles is
     # not maintained by the continuous stream).
-    monkeypatch.setenv("LB_ALLOW_PARTIAL_SILVER", "1")
 
     executed_sql: list[str] = []
 
@@ -126,8 +125,6 @@ def test_stream_ensure_namespaces_includes_profiles_ddl(monkeypatch):
     """
     pytest.importorskip("pyspark")
     import silver_stream_financial as ss
-
-    monkeypatch.setenv("LB_ALLOW_PARTIAL_SILVER", "1")
 
     seen_ddls: list[tuple] = []
 

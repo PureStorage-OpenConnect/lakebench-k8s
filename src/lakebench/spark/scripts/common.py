@@ -1484,6 +1484,46 @@ def delta_idempotent_options(spark, app, batch_id):
     }
 
 
+def welford_merge(n_a, mean_a, M2_a, n_b, mean_b, M2_b):
+    """Parallel Welford merge of two (n, mean, M2) blocks.
+
+    D-full-profiles: ``silver.entity_profiles.avg_amount_usd`` and
+    ``stddev_amount_usd`` are maintained incrementally in continuous mode.
+    Each micro-batch computes its own (n_b, mean_b, M2_b) over the
+    originator-side amounts for the entities it touches; this helper folds
+    that batch block into the profile row's target block using the parallel
+    recurrence (Chan et al., 1979; the Wikipedia
+    "Algorithms for calculating variance -- Parallel algorithm").
+
+    Given target block ``a`` and batch block ``b``::
+
+        n   = n_a + n_b
+        d   = mean_b - mean_a
+        mean = mean_a + d * n_b / n
+        M2  = M2_a + M2_b + d * d * n_a * n_b / n
+
+    Sample stddev is then ``sqrt(M2 / (n - 1))`` -- pyspark's ``stddev`` is
+    ``stddev_samp``, so the batch main writes M2 as ``variance * (n - 1)``
+    for parity.
+
+    Returns ``(n, mean, M2)`` with the empty-block identity: merging with
+    ``(0, 0.0, 0.0)`` on either side returns the other block unchanged.
+    Callers must feed 0.0 (not None) for M2 when n <= 1 (variance is
+    undefined for a single point; M2 is 0 by definition).
+    """
+    n_a = int(n_a or 0)
+    n_b = int(n_b or 0)
+    if n_a == 0:
+        return n_b, float(mean_b or 0.0), float(M2_b or 0.0)
+    if n_b == 0:
+        return n_a, float(mean_a or 0.0), float(M2_a or 0.0)
+    n = n_a + n_b
+    delta = float(mean_b) - float(mean_a)
+    mean = float(mean_a) + delta * n_b / n
+    M2 = float(M2_a) + float(M2_b) + delta * delta * n_a * n_b / n
+    return n, mean, M2
+
+
 def delta_batch_txn_options(app, rebuild_epoch, cycle):
     """Delta writer options that make a batch cycle-append exactly-once (B1).
 

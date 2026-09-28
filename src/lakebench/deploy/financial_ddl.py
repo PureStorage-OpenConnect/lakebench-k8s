@@ -327,6 +327,10 @@ CREATE TABLE IF NOT EXISTS {catalog}.{table} (
     distinct_counterparties_in  BIGINT NOT NULL,
     passthrough_ratio          DOUBLE,
     profile_updated_ts         TIMESTAMP,
+    _m2                        DOUBLE,
+    _first_out_ts              TIMESTAMP,
+    _last_out_ts               TIMESTAMP,
+    _stream_id                 STRING,
     _batch_id                  BIGINT
 )
 USING iceberg
@@ -352,6 +356,24 @@ TBLPROPERTIES (
 #   when the entity never received (ratio undefined).
 # * _batch_id mirrors the other silver tables for the continuous DELETE+append
 #   idempotency protocol.
+# * _m2 stores the Welford sum-of-squared-deviations from the mean of
+#   ``txn_amount_usd`` on the originator side; the streaming update combines
+#   the target's (n, mean, _m2) with the batch's own block via the parallel
+#   Welford recurrence in common.welford_merge so ``stddev_amount_usd`` can
+#   be maintained without rescanning the entire silver.transactions table.
+#   Batch mode writes ``_m2 = variance * (txn_count_out - 1)`` so the two
+#   modes converge byte-identically for the same bronze.
+# * _first_out_ts / _last_out_ts hold the originator-side first / last
+#   ``txn_timestamp`` per entity. ``avg_gap_days`` is defined as
+#   ``(_last_out_ts - _first_out_ts) / (txn_count_out - 1)`` -- the
+#   originator-only span, not the profile-wide first/last (which fold both
+#   sides). Kept as internal columns so the continuous MERGE only needs
+#   LEAST / GREATEST against the batch's own out-side extremes rather than
+#   a scan of silver.transactions.
+# * _stream_id mirrors silver.transactions and silver.counterparty_edges
+#   (B2). Batch build writes the sentinel 'batch'; a stream write carries
+#   its ``streaming_query_id`` so a fresh checkpoint's batch 0 does not
+#   collide with the previous stream's batch 0.
 
 
 # Silver batch-versions sidecar (I10): "sealed" marker table written as

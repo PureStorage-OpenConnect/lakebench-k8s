@@ -306,14 +306,35 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_PROFILES} (
     distinct_counterparties_in  BIGINT NOT NULL,
     passthrough_ratio           DOUBLE,
     profile_updated_ts          TIMESTAMP,
+    _m2                         DOUBLE,
+    _first_out_ts               TIMESTAMP,
+    _last_out_ts                TIMESTAMP,
+    _stream_id                  STRING,
     _batch_id                   BIGINT
 ) USING iceberg PARTITIONED BY (bucket(64, entity_id))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
-# `_batch_id` is reserved for the continuous profile-maintenance path (not yet
-# built -- silver_stream does not refresh profiles today; C-PROFILES continuous
-# MERGE is the follow-up before W4/W8 read this table in continuous mode).
-# Batch silver_build writes one row per entity with _batch_id = NULL.
+# D-full-profiles (silver-plan): the streaming update maintains this table
+# incrementally. Aggregate strategies per column:
+#   - Additive (txn_count_out/in, total_*_usd): MERGE ... SET t = t + delta.
+#   - LEAST/GREATEST (first/last_seen_ts, _first_out_ts, _last_out_ts):
+#     MERGE ... SET t = LEAST(t, delta) / GREATEST(t, delta).
+#   - Welford (avg_amount_usd, stddev_amount_usd via _m2): the parallel
+#     Welford merge combines the target block (n, mean, _m2) with the batch
+#     block; see common.welford_merge. Sample stddev is derived on read as
+#     sqrt(_m2 / (n - 1)).
+#   - Derived on write (txn_count_total, active_span_days, avg_gap_days,
+#     passthrough_ratio): recomputed from the freshly merged base columns.
+#   - Recompute-per-batch (distinct_counterparties_out/in): exact
+#     count_distinct is not incrementally maintainable without keeping a
+#     seen-set per entity; instead the merge scans silver.transactions
+#     filtered to the touched entities (a bounded scan) and rewrites these
+#     two columns per touched entity. Acceptable here because batches touch
+#     a bounded entity set and silver.transactions is bucketed on
+#     originator_id, so the filter prunes to a few buckets.
+# `_batch_id` is the most-recent-batch stamp per row (Iceberg does not
+# preserve _batch_id across MERGE updates unless the SET clause writes it,
+# which the streaming update does). Batch silver_build writes NULL.
 
 # I10 sidecar: keep in lock-step with deploy/financial_ddl.py:SILVER_BATCH_VERSIONS_DDL.
 # A single-row insert after every successful micro-batch (stream) or cycle
@@ -923,7 +944,25 @@ def build_entity_profiles(txns_df, data_clock):
       is what the velocity/structuring rules reason about.
     - _batch_id is NULL in batch mode (mirrors the other silver tables); the
       continuous MERGE path sets it.
+
+    D-full-profiles parity columns projected here so batch and stream write
+    the same schema:
+
+    - ``_m2 = variance * (txn_count_out - 1)`` on the originator-side
+      amounts, coalesced to 0.0 when txn_count_out <= 1 (variance undefined
+      for a single point; M2 is 0 by definition). ``variance()`` in Spark is
+      ``var_samp = M2 / (n - 1)``, so multiplying by (n - 1) recovers M2.
+      Stream mode combines target M2 with each batch's block via the
+      parallel Welford recurrence (common.welford_merge).
+    - ``_first_out_ts`` / ``_last_out_ts`` retain the originator-side first
+      / last ``txn_timestamp`` per entity so the streaming MERGE can update
+      ``avg_gap_days`` from LEAST/GREATEST without a bronze rescan.
+    - ``_stream_id`` mirrors the transactions / edges sentinel: 'batch' in
+      this path so a subsequent stream never confuses batch-mode rows for
+      its own.
     """
+    from pyspark.sql.functions import variance
+
     amt = col("txn_amount_usd").cast("double")
     out_side = txns_df.groupBy(col("originator_id").alias("entity_id")).agg(
         min_(col("txn_timestamp")).alias("first_seen_ts"),
@@ -932,6 +971,9 @@ def build_entity_profiles(txns_df, data_clock):
         sum_(col("txn_amount_usd")).cast("decimal(38,2)").alias("total_sent_usd"),
         avg_(amt).alias("avg_amount_usd"),
         stddev_(amt).alias("stddev_amount_usd"),
+        # Welford M2 = variance * (n - 1); undefined for n <= 1 (single
+        # point) so coalesce to 0.0 -- the parallel merge identity.
+        coalesce(variance(amt) * (count_(lit(1)) - lit(1)), lit(0.0)).alias("_m2"),
         count_distinct_(col("beneficiary_id")).alias("distinct_counterparties_out"),
     )
     in_side = txns_df.groupBy(col("beneficiary_id").alias("entity_id")).agg(
@@ -996,6 +1038,11 @@ def build_entity_profiles(txns_df, data_clock):
         # impossible. Cast the date to TIMESTAMP so the column type stays
         # unchanged (the DDL declares it as TIMESTAMP).
         lit(data_clock.isoformat()).cast("timestamp").alias("profile_updated_ts"),
+        # D-full-profiles parity columns.
+        coalesce(col("_m2"), lit(0.0)).alias("_m2"),
+        col("first_seen_ts").alias("_first_out_ts"),
+        col("last_seen_ts").alias("_last_out_ts"),
+        lit("batch").alias("_stream_id"),
         lit(None).cast("bigint").alias("_batch_id"),
     )
 
