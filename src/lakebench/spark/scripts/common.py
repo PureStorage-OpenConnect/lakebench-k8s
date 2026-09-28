@@ -969,6 +969,29 @@ def delta_idempotent_options(spark, app, batch_id):
     }
 
 
+def delta_batch_txn_options(app, rebuild_epoch, cycle):
+    """Delta writer options that make a batch cycle-append exactly-once (B1).
+
+    Extends the ``txnAppId`` / ``txnVersion`` protocol Delta uses in
+    ``foreachBatch`` to batch-mode multi-cycle appends. ``rebuild_epoch``
+    partitions the app id so a ``--force-rebuild`` cycles the id space and
+    cycle 0 of the new epoch is not skipped as a duplicate of the last epoch's
+    cycle 0. ``cycle`` is the txnVersion: Delta short-circuits any later
+    commit whose (appId, version) it has already seen, so re-submitting the
+    same cycle within the same epoch is a no-op at the transaction log --
+    the second submission's DESCRIBE HISTORY shows ``SET TRANSACTION`` with
+    no data commit.
+
+    Do NOT reuse ``delta_idempotent_options``: that helper calls
+    ``streaming_query_id`` which raises outside ``foreachBatch`` and would
+    crash the batch main at import.
+    """
+    return {
+        "txnAppId": f"{app}-rebuild-{int(rebuild_epoch)}",
+        "txnVersion": str(int(cycle)),
+    }
+
+
 def stream_run_id(spark):
     """Run id of the streaming query in the current ``foreachBatch`` call.
 
@@ -1020,17 +1043,34 @@ def refuse_fresh_checkpoint_over_data(spark, checkpoint_location, fq_table):
     A new checkpoint starts the source from the beginning, so every row
     already in ``fq_table`` would be written a second time. That happens when
     checkpoints are deleted but tables are not. Clear both, or neither.
+
+    ``fq_table`` accepts a single fully-qualified table name (str) or a list
+    of them; any populated table on the list triggers the refusal. B3
+    uniform silver exit contract: the refusal raises ``SilverAbort`` so the
+    driver terminates with the same exception class every other silver
+    invariant does (A1, F1). Existing callers already let unhandled
+    exceptions terminate main().
     """
     if not checkpoint_is_fresh(spark, checkpoint_location):
         return
-    if not table_exists(spark, fq_table) or spark.table(fq_table).limit(1).count() == 0:
+    tables = [fq_table] if isinstance(fq_table, str) else list(fq_table)
+    populated: list[str] = []
+    for t in tables:
+        if not table_exists(spark, t):
+            continue
+        if spark.table(t).limit(1).count() == 0:
+            continue
+        populated.append(t)
+    if not populated:
         return
     log(
-        f"ERROR: checkpoint {checkpoint_location} is empty but {fq_table} already has "
-        "rows; starting would re-read the whole source and duplicate them. Drop the "
-        "table or restore the checkpoint."
+        f"ERROR: checkpoint {checkpoint_location} is empty but populated silver "
+        f"table(s) {', '.join(populated)} already hold rows; starting would re-read "
+        "the whole source and duplicate them. Drop the tables or restore the checkpoint."
     )
-    raise SystemExit(1)
+    raise SilverAbort(
+        f"fresh checkpoint over populated silver: {checkpoint_location} vs {', '.join(populated)}"
+    )
 
 
 def await_stream(spark, query):

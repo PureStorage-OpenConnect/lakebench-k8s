@@ -187,6 +187,7 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_TRANSACTIONS} (
     rptd_beneficiary_address STRING,
     source_message_ref      STRING,
     _batch_id               BIGINT,
+    _stream_id              STRING,
     ingest_ts               TIMESTAMP
 ) USING iceberg PARTITIONED BY (months(txn_timestamp))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
@@ -273,7 +274,8 @@ CREATE TABLE IF NOT EXISTS {CATALOG}.{SILVER_EDGES} (
     last_seen_ts           TIMESTAMP NOT NULL,
     cumulative_amount_usd  DECIMAL(38, 2) NOT NULL,
     txn_count              BIGINT NOT NULL,
-    _batch_id              BIGINT
+    _batch_id              BIGINT,
+    _stream_id             STRING
 ) USING iceberg PARTITIONED BY (bucket(64, source_entity_id))
 TBLPROPERTIES ({ICEBERG_V2_SNAPPY_PROPS_SQL})
 """
@@ -443,6 +445,12 @@ def build_transactions(bronze):
         # Present in every DataFrame that writes silver.transactions so the
         # DataFrameWriterV2.overwrite() column set matches the target schema.
         lit(None).cast("bigint").alias("_batch_id"),
+        # B2: _stream_id scopes _batch_id to one streaming query so a fresh
+        # checkpoint's batch 0 does not collide with the previous stream's.
+        # Batch-mode writes stamp the sentinel 'batch' so a batch overwrite
+        # followed by a stream never DELETEs batch-mode rows (streams key on
+        # _stream_id = streaming_query_id, never 'batch').
+        lit("batch").alias("_stream_id"),
         # Continuous clock: bronze-ingest stamps each micro-batch; batch
         # bronze has no ingest time, so freshness stays undefined there.
         (col("ingest_ts") if "ingest_ts" in bronze.columns else lit(None).cast("timestamp")).alias(
@@ -855,6 +863,9 @@ def build_edges(txns_df):
             # per-batch build_edges wrapper. Present so overwrite() writes
             # match the target schema.
             lit(None).cast("bigint").alias("_batch_id"),
+            # B2: batch-mode edges carry the same 'batch' sentinel as
+            # transactions so a subsequent stream never DELETEs batch rows.
+            lit("batch").alias("_stream_id"),
         )
     )
 
@@ -1111,6 +1122,10 @@ def main() -> None:
     # below (which carry them) would fail on a schema mismatch.
     for table in (SILVER_TRANSACTIONS, SILVER_EDGES):
         ensure_column(spark, f"{CATALOG}.{table}", "_batch_id", "BIGINT")
+        # B2: _stream_id scopes _batch_id per streaming query. Batch build
+        # writes 'batch'; streams write streaming_query_id. Old catalogs
+        # predate the column, so add it before the first write below.
+        ensure_column(spark, f"{CATALOG}.{table}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "ingest_ts", "TIMESTAMP")
     ensure_partition_transform(
         spark, f"{CATALOG}.{SILVER_TRANSACTIONS}", "days(txn_timestamp)", "months(txn_timestamp)"

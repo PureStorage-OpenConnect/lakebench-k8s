@@ -33,6 +33,7 @@ def main():
     jar_dir, work = sys.argv[1], sys.argv[2]
     spark = session(jar_dir, work)
     from common import (
+        SilverAbort,
         refuse_fresh_checkpoint_over_data,
         reset_stream_tables,
         table_exists,
@@ -91,7 +92,7 @@ def main():
     try:
         refuse_fresh_checkpoint_over_data(spark, ckpt, "ice.silver.customer_interactions_enriched")
         out["refused_before"] = False
-    except SystemExit:
+    except SilverAbort:
         out["refused_before"] = True
 
     # Spelled file:///... on purpose; Hadoop reports some locations as
@@ -147,7 +148,7 @@ def main():
     try:
         refuse_fresh_checkpoint_over_data(spark, ckpt, "ice.silver.customer_interactions_enriched")
         out["refused_after"] = False
-    except SystemExit:
+    except SilverAbort:
         out["refused_after"] = True
 
     # Idempotent: a second reset over nothing succeeds and drops nothing.

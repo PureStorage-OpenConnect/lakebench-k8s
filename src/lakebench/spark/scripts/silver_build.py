@@ -22,6 +22,7 @@ from common import (
     apply_silver_transformations_anchored,
     assert_progress,
     c360_bronze_path,
+    ensure_column,
     env,
     log,
     path_size_gb_strict,
@@ -32,6 +33,7 @@ from common import (
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
+    lit,
     to_date,
 )
 from pyspark.sql.functions import max as max_
@@ -354,8 +356,14 @@ def reassert_silver_iceberg_props(spark, silver_tbl) -> None:
     spark.sql(f"ALTER TABLE {silver_tbl} SET TBLPROPERTIES ({props_sql})")
 
 
-def silver_simple(spark, source, silver_tbl, catalog, appending=False):
-    """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB."""
+def silver_simple(spark, source, silver_tbl, catalog, appending=False, cycle=0):
+    """SIMPLE strategy: Standard shuffle joins, single pass. For < 100GB.
+
+    B1: every row carries ``_batch_id = cycle`` so a re-submission of the
+    same cycle DELETEs the earlier attempt's rows before re-inserting them,
+    matching the DELETE + APPEND pattern silver_stream.py already uses.
+    Cycle 0 is the full rebuild (createOrReplace); cycles 1+ append.
+    """
     log("Executing SIMPLE strategy...")
 
     df_bronze = spark.read.parquet(source)
@@ -364,12 +372,18 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     _COUNTED["bronze_rows"] = bronze_count
     anchor = resolve_data_clock(df_bronze)
 
-    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
+        "_batch_id", lit(int(cycle)).cast("bigint")
+    )
     silver_count = silver_df.count()
 
     log(f"Writing {silver_count:,} records to {silver_tbl}")
     if appending:
-        log("Appending to existing table (incremental mode)")
+        log(f"Appending to existing table (incremental mode, cycle={cycle})")
+        # B1: DELETE this cycle's rows first so a re-submission of the same
+        # cycle is idempotent. First attempt: DELETE matches nothing.
+        ensure_column(spark, silver_tbl, "_batch_id", "BIGINT")
+        spark.sql(f"DELETE FROM {silver_tbl} WHERE _batch_id = {int(cycle)}")
         # G4: re-assert table properties before the append so a stale table
         # cannot silently degrade the write (invariant 5).
         reassert_silver_iceberg_props(spark, silver_tbl)
@@ -390,7 +404,7 @@ def silver_simple(spark, source, silver_tbl, catalog, appending=False):
     return silver_count
 
 
-def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=False):
+def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=False, cycle=0):
     """STREAMING strategy: Direct write, single pass. For >= 100GB.
 
     Key insight: Column transformations don't require data redistribution.
@@ -425,7 +439,9 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
     anchor = resolve_data_clock(df_bronze)
 
     # Apply transformations - all column operations, no joins
-    silver_df = apply_silver_transformations_anchored(df_bronze, anchor)
+    silver_df = apply_silver_transformations_anchored(df_bronze, anchor).withColumn(
+        "_batch_id", lit(int(cycle)).cast("bigint")
+    )
 
     # LB-049: distribution-mode is overridable via Spark conf for scale
     # testing. Default changed from "none" to "hash" -- see docstring.
@@ -434,7 +450,11 @@ def silver_streaming(spark, source, silver_tbl, catalog, profile, appending=Fals
     log(f"Writing to {silver_tbl} (single pass, distribution-mode={dist_mode}, fanout={fanout})...")
 
     if appending:
-        log("Appending to existing table (incremental mode)")
+        log(f"Appending to existing table (incremental mode, cycle={cycle})")
+        # B1: DELETE this cycle's rows first so a re-submission of the same
+        # cycle is idempotent (same pattern as SIMPLE and silver_stream).
+        ensure_column(spark, silver_tbl, "_batch_id", "BIGINT")
+        spark.sql(f"DELETE FROM {silver_tbl} WHERE _batch_id = {int(cycle)}")
         # G4: re-assert table properties before the append. STREAMING is only
         # picked when incremental is fresh in practice, but the append path
         # still needs the same guarantee as SIMPLE.
@@ -509,11 +529,34 @@ incremental_mode = os.environ.get("LB_SILVER_INCREMENTAL", "false").lower() == "
 if incremental_mode:
     log("INCREMENTAL MODE: will append to existing table")
 
+# B1: cycle number is 0 on the full rebuild and 1..N on subsequent appends.
+# LB_BRONZE_CYCLE is 0-indexed from cli/_run.py; it is unset in a single-cycle
+# run. A repeated submission of the same cycle is idempotent because the
+# writer DELETEs on the _batch_id key first.
+_cycle = int(os.environ.get("LB_BRONZE_CYCLE", "0"))
+
 # Cycles 2+ of a multi-cycle run append only their own bronze files; a full
 # build reads every file. Profile, size and read the same path.
 appending = incremental_mode and _table_exists(spark, silver_tbl)
 bronze_source = c360_bronze_path(bronze_uri, appending)
 log(f"Bronze source: {bronze_source}")
+
+# B1 full-rebuild epoch guard: cycle 0 with an already-populated silver
+# table is an unintended rebuild that would drop rows this deployment has
+# already written. --force-rebuild (LB_FORCE_REBUILD=1) opts in explicitly,
+# and job.py bumps LB_REBUILD_EPOCH before submitting so downstream idempotency
+# keys move to a new namespace. Without it, refuse.
+_force_rebuild = os.environ.get("LB_FORCE_REBUILD", "0") == "1"
+if not appending and _table_exists(spark, silver_tbl):
+    try:
+        _has_rows = spark.table(silver_tbl).limit(1).count() > 0
+    except Exception:  # noqa: BLE001
+        _has_rows = False
+    if _has_rows and not _force_rebuild:
+        raise SilverAbort(
+            f"silver-build: refusing full rebuild of populated {silver_tbl}; "
+            "re-run with --force-rebuild to opt in"
+        )
 
 # Check for size override first (skip profiling entirely for faster startup)
 size_override = get_size_override(spark)
@@ -552,10 +595,12 @@ apply_dynamic_config(spark, profile)
 
 # Execute selected strategy
 if strategy == SilverStrategy.SIMPLE:
-    silver_count = silver_simple(spark, bronze_source, silver_tbl, catalog, appending=appending)
+    silver_count = silver_simple(
+        spark, bronze_source, silver_tbl, catalog, appending=appending, cycle=_cycle
+    )
 elif strategy == SilverStrategy.STREAMING:
     silver_count = silver_streaming(
-        spark, bronze_source, silver_tbl, catalog, profile, appending=appending
+        spark, bronze_source, silver_tbl, catalog, profile, appending=appending, cycle=_cycle
     )
 elif strategy == SilverStrategy.SALTED:
     # G1: SALTED is deferred to v1.7 (plan Block J). `get_strategy_override`

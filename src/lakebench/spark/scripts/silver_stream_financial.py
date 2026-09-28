@@ -85,6 +85,8 @@ from common import (
     ensure_partition_transform,
     env,
     log,
+    refuse_fresh_checkpoint_over_data,
+    streaming_query_id,
 )
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
@@ -164,7 +166,7 @@ def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
     the key against the table, so a replayed batch writes nothing twice."""
     from pyspark.sql.functions import col
 
-    ents = build_entities(txns.drop("_batch_id"), batch_df, kyc)
+    ents = build_entities(txns.drop("_batch_id", "_stream_id"), batch_df, kyc)
     have = spark.table(f"{CATALOG}.{SILVER_ENTITIES}").select(col("entity_id").alias("_have"))
     new_ents = ents.join(have, ents["entity_id"] == have["_have"], "left_anti")
     accts = build_accounts(batch_df, kyc)
@@ -201,12 +203,21 @@ def _merge_batch(batch_df, batch_id: int) -> int:
     these across batches to feed assert_progress.
     """
     spark = batch_df.sparkSession
+    # B2: compose the DELETE key with the streaming query id so a fresh
+    # checkpoint's batch 0 does not stomp the previous stream's batch 0.
+    # streaming_query_id() must be read inside foreachBatch: Spark sets
+    # it as a local property on the micro-batch thread.
+    sid = streaming_query_id(spark)
     tagged_txns = (
         build_transactions(batch_df)
         # Overwrite the batch column with the real batchId. Cheaper than
         # projecting the schema again, and mirrors the same pattern the
         # per-batch edges do below.
         .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
+        # Every stream-written row also carries its streaming query id
+        # so the DELETE key is (stream, batch); batch-mode writes stamp
+        # 'batch' and are never matched.
+        .withColumn("_stream_id", lit(sid))
         .cache()
     )
     try:
@@ -224,17 +235,26 @@ def _merge_batch(batch_df, batch_id: int) -> int:
         # ghost rows behind; INSERT then re-materializes the batch. On a
         # first attempt DELETE is a no-op (nothing matches). Iceberg V2
         # supports row-level DELETE; both COW and MoR configurations work.
-        spark.sql(f"DELETE FROM {CATALOG}.{SILVER_TXNS} WHERE _batch_id = {int(batch_id)}")
+        # B2: predicate is (stream, batch), never bare batch id.
+        spark.sql(
+            f"DELETE FROM {CATALOG}.{SILVER_TXNS} "
+            f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
+        )
         tagged_txns.writeTo(f"{CATALOG}.{SILVER_TXNS}").append()
 
         # PHASE 2: silver.counterparty_edges.
         # Per-batch aggregates only; cumulative sums are computed on read
         # by consumers via SUM(cumulative_amount_usd) GROUP BY
         # source_entity_id, target_entity_id (FQ3 already does this).
-        edges_batch = build_edges(tagged_txns.drop("_batch_id")).withColumn(
-            "_batch_id", lit(int(batch_id)).cast("bigint")
+        edges_batch = (
+            build_edges(tagged_txns.drop("_batch_id", "_stream_id"))
+            .withColumn("_batch_id", lit(int(batch_id)).cast("bigint"))
+            .withColumn("_stream_id", lit(sid))
         )
-        spark.sql(f"DELETE FROM {CATALOG}.{SILVER_EDGES} WHERE _batch_id = {int(batch_id)}")
+        spark.sql(
+            f"DELETE FROM {CATALOG}.{SILVER_EDGES} "
+            f"WHERE _stream_id = '{sid}' AND _batch_id = {int(batch_id)}"
+        )
         edges_batch.writeTo(f"{CATALOG}.{SILVER_EDGES}").append()
 
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
@@ -298,7 +318,21 @@ def main() -> None:
     # tables before the first micro-batch fires. Idempotent on re-runs.
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_batch_id", "BIGINT")
     ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_batch_id", "BIGINT")
+    # B2: _stream_id scopes _batch_id per streaming query so a fresh
+    # checkpoint's batch 0 does not collide with the previous stream's.
+    # Idempotent on re-runs; adds the column on a reused catalog.
+    ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "_stream_id", "STRING")
+    ensure_column(spark, f"{CATALOG}.{SILVER_EDGES}", "_stream_id", "STRING")
     ensure_column(spark, f"{CATALOG}.{SILVER_TXNS}", "ingest_ts", "TIMESTAMP")
+
+    # B3: refuse a fresh checkpoint over populated silver -- the source
+    # would start from the beginning and every existing row would be
+    # duplicated. Uniform SilverAbort exit contract (see common.py).
+    refuse_fresh_checkpoint_over_data(
+        spark,
+        CHECKPOINT_URI,
+        [f"{CATALOG}.{SILVER_TXNS}", f"{CATALOG}.{SILVER_EDGES}"],
+    )
     # H2: match silver_build_financial's partition evolution so a
     # continuous-only deployment on a reused catalog does not drift on the
     # old days() spec. Iceberg partition evolution is metadata-only (~1s)
