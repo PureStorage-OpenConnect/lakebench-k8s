@@ -1,4 +1,4 @@
-"""AML D8 scale invariance (AML-GOALS 5a D8, section 9 #45, prereg 3.6.0).
+"""AML D8 scale invariance (AML-GOALS 5a D8, section 9 #45, prereg 3.6.0+ unchanged through 3.6.1).
 
 Known answers for the registered rule (scale_estimate + typology_rule on
 synthetic run statistics): an invariant typology passes, a 0.10 mid-band
@@ -673,7 +673,9 @@ def test_prereg_registers_the_d8_rule():
     assert s["l2_sensitivity"]["values"] == [1.0, 100.0]
     assert s["l2_sensitivity"]["gated"] is False
     assert "not an equivalence test" in s["not_an_equivalence_test"]
-    assert REAL["version"] == REAL["changelog"][0]["version"] == "3.6.0"
+    # 3.6.1 (Wave 1 A2, 2026-09-28) pinned the screening block; D8 rule content
+    # unchanged. The changelog head moves with the version bump.
+    assert REAL["version"] == REAL["changelog"][0]["version"] == "3.6.1"
 
 
 def test_power_sim_output_hash_is_recorded():

@@ -534,11 +534,20 @@ pub fn build_batch(
     // rescale so cfg.dirty_ratio is the operator-visible AGGREGATE dirty rate
     // (LB-191, 2026-09-28): per-row rate = cfg.dirty_ratio *
     // DIRTY_RATE_BY_SOURCE[src] / weighted_mean, where weighted_mean is the
-    // DATA_SOURCE_WEIGHTS-weighted average of DIRTY_RATE_BY_SOURCE. This makes
-    // cfg.dirty_ratio == 0.08 produce ~8% aggregate dirty rows on the pass,
-    // not ~0.6% (the pre-fix bug where the input was multiplied by the
-    // weighted mean itself). Per-source rates are clamped at 1.0 for
-    // pathological cfg.dirty_ratio settings.
+    // DATA_SOURCE_WEIGHTS-weighted average of DIRTY_RATE_BY_SOURCE (~0.0735).
+    // This makes cfg.dirty_ratio == 0.08 produce ~8% aggregate dirty rows on
+    // the pass, not ~0.6% (the pre-fix bug where the input was multiplied by
+    // the weighted mean itself).
+    //
+    // Clamp at 1.0 is required because per-source rates are probabilities.
+    // Elbow at cfg = weighted_mean / max(DIRTY_RATE_BY_SOURCE) = 0.0735/0.35
+    // ~= 0.21: above that, legacy_import saturates at 1.0, the 70x
+    // legacy/primary shape ratio compresses, and the aggregate rate degrades
+    // (cfg = 0.5 gives observed aggregate ~29%, not 50%). The operator
+    // promise "cfg.dirty_ratio == observed aggregate" is exact for
+    // cfg <= 0.21 and increasingly optimistic above it. Realistic dirty
+    // rates sit well below the elbow so the default (0.08) is exact.
+    // Documented rather than silently clipped.
     let per_row_dirty_rate: Vec<f64> = if cfg.dirty_ratio > 0.0 {
         let weighted_mean: f64 = r::DATA_SOURCE_WEIGHTS
             .iter()
@@ -1535,13 +1544,15 @@ mod tests {
                 _ => {}
             }
         }
-        // Post LB-191 rescale: aggregate per-row rate == cfg.dirty_ratio, per-
-        // source rate = cfg.dirty_ratio * DIRTY_RATE_BY_SOURCE[s] / 0.0735.
-        // At cfg.dirty_ratio=0.08: legacy per-row = 0.381, primary per-row =
-        // 0.00544. After corruptibility (~10/22 cities have variants):
-        // legacy observed ~17%, primary observed ~0.25%. Ratio ~70x, well
-        // above the 10x lower bound this test asserts. Shape unchanged from
-        // the pre-fix code; only the absolute magnitudes moved up.
+        // Post LB-191 rescale: aggregate per-row rate == cfg.dirty_ratio,
+        // per-source rate = cfg.dirty_ratio * DIRTY_RATE_BY_SOURCE[s] /
+        // 0.0735. At cfg.dirty_ratio=0.08: legacy per-row = 0.381, primary
+        // per-row = 0.00544. After corruptibility (~10/22 cities have
+        // variants): legacy observed ~17%, primary observed ~0.25%. Ratio
+        // ~70x, well above the 10x floor asserted here. Shape ratio is the
+        // full 70x below the clamp elbow at cfg ~= 0.21 and compresses
+        // above it (see the aggregate-rate elbow comment in build_batch);
+        // the coverage at cfg=0.5 is in dirty_ratio_above_elbow_degrades.
         let legacy_rate = legacy_dirty as f64 / legacy_total.max(1) as f64;
         let primary_rate = primary_dirty as f64 / primary_total.max(1) as f64;
         // Primary might be zero at this sample size -- guard for the ratio.
@@ -1557,6 +1568,57 @@ mod tests {
             // primary got exactly none -- that's the shape too.
             assert!(legacy_dirty > 0, "no legacy_import corruption seen");
         }
+    }
+
+    #[test]
+    fn dirty_ratio_above_elbow_degrades_predictably() {
+        // Documents (rather than hides) the clamp behaviour. Elbow is at
+        // cfg = weighted_mean / max(DIRTY_RATE_BY_SOURCE) = 0.0735/0.35
+        // ~= 0.21. Above the elbow, legacy_import per-row saturates at
+        // 1.0 and the operator-visible aggregate rate stops tracking
+        // cfg.dirty_ratio.
+        //
+        // At cfg = 0.5: per-source rates before clamp =
+        //   legacy = 0.5 * 0.35 / 0.0735 ~= 2.38 -> 1.0
+        //   manual = 0.5 * 0.15 / 0.0735 ~= 1.02 -> 1.0
+        //   third  = 0.5 * 0.05 / 0.0735 ~= 0.34
+        //   primary= 0.5 * 0.005 / 0.0735 ~= 0.034
+        // Weighted aggregate = 0.70*0.034 + 0.15*1.0 + 0.10*1.0 + 0.05*0.34
+        //   ~= 0.291 (city corruptibility factor ~10/22 makes the observed
+        //   city-not-clean share ~13% at 5000 rows). This test asserts the
+        //   observed rate is roughly half of cfg = 0.5, not the 8% band that
+        //   dirty_ratio_positive_corrupts_some_cities pins at the default.
+        let cfg = Config {
+            dirty_ratio: 0.5,
+            ..small_cfg(5000)
+        };
+        let loyalty = r::LoyaltyLookup::build(42, cfg.customer_id_max);
+        let sampler = r::CustomerIdSampler::new(cfg.customer_id_max);
+        let batch = build_batch(&cfg, &loyalty, &sampler);
+        let cities = batch
+            .column_by_name("city_raw")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let clean: std::collections::HashSet<&str> = r::CITIES.iter().map(|(c, _)| *c).collect();
+        let mut dirty = 0;
+        for i in 0..batch.num_rows() {
+            if !clean.contains(cities.value(i)) {
+                dirty += 1;
+            }
+        }
+        let share = dirty as f64 / batch.num_rows() as f64;
+        // Expected ~29% aggregate rate * ~10/22 corruptibility = ~13% share.
+        // Assert we are NOT tracking cfg=0.5 (i.e. share < 0.20, well
+        // below the "if it tracked" observed ~23%), and we ARE well above
+        // the sub-elbow ~4% observed at cfg=0.08. Range [0.08, 0.20] captures
+        // this predictable-degradation window across sample noise.
+        assert!(
+            (0.08..=0.20).contains(&share),
+            "dirty share {} at cfg=0.5 outside [0.08, 0.20] degradation band",
+            share
+        );
     }
 
     #[test]
