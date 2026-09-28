@@ -31,11 +31,29 @@ locally in `dev-artifacts/AML-GOALS.md` section 9, and R-numbers to its rules.
   decision, a decision-log row and a fresh evaluation seed.
 - Everything that changes AML generator output lands before the freeze:
   sanctions and PEP planting (#50), and moving answer keys out of bronze.
-- After the freeze, any change that alters AML generator output (AML rows,
-  manifest or MODEL_VERSION at a fixed seed) voids the freeze: it needs a
-  MODEL_VERSION bump, a re-run of the calibration table and a new evaluation
-  seed. Customer 360 only and output-neutral changes to `datagen_rs/` are
-  fine when a byte-identical AML corpus at seed 43 proves them so.
+- The freeze spans bronze AND silver (#55). It covers the AML generator
+  output (bronze rows, manifest, MODEL_VERSION at a fixed seed) and the
+  silver transform output: the business-column content of the six silver
+  tables `silver_build_financial` writes (silver.transactions, .entities,
+  .accounts, .account_statements, .counterparty_edges, .entity_profiles)
+  at a fixed seed. Per-run sentinels (`_batch_id`, `_stream_id`,
+  `ingest_ts`, and the sidecar's `committed_at`) are not part of the
+  frozen content -- they vary per run by design and are excluded from the
+  parity definition, exactly as the batch/stream parity tests exclude
+  them. Silver was hardened and its batch vs stream row-content parity
+  proven before this extension; freezing bronze->silver gives gold,
+  detection, scoring and replay a stable silver contract to build on.
+- After the freeze, any change that alters AML generator output OR silver
+  transform output (AML rows, manifest, MODEL_VERSION, or any frozen
+  silver business-column content at a fixed seed) voids the freeze: it
+  needs a MODEL_VERSION bump, a re-run of the calibration table and a new
+  evaluation seed. Customer 360 only and output-neutral changes to
+  `datagen_rs/` or `silver_build_financial.py` are fine when a
+  byte-identical AML corpus and byte-identical silver business columns at
+  seed 43 prove them so; the spark-tier batch/stream parity tests
+  (statements, profiles, dimensions, replay-idempotency) are the standing
+  automated guard, matching how MODEL_VERSION plus the seed-43
+  byte-compare guards the generator (no separate silver-hash gate).
 
 ## The registered looks
 
