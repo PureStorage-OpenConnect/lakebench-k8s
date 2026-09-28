@@ -16,6 +16,7 @@ of the assertion is exercised by tests/spark under the local-Spark tier.
 
 from __future__ import annotations
 
+import importlib
 import sys
 from pathlib import Path
 
@@ -24,18 +25,23 @@ import pytest
 _SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "src/lakebench/spark/scripts"
 sys.path.insert(0, str(_SCRIPTS_DIR))
 
-from common import SilverAbort  # noqa: E402, I001
-
 
 # --- Direct behaviour: the common-only path raises SilverAbort ---
 
 
 def test_silver_abort_symbol_is_public_from_common():
-    """SilverAbort is exported from common.py so silver_build can import it."""
-    from common import SilverAbort as Imported
+    """SilverAbort is exported from common.py so silver_build can import it.
 
-    assert Imported is SilverAbort
-    assert issubclass(SilverAbort, RuntimeError)
+    Full-suite test-ordering guard: other tests earlier in the run (e.g.
+    test_delta_silver_layout.py) pop and re-import `common` inside their
+    test bodies, so a module-level `from common import SilverAbort`
+    captured at import time may go stale relative to sys.modules['common']
+    by the time this test runs. Resolve dynamically from the live module
+    so we test what silver_build.py would actually see.
+    """
+    common = importlib.import_module("common")
+    assert hasattr(common, "SilverAbort")
+    assert issubclass(common.SilverAbort, RuntimeError)
 
 
 # --- Source inspection: each dispatch site refuses SALTED before it runs ---
