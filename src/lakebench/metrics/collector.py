@@ -449,6 +449,11 @@ class PipelineMetrics:
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
+        # A2a: compute the Verdict alongside ``success``. This is the
+        # skeleton; no consumer of ``success`` changes yet (that is A2b).
+        from lakebench.metrics.verdict import compute_verdict
+
+        verdict = compute_verdict(self)
         d: dict[str, Any] = {
             "run_id": self.run_id,
             "deployment_name": self.deployment_name,
@@ -456,6 +461,7 @@ class PipelineMetrics:
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "total_elapsed_seconds": self.total_elapsed_seconds,
             "success": self.success,
+            "verdict": verdict.to_dict(),
             "bronze_size_gb": self.bronze_size_gb,
             "silver_size_gb": self.silver_size_gb,
             "gold_size_gb": self.gold_size_gb,

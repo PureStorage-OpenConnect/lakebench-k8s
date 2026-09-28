@@ -1,0 +1,2341 @@
+{
+  "run_id": "20260925-135005-4b7a97",
+  "deployment_name": "ov-aml-c10",
+  "start_time": "2026-09-25T13:50:05.986838",
+  "end_time": "2026-09-25T14:23:41.409564",
+  "total_elapsed_seconds": 2015.422726,
+  "success": true,
+  "bronze_size_gb": 184.18295592814684,
+  "silver_size_gb": 40.64822254050523,
+  "gold_size_gb": 0.37615345045924187,
+  "jobs": [],
+  "queries": [],
+  "streaming": [
+    {
+      "job_name": "lakebench-bronze-ingest",
+      "job_type": "bronze-ingest",
+      "throughput_rps": 148148.0,
+      "freshness_seconds": 0.0,
+      "freshness_active_seconds": null,
+      "trailing_idle_cycles": 0,
+      "committed_rows": null,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 0,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "requested_executors": 5,
+      "micro_batch_duration_ms": 28692.857142857145,
+      "batch_size": 9523800,
+      "total_batches": 28,
+      "total_rows_processed": 266666400,
+      "unique_rows_processed": 266666400,
+      "elapsed_seconds": 1800,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "job_name": "lakebench-silver-stream",
+      "job_type": "silver-stream",
+      "throughput_rps": 148148.0,
+      "freshness_seconds": 0.0,
+      "freshness_active_seconds": null,
+      "trailing_idle_cycles": 0,
+      "committed_rows": 165332675,
+      "ttd_alerts": null,
+      "ttd_unmatched": 0,
+      "ttd_late": 0,
+      "ttd_unmeasured_cycles": 0,
+      "ttd_p50_seconds": null,
+      "ttd_p95_seconds": null,
+      "ttd_max_seconds": null,
+      "requested_executors": 4,
+      "micro_batch_duration_ms": 299099.99999999994,
+      "batch_size": 66666600,
+      "total_batches": 4,
+      "total_rows_processed": 266666400,
+      "unique_rows_processed": 266666400,
+      "elapsed_seconds": 1800,
+      "success": true,
+      "error_message": null
+    },
+    {
+      "job_name": "lakebench-gold-refresh",
+      "job_type": "gold-refresh",
+      "throughput_rps": 129672.64055555555,
+      "freshness_seconds": 1271.0,
+      "freshness_active_seconds": 1271.0,
+      "trailing_idle_cycles": 0,
+      "committed_rows": null,
+      "ttd_alerts": 860897,
+      "ttd_unmatched": 0,
+      "ttd_late": 4,
+      "ttd_unmeasured_cycles": 1,
+      "ttd_p50_seconds": 1280.0,
+      "ttd_p95_seconds": 1390.0,
+      "ttd_max_seconds": 1427.7,
+      "requested_executors": 2,
+      "micro_batch_duration_ms": 349500.0,
+      "batch_size": 58352688,
+      "total_batches": 4,
+      "total_rows_processed": 233410753,
+      "unique_rows_processed": 0,
+      "elapsed_seconds": 1800,
+      "success": true,
+      "error_message": null
+    }
+  ],
+  "config_snapshot": {
+    "name": "ov-aml-c10",
+    "scale": 10.0,
+    "approx_bronze_gb": 84.0,
+    "processing_pattern": "medallion",
+    "s3": {
+      "endpoint": "http://10.21.227.93:80",
+      "buckets": {
+        "bronze": "ov-aml-c10-bronze",
+        "silver": "ov-aml-c10-silver",
+        "gold": "ov-aml-c10-gold"
+      }
+    },
+    "scratch": {
+      "enabled": true,
+      "storage_class": "px-csi-scratch",
+      "size": "200Gi"
+    },
+    "spark": {
+      "driver": {
+        "cores": 4,
+        "memory": "8g"
+      },
+      "executor": {
+        "instances": 4,
+        "cores": 4,
+        "memory": "16g",
+        "memory_overhead": "4g"
+      },
+      "executor_overrides": {
+        "bronze": null,
+        "silver": null,
+        "gold": null,
+        "bronze_ingest": null,
+        "silver_stream": null,
+        "gold_refresh": null
+      }
+    },
+    "catalog": "polaris",
+    "table_format": "iceberg",
+    "pipeline_engine": "spark",
+    "query_engine": "trino",
+    "workload_schema": "financial",
+    "sustained": {
+      "bronze_trigger_interval": "30 seconds",
+      "silver_trigger_interval": "60 seconds",
+      "gold_refresh_interval": "5 minutes",
+      "run_duration": 1800,
+      "max_files_per_trigger": 50,
+      "bronze_target_file_size_mb": 512,
+      "silver_target_file_size_mb": 512,
+      "gold_target_file_size_mb": 128,
+      "benchmark_interval": 300,
+      "benchmark_warmup": 300
+    },
+    "datagen": {
+      "scale": 10.0,
+      "mode": "auto",
+      "parallelism": 4,
+      "file_size": "64mb"
+    },
+    "images": {
+      "datagen": "docker.io/sillidata/lb-datagen:14c4eee",
+      "spark": "apache/spark:4.0.2-python3",
+      "trino": "trinodb/trino:483"
+    },
+    "trino": {
+      "coordinator": {
+        "cpu": "2",
+        "memory": "8Gi"
+      },
+      "worker": {
+        "replicas": 2,
+        "cpu": "4",
+        "memory": "16Gi"
+      }
+    },
+    "benchmark": {
+      "mode": "power",
+      "streams": 4,
+      "cache": "hot",
+      "iterations": 3
+    }
+  },
+  "benchmark": {
+    "benchmark_type": "trino_query",
+    "query_set_id": "qs8-1c2902f0b26a",
+    "mode": "power",
+    "cache": "hot",
+    "scale": 10.0,
+    "qph": 365.4,
+    "total_seconds": 84.57,
+    "iterations": 1,
+    "streams": 1,
+    "queries": [
+      {
+        "name": "FQ1_txn_full_scan",
+        "display_name": "Silver transactions full aggregation",
+        "class": "scan",
+        "elapsed_seconds": 29.98,
+        "rows_returned": 1,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          11.097
+        ],
+        "min_seconds": 11.097,
+        "max_seconds": 11.097,
+        "relative_range": 0.0
+      },
+      {
+        "name": "FQ2_top_corridors_window",
+        "display_name": "Top payment corridors by volume (last 30 days)",
+        "class": "filter_prune",
+        "elapsed_seconds": 5.168,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          5.488
+        ],
+        "min_seconds": 5.488,
+        "max_seconds": 5.488,
+        "relative_range": 0.0
+      },
+      {
+        "name": "FQ6_structuring_scan",
+        "display_name": "Structuring-band transaction detection (W2 shape)",
+        "class": "filter_prune",
+        "elapsed_seconds": 6.627,
+        "rows_returned": 500,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          5.033
+        ],
+        "min_seconds": 5.033,
+        "max_seconds": 5.033,
+        "relative_range": 0.0
+      },
+      {
+        "name": "FQ3_entity_edge_risk",
+        "display_name": "Entity out-degree + volume via edges",
+        "class": "aggregation",
+        "elapsed_seconds": 22.709,
+        "rows_returned": 200,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          9.945
+        ],
+        "min_seconds": 9.945,
+        "max_seconds": 9.945,
+        "relative_range": 0.0
+      },
+      {
+        "name": "FQ7_cross_border_concentration",
+        "display_name": "Cross-border corridor concentration",
+        "class": "aggregation",
+        "elapsed_seconds": 10.976,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          8.54
+        ],
+        "min_seconds": 8.54,
+        "max_seconds": 8.54,
+        "relative_range": 0.0
+      },
+      {
+        "name": "FQ4_running_balance_window",
+        "display_name": "Running balance for high-activity accounts",
+        "class": "analytics",
+        "elapsed_seconds": 1.885,
+        "rows_returned": 0,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          1.917
+        ],
+        "min_seconds": 1.917,
+        "max_seconds": 1.917,
+        "relative_range": 0.0
+      },
+      {
+        "name": "FQ5_alert_triage",
+        "display_name": "Alert triage by priority + rule",
+        "class": "operational",
+        "elapsed_seconds": 2.333,
+        "rows_returned": 3,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          2.089
+        ],
+        "min_seconds": 2.089,
+        "max_seconds": 2.089,
+        "relative_range": 0.0
+      },
+      {
+        "name": "FQ8_alert_to_entity_join",
+        "display_name": "Case investigation: alert -> entity -> recent txns",
+        "class": "operational",
+        "elapsed_seconds": 2.591,
+        "rows_returned": 100,
+        "success": true,
+        "error_message": "",
+        "samples": [
+          2.412
+        ],
+        "min_seconds": 2.412,
+        "max_seconds": 2.412,
+        "relative_range": 0.0
+      }
+    ],
+    "spread": {
+      "samples_per_query": 1,
+      "qph_low": 619.1,
+      "qph_high": 619.1,
+      "relative_range": 0.0
+    }
+  },
+  "benchmark_rounds": [
+    {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs8-1c2902f0b26a",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 10.0,
+      "qph": 619.1,
+      "total_seconds": 46.52,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 11.097,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            11.097
+          ],
+          "min_seconds": 11.097,
+          "max_seconds": 11.097,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 5.488,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            5.488
+          ],
+          "min_seconds": 5.488,
+          "max_seconds": 5.488,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 5.033,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            5.033
+          ],
+          "min_seconds": 5.033,
+          "max_seconds": 5.033,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 9.945,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            9.945
+          ],
+          "min_seconds": 9.945,
+          "max_seconds": 9.945,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 8.54,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            8.54
+          ],
+          "min_seconds": 8.54,
+          "max_seconds": 8.54,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 1.917,
+          "rows_returned": 0,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            1.917
+          ],
+          "min_seconds": 1.917,
+          "max_seconds": 1.917,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 2.089,
+          "rows_returned": 3,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.089
+          ],
+          "min_seconds": 2.089,
+          "max_seconds": 2.089,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 2.412,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.412
+          ],
+          "min_seconds": 2.412,
+          "max_seconds": 2.412,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 619.1,
+        "qph_high": 619.1,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 1,
+        "timestamp": "2026-09-25T13:58:38.003940",
+        "gold_freshness_seconds": 0.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 12,
+          "silver_snapshot_count": 3,
+          "gold_data_file_count": 0,
+          "gold_snapshot_count": 2
+        }
+      }
+    },
+    {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs8-1c2902f0b26a",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 10.0,
+      "qph": 460.6,
+      "total_seconds": 62.53,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 19.24,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            19.24
+          ],
+          "min_seconds": 19.24,
+          "max_seconds": 19.24,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 4.847,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            4.847
+          ],
+          "min_seconds": 4.847,
+          "max_seconds": 4.847,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 5.716,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            5.716
+          ],
+          "min_seconds": 5.716,
+          "max_seconds": 5.716,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 18.235,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            18.235
+          ],
+          "min_seconds": 18.235,
+          "max_seconds": 18.235,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 7.66,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            7.66
+          ],
+          "min_seconds": 7.66,
+          "max_seconds": 7.66,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 1.801,
+          "rows_returned": 0,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            1.801
+          ],
+          "min_seconds": 1.801,
+          "max_seconds": 1.801,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 2.53,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.53
+          ],
+          "min_seconds": 2.53,
+          "max_seconds": 2.53,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 2.501,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.501
+          ],
+          "min_seconds": 2.501,
+          "max_seconds": 2.501,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 460.6,
+        "qph_high": 460.6,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 2,
+        "timestamp": "2026-09-25T14:04:38.030522",
+        "gold_freshness_seconds": 0.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 44,
+          "silver_snapshot_count": 4,
+          "gold_data_file_count": 1,
+          "gold_snapshot_count": 6
+        }
+      }
+    },
+    {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs8-1c2902f0b26a",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 10.0,
+      "qph": 268.5,
+      "total_seconds": 107.28,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 42.948,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            42.948
+          ],
+          "min_seconds": 42.948,
+          "max_seconds": 42.948,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 6.319,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            6.319
+          ],
+          "min_seconds": 6.319,
+          "max_seconds": 6.319,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 8.133,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            8.133
+          ],
+          "min_seconds": 8.133,
+          "max_seconds": 8.133,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 29.268,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            29.268
+          ],
+          "min_seconds": 29.268,
+          "max_seconds": 29.268,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 13.412,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            13.412
+          ],
+          "min_seconds": 13.412,
+          "max_seconds": 13.412,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 2.135,
+          "rows_returned": 0,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.135
+          ],
+          "min_seconds": 2.135,
+          "max_seconds": 2.135,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 2.37,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.37
+          ],
+          "min_seconds": 2.37,
+          "max_seconds": 2.37,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 2.695,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.695
+          ],
+          "min_seconds": 2.695,
+          "max_seconds": 2.695,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 268.5,
+        "qph_high": 268.5,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 3,
+        "timestamp": "2026-09-25T14:10:51.721301",
+        "gold_freshness_seconds": 0.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 105,
+          "silver_snapshot_count": 6,
+          "gold_data_file_count": 1,
+          "gold_snapshot_count": 6
+        }
+      }
+    },
+    {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs8-1c2902f0b26a",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 10.0,
+      "qph": 270.2,
+      "total_seconds": 106.6,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 40.72,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            40.72
+          ],
+          "min_seconds": 40.72,
+          "max_seconds": 40.72,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 4.44,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            4.44
+          ],
+          "min_seconds": 4.44,
+          "max_seconds": 4.44,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 7.537,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            7.537
+          ],
+          "min_seconds": 7.537,
+          "max_seconds": 7.537,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 27.182,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            27.182
+          ],
+          "min_seconds": 27.182,
+          "max_seconds": 27.182,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 19.896,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            19.896
+          ],
+          "min_seconds": 19.896,
+          "max_seconds": 19.896,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 1.852,
+          "rows_returned": 0,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            1.852
+          ],
+          "min_seconds": 1.852,
+          "max_seconds": 1.852,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 2.295,
+          "rows_returned": 12,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.295
+          ],
+          "min_seconds": 2.295,
+          "max_seconds": 2.295,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 2.682,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.682
+          ],
+          "min_seconds": 2.682,
+          "max_seconds": 2.682,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 270.2,
+        "qph_high": 270.2,
+        "relative_range": 0.0
+      },
+      "round_meta": {
+        "round_index": 4,
+        "timestamp": "2026-09-25T14:17:50.249732",
+        "gold_freshness_seconds": 0.0,
+        "q9_contention_observed": false,
+        "q9_retry_used": false,
+        "table_health": {
+          "silver_data_file_count": 105,
+          "silver_snapshot_count": 7,
+          "gold_data_file_count": 1,
+          "gold_snapshot_count": 6
+        }
+      }
+    }
+  ],
+  "pipeline_benchmark": {
+    "run_id": "20260925-135005-4b7a97",
+    "deployment_name": "ov-aml-c10",
+    "pipeline_mode": "sustained",
+    "scale_factor": 10.0,
+    "start_time": "2026-09-25T13:50:05.986838",
+    "end_time": "2026-09-25T14:23:41.409564",
+    "success": true,
+    "scorecard": {
+      "data_freshness_seconds": 1271.0,
+      "sustained_throughput_rps": 148148.0,
+      "total_data_processed_gb": 265.856,
+      "pipeline_throughput_gb_per_second": 0.1477,
+      "total_core_hours": 22.0,
+      "ingest_ratio": 1.0,
+      "compute_efficiency_gb_per_core_hour": 12.0672,
+      "stage_latency_profile": {
+        "bronze_ms": 28692.9,
+        "silver_ms": 299100.0,
+        "gold_ms": 349500.0
+      },
+      "composite_qph": 365.4,
+      "pipeline_saturated": false,
+      "corpus_drained": false,
+      "intake_limit": "none",
+      "bronze_busy_fraction": 0.446,
+      "total_rows_processed": 766743553,
+      "total_elapsed_seconds": 2015.42,
+      "total_s3_objects": 3065,
+      "time_to_detect_seconds": 1280.0,
+      "time_to_detect_p95_seconds": 1390.0,
+      "time_to_detect_max_seconds": 1427.7,
+      "time_to_detect_alerts": 860897,
+      "time_to_detect_late_alerts": 4,
+      "time_to_detect_unmeasured_cycles": 1,
+      "in_stream_composite_qph": 365.4,
+      "benchmark_rounds_count": 4,
+      "qph_degradation_pct": 50.11
+    },
+    "scores": {
+      "data_freshness_seconds": 1271.0,
+      "sustained_throughput_rps": 148148.0,
+      "total_data_processed_gb": 265.856,
+      "pipeline_throughput_gb_per_second": 0.1477,
+      "total_core_hours": 22.0,
+      "ingest_ratio": 1.0,
+      "compute_efficiency_gb_per_core_hour": 12.0672,
+      "stage_latency_profile": {
+        "bronze_ms": 28692.9,
+        "silver_ms": 299100.0,
+        "gold_ms": 349500.0
+      },
+      "composite_qph": 365.4,
+      "pipeline_saturated": false,
+      "corpus_drained": false,
+      "intake_limit": "none",
+      "bronze_busy_fraction": 0.446,
+      "total_rows_processed": 766743553,
+      "total_elapsed_seconds": 2015.42,
+      "total_s3_objects": 3065,
+      "time_to_detect_seconds": 1280.0,
+      "time_to_detect_p95_seconds": 1390.0,
+      "time_to_detect_max_seconds": 1427.7,
+      "time_to_detect_alerts": 860897,
+      "time_to_detect_late_alerts": 4,
+      "time_to_detect_unmeasured_cycles": 1,
+      "in_stream_composite_qph": 365.4,
+      "benchmark_rounds_count": 4,
+      "qph_degradation_pct": 50.11
+    },
+    "stages": [
+      {
+        "stage_name": "bronze",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 1800,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 184.18295592814684,
+        "output_size_gb": 0.0,
+        "input_rows": 266666400,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.10232386440452602,
+        "throughput_rows_per_second": 148148.0,
+        "executor_count": 5,
+        "executor_cores": 4,
+        "executor_memory_gb": 8.0,
+        "latency_ms": 28692.857142857145,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 28,
+        "batch_size": 9523800,
+        "unique_rows_processed": 266666400,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "silver",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 1800,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 40.64822254050523,
+        "output_size_gb": 0.0,
+        "input_rows": 266666400,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.02258234585583624,
+        "throughput_rows_per_second": 148148.0,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 299099.99999999994,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": 165332675,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 4,
+        "batch_size": 66666600,
+        "unique_rows_processed": 266666400,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "gold",
+        "stage_type": "streaming",
+        "engine": "spark",
+        "elapsed_seconds": 1800,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 40.64822254050523,
+        "output_size_gb": 0.0,
+        "input_rows": 233410753,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.02258234585583624,
+        "throughput_rows_per_second": 129672.64055555555,
+        "executor_count": 2,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 349500.0,
+        "freshness_seconds": 1271.0,
+        "freshness_active_seconds": 1271.0,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "ttd_alerts": 860897,
+        "ttd_unmatched": 0,
+        "ttd_late": 4,
+        "ttd_unmeasured_cycles": 1,
+        "ttd_p50_seconds": 1280.0,
+        "ttd_p95_seconds": 1390.0,
+        "ttd_max_seconds": 1427.7,
+        "total_batches": 4,
+        "batch_size": 58352688,
+        "unique_rows_processed": null,
+        "queries_executed": 0,
+        "queries_per_hour": 0.0
+      },
+      {
+        "stage_name": "query",
+        "stage_type": "query",
+        "engine": "trino",
+        "elapsed_seconds": 84.56741023850918,
+        "success": true,
+        "error_message": null,
+        "input_size_gb": 0.37615345045924187,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "freshness_active_seconds": null,
+        "trailing_idle_cycles": 0,
+        "committed_rows": null,
+        "ttd_alerts": null,
+        "ttd_unmatched": 0,
+        "ttd_late": 0,
+        "ttd_unmeasured_cycles": 0,
+        "ttd_p50_seconds": null,
+        "ttd_p95_seconds": null,
+        "ttd_max_seconds": null,
+        "total_batches": 0,
+        "batch_size": 0,
+        "unique_rows_processed": 0,
+        "queries_executed": 8,
+        "queries_per_hour": 365.3670122968226
+      }
+    ],
+    "stage_matrix": {
+      "bronze": {
+        "engine": "spark",
+        "elapsed_seconds": 1800,
+        "input_size_gb": 184.183,
+        "output_size_gb": 0.0,
+        "input_rows": 266666400,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.1023,
+        "throughput_rows_per_second": 148148.0,
+        "executor_count": 5,
+        "executor_cores": 4,
+        "executor_memory_gb": 8.0,
+        "latency_ms": 28692.9,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "silver": {
+        "engine": "spark",
+        "elapsed_seconds": 1800,
+        "input_size_gb": 40.648,
+        "output_size_gb": 0.0,
+        "input_rows": 266666400,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0226,
+        "throughput_rows_per_second": 148148.0,
+        "executor_count": 4,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 299100.0,
+        "freshness_seconds": null,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "gold": {
+        "engine": "spark",
+        "elapsed_seconds": 1800,
+        "input_size_gb": 40.648,
+        "output_size_gb": 0.0,
+        "input_rows": 233410753,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0226,
+        "throughput_rows_per_second": 129672.6,
+        "executor_count": 2,
+        "executor_cores": 4,
+        "executor_memory_gb": 32.0,
+        "latency_ms": 349500.0,
+        "freshness_seconds": 1271.0,
+        "queries_per_hour": 0.0,
+        "success": true
+      },
+      "query": {
+        "engine": "trino",
+        "elapsed_seconds": 84.57,
+        "input_size_gb": 0.376,
+        "output_size_gb": 0.0,
+        "input_rows": 0,
+        "output_rows": 0,
+        "throughput_gb_per_second": 0.0,
+        "throughput_rows_per_second": 0.0,
+        "executor_count": 0,
+        "executor_cores": 0,
+        "executor_memory_gb": 0.0,
+        "latency_ms": null,
+        "freshness_seconds": null,
+        "queries_per_hour": 365.4,
+        "success": true
+      }
+    },
+    "bucket_sizes": {
+      "bronze_gb": 184.183,
+      "silver_gb": 0.0,
+      "gold_gb": 0.0
+    },
+    "config_snapshot": {
+      "name": "ov-aml-c10",
+      "scale": 10.0,
+      "approx_bronze_gb": 84.0,
+      "processing_pattern": "medallion",
+      "s3": {
+        "endpoint": "http://10.21.227.93:80",
+        "buckets": {
+          "bronze": "ov-aml-c10-bronze",
+          "silver": "ov-aml-c10-silver",
+          "gold": "ov-aml-c10-gold"
+        }
+      },
+      "scratch": {
+        "enabled": true,
+        "storage_class": "px-csi-scratch",
+        "size": "200Gi"
+      },
+      "spark": {
+        "driver": {
+          "cores": 4,
+          "memory": "8g"
+        },
+        "executor": {
+          "instances": 4,
+          "cores": 4,
+          "memory": "16g",
+          "memory_overhead": "4g"
+        },
+        "executor_overrides": {
+          "bronze": null,
+          "silver": null,
+          "gold": null,
+          "bronze_ingest": null,
+          "silver_stream": null,
+          "gold_refresh": null
+        }
+      },
+      "catalog": "polaris",
+      "table_format": "iceberg",
+      "pipeline_engine": "spark",
+      "query_engine": "trino",
+      "workload_schema": "financial",
+      "sustained": {
+        "bronze_trigger_interval": "30 seconds",
+        "silver_trigger_interval": "60 seconds",
+        "gold_refresh_interval": "5 minutes",
+        "run_duration": 1800,
+        "max_files_per_trigger": 50,
+        "bronze_target_file_size_mb": 512,
+        "silver_target_file_size_mb": 512,
+        "gold_target_file_size_mb": 128,
+        "benchmark_interval": 300,
+        "benchmark_warmup": 300
+      },
+      "datagen": {
+        "scale": 10.0,
+        "mode": "auto",
+        "parallelism": 4,
+        "file_size": "64mb"
+      },
+      "images": {
+        "datagen": "docker.io/sillidata/lb-datagen:14c4eee",
+        "spark": "apache/spark:4.0.2-python3",
+        "trino": "trinodb/trino:483"
+      },
+      "trino": {
+        "coordinator": {
+          "cpu": "2",
+          "memory": "8Gi"
+        },
+        "worker": {
+          "replicas": 2,
+          "cpu": "4",
+          "memory": "16Gi"
+        }
+      },
+      "benchmark": {
+        "mode": "power",
+        "streams": 4,
+        "cache": "hot",
+        "iterations": 3
+      },
+      "datagen_output_rows": 266666400
+    },
+    "ingest_ratio": 1.0,
+    "pipeline_saturated": false,
+    "corpus_drained": false,
+    "query_benchmark": {
+      "benchmark_type": "trino_query",
+      "query_set_id": "qs8-1c2902f0b26a",
+      "mode": "power",
+      "cache": "hot",
+      "scale": 10.0,
+      "qph": 365.4,
+      "total_seconds": 84.57,
+      "iterations": 1,
+      "streams": 1,
+      "queries": [
+        {
+          "name": "FQ1_txn_full_scan",
+          "display_name": "Silver transactions full aggregation",
+          "class": "scan",
+          "elapsed_seconds": 29.98,
+          "rows_returned": 1,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            11.097
+          ],
+          "min_seconds": 11.097,
+          "max_seconds": 11.097,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ2_top_corridors_window",
+          "display_name": "Top payment corridors by volume (last 30 days)",
+          "class": "filter_prune",
+          "elapsed_seconds": 5.168,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            5.488
+          ],
+          "min_seconds": 5.488,
+          "max_seconds": 5.488,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ6_structuring_scan",
+          "display_name": "Structuring-band transaction detection (W2 shape)",
+          "class": "filter_prune",
+          "elapsed_seconds": 6.627,
+          "rows_returned": 500,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            5.033
+          ],
+          "min_seconds": 5.033,
+          "max_seconds": 5.033,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ3_entity_edge_risk",
+          "display_name": "Entity out-degree + volume via edges",
+          "class": "aggregation",
+          "elapsed_seconds": 22.709,
+          "rows_returned": 200,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            9.945
+          ],
+          "min_seconds": 9.945,
+          "max_seconds": 9.945,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ7_cross_border_concentration",
+          "display_name": "Cross-border corridor concentration",
+          "class": "aggregation",
+          "elapsed_seconds": 10.976,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            8.54
+          ],
+          "min_seconds": 8.54,
+          "max_seconds": 8.54,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ4_running_balance_window",
+          "display_name": "Running balance for high-activity accounts",
+          "class": "analytics",
+          "elapsed_seconds": 1.885,
+          "rows_returned": 0,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            1.917
+          ],
+          "min_seconds": 1.917,
+          "max_seconds": 1.917,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ5_alert_triage",
+          "display_name": "Alert triage by priority + rule",
+          "class": "operational",
+          "elapsed_seconds": 2.333,
+          "rows_returned": 3,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.089
+          ],
+          "min_seconds": 2.089,
+          "max_seconds": 2.089,
+          "relative_range": 0.0
+        },
+        {
+          "name": "FQ8_alert_to_entity_join",
+          "display_name": "Case investigation: alert -> entity -> recent txns",
+          "class": "operational",
+          "elapsed_seconds": 2.591,
+          "rows_returned": 100,
+          "success": true,
+          "error_message": "",
+          "samples": [
+            2.412
+          ],
+          "min_seconds": 2.412,
+          "max_seconds": 2.412,
+          "relative_range": 0.0
+        }
+      ],
+      "spread": {
+        "samples_per_query": 1,
+        "qph_low": 619.1,
+        "qph_high": 619.1,
+        "relative_range": 0.0
+      }
+    },
+    "benchmark_rounds": [
+      {
+        "benchmark_type": "trino_query",
+        "query_set_id": "qs8-1c2902f0b26a",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 10.0,
+        "qph": 619.1,
+        "total_seconds": 46.52,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "FQ1_txn_full_scan",
+            "display_name": "Silver transactions full aggregation",
+            "class": "scan",
+            "elapsed_seconds": 11.097,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              11.097
+            ],
+            "min_seconds": 11.097,
+            "max_seconds": 11.097,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ2_top_corridors_window",
+            "display_name": "Top payment corridors by volume (last 30 days)",
+            "class": "filter_prune",
+            "elapsed_seconds": 5.488,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              5.488
+            ],
+            "min_seconds": 5.488,
+            "max_seconds": 5.488,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ6_structuring_scan",
+            "display_name": "Structuring-band transaction detection (W2 shape)",
+            "class": "filter_prune",
+            "elapsed_seconds": 5.033,
+            "rows_returned": 500,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              5.033
+            ],
+            "min_seconds": 5.033,
+            "max_seconds": 5.033,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ3_entity_edge_risk",
+            "display_name": "Entity out-degree + volume via edges",
+            "class": "aggregation",
+            "elapsed_seconds": 9.945,
+            "rows_returned": 200,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              9.945
+            ],
+            "min_seconds": 9.945,
+            "max_seconds": 9.945,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ7_cross_border_concentration",
+            "display_name": "Cross-border corridor concentration",
+            "class": "aggregation",
+            "elapsed_seconds": 8.54,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              8.54
+            ],
+            "min_seconds": 8.54,
+            "max_seconds": 8.54,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ4_running_balance_window",
+            "display_name": "Running balance for high-activity accounts",
+            "class": "analytics",
+            "elapsed_seconds": 1.917,
+            "rows_returned": 0,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              1.917
+            ],
+            "min_seconds": 1.917,
+            "max_seconds": 1.917,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ5_alert_triage",
+            "display_name": "Alert triage by priority + rule",
+            "class": "operational",
+            "elapsed_seconds": 2.089,
+            "rows_returned": 3,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.089
+            ],
+            "min_seconds": 2.089,
+            "max_seconds": 2.089,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ8_alert_to_entity_join",
+            "display_name": "Case investigation: alert -> entity -> recent txns",
+            "class": "operational",
+            "elapsed_seconds": 2.412,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.412
+            ],
+            "min_seconds": 2.412,
+            "max_seconds": 2.412,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 619.1,
+          "qph_high": 619.1,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 1,
+          "timestamp": "2026-09-25T13:58:38.003940",
+          "gold_freshness_seconds": 0.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 12,
+            "silver_snapshot_count": 3,
+            "gold_data_file_count": 0,
+            "gold_snapshot_count": 2
+          }
+        }
+      },
+      {
+        "benchmark_type": "trino_query",
+        "query_set_id": "qs8-1c2902f0b26a",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 10.0,
+        "qph": 460.6,
+        "total_seconds": 62.53,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "FQ1_txn_full_scan",
+            "display_name": "Silver transactions full aggregation",
+            "class": "scan",
+            "elapsed_seconds": 19.24,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              19.24
+            ],
+            "min_seconds": 19.24,
+            "max_seconds": 19.24,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ2_top_corridors_window",
+            "display_name": "Top payment corridors by volume (last 30 days)",
+            "class": "filter_prune",
+            "elapsed_seconds": 4.847,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              4.847
+            ],
+            "min_seconds": 4.847,
+            "max_seconds": 4.847,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ6_structuring_scan",
+            "display_name": "Structuring-band transaction detection (W2 shape)",
+            "class": "filter_prune",
+            "elapsed_seconds": 5.716,
+            "rows_returned": 500,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              5.716
+            ],
+            "min_seconds": 5.716,
+            "max_seconds": 5.716,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ3_entity_edge_risk",
+            "display_name": "Entity out-degree + volume via edges",
+            "class": "aggregation",
+            "elapsed_seconds": 18.235,
+            "rows_returned": 200,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              18.235
+            ],
+            "min_seconds": 18.235,
+            "max_seconds": 18.235,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ7_cross_border_concentration",
+            "display_name": "Cross-border corridor concentration",
+            "class": "aggregation",
+            "elapsed_seconds": 7.66,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              7.66
+            ],
+            "min_seconds": 7.66,
+            "max_seconds": 7.66,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ4_running_balance_window",
+            "display_name": "Running balance for high-activity accounts",
+            "class": "analytics",
+            "elapsed_seconds": 1.801,
+            "rows_returned": 0,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              1.801
+            ],
+            "min_seconds": 1.801,
+            "max_seconds": 1.801,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ5_alert_triage",
+            "display_name": "Alert triage by priority + rule",
+            "class": "operational",
+            "elapsed_seconds": 2.53,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.53
+            ],
+            "min_seconds": 2.53,
+            "max_seconds": 2.53,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ8_alert_to_entity_join",
+            "display_name": "Case investigation: alert -> entity -> recent txns",
+            "class": "operational",
+            "elapsed_seconds": 2.501,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.501
+            ],
+            "min_seconds": 2.501,
+            "max_seconds": 2.501,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 460.6,
+          "qph_high": 460.6,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 2,
+          "timestamp": "2026-09-25T14:04:38.030522",
+          "gold_freshness_seconds": 0.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 44,
+            "silver_snapshot_count": 4,
+            "gold_data_file_count": 1,
+            "gold_snapshot_count": 6
+          }
+        }
+      },
+      {
+        "benchmark_type": "trino_query",
+        "query_set_id": "qs8-1c2902f0b26a",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 10.0,
+        "qph": 268.5,
+        "total_seconds": 107.28,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "FQ1_txn_full_scan",
+            "display_name": "Silver transactions full aggregation",
+            "class": "scan",
+            "elapsed_seconds": 42.948,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              42.948
+            ],
+            "min_seconds": 42.948,
+            "max_seconds": 42.948,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ2_top_corridors_window",
+            "display_name": "Top payment corridors by volume (last 30 days)",
+            "class": "filter_prune",
+            "elapsed_seconds": 6.319,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              6.319
+            ],
+            "min_seconds": 6.319,
+            "max_seconds": 6.319,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ6_structuring_scan",
+            "display_name": "Structuring-band transaction detection (W2 shape)",
+            "class": "filter_prune",
+            "elapsed_seconds": 8.133,
+            "rows_returned": 500,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              8.133
+            ],
+            "min_seconds": 8.133,
+            "max_seconds": 8.133,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ3_entity_edge_risk",
+            "display_name": "Entity out-degree + volume via edges",
+            "class": "aggregation",
+            "elapsed_seconds": 29.268,
+            "rows_returned": 200,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              29.268
+            ],
+            "min_seconds": 29.268,
+            "max_seconds": 29.268,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ7_cross_border_concentration",
+            "display_name": "Cross-border corridor concentration",
+            "class": "aggregation",
+            "elapsed_seconds": 13.412,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              13.412
+            ],
+            "min_seconds": 13.412,
+            "max_seconds": 13.412,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ4_running_balance_window",
+            "display_name": "Running balance for high-activity accounts",
+            "class": "analytics",
+            "elapsed_seconds": 2.135,
+            "rows_returned": 0,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.135
+            ],
+            "min_seconds": 2.135,
+            "max_seconds": 2.135,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ5_alert_triage",
+            "display_name": "Alert triage by priority + rule",
+            "class": "operational",
+            "elapsed_seconds": 2.37,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.37
+            ],
+            "min_seconds": 2.37,
+            "max_seconds": 2.37,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ8_alert_to_entity_join",
+            "display_name": "Case investigation: alert -> entity -> recent txns",
+            "class": "operational",
+            "elapsed_seconds": 2.695,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.695
+            ],
+            "min_seconds": 2.695,
+            "max_seconds": 2.695,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 268.5,
+          "qph_high": 268.5,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 3,
+          "timestamp": "2026-09-25T14:10:51.721301",
+          "gold_freshness_seconds": 0.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 105,
+            "silver_snapshot_count": 6,
+            "gold_data_file_count": 1,
+            "gold_snapshot_count": 6
+          }
+        }
+      },
+      {
+        "benchmark_type": "trino_query",
+        "query_set_id": "qs8-1c2902f0b26a",
+        "mode": "power",
+        "cache": "hot",
+        "scale": 10.0,
+        "qph": 270.2,
+        "total_seconds": 106.6,
+        "iterations": 1,
+        "streams": 1,
+        "queries": [
+          {
+            "name": "FQ1_txn_full_scan",
+            "display_name": "Silver transactions full aggregation",
+            "class": "scan",
+            "elapsed_seconds": 40.72,
+            "rows_returned": 1,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              40.72
+            ],
+            "min_seconds": 40.72,
+            "max_seconds": 40.72,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ2_top_corridors_window",
+            "display_name": "Top payment corridors by volume (last 30 days)",
+            "class": "filter_prune",
+            "elapsed_seconds": 4.44,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              4.44
+            ],
+            "min_seconds": 4.44,
+            "max_seconds": 4.44,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ6_structuring_scan",
+            "display_name": "Structuring-band transaction detection (W2 shape)",
+            "class": "filter_prune",
+            "elapsed_seconds": 7.537,
+            "rows_returned": 500,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              7.537
+            ],
+            "min_seconds": 7.537,
+            "max_seconds": 7.537,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ3_entity_edge_risk",
+            "display_name": "Entity out-degree + volume via edges",
+            "class": "aggregation",
+            "elapsed_seconds": 27.182,
+            "rows_returned": 200,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              27.182
+            ],
+            "min_seconds": 27.182,
+            "max_seconds": 27.182,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ7_cross_border_concentration",
+            "display_name": "Cross-border corridor concentration",
+            "class": "aggregation",
+            "elapsed_seconds": 19.896,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              19.896
+            ],
+            "min_seconds": 19.896,
+            "max_seconds": 19.896,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ4_running_balance_window",
+            "display_name": "Running balance for high-activity accounts",
+            "class": "analytics",
+            "elapsed_seconds": 1.852,
+            "rows_returned": 0,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              1.852
+            ],
+            "min_seconds": 1.852,
+            "max_seconds": 1.852,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ5_alert_triage",
+            "display_name": "Alert triage by priority + rule",
+            "class": "operational",
+            "elapsed_seconds": 2.295,
+            "rows_returned": 12,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.295
+            ],
+            "min_seconds": 2.295,
+            "max_seconds": 2.295,
+            "relative_range": 0.0
+          },
+          {
+            "name": "FQ8_alert_to_entity_join",
+            "display_name": "Case investigation: alert -> entity -> recent txns",
+            "class": "operational",
+            "elapsed_seconds": 2.682,
+            "rows_returned": 100,
+            "success": true,
+            "error_message": "",
+            "samples": [
+              2.682
+            ],
+            "min_seconds": 2.682,
+            "max_seconds": 2.682,
+            "relative_range": 0.0
+          }
+        ],
+        "spread": {
+          "samples_per_query": 1,
+          "qph_low": 270.2,
+          "qph_high": 270.2,
+          "relative_range": 0.0
+        },
+        "round_meta": {
+          "round_index": 4,
+          "timestamp": "2026-09-25T14:17:50.249732",
+          "gold_freshness_seconds": 0.0,
+          "q9_contention_observed": false,
+          "q9_retry_used": false,
+          "table_health": {
+            "silver_data_file_count": 105,
+            "silver_snapshot_count": 7,
+            "gold_data_file_count": 1,
+            "gold_snapshot_count": 6
+          }
+        }
+      }
+    ],
+    "score_descriptions": {
+      "total_core_hours": "Total CPU core-hours of requested compute (executor_count x cores x elapsed / 3600). Uses per-job profile cores from K8s manifest, not the global executor.cores config value",
+      "compute_efficiency_gb_per_core_hour": "GB processed per core-hour of requested compute (higher is better)",
+      "total_data_processed_gb": "Sum of input data across all pipeline stages in GB",
+      "pipeline_throughput_gb_per_second": "Total data / wall-clock time in GB/s (higher is better)",
+      "total_elapsed_seconds": "Wall-clock seconds from pipeline start to final stage completion",
+      "composite_qph": "Queries per Hour -- median of in-stream rounds or single benchmark (higher is better)",
+      "data_freshness_seconds": "Primary freshness score. Worst-case gold table staleness during the streaming window in seconds (lower is better)",
+      "sustained_throughput_rps": "Rows entering bronze per second (higher is better)",
+      "ingest_ratio": "Bronze rows ingested / datagen rows produced (1.0 = all data consumed)",
+      "stage_latency_profile": "Average micro-batch processing time per stage {bronze_ms, silver_ms, gold_ms} in ms",
+      "pipeline_saturated": "True when ingest_ratio < 0.95 -- pipeline cannot keep pace with input; intake_limit says whether bronze processing was the limit",
+      "intake_limit": "What bounded intake when ingest_ratio < 0.95: bronze_capacity (bronze busy for most of the window; sustained_throughput_rps is its capacity), below_bronze_capacity (bronze had idle time: the trigger rate, a late start or a stall; the throughput is not bronze's capacity), none (kept up)",
+      "bronze_busy_fraction": "Share of the window bronze spent inside micro-batches (batches x mean batch time / window)",
+      "time_to_detect_seconds": "AML continuous. Median seconds from the newest bronze ingest of an alert's related transactions to the end of the detection pass that first raised it (lower is better)",
+      "time_to_detect_p95_seconds": "AML continuous. 95th percentile of time_to_detect (histogram bin upper edge, 10 s bins)",
+      "time_to_detect_max_seconds": "AML continuous. Longest time to detect of any newly raised alert",
+      "time_to_detect_alerts": "AML continuous. Newly raised alerts the time to detect is measured over",
+      "time_to_detect_late_alerts": "AML continuous. Measured alerts whose related transactions were all in silver before the previous detection pass (re-raised after a rule error, or evidence outside related_txn_ids); included in the percentiles",
+      "time_to_detect_unmeasured_cycles": "AML continuous. Gold cycles that logged no time-to-detect line; their alerts are measured on the next cycle, late by one cycle",
+      "corpus_drained": "True when the finite corpus was fully ingested before the window ended: freshness covers only cycles that saw new data, and sustained_throughput_rps is a lower bound",
+      "total_rows_processed": "Cumulative rows processed across all streaming stages",
+      "total_s3_objects": "Total S3 objects across bronze/silver/gold buckets at end of run. Growth rate vs retention capacity is the key signal -- if this grows unbounded, metadata ops degrade",
+      "in_stream_composite_qph": "Median QpH from in-stream benchmark rounds",
+      "benchmark_rounds_count": "Number of in-stream benchmark rounds executed",
+      "qph_degradation_pct": "QpH degradation from first-half to second-half of sustained run (positive = slower, negative = faster)"
+    },
+    "advanced_metrics": null
+  },
+  "tm_operations": {
+    "status": "pass",
+    "reason": "",
+    "problems": [],
+    "cycles_ran": [
+      1
+    ],
+    "cycles_not_run": [],
+    "invariants": {
+      "1": {
+        "monitored_population": {
+          "status": "pass",
+          "detail": "556361 customers of the reporting FI, 43867082 monitored payments"
+        },
+        "reconciliation": {
+          "status": "pass",
+          "detail": "monitored 43867082 + excluded 222799318 = 266666400 vs source 266666400"
+        },
+        "every_alert_dispositioned": {
+          "status": "pass",
+          "detail": "alerts 198652, disposition rows for them 198652"
+        },
+        "one_row_per_alert_identity": {
+          "status": "pass",
+          "detail": "198652 disposition rows, 198652 distinct alert identities"
+        },
+        "no_null_disposition": {
+          "status": "pass",
+          "detail": "0 disposition rows with no disposition"
+        },
+        "noncustomer_alerts_declared": {
+          "status": "pass",
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (98744 non-customer alerts in all)"
+        },
+        "escalated_le_alerts": {
+          "status": "pass",
+          "detail": "escalated 10872 <= customer alerts 99908"
+        },
+        "cases_le_escalated": {
+          "status": "pass",
+          "detail": "alert-driven cases 10872 <= escalated 10872"
+        },
+        "sars_le_cases": {
+          "status": "pass",
+          "detail": "SARs 1467 <= cases 12338"
+        },
+        "one_open_case_per_customer": {
+          "status": "pass",
+          "detail": "most open cases on one customer: 0"
+        },
+        "funnel_monotone": {
+          "status": "pass",
+          "detail": "payments 266666400 >= monitored 43867082 >= alerts 99908 >= escalated 10872 >= cases 10872 >= sars 1394"
+        },
+        "continuing_review_fires": {
+          "status": "pass",
+          "detail": "0 SARs past their 90-day review date with no review (1467 due, 0 deferred behind a case waiting to file)"
+        },
+        "review_not_folded_into_determined": {
+          "status": "pass",
+          "detail": "0 reviews credited to a case already determined before the review was due"
+        }
+      }
+    },
+    "ops": {
+      "alert_aging_open": {
+        "0-30": 0,
+        "31-60": 0,
+        "61-90": 0,
+        "90+": 0
+      },
+      "alert_sla_breaches": 1946,
+      "alerts_by_disposition": {
+        "attached": 157,
+        "closed_nfa": 88879,
+        "escalated": 10872,
+        "out_of_scope": 98744
+      },
+      "alerts_by_priority": {
+        "critical": 1557,
+        "high": 30,
+        "low": 23453,
+        "medium": 74868
+      },
+      "alerts_noncustomer_undeclared": 0,
+      "alerts_out_of_scope": 98744,
+      "alerts_over_capacity": 0,
+      "alerts_total": 198652,
+      "alerts_withdrawn_carried": 0,
+      "as_of_date": "2025-06-24",
+      "cases_by_status": {
+        "closed": 12338
+      },
+      "cases_by_type": {
+        "alert_escalation": 10872,
+        "continuing_activity": 1466
+      },
+      "continuing_reviews_deferred": 0,
+      "continuing_reviews_due": 1467,
+      "continuing_reviews_folded": 1,
+      "continuing_reviews_opened": 1466,
+      "continuing_reviews_superseded": 0,
+      "continuing_sars_over_120_days": 2,
+      "cycle": 1,
+      "elapsed_seconds": 55.3,
+      "filed_late": 48,
+      "filed_over_30_days_pct": 0.05725971370143149,
+      "filing_days_median": 15,
+      "filing_days_p95": 33,
+      "funnel": {
+        "alerts": 99908,
+        "cases": 10872,
+        "escalated": 10872,
+        "monitored": 43867082,
+        "payments": 266666400,
+        "sars": 1394
+      },
+      "gold_refresh_tick": 2,
+      "invariants": {
+        "cases_le_escalated": {
+          "detail": "alert-driven cases 10872 <= escalated 10872",
+          "status": "pass"
+        },
+        "continuing_review_fires": {
+          "detail": "0 SARs past their 90-day review date with no review (1467 due, 0 deferred behind a case waiting to file)",
+          "status": "pass"
+        },
+        "escalated_le_alerts": {
+          "detail": "escalated 10872 <= customer alerts 99908",
+          "status": "pass"
+        },
+        "every_alert_dispositioned": {
+          "detail": "alerts 198652, disposition rows for them 198652",
+          "status": "pass"
+        },
+        "funnel_monotone": {
+          "detail": "payments 266666400 >= monitored 43867082 >= alerts 99908 >= escalated 10872 >= cases 10872 >= sars 1394",
+          "status": "pass"
+        },
+        "monitored_population": {
+          "detail": "556361 customers of the reporting FI, 43867082 monitored payments",
+          "status": "pass"
+        },
+        "no_null_disposition": {
+          "detail": "0 disposition rows with no disposition",
+          "status": "pass"
+        },
+        "noncustomer_alerts_declared": {
+          "detail": "0 alerts on non-customers from scenarios not declared customer-and-counterparty (98744 non-customer alerts in all)",
+          "status": "pass"
+        },
+        "one_open_case_per_customer": {
+          "detail": "most open cases on one customer: 0",
+          "status": "pass"
+        },
+        "one_row_per_alert_identity": {
+          "detail": "198652 disposition rows, 198652 distinct alert identities",
+          "status": "pass"
+        },
+        "reconciliation": {
+          "detail": "monitored 43867082 + excluded 222799318 = 266666400 vs source 266666400",
+          "status": "pass"
+        },
+        "review_not_folded_into_determined": {
+          "detail": "0 reviews credited to a case already determined before the review was due",
+          "status": "pass"
+        },
+        "sars_le_cases": {
+          "detail": "SARs 1467 <= cases 12338",
+          "status": "pass"
+        }
+      },
+      "l1_decided": 99751,
+      "l1_escalation_rate": 0.1089913885575082,
+      "open_cases": 0,
+      "open_cases_over_60_days": 0,
+      "qa_disagreement_rate": 0.14561196379378197,
+      "qa_sample": 5082,
+      "reconciliation": {
+        "bound.bronze_expected": 155606347,
+        "completeness.bronze": 155606347,
+        "completeness.customers": 556361,
+        "completeness.excluded": 222799318,
+        "completeness.monitored": 43867082,
+        "completeness.silver": 58352460,
+        "completeness.source": 266666400,
+        "completeness.unaccounted": 0,
+        "dq.dq_missing_agent_bic": 0,
+        "dq.dq_nonpositive_amount": 0,
+        "dq.dq_self_transfer": 0,
+        "dq.dq_unconvertible_currency": 0,
+        "exclusion.dq_unconvertible_currency": 0,
+        "exclusion.in_flight_to_bronze": 111060053,
+        "exclusion.in_flight_to_silver": 97253887,
+        "exclusion.no_customer_party": 14485378,
+        "funnel.alerts": 99908,
+        "funnel.alerts_noncustomer_undeclared": 0,
+        "funnel.alerts_out_of_scope": 98744,
+        "funnel.cases": 10872,
+        "funnel.continuing_review_cases": 1466,
+        "funnel.continuing_sars": 73,
+        "funnel.escalated": 10872,
+        "funnel.sars": 1394
+      },
+      "sars_by_limit": {
+        "120_day_continuing": {
+          "filed": 73,
+          "late": 2
+        },
+        "30_day": {
+          "filed": 1318,
+          "late": 44
+        },
+        "60_day_no_suspect": {
+          "filed": 76,
+          "late": 2
+        }
+      },
+      "sars_filed": 1467,
+      "sars_no_suspect": 76,
+      "scenarios": {
+        "W17_layering_chain": {
+          "alerts": 1398,
+          "escalated": 268,
+          "productive_rate": 0.21745350500715308,
+          "sar_conversion": 0.13304721030042918
+        },
+        "W2_structuring": {
+          "alerts": 623,
+          "escalated": 151,
+          "productive_rate": 0.26324237560192615,
+          "sar_conversion": 0.18780096308186195
+        },
+        "W3_round_tripping": {
+          "alerts": 87,
+          "escalated": 74,
+          "productive_rate": 0.8735632183908046,
+          "sar_conversion": 0.8390804597701149
+        },
+        "W4_risk_propagation": {
+          "alerts": 97800,
+          "escalated": 10379,
+          "productive_rate": 0.10677914110429448,
+          "sar_conversion": 0.01158486707566462
+        }
+      },
+      "simulation": {
+        "alert_sla_days": 60,
+        "analyst_accuracy": 0.9,
+        "continuous_interval_seconds": 1800,
+        "counterparty_scenarios": [
+          "W1_connected_components",
+          "W3_round_tripping",
+          "W4_risk_propagation",
+          "W17_layering_chain"
+        ],
+        "enabled": true,
+        "investigator_accuracy": 0.95,
+        "late_filing_rate": 0.03,
+        "lookback_months": 12,
+        "max_alerts_per_customer": 50000,
+        "no_suspect_rate": 0.05,
+        "note": "dispositions simulated from datagen ground truth",
+        "qa_sample_rate": 0.05,
+        "seed": 20260924
+      }
+    },
+    "mode": "continuous"
+  }
+}
