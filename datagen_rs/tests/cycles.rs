@@ -466,6 +466,12 @@ fn c360_driver_output_is_pinned() {
 fn run_c360_mode(dir: &Path, delivery: &str) {
     let out = Command::new(env!("CARGO_BIN_EXE_generate"))
         .env("DG_LOCAL_DIR", dir)
+        // DG_ROW_GROUP forces multiple row-groups per file so continuous
+        // mode actually flushes mid-file via MpuWriter (parquet default is
+        // ~1M rows/group which produces one group per file in every shipping
+        // config, so a naive test would prove nothing about the streaming
+        // path). 100 rows/group means every c360 file has dozens of groups.
+        .env("DG_ROW_GROUP", "100")
         .args([
             "--schema",
             "customer360",
@@ -571,6 +577,10 @@ fn c360_row_identity_across_delivery_modes() {
 fn run_aml_mode(dir: &Path, delivery: &str) {
     let out = Command::new(env!("CARGO_BIN_EXE_generate"))
         .env("DG_LOCAL_DIR", dir)
+        // See run_c360_mode: DG_ROW_GROUP forces multi-row-group per file so
+        // continuous mode actually flushes to S3 multipart mid-file. 100 rows
+        // per group gives dozens of groups per AML bronze file.
+        .env("DG_ROW_GROUP", "100")
         .args([
             "--bucket",
             "b",

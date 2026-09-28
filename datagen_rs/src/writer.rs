@@ -112,7 +112,15 @@ pub fn customer360_bytes_per_row_default() -> f64 {
 }
 
 /// WriterProperties used across every parquet the datagen writes. Reads
-/// `DG_STATS`, `DG_DICT`, `DG_PAGESZ`, `DG_COMPRESSION` from env.
+/// `DG_STATS`, `DG_DICT`, `DG_PAGESZ`, `DG_COMPRESSION`, `DG_ROW_GROUP` from env.
+///
+/// `DG_ROW_GROUP` (Wave 2 D-wave adv-review fix, 2026-09-28) caps
+/// `max_row_group_size` in rows. Default None -> parquet crate default
+/// (~1M rows), which produces one row-group for every shipping file size
+/// in this codebase. Row-identity tests set a small cap to force multiple
+/// row-groups per file, so the continuous MpuWriter path actually flushes
+/// mid-file and exercises the streaming semantics. Production sizing
+/// tuning belongs in a follow-up sprint with live-scale measurement.
 pub fn writer_properties() -> WriterProperties {
     let stats = match std::env::var("DG_STATS").as_deref() {
         Ok("page") => EnabledStatistics::Page,
@@ -127,6 +135,13 @@ pub fn writer_properties() -> WriterProperties {
     if let Ok(ps) = std::env::var("DG_PAGESZ") {
         if let Ok(n) = ps.parse::<usize>() {
             b = b.set_data_page_size_limit(n);
+        }
+    }
+    if let Ok(rg) = std::env::var("DG_ROW_GROUP") {
+        if let Ok(n) = rg.parse::<usize>() {
+            if n > 0 {
+                b = b.set_max_row_group_size(n);
+            }
         }
     }
     b.build()

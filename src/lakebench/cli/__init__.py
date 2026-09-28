@@ -1388,26 +1388,22 @@ _C360_TIMESTAMP_DEFAULTS = ("2024-01-01", "2025-01-01")
 
 
 def info_datagen_mode(cfg: LakebenchConfig) -> str:
-    """The datagen mode line ``info`` shows: the generator mode the run
-    deploys, where it came from, and, for a continuous pipeline, how the
-    corpus reaches bronze.
+    """The datagen mode line ``info`` shows: the delivery mode the run uses,
+    where it came from, and, for a continuous pipeline, how the corpus
+    reaches bronze.
 
-    A continuous pipeline at scale 10 or below deploys the batch generator
-    (DatagenMode is the generator's process and memory profile, not the
-    pipeline mode; DESIGN 5). The bare word "batch" beside "Pipeline mode:
-    continuous" read as a contradiction (lb16-cs).
+    DatagenMode is a delivery pattern since Wave 2 D1 (2026-09-28): batch
+    buffers whole files and PUTs, continuous streams row-groups through S3
+    multipart. Same corpus, different write pipeline. Auto resolves to
+    continuous at every scale (Wave 2 D-wave adv-review fix).
     """
     from lakebench.config.autosizer import _resolve_datagen_mode
     from lakebench.config.schema import DatagenMode
 
     datagen = cfg.architecture.workload.datagen
     mode = _resolve_datagen_mode(cfg)
-    source = (
-        f"auto for scale {datagen.get_effective_scale():g}"
-        if datagen.mode == DatagenMode.AUTO
-        else "set in config"
-    )
-    line = f"{mode} generator ({source})"
+    source = "auto" if datagen.mode == DatagenMode.AUTO else "set in config"
+    line = f"{mode} delivery ({source})"
     if is_continuous_mode(cfg.architecture.pipeline.mode):
         line += "; corpus written up front, trickled to bronze by the pipeline"
     return line

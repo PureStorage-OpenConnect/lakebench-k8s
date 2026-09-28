@@ -176,9 +176,14 @@ class DatagenMode(str, Enum):
 
     - continuous (default per owner D18, matches PipelineMode.CONTINUOUS):
       streams each bronze parquet file through S3 multipart as row-groups
-      close. Peak RSS is bounded by MPU_MAX_CONCURRENT_PARTS x 5 MiB plus
-      one row-group buffer per worker; files arrive in S3 progressively
-      rather than in bursts.
+      close. Files arrive in S3 progressively rather than in bursts.
+      RSS bound is MPU_MAX_CONCURRENT_PARTS x 5 MiB plus one row-group
+      buffer per worker; the row-group buffer is the whole file today
+      because the parquet crate defaults to 1M-row groups and no shipping
+      config crosses that. A DG_ROW_GROUP env override in
+      datagen_rs/src/writer.rs enables multi-row-group streaming (used by
+      the row-identity tests); production tuning to bound RSS is a
+      follow-up sprint task with live-scale measurement.
     - batch: buffers the whole file in memory then does one S3 PUT per
       file. Higher peak RSS (whole file per worker), bursty network,
       simpler failure semantics (single-PUT retry loop). Kept for stress
