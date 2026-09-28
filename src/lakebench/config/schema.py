@@ -262,10 +262,19 @@ class ImagesConfig(ConfigModel):
 
     # Immutable tag = the datagen_rs commit it was built from. Bump it with
     # every datagen_rs change; :latest drifted from the code it claimed to be.
-    # 7c24641 is the AML generator-freeze commit (MODEL_VERSION
-    # datagen-v2-rs-0.3). Pushed digest:
-    # sha256:c5a6bc80d89341b0753dccd39abb5cbe835ed31a9d14b33e0989863cca774f3b
-    datagen: str = "docker.io/sillidata/lb-datagen:7c24641"
+    # 0a83acd is the datagen v1.6 sprint merge into integrate (2026-09-28):
+    # LB-191 dirty-ratio semantics, screening rates in prereg 3.6.1,
+    # calibration-replicate seed refusal in perturbation_for_seed,
+    # multi-writer guard on --mode reference, S3Sink::put_multipart retry,
+    # and --delivery-mode {batch|continuous} MpuWriter switch (continuous is
+    # the default). AML corpus bytes unchanged, MODEL_VERSION stays
+    # datagen-v2-rs-0.3. c360 corpus bytes moved with the LB-191 fix.
+    # Live smoke on FlashBlade 2026-09-28 (namespace ds-0928, scale 1, 4
+    # parallel Jobs): all 16 pods complete in 10-12s; batch and continuous
+    # produce byte-identical S3 output for both schemas. Pushed digest:
+    # sha256:acdf3925e3eb9863974a5ba28255bd8d94c0143246cf0fd1546f16884fb10bf1
+    # Prior freeze: 7c24641 / sha256:c5a6bc80...
+    datagen: str = "docker.io/sillidata/lb-datagen:0a83acd"
     spark: str = "apache/spark:4.0.2-python3"
     postgres: str = "postgres:17"  # Tested with 16, 17, 18
     hive: str = "apache/hive:3.1.3"

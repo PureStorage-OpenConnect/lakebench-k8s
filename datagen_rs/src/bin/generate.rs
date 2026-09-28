@@ -246,7 +246,13 @@ enum DeliveryMode {
 }
 
 fn parse_delivery_mode() -> DeliveryMode {
-    let s: String = arg("--delivery-mode", "batch".to_string());
+    // Default is continuous (Wave 2 D-wave, follow-up 2026-09-28). Live smoke
+    // (16 pods at scale 1 on FlashBlade) confirmed batch and continuous
+    // produce byte-identical S3 output for both schemas, so flipping the Rust
+    // binary default matches the K8s template and Python entrypoint defaults
+    // and matches owner D18. Legacy raw-CLI callers who need the pre-flip
+    // behaviour can pass --delivery-mode batch explicitly.
+    let s: String = arg("--delivery-mode", "continuous".to_string());
     match s.as_str() {
         "batch" => DeliveryMode::Batch,
         "continuous" => DeliveryMode::Continuous,
