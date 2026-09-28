@@ -53,22 +53,23 @@ against the same table. Batch-mode silver_build writes with _batch_id
 deployment sees no change.
 
 Dimensions (entities, accounts): continuous mode never runs the batch
-silver_build, so each micro-batch appends the entities and accounts it
-introduces (anti-join on entity_id / iban against the table), carrying
-country and the monitored-population / KYC columns from the party and
-account masters. The anti-join makes a retried batch a no-op for rows it
-already wrote. The masters are read once, when they appear: the datagen
-writes them before its first bronze file, and a batch that arrives first
-waits for them (LB_FINANCIAL_KYC_WAIT_S), so no entity is written with
-NULL KYC that a moment later would have had it; if they never appear,
-the stream fails unless the manifest proves a pre-KYC corpus.
-
-Known differences from batch mode: an entity's name, type and (for
-LEI-keyed entities) country, and an account's holder and opened_date, come
-from the first micro-batch that sees them rather than from the whole
-corpus. The datagen gives each entity (world entities and the screening
-track's external accounts alike) one name and country, so the difference is
-limited to opened_date (first date the stream saw).
+silver_build, so each micro-batch merges the entities and accounts it
+introduces into the silver dimensions, carrying country and the
+monitored-population / KYC columns from the party and account masters.
+The MERGE (E1) preserves the LEAST() of the target row and the batch row
+on the dimension columns batch mode collapses with min() (entities:
+name, entity_type re-derived from the merged name, legal_name, country;
+accounts: holder_entity_id, bank_bic, currency, opened_date). This
+closes the pre-E1 first-batch-wins parity gap between stream and batch
+against identical bronze. The masters are read once, when they appear:
+the datagen writes them before its first bronze file, and a batch that
+arrives first waits for them (LB_FINANCIAL_KYC_WAIT_S), so no entity is
+written with NULL KYC that a moment later would have had it; if they
+never appear, the stream fails unless the manifest proves a pre-KYC
+corpus. KYC columns are set at first insert and left alone on later
+batches (they are the same across a stream's lifetime); a KYC refresh
+that changes a value picks up on the NEXT run, matching pre-E1
+behaviour.
 """
 
 from __future__ import annotations
@@ -87,6 +88,7 @@ from common import (
     ensure_column,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
+    entity_type_from_name_sql,
     env,
     log,
     log_job_metrics,
@@ -177,6 +179,14 @@ KYC_REFRESH_S = int(env("LB_STREAM_KYC_REFRESH_SECONDS", "3600"))
 _KYC = None
 _KYC_LOADED = False
 _KYC_LOADED_AT = 0.0
+
+# E1 (dimension parity): temp view names the per-batch MERGE reuses.
+# foreachBatch runs sequentially per streaming query on the driver, so
+# fixed names are safe within a single query. Two concurrent stream
+# queries in the same JVM (not a supported deployment mode today) would
+# need per-query naming.
+_ENTITIES_MERGE_VIEW = "_silver_stream_dim_merge_entities"
+_ACCOUNTS_MERGE_VIEW = "_silver_stream_dim_merge_accounts"
 
 
 def _kyc(spark):
@@ -537,33 +547,264 @@ def _sanitize_for_view(text: str) -> str:
     return "".join(c if c.isalnum() else "_" for c in text)
 
 
-def append_new_dimensions(spark, batch_df, txns, kyc) -> tuple[int, int]:
-    """Append the entities and accounts this batch introduces. Anti-join on
-    the key against the table, so a replayed batch writes nothing twice."""
-    from pyspark.sql.functions import col
+def _sanitize_view_suffix(stream_id):
+    """Turn a streaming query id (UUID with hyphens) into a temp-view suffix.
+
+    Non-blocker defense: two concurrent stream queries in the same JVM
+    (not a supported deployment mode today) share a session, so a fixed
+    temp-view name would collide across their MERGEs. Suffixing with a
+    per-query id keeps them isolated. Non-alphanumerics collapse to
+    underscore; the empty case (unit-test path with stream_id=None)
+    returns the empty string so tests keep the fixed name.
+    """
+    if not stream_id:
+        return ""
+    safe = "".join(c if c.isalnum() else "_" for c in str(stream_id))
+    return f"_{safe}"
+
+
+def append_new_dimensions(spark, batch_df, txns, kyc, stream_id=None) -> tuple[int, int]:
+    """Merge this batch's entities and accounts into the silver dimensions.
+
+    E1: replaces the previous first-seen-wins append with per-table MERGE
+    INTOs that end each batch with the same silver.entities and
+    silver.accounts row shape a single-pass batch build would.
+
+    ``silver.entities`` -- per-column LEAST is safe on the entity
+    dimension columns because each column collapses independently under
+    batch's ``build_entities`` (``_min("name")`` on the reported name,
+    then a left join to ``_entity_countries`` for country; there is no
+    cross-column tiebreak). Semantics per column (matches batch's
+    ``min()`` skip-NULL behaviour via ``coalesce(least(t, s), t, s)``):
+
+    - name updated to ``LEAST(target.name, source.name)``.
+    - legal_name updated to the SAME expression as name -- batch enforces
+      ``legal_name = col("name")`` at build_entities so the invariant
+      ``legal_name == name`` must survive stream updates. Using an
+      independent LEAST on legal_name would drift on a batch where the
+      target's name and legal_name disagreed for any reason (they never
+      should, but the invariant is what the DDL semantics rely on).
+    - entity_type re-derived from the merged name via the shared
+      ``common.entity_type_from_name_sql`` helper so batch and stream
+      cannot drift on the corporate-suffix regex.
+    - country updated to ``LEAST(target.country, source.country)``.
+    - KYC and screening columns are set at first insert and left alone
+      on later batches (they are the same across a stream's lifetime).
+
+    ``silver.accounts`` -- per-column LEAST WOULD MIX FIELDS across
+    debtor and creditor sides on the same iban: batch's ``build_accounts``
+    already fixed this exact class of hazard (I3 at
+    silver_build_financial.py:632-644 -- ``row_number() over (iban)
+    order by (holder_entity_id, bank_bic, opened_date) asc_nulls_last``,
+    filter rn=1) so the four dimension columns come from ONE OBSERVED
+    ROW. Reopening per-column LEAST here would synthesise a row that
+    appears on neither side (debtor's holder + creditor's bank_bic + a
+    third row's opened_date). Instead the stream computes the same
+    row_number winner across (target existing row + this batch's
+    candidates) and UPDATEs the four columns as a unit. For a
+    row_number-1-by-lex-tuple the operation is associative:
+    ``winner(A, B, C) == winner(winner(A, B), C)`` -- so a stream that
+    sees the corpus in chunks converges on the same winner a single-pass
+    batch would.
+
+    Structure: TWO MERGEs on silver.accounts to keep the source cleanly
+    typed for each path -- one INSERT-only source (batch anti-join,
+    full-shape rows carrying KYC), one UPDATE-only source (winners
+    resolved over target + batch candidates; only the four dimension
+    columns are UPDATEd so target KYC is preserved). One MERGE on
+    silver.entities (source shape is DDL-shaped, INSERT * safe).
+
+    Returns ``(entities_inserted, accounts_inserted)``, the count of
+    genuinely new rows (WHEN NOT MATCHED path). The A1 driver-side
+    progress gate treats a batch that inserted zero new dimensions as
+    non-progress on the dimensions themselves; ``_merge_batch``'s
+    return value (silver.transactions row count) is the LB-044 gate.
+
+    Instrumentation: publishes ``dim_merge_elapsed_ms`` for entities and
+    accounts separately via ``log_job_metrics`` so the E1/E2 live gate
+    can measure whether the MERGE cost at scale 10 stays within one
+    trigger interval. If not, the block-E fallback (E2: label + defer,
+    v1.7) is triggered.
+
+    ``stream_id`` scopes the per-batch temp views used by the MERGE
+    sources so two concurrent stream queries in the same JVM never
+    collide on the fixed view name. ``_merge_batch`` passes it in from
+    ``streaming_query_id(spark)``; the unit-test paths pass None and
+    fall back to the fixed name.
+    """
+    from pyspark.sql import Window
+    from pyspark.sql.functions import col, row_number
 
     ents = build_entities(txns.drop("_batch_id", "_stream_id"), batch_df, kyc)
-    have = spark.table(f"{CATALOG}.{SILVER_ENTITIES}").select(col("entity_id").alias("_have"))
-    new_ents = ents.join(have, ents["entity_id"] == have["_have"], "left_anti")
     accts = build_accounts(batch_df, kyc)
-    have_a = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}").select(col("iban").alias("_have"))
-    new_accts = accts.join(have_a, accts["iban"] == have_a["_have"], "left_anti")
-    # One small file per table per batch, not one per shuffle partition: the
-    # dimensions are append-only in continuous mode and nothing compacts them.
-    # repartition, not coalesce: coalesce would pull the anti-join itself into
-    # one task, and the first batch carries nearly every entity.
-    new_ents = new_ents.repartition(1).cache()
-    new_accts = new_accts.repartition(1).cache()
+    # One small file per source per batch, not one per shuffle partition:
+    # the dimensions are dozens to thousands of rows per micro-batch and a
+    # 200-partition shuffle would produce as many empty files.
+    ents = ents.repartition(1).cache()
+    accts = accts.repartition(1).cache()
     try:
-        n_e, n_a = new_ents.count(), new_accts.count()
-        if n_e:
-            new_ents.writeTo(f"{CATALOG}.{SILVER_ENTITIES}").append()
-        if n_a:
-            new_accts.writeTo(f"{CATALOG}.{SILVER_ACCOUNTS}").append()
-        return n_e, n_a
+        n_ents_total = ents.count()
+        n_accts_total = accts.count()
+        # Anti-join gives the count of rows that WILL insert (WHEN NOT
+        # MATCHED). We compute it before the MERGE so the return value
+        # matches the "new entities/accounts introduced" contract the
+        # previous append-based API published.
+        have_e = spark.table(f"{CATALOG}.{SILVER_ENTITIES}").select(col("entity_id").alias("_have"))
+        n_new_ents = (
+            ents.join(have_e, ents["entity_id"] == have_e["_have"], "left_anti").count()
+            if n_ents_total
+            else 0
+        )
+        have_a_full = spark.table(f"{CATALOG}.{SILVER_ACCOUNTS}")
+        have_a = have_a_full.select(col("iban").alias("_have"))
+        n_new_accts = (
+            accts.join(have_a, accts["iban"] == have_a["_have"], "left_anti").count()
+            if n_accts_total
+            else 0
+        )
+
+        # BLOCKER 3 fix: batch enforces ``legal_name = col("name")``. Use
+        # the SAME expression for both so the invariant survives the
+        # UPDATE. entity_type re-derivation reads the same expression.
+        merged_name_sql = "coalesce(least(t.name, s.name), t.name, s.name)"
+        entity_type_expr = entity_type_from_name_sql(merged_name_sql)
+
+        # Non-blocker: sid-scope the temp views so two concurrent stream
+        # queries in the same JVM cannot clobber each other's MERGE
+        # source. Falls back to the fixed name when stream_id is None
+        # (unit-test path).
+        suffix = _sanitize_view_suffix(stream_id)
+        ent_view = f"{_ENTITIES_MERGE_VIEW}{suffix}"
+        acct_view_ins = f"{_ACCOUNTS_MERGE_VIEW}{suffix}"
+        acct_view_upd = f"{_ACCOUNTS_MERGE_VIEW}{suffix}_upd"
+
+        ent_elapsed_ms = 0
+        if n_ents_total:
+            ents.createOrReplaceTempView(ent_view)
+            t0 = time.time()
+            spark.sql(
+                f"""
+                MERGE INTO {CATALOG}.{SILVER_ENTITIES} t
+                USING {ent_view} s
+                ON t.entity_id = s.entity_id
+                WHEN MATCHED THEN UPDATE SET
+                    name = {merged_name_sql},
+                    entity_type = {entity_type_expr},
+                    legal_name = {merged_name_sql},
+                    country = coalesce(least(t.country, s.country), t.country, s.country)
+                WHEN NOT MATCHED THEN INSERT *
+                """
+            )
+            ent_elapsed_ms = int((time.time() - t0) * 1000)
+
+        acct_elapsed_ms = 0
+        if n_accts_total:
+            # BLOCKER 1 fix: pick ONE coherent winning row per iban
+            # across (target existing row + this batch's candidates)
+            # using the same row_number tiebreak as batch's
+            # build_accounts. Per-column LEAST would mix the debtor's
+            # holder with the creditor's bank_bic on the same iban --
+            # exactly the I3 hazard build_accounts already fixed.
+            tiebreak_window = Window.partitionBy("iban").orderBy(
+                col("holder_entity_id").asc_nulls_last(),
+                col("bank_bic").asc_nulls_last(),
+                col("opened_date").asc_nulls_last(),
+            )
+            dim_cols = ["iban", "holder_entity_id", "bank_bic", "currency", "opened_date"]
+            # Path (i): WHEN NOT MATCHED THEN INSERT * -- full-shape
+            # rows for the ibans this batch introduces for the first
+            # time. KYC columns carried through from build_accounts's
+            # kyc join.
+            new_accts = accts.join(have_a, accts["iban"] == have_a["_have"], "left_anti")
+            # Path (ii): WHEN MATCHED THEN UPDATE the four dimension
+            # columns from a winning row. Compute the winner over the
+            # touched target rows plus this batch's candidates for the
+            # same ibans; row_number-1 by (holder, bic, opened) asc
+            # nulls-last. Winner comes from ONE actual row (debtor or
+            # creditor side, or a previously-committed row), never a
+            # cross-side synthesis.
+            touched_existing_ibans = (
+                accts.join(have_a, accts["iban"] == have_a["_have"], "left_semi")
+                .select("iban")
+                .distinct()
+            )
+            existing_candidates = have_a_full.select(*dim_cols).join(
+                touched_existing_ibans, "iban", "inner"
+            )
+            batch_candidates_for_update = accts.join(
+                touched_existing_ibans, "iban", "left_semi"
+            ).select(*dim_cols)
+            winners = (
+                existing_candidates.unionByName(batch_candidates_for_update)
+                .withColumn("_rn", row_number().over(tiebreak_window))
+                .filter("_rn = 1")
+                .drop("_rn")
+            )
+
+            t0 = time.time()
+
+            if n_new_accts:
+                new_accts.createOrReplaceTempView(acct_view_ins)
+                spark.sql(
+                    f"""
+                    MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
+                    USING {acct_view_ins} s
+                    ON t.iban = s.iban
+                    WHEN NOT MATCHED THEN INSERT *
+                    """
+                )
+            if n_accts_total > n_new_accts:
+                winners.createOrReplaceTempView(acct_view_upd)
+                spark.sql(
+                    f"""
+                    MERGE INTO {CATALOG}.{SILVER_ACCOUNTS} t
+                    USING {acct_view_upd} s
+                    ON t.iban = s.iban
+                    WHEN MATCHED THEN UPDATE SET
+                        holder_entity_id = s.holder_entity_id,
+                        bank_bic = s.bank_bic,
+                        currency = s.currency,
+                        opened_date = s.opened_date
+                    """
+                )
+
+            acct_elapsed_ms = int((time.time() - t0) * 1000)
+
+        # E1 instrumentation: per-batch merge cost, split entities vs
+        # accounts. Emitted through ``log_job_metrics`` so the collector's
+        # existing regex lifts the JOB METRICS block into metrics.json,
+        # and also as a plain labelled line for a follow-on parser.
+        log(
+            f"[dim-merge] entities: total={n_ents_total} inserted={n_new_ents} "
+            f"updated={n_ents_total - n_new_ents} elapsed_ms={ent_elapsed_ms}"
+        )
+        log(
+            f"[dim-merge] accounts: total={n_accts_total} inserted={n_new_accts} "
+            f"updated={n_accts_total - n_new_accts} elapsed_ms={acct_elapsed_ms}"
+        )
+        log(
+            f"dim_merge_elapsed_ms_entities: {ent_elapsed_ms} "
+            f"dim_merge_elapsed_ms_accounts: {acct_elapsed_ms}"
+        )
+        log_job_metrics(
+            "silver-stream-dim-merge",
+            input_size_gb=0.0,
+            input_rows=n_ents_total + n_accts_total,
+            output_rows=n_new_ents + n_new_accts,
+            elapsed_seconds=(ent_elapsed_ms + acct_elapsed_ms) / 1000.0,
+            dim_merge_entities_total=n_ents_total,
+            dim_merge_entities_inserted=n_new_ents,
+            dim_merge_entities_updated=n_ents_total - n_new_ents,
+            dim_merge_accounts_total=n_accts_total,
+            dim_merge_accounts_inserted=n_new_accts,
+            dim_merge_accounts_updated=n_accts_total - n_new_accts,
+            dim_merge_elapsed_ms_entities=ent_elapsed_ms,
+            dim_merge_elapsed_ms_accounts=acct_elapsed_ms,
+        )
+        return n_new_ents, n_new_accts
     finally:
-        new_ents.unpersist(blocking=False)
-        new_accts.unpersist(blocking=False)
+        ents.unpersist(blocking=False)
+        accts.unpersist(blocking=False)
 
 
 def _merge_profiles(spark, tagged_txns, sid: str, batch_id: int) -> None:
@@ -914,7 +1155,7 @@ def _merge_batch(batch_df, batch_id: int) -> tuple[int, int]:
         log(f"[batch {batch_id}] appended edges idempotently (source txns: {n_txns})")
 
         # PHASE 3: dimensions this batch introduces (entities, accounts).
-        n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark))
+        n_e, n_a = append_new_dimensions(spark, batch_df, tagged_txns, _kyc(spark), stream_id=sid)
         log(f"[batch {batch_id}] appended {n_e} new entities, {n_a} new accounts")
 
         # PHASE 4 (D-full-simple): silver.account_statements per-batch MERGE and

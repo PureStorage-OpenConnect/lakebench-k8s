@@ -29,6 +29,7 @@ from common import (
     aml_opening_balance,
     assert_preflight_rows,
     assert_progress,
+    derive_entity_type,
     ensure_column,
     ensure_namespaces_for_ddl,
     ensure_partition_transform,
@@ -612,23 +613,12 @@ def build_entities(txns_df, bronze=None, kyc=None):
         picked = picked.join(k, "iban", "left")
     return picked.select(
         col("entity_id"),
-        # We can't tell Person from Company from FI from pacs.008 name alone;
-        # a common heuristic is "the name ends with a corporate suffix
-        # (LTD/INC/GMBH/PLC etc.) -> Company", else default Person. Applied
-        # to the END of the name only (via $) so "MARIA SA" doesn't match
-        # SA as a Company (SA at word-end common in personal names) and
-        # short two-letter tokens (AG, BV, SA) don't false-positive
-        # anywhere in the middle. Corporate names put the suffix at the
-        # end by convention. "L.L.C." is intentionally not detected here
-        # -- the dotted form is rare in pacs.008 dbtr/cdtr fields.
-        when(
-            upper(col("name")).rlike(
-                r"(LTD|LIMITED|INC|CORP|LLC|GMBH|AG|PLC|SA|SARL|BV|BANK|CAPITAL|HOLDINGS|GROUP|INTERNATIONAL|COMPANY|CO)$"
-            ),
-            lit("Company"),
-        )
-        .otherwise(lit("Person"))
-        .alias("entity_type"),
+        # E1: derived via the shared helper in common.py so the batch
+        # picker and the stream MERGE's UPDATE clause use one regex. See
+        # ``common._ENTITY_TYPE_COMPANY_SUFFIX_REGEX`` for the heuristic
+        # (upper-cased name ends with a corporate suffix -> Company,
+        # else Person) and its rationale.
+        derive_entity_type(col("name")),
         col("name"),
         col("name").alias("legal_name"),
         lit(None)
