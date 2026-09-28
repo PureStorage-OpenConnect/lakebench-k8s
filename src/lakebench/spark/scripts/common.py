@@ -837,6 +837,100 @@ def data_clock_date(df, ts_col="event_timestamp"):
     return df.agg(max_(to_date(col(ts_col))).alias("d")).collect()[0]["d"]
 
 
+SILVER_STATE_CONFIGMAP_NAME = "lakebench-silver-state"
+"""C2 (silver-plan): per-deployment ConfigMap that carries the bronze-side
+data clock (``bronze_data_clock``) that bronze-verify writes and job.py
+reads to build the silver env bundle. The deployer creates it on greenfield
+deploy so bronze-verify's write is a plain update, not a first create."""
+
+
+def write_bronze_data_clock(namespace, bronze_max_ts):
+    """C2 (silver-plan): record bronze's newest observed event date to the
+    ``lakebench-silver-state`` ConfigMap so job.py can resolve LB_DATA_CLOCK
+    for silver jobs without a Spark session in the submit path.
+
+    ``bronze_max_ts`` is the ``max(event_timestamp)`` value verified bronze
+    holds (``datetime.datetime`` or ``datetime.date``); this function
+    computes the ISO date and stores it under the ``bronze_data_clock`` key.
+
+    A failure to write is logged and swallowed. Silver's C2 resolver falls
+    back through ``datagen.timestamp_start`` and today at 00:00 UTC when the
+    key is missing, so a transient K8s error at bronze-verify time never
+    blocks a silver run.
+    """
+    if bronze_max_ts is None:
+        log("[silver-state] bronze_data_clock: no timestamp to write; skipping")
+        return
+    from datetime import date as _date
+    from datetime import datetime as _dt
+    from datetime import timedelta as _td
+
+    # LB_DATA_CLOCK follows the datagen ``timestamp_end`` (EXCLUSIVE) convention:
+    # ``configured_data_clock`` subtracts one day to recover the newest possible
+    # event date. To keep ConfigMap-sourced anchors consistent with the
+    # ``timestamp_end`` rung, we store ``max(event_ts) + 1 day`` -- so silver
+    # resolves back to exactly ``max(event_ts)`` as the recency anchor.
+    if isinstance(bronze_max_ts, _dt):
+        d = bronze_max_ts.date()
+    elif isinstance(bronze_max_ts, _date):
+        d = bronze_max_ts
+    else:
+        d = _date.fromisoformat(str(bronze_max_ts)[:10])
+    iso = (d + _td(days=1)).isoformat()
+    ns = namespace or os.environ.get("LAKEBENCH_NAMESPACE")
+    if not ns:
+        log("[silver-state] LAKEBENCH_NAMESPACE unset; skipping bronze_data_clock write")
+        return
+    try:
+        from kubernetes import client as _kclient
+        from kubernetes import config as _kconfig
+        from kubernetes.client.exceptions import ApiException
+    except ImportError as e:  # pragma: no cover -- k8s client always present on driver
+        log(f"[silver-state] kubernetes client not importable: {e}; skipping")
+        return
+    try:
+        try:
+            _kconfig.load_incluster_config()
+        except Exception:  # noqa: BLE001 -- fallback for out-of-cluster runs
+            try:
+                _kconfig.load_kube_config()
+            except Exception as e:  # noqa: BLE001
+                log(f"[silver-state] no kube config available: {e}; skipping")
+                return
+        core = _kclient.CoreV1Api()
+        try:
+            core.patch_namespaced_config_map(
+                name=SILVER_STATE_CONFIGMAP_NAME,
+                namespace=ns,
+                body={"data": {"bronze_data_clock": iso}},
+            )
+            log(
+                f"[silver-state] bronze_data_clock={iso} written to {ns}/{SILVER_STATE_CONFIGMAP_NAME}"
+            )
+            return
+        except ApiException as e:
+            if e.status != 404:
+                log(f"[silver-state] patch failed ({e.status}): {e.reason}; skipping")
+                return
+        # Not found: create it. The deployer normally seeds this on greenfield;
+        # a create here is a safety net for pre-C2 deployments.
+        from kubernetes.client.models import V1ConfigMap, V1ObjectMeta
+
+        body = V1ConfigMap(
+            metadata=V1ObjectMeta(name=SILVER_STATE_CONFIGMAP_NAME, namespace=ns),
+            data={"bronze_data_clock": iso},
+        )
+        try:
+            core.create_namespaced_config_map(namespace=ns, body=body)
+            log(
+                f"[silver-state] bronze_data_clock={iso} created in {ns}/{SILVER_STATE_CONFIGMAP_NAME}"
+            )
+        except ApiException as e:
+            log(f"[silver-state] create failed ({e.status}): {e.reason}; skipping")
+    except Exception as e:  # noqa: BLE001
+        log(f"[silver-state] unexpected write error: {type(e).__name__}: {e}; skipping")
+
+
 def configured_data_clock(value=None):
     """Last day of the configured datagen window, or None when unset.
 
@@ -852,18 +946,33 @@ def configured_data_clock(value=None):
     return date.fromisoformat(raw[:10]) - timedelta(days=1)
 
 
-def resolve_data_clock(df_fallback=None):
+def resolve_data_clock(df_fallback=None, strict=False):
     """The c360 data clock: the date recency is measured from.
 
     One clock for the whole run: from LB_DATA_CLOCK when set, so batch,
     every multi-cycle cycle and every micro-batch use the same anchor and a
     rerun reproduces the same scores (GOALS P4.2). Only when it is unset is
     it measured as max(event date) of ``df_fallback``. Logs which was used.
+
+    ``strict=True`` (C1, silver-plan): C360 silver mains use this. C2 sets
+    LB_DATA_CLOCK unconditionally in the silver env bundle (with a today
+    fallback), so seeing it unset here means the env plumbing broke -- a
+    silent fallback would ship a NULL or measured-per-batch anchor,
+    invalidating cross-cycle recency scoring. Raise ``SilverAbort`` instead.
+    AML mains keep ``strict=False``: they do not use customer_recency_score,
+    so a missing anchor is not a correctness hazard for them.
     """
     anchor = configured_data_clock()
     if anchor is not None:
         log(f"Data clock (recency anchor): {anchor} from LB_DATA_CLOCK")
         return anchor
+    if strict:
+        raise SilverAbort(
+            "LB_DATA_CLOCK is unset. Silver C360 mains require a resolved "
+            "data clock so recency scores stay reproducible across cycles "
+            "and batch/stream. job.py._build_env_vars should always export "
+            "LB_DATA_CLOCK for silver jobs (see silver-plan C2)."
+        )
     if df_fallback is None:
         log("Data clock: LB_DATA_CLOCK unset and no data to measure; recency is NULL")
         return None

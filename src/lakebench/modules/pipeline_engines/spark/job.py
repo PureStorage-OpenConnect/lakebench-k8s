@@ -2569,6 +2569,65 @@ class SparkJobManager:
 
         return manifest
 
+    def _resolve_silver_data_clock(self, cfg: LakebenchConfig) -> tuple[str, str]:
+        """C2 (silver-plan): resolve LB_DATA_CLOCK for a silver job.
+
+        Returns ``(iso_date, source_label)`` where ``source_label`` is one of
+        ``datagen_timestamp_end``, ``bronze_data_clock``,
+        ``datagen_timestamp_start`` or ``fallback_default``.
+
+        The Kubernetes lookup (``lakebench-silver-state.bronze_data_clock``)
+        is best-effort: any error (404, transport, missing config) falls
+        through to the next rung of the ladder. Silver's C1 strict resolver
+        raises if LB_DATA_CLOCK is somehow still missing on the driver, but
+        this path is designed so that never happens for a bare config.
+        """
+        from datetime import datetime as _dt
+        from datetime import timezone as _tz
+
+        # Rung 1: configured window end.
+        _ts_end = cfg.architecture.workload.datagen.timestamp_end
+        if _ts_end:
+            return str(_ts_end), "datagen_timestamp_end"
+
+        # Rung 2: bronze-verify's max(event_ts).
+        bronze_clock = self._read_bronze_data_clock()
+        if bronze_clock:
+            return bronze_clock, "bronze_data_clock"
+
+        # Rung 3: configured window start.
+        _ts_start = cfg.architecture.workload.datagen.timestamp_start
+        if _ts_start:
+            return str(_ts_start), "datagen_timestamp_start"
+
+        # Rung 4: today at 00:00 UTC.
+        today = _dt.now(_tz.utc).date().isoformat()
+        return today, "fallback_default"
+
+    def _read_bronze_data_clock(self) -> str | None:
+        """Best-effort read of ``lakebench-silver-state.bronze_data_clock``
+        from the deployment namespace. Returns None on any failure so the
+        resolver falls through to the next ladder rung."""
+        try:
+            from kubernetes import client as _kclient
+            from kubernetes.client.exceptions import ApiException
+        except ImportError:  # pragma: no cover
+            return None
+        try:
+            core = _kclient.CoreV1Api()
+            cm = core.read_namespaced_config_map("lakebench-silver-state", self.namespace)
+            data = getattr(cm, "data", None) or {}
+            val = data.get("bronze_data_clock", "")
+            return val.strip() or None
+        except ApiException as e:
+            if e.status == 404:
+                return None
+            logger.debug("silver-state ConfigMap read failed (%s); falling back", e.status)
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.debug("silver-state ConfigMap read error: %s; falling back", e)
+            return None
+
     def _build_env_vars(
         self,
         job_type: JobType | None = None,
@@ -2636,11 +2695,29 @@ class SparkJobManager:
             {"name": "LB_GOLD_TABLE", "value": cfg.architecture.tables.gold},
         ]
 
-        # c360 recency data clock (E4): the configured datagen end (exclusive),
-        # so batch, every cycle and every micro-batch share one anchor. Unset,
-        # the scripts measure max(event_timestamp) instead.
+        # C2 (silver-plan): silver jobs always carry LB_DATA_CLOCK so a rerun
+        # scores recency reproducibly, and a greenfield deployment never
+        # silently writes NULL customer_recency_score. Resolution order:
+        #
+        #   1. datagen.timestamp_end (configured window end, exclusive)
+        #   2. bronze-verify's max(event_ts) recorded in ConfigMap
+        #      ``lakebench-silver-state.bronze_data_clock``
+        #   3. datagen.timestamp_start (first-cycle greenfield with no bronze)
+        #   4. today at 00:00 UTC (bare-config safety net)
+        #
+        # A companion ``LB_DATA_CLOCK_SOURCE`` label lands in metrics.json so
+        # a report reader can tell which rung of the ladder fired.
+        #
+        # Non-silver jobs (bronze-verify, gold-*) keep the old behaviour of
+        # emitting LB_DATA_CLOCK only when timestamp_end is directly set;
+        # they do not carry the fallback source label.
         _ts_end = cfg.architecture.workload.datagen.timestamp_end
-        if _ts_end:
+        _is_silver_job = job_type in (JobType.SILVER_BUILD, JobType.SILVER_STREAM)
+        if _is_silver_job:
+            _clock_value, _clock_source = self._resolve_silver_data_clock(cfg)
+            env.append({"name": "LB_DATA_CLOCK", "value": _clock_value})
+            env.append({"name": "LB_DATA_CLOCK_SOURCE", "value": _clock_source})
+        elif _ts_end:
             env.append({"name": "LB_DATA_CLOCK", "value": str(_ts_end)})
 
         # G3: reproducibility seed for silver-build profile sampling

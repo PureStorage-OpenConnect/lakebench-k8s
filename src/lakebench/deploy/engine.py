@@ -1109,27 +1109,38 @@ class DeploymentEngine:
             detail="S3 + PostgreSQL",
         )
 
-    # B1: names of the rebuild-epoch ConfigMap and its keys. The ConfigMap
-    # is per-deployment; job.py._build_env_vars reads the workload+format key
-    # into LB_REBUILD_EPOCH, and the CLI --force-rebuild atomically bumps it
-    # before submitting silver.
+    # B1 + C2: names of the silver-state ConfigMap and its keys. The
+    # ConfigMap is per-deployment. Rebuild-epoch keys: job.py._build_env_vars
+    # reads the workload+format key into LB_REBUILD_EPOCH and the CLI
+    # --force-rebuild atomically bumps it before submitting silver.
+    # bronze_data_clock: bronze-verify PATCHes it after a successful run
+    # so silver's LB_DATA_CLOCK resolution has a real anchor.
     SILVER_STATE_CONFIGMAP = "lakebench-silver-state"
-    _SILVER_STATE_KEYS = (
+    _SILVER_STATE_REBUILD_KEYS = (
         "rebuild_epoch_c360_delta",
         "rebuild_epoch_c360_iceberg",
         "rebuild_epoch_aml_iceberg",
     )
+    _SILVER_STATE_CLOCK_KEY = "bronze_data_clock"
+    _SILVER_STATE_KEYS = _SILVER_STATE_REBUILD_KEYS + (_SILVER_STATE_CLOCK_KEY,)
 
     def _deploy_silver_state(self) -> DeploymentResult:
         """Create the per-deployment silver-state ConfigMap on a greenfield deploy.
 
-        Holds the B1 rebuild-epoch counters (one per workload x format) that
-        job.py exports to silver jobs as ``LB_REBUILD_EPOCH``. Deltas' batch
-        cycle-append idempotency and Iceberg's cycle-0 rebuild guard both key
-        off it. If the ConfigMap already exists (redeploy or a prior create),
-        its values are left alone -- this method never resets a counter, so a
-        redeploy cannot silently make an old ``(txnAppId, txnVersion)`` look
-        fresh to Delta.
+        Holds two independent state families keyed off the same ConfigMap so a
+        single early deploy step covers both silver-plan blocks:
+        - B1 rebuild-epoch counters (one per workload x format) initialised to
+          "0" so the first --force-rebuild bumps to "1". Delta's batch
+          cycle-append idempotency and Iceberg's cycle-0 rebuild guard both
+          key off these; a redeploy never resets a counter so an old
+          ``(txnAppId, txnVersion)`` cannot silently look fresh to Delta.
+        - C2 ``bronze_data_clock`` initialised empty; bronze-verify PATCHes it
+          on a successful run and silver's LB_DATA_CLOCK resolution ladder
+          falls through to ``datagen.timestamp_start`` or today until then.
+
+        Idempotent: an existing ConfigMap has any missing keys backfilled to
+        empty defaults ("0" for rebuild counters, "" for the clock); existing
+        values are left alone.
         """
         import time
 
@@ -1143,6 +1154,12 @@ class DeploymentEngine:
             )
 
         namespace = self.config.get_namespace()
+
+        def _defaults() -> dict[str, str]:
+            data = dict.fromkeys(self._SILVER_STATE_REBUILD_KEYS, "0")
+            data[self._SILVER_STATE_CLOCK_KEY] = ""
+            return data
+
         try:
             from kubernetes import client as _kclient
             from kubernetes.client.exceptions import ApiException
@@ -1153,17 +1170,18 @@ class DeploymentEngine:
                     self.SILVER_STATE_CONFIGMAP, namespace
                 )
                 data = dict(existing.data or {})
+                defaults = _defaults()
                 changed = False
-                for k in self._SILVER_STATE_KEYS:
+                for k, v in defaults.items():
                     if k not in data:
-                        data[k] = "0"
+                        data[k] = v
                         changed = True
                 if changed:
                     existing.data = data
                     core_v1.replace_namespaced_config_map(
                         self.SILVER_STATE_CONFIGMAP, namespace, existing
                     )
-                    msg = f"Updated {self.SILVER_STATE_CONFIGMAP} with missing rebuild-epoch keys"
+                    msg = f"Updated {self.SILVER_STATE_CONFIGMAP} with missing keys"
                 else:
                     msg = f"{self.SILVER_STATE_CONFIGMAP} already present; kept existing values"
             except ApiException as e:
@@ -1175,13 +1193,17 @@ class DeploymentEngine:
                     "metadata": {
                         "name": self.SILVER_STATE_CONFIGMAP,
                         "namespace": namespace,
+                        "labels": {
+                            "app.kubernetes.io/managed-by": "lakebench",
+                            "lakebench.deployment/system": "silver-state",
+                        },
                     },
-                    "data": dict.fromkeys(self._SILVER_STATE_KEYS, "0"),
+                    "data": _defaults(),
                 }
                 self.k8s.apply_manifest(manifest, namespace=namespace)
                 msg = (
-                    f"Created {self.SILVER_STATE_CONFIGMAP} with rebuild-epoch keys "
-                    f"({', '.join(self._SILVER_STATE_KEYS)})"
+                    f"Created {self.SILVER_STATE_CONFIGMAP} with "
+                    f"{len(self._SILVER_STATE_KEYS)} keys"
                 )
         except Exception as e:  # noqa: BLE001
             return DeploymentResult(

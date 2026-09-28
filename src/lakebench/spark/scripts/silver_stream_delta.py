@@ -62,7 +62,6 @@ from common import (
     apply_silver_transformations_anchored,
     assert_progress,
     await_stream,
-    configured_data_clock,
     data_clock_date,
     delta_idempotent_options,
     emit_stream_scale_admission,
@@ -70,6 +69,7 @@ from common import (
     env,
     log,
     refuse_fresh_checkpoint_over_data,
+    resolve_data_clock,
     set_utc_session,
     streaming_query_id,
     table_exists,
@@ -282,12 +282,10 @@ def main() -> None:
         ensure_column(spark, silver_tbl, "_stream_id", "STRING")
         ensure_column(spark, silver_tbl, "_batch_id", "BIGINT")
     refuse_fresh_checkpoint_over_data(spark, checkpoint_location, silver_tbl)
-    data_clock = configured_data_clock()
-    log(
-        f"Data clock (recency anchor): {data_clock} from LB_DATA_CLOCK"
-        if data_clock is not None
-        else "Data clock: LB_DATA_CLOCK unset; recency anchored per micro-batch"
-    )
+    # C1 (silver-plan): silver C360 stream mains use strict=True. C2 always
+    # exports LB_DATA_CLOCK in the silver env bundle, so a missing env here
+    # is a plumbing break, not a legitimate greenfield.
+    data_clock = resolve_data_clock(df_fallback=None, strict=True)
 
     # Bronze-ingest creates bronze_raw on its first batch; silver-stream
     # starts concurrently. Any probe error only means "wait longer".
