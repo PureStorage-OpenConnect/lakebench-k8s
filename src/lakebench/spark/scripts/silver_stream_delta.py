@@ -33,10 +33,12 @@ Environment variables (set by job.py):
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 
 from common import (
+    SilverAbort,
     apply_silver_transformations_anchored,
     assert_progress,
     await_stream,
@@ -55,7 +57,8 @@ from common import (
 from pyspark.sql import SparkSession
 
 _TABLE_WAIT_INTERVAL = 15  # seconds between checks
-_TABLE_WAIT_MAX = 1800  # 30 minutes -- generous for large datagen
+# A3 (silver-plan): see silver_stream.py for rationale.
+_TABLE_WAIT_MAX = int(os.environ.get("LB_SILVER_BRONZE_WAIT_SECONDS", "1800"))
 
 
 def write_silver_batch(batch_df, batch_id, silver_tbl, silver_bucket, data_clock=None):
@@ -163,7 +166,7 @@ def main() -> None:
         if waited >= _TABLE_WAIT_MAX:
             log(f"Bronze table {bronze_tbl} not found after {waited}s, giving up")
             spark.stop()
-            raise SystemExit(1)
+            raise SilverAbort(f"bronze did not appear in wait window ({_TABLE_WAIT_MAX}s)")
         log(f"Waiting for {bronze_tbl} to be created ({waited}s elapsed)...")
         time.sleep(_TABLE_WAIT_INTERVAL)
         waited += _TABLE_WAIT_INTERVAL

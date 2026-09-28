@@ -197,29 +197,52 @@ def ensure_partition_transform(spark, fq_table, old, new):
     return True
 
 
+def _path_size_gb_impl(spark, uri):
+    """Total bytes under a Hadoop-FS path or glob, in GiB.
+
+    The file system comes from ``Path.getFileSystem``: ``java.net.URI(uri)``
+    rejects glob characters such as ``[0-9]`` (common.c360_bronze_path).
+    Raises the underlying Hadoop exception on listing failure; wrappers decide
+    whether to swallow it (path_size_gb) or propagate it (path_size_gb_strict).
+    """
+    jvm = spark._jvm
+    hconf = spark._jsc.hadoopConfiguration()
+    path = jvm.org.apache.hadoop.fs.Path(uri)
+    fs = path.getFileSystem(hconf)
+    if any(ch in uri for ch in "*?[{"):
+        total = 0
+        for st in fs.globStatus(path) or []:
+            total += fs.getContentSummary(st.getPath()).getLength()
+        return total / (1024**3)
+    if not fs.exists(path):
+        return 0.0
+    return fs.getContentSummary(path).getLength() / (1024**3)
+
+
 def path_size_gb(spark, uri):
     """Total bytes under a Hadoop-FS path or glob, in GiB; 0.0 if it cannot be
     measured.
 
-    The file system comes from ``Path.getFileSystem``: ``java.net.URI(uri)``
-    rejects glob characters such as ``[0-9]`` (common.c360_bronze_path).
+    Callers that must distinguish "path empty" from "listing failed" should use
+    ``path_size_gb_strict`` instead.
     """
     try:
-        jvm = spark._jvm
-        hconf = spark._jsc.hadoopConfiguration()
-        path = jvm.org.apache.hadoop.fs.Path(uri)
-        fs = path.getFileSystem(hconf)
-        if any(ch in uri for ch in "*?[{"):
-            total = 0
-            for st in fs.globStatus(path) or []:
-                total += fs.getContentSummary(st.getPath()).getLength()
-            return total / (1024**3)
-        if not fs.exists(path):
-            return 0.0
-        return fs.getContentSummary(path).getLength() / (1024**3)
+        return _path_size_gb_impl(spark, uri)
     except Exception as e:  # noqa: BLE001
         log(f"[metrics] size of {uri} unavailable: {one_line(e)}")
         return 0.0
+
+
+def path_size_gb_strict(spark, uri):
+    """Total bytes under a Hadoop-FS path or glob, in GiB.
+
+    A6 (silver-plan): silver mains call this variant so an S3 outage surfaces
+    as a retryable driver error rather than as an "empty bronze" exit-1. The
+    non-strict ``path_size_gb`` returns 0.0 on any exception, which made a
+    transient listing failure indistinguishable from a truly empty bronze
+    path and led to a silent no-op silver run.
+    """
+    return _path_size_gb_impl(spark, uri)
 
 
 def _describe_table(spark, fq_table):
