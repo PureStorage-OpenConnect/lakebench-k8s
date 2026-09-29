@@ -64,15 +64,16 @@ pub fn place_instances(instances: &mut [Instance], cal: &DayCal, start_us: i64, 
     }
 }
 
-/// Shape one instance's rows in place. `country[orig]` is each originator's
-/// country. Returns the [min, max] of the shaped in-window rows, which is
-/// what the manifest should report as the injection window.
-pub fn shape_instance_rows(
+/// Shape one instance's rows in place. `country(orig)` gives each originator's
+/// country (recomputed on demand, LB-204). Returns the [min, max] of the
+/// shaped in-window rows, which is what the manifest should report as the
+/// injection window.
+pub fn shape_instance_rows<F: Fn(usize) -> &'static str>(
     rows: &mut [TxRow],
     inst: &Instance,
     cal: &DayCal,
     span_us: i64,
-    country: &[&str],
+    country: F,
     rng: &mut Rng,
 ) -> Option<(i64, i64)> {
     let n = rows.len();
@@ -104,7 +105,7 @@ pub fn shape_instance_rows(
                 cal.day_of(r.ts_us)
             }
         };
-        shaped.push(sample_ts_on_day(rng, cal, day, country[r.orig as usize]));
+        shaped.push(sample_ts_on_day(rng, cal, day, country(r.orig as usize)));
     }
 
     // 2. Rank by original time (stable), so shaping never reorders legs.
@@ -133,7 +134,7 @@ pub fn shape_instance_rows(
     for &i in &rank {
         if let Some(p) = prev {
             if shaped[i] <= p {
-                let cc = country[rows[i].orig as usize];
+                let cc = country(rows[i].orig as usize);
                 let bump = p + 1_000_000 + (rng.unit() * 1_800_000_000.0) as i64;
                 let d = cal.day_of(bump);
                 let same_day = bump < cal.day_start_us(d) + US_PER_DAY;

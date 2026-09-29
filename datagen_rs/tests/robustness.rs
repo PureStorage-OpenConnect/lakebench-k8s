@@ -63,6 +63,15 @@ fn corpus() -> (i64, i64) {
     (start, start + 1826 * DAY)
 }
 
+// LB-204: the world no longer materialises these columns; recompute them into
+// a Vec for tests that need the whole column (digest, slice-taking `schedule`).
+fn logshift_vec(w: &datagen_rs::model::World) -> Vec<f64> {
+    (0..=w.population).map(|i| w.amount_logshift(i)).collect()
+}
+fn country_vec(w: &datagen_rs::model::World) -> Vec<&'static str> {
+    (0..=w.population).map(|i| w.country(i)).collect()
+}
+
 #[test]
 fn default_world_and_schedule_are_pinned() {
     // Quantised digest captured on c9d7202 (corpus output byte-identical to c0d658f,
@@ -76,10 +85,10 @@ fn default_world_and_schedule_are_pinned() {
         w.population,
         s,
         e,
-        &w.country,
+        &country_vec(&w),
     );
     let got = (
-        world_digest(&w.activity, &w.amount_logshift, w.total_activity),
+        world_digest(&w.activity, &logshift_vec(&w), w.total_activity),
         schedule_digest(&insts),
     );
     assert_eq!(
@@ -132,12 +141,12 @@ fn none_is_the_default_path() {
         w.population,
         s,
         e,
-        &w.country,
+        |i| w.country(i),
         &Perturbation::NONE,
     );
     assert_eq!(
         (
-            world_digest(&w.activity, &w.amount_logshift, w.total_activity),
+            world_digest(&w.activity, &logshift_vec(&w), w.total_activity),
             schedule_digest(&insts),
         ),
         (10_581_863_675_670_526_329, 8_773_633_312_168_967_265),
@@ -165,7 +174,7 @@ fn median_amount_moves_the_log_mean_by_ln_m_only() {
     let p = build_world_p(SCALE, DEV_SEED, 60, false, &only(1.2, 1.0, 1.0));
     let ln_m = 1.2f64.ln();
     for i in 1..=base.population {
-        let d = p.amount_logshift[i] - base.amount_logshift[i];
+        let d = p.amount_logshift(i) - base.amount_logshift(i);
         assert!(
             (d - ln_m).abs() < 1e-12,
             "entity {i}: log shift moved by {d}"
@@ -182,7 +191,7 @@ fn median_amount_moves_the_log_mean_by_ln_m_only() {
         (0..200_000)
             .map(|k| {
                 let o = 1 + (k % w.population);
-                native_amount(&mut rng, w.amount_logshift[o], "USD")
+                native_amount(&mut rng, w.amount_logshift(o), "USD")
             })
             .collect()
     };
@@ -197,10 +206,10 @@ fn persona_sd_scales_the_log_spread_around_fixed_centres() {
     let c = -0.5 * datagen_rs::world::AMOUNT_LOG_SD.powi(2);
     for i in 1..=base.population {
         // Amount: deviation from the unchanged centre scales by exactly 1.2.
-        let (b, q) = (base.amount_logshift[i] - c, p.amount_logshift[i] - c);
+        let (b, q) = (base.amount_logshift(i) - c, p.amount_logshift(i) - c);
         assert!((q - 1.2 * b).abs() < 1e-12, "entity {i}: {b} -> {q}");
         // Activity: log of the rate multiplier (median 1x) scales by 1.2.
-        let t = base.ty[i];
+        let t = base.ty(i);
         if t >= 0 {
             let per_type = BASELINE_ACTIVITY[t as usize];
             let (lb, lq) = (
@@ -210,14 +219,21 @@ fn persona_sd_scales_the_log_spread_around_fixed_centres() {
             assert!((lq - 1.2 * lb).abs() < 1e-9, "entity {i}: {lb} -> {lq}");
         }
     }
-    // Everything else in the world is the same.
-    assert_eq!(p.ty, base.ty);
-    assert_eq!(p.country, base.country);
-    assert_eq!(p.ccy, base.ccy);
-    assert_eq!(p.ring_sz, base.ring_sz);
-    assert_eq!(p.n_accounts, base.n_accounts);
-    assert_eq!(p.iban, base.iban);
-    assert!(p.ty.contains(&TYPE_PERSON));
+    // Everything else in the world is the same. These attributes do not depend
+    // on the perturbation, so the recomputed values must match id for id.
+    for i in 0..=base.population {
+        assert_eq!(p.ty(i), base.ty(i), "ty differs at {i}");
+        assert_eq!(p.country(i), base.country(i), "country differs at {i}");
+        assert_eq!(p.ccy(i), base.ccy(i), "ccy differs at {i}");
+        assert_eq!(p.ring_sz(i), base.ring_sz(i), "ring_sz differs at {i}");
+        assert_eq!(
+            p.n_accounts(i),
+            base.n_accounts(i),
+            "n_accounts differs at {i}"
+        );
+        assert_eq!(p.iban(i), base.iban(i), "iban differs at {i}");
+    }
+    assert!((1..=p.population).any(|i| p.ty(i) == TYPE_PERSON));
 }
 
 #[test]
@@ -232,7 +248,7 @@ fn dormancy_scales_each_episode_and_nothing_else_in_the_schedule() {
             w.population,
             s,
             e,
-            &w.country,
+            |i| w.country(i),
             p,
         )
     };
@@ -383,7 +399,7 @@ fn manifest_carries_the_stamp_only_when_perturbed() {
         w.population,
         s,
         e,
-        &w.country,
+        &country_vec(&w),
     );
     let uids = std::collections::HashMap::new();
     let plain = build_manifest(&insts, DEV_SEED, &uids);

@@ -1,9 +1,17 @@
-//! Precomputed per-entity world, the Rust analogue of emit.World. Every vector
-//! is indexed by entity_id (index 0 is an unused sentinel).
+//! Precomputed per-entity world, the Rust analogue of emit.World.
+//!
+//! LB-204 (datagen per-pod memory redesign, Tier-1): the world no longer
+//! materialises the full-population string/attribute columns. Every one of
+//! those columns is a pure function of `(id, seed)` (and, for the amount
+//! shift, the persona perturbation), so it is recomputed on demand through the
+//! methods below instead of being held resident. Only the genuinely-global
+//! sampler inputs stay materialised: `activity` and its `total_activity` sum
+//! (the Tier-2 targets). This keeps per-pod memory from scaling with the
+//! name/street/town/region/postcode/email/iban/lei/bic/ccy/country/ty/
+//! ring_sz/ring_hit/amount_logshift columns, while the corpus stays
+//! byte-identical (the recompute uses the same functions the columns were
+//! built from).
 
-use rayon::prelude::*;
-
-use crate::arena::ArenaCol;
 use crate::ids::{bic_pool, iban_for, lei_for};
 use crate::kyc::entity_bic_idx;
 use crate::realism as R;
@@ -22,48 +30,33 @@ use crate::world as W;
 /// A pre-freeze corpus carries 0.2 and must not pass as current.
 pub const MODEL_VERSION: &str = "datagen-v2-rs-0.3";
 
+/// The static per-entity world. After LB-204 this holds only the sampler
+/// inputs; every attribute column is recomputed on demand (see the methods
+/// below), so its size no longer scales with the population's string columns.
 pub struct World {
     pub seed: i64,
     pub population: usize,
     pub dims: W::Dimensions,
-    pub ty: Vec<i8>,
-    pub country: Vec<&'static str>,
-    // Hot in the emit gather (per row: name, street, town for both parties).
-    // Stored as contiguous arenas so a lookup is two adjacent u32 reads plus
-    // a slice into a flat byte buffer, with no per-entry pointer chase into
-    // the heap. See crate::arena for the layout rationale.
-    pub name: ArenaCol,
-    pub street: ArenaCol,
-    pub town: ArenaCol,
-    // Reference-only columns: still Vec<String> because the party.rs builders
-    // consume them once each and .clone() them into the Arrow batch; there is
-    // no random gather over an 11M-entry column here.
-    pub region: Vec<String>,
-    pub postcode: Vec<String>,
-    pub email: Vec<String>,
-    pub iban: Vec<String>,
-    pub lei: Vec<String>,
-    pub bic: Vec<String>,
-    pub ccy: Vec<&'static str>,
-    pub n_accounts: Vec<i32>,
-    pub ring_sz: Vec<i64>,
+    /// Persona perturbation inputs needed to recompute `amount_logshift(id)`
+    /// on demand. `sd_mult` (== `perturb.persona_sd`) and the log-mean shift
+    /// (== `perturb.amount_log_mu_shift()`), captured at build time so the
+    /// recompute reproduces the exact value the materialised column held.
+    persona_sd: f64,
+    amount_log_mu_shift: f64,
     /// Per-entity activity rate: BASELINE_ACTIVITY[type] * persona rate_mult(id).
-    /// Drives activity-weighted originator sampling, so each account has its own
-    /// consistent cadence (a per-account Poisson process) rather than a per-type
-    /// constant. Always built (the bronze emit path samples originators).
+    /// Drives activity-weighted originator sampling. STAYS materialised
+    /// (Tier-2 target): the sampler prefix sum consumes it and `total_activity`
+    /// is a strictly ordered ascending-id sum of it (freeze-void landmine).
     pub activity: Vec<f64>,
     /// Sum of `activity` over the population, so a declared expected volume can
     /// use each entity's share of the send volume.
     pub total_activity: f64,
-    /// Per-entity additive shift to the log-normal amount mean (persona). Always
-    /// built: the bronze base-amount draw reads it per row.
-    pub amount_logshift: Vec<f64>,
-    pub ring_hit: Vec<f64>,
     pub bic_pool: Vec<String>,
     /// External counterparties above the population (crate::screening):
     /// listed parties and their namesake decoys. Never customers, never in
     /// the party or account zones; only the pacs.008 emit reads them, as a
-    /// beneficiary. Empty until `attach_external`.
+    /// beneficiary. Empty until `attach_external`. Small (bounded by the
+    /// watchlist size), so these stay materialised.
     pub ext_first: usize,
     pub ext_name: Vec<String>,
     pub ext_street: Vec<String>,
@@ -73,7 +66,7 @@ pub struct World {
 
 impl World {
     /// Register external counterparties with ids `population + 1 ..`, in
-    /// order. Leaves every population column untouched.
+    /// order. Leaves every population attribute untouched.
     pub fn attach_external(&mut self, ents: Vec<(String, String, String, &'static str)>) {
         self.ext_first = self.population + 1;
         for (n, s, t, c) in ents {
@@ -89,30 +82,179 @@ impl World {
         id > self.population
     }
 
-    /// Counterparty name, street, town and country for any entity id,
-    /// population or external.
+    // --- Recomputed per-entity attributes (pure functions of (id, seed)) ----
+    // Each reproduces, bit for bit, the value the former materialised column
+    // held at index `id`. Index 0 keeps its old sentinel value so a debug dump
+    // over 0..=n is unchanged; real entities are 1..=population.
+
     #[inline]
-    pub fn cp_name(&self, id: usize) -> &str {
-        if id > self.population {
-            &self.ext_name[id - self.ext_first]
+    pub fn ty(&self, id: usize) -> i8 {
+        if id == 0 {
+            0
         } else {
-            self.name.get(id)
+            W::entity_type(id as u64, self.seed)
+        }
+    }
+
+    #[inline]
+    pub fn country(&self, id: usize) -> &'static str {
+        if id == 0 {
+            "US"
+        } else {
+            W::HOME_CODES[W::home_country_idx(id as u64, self.seed)]
+        }
+    }
+
+    #[inline]
+    pub fn ccy(&self, id: usize) -> &'static str {
+        R::currency_for_country(self.country(id))
+    }
+
+    #[inline]
+    pub fn ring_sz(&self, id: usize) -> i64 {
+        if id == 0 {
+            0
+        } else {
+            W::ring_size(id as u64, self.ty(id), self.seed)
+        }
+    }
+
+    #[inline]
+    pub fn ring_hit(&self, id: usize) -> f64 {
+        let t = self.ty(id);
+        if t < 0 {
+            0.0
+        } else {
+            W::RING_HIT_RATE[t as usize]
+        }
+    }
+
+    #[inline]
+    pub fn amount_logshift(&self, id: usize) -> f64 {
+        if id == 0 {
+            0.0
+        } else {
+            W::amount_log_shift_p(
+                id as u64,
+                self.seed,
+                self.persona_sd,
+                self.amount_log_mu_shift,
+            )
+        }
+    }
+
+    #[inline]
+    pub fn n_accounts(&self, id: usize) -> i32 {
+        if id == 0 {
+            0
+        } else {
+            W::accounts_for(id as u64, self.seed)
+        }
+    }
+
+    pub fn name(&self, id: usize) -> String {
+        if id == 0 {
+            return "_".to_string();
+        }
+        let iid = id as u64;
+        match self.ty(id) {
+            W::TYPE_PERSON => R::person_name(iid, self.seed),
+            W::TYPE_COMPANY => R::company_name(iid, self.country(id), self.seed),
+            _ => R::fi_name(iid, self.seed),
+        }
+    }
+
+    pub fn street(&self, id: usize) -> String {
+        if id == 0 {
+            "_".to_string()
+        } else {
+            R::street(id as u64, self.country(id), self.seed)
+        }
+    }
+
+    pub fn town(&self, id: usize) -> String {
+        if id == 0 {
+            "_".to_string()
+        } else {
+            R::city(id as u64, self.country(id), self.seed)
+        }
+    }
+
+    pub fn region(&self, id: usize) -> String {
+        if id == 0 {
+            "_".to_string()
+        } else {
+            R::region(id as u64, self.country(id), self.seed)
+        }
+    }
+
+    pub fn postcode(&self, id: usize) -> String {
+        if id == 0 {
+            "_".to_string()
+        } else {
+            R::postcode(id as u64, self.country(id), self.seed)
+        }
+    }
+
+    pub fn email(&self, id: usize) -> String {
+        if id == 0 {
+            "_".to_string()
+        } else {
+            R::email(&self.name(id), id as u64, self.country(id), self.seed)
+        }
+    }
+
+    pub fn iban(&self, id: usize) -> String {
+        if id == 0 {
+            return "_".to_string();
+        }
+        let cc = crate::kyc::account_country(
+            crate::kyc::is_customer(id as u64, self.seed),
+            self.country(id),
+        );
+        iban_for(&[cc.as_bytes()[0], cc.as_bytes()[1]], id as u64)
+    }
+
+    pub fn lei(&self, id: usize) -> String {
+        if id == 0 {
+            "_".to_string()
+        } else {
+            lei_for(id as u64)
+        }
+    }
+
+    /// Pool BIC for entity `id`. Matches the former `bic` column, which had no
+    /// index-0 sentinel (`bic[0] == pool[entity_bic_idx(0, seed, len)]`).
+    pub fn bic(&self, id: usize) -> String {
+        self.bic_pool[entity_bic_idx(id as u64, self.seed, self.bic_pool.len())].clone()
+    }
+
+    // --- Counterparty helpers (population OR external) ----------------------
+
+    /// Counterparty name for any entity id, population (recomputed) or
+    /// external (from the small attached table).
+    #[inline]
+    pub fn cp_name(&self, id: usize) -> String {
+        if id > self.population {
+            self.ext_name[id - self.ext_first].clone()
+        } else {
+            self.name(id)
         }
     }
     #[inline]
-    pub fn cp_street(&self, id: usize) -> &str {
+    pub fn cp_street(&self, id: usize) -> String {
         if id > self.population {
-            &self.ext_street[id - self.ext_first]
+            self.ext_street[id - self.ext_first].clone()
         } else {
-            self.street.get(id)
+            self.street(id)
         }
     }
     #[inline]
-    pub fn cp_town(&self, id: usize) -> &str {
+    pub fn cp_town(&self, id: usize) -> String {
         if id > self.population {
-            &self.ext_town[id - self.ext_first]
+            self.ext_town[id - self.ext_first].clone()
         } else {
-            self.town.get(id)
+            self.town(id)
         }
     }
     #[inline]
@@ -120,7 +262,7 @@ impl World {
         if id > self.population {
             self.ext_country[id - self.ext_first]
         } else {
-            self.country[id]
+            self.country(id)
         }
     }
 }
@@ -129,12 +271,9 @@ pub fn build_world(scale: f64, seed: i64, corpus_months: i64) -> World {
     build_world_ex(scale, seed, corpus_months, false)
 }
 
-/// `bronze_only` skips the columns the pacs.008 emit path never reads
-/// (region, postcode, email, n_accounts). Those exist only for
-/// the party/account reference tables, so a dedicated-bronze pod that does not
-/// write the reference zones pays nothing for them -- at scale 100 that removes
-/// roughly six full-population passes (email being the costly one) from every
-/// bronze pod, which is the dominant fixed per-pod cost.
+/// `bronze_only` is retained for API compatibility but no longer changes the
+/// built world: after LB-204 every attribute column is recomputed on demand,
+/// so there is nothing for a dedicated-bronze pod to skip materialising.
 pub fn build_world_ex(scale: f64, seed: i64, corpus_months: i64, bronze_only: bool) -> World {
     build_world_p(scale, seed, corpus_months, bronze_only, &Perturbation::NONE)
 }
@@ -149,216 +288,62 @@ pub fn build_world_p(
     bronze_only: bool,
     perturb: &Perturbation,
 ) -> World {
+    // See build_world_ex: bronze_only is now inert (all columns recomputed).
+    let _ = bronze_only;
     let sd_mult = perturb.persona_sd;
     let log_mu_shift = perturb.amount_log_mu_shift();
     let dims = W::dimensions(scale, corpus_months);
     let n = dims.population;
     let pool = bic_pool();
 
-    // Per-entity attributes are independent, so build every column in parallel.
-    // Vec<String> columns allocate a struct-triple per entry plus one heap
-    // buffer each; the arena columns transiently hold their producer's
-    // Vec<String> before compacting (see crate::arena module docs). Peak
-    // memory during build is therefore roughly 2-3x the final world for the
-    // arena columns, not 1x. Pod memory limits must budget for this.
-    let sentinel = |first: &str, f: &(dyn Fn(usize) -> String + Sync)| -> Vec<String> {
-        (0..=n)
-            .into_par_iter()
-            .map(|i| if i == 0 { first.to_string() } else { f(i) })
-            .collect()
-    };
+    // The only materialised population column: the activity rate. It feeds the
+    // activity-weighted originator sampler (Tier-2 target) and `total_activity`.
+    // Built sequentially so `total_activity` below is a strictly ordered
+    // ascending-id sum (see the freeze-void guard). The per-entity work is a
+    // couple of hashes, so a sequential build is cheap even at scale.
+    let mut activity: Vec<f64> = Vec::with_capacity(n + 1);
+    for i in 0..=n {
+        if i == 0 {
+            activity.push(0.0);
+            continue;
+        }
+        let t = W::entity_type(i as u64, seed);
+        activity.push(if t < 0 {
+            0.0
+        } else {
+            W::BASELINE_ACTIVITY[t as usize] * W::rate_mult_sd(i as u64, seed, sd_mult)
+        });
+    }
 
-    let ty: Vec<i8> = (0..=n)
-        .into_par_iter()
-        .map(|i| {
-            if i == 0 {
-                0
-            } else {
-                W::entity_type(i as u64, seed)
-            }
-        })
-        .collect();
-    let country: Vec<&'static str> = (0..=n)
-        .into_par_iter()
-        .map(|i| {
-            if i == 0 {
-                "US"
-            } else {
-                W::HOME_CODES[W::home_country_idx(i as u64, seed)]
-            }
-        })
-        .collect();
-    let ccy: Vec<&'static str> = country
-        .par_iter()
-        .map(|c| R::currency_for_country(c))
-        .collect();
-    // Build the hot per-entity strings into an arena. The parallel producer
-    // stays as-is (build cost is ~1% of total), the from_vec is one sequential
-    // pass; the arena is what emit reads at scale.
-    let names_vec: Vec<String> = (0..=n)
-        .into_par_iter()
-        .map(|i| {
-            if i == 0 {
-                return "_".to_string();
-            }
-            let id = i as u64;
-            match ty[i] {
-                W::TYPE_PERSON => R::person_name(id, seed),
-                W::TYPE_COMPANY => R::company_name(id, country[i], seed),
-                _ => R::fi_name(id, seed),
-            }
-        })
-        .collect();
-    let name = ArenaCol::from_vec(names_vec);
-    let street = ArenaCol::build_par(n, |i| {
-        if i == 0 {
-            "_".into()
-        } else {
-            R::street(i as u64, country[i], seed)
-        }
-    });
-    let town = ArenaCol::build_par(n, |i| {
-        if i == 0 {
-            "_".into()
-        } else {
-            R::city(i as u64, country[i], seed)
-        }
-    });
-    // Reference-only columns: skipped for a dedicated-bronze pod.
-    let region = if bronze_only {
-        Vec::new()
-    } else {
-        sentinel("_", &|i| R::region(i as u64, country[i], seed))
-    };
-    let postcode = if bronze_only {
-        Vec::new()
-    } else {
-        sentinel("_", &|i| R::postcode(i as u64, country[i], seed))
-    };
-    let email: Vec<String> = if bronze_only {
-        Vec::new()
-    } else {
-        (0..=n)
-            .into_par_iter()
-            .map(|i| {
-                if i == 0 {
-                    "_".to_string()
-                } else {
-                    R::email(name.get(i), i as u64, country[i], seed)
-                }
-            })
-            .collect()
-    };
-    // The bronze emit path recomputes IBAN/LEI/BIC per row (ids::iban_into etc.),
-    // so a dedicated-bronze pod skips materialising these three 11M-entry
-    // columns too. The reference pod still needs them for party/account.
-    let iban = if bronze_only {
-        Vec::new()
-    } else {
-        sentinel("_", &|i| {
-            let cc =
-                crate::kyc::account_country(crate::kyc::is_customer(i as u64, seed), country[i]);
-            iban_for(&[cc.as_bytes()[0], cc.as_bytes()[1]], i as u64)
-        })
-    };
-    let lei = if bronze_only {
-        Vec::new()
-    } else {
-        sentinel("_", &|i| lei_for(i as u64))
-    };
-    let bic: Vec<String> = if bronze_only {
-        Vec::new()
-    } else {
-        (0..=n)
-            .into_par_iter()
-            .map(|i| pool[entity_bic_idx(i as u64, seed, pool.len())].clone())
-            .collect()
-    };
-    let n_accounts: Vec<i32> = if bronze_only {
-        Vec::new()
-    } else {
-        (0..=n)
-            .into_par_iter()
-            .map(|i| {
-                if i == 0 {
-                    0
-                } else {
-                    W::accounts_for(i as u64, seed)
-                }
-            })
-            .collect()
-    };
-    let ring_sz: Vec<i64> = (0..=n)
-        .into_par_iter()
-        .map(|i| {
-            if i == 0 {
-                0
-            } else {
-                W::ring_size(i as u64, ty[i], seed)
-            }
-        })
-        .collect();
-    // Per-entity activity rate = per-type base * persona multiplier, so accounts
-    // have individual cadences. Indexed (not par_iter over ty) because rate_mult
-    // needs the entity id. Index 0 is the unused sentinel.
-    let activity: Vec<f64> = (0..=n)
-        .into_par_iter()
-        .map(|i| {
-            let t = ty[i];
-            if i == 0 || t < 0 {
-                0.0
-            } else {
-                W::BASELINE_ACTIVITY[t as usize] * W::rate_mult_sd(i as u64, seed, sd_mult)
-            }
-        })
-        .collect();
-    // Per-entity persona amount shift. Unperturbed: recentred, mean-preserving.
-    // Robustness perturbation: recentred at the base sd, so the median (x the
-    // median multiplier) is held and the mean rises with the sd.
-    let amount_logshift: Vec<f64> = (0..=n)
-        .into_par_iter()
-        .map(|i| {
-            if i == 0 {
-                0.0
-            } else {
-                W::amount_log_shift_p(i as u64, seed, sd_mult, log_mu_shift)
-            }
-        })
-        .collect();
+    // FREEZE-VOID GUARD (DATAGEN-SHARDING-POC REVISION 2): total_activity feeds
+    // crr_score/crr_tier in party.parquet (frozen). It MUST be a strictly
+    // ordered, ascending-id, sequential f64 sum -- a reordered or parallel
+    // reduction can flip a low bit and change party.parquet bytes -> freeze
+    // void. `Iterator::sum` folds left-to-right in index order; the explicit
+    // loop below re-derives the same ordered sum and the assert pins that the
+    // two agree bit for bit, so any future switch to a reordered/parallel sum
+    // trips here instead of silently voiding the freeze.
     let total_activity: f64 = activity.iter().sum();
-    let ring_hit: Vec<f64> = ty
-        .par_iter()
-        .map(|&t| {
-            if t < 0 {
-                0.0
-            } else {
-                W::RING_HIT_RATE[t as usize]
-            }
-        })
-        .collect();
+    {
+        let mut ordered = 0.0f64;
+        for i in 0..=n {
+            ordered += activity[i];
+        }
+        assert_eq!(
+            total_activity.to_bits(),
+            ordered.to_bits(),
+            "total_activity is not a strictly ordered ascending-id sum (freeze-void)"
+        );
+    }
 
     World {
         seed,
         population: n,
         dims,
-        ty,
-        country,
-        name,
-        street,
-        town,
-        region,
-        postcode,
-        email,
-        iban,
-        lei,
-        bic,
-        ccy,
-        n_accounts,
-        ring_sz,
+        persona_sd: sd_mult,
+        amount_log_mu_shift: log_mu_shift,
         activity,
         total_activity,
-        amount_logshift,
-        ring_hit,
         bic_pool: pool,
         ext_first: n + 1,
         ext_name: Vec::new(),

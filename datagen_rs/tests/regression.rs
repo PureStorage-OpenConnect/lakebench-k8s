@@ -679,7 +679,7 @@ fn world_activity_is_per_entity_not_per_type() {
     let base = BASELINE_ACTIVITY[TYPE_PERSON as usize];
     // Collect activity for the first several persons.
     let persons: Vec<f64> = (1..w.population)
-        .filter(|&i| w.ty[i] == TYPE_PERSON)
+        .filter(|&i| w.ty(i) == TYPE_PERSON)
         .take(500)
         .map(|i| w.activity[i])
         .collect();
@@ -698,9 +698,8 @@ fn world_activity_is_per_entity_not_per_type() {
         distinct > persons.len() / 2,
         "activity not sufficiently heterogeneous"
     );
-    // amount_logshift column is built and non-trivial.
-    assert_eq!(w.amount_logshift.len(), w.population + 1);
-    assert!(w.amount_logshift[1..].iter().any(|&v| v.abs() > 0.01));
+    // amount_logshift is recomputed on demand (LB-204) and non-trivial.
+    assert!((1..=w.population).any(|i| w.amount_logshift(i).abs() > 0.01));
 }
 
 #[test]
@@ -970,7 +969,8 @@ fn shaping_preserves_time_order_and_uses_each_rows_country() {
             .collect();
         let before: Vec<i64> = rows.iter().map(|r| r.ts_us).collect();
         let (lo, hi) =
-            shape_instance_rows(&mut rows, &inst, &cal, 365 * DAY, &country, &mut rng).unwrap();
+            shape_instance_rows(&mut rows, &inst, &cal, 365 * DAY, |i| country[i], &mut rng)
+                .unwrap();
         let mut idx: Vec<usize> = (0..10).collect();
         idx.sort_by_key(|&i| before[i]);
         for w in idx.windows(2) {
@@ -1154,12 +1154,12 @@ fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
         let v = expected_monthly_volume_usd(
             i as u64,
             w.seed,
-            w.amount_logshift[i],
+            w.amount_logshift(i),
             w.activity[i] / w.total_activity,
             w.population,
             w.dims.txn_per_entity_per_month,
         );
-        crr(w.ty[i], w.country[i], v).1
+        crr(w.ty(i), w.country(i), v).1
     };
     let mut all = [0usize; 3];
     let mut person_us = [0usize; 3];
@@ -1174,7 +1174,7 @@ fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
         }
         let t = idx(tier_of(i));
         all[t] += 1;
-        if w.ty[i] == datagen_rs::world::TYPE_PERSON && w.country[i] == "US" {
+        if w.ty(i) == datagen_rs::world::TYPE_PERSON && w.country(i) == "US" {
             person_us[t] += 1;
         }
     }
@@ -1197,7 +1197,7 @@ fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
     // Typology subjects from the person pool are US persons ~88% of the time;
     // their tiers must look like baseline US-person customers' tiers, since
     // selection never looks at anything the CRR uses beyond type and country.
-    let country: Vec<&'static str> = w.country.clone();
+    let country: Vec<&'static str> = (0..=w.population).map(|i| w.country(i)).collect();
     let insts = datagen_rs::typology::schedule(
         42,
         w.dims.total_txns(),
@@ -1213,7 +1213,7 @@ fn crr_tiers_are_a_low_majority_and_subjects_match_their_pool() {
         }
         let s =
             inst.participants[subject_index(inst.typ, inst.participants.len(), inst.seed)] as usize;
-        if w.country[s] == "US" {
+        if w.country(s) == "US" {
             subj[idx(tier_of(s))] += 1;
         }
     }
@@ -1332,8 +1332,8 @@ fn party_and_account_zones_carry_kyc_and_join_to_payments() {
         let home = home.as_any().downcast_ref::<StringArray>().unwrap();
         for r in 0..rb.num_rows() {
             let h = holder.value(r) as usize;
-            assert_eq!(home.value(r), &w.bic[h][..8]);
-            if iban.value(r) == w.iban[h] {
+            assert_eq!(home.value(r), &w.bic(h)[..8]);
+            if iban.value(r) == w.iban(h).as_str() {
                 seen_primary += 1;
             }
         }
@@ -1549,14 +1549,14 @@ fn customer_accounts_are_us_accounts() {
         let c = is_customer(i as u64, 42);
         if c {
             assert!(
-                w.iban[i].starts_with("US"),
+                w.iban(i).starts_with("US"),
                 "customer {i} holds {}",
-                w.iban[i]
+                w.iban(i)
             );
-            foreign_cust += (w.country[i] != "US") as usize;
+            foreign_cust += (w.country(i) != "US") as usize;
         } else {
-            assert_eq!(&w.iban[i][..2], w.country[i]);
-            foreign_non += (w.country[i] != "US") as usize;
+            assert_eq!(&w.iban(i)[..2], w.country(i));
+            foreign_non += (w.country(i) != "US") as usize;
         }
     }
     // Residence is unchanged: foreign residents bank with the US FI too.
@@ -1980,4 +1980,28 @@ fn screening_rates_match_prereg() {
     assert_eq!(BACKGROUND_PER_PARTY, 20);
     assert_eq!(MAX_REL, 2);
     assert_eq!(V2_AT, 0.75);
+}
+
+/// LB-204 freeze-void guard (DATAGEN-SHARDING-POC REVISION 2): total_activity
+/// feeds crr_score/crr_tier in party.parquet (frozen). It must be a strictly
+/// ordered, ascending-id, sequential f64 sum of the activity column -- a
+/// reordered or parallel reduction can flip a low bit and change party.parquet
+/// bytes. build_world_p asserts this internally; this test pins it externally
+/// and confirms the stored scalar is bit-exact to an independent ordered sum.
+#[test]
+fn total_activity_is_a_bit_exact_ordered_ascending_id_sum() {
+    use datagen_rs::model::build_world;
+    for &(scale, seed) in &[(0.02, 42i64), (0.05, 7777i64)] {
+        let w = build_world(scale, seed, 60);
+        // Independent recompute in strict ascending-id order.
+        let mut ordered = 0.0f64;
+        for i in 0..=w.population {
+            ordered += w.activity[i];
+        }
+        assert_eq!(
+            w.total_activity.to_bits(),
+            ordered.to_bits(),
+            "total_activity not a bit-exact ordered sum at scale {scale} seed {seed}"
+        );
+    }
 }

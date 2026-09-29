@@ -525,7 +525,14 @@ fn pacs008_main() {
     // Schedule + emit typology rows, then bin by file.
     let t_typ0 = std::time::Instant::now();
     let mut instances = datagen_rs::typology::schedule_p(
-        seed, seed, total_txns, pop, start_us, end_us, &w.country, &perturb,
+        seed,
+        seed,
+        total_txns,
+        pop,
+        start_us,
+        end_us,
+        |i| w.country(i),
+        &perturb,
     );
     // Place every instance on the baseline calendar (see placement.rs).
     datagen_rs::placement::place_instances(&mut instances, &gcal, start_us, end_us);
@@ -570,7 +577,12 @@ fn pacs008_main() {
         let mut rows = datagen_rs::typology::emit_instance(inst);
         let mut srng = Rng::new(splitmix64((inst.seed as u64) ^ 0x5A4E_0000_0000_0001));
         if let Some(b) = datagen_rs::placement::shape_instance_rows(
-            &mut rows, inst, &gcal, span_us, &w.country, &mut srng,
+            &mut rows,
+            inst,
+            &gcal,
+            span_us,
+            |i| w.country(i),
+            &mut srng,
         ) {
             inst_bounds.insert(inst.id.clone(), b);
         }
@@ -593,16 +605,16 @@ fn pacs008_main() {
                 instance_amounts(
                     inst.typ,
                     &rows,
-                    |o| w.ccy[o as usize],
-                    |o| w.amount_logshift[o as usize],
+                    |o| w.ccy(o as usize),
+                    |o| w.amount_logshift(o as usize),
                     &mut arng,
                 )
             }
             None => instance_amounts(
                 inst.typ,
                 &rows,
-                |o| w.ccy[o as usize],
-                |o| w.amount_logshift[o as usize],
+                |o| w.ccy(o as usize),
+                |o| w.amount_logshift(o as usize),
                 &mut trng,
             ),
         };
@@ -614,7 +626,7 @@ fn pacs008_main() {
             {
                 continue;
             }
-            let ccy = w.ccy[r.orig as usize];
+            let ccy = w.ccy(r.orig as usize);
             let m = gcal.mass_at(r.ts_us);
             let last = inst_last_mass.entry(inst.id.clone()).or_insert(m);
             *last = last.max(m);
@@ -748,14 +760,14 @@ fn pacs008_main() {
             }
             None
         },
-        |o| w.country[o as usize],
+        |o| w.country(o as usize),
         |o, t| !in_suppress_window(&is_suppressed, &suppress_windows, o, t),
     );
     let screen_amount = |uid: u64, o: u64| -> f64 {
         let mut rng = Rng::new(splitmix64(
             uid ^ datagen_rs::screening::SCREEN_SALT ^ 0xA307,
         ));
-        native_amount(&mut rng, w.amount_logshift[o as usize], w.ccy[o as usize])
+        native_amount(&mut rng, w.amount_logshift(o as usize), w.ccy(o as usize))
     };
     let mut screen_instances: Vec<datagen_rs::typology::Instance> = Vec::new();
     let mut screen_extra: HashMap<String, Vec<(&'static str, String)>> = HashMap::new();
@@ -771,7 +783,7 @@ fn pacs008_main() {
                 bene: r.bene,
                 ts_us: r.ts_us,
                 amount: screen_amount(uid, r.orig),
-                ccy: w.ccy[r.orig as usize],
+                ccy: w.ccy(r.orig as usize),
                 uid,
             });
             inst_uids.entry(pl.inst.id.clone()).or_default().push(uid);
@@ -793,7 +805,7 @@ fn pacs008_main() {
             bene: r.bene,
             ts_us: r.ts_us,
             amount: screen_amount(uid, r.orig),
-            ccy: w.ccy[r.orig as usize],
+            ccy: w.ccy(r.orig as usize),
             uid,
         });
         n_screen_rows += 1;
@@ -1019,9 +1031,9 @@ fn pacs008_main() {
                     // large, which collapsed the repeat-edge share at scale 1). The
                     // core is capped at CORE members; off-ring draws hit an extended
                     // band.
-                    let rs = w.ring_sz[o as usize].max(1) as u64;
+                    let rs = w.ring_sz(o as usize).max(1) as u64;
                     let core = rs.min(CORE);
-                    if rng.unit() < w.ring_hit[o as usize] {
+                    if rng.unit() < w.ring_hit(o as usize) {
                         b = ring_member(o, rng.below(core), pop, seed);
                     } else {
                         // Extended band: still bounded per originator, so it repeats.
@@ -1031,17 +1043,17 @@ fn pacs008_main() {
                     if b == o {
                         b = (b % pop as u64) + 1;
                     }
-                    t = sample_ts_on_day(&mut rng, &gcal, day, w.country[o as usize]);
+                    t = sample_ts_on_day(&mut rng, &gcal, day, w.country(o as usize));
                     tries += 1;
                     if tries >= 8 || !in_suppress_window(&is_suppressed, &suppress_windows, o, t) {
                         break;
                     }
                 }
-                let cc = w.ccy[o as usize];
+                let cc = w.ccy(o as usize);
                 orig.push(o);
                 bene.push(b);
                 ts_us.push(t);
-                amount.push(native_amount(&mut rng, w.amount_logshift[o as usize], cc));
+                amount.push(native_amount(&mut rng, w.amount_logshift(o as usize), cc));
                 ccy.push(cc);
                 uid_pre.push(gi);
             }
@@ -1072,13 +1084,13 @@ fn pacs008_main() {
                 for j in j0..j1 {
                     let a = class.account(j);
                     let day = gcal.day_for_mass(class.nominal_mass(j));
-                    let rd = gcal.rolled_day(day, w.country[a as usize]);
+                    let rd = gcal.rolled_day(day, w.country(a as usize));
                     if rd < d_lo || rd > d_hi {
                         continue;
                     }
                     let uid = class.uid_base + j;
                     let mut rng = Rng::new(splitmix64(uid ^ base_seed ^ 0xD2D2_0000_0000_0001));
-                    let t = sample_ts_on_day(&mut rng, &gcal, day, w.country[a as usize]);
+                    let t = sample_ts_on_day(&mut rng, &gcal, day, w.country(a as usize));
                     if file_of(t) != fid || !in_slice(gcal.mass_at(t)) {
                         continue;
                     }
@@ -1095,20 +1107,20 @@ fn pacs008_main() {
                     // band), so counterparty counts and repeat-edge shares are
                     // unchanged by D2 and no typology's counterparty signal moves.
                     const CORE: u64 = 40;
-                    let rs = w.ring_sz[o as usize].max(1) as u64;
+                    let rs = w.ring_sz(o as usize).max(1) as u64;
                     let core = rs.min(CORE);
-                    let b = if rng.unit() < w.ring_hit[o as usize] {
+                    let b = if rng.unit() < w.ring_hit(o as usize) {
                         ring_member(o, rng.below(core), pop, seed)
                     } else {
                         let ext = (rs.min(4 * CORE)).max(core + 1);
                         ring_member(o, core + rng.below(ext), pop, seed)
                     };
                     let b = if b == o { (b % pop as u64) + 1 } else { b };
-                    let cc = w.ccy[o as usize];
+                    let cc = w.ccy(o as usize);
                     orig.push(o);
                     bene.push(b);
                     ts_us.push(t);
-                    amount.push(native_amount(&mut rng, w.amount_logshift[o as usize], cc));
+                    amount.push(native_amount(&mut rng, w.amount_logshift(o as usize), cc));
                     ccy.push(cc);
                     uid_pre.push(uid);
                 }
