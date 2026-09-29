@@ -17,6 +17,7 @@ from common import (
     ICEBERG_METADATA_PROPS_SQL,
     METADATA_DELETE_AFTER_COMMIT,
     METADATA_PREVIOUS_VERSIONS_MAX,
+    _norm_uri,
     ensure_namespaces,
     env,
     log,
@@ -276,6 +277,19 @@ def _drop_owned_table(spark, table):
     unreadable, shared (a namespace or warehouse root), or overlaps the datagen
     path is dropped catalog-only and its files are kept.
 
+    Scope of the proof: the callers pass only this deployment's silver.* and TM
+    gold.* tables, all created ``CREATE TABLE ... USING iceberg`` with no
+    LOCATION and no ``add_files`` (verified in silver_build_financial.py and
+    tm_operations.py), in this deployment's own catalog. So their files live
+    under the catalog warehouse and the name + datagen-disjoint check is enough
+    to keep PURGE off the raw corpus and off a shared namespace root. It does
+    NOT prove the location is under a deployment-owned bucket root the way c360's
+    common.owned_table_dir does, because this script does not know the catalog
+    warehouse root (Hive vs Polaris differ) and the tables are catalog-managed;
+    a bucket-root check keyed on the warehouse is tracked for when it can be
+    verified live (BUGS LB-188 note). Not a live hazard today: with no LOCATION
+    and no add_files these tables cannot resolve to a foreign bucket.
+
     Polaris refuses PURGE (403) unless DROP_WITH_PURGE_ENABLED is set, which the
     bootstrap does not do; there we fall back to a plain DROP and delete the
     table's own directory, as common.reset_stream_tables does for c360.
@@ -285,8 +299,8 @@ def _drop_owned_table(spark, table):
     name = table.rsplit(".", 1)[-1]
     last = loc.rstrip("/").rsplit("/", 1)[-1] if loc else ""
     named = bool(loc) and (last == name or last.startswith(name + "-"))
-    raw = _norm(BRONZE_URI + PACS_PREFIX)
-    overlaps_raw = bool(loc) and (raw.startswith(_norm(loc)) or _norm(loc).startswith(raw))
+    raw = _norm_uri(BRONZE_URI + PACS_PREFIX)
+    overlaps_raw = bool(loc) and (raw.startswith(_norm_uri(loc)) or _norm_uri(loc).startswith(raw))
     if not named or overlaps_raw:
         if loc:
             log(f"Continuous reset: {fq} location {loc} not its own dir; catalog-only DROP")
