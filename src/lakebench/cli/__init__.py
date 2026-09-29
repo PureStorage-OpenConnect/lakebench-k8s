@@ -1741,8 +1741,12 @@ def report(
         table.add_column("Status")
         table.add_column("Duration")
 
+        from lakebench.metrics.verdict import passed as _record_passed
+
         for r in runs:
-            status = "[green]Passed[/green]" if r.get("success") else "[red]Failed[/red]"
+            # Prefer the persisted verdict (OD-6: v1.6 records) and fall
+            # back to raw ``success`` for legacy v1.5 records.
+            status = "[green]Passed[/green]" if _record_passed(r) else "[red]Failed[/red]"
             elapsed = f"{r.get('total_elapsed_seconds', 0):.1f}s"
             date = r.get("start_time", "")[:10] if r.get("start_time") else ""
             table.add_row(

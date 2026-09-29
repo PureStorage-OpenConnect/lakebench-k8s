@@ -421,6 +421,21 @@ def _build_comparison(
         for label, m in (("A", metrics_a), ("B", metrics_b)):
             if "error" in m:
                 provenance_refusals.append(f"run {label} did not complete: {m['error']}")
+
+    # A run whose verdict is FAILED (OD-6) cannot stand for a comparison
+    # even when its raw ``success`` flag is True (LB-044 shape: the CLI
+    # exited 0, silver never kept pace with the trickle, and no comparable
+    # evidence was produced). Legacy v1.5 records with no verdict block
+    # fall back to raw ``success``.
+    from lakebench.metrics.verdict import passed as _record_passed
+
+    for label, m in (("A", metrics_a), ("B", metrics_b)):
+        if "error" in m:
+            continue
+        if not _record_passed(m):
+            provenance_refusals.append(
+                f"run {label} did not pass its verdict; a FAILED run has no evidence to compare"
+            )
     # Three verdicts. not_comparable: different experiments or different
     # results. not_established: nothing contradicts the pair, but at least
     # one side has no checked results (continuous, --skip-benchmark, a

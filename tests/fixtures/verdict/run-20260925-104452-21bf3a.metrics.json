@@ -2263,5 +2263,20 @@
       }
     },
     "mode": "continuous"
+  },
+  "verdict": {
+    "status": "FAILED",
+    "reasons": [
+      "Ingest ratio 0.58 < 0.95 (pipeline saturated)"
+    ],
+    "gates": {
+      "pipeline": "PASS",
+      "benchmark": "PASS"
+    },
+    "qualifiers": {
+      "pipeline_mode": "sustained",
+      "n_streaming_stages": 3,
+      "n_benchmark_queries": 8
+    }
   }
 }

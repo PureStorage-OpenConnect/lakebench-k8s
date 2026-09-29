@@ -63,6 +63,14 @@ def _metrics(cfg, fingerprints: dict | None = None, fleet: dict | None = None):
         ],
     )
     run.datagen_fleet = fleet
+    # A2b wiring: compare and perf_gate now refuse a run whose verdict is
+    # FAILED. PipelineMetrics defaults success to False (the "run in
+    # progress" shape), so a synthetic collector object without an
+    # end_run(success=True) call would compute a FAILED verdict and be
+    # refused by compare. These tests build a synthetic completed run to
+    # exercise the comparability ladder itself, not to test a failed run;
+    # mark it complete so the verdict computes PASSED.
+    run.success = True
     return run
 
 

@@ -682,8 +682,13 @@ def benchmark_sample_refusal(run: RunRecord, pinned: PinnedConfig) -> str | None
 
 def run_refusals(run: RunRecord, pinned: PinnedConfig) -> list[str]:
     """Reasons this run cannot stand for *pinned*. Empty means comparable."""
+    from lakebench.metrics.verdict import passed as _record_passed
+
     reasons: list[str] = []
-    if not run.raw.get("success"):
+    # Prefer the persisted verdict (OD-6: v1.6 records) and fall back to
+    # raw ``success`` for legacy v1.5 records. A verdict of FAILED refuses
+    # even when the raw flag is True (LB-044 shape).
+    if not _record_passed(run.raw):
         reasons.append("run did not succeed")
     # Only runs under this version's maintenance policy are compared or
     # recorded: m1-legacy covers two different real policies, and a baseline
@@ -1353,9 +1358,19 @@ def latest_candidate(pinned: PinnedConfig, runs_dir: Path) -> RunRecord | None:
     Guards (scale_ratio, datagen pods) are not applied here, so a matching
     run that fails them is still returned and then refused by compare.
     """
+    from lakebench.metrics.verdict import passed as _record_passed
+
     for run in iter_runs(runs_dir):
+        # Prefer the persisted verdict (OD-6: v1.6) with fallback to raw
+        # ``success`` (legacy v1.5). A FAILED verdict disqualifies a run
+        # even when its raw success flag was left True. OD-6 also says
+        # 'v1.5 records are never a perf baseline'; enforcing that here
+        # requires the whole synthetic-fixture surface in tests to add a
+        # verdict block, which is bigger than this lane. TODO(follow-up):
+        # tighten to ``_has_verdict(run.raw) and _record_passed(...)``
+        # once the perf-gate test suite fixtures carry verdict blocks.
         if (
-            run.raw.get("success")
+            _record_passed(run.raw)
             and run.mode == pinned.mode
             and fingerprint_hash(run.fingerprint) == pinned.fingerprint_hash
             # A later --skip-maintenance or --local run must not displace the
