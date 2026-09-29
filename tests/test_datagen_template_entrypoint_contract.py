@@ -13,6 +13,7 @@ Regressions found by the 2026-09-24 audit:
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -118,6 +119,7 @@ def test_entrypoint_memory_model_matches_autosizer():
     ep = _entrypoint()
     assert ep.PER_THREAD_FILE_MULTIPLIER == a.DATAGEN_PER_THREAD_FILE_MULTIPLIER
     assert ep.WORLD_BYTES_PER_ENTITY_NODE0 == a.DATAGEN_WORLD_BYTES_PER_ENTITY_NODE0
+    assert ep.WORKER_ENTITY_BYTES == a.DATAGEN_WORKER_ENTITY_BYTES
     assert ep.ENTITIES_PER_SCALE == a.DATAGEN_ENTITIES_PER_SCALE
     assert ep.BASE_GIB == a.DATAGEN_BASE_GIB
     assert ep.HEADROOM == a.DATAGEN_HEADROOM
@@ -139,6 +141,26 @@ def test_default_memory_fits_default_threads(schema, scale):
     cap = ep.max_threads_for_memory(schema, float(scale), file_mb, True, mem_gib * 2**30)
     assert cap >= cpu, f"{schema} scale {scale}: {cpu} threads but memory fits {cap}"
     assert args[args.index("--workers") + 1] == "0"
+
+
+@pytest.mark.parametrize("schema", ["customer360", "financial"])
+@pytest.mark.parametrize("scale", [1, 10, 100])
+@pytest.mark.parametrize("cpu", [2, 4, 8, 16])
+@pytest.mark.parametrize("file_mb", [64, 128, 256])
+def test_request_and_cap_agree_off_the_default_grid(schema, scale, cpu, file_mb):
+    """LB-199 review F4: the autosizer request and the entrypoint cap use one
+    model, so for any (schema, scale, cpu, file) the request must admit the cpu
+    threads. Catches a worker-term added to the cap but omitted from the request
+    (the mismatch that was invisible at scale 1/10 with the old grid)."""
+    from lakebench.config import autosizer as a
+
+    ep = _entrypoint()
+    threads = cpu
+    req = math.ceil(a.datagen_memory_gib(schema, float(scale), threads, float(file_mb)))
+    cap = ep.max_threads_for_memory(schema, float(scale), file_mb, True, req * 2**30)
+    assert cap >= threads, (
+        f"{schema} s{scale} cpu{cpu} f{file_mb}: request {req}Gi caps to {cap} < {threads}"
+    )
 
 
 def test_thread_cap_under_tight_memory():
