@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -189,6 +190,18 @@ def generate(
     )
 
     try:
+        # Share a run id with the datagen pods (live-observability grouping
+        # label) so a standalone `generate` is correlatable in Grafana and a
+        # re-run does not read as the previous run's series. Respect an id an
+        # enclosing run flow already set.
+        if not os.environ.get("LB_RUN_ID"):
+            import uuid as _uuid
+            from datetime import datetime as _dt
+
+            os.environ["LB_RUN_ID"] = (
+                _dt.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:6]
+            )
+
         engine = DeploymentEngine(cfg)
         datagen = DatagenDeployer(engine)
 

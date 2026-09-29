@@ -232,8 +232,8 @@ images:
   pull_policy: Always
 ```
 
-The default image (`docker.io/sillidata/lb-datagen:b6f2905`, digest
-`sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6`;
+The default image (`docker.io/sillidata/lb-datagen:9382420`, digest
+`sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2`;
 the v1.6 AML generator-freeze commit, generator version `datagen-v2-rs-0.3`)
 is built from the `datagen_rs/` directory in this repository. To build and push a custom
 image:

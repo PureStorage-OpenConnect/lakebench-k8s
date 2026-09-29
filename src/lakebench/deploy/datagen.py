@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -108,6 +109,18 @@ class DatagenDeployer:
         # the pipeline side trickle-reading a pre-written finite corpus (LB-156)
         # or, in a future release, by a producer-driven delivery mode
         # (--delivery-mode). Passing --duration was misleading.
+
+        # Live observability: point datagen pods at the per-deployment
+        # Pushgateway. Best-effort -- the Rust binary no-ops when the env is
+        # unset. Only when observability + the pushgateway are enabled. LB_RUN_ID
+        # is shared across datagen and the Spark stages via the orchestrator's
+        # env (set by the run flow) so the dashboard can correlate a run and a
+        # re-run does not read as the previous run's series.
+        obs = cfg.observability
+        if obs.enabled and obs.pushgateway_enabled:
+            namespace = cfg.get_namespace()
+            context["pushgateway_url"] = f"http://lakebench-pushgateway.{namespace}.svc:9091"
+            context["run_id"] = os.environ.get("LB_RUN_ID", "")
 
         return context
 

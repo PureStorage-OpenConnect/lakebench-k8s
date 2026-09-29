@@ -35,7 +35,7 @@ spec:
       {% endif %}
       containers:
         - name: datagen
-          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:b6f2905') }}
+          image: {{ datagen_image | default('docker.io/sillidata/lb-datagen:9382420') }}
           imagePullPolicy: {{ image_pull_policy | default('IfNotPresent') }}
           args:
             - "--schema"
@@ -148,6 +148,15 @@ spec:
                   containerName: datagen
                   resource: requests.cpu
                   divisor: "1m"
+            {% if pushgateway_url is defined and pushgateway_url %}
+            # Live observability (best-effort): the pod pushes metrics to the
+            # per-deployment Pushgateway. Absent when observability is off, in
+            # which case the binary no-ops.
+            - name: LB_PUSHGATEWAY_URL
+              value: "{{ pushgateway_url }}"
+            - name: LB_RUN_ID
+              value: "{{ run_id | default('') }}"
+            {% endif %}
           {% if s3_ca_cert_pem %}
           volumeMounts:
             - name: ca-cert

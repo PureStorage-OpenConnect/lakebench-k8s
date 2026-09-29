@@ -130,7 +130,7 @@ version: 1
 # Container images for every component. Override these for air-gapped
 # registries or custom builds.
 images:
-  datagen: docker.io/sillidata/lb-datagen:b6f2905
+  datagen: docker.io/sillidata/lb-datagen:9382420
   spark: apache/spark:4.0.2-python3
   postgres: postgres:17
   hive: apache/hive:3.1.3
@@ -383,7 +383,7 @@ registries or custom builds.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `images.datagen` | string | `docker.io/sillidata/lb-datagen:b6f2905` | Data generator image. Pinned by digest `sha256:312f9ecfa301b09f696cd04f9b6d44052656041fc293d9d76f0adddd01fbd4f6` for provenance; the v1.6 AML generator-freeze commit (Python base bumped to 3.14-slim + digest-pinned; Rust source unchanged from 25f1aa8, corpus bytes unchanged). |
+| `images.datagen` | string | `docker.io/sillidata/lb-datagen:9382420` | Data generator image. Pinned by digest `sha256:2faad1cc0252a165a56361a06f159a62ba7c4387c83adfb7c46fe260af23b8f2` for provenance; the v1.6 AML generator-freeze commit (Python base bumped to 3.14-slim + digest-pinned; Rust source unchanged from 25f1aa8, corpus bytes unchanged). |
 | `images.spark` | string | `apache/spark:4.0.2-python3` | Spark runtime image. Spark 4.x images are auto-detected. |
 | `images.postgres` | string | `postgres:17` | PostgreSQL image (metadata backend). |
 | `images.hive` | string | `apache/hive:3.1.3` | Hive Metastore image (Stackable operator). |
