@@ -1947,8 +1947,10 @@ def results(
     as a column with consistent metrics as rows. Use --format json or
     --format csv for machine-readable output.
 
-    Accepts an optional config file argument (ignored, for command-line
-    consistency with other lakebench commands).
+    Accepts an optional config file argument. When provided, scopes the
+    default-summary lookup to that deployment (so ``results other.yaml``
+    on a shared lakebench-output tree does not read another deployment's
+    latest run).
     """
     if format_short_f is not None:
         warn_deprecated_short_f("--format / -o")

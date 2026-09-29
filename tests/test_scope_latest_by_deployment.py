@@ -347,10 +347,28 @@ class TestCallsiteWireup:
             "the scope-by-deployment wire-up was reverted at query or "
             "benchmark path"
         )
-        # Both scoped calls must be present.
-        assert src.count("get_latest_run_for_deployment(cfg.name)") >= 2, (
+        # Both scoped calls must be present (regex tolerates a trailing
+        # writable=True flag on the write path).
+        import re
+
+        scoped = re.findall(
+            r"get_latest_run_for_deployment\(\s*cfg\.name\s*(?:,\s*writable\s*=\s*True\s*)?\)",
+            src,
+        )
+        assert len(scoped) >= 2, (
             "cli/_query.py should scope both benchmark and query paths by "
             "cfg.name; one of the two sites is missing"
+        )
+        # And both write callsites must pass writable=True so the legacy
+        # fallback cannot let a query/benchmark rewrite another
+        # deployment's legacy record.
+        writable = re.findall(
+            r"get_latest_run_for_deployment\(\s*cfg\.name\s*,\s*writable\s*=\s*True\s*\)",
+            src,
+        )
+        assert len(writable) >= 2, (
+            "cli/_query.py write callsites must pass writable=True to "
+            "prevent legacy-fallback rewrite of another deployment's record"
         )
 
     def test_generator_scopes_latest_lookup(self) -> None:

@@ -528,8 +528,12 @@ Use `--render` to regenerate a fresh HTML report at
 delivered file.
 
 ```
-lakebench report [OPTIONS]
+lakebench report [CONFIG_FILE] [OPTIONS]
 ```
+
+The optional `CONFIG_FILE` scopes the default-summary lookup to that
+deployment. On a shared `lakebench-output` tree it prevents `report
+other.yaml` from picking up another deployment's latest run.
 
 | Flag | Short | Default | Description |
 |---|---|---|---|

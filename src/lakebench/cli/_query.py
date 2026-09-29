@@ -500,7 +500,9 @@ def query(
     from lakebench.metrics import MetricsStorage
 
     storage = MetricsStorage()
-    latest_run = storage.get_latest_run_for_deployment(cfg.name)
+    # writable=True: this is the rewrite path; never fall back to a legacy
+    # record (which could belong to another deployment) and rewrite it.
+    latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
     if latest_run:
         latest_run.queries.append(query_metrics)
         storage.save_run(latest_run)
@@ -741,7 +743,9 @@ def benchmark(
     # benchmark's metrics (SP-2 owns deployment_id; this is the interim
     # name-scoped lookup).
     storage = MetricsStorage()
-    latest_run = storage.get_latest_run_for_deployment(cfg.name)
+    # writable=True: this is the rewrite path; never fall back to a legacy
+    # record (which could belong to another deployment) and rewrite it.
+    latest_run = storage.get_latest_run_for_deployment(cfg.name, writable=True)
     if latest_run:
         bench_metrics = BenchmarkMetrics(
             mode=primary_result.mode,
