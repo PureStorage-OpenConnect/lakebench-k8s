@@ -58,11 +58,10 @@ architecture:
       # `deploy`, `run` and `destroy` each reload the config, so they must
       # agree on the same value. Generate one with
       #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-      # then either paste it below in place of the placeholder, or export
-      # LAKEBENCH_POLARIS_CLIENT_SECRET and use ${LAKEBENCH_POLARIS_CLIENT_SECRET}
-      # here. The placeholder itself is not a working secret and Polaris
-      # OAuth2 will refuse it at first use.
-      client_secret: "<REPLACE_WITH_POLARIS_CLIENT_SECRET>"
+      # then export it as LAKEBENCH_POLARIS_CLIENT_SECRET before running any
+      # lakebench command. The env-var pattern avoids committing the secret
+      # by accident and matches the other polaris-*.yaml examples.
+      client_secret: ${LAKEBENCH_POLARIS_CLIENT_SECRET}
 
   pipeline:
     mode: batch
